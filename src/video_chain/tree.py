@@ -117,6 +117,15 @@ class Tree:
             self.selected = parent
         return gone
 
+    def siblings(self, nid: str) -> list["Node"]:
+        """The other clips that start from the same point as nid."""
+        parent = self.nodes[nid].parent
+        return [n for n in self.children(parent) if n.id != nid]
+
+    def others_than_path(self, nid: str) -> list[str]:
+        """Root ids of every branch that is not on the path start -> nid (the siblings along the path)."""
+        return [s.id for n in self.path_to(nid) for s in self.siblings(n.id)]
+
     def number(self, nid: str) -> int:
         return int(nid[1:]) if nid[1:].isdigit() else 0
 

@@ -1922,6 +1922,35 @@ class MainWindow(QMainWindow):
         if self.cards and self.cards[-1].nid == new.id:
             self.cards[-1].edit.setFocus()
 
+    def keep_branch(self, nid: str, whole_path: bool = False, confirm: bool = True) -> list[str]:
+        """Delete the other branches at this clip's point (its siblings), or along its whole path; the clip and
+        what follows it stay. Returns the deleted ids."""
+        if self.tree is None or self.running or nid not in self.tree.nodes:
+            return []
+        roots = self.tree.others_than_path(nid) if whole_path else [n.id for n in self.tree.siblings(nid)]
+        if not roots:
+            return []
+        doomed = [r for r in roots] + [d.id for r in roots for d in self.tree.descendants(r)]
+        made = sum(1 for d in doomed if self.tree.nodes[d].made)
+        if confirm:
+            where = "along the path to" if whole_path else "next to"
+            msg = (f"Delete {len(doomed)} clip{'s' if len(doomed) != 1 else ''} in "
+                   f"{len(roots)} other branch{'es' if len(roots) != 1 else ''} {where} clip #{nid[1:]}?")
+            if made:
+                msg += f"\n{made} of them are made; their video files are deleted too."
+            if QMessageBox.question(self, "Keep this branch", msg) != QMessageBox.Yes:
+                return []
+        gone = []
+        for r in roots:
+            if r in self.tree.nodes:
+                gone += self.tree.remove(r, self.project)
+        self.tree.selected = nid
+        self._write_tree()
+        self.refresh()
+        self.status.setText(f"Kept clip #{nid[1:]}; deleted {len(gone)} clip{'s' if len(gone) != 1 else ''} "
+                            "in the other branches.")
+        return gone
+
     def create_variants(self, nid: str, count: int, generate: bool = True) -> list[str]:
         """count new branches next to nid: same prompt and clip settings, each its own new seed; then (optionally)
         generate them in one run. Returns the new node ids."""
@@ -1946,7 +1975,7 @@ class MainWindow(QMainWindow):
             return
         m = QMenu(self)
         acts = {m.addAction("Continue from here"): "continue"}
-        play = gen = delete = None
+        play = gen = delete = keep_here = keep_path = None
         if nid != START:
             acts[m.addAction("Branch (another continuation)")] = "branch"
             acts[m.addAction("Variant (same prompt, other seed)")] = "variant"
@@ -1956,6 +1985,10 @@ class MainWindow(QMainWindow):
             play.setEnabled(bool(self.tree.nodes[nid].made))
             gen = m.addAction("Generate the path to here")
             m.addSeparator()
+            keep_here = m.addAction("Keep this branch, delete the other branches here")
+            keep_here.setEnabled(bool(self.tree.siblings(nid)))
+            keep_path = m.addAction("Keep only this path, delete all other branches")
+            keep_path.setEnabled(bool(self.tree.others_than_path(nid)))
             delete = m.addAction("Delete (with everything after it)")
         chosen = self._exec_menu(m, pos.toPoint() if hasattr(pos, "toPoint") else pos)
         if chosen is None:
@@ -1971,6 +2004,10 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self.generate_path)
         elif chosen is delete:
             QTimer.singleShot(0, lambda: self.node_action("delete", nid))
+        elif chosen is keep_here:
+            QTimer.singleShot(0, lambda: self.keep_branch(nid, whole_path=False))
+        elif chosen is keep_path:
+            QTimer.singleShot(0, lambda: self.keep_branch(nid, whole_path=True))
 
     def _exec_menu(self, menu: QMenu, pos):
         return menu.exec(pos)

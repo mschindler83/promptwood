@@ -737,3 +737,24 @@ def test_create_variants(app, win, tmp_path, image):
     assert len(win.tree.leaves()) == 4
     only = win.create_variants(ids[0], 2, generate=False)
     assert not win.running and all(win.state(n) == "new" for n in only)
+
+
+def test_keep_this_branch(app, win, tmp_path, image):
+    ids = new_project(win, tmp_path, image, ("a", "b"))                       # n1 -> n2
+    variants = win.create_variants(ids[1], 2, generate=False)                 # n1 -> n2 | v1 | v2
+    win.node_action("continue", variants[0])                                  # v1 -> v1a
+    after_v1 = win.selected_id()
+    win.node_action("branch", ids[0])                                         # another branch at the root's level
+    other_root_level = win.selected_id()
+    gone = win.keep_branch(ids[1], whole_path=False, confirm=False)           # keep n2, drop its siblings
+    assert set(gone) == {variants[0], variants[1], after_v1}                   # with what follows them
+    assert ids[1] in win.tree.nodes and other_root_level in win.tree.nodes     # other levels untouched
+    assert win.selected_id() == ids[1]
+    # whole path: also the branches next to the clips before
+    win.node_action("branch", ids[0])
+    root_sibling = win.selected_id()
+    win.node_action("continue", ids[1])
+    kept_child = win.selected_id()
+    assert win.tree.others_than_path(ids[1])
+    win.keep_branch(ids[1], whole_path=True, confirm=False)
+    assert set(win.tree.nodes) == {ids[0], ids[1], kept_child} and root_sibling not in win.tree.nodes
