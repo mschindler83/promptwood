@@ -45,18 +45,53 @@ def free_gpu_gb() -> float | None:
         return None
 
 
+def lora_file_info(path: Path) -> tuple[int, float]:
+    """(rank, scale) of a LoRA file, read from the tensor shapes and alpha values without loading the weights.
+    scale = alpha / rank; files without alpha values (ai-toolkit's own format) use alpha = rank, scale 1."""
+    from safetensors import safe_open
+
+    ranks: dict[str, int] = {}
+    alphas: dict[str, float] = {}
+    with safe_open(str(path), framework="numpy") as f:
+        for key in f.keys():
+            if key.endswith((".lora_A.weight", ".lora_down.weight")):
+                ranks[key.rsplit(".", 2)[0]] = int(f.get_slice(key).get_shape()[0])
+            elif key.endswith(".alpha"):
+                alphas[key[: -len(".alpha")]] = float(f.get_tensor(key).reshape(-1)[0])
+    if not ranks:
+        raise ValueError(f"{Path(path).name} contains no LoRA weights")
+    scales = {round(alphas.get(m, r) / r, 6) for m, r in ranks.items()}
+    if len(scales) != 1:
+        raise ValueError(f"{Path(path).name} uses different alpha/rank ratios per layer; not supported")
+    return max(ranks.values()), scales.pop()
+
+
 class H3Generator:
+    """MiniMax-H3 image-to-video. Several LoRAs can be used in one run (one at a time, per clip): the LoRA
+    network is built at the largest rank among them; a smaller LoRA is padded with zeros, which is exact. Before
+    every swap all LoRA weights are zeroed (nothing of the previous LoRA stays) and every module's scale is set to
+    the new file's alpha / rank (ai-toolkit computes the scale only once, when the network is built)."""
+
     def __init__(self, *, width: int, height: int, frames: int = 73, steps: int = 28, lora: Path | None = None,
                  strength: float = 1.0, model: str = DEFAULT_MODEL, offload: float = 0.9, low_vram: bool = True,
                  audio: bool = True, aitk: Path = DEFAULT_AITK, device: str = "cuda:0", min_free_gb: float = 18.0,
-                 log=print, progress=None):
+                 log=print, progress=None, loras: list | tuple = ()):
         self.width, self.height, self.frames, self.steps = width, height, frames, steps
+        self.default_lora = str(lora) if lora else None
+        self.default_strength = float(strength)
         self.log = log
         aitk = Path(aitk).resolve()
         if not (aitk / "toolkit").is_dir():
             raise FileNotFoundError(f"{aitk} is not an ai-toolkit folder")
-        if lora is not None and not Path(lora).is_file():
-            raise FileNotFoundError(lora)
+        wanted = []
+        for lo in ([self.default_lora] if self.default_lora else []) + [str(x) for x in loras if x]:
+            if lo not in wanted:
+                wanted.append(lo)
+        for lo in wanted:
+            if not Path(lo).is_file():
+                raise FileNotFoundError(lo)
+        self.info = {lo: lora_file_info(Path(lo)) for lo in wanted}       # rank, scale
+        base = max(wanted, key=lambda lo: self.info[lo][0]) if wanted else None
 
         free = free_gpu_gb()
         if free is not None and free < min_free_gb:
@@ -67,28 +102,18 @@ class H3Generator:
         sys.path.insert(0, str(aitk))
         os.chdir(aitk)
         import torch  # noqa: F401
-        from safetensors.torch import load_file
         from toolkit.config_modules import ModelConfig
         from toolkit.util.get_model import get_model_class
 
-        cfg = ModelConfig(**model_config_dict(model, str(lora) if lora else None, offload, low_vram, audio))
+        cfg = ModelConfig(**model_config_dict(model, base, offload, low_vram, audio))
         cls = get_model_class(cfg)
         self.sd = cls(device=device, model_config=cfg, dtype="bf16", noise_scheduler=cls.get_train_scheduler())
         log("loading MiniMax-H3 (this takes a few minutes)")
         self.sd.load_model()
-
-        if lora is not None:
-            net = self.sd.assistant_lora
-            weights = self.sd.convert_lora_weights_before_load(load_file(str(lora)))
-            unknown = net.load_weights(weights)          # same weights again; returns what did not fit
-            if unknown:
-                raise RuntimeError(f"{len(unknown)} of {len(weights)} LoRA weights do not fit this model "
-                                   f"(e.g. {next(iter(unknown))}); is it an H3 LoRA for this checkpoint?")
-            if not any(float(p.detach().abs().sum()) > 0 for n, p in net.named_parameters() if "lora_up" in n):
-                raise RuntimeError("the LoRA loaded as all zeros")
-            net.multiplier = float(strength)
-            net._update_torch_multiplier()
-            log(f"LoRA {Path(lora).name} applied (strength {strength:g}, {len(weights)} weights)")
+        self.net = self.sd.assistant_lora if base else None
+        self.current: str | None = None
+        if self.net is not None:
+            self.use_lora(base, 1.0)                      # checks that it fits; the strength is set per clip
 
         if progress is not None:          # H3's sampler reports every denoising step through this hook
             self.sd.sample_step_hook = lambda idx, num, _latents: progress(idx + 1, num)
@@ -111,14 +136,55 @@ class H3Generator:
 
         h3mod.new_save_image_function = save_and_keep_last
 
-    def generate(self, prompt: str, start_image: Path, out_video: Path, out_last_frame: Path, seed: int) -> None:
+    def use_lora(self, lora: str | None, strength: float) -> None:
+        """Make lora (or none) the active LoRA at this strength."""
+        import torch
+        from safetensors.torch import load_file
+
+        net = self.net
+        if lora is None:
+            if net is not None:
+                net.multiplier = 0.0                      # ai-toolkit skips the LoRA path entirely at 0
+                net._update_torch_multiplier()
+            return
+        if net is None or lora not in self.info:
+            raise RuntimeError(f"LoRA {Path(lora).name} was not prepared for this run")
+        if lora != self.current:
+            weights = self.sd.convert_lora_weights_before_load(load_file(lora))
+            with torch.no_grad():
+                for p in net.parameters():
+                    p.zero_()
+            unknown = net.load_weights(weights)           # pads a smaller rank with zeros
+            if unknown:
+                raise RuntimeError(f"{len(unknown)} of {len(weights)} weights of {Path(lora).name} do not fit this "
+                                   f"model (e.g. {next(iter(unknown))}); is it an H3 LoRA for this checkpoint?")
+            if not any(float(p.detach().abs().sum()) > 0 for n, p in net.named_parameters() if "lora_up" in n):
+                raise RuntimeError(f"{Path(lora).name} loaded as all zeros")
+            rank, scale = self.info[lora]
+            for m in net.get_all_modules():
+                m._set_runtime_scale(scale)
+            self.current = lora
+            self.log(f"LoRA {Path(lora).name} loaded (rank {rank}, scale {scale:g})")
+        net.multiplier = float(strength)
+        net._update_torch_multiplier()
+
+    def generate(self, prompt: str, start_image: Path, out_video: Path, out_last_frame: Path, seed: int,
+                 settings: dict | None = None) -> None:
         from toolkit.config_modules import GenerateImageConfig
 
+        s = settings or {}
+        frames = int(s.get("frames", self.frames))
+        steps = int(s.get("steps", self.steps))
+        width, height = int(s.get("width", self.width)), int(s.get("height", self.height))
+        if settings is not None:
+            self.use_lora(s.get("lora"), float(s.get("strength", 1.0)))
+        else:
+            self.use_lora(self.default_lora, self.default_strength)
         with tempfile.TemporaryDirectory(prefix="video-chain-", dir=str(Path(out_video).parent)) as tmp:
             cfg = GenerateImageConfig(
-                prompt=prompt, negative_prompt="", width=self.width, height=self.height,
-                num_inference_steps=self.steps, guidance_scale=1.0,      # H3 is guidance-distilled
-                seed=int(seed), num_frames=self.frames, fps=24, ctrl_img=str(start_image),
+                prompt=prompt, negative_prompt="", width=width, height=height,
+                num_inference_steps=steps, guidance_scale=1.0,      # H3 is guidance-distilled
+                seed=int(seed), num_frames=frames, fps=24, ctrl_img=str(start_image),
                 output_folder=tmp, output_ext="mp4")
             self._last_png = Path(out_last_frame)
             try:

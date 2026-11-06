@@ -8,6 +8,9 @@ Project folder:
   nodes/<id>.png       its last frame, the start image of its children
   paths/<id>.mp4       a joined path (start -> node), made on demand
 
+Every node can override the project's LoRA (another one or none), LoRA strength, clip length and steps
+(Node.overrides); the video size and sound stay per project, so the clips of a path fit together.
+
 A node counts as done when its clip exists and was made from exactly its current prompt, seed, settings and start
 frame (the parent's current last frame). If any of that changed, the node and everything below it is "changed"
 and is made again when a path through it is generated. Other branches are not touched.
@@ -24,6 +27,8 @@ from . import chain
 
 TREE_FILE = "tree.json"
 START_FILE = "start.png"
+NO_LORA = "none"                   # override value: this node without any LoRA
+OVERRIDE_KEYS = ("lora", "strength", "frames", "steps")
 DEFAULT_OPTIONS = {"model": "Comfy-Org/MiniMax-H3", "lora": None, "strength": 1.0, "frames": 73, "steps": 28,
                    "resolution": 512, "audio": True, "keep_repeated": False, "seed": 42}
 
@@ -35,6 +40,7 @@ class Node:
     prompt: str = ""
     seed: int = 42
     made: dict | None = None       # what the current files were made from (prompt, seed, settings, start_sha1, files)
+    overrides: dict = field(default_factory=dict)   # lora (path or NO_LORA), strength, frames, steps
 
 
 @dataclass
@@ -112,7 +118,8 @@ class Tree:
         t = cls(options={**DEFAULT_OPTIONS, **(d.get("options") or {})}, image=d.get("image"),
                 selected=d.get("selected"), next_num=int(d.get("next_num") or 1))
         for nd in d.get("nodes", []):
-            n = Node(nd["id"], nd.get("parent"), nd.get("prompt", ""), int(nd.get("seed", 42)), nd.get("made"))
+            ov = {k: v for k, v in (nd.get("overrides") or {}).items() if k in OVERRIDE_KEYS and v is not None}
+            n = Node(nd["id"], nd.get("parent"), nd.get("prompt", ""), int(nd.get("seed", 42)), nd.get("made"), ov)
             t.nodes[n.id] = n
         t.next_num = max([t.next_num] + [t.number(i) + 1 for i in t.nodes])
         if t.selected not in t.nodes:
@@ -185,10 +192,14 @@ class Checker:
             self._sha[key] = chain.sha1_file(path)
         return self._sha[key]
 
-    def settings(self) -> dict | None:
+    def base(self) -> dict | None:
         if self._settings is None:
             self._settings = current_settings(self.project, self.tree.options)
         return self._settings
+
+    def settings(self, nid: str) -> dict | None:
+        base = self.base()
+        return None if base is None else node_settings(base, self.tree.options, self.tree.nodes[nid])
 
     def start_frame(self, node: Node) -> Path:
         if node.parent is None:
@@ -204,7 +215,7 @@ class Checker:
         m = node.made
         if not m or not (self.project / m.get("video", "")).is_file() or not (self.project / m.get("frame", "")).is_file():
             st = "new"
-        elif (m.get("prompt") != node.prompt or m.get("seed") != node.seed or m.get("settings") != self.settings()
+        elif (m.get("prompt") != node.prompt or m.get("seed") != node.seed or m.get("settings") != self.settings(nid)
               or (node.parent is not None and self.status(node.parent) != "done")
               or m.get("start_sha1") != self.sha(self.start_frame(node))):
             st = "changed"
@@ -223,6 +234,30 @@ def current_settings(project: Path, options: dict) -> dict | None:
     return chain.settings_dict(model=options.get("model", DEFAULT_OPTIONS["model"]), lora=options.get("lora"),
                                strength=options.get("strength", 1.0), frames=options.get("frames", 73),
                                steps=options.get("steps", 28), width=w, height=h, audio=options.get("audio", True))
+
+
+def node_settings(base: dict, options: dict, node: Node) -> dict:
+    """The settings one node is made with: the project's, with the node's overrides applied."""
+    ov = node.overrides or {}
+    if "lora" in ov:
+        lora = None if ov["lora"] == NO_LORA else ov["lora"]
+    else:
+        lora = options.get("lora")
+    return chain.settings_dict(model=base["model"], lora=lora,
+                               strength=ov.get("strength", options.get("strength", 1.0)),
+                               frames=ov.get("frames", options.get("frames", 73)),
+                               steps=ov.get("steps", options.get("steps", 28)),
+                               width=base["width"], height=base["height"], audio=base["audio"])
+
+
+def loras_needed(tree: Tree, checker: "Checker", nids: list[str]) -> list[str]:
+    """The LoRA files these nodes are made with (each once, in order)."""
+    out: list[str] = []
+    for nid in nids:
+        lora = checker.settings(nid)["lora"]
+        if lora and lora not in out:
+            out.append(lora)
+    return out
 
 
 # ----------------------------------------------------------------------------- generating
@@ -252,9 +287,11 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
     if empty:
         raise ValueError(f"empty prompt in node {empty[0]}")
     checker = Checker(project, tree)
-    settings = checker.settings()
     todo = plan(tree, checker, targets)
     on_paths = {n.id for t in targets for n in tree.path_to(t)}
+    missing = [lo for lo in loras_needed(tree, checker, todo) if not Path(lo).is_file()]
+    if missing:
+        raise FileNotFoundError(f"LoRA not found: {missing[0]}")
     for nid in sorted(on_paths - set(todo), key=lambda i: tree.depth(i)):
         emit({"e": "node", "id": nid, "state": "reused"})
     emit({"e": "plan", "make": todo})
@@ -269,7 +306,8 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
             f.unlink(missing_ok=True)
         node.made = None
         save(project, tree)
-        generator.generate(node.prompt, start, video, frame, node.seed)
+        settings = checker.settings(nid)
+        generator.generate(node.prompt, start, video, frame, node.seed, settings=settings)
         if not video.exists() or not frame.exists():
             raise RuntimeError(f"the generator did not write {video.name} and {frame.name}")
         node.made = {"prompt": node.prompt, "seed": node.seed, "settings": settings,

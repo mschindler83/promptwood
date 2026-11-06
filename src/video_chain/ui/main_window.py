@@ -47,10 +47,20 @@ class _Bridge(QObject):
 
 # ----------------------------------------------------------------------------- path card
 
+STRENGTH_DEFAULT = -0.05          # spin box minimum = "default"
+STEPS_DEFAULT = 3
+
+
+def lora_label(path: str | None) -> str:
+    return Path(path).stem if path else "none"
+
+
 class PromptCard(QFrame):
-    """One clip of the selected path: prompt, seed, status, last frame."""
+    """One clip of the selected path: prompt, seed, own settings (LoRA, strength, length, steps), status."""
     edited = Signal(str)
     seedChanged = Signal(str, int)
+    overridesChanged = Signal(str, dict)
+    chooseLora = Signal(str)
     action = Signal(str, str)                  # action, node id
     play = Signal(str)
 
@@ -104,6 +114,44 @@ class PromptCard(QFrame):
         self.seed.setToolTip("Seed of this clip; another seed gives another version")
         foot.addWidget(self.seed)
         v.addLayout(foot)
+
+        # own settings of this clip; "default" = the project's
+        self.ov = dict(node.overrides or {})
+        grid = QFormLayout()
+        grid.setContentsMargins(0, 2, 0, 0)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(4)
+        lrow = QHBoxLayout()
+        self.lora = QComboBox()
+        self.lora.setToolTip("LoRA of this clip: the project's, none, or its own")
+        self.b_lora = icon_button("fopen", "Choose a LoRA file for this clip")
+        self.b_lora.clicked.connect(lambda: self.chooseLora.emit(self.nid))
+        lrow.addWidget(self.lora, 1)
+        lrow.addWidget(self.b_lora)
+        grid.addRow("LoRA", lrow)
+        srow = QHBoxLayout()
+        self.strength = QDoubleSpinBox()
+        self.strength.setRange(STRENGTH_DEFAULT, 2.0)
+        self.strength.setSingleStep(0.05)
+        self.strength.setDecimals(2)
+        self.strength.setSpecialValueText("default")
+        self.strength.setToolTip("LoRA strength of this clip (lowest value = the project's)")
+        self.length = QComboBox()
+        self.length.setToolTip("Length of this clip")
+        self.steps = QSpinBox()
+        self.steps.setRange(STEPS_DEFAULT, 80)
+        self.steps.setSpecialValueText("default")
+        self.steps.setToolTip("Sampling steps of this clip (lowest value = the project's)")
+        srow.addWidget(self.strength)
+        srow.addWidget(self.length, 1)
+        srow.addWidget(self.steps)
+        grid.addRow("Strength", srow)
+        v.addLayout(grid)
+        self.lora.currentIndexChanged.connect(self._ov_changed)
+        self.strength.valueChanged.connect(self._ov_changed)
+        self.length.currentIndexChanged.connect(self._ov_changed)
+        self.steps.valueChanged.connect(self._ov_changed)
+
         self.step = label("", level="tertiary")
         v.addWidget(self.step)
         self.bar = QProgressBar()
@@ -114,6 +162,53 @@ class PromptCard(QFrame):
         self.seed.valueChanged.connect(lambda s: self.seedChanged.emit(self.nid, s))
         self._words()
         self._restyle()
+
+    def set_choices(self, project_lora: str | None, project_frames: int, project_steps: int, known: list[str]):
+        """Fill the setting widgets (without emitting changes)."""
+        widgets = (self.lora, self.strength, self.length, self.steps)
+        for w in widgets:
+            w.blockSignals(True)
+        try:
+            self.lora.clear()
+            self.lora.addItem(f"project default ({lora_label(project_lora)})", None)
+            self.lora.addItem("no LoRA", T.NO_LORA)
+            for k in known:
+                self.lora.addItem(lora_label(k), k)
+                self.lora.setItemData(self.lora.count() - 1, k, Qt.ToolTipRole)
+            cur = self.ov.get("lora")
+            if cur and cur != T.NO_LORA and self.lora.findData(cur) < 0:
+                self.lora.addItem(lora_label(cur), cur)
+            self.lora.setCurrentIndex(max(0, self.lora.findData(cur)) if cur else 0)
+            self.strength.setValue(float(self.ov.get("strength", STRENGTH_DEFAULT)))
+            self.length.clear()
+            self.length.addItem(f"default ({project_frames / 24:.1f} s)", None)
+            for n in FRAME_CHOICES:
+                self.length.addItem(f"{n / 24:.1f} s ({n} frames)", n)
+            fr = self.ov.get("frames")
+            self.length.setCurrentIndex(max(0, self.length.findData(fr)) if fr else 0)
+            self.steps.setValue(int(self.ov.get("steps", STEPS_DEFAULT)))
+            self.steps.setToolTip(f"Sampling steps of this clip (lowest value = the project's: {project_steps})")
+        finally:
+            for w in widgets:
+                w.blockSignals(False)
+        self._enable_strength()
+
+    def _enable_strength(self):
+        self.strength.setEnabled(not self.edit.isReadOnly() and self.lora.currentData() != T.NO_LORA)
+
+    def _ov_changed(self, *_):
+        ov = {}
+        if self.lora.currentData() is not None:
+            ov["lora"] = self.lora.currentData()
+        if self.strength.value() > STRENGTH_DEFAULT + 1e-6:
+            ov["strength"] = round(self.strength.value(), 2)
+        if self.length.currentData() is not None:
+            ov["frames"] = self.length.currentData()
+        if self.steps.value() > STEPS_DEFAULT:
+            ov["steps"] = self.steps.value()
+        self.ov = ov
+        self._enable_strength()
+        self.overridesChanged.emit(self.nid, ov)
 
     def text(self) -> str:
         return " ".join(self.edit.toPlainText().split())
@@ -146,9 +241,9 @@ class PromptCard(QFrame):
 
     def set_editable(self, on: bool):
         self.edit.setReadOnly(not on)
-        self.seed.setEnabled(on)
-        for b in self.buttons:
-            b.setEnabled(on)
+        for w in (self.seed, self.lora, self.b_lora, self.length, self.steps, *self.buttons):
+            w.setEnabled(on)
+        self._enable_strength()
 
     def _restyle(self):
         t = theme()
@@ -743,7 +838,8 @@ class MainWindow(QMainWindow):
         for n in sorted(self.tree.nodes.values(), key=lambda n: self.tree.number(n.id)):
             infos.append(NodeInfo(n.id, n.parent or START, f"Clip {self.tree.depth(n.id)}", f"#{n.id[1:]}",
                                   n.prompt, self.state(n.id), self._pixmap(self._node_frame(n)),
-                                  self.progress_of.get(n.id, 0.0), n.id in on_path, n.id == sel))
+                                  self.progress_of.get(n.id, 0.0), n.id in on_path, n.id == sel,
+                                  self.badge(n)))
         self.graph.show_nodes(infos)
         if rebuild_path or [c.nid for c in self.cards] != [n.id for n in self.selected_path()]:
             self._rebuild_path()
@@ -754,6 +850,19 @@ class MainWindow(QMainWindow):
         self.tree_info.setText(f"{len(self.tree.nodes)} clips · {branches} branch{'es' if branches != 1 else ''}"
                                f" · {made} made")
         self._update_buttons()
+
+    def badge(self, n: T.Node) -> str:
+        """Short text for a clip's own settings, shown on its node ('' = all project defaults)."""
+        ov, parts = n.overrides or {}, []
+        if "lora" in ov:
+            parts.append("no LoRA" if ov["lora"] == T.NO_LORA else lora_label(ov["lora"])[:18])
+        if "strength" in ov and ov.get("lora") != T.NO_LORA:
+            parts.append(f"×{ov['strength']:g}")
+        if "frames" in ov:
+            parts.append(f"{ov['frames'] / 24:.1f} s")
+        if "steps" in ov:
+            parts.append(f"{ov['steps']} steps")
+        return " · ".join(parts)
 
     def _rebuild_path(self):
         for c in self.cards:
@@ -769,6 +878,10 @@ class MainWindow(QMainWindow):
             card = PromptCard(n)
             card.edited.connect(self._card_edited)
             card.seedChanged.connect(self._seed_changed)
+            card.overridesChanged.connect(self._overrides_changed)
+            card.chooseLora.connect(self._choose_node_lora)
+            card.set_choices(self.tree.options.get("lora"), int(self.tree.options.get("frames", 73)),
+                             int(self.tree.options.get("steps", 28)), self.known_loras())
             card.action.connect(self.node_action)
             card.play.connect(self._play_node)
             self.path_box.insertWidget(k, card)
@@ -780,13 +893,13 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, lambda: self.path_area.ensureWidgetVisible(last))
 
     def _update_cards(self):
-        frames = self.tree.options.get("frames", 73)
         drop = not self.tree.options.get("keep_repeated")
         t = 0.0
         for k, card in enumerate(self.cards):
             n = self.tree.nodes.get(card.nid)
             if n is None:
                 continue
+            frames = int(n.overrides.get("frames", self.tree.options.get("frames", 73)))
             length = (frames - (1 if drop and k > 0 else 0)) / 24
             card.title.setText(f"Clip {k + 1}")
             card.span.setText(f"{fmt_time(t)} – {fmt_time(t + length)} in this path")
@@ -835,6 +948,58 @@ class MainWindow(QMainWindow):
             return
         self.tree.nodes[nid].prompt = card.text()
         self._changed()
+
+    def known_loras(self) -> list[str]:
+        """LoRAs used in this project (project default and every node's own) plus recently chosen ones."""
+        out: list[str] = []
+        try:
+            recent = json.loads(self.qs.value("recentLoras", "[]", type=str))
+        except ValueError:
+            recent = []
+        cands = [self.tree.options.get("lora")] + [n.overrides.get("lora") for n in self.tree.nodes.values()] + recent
+        for lo in cands:
+            if lo and lo != T.NO_LORA and lo not in out and Path(lo).is_file():
+                out.append(lo)
+        return out
+
+    def _remember_lora(self, path: str):
+        try:
+            recent = json.loads(self.qs.value("recentLoras", "[]", type=str))
+        except ValueError:
+            recent = []
+        recent = [path] + [r for r in recent if r != path]
+        self.qs.setValue("recentLoras", json.dumps(recent[:12]))
+
+    def _overrides_changed(self, nid: str, ov: dict):
+        if self.tree and nid in self.tree.nodes:
+            self.tree.nodes[nid].overrides = dict(ov)
+            self._changed()
+
+    def _choose_node_lora(self, nid: str):
+        card = next((c for c in self.cards if c.nid == nid), None)
+        if card is None:
+            return
+        cur = card.lora.currentData()
+        start = str(Path(cur).parent) if cur and cur != T.NO_LORA else (
+            str(Path(self.tree.options["lora"]).parent) if self.tree.options.get("lora") else "")
+        f, _ = QFileDialog.getOpenFileName(self, "LoRA for this clip", start, "LoRA (*.safetensors)")
+        if f:
+            self.set_node_lora(nid, f)
+
+    def set_node_lora(self, nid: str, path: str | None):
+        """Give one clip its own LoRA (a file), no LoRA (T.NO_LORA) or the project's (None)."""
+        if self.tree is None or nid not in self.tree.nodes:
+            return
+        ov = dict(self.tree.nodes[nid].overrides)
+        if path is None:
+            ov.pop("lora", None)
+        else:
+            ov["lora"] = path if path == T.NO_LORA else str(Path(path).expanduser().resolve())
+            if path != T.NO_LORA:
+                self._remember_lora(ov["lora"])
+        self.tree.nodes[nid].overrides = ov
+        self._changed()
+        self.refresh(rebuild_path=True)
 
     def _seed_changed(self, nid: str, seed: int):
         if self.tree and nid in self.tree.nodes:
@@ -961,6 +1126,7 @@ class MainWindow(QMainWindow):
         f, _ = QFileDialog.getOpenFileName(self, "LoRA", start, "LoRA (*.safetensors)")
         if f:
             self.lora.setText(f)
+            self._remember_lora(str(Path(f).resolve()))
             self._options_changed()
 
     # ------------------------------------------------------------------ GPU
@@ -1018,9 +1184,15 @@ class MainWindow(QMainWindow):
         empty = [n for n in nodes.values() if not n.prompt.strip()]
         if empty:
             problems.append(f"write the prompt of clip #{empty[0].id[1:]}")
-        lora = self.tree.options.get("lora")
-        if lora and not Path(lora).is_file():
-            problems.append(f"the LoRA file does not exist ({Path(lora).name})")
+        try:
+            checker = T.Checker(self.project, self.tree)
+            if checker.base() is not None:
+                for lo in T.loras_needed(self.tree, checker, list(nodes)):
+                    if not Path(lo).is_file():
+                        problems.append(f"the LoRA file does not exist ({Path(lo).name})")
+                        break
+        except Exception as e:  # noqa: BLE001
+            problems.append(f"could not check the settings ({e})")
         if problems:
             self.status.setText("To start: " + ", ".join(problems) + ".")
             if empty and len(targets) > 1:

@@ -18,13 +18,13 @@ class FakeGenerator:
         self.progress, self.step_delay, self.steps = progress, step_delay, steps
         self.calls = []
 
-    def generate(self, prompt, start_image, out_video, out_last_frame, seed):
+    def generate(self, prompt, start_image, out_video, out_last_frame, seed, settings=None):
         k = len(self.calls)
         if self.progress is not None:
             for i in range(1, self.steps + 1):
                 time.sleep(self.step_delay)
                 self.progress(i, self.steps)
-        self.calls.append({"prompt": prompt, "start": Path(start_image).name, "seed": seed,
+        self.calls.append({"prompt": prompt, "start": Path(start_image).name, "seed": seed, "settings": settings,
                            "start_rgb": Image.open(start_image).convert("RGB").getpixel((5, 5))})
         w, h = self.size
         colour = COLOURS[k % len(COLOURS)]

@@ -72,11 +72,12 @@ def _fail(emit, msg: str) -> int:
     return 2
 
 
-def _generator(a, emit, current, width, height, frames, steps, lora, strength, model, audio):
+def _generator(a, emit, current, width, height, frames, steps, lora, strength, model, audio, loras=()):
     emit({"e": "loading"})
     from .h3 import H3Generator          # imports torch / ai-toolkit: only now, after the cheap checks
     gen = H3Generator(width=width, height=height, frames=frames, steps=steps, lora=lora, strength=strength,
                       model=model, offload=a.offload, audio=audio, aitk=a.aitk, min_free_gb=a.min_free_gb,
+                      loras=loras,
                       progress=lambda i, n: emit({"e": "step", "id": current["id"], "k": current["k"],
                                                   "i": i, "n": n}))
     emit({"e": "loaded"})
@@ -97,6 +98,10 @@ def _main_tree(a, emit) -> int:
         return _fail(emit, "the project has no start image")
     checker = treemod.Checker(project, tree)
     todo = treemod.plan(tree, checker, targets)
+    loras = treemod.loras_needed(tree, checker, todo)
+    missing = [lo for lo in loras if not Path(lo).is_file()]
+    if missing:
+        return _fail(emit, f"LoRA not found: {missing[0]}")
     emit({"e": "start", "nodes": len(todo), "width": settings["width"], "height": settings["height"],
           "frames": settings["frames"], "steps": settings["steps"], "out": str(project)})
     current = {"id": None, "k": 0}
@@ -109,10 +114,8 @@ def _main_tree(a, emit) -> int:
     if not todo:                                   # nothing to make: no need to load the model
         treemod.run_tree(None, project, targets, events=on_event)
         return 0
-    o = tree.options
-    lora = Path(o["lora"]) if o.get("lora") else None
     gen = _generator(a, emit, current, settings["width"], settings["height"], settings["frames"], settings["steps"],
-                     lora, settings["strength"], settings["model"], settings["audio"])
+                     None, 1.0, settings["model"], settings["audio"], loras=loras)
     treemod.run_tree(gen, project, targets, events=on_event)
     return 0
 

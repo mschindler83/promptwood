@@ -28,6 +28,7 @@ class NodeInfo:
     progress: float = 0.0
     on_path: bool = False
     selected: bool = False
+    badge: str = ""               # the clip's own settings (LoRA, strength, length, steps)
 
 
 STATUS_TEXT = {"done": "done", "changed": "changed", "new": "not made", "generating": "generating",
@@ -94,6 +95,21 @@ class NodeItem(QGraphicsObject):
         else:
             p.setPen(t.textTertiary)
             p.drawText(thumb, Qt.AlignCenter, "not made yet" if i.status != "start" else "no start image")
+        if i.badge:
+            base_font = QFont(p.font())
+            bf = QFont(base_font)
+            bf.setPointSizeF(max(6.5, bf.pointSizeF() * 0.82))
+            p.setFont(bf)
+            bfm = QFontMetrics(bf)
+            text = bfm.elidedText(i.badge, Qt.ElideRight, int(thumb.width() - 16))
+            bw, bh = bfm.horizontalAdvance(text) + 10, bfm.height() + 2
+            pill = QRectF(thumb.x() + 5, thumb.y() + 5, bw, bh)
+            p.setPen(Qt.NoPen)
+            p.setBrush(with_alpha(t.accent, 0.85))
+            p.drawRoundedRect(pill, bh / 2, bh / 2)
+            p.setPen(t.onAccent)
+            p.drawText(pill, Qt.AlignCenter, text)
+            p.setFont(base_font)
 
         f = QFont(p.font())
         f.setBold(True)

@@ -29,8 +29,10 @@ MAX_RATIO = 2.5          # H3 custom sizes go from 2:5 to 5:2
 
 
 class Generator(Protocol):
-    def generate(self, prompt: str, start_image: Path, out_video: Path, out_last_frame: Path, seed: int) -> None:
-        """Make one clip that starts at start_image; write it to out_video and its last frame to out_last_frame."""
+    def generate(self, prompt: str, start_image: Path, out_video: Path, out_last_frame: Path, seed: int,
+                 settings: dict | None = None) -> None:
+        """Make one clip that starts at start_image; write it to out_video and its last frame to out_last_frame.
+        settings (chain.settings_dict) carries per-clip lora, strength, frames and steps; None: the generator's own."""
 
 
 # ----------------------------------------------------------------------------- input

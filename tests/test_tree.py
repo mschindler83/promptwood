@@ -197,3 +197,66 @@ def test_cli_tree_mode_without_loading_the_model(project, capsys):
     kinds = [e["e"] for e in events]
     assert "loading" not in kinds and kinds[-1] == "done" and events[-1]["made"] == []
     assert [e["state"] for e in events if e["e"] == "node"] == ["reused"] * 3
+
+
+def test_node_overrides(project, tmp_path):
+    lora_a, lora_b = tmp_path / "a.safetensors", tmp_path / "b.safetensors"
+    lora_a.write_bytes(b"x")
+    lora_b.write_bytes(b"x")
+    t, a, b1, b2, c = build(project)
+    t = T.load(project)
+    t.options["lora"] = str(lora_a)
+    t.nodes[b1.id].overrides = {"lora": str(lora_b), "strength": 0.7, "frames": 124, "steps": 20}
+    t.nodes[b2.id].overrides = {"lora": T.NO_LORA}
+    T.save(project, t)
+    t = T.load(project)
+    ch = T.Checker(project, t)
+    sa, sb1, sb2, sc = (ch.settings(n.id) for n in (a, b1, b2, c))
+    assert (sa["lora"], sa["strength"], sa["frames"], sa["steps"]) == (str(lora_a), 1.0, 73, 28)
+    assert (sb1["lora"], sb1["strength"], sb1["frames"], sb1["steps"]) == (str(lora_b), 0.7, 124, 20)
+    assert sb2["lora"] is None and sb2["strength"] == 1.0
+    assert sc["lora"] == str(lora_a)                                   # overrides are not inherited
+    assert T.loras_needed(t, ch, [a.id, b1.id, b2.id, c.id]) == [str(lora_a), str(lora_b)]
+    gen = run(project, [c.id, b2.id])
+    used = {x["prompt"]: x["settings"] for x in gen.calls}
+    assert used["b1"]["lora"] == str(lora_b) and used["b1"]["frames"] == 124 and used["b2"]["lora"] is None
+    # changing one node's override changes it and what follows, nothing else
+    t = T.load(project)
+    t.nodes[b1.id].overrides["strength"] = 0.9
+    T.save(project, t)
+    assert statuses(project) == {"a": "done", "b1": "changed", "c": "changed", "b2": "done"}
+
+
+def test_missing_lora_file_is_refused(project, tmp_path):
+    t = T.load(project)
+    n = t.add(None, "x")
+    n.overrides = {"lora": str(tmp_path / "gone.safetensors")}
+    T.save(project, t)
+    with pytest.raises(FileNotFoundError, match="LoRA not found"):
+        run(project, [n.id])
+
+
+def test_lora_file_info(tmp_path):
+    import numpy as np
+    from safetensors.numpy import save_file
+
+    from video_chain.h3 import lora_file_info
+    peft = tmp_path / "peft.safetensors"                      # ai-toolkit format: no alpha -> scale 1
+    save_file({"diffusion_model.blocks.0.attn.q.lora_A.weight": np.zeros((16, 64), np.float32),
+               "diffusion_model.blocks.0.attn.q.lora_B.weight": np.zeros((64, 16), np.float32)}, str(peft))
+    assert lora_file_info(peft) == (16, 1.0)
+    kohya = tmp_path / "kohya.safetensors"                    # alpha 16 at rank 32 -> scale 0.5
+    save_file({"lora_unet_b0_q.lora_down.weight": np.zeros((32, 64), np.float32),
+               "lora_unet_b0_q.lora_up.weight": np.zeros((64, 32), np.float32),
+               "lora_unet_b0_q.alpha": np.array(16.0, np.float32)}, str(kohya))
+    assert lora_file_info(kohya) == (32, 0.5)
+    mixed = tmp_path / "mixed.safetensors"
+    save_file({"l1.lora_down.weight": np.zeros((8, 4), np.float32), "l1.alpha": np.array(8.0, np.float32),
+               "l2.lora_down.weight": np.zeros((8, 4), np.float32), "l2.alpha": np.array(4.0, np.float32)},
+              str(mixed))
+    with pytest.raises(ValueError, match="different alpha"):
+        lora_file_info(mixed)
+    empty = tmp_path / "empty.safetensors"
+    save_file({"x": np.zeros(2, np.float32)}, str(empty))
+    with pytest.raises(ValueError, match="no LoRA weights"):
+        lora_file_info(empty)

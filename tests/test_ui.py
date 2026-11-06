@@ -238,3 +238,50 @@ def test_step_progress_and_export(app, win, tmp_path, image, monkeypatch):
     win.join_selected("export", target)
     wait(app, lambda: target.exists() and "Exported" in win.status.text())
     assert chain.probe(target)["frames"] == 17
+
+
+def test_clip_settings_per_node(app, win, tmp_path, image):
+    lora = tmp_path / "nose.safetensors"
+    lora.write_bytes(b"x")
+    ids = new_project(win, tmp_path, image, ("a", "b", "c"))
+    card = next(c for c in win.cards if c.nid == ids[1])
+    assert card.lora.currentIndex() == 0 and card.strength.text() == "default"
+    win.set_node_lora(ids[1], str(lora))
+    card = next(c for c in win.cards if c.nid == ids[1])
+    assert card.lora.currentData() == str(lora.resolve())
+    card.strength.setValue(0.8)
+    card.length.setCurrentIndex(card.length.findData(124))
+    card.steps.setValue(20)
+    flush(app, win)
+    assert win.tree.nodes[ids[1]].overrides == {"lora": str(lora.resolve()), "strength": 0.8, "frames": 124,
+                                                "steps": 20}
+    assert win.badge(win.tree.nodes[ids[1]]) == "nose · ×0.8 · 5.2 s · 20 steps"
+    assert win.graph.items_by_id[ids[1]].info.badge.startswith("glow")
+    assert win.graph.items_by_id[ids[0]].info.badge == ""
+    # time spans follow the clip's own length: clip 2 is 124 frames (minus the repeated one)
+    assert win.cards[2].span.text().startswith(f"0:{(73 + 123) / 24:04.1f}")
+    run_and_wait(app, win, win.generate_path)
+    made = T.load(tmp_path / "proj").nodes[ids[1]].made["settings"]
+    assert made["lora"] == str(lora.resolve()) and made["strength"] == 0.8 and made["frames"] == 124
+    # no LoRA on clip 3: strength is not used there
+    card3 = next(c for c in win.cards if c.nid == ids[2])
+    card3.lora.setCurrentIndex(card3.lora.findData(T.NO_LORA))
+    flush(app, win)
+    assert win.tree.nodes[ids[2]].overrides == {"lora": T.NO_LORA} and not card3.strength.isEnabled()
+    assert [win.state(i) for i in ids] == ["done", "done", "done"]     # the project has no LoRA: same clip
+    win.set_node_lora(ids[2], str(lora))                                # its own LoRA: made again
+    flush(app, win)
+    assert [win.state(i) for i in ids] == ["done", "done", "changed"]
+    card3 = next(c for c in win.cards if c.nid == ids[2])
+    card3.lora.setCurrentIndex(0)                                       # back to the project default
+    flush(app, win)
+    assert win.tree.nodes[ids[2]].overrides == {} and win.state(ids[2]) == "done"
+    # the project LoRA list now offers the chosen file on every card
+    assert str(lora.resolve()) in [card3.lora.itemData(i) for i in range(card3.lora.count())]
+
+
+def test_missing_node_lora_stops_the_start(app, win, tmp_path, image):
+    ids = new_project(win, tmp_path, image, ("a",))
+    win.tree.nodes[ids[0]].overrides = {"lora": str(tmp_path / "gone.safetensors")}
+    win.generate_path()
+    assert not win.running and "LoRA file does not exist (gone.safetensors)" in win.status.text()
