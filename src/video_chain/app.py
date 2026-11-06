@@ -6,11 +6,15 @@ import sys
 
 
 def main(argv: list[str] | None = None) -> int:
+    from PySide6.QtCore import QLoggingCategory
     from PySide6.QtWidgets import QApplication, QMessageBox
 
     from .ui.main_window import LAUNCHER, MainWindow
     from .ui.theme import ThemeManager
 
+    # harmless Qt messages on Wayland: text input warns when focus leaves a field of an inactive window, and the
+    # desktop portal cannot register the app ID because the app has no installed .desktop file
+    QLoggingCategory.setFilterRules("qt.qpa.wayland.textinput.warning=false\nqt.qpa.services.warning=false")
     argv = sys.argv if argv is None else argv
     app = QApplication(argv)
     app.setOrganizationName("video-chain")
