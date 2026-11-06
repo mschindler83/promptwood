@@ -354,3 +354,40 @@ def test_identity_references(project, tmp_path):
     T.remove_reference(project, rel, t)
     assert not (project / rel).exists() and t.options["identity"]["images"] == []
     assert T.Tree().options["identity"] is not T.Tree().options["identity"]     # defaults are not shared
+
+
+def test_stacked_loras(project, tmp_path):
+    files = {}
+    for n in ("a", "b", "c", "d"):
+        files[n] = tmp_path / f"{n}.safetensors"
+        files[n].write_bytes(n.encode())
+    t, a, b1, b2, c = build(project)
+    t = T.load(project)
+    t.options["lora"], t.options["strength"] = str(files["a"]), 0.9
+    t.options["extra_loras"] = [{"path": str(files["b"]), "strength": 0.5}]
+    t.nodes[b1.id].overrides = {"extra_loras": [{"path": str(files["c"]), "strength": 0.3}]}     # on top
+    t.nodes[b2.id].overrides = {"lora": str(files["d"]), "strength": 0.7}                         # own, no extras
+    T.save(project, t)
+    t = T.load(project)
+    ch = T.Checker(project, t)
+    sa, sb1, sb2 = ch.settings(a.id), ch.settings(b1.id), ch.settings(b2.id)
+    assert (sa["lora"], [e["lora"] for e in sa["extra_loras"]]) == (str(files["a"]), [str(files["b"])])
+    assert [e["lora"] for e in sb1["extra_loras"]] == [str(files["b"]), str(files["c"])]
+    assert sb1["extra_loras"][1]["strength"] == 0.3
+    assert sb2["lora"] == str(files["d"]) and "extra_loras" not in sb2
+    assert T.loras_needed(t, ch, [a.id, b1.id, b2.id]) == [str(files[k]) for k in "abcd"]
+    gen = run(project, [c.id, b2.id])
+    assert {x["prompt"]: len(x["settings"].get("extra_loras", [])) for x in gen.calls} == {"a": 1, "b1": 2,
+                                                                                            "c": 1, "b2": 0}
+    files["c"].write_bytes(b"retrained")                                       # an extra LoRA counts by content
+    assert statuses(project) == {"a": "done", "b1": "changed", "c": "changed", "b2": "done"}
+
+
+def test_single_lora_record_unchanged(project, tmp_path):
+    """Projects with one LoRA keep exactly their old settings record (their clips stay done)."""
+    lo = tmp_path / "x.safetensors"
+    lo.write_bytes(b"x")
+    s = chain.settings_dict(model="m", lora=str(lo), strength=0.8, frames=73, steps=28, width=512, height=512,
+                            audio=True, backend="comfyui", extra_loras=[])
+    assert "extra_loras" not in s and set(s) == {"model", "lora", "lora_sha1", "strength", "frames", "steps",
+                                                 "width", "height", "audio", "backend"}

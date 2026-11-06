@@ -206,6 +206,8 @@ class H3Generator:
         s = settings or {}
         if s.get("ref_paths"):
             raise RuntimeError("reference images (identity) need the ComfyUI generator; ai-toolkit cannot use them")
+        if s.get("extra_loras"):
+            raise RuntimeError("several LoRAs on one clip need the ComfyUI generator; ai-toolkit applies one")
         frames = int(s.get("frames", self.frames))
         steps = int(s.get("steps", self.steps))
         width, height = int(s.get("width", self.width)), int(s.get("height", self.height))

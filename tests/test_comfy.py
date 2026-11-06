@@ -264,3 +264,15 @@ def test_generate_with_references(server, start, tmp_path):
     assert wf["refcond"]["inputs"]["prompt"].endswith(C.REF_HINT)
     assert chain.probe(tmp_path / "v.mp4")["frames"] == 39
     assert not list((server.root / "input" / "video-chain").glob("*"))           # start + reference cleaned up
+
+
+def test_stacked_loras_are_chained(server, start, tmp_path):
+    server.loras = ["MiniMax H3/glow.safetensors", "MiniMax H3/motion.safetensors"]
+    gen = C.ComfyGenerator(server.url)
+    s = settings(lora="/m/MiniMax H3/glow.safetensors", strength=0.8,
+                 extra_loras=[{"lora": "/m/MiniMax H3/motion.safetensors", "sha1": "x", "strength": 0.4}])
+    gen.generate("x", start, tmp_path / "v.mp4", tmp_path / "v.png", 1, s)
+    wf = server.prompts[-1]
+    assert wf["lora0"]["inputs"]["lora_name"] == "MiniMax H3/glow.safetensors" and wf["lora0"]["inputs"]["strength_model"] == 0.8
+    assert wf["lora1"]["inputs"]["lora_name"] == "MiniMax H3/motion.safetensors" and wf["lora1"]["inputs"]["model"] == ["lora0", 0]
+    assert wf["lora1"]["inputs"]["strength_model"] == 0.4 and wf["guider"]["inputs"]["model"] == ["lora1", 0]

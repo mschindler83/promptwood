@@ -30,10 +30,11 @@ from . import chain
 TREE_FILE = "tree.json"
 START_FILE = "start.png"
 NO_LORA = "none"                   # override value: this node without any LoRA
-OVERRIDE_KEYS = ("lora", "strength", "frames", "steps")
+OVERRIDE_KEYS = ("lora", "strength", "frames", "steps", "extra_loras")
 DEFAULT_OPTIONS = {"model": "Comfy-Org/MiniMax-H3", "lora": None, "strength": 1.0, "frames": 73, "steps": 28,
                    "resolution": 512, "audio": True, "keep_repeated": False, "seed": 42,
                    "backend": "comfyui",         # comfyui | ai-toolkit (they sample differently)
+                   "extra_loras": [],            # further LoRAs stacked after "lora": [{"path", "strength"}]
                    # identity: reference images (copies in refs/) every clip sees, so the face stays the same
                    "identity": {"mode": "off", "images": [], "size": "match", "hint": True}}
 REFS_DIR = "refs"
@@ -305,14 +306,23 @@ def current_settings(project: Path, options: dict) -> dict | None:
                                ref_size=ident.get("size", "match"), ref_hint=ident.get("hint", True))
 
 
+def _extras(items) -> list[tuple[str, float]]:
+    return [(e["path"], float(e.get("strength", 1.0))) for e in (items or []) if e.get("path")]
+
+
 def node_settings(base: dict, options: dict, node: Node) -> dict:
-    """The settings one node is made with: the project's, with the node's overrides applied."""
+    """The settings one node is made with: the project's, with the node's overrides applied.
+
+    LoRAs: the first one is the node's own (or none), else the project's; a node on the project default also
+    gets the project's extra LoRAs; the node's own extra LoRAs come on top, in order."""
     ov = node.overrides or {}
     if "lora" in ov:
         lora = None if ov["lora"] == NO_LORA else ov["lora"]
+        extras = _extras(ov.get("extra_loras"))
     else:
         lora = options.get("lora")
-    return chain.settings_dict(model=base["model"], lora=lora,
+        extras = _extras(options.get("extra_loras")) + _extras(ov.get("extra_loras"))
+    return chain.settings_dict(model=base["model"], lora=lora, extra_loras=extras,
                                strength=ov.get("strength", options.get("strength", 1.0)),
                                frames=ov.get("frames", options.get("frames", 73)),
                                steps=ov.get("steps", options.get("steps", 28)),
@@ -325,9 +335,10 @@ def loras_needed(tree: Tree, checker: "Checker", nids: list[str]) -> list[str]:
     """The LoRA files these nodes are made with (each once, in order)."""
     out: list[str] = []
     for nid in nids:
-        lora = checker.settings(nid)["lora"]
-        if lora and lora not in out:
-            out.append(lora)
+        s = checker.settings(nid)
+        for lora in [s["lora"]] + [e["lora"] for e in s.get("extra_loras") or []]:
+            if lora and lora not in out:
+                out.append(lora)
     return out
 
 

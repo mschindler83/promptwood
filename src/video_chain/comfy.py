@@ -347,11 +347,13 @@ class ComfyGenerator:
                  settings: dict | None = None) -> None:
         s = settings or {}
         loras = []
-        if s.get("lora"):
-            name = self.name_for(s["lora"])
+        stack = ([(s["lora"], s.get("strength", 1.0))] if s.get("lora") else []) + \
+            [(e["lora"], e.get("strength", 1.0)) for e in s.get("extra_loras") or []]
+        for path, strength in stack:                 # chained in this order
+            name = self.name_for(path)
             if name is None:
-                raise ComfyError(f"{Path(s['lora']).name} is not in ComfyUI's LoRA folders")
-            loras.append((name, float(s.get("strength", 1.0))))
+                raise ComfyError(f"{Path(path).name} is not in ComfyUI's LoRA folders")
+            loras.append((name, float(strength)))
         image = self.upload(Path(start_image))
         refs = []
         if s.get("ref_paths"):

@@ -537,3 +537,50 @@ def test_identity_references_in_the_window(app, win, tmp_path, image):
     win.ident_mode.setCurrentIndex(win.ident_mode.findData("off"))
     flush(app, win)
     assert [win.state(i) for i in ids] == ["changed", "changed"]               # made with refs, now without
+
+
+def test_stacked_loras_in_the_window(app, tmp_path, image, monkeypatch):
+    from video_chain.ui.main_window import MainWindow
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    comfy = tmp_path / "ComfyUI"
+    (comfy / "main.py").parent.mkdir(parents=True, exist_ok=True)
+    (comfy / "main.py").write_text("")
+    for n in ("glow", "motion", "style"):
+        write_lora(comfy / "models" / "loras" / "MiniMax H3" / f"{n}.safetensors", H3_KEYS)
+    q = settings(tmp_path, "st.ini")
+    q.setValue("comfyDir", str(comfy))
+    w = MainWindow(q, command=FAKE)
+    ids = new_project(w, tmp_path, image, ("a", "b"))
+    wait(app, lambda: len(w.h3_loras) == 3, timeout=10)
+    path = {Path(p).stem: p for p, _n in w.h3_loras}
+    # project: nose + motion stacked
+    w.lora.setCurrentIndex(w.lora.findData(path["glow"]))
+    w.extra_loras._add_row(path["motion"], 0.5)
+    w.extra_loras.changed.emit()
+    flush(app, w)
+    assert w.tree.options["extra_loras"] == [{"path": path["motion"], "strength": 0.5}]
+    # clip 2: style on top of the project's LoRAs
+    card = next(c for c in w.cards if c.nid == ids[1])
+    card.extras._add_row(path["style"], 0.3)
+    card.extras.changed.emit()
+    flush(app, w)
+    assert w.tree.nodes[ids[1]].overrides["extra_loras"] == [{"path": path["style"], "strength": 0.3}]
+    assert w.badge(w.tree.nodes[ids[1]]) == "+ style ×0.3"
+    ch = T.Checker(w.project, w.tree)
+    s2 = ch.settings(ids[1])
+    assert s2["lora"] == path["glow"] and [e["lora"] for e in s2["extra_loras"]] == [path["motion"], path["style"]]
+    run_and_wait(app, w, w.generate_path)
+    made = T.load(w.project).nodes[ids[1]].made["settings"]
+    assert [e["strength"] for e in made["extra_loras"]] == [0.5, 0.3]
+    # removing the row takes the LoRA off again
+    card = next(c for c in w.cards if c.nid == ids[1])
+    card.extras._remove(card.extras.rows[0])
+    flush(app, w)
+    assert "extra_loras" not in w.tree.nodes[ids[1]].overrides and w.state(ids[1]) == "changed"
+    # ai-toolkit can apply only one LoRA
+    w.backend.setCurrentIndex(w.backend.findData("ai-toolkit"))
+    flush(app, w)
+    wait(app, lambda: not w._joins, timeout=30)
+    w.generate_path()
+    assert not w.running and "several LoRAs on one clip need the ComfyUI generator" in w.status.text()
+    w.close()

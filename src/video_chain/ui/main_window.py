@@ -94,6 +94,86 @@ def fill_lora_combo(combo: QComboBox, known: list[tuple[str, str]], current: str
     combo.setCurrentIndex(i)
 
 
+class LoraStack(QWidget):
+    """Further LoRAs stacked after the first one: rows of (LoRA, strength, remove) and '+ LoRA'.
+    items() -> [{"path", "strength"}] in order (rows without a chosen LoRA are left out)."""
+    changed = Signal()
+
+    def __init__(self, parent=None, add_text: str = "+ LoRA"):
+        super().__init__(parent)
+        self.known: list[tuple[str, str]] = []
+        self.rows: list[tuple[QWidget, QComboBox, QDoubleSpinBox]] = []
+        self.v = QVBoxLayout(self)
+        self.v.setContentsMargins(0, 0, 0, 0)
+        self.v.setSpacing(4)
+        self.b_add = QPushButton(add_text)
+        self.b_add.setToolTip("Stack another LoRA on top (applied after the ones above, in this order; "
+                              "ComfyUI generator only)")
+        self.b_add.clicked.connect(lambda: (self._add_row(None, 1.0), self.changed.emit()))
+        self.v.addWidget(self.b_add, 0, Qt.AlignLeft)
+        self._enabled = True
+
+    def set_items(self, known: list[tuple[str, str]], items: list[dict]):
+        self.known = list(known)
+        for w, _c, _s in self.rows:
+            self.v.removeWidget(w)
+            w.setParent(None)
+            w.deleteLater()
+        self.rows = []
+        for it in items or []:
+            self._add_row(it.get("path"), float(it.get("strength", 1.0)))
+
+    def _add_row(self, path: str | None, strength: float):
+        w = QWidget(self)
+        h = QHBoxLayout(w)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(4)
+        combo = QComboBox(w)
+        combo.addItem("choose a LoRA …", None)
+        fill_lora_combo(combo, self.known, path)
+        spin = QDoubleSpinBox(w)
+        spin.setRange(0.0, 2.0)
+        spin.setSingleStep(0.05)
+        spin.setDecimals(2)
+        spin.setValue(strength)
+        spin.setToolTip("Strength of this LoRA")
+        rm = icon_button("x", "Remove this LoRA", w)
+        h.addWidget(combo, 1)
+        h.addWidget(spin)
+        h.addWidget(rm)
+        self.v.insertWidget(len(self.rows), w)
+        row = (w, combo, spin)
+        self.rows.append(row)
+        combo.currentIndexChanged.connect(lambda *_: self.changed.emit())
+        spin.valueChanged.connect(lambda *_: self.changed.emit())
+        rm.clicked.connect(lambda: self._remove(row))
+        for x in (combo, spin, rm):
+            x.setEnabled(self._enabled)
+
+    def _remove(self, row):
+        if row in self.rows:
+            self.rows.remove(row)
+            self.v.removeWidget(row[0])
+            row[0].setParent(None)
+            row[0].deleteLater()
+            self.changed.emit()
+
+    def items(self) -> list[dict]:
+        out = []
+        for _w, combo, spin in self.rows:
+            path = combo.currentData()
+            if path and path != T.NO_LORA:
+                out.append({"path": lora_path(path), "strength": round(spin.value(), 2)})
+        return out
+
+    def setEnabled(self, on: bool):          # noqa: N802  (Qt naming)
+        self._enabled = on
+        self.b_add.setEnabled(on)
+        for _w, combo, spin in self.rows:
+            combo.setEnabled(on)
+            spin.setEnabled(on)
+
+
 class PromptCard(QFrame):
     """One clip of the selected path: prompt, seed, own settings (LoRA, strength, length, steps), status."""
     edited = Signal(str)
@@ -185,7 +265,12 @@ class PromptCard(QFrame):
         srow.addWidget(self.length, 1)
         srow.addWidget(self.steps)
         grid.addRow("Strength", srow)
+        self.extras = LoraStack(self)
+        self.extras.setToolTip("LoRAs stacked on top of the one above (with 'project default' also on top of the "
+                               "project's own extra LoRAs)")
+        grid.addRow("More", self.extras)
         v.addLayout(grid)
+        self.extras.changed.connect(self._ov_changed)
         self.lora.currentIndexChanged.connect(self._ov_changed)
         self.strength.valueChanged.connect(self._ov_changed)
         self.length.currentIndexChanged.connect(self._ov_changed)
@@ -213,6 +298,9 @@ class PromptCard(QFrame):
             self.lora.addItem(f"project default ({project_label})", None)
             self.lora.addItem("no LoRA", T.NO_LORA)
             fill_lora_combo(self.lora, known, self.ov.get("lora"))
+            self.extras.blockSignals(True)
+            self.extras.set_items(known, self.ov.get("extra_loras") or [])
+            self.extras.blockSignals(False)
             self.strength.setValue(float(self.ov.get("strength", STRENGTH_DEFAULT)))
             self.length.clear()
             self.length.addItem(f"default ({project_frames / 24:.1f} s)", None)
@@ -240,6 +328,9 @@ class PromptCard(QFrame):
             ov["frames"] = self.length.currentData()
         if self.steps.value() > STEPS_DEFAULT:
             ov["steps"] = self.steps.value()
+        extras = self.extras.items()
+        if extras:
+            ov["extra_loras"] = extras
         self.ov = ov
         self._enable_strength()
         self.overridesChanged.emit(self.nid, ov)
@@ -275,7 +366,7 @@ class PromptCard(QFrame):
 
     def set_editable(self, on: bool):
         self.edit.setReadOnly(not on)
-        for w in (self.seed, self.lora, self.b_lora, self.length, self.steps, *self.buttons):
+        for w in (self.seed, self.lora, self.b_lora, self.length, self.steps, self.extras, *self.buttons):
             w.setEnabled(on)
         self._enable_strength()
 
@@ -572,6 +663,11 @@ class MainWindow(QMainWindow):
         self.strength.setSingleStep(0.05)
         self.strength.setValue(1.0)
         f.addRow("Strength", self.strength)
+        self.extra_loras = LoraStack(fw)
+        self.extra_loras.setToolTip("LoRAs stacked on top of the project LoRA for every clip on the project "
+                                    "default (ComfyUI generator only)")
+        f.addRow("More", self.extra_loras)
+        self.extra_loras.changed.connect(self._options_changed)
         lv.addWidget(fw)
 
         bar, _ = section_bar("Clips", left)
@@ -900,6 +996,9 @@ class MainWindow(QMainWindow):
         self._loading = True
         try:
             self._fill_project_lora(o.get("lora"))
+            self.extra_loras.blockSignals(True)
+            self.extra_loras.set_items(self.known_loras(), o.get("extra_loras") or [])
+            self.extra_loras.blockSignals(False)
             self.strength.setValue(float(o.get("strength", 1.0)))
             fr = int(o.get("frames", 73))
             self.frames.setCurrentIndex(FRAME_CHOICES.index(fr) if fr in FRAME_CHOICES else 2)
@@ -925,7 +1024,7 @@ class MainWindow(QMainWindow):
             "lora": lora_path(lora) if lora else None, "strength": self.strength.value(),
             "frames": self.frames.currentData(), "resolution": self.resolution.currentData(),
             "steps": self.steps.value(), "audio": self.audio.isChecked(), "keep_repeated": self.keep_rep.isChecked(),
-            "backend": self.backend.currentData()})
+            "backend": self.backend.currentData(), "extra_loras": self.extra_loras.items()})
         self._update_size_info()
         self._show_references()
         self._refresh_card_choices()
@@ -1147,6 +1246,8 @@ class MainWindow(QMainWindow):
             parts.append("no LoRA" if ov["lora"] == T.NO_LORA else lora_label(ov["lora"])[:18])
         if "strength" in ov and ov.get("lora") != T.NO_LORA:
             parts.append(f"×{ov['strength']:g}")
+        for e in ov.get("extra_loras") or []:
+            parts.append(f"+ {lora_label(e['path'])[:14]} ×{e.get('strength', 1.0):g}")
         if "frames" in ov:
             parts.append(f"{ov['frames'] / 24:.1f} s")
         if "steps" in ov:
@@ -1223,6 +1324,7 @@ class MainWindow(QMainWindow):
         self.b_export.setEnabled(all_done and idle)
         self.b_stop.setEnabled(not idle)
         self._update_comfy_label()
+        self.extra_loras.setEnabled(idle)
         for w in (self.start_tile, self.lora, self.b_lora, self.strength, self.frames, self.resolution, self.steps,
                   self.audio, self.keep_rep, self.offload, self.min_free, self.aitk, self.b_project, self.backend,
                   self.comfy_url, self.ident_mode, self.ref_size, self.ref_hint, self.b_ref_add, self.b_ref_start,
@@ -1255,6 +1357,9 @@ class MainWindow(QMainWindow):
             recent = []
         cands = ([self.tree.options.get("lora")] if self.tree else []) + \
             ([n.overrides.get("lora") for n in self.tree.nodes.values()] if self.tree else []) + recent
+        if self.tree:
+            cands += [e.get("path") for e in self.tree.options.get("extra_loras") or []]
+            cands += [e.get("path") for n in self.tree.nodes.values() for e in n.overrides.get("extra_loras") or []]
         for lo in cands:
             if lo and lo != T.NO_LORA and lo not in listed and os.path.realpath(lo) not in listed \
                     and Path(lo).is_file():
@@ -1297,6 +1402,9 @@ class MainWindow(QMainWindow):
         if self.tree is None:
             return
         self._fill_project_lora(self.tree.options.get("lora"))
+        self.extra_loras.blockSignals(True)             # the list of LoRAs changed: rebuild the project's rows
+        self.extra_loras.set_items(self.known_loras(), self.tree.options.get("extra_loras") or [])
+        self.extra_loras.blockSignals(False)
         self._refresh_card_choices()
 
     def _refresh_card_choices(self):
@@ -1594,6 +1702,9 @@ class MainWindow(QMainWindow):
             problems.append(f"write the prompt of clip #{empty[0].id[1:]}")
         try:
             checker = T.Checker(self.project, self.tree)
+            if checker.base() is not None and self.current_backend() != "comfyui":
+                if any(checker.settings(nid).get("extra_loras") for nid in nodes):
+                    problems.append("several LoRAs on one clip need the ComfyUI generator")
             if checker.base() is not None:
                 for lo in T.loras_needed(self.tree, checker, list(nodes)):
                     if not Path(lo).is_file():
