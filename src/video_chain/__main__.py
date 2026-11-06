@@ -1,7 +1,7 @@
-"""video-chain: one start image + N prompts -> N chained H3 clips + one joined video.
-
-Run it with ai-toolkit's Python (see the video-chain launcher next to this project), e.g.
+"""video-chain: one start image + N prompts -> N chained MiniMax-H3 clips + one joined video, rendered by a running
+ComfyUI (see comfy.py). E.g.
   ./video-chain start.jpg prompts.txt --out ~/chains/test1 --lora glow_h3_lora.safetensors
+The LoRA must be in one of ComfyUI's LoRA folders.
 """
 from __future__ import annotations
 
@@ -43,25 +43,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--keep-repeated-frames", action="store_true",
                    help="keep the first frame of clips 2..n in chain.mp4 (it repeats the last frame before)")
     p.add_argument("--redo", action="store_true", help="generate every clip again (default: reuse unchanged clips)")
-    p.add_argument("--offload", type=float, default=0.9, help="share of transformer layers kept in RAM (default 0.9)")
-    p.add_argument("--min-free-gb", type=float, default=18.0,
-                   help="refuse to start with less free GPU memory (protects a running training; default 18)")
-    p.add_argument("--model", default="Comfy-Org/MiniMax-H3")
     p.add_argument("--events", action="store_true", help="also print progress as '@@ {json}' lines (for the GUI)")
     p.add_argument("--serve", action="store_true",
                    help="worker mode (for the GUI): load the model once, then read jobs as JSON lines from stdin "
                         '({"cmd": "run", "tree": DIR, "targets": [ids]} or {"cmd": "quit"})')
     p.add_argument("--idle-minutes", type=float, default=15,
                    help="worker mode: quit (and free the memory) after this long without a job; 0 = never")
-    p.add_argument("--loras", default="", help="worker mode: comma-separated LoRA files to prepare when loading")
-    p.add_argument("--backend", choices=["ai-toolkit", "comfyui"], default="ai-toolkit",
-                   help="worker mode: render with ai-toolkit (loads the model itself) or a running ComfyUI")
-    p.add_argument("--comfy-url", default="http://127.0.0.1:8188", help="ComfyUI address (backend comfyui)")
+    p.add_argument("--comfy-url", default="http://127.0.0.1:8188", help="ComfyUI address")
     p.add_argument("--comfy-dir", type=Path, help="ComfyUI's folder (its LoRA folders; cleanup of its copies)")
     p.add_argument("--keep-comfy-copies", action="store_true",
                    help="leave ComfyUI's copies of clips and start images in its output/input folders")
-    p.add_argument("--aitk", type=Path, default=Path("/path/to/ai/ai-toolkit"),
-                   help="ai-toolkit folder")
     return p
 
 
@@ -89,16 +80,22 @@ def _fail(emit, msg: str) -> int:
     return 2
 
 
-def _generator(a, emit, current, width, height, frames, steps, lora, strength, model, audio, loras=()):
-    """Load MiniMax-H3 (minutes). Step progress goes out as events for the node in current."""
-    emit({"e": "loading"})
-    from .h3 import H3Generator          # imports torch / ai-toolkit: only now, after the cheap checks
-    gen = H3Generator(width=width, height=height, frames=frames, steps=steps, lora=lora, strength=strength,
-                      model=model, offload=a.offload, audio=audio, aitk=a.aitk, min_free_gb=a.min_free_gb,
-                      loras=loras,
-                      progress=lambda i, n: emit({"e": "step", "id": current["id"], "k": current["k"],
-                                                  "i": i, "n": n}))
-    emit({"e": "loaded"})
+COMFY_DOWN = 4      # exit code: ComfyUI is not running
+
+
+def _generator(a, emit, current):
+    """Connect to ComfyUI (it loads the model on the first clip and keeps it). Step progress goes out as events
+    for the node in current."""
+    from .comfy import ComfyGenerator, ComfyUnavailable
+    emit({"e": "loading", "what": "comfyui"})
+    try:
+        gen = ComfyGenerator(a.comfy_url, progress=lambda i, n: emit(
+            {"e": "step", "id": current.get("id"), "k": current.get("k", 0), "i": i, "n": n}),
+            comfy_dir=a.comfy_dir, cleanup=not a.keep_comfy_copies)
+    except ComfyUnavailable as e:
+        emit({"e": "error", "msg": str(e), "comfy_down": True})
+        raise SystemExit(COMFY_DOWN)
+    emit({"e": "loaded", "what": "comfyui"})
     return gen
 
 
@@ -128,10 +125,6 @@ def prepare_job(project: Path, targets: list[str]) -> dict:
     if missing:
         raise JobError(f"LoRA not found: {missing[0]}")
     ai_todo = [nid for nid in todo if not tree.nodes[nid].is_video]     # what needs the model
-    if settings.get("backend") == "ai-toolkit":
-        why = treemod.needs_comfy(tree, checker, ai_todo)
-        if why:
-            raise JobError(f"{why}: that needs the ComfyUI generator")
     return {"project": project, "targets": targets, "settings": settings, "todo": todo, "loras": loras,
             "ai_todo": ai_todo}
 
@@ -157,10 +150,11 @@ def _main_tree(a, emit) -> int:
         return _fail(emit, str(e))
     current = {"id": None, "k": 0}
     gen = None
-    if job["ai_todo"]:                             # nothing to generate: no need to load the model
-        s = job["settings"]
-        gen = _generator(a, emit, current, s["width"], s["height"], s["frames"], s["steps"], None, 1.0,
-                         s["model"], s["audio"], loras=job["loras"])
+    if job["ai_todo"]:                             # nothing to generate: no need for ComfyUI
+        gen = _generator(a, emit, current)
+        missing = gen.missing_loras(job["loras"])
+        if missing:
+            return _fail(emit, _missing_msg(missing[0]))
     run_job(job, gen, emit, current)
     return 0
 
@@ -190,26 +184,25 @@ class _LineReader:
         return line.decode(errors="replace") + "\n"
 
 
-RESTART = 3          # worker exit code: the job needs a fresh worker (other model, sound or a bigger LoRA)
+def _missing_msg(lora: str) -> str:
+    return (f"{Path(lora).name} is not in ComfyUI's LoRA folders; copy or link it there "
+            "(e.g. into my_models/loras)")
 
 
-def serve(a, emit, make_generator: Callable[[list[str], dict], object], stdin=None) -> int:
-    """Worker: load once, then run jobs from stdin until 'quit', end of input, or the idle timeout.
-
-    make_generator(loras, current) loads the model with these LoRAs prepared. A job the loaded model cannot do
-    (another model or sound setting, or a LoRA of a higher rank than the prepared ones) is answered with a
-    'restart' event and exit code RESTART; the GUI then starts a new worker for it."""
+def serve(a, emit, make_generator: Callable[[dict], object], stdin=None) -> int:
+    """Worker: connect once, then run jobs from stdin until 'quit', end of input, or the idle timeout.
+    make_generator(current) connects to ComfyUI; ComfyUI keeps the model loaded between jobs, and the worker asks
+    it to unload after the idle time (or on quit with free)."""
     stdin = stdin or sys.stdin
     lines = _LineReader(stdin)
     current = {"id": None, "k": 0}
-    model, audio = a.model, not a.no_audio
-    gen = make_generator([lo for lo in a.loras.split(",") if lo], current)
+    gen = make_generator(current)
     idle = a.idle_minutes * 60 if a.idle_minutes and a.idle_minutes > 0 else None
     emit({"e": "idle", "timeout": idle})
     while True:
         if idle is not None and not lines.ready(idle):
             if hasattr(gen, "free"):
-                gen.free()                          # ComfyUI: unload its models after the idle time
+                gen.free()                          # unload ComfyUI's models after the idle time
             emit({"e": "bye", "reason": "idle"})
             return 0
         line = lines.readline()
@@ -231,19 +224,10 @@ def serve(a, emit, make_generator: Callable[[list[str], dict], object], stdin=No
         started = time.monotonic()
         try:
             job = prepare_job(Path(cmd["tree"]), list(cmd.get("targets") or []))
-            s = job["settings"]
-            if job["ai_todo"] and s.get("backend", a.backend) != a.backend:
-                emit({"e": "restart", "backend": s.get("backend"), "loras": job["loras"]})
-                return RESTART
-            if job["ai_todo"] and getattr(gen, "restart_helps", True):
-                if s["model"] != model or s["audio"] != audio or not gen.can_use(job["loras"]):
-                    emit({"e": "restart", "model": s["model"], "audio": s["audio"], "loras": job["loras"]})
-                    return RESTART
-            elif job["ai_todo"]:
+            if job["ai_todo"]:
                 missing = gen.missing_loras(job["loras"])
                 if missing:
-                    raise JobError(f"{Path(missing[0]).name} is not in ComfyUI's LoRA folders; copy or link it "
-                                   "there (e.g. into my_models/loras)")
+                    raise JobError(_missing_msg(missing[0]))
             run_job(job, gen if job["ai_todo"] else None, emit, current)
         except (JobError, ValueError, FileNotFoundError, KeyError) as e:
             emit({"e": "error", "msg": str(e)})
@@ -251,9 +235,6 @@ def serve(a, emit, make_generator: Callable[[list[str], dict], object], stdin=No
             traceback.print_exc()
             emit({"e": "error", "msg": f"{type(e).__name__}: {e}"})
         emit({"e": "idle", "timeout": idle, "took": round(time.monotonic() - started, 1)})
-
-
-COMFY_DOWN = 4      # worker exit code: ComfyUI is not running
 
 
 def _main_serve(a, emit) -> int:
@@ -266,26 +247,9 @@ def _main_serve(a, emit) -> int:
         raise SystemExit(143)
     signal.signal(signal.SIGTERM, on_term)
 
-    if a.backend == "comfyui":
-        from .comfy import ComfyGenerator, ComfyUnavailable
-
-        def make(_loras: list[str], current: dict):
-            emit({"e": "loading", "what": "comfyui"})
-            try:
-                gen = ComfyGenerator(a.comfy_url, progress=lambda i, n: emit(
-                    {"e": "step", "id": current["id"], "k": current["k"], "i": i, "n": n}),
-                    comfy_dir=a.comfy_dir, cleanup=not a.keep_comfy_copies)
-            except ComfyUnavailable as e:
-                emit({"e": "error", "msg": str(e), "comfy_down": True})
-                raise SystemExit(COMFY_DOWN)
-            holder["gen"] = gen
-            emit({"e": "loaded", "what": "comfyui"})
-            return gen
-    else:
-        def make(loras: list[str], current: dict):
-            gen = _generator(a, emit, current, 512, 512, 73, 28, None, 1.0, a.model, not a.no_audio, loras=loras)
-            holder["gen"] = gen
-            return gen
+    def make(current: dict):
+        holder["gen"] = _generator(a, emit, current)
+        return holder["gen"]
     return serve(a, emit, make)
 
 
@@ -312,8 +276,9 @@ def _main(a, emit) -> int:
         return _fail(emit, str(e))
     image, prompts_file, out = a.image.resolve(), a.prompts.resolve(), a.out.expanduser().resolve()
     lora = a.lora.resolve() if a.lora else None
-    settings = chain.settings_dict(model=a.model, lora=str(lora) if lora else None, strength=a.strength,
-                                   frames=a.frames, steps=a.steps, width=width, height=height, audio=not a.no_audio)
+    settings = chain.settings_dict(model=treemod.DEFAULT_OPTIONS["model"], lora=str(lora) if lora else None,
+                                   strength=a.strength, frames=a.frames, steps=a.steps, width=width, height=height,
+                                   audio=not a.no_audio)
     print(f"{len(prompts)} prompts, {width}x{height}, {a.frames} frames ({a.frames / 24:.1f} s) per clip, "
           f"{a.steps} steps, seed {a.seed}{' (same for all)' if a.same_seed else '+'}")
 
@@ -327,7 +292,9 @@ def _main(a, emit) -> int:
         emit(ev)
 
     current.setdefault("id", None)
-    gen = _generator(a, emit, current, width, height, a.frames, a.steps, lora, a.strength, a.model, not a.no_audio)
+    gen = _generator(a, emit, current)
+    if lora is not None and gen.missing_loras([str(lora)]):
+        return _fail(emit, _missing_msg(str(lora)))
     result = chain.run_chain(gen, image, prompts, out, seed=a.seed, same_seed=a.same_seed, settings=settings,
                              resume=not a.redo, drop_first=not a.keep_repeated_frames, events=on_event)
     chain.copy_prompts(prompts_file, out)

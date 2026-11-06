@@ -296,8 +296,6 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
 class ComfyGenerator:
     """Generator (see chain.Generator) that renders clips in ComfyUI."""
 
-    restart_helps = False            # a missing LoRA is not fixed by starting a new worker
-
     def __init__(self, url: str = DEFAULT_URL, log=print, progress=None, timeout: float = 3600,
                  comfy_dir: Path | None = None, cleanup: bool = True):
         """comfy_dir: ComfyUI's folder on this machine (for its LoRA folders and, with cleanup, to delete the
@@ -395,9 +393,6 @@ class ComfyGenerator:
     def missing_loras(self, loras: list[str]) -> list[str]:
         """LoRA files ComfyUI cannot load (not in its LoRA folders)."""
         return [lo for lo in loras if self.name_for(lo) is None]
-
-    def can_use(self, loras: list[str]) -> bool:
-        return not self.missing_loras(loras)
 
     def free(self) -> None:
         """Ask ComfyUI to unload its models and free the memory."""

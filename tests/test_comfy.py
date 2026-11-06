@@ -124,8 +124,8 @@ def test_websocket_messages(server):
                            "p1")
 
 
-def test_real_worker_with_comfyui_backend(server, tmp_path):
-    """The real CLI worker (--serve --backend comfyui) end to end against the fake ComfyUI."""
+def test_real_worker_with_comfyui(server, tmp_path):
+    """The real CLI worker (--serve) end to end against the fake ComfyUI."""
     import json
     import subprocess
     import sys
@@ -140,7 +140,7 @@ def test_real_worker_with_comfyui_backend(server, tmp_path):
     a = t.add(None, "first")
     b = t.add(a.id, "second")
     T.save(proj, t)
-    p = subprocess.Popen([sys.executable, "-m", "video_chain", "--serve", "--events", "--backend", "comfyui",
+    p = subprocess.Popen([sys.executable, "-m", "video_chain", "--serve", "--events",
                           "--comfy-url", server.url, "--idle-minutes", "0"],
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
     events = []

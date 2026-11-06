@@ -9,7 +9,7 @@ def main(argv: list[str] | None = None) -> int:
     from PySide6.QtCore import QLoggingCategory
     from PySide6.QtWidgets import QApplication, QMessageBox
 
-    from .ui.main_window import LAUNCHER, MainWindow
+    from .ui.main_window import MainWindow
     from .ui.theme import ThemeManager
 
     # harmless Qt messages on Wayland: text input warns when focus leaves a field of an inactive window, and the
@@ -23,9 +23,6 @@ def main(argv: list[str] | None = None) -> int:
     ThemeManager.instance().apply(app)
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         QMessageBox.critical(None, "Promptwood", "ffmpeg and ffprobe are required (sudo dnf install ffmpeg).")
-        return 1
-    if not LAUNCHER.exists():
-        QMessageBox.critical(None, "Promptwood", f"The launcher {LAUNCHER} is missing.")
         return 1
     w = MainWindow()
     w.show()

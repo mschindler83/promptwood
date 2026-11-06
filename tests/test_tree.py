@@ -239,32 +239,6 @@ def test_missing_lora_file_is_refused(project, tmp_path):
         run(project, [n.id])
 
 
-def test_lora_file_info(tmp_path):
-    import numpy as np
-    from safetensors.numpy import save_file
-
-    from video_chain.h3 import lora_file_info
-    peft = tmp_path / "peft.safetensors"                      # ai-toolkit format: no alpha -> scale 1
-    save_file({"diffusion_model.blocks.0.attn.q.lora_A.weight": np.zeros((16, 64), np.float32),
-               "diffusion_model.blocks.0.attn.q.lora_B.weight": np.zeros((64, 16), np.float32)}, str(peft))
-    assert lora_file_info(peft) == (16, 1.0)
-    kohya = tmp_path / "kohya.safetensors"                    # alpha 16 at rank 32 -> scale 0.5
-    save_file({"lora_unet_b0_q.lora_down.weight": np.zeros((32, 64), np.float32),
-               "lora_unet_b0_q.lora_up.weight": np.zeros((64, 32), np.float32),
-               "lora_unet_b0_q.alpha": np.array(16.0, np.float32)}, str(kohya))
-    assert lora_file_info(kohya) == (32, 0.5)
-    mixed = tmp_path / "mixed.safetensors"
-    save_file({"l1.lora_down.weight": np.zeros((8, 4), np.float32), "l1.alpha": np.array(8.0, np.float32),
-               "l2.lora_down.weight": np.zeros((8, 4), np.float32), "l2.alpha": np.array(4.0, np.float32)},
-              str(mixed))
-    with pytest.raises(ValueError, match="different alpha"):
-        lora_file_info(mixed)
-    empty = tmp_path / "empty.safetensors"
-    save_file({"x": np.zeros(2, np.float32)}, str(empty))
-    with pytest.raises(ValueError, match="no LoRA weights"):
-        lora_file_info(empty)
-
-
 def test_retrained_lora_in_the_same_file_changes_its_clips(project, tmp_path):
     lora = tmp_path / "nose.safetensors"
     lora.write_bytes(b"weights v1")
@@ -462,18 +436,20 @@ def test_turbo_mode(project, tmp_path):
     assert statuses(project)["a"] == "done"
 
 
-def test_old_records_and_options_count_as_ai_toolkit(project):
+def test_old_records_count_as_ai_toolkit(project):
+    """Clips made by the ai-toolkit generator of early versions (records without a backend, or with it) count as
+    changed: ComfyUI samples differently and makes them again. A stored backend option is dropped."""
     t, a, b1, b2, c = build(project)
     run(project, [a.id])
     d = json.loads((project / T.TREE_FILE).read_text())
-    d["options"].pop("backend")                                     # a tree.json from before the backend choice
+    d["options"]["backend"] = "ai-toolkit"
     for nd in d["nodes"]:
         if nd.get("made"):
-            nd["made"]["settings"].pop("backend")          # and records without it
+            nd["made"]["settings"].pop("backend")
     (project / T.TREE_FILE).write_text(json.dumps(d))
     t = T.load(project)
-    assert t.options["backend"] == "ai-toolkit"
-    assert statuses(project)["a"] == "done"
+    assert "backend" not in t.options
+    assert statuses(project)["a"] == "changed"
 
 
 def test_records_never_point_outside_the_project(project, tmp_path):

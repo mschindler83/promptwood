@@ -188,24 +188,6 @@ def test_source_gone_keeps_clip(project, source, tmp_path):
         T.run_tree(FakeGenerator(frames=17, size=None), project, [v.id], log=lambda _m: None)
 
 
-def test_ai_toolkit_refuses_end_frames(project, tmp_path, source):
-    with_start(project, tmp_path)
-    t = T.load(project)
-    t.options["backend"] = "ai-toolkit"
-    a = t.add(None, "a")
-    v = t.add_video(a.id, str(source), 0, 1)
-    b = t.add(v.id, "b")                                    # video -> clip works with a single start frame
-    T.save(project, t)
-    with pytest.raises(cli.JobError, match="ends at a video"):
-        cli.prepare_job(project, [v.id])
-    t.remove(a.id)
-    v2 = t.add_video(None, str(source), 0, 1)
-    c = t.add(v2.id, "c")
-    T.save(project, t)
-    assert cli.prepare_job(project, [c.id])["ai_todo"] == [c.id]
-    assert b.id not in t.nodes
-
-
 def test_only_videos_need_no_model(project, source):
     t = T.load(project)
     v = t.add_video(None, str(source), 0, 1)

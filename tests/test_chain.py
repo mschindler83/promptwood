@@ -9,7 +9,6 @@ from PIL import Image
 
 from video_chain import chain
 from video_chain.__main__ import main
-from video_chain.h3 import model_config_dict
 from fakes import COLOURS, FakeGenerator  # noqa: F401
 
 if not shutil.which("ffmpeg"):
@@ -149,17 +148,6 @@ def _img(tmp_path):
     p = tmp_path / "i.png"
     Image.new("RGB", (64, 64), (0, 0, 0)).save(p)
     return p
-
-
-def test_model_config_for_inference():
-    cfg = model_config_dict(lora="/x/l.safetensors", offload=0.9)
-    assert cfg["arch"] == "minimax_h3" and cfg["qtype"] == "convrot8" and cfg["qtype_te"] == "nvfp4"
-    assert cfg["assistant_lora_path"] == cfg["inference_lora_path"] == "/x/l.safetensors"
-    assert cfg["layer_offloading_transformer_percent"] == 0.9 and cfg["model_kwargs"]["sample_audio"] is True
-    base = model_config_dict(offload=0, audio=False)
-    assert "assistant_lora_path" not in base and "layer_offloading" not in base
-    assert base["model_kwargs"]["sample_audio"] is False
-    assert "training_adapter" not in json.dumps(cfg)              # the training adapter is for training only
 
 
 def test_cli_rejects_bad_input_before_loading_anything(tmp_path, start, capsys):

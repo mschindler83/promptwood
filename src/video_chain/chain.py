@@ -2,7 +2,7 @@
 clip before. Writes every clip on its own and all of them joined into one video.
 
 This module knows nothing about the model: a generator object makes one clip from (prompt, start image, seed) and
-saves the clip's last frame as a lossless PNG. The MiniMax-H3 generator lives in h3.py.
+saves the clip's last frame as a lossless PNG. The MiniMax-H3 generator (through ComfyUI) lives in comfy.py.
 
 Output folder:
   start.png          the reference image as given (converted to PNG)
@@ -316,7 +316,7 @@ def _load_previous(out_dir: Path) -> dict[int, dict]:
 
 
 def settings_dict(*, model: str, lora: str | None, strength: float, frames: int, steps: int, width: int,
-                  height: int, audio: bool, backend: str = "ai-toolkit", refs: list | None = None,
+                  height: int, audio: bool, backend: str = "comfyui", refs: list | None = None,
                   ref_size: str = "match", ref_hint: bool = True, extra_loras: list | None = None,
                   turbo: tuple[str, float] | None = None, guide: int = 0) -> dict:
     """What a clip depends on besides prompt, seed and start image; a clip is reused only if this is unchanged.
@@ -390,7 +390,7 @@ def run_chain(generator: Generator, image: Path, prompts: list[str], out_dir: Pa
             new_video, new_last = video.with_name(video.stem + ".new.mp4"), last.with_name(last.stem + ".new.png")
             for f in (new_video, new_last):
                 f.unlink(missing_ok=True)
-            generator.generate(prompt, current, new_video, new_last, s)
+            generator.generate(prompt, current, new_video, new_last, s, settings=settings or None)
             if not new_video.exists() or not new_last.exists():
                 raise RuntimeError(f"the generator did not write {video.name} and {last.name}")
             new_video.replace(video)              # the old clip is replaced only once the new one exists

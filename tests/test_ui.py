@@ -1,4 +1,4 @@
-"""GUI tests: offscreen, own QSettings file, the fake backend instead of ai-toolkit."""
+"""GUI tests: offscreen, own QSettings file, a fake worker instead of ComfyUI."""
 import json
 import os
 import sys
@@ -32,6 +32,8 @@ def settings(tmp_path, name="s.ini"):
         q.setValue("comfyDir", str(tmp_path / "no-comfyui"))
     if q.value("thumbCacheDir") is None:             # nor the real thumbnail cache
         q.setValue("thumbCacheDir", str(tmp_path / "thumb-cache"))
+    if q.value("comfyAutoStart") is None:            # never start the real ComfyUI from a test
+        q.setValue("comfyAutoStart", False)
     return q
 
 
@@ -385,32 +387,46 @@ def test_without_keep_loaded_the_worker_quits(app, win, tmp_path, image):
     assert win.status.text().startswith("Done: 1 clip made")
 
 
-def test_bigger_lora_and_sound_change_reload(app, win, tmp_path, image, monkeypatch):
+def test_one_worker_until_comfyui_settings_change(app, win, tmp_path, image, monkeypatch):
+    """Sound, LoRAs and sizes are per clip in ComfyUI: no new worker for them; another ComfyUI address needs one."""
     log = tmp_path / "loads.jsonl"
     monkeypatch.setenv("FAKE_LOADS", str(log))
-    monkeypatch.setenv("FAKE_BIG", "big")
-    big = tmp_path / "big_rank64.safetensors"
-    big.write_bytes(b"x")
+    lora = tmp_path / "x.safetensors"
+    lora.write_bytes(b"x")
     ids = new_project(win, tmp_path, image, ("a",))
-    win.backend.setCurrentIndex(win.backend.findData("ai-toolkit"))    # only ai-toolkit prepares LoRA ranks
-    flush(app, win)
     run_and_wait(app, win, win.generate_path)
+    win.audio.setChecked(False)
+    win.set_node_lora(ids[0], str(lora))
+    flush(app, win)
+    wait(app, lambda: not win._joins, timeout=30)
+    run_and_wait(app, win, win.generate_path)
+    assert win.state(ids[0]) == "done" and len(loads(log)) == 1
+    win.comfy_url.setText("http://127.0.0.1:8199")
+    wait(app, lambda: not win._joins, timeout=30)
     win.node_action("continue", ids[0])
-    n2 = win.selected_id()
-    type_prompt(win, n2, "b")
-    flush(app, win)
-    win.tree.nodes[n2].overrides = {"lora": str(big)}       # added after the worker loaded: does not fit
-    flush(app, win)
-    win.refresh()
-    run_and_wait(app, win, win.generate_path)
-    wait(app, lambda: win.state(n2) == "done", timeout=20)
-    got = loads(log)
-    assert len(got) == 2 and got[0]["loras"] == [] and got[1]["loras"] == [str(big)]
-    win.audio.setChecked(False)                              # another sound setting: a new worker
+    type_prompt(win, win.selected_id(), "b")
     flush(app, win)
     run_and_wait(app, win, win.generate_path)
     got = loads(log)
-    assert len(got) == 3 and got[2]["audio"] is False
+    assert len(got) == 2 and got[1]["url"] == "http://127.0.0.1:8199"
+
+
+def test_comfyui_is_started_when_generating(app, win, tmp_path, image, monkeypatch):
+    started = []
+    monkeypatch.setattr(win, "start_comfy", lambda: started.append(1) or setattr(
+        win, "_comfy_starting", time.monotonic()) or True)
+    ids = new_project(win, tmp_path, image, ("a",))
+    win.comfy_autostart.setChecked(True)
+    win._comfy_state(False)
+    win.generate_path()
+    assert started == [1] and not win.running and win._waiting_comfy == [ids[0]]
+    assert "generating begins as soon as it runs" in win.status.text()
+    win.generate_path()                                       # pressed again while it starts: no second start
+    assert started == [1]
+    win._comfy_state(True)                                    # ComfyUI answers: the generation begins
+    wait(app, lambda: win.running or win.state(ids[0]) == "done", timeout=10)
+    wait(app, lambda: not win.running)
+    assert win.state(ids[0]) == "done" and win._waiting_comfy is None
 
 
 def test_worker_quits_after_the_idle_time(tmp_path):
@@ -457,15 +473,6 @@ def test_comfyui_not_running(app, win, tmp_path, image, monkeypatch):
     run_and_wait(app, win, win.generate_path)
     assert "ComfyUI is not running" in win.status.text() and win.comfy_label.text() == "ComfyUI: not running"
     assert win.b_start_comfy.isEnabled()
-
-
-def test_backend_change_marks_clips(app, win, tmp_path, image):
-    ids = new_project(win, tmp_path, image, ("a",))
-    run_and_wait(app, win, win.generate_path)
-    assert win.state(ids[0]) == "done"
-    win.backend.setCurrentIndex(win.backend.findData("ai-toolkit"))
-    flush(app, win)
-    assert win.state(ids[0]) == "changed" and win.tree.options["backend"] == "ai-toolkit"
 
 
 def write_lora(path, names):
@@ -524,12 +531,7 @@ def test_identity_references_in_the_window(app, win, tmp_path, image):
     win.ref_size.setCurrentIndex(win.ref_size.findData("max"))
     flush(app, win)
     assert win.state(ids[0]) == "changed"
-    win.backend.setCurrentIndex(win.backend.findData("ai-toolkit"))
-    flush(app, win)
     wait(app, lambda: not win._joins, timeout=30)                              # the auto-play join of the run
-    win.generate_path()
-    assert not win.running and "reference images need the ComfyUI generator" in win.status.text()
-    win.backend.setCurrentIndex(win.backend.findData("comfyui"))
     win.refs.setCurrentRow(0)
     win._remove_reference()
     flush(app, win)
@@ -579,12 +581,6 @@ def test_stacked_loras_in_the_window(app, tmp_path, image, monkeypatch):
     card.extras._remove(card.extras.rows[0])
     flush(app, w)
     assert "extra_loras" not in w.tree.nodes[ids[1]].overrides and w.state(ids[1]) == "changed"
-    # ai-toolkit can apply only one LoRA
-    w.backend.setCurrentIndex(w.backend.findData("ai-toolkit"))
-    flush(app, w)
-    wait(app, lambda: not w._joins, timeout=30)
-    w.generate_path()
-    assert not w.running and "several LoRAs on one clip need the ComfyUI generator" in w.status.text()
     w.close()
 
 
@@ -644,11 +640,6 @@ def test_turbo_in_the_window(app, tmp_path, image, monkeypatch):
     run_and_wait(app, w, w.generate_path)
     made = T.load(w.project).nodes[ids[0]].made["settings"]
     assert made["steps"] == 6 and made["turbo"]["lora"].endswith("_ema.safetensors")
-    w.backend.setCurrentIndex(w.backend.findData("ai-toolkit"))
-    flush(app, w)
-    wait(app, lambda: not w._joins, timeout=30)
-    w.generate_path()
-    assert not w.running and "turbo mode needs the ComfyUI generator" in w.status.text()
     w.close()
 
 
@@ -898,16 +889,6 @@ def test_clip_into_video_and_variants(app, win, tmp_path, image):
         assert win.state(vc.id) == "done" and vc.made["video"] != win.tree.nodes[v].made["video"]
     win.node_action("variant", v)                                         # not for real videos
     assert "Variants are for generated clips" in win.status.text()
-
-
-def test_ai_toolkit_cannot_end_at_a_video(app, win, tmp_path, image):
-    src = make_real_video(tmp_path / "real.mp4")
-    ids = new_project(win, tmp_path, image, ("x",))
-    win.add_video(ids[0], str(src), 0.0, 1.0)
-    wait(app, lambda: not win._converts)
-    win.backend.setCurrentIndex(win.backend.findData("ai-toolkit"))
-    win.generate_path()
-    assert not win.running and "needs the ComfyUI generator" in win.status.text()
 
 
 def test_motion_guide_choice_on_the_card(app, win, tmp_path, image):

@@ -3,8 +3,9 @@ before it; any clip can be continued in several ways (branches). A path from the
 Real videos can be put into the chain too (a range of a file): a generated clip before one ends at its first frame,
 one after it starts from its last frame.
 
-The project folder holds tree.json, start.png and the clips (see tree.py). Generation runs in a separate process
-(the video-chain launcher with ai-toolkit's Python) that reports '@@ {json}' events; Stop ends only that process.
+The project folder holds tree.json, start.png and the clips (see tree.py). Clips are rendered by ComfyUI; a small
+worker process (python -m video_chain --serve) talks to it and reports '@@ {json}' events; Stop ends that process
+and cancels the clip in ComfyUI.
 """
 from __future__ import annotations
 
@@ -37,14 +38,9 @@ from .video_editor import VideoRangeDialog, choose_video
 from .theme import icon, repolish, theme
 from .widgets import FrameTile, icon_button, label, section_bar
 
-PROJECT_DIR = Path(__file__).resolve().parents[3]
-LAUNCHER = PROJECT_DIR / "video-chain"
-DEFAULT_AITK = "/path/to/ai/ai-toolkit"
 DEFAULT_COMFY_URL = "http://127.0.0.1:8188"
 DEFAULT_COMFY_LAUNCHER = str(Path.home() / "bin" / "comfyui")
 DEFAULT_COMFY_DIR = str(Path.home() / "ComfyUI")
-BACKENDS = (("comfyui", "ComfyUI (fast, keeps the model loaded)"),
-            ("ai-toolkit", "ai-toolkit (the trainer's sampler)"))
 # H3's 17n+5 frame grid from 3 s to 15 s (362 frames = 15.1 s, the top of its trained range of ~124-362)
 FRAME_CHOICES = [17 * n + 5 for n in range(4, 22)]
 
@@ -182,6 +178,7 @@ class _Bridge(QObject):
 
 # ----------------------------------------------------------------------------- path card
 
+STEPS_TIP = "Sampling steps per clip (ComfyUI's H3 blueprint uses 20; more is slower, rarely better)"
 STRENGTH_DEFAULT = -0.05          # spin box minimum = "default"
 STEPS_DEFAULT = 3
 
@@ -229,8 +226,7 @@ class LoraStack(QWidget):
         self.v.setContentsMargins(0, 0, 0, 0)
         self.v.setSpacing(4)
         self.b_add = QPushButton(add_text)
-        self.b_add.setToolTip("Stack another LoRA on top (applied after the ones above, in this order; "
-                              "ComfyUI generator only)")
+        self.b_add.setToolTip("Stack another LoRA on top (applied after the ones above, in this order)")
         self.b_add.clicked.connect(lambda: (self._add_row(None, 1.0), self.changed.emit()))
         self.v.addWidget(self.b_add, 0, Qt.AlignLeft)
         self._enabled = True
@@ -401,8 +397,8 @@ class PromptCard(QFrame):
         self.guide.setToolTip("How this clip joins its neighbours. Single frame: it starts at the last frame of the "
                               "clip before (and ends at the first frame of a real video after it). Motion guide: "
                               "the last frames of the clip before and the first frames of a video after it, with "
-                              "their sound, are anchored in this clip, so motion and voice carry over (ComfyUI only; "
-                              "those frames are left out when the path is joined)")
+                              "their sound, are anchored in this clip, so motion and voice carry over (those "
+                              "frames are left out when the path is joined)")
         grid.addRow("Join", self.guide)
         v.addLayout(grid)
         self.guide.currentIndexChanged.connect(self._ov_changed)
@@ -736,7 +732,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Promptwood")
         self._build_menu()
         self.qs = settings or QSettings()
-        self.command = command                  # tests replace the launcher with a fake backend
+        self.command = command                  # tests replace the worker with a fake one
         self.project: Path | None = None
         self.tree: T.Tree | None = None
         self.status_of: dict[str, str] = {}
@@ -758,9 +754,7 @@ class MainWindow(QMainWindow):
         self._job: dict | None = None           # the generation in progress
         self._worker_idle = False
         self._worker_bound: tuple | None = None
-        self._worker_loras: list[str] = []
-        self._replace_worker = self._restart = False
-        self._restart_loras: list[str] = []
+        self._replace_worker = False
         self._idle_since, self._idle_timeout = 0.0, None
         self._model_state = ""
         self._joins = 0                         # path joins still running
@@ -777,6 +771,7 @@ class MainWindow(QMainWindow):
         self.comfy_up: bool | None = None
         self._comfy_polling = False
         self._comfy_starting = 0.0
+        self._waiting_comfy: list[str] | None = None   # targets to generate once ComfyUI answers
         self._join_lock = threading.Lock()      # joins run one after another (play after generating + export)
         self._save_timer = QTimer(self, singleShot=True, interval=400, timeout=self._save_tree)
         self._refresh_timer = QTimer(self, singleShot=True, interval=250, timeout=self.refresh)
@@ -865,7 +860,7 @@ class MainWindow(QMainWindow):
         self.ident_mode.addItem("Reference images (H3 ref2va)", "reference")
         self.ident_mode.setToolTip("With reference images every clip sees the same original face (<Picture 1> ...), "
                                    "not only the last frame of the clip before, so the face does not drift along "
-                                   "the chain. Uses H3's reference-to-video model (ComfyUI generator only).")
+                                   "the chain. Uses H3's reference-to-video model.")
         iv.addWidget(self.ident_mode)
         self.refs = QListWidget()
         self.refs.setViewMode(QListWidget.IconMode)
@@ -927,7 +922,7 @@ class MainWindow(QMainWindow):
         f.addRow("Strength", self.strength)
         self.extra_loras = LoraStack(fw)
         self.extra_loras.setToolTip("LoRAs stacked on top of the project LoRA for every clip on the project "
-                                    "default (ComfyUI generator only)")
+                                    "default")
         f.addRow("More", self.extra_loras)
         self.extra_loras.changed.connect(self._options_changed)
         lv.addWidget(fw)
@@ -942,8 +937,7 @@ class MainWindow(QMainWindow):
             self.frames.addItem(frames_text(n), n)
         self.frames.setCurrentIndex(FRAME_CHOICES.index(73))
         self.frames.setToolTip("Length of every clip (a clip can have its own). Longer clips mean fewer hand-overs "
-                               "between clips, so the face drifts less; they take longer and need more memory "
-                               "(with ai-toolkit beyond 124 frames possibly too much for 24 GB)")
+                               "between clips, so the face drifts less; they take longer and need more memory")
         c.addRow("Length", self.frames)
         self.resolution = QComboBox()
         for r, txt in ((384, "384 (fast draft)"), (512, "512 (like the training)"), (640, "640"), (768, "768")):
@@ -954,13 +948,13 @@ class MainWindow(QMainWindow):
         self.steps = QSpinBox()
         self.steps.setRange(4, 80)
         self.steps.setValue(28)
-        self.steps.setToolTip("Sampling steps per clip. The trainer's samples use 20, ai-toolkit's H3 default is 28")
+        self.steps.setToolTip(STEPS_TIP)
         c.addRow("Steps", self.steps)
         self.speed = QComboBox()
         self.speed.addItem("Normal", "normal")
         self.speed.addItem("Turbo (turbo LoRA, 4-8 steps)", "turbo")
         self.speed.setToolTip("Turbo: a step-distilled LoRA with its own sampler renders every clip in 4-8 steps "
-                              "instead of ~20 (needs ComfyUI and the ComfyUI-MiniMax-H3-Turbo nodes)")
+                              "instead of ~20 (needs the ComfyUI-MiniMax-H3-Turbo nodes)")
         c.addRow("Speed", self.speed)
         self.turbo_lora = QComboBox()
         self.turbo_lora.setToolTip("The turbo LoRA (only turbo LoRAs are listed here, and they are left out of the "
@@ -983,13 +977,6 @@ class MainWindow(QMainWindow):
         trow.addWidget(self.turbo_strength)
         trow.addStretch(1)
         c.addRow("", trow)
-        self.backend = QComboBox()
-        for key, text in BACKENDS:
-            self.backend.addItem(text, key)
-        self.backend.setToolTip("Who renders the clips. ComfyUI loads the model quickly and keeps it; ai-toolkit "
-                                "uses the trainer's sampler (like the training samples). Clips made by the other "
-                                "one count as changed.")
-        c.addRow("Generator", self.backend)
         self.audio = QCheckBox("Generate sound")
         self.audio.setChecked(True)
         c.addRow("", self.audio)
@@ -999,27 +986,14 @@ class MainWindow(QMainWindow):
         c.addRow("", self.keep_rep)
         lv.addWidget(cw)
 
-        bar, _ = section_bar("Advanced", left)
+        bar, _ = section_bar("ComfyUI", left)
         lv.addWidget(bar)
         aw = QWidget()
         a = QFormLayout(aw)
         a.setContentsMargins(10, 6, 10, 8)
-        self.offload = QSpinBox()
-        self.offload.setRange(0, 100)
-        self.offload.setValue(90)
-        self.offload.setSuffix(" % of layers in RAM")
-        a.addRow("Offloading", self.offload)
-        self.min_free = QDoubleSpinBox()
-        self.min_free.setRange(0, 24)
-        self.min_free.setValue(18)
-        self.min_free.setSuffix(" GB")
-        self.min_free.setToolTip("Refuse to start with less free GPU memory (protects a running training)")
-        a.addRow("Min. free GPU", self.min_free)
-        self.aitk = QLineEdit(DEFAULT_AITK)
-        a.addRow("ai-toolkit", self.aitk)
         self.comfy_url = QLineEdit(DEFAULT_COMFY_URL)
         self.comfy_url.setToolTip("Address of the ComfyUI that renders the clips")
-        a.addRow("ComfyUI", self.comfy_url)
+        a.addRow("Address", self.comfy_url)
         crow = QHBoxLayout()
         self.comfy_launcher = QLineEdit(DEFAULT_COMFY_LAUNCHER)
         self.comfy_launcher.setToolTip("Command that starts ComfyUI (your app-drawer launcher)")
@@ -1032,13 +1006,18 @@ class MainWindow(QMainWindow):
         self.comfy_dir = QLineEdit(DEFAULT_COMFY_DIR)
         self.comfy_dir.setToolTip("ComfyUI's folder: its LoRA folders are searched for the chosen LoRA files, and "
                                   "its copies of the clips are removed after they were taken over")
-        a.addRow("ComfyUI folder", self.comfy_dir)
+        a.addRow("Folder", self.comfy_dir)
         self.comfy_cleanup = QCheckBox("Delete ComfyUI's copies of the clips")
         self.comfy_cleanup.setChecked(True)
         self.comfy_cleanup.setToolTip("ComfyUI keeps every clip and start image in output/video-chain and "
                                       "input/video-chain; the project has its own copy, so they are removed after "
                                       "the download (only there, never anything else)")
         a.addRow("", self.comfy_cleanup)
+        self.comfy_autostart = QCheckBox("Start ComfyUI when generating")
+        self.comfy_autostart.setChecked(True)
+        self.comfy_autostart.setToolTip("If ComfyUI is not running when you generate, start it with the command "
+                                        "above and begin as soon as it answers")
+        a.addRow("", self.comfy_autostart)
         krow = QHBoxLayout()
         self.keep_loaded = QCheckBox("Keep the model loaded for")
         self.keep_loaded.setChecked(True)
@@ -1184,7 +1163,7 @@ class MainWindow(QMainWindow):
         self.start_tile.dropped.connect(self.set_image)
         for sig in (self.strength.valueChanged, self.frames.currentIndexChanged, self.resolution.currentIndexChanged,
                     self.steps.valueChanged, self.audio.toggled, self.keep_rep.toggled,
-                    self.backend.currentIndexChanged, self.speed.currentIndexChanged,
+                    self.speed.currentIndexChanged,
                     self.turbo_lora.currentIndexChanged, self.turbo_steps.valueChanged,
                     self.turbo_strength.valueChanged):
             sig.connect(self._options_changed)
@@ -1203,15 +1182,13 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ settings
     def _load_settings(self):
         q = self.qs
-        self.offload.setValue(q.value("offload", 90, type=int))
         self.keep_loaded.setChecked(q.value("keepLoaded", True, type=bool))
         self.comfy_url.setText(q.value("comfyUrl", DEFAULT_COMFY_URL, type=str))
         self.comfy_launcher.setText(q.value("comfyLauncher", DEFAULT_COMFY_LAUNCHER, type=str))
         self.comfy_dir.setText(q.value("comfyDir", DEFAULT_COMFY_DIR, type=str))
         self.comfy_cleanup.setChecked(q.value("comfyCleanup", True, type=bool))
+        self.comfy_autostart.setChecked(q.value("comfyAutoStart", True, type=bool))
         self.idle_minutes.setValue(q.value("idleMinutes", 15, type=int))
-        self.min_free.setValue(q.value("minFree", 18.0, type=float))
-        self.aitk.setText(q.value("aitk", DEFAULT_AITK, type=str))
         if g := q.value("geometry"):
             self.restoreGeometry(g)
         self._fill_recent()
@@ -1221,15 +1198,13 @@ class MainWindow(QMainWindow):
 
     def save_settings(self):
         q = self.qs
-        q.setValue("offload", self.offload.value())
         q.setValue("keepLoaded", self.keep_loaded.isChecked())
         q.setValue("comfyUrl", self.comfy_url.text().strip())
         q.setValue("comfyLauncher", self.comfy_launcher.text().strip())
         q.setValue("comfyDir", self.comfy_dir.text().strip())
         q.setValue("comfyCleanup", self.comfy_cleanup.isChecked())
+        q.setValue("comfyAutoStart", self.comfy_autostart.isChecked())
         q.setValue("idleMinutes", self.idle_minutes.value())
-        q.setValue("minFree", self.min_free.value())
-        q.setValue("aitk", self.aitk.text().strip())
         q.setValue("project", str(self.project) if self.project else "")
         if self.tree is not None:
             q.setValue("lastOptions", json.dumps(self.tree.options))
@@ -1486,8 +1461,6 @@ class MainWindow(QMainWindow):
             self.resolution.setCurrentIndex(i if i >= 0 else 1)
             self.steps.setValue(int(o.get("steps", 28)))
             self.audio.setChecked(bool(o.get("audio", True)))
-            i = self.backend.findData(o.get("backend", "comfyui"))
-            self.backend.setCurrentIndex(i if i >= 0 else 0)
             ident = o.get("identity") or {}
             self.ident_mode.setCurrentIndex(max(0, self.ident_mode.findData(ident.get("mode", "off"))))
             self.ref_size.setCurrentIndex(max(0, self.ref_size.findData(ident.get("size", "match"))))
@@ -1509,7 +1482,7 @@ class MainWindow(QMainWindow):
             "lora": lora_path(lora) if lora else None, "strength": self.strength.value(),
             "frames": self.frames.currentData(), "resolution": self.resolution.currentData(),
             "steps": self.steps.value(), "audio": self.audio.isChecked(), "keep_repeated": self.keep_rep.isChecked(),
-            "backend": self.backend.currentData(), "extra_loras": self.extra_loras.items(),
+            "extra_loras": self.extra_loras.items(),
             "turbo": {"on": self.speed.currentData() == "turbo", "lora": self.turbo_lora.currentData(),
                       "steps": self.turbo_steps.value(), "strength": round(self.turbo_strength.value(), 2)}})
         self._update_size_info()
@@ -1579,8 +1552,6 @@ class MainWindow(QMainWindow):
             text = "Off: every clip only continues from the last frame of the clip before."
         elif not n:
             text = "Add a reference image (best a sharp close-up of the face)."
-        elif self.current_backend() != "comfyui":
-            text = "Reference images need the ComfyUI generator (Clips → Generator)."
         else:
             text = (f"{n} reference image{'s' if n != 1 else ''}: every clip sees the same face. Uses H3's ref2va "
                     "model; LoRAs trained on the normal model may act weaker there.")
@@ -1877,7 +1848,7 @@ class MainWindow(QMainWindow):
         self._update_comfy_label()
         self.extra_loras.setEnabled(idle)
         for w in (self.start_tile, self.lora, self.b_lora, self.strength, self.frames, self.resolution, self.steps,
-                  self.audio, self.keep_rep, self.offload, self.min_free, self.aitk, self.b_project, self.backend,
+                  self.audio, self.keep_rep, self.b_project,
                   self.comfy_url, self.ident_mode, self.ref_size, self.ref_hint, self.b_ref_add, self.b_ref_start,
                   self.b_ref_del, self.speed):
             w.setEnabled(idle)
@@ -1959,7 +1930,7 @@ class MainWindow(QMainWindow):
             w.setEnabled(on and idle)
         self.steps.setEnabled(idle and not on)
         self.steps.setToolTip("Turbo mode: every clip uses the turbo steps" if on else
-                              "Sampling steps per clip. The trainer's samples use 20, ai-toolkit's H3 default is 28")
+                              STEPS_TIP)
         for card in self.cards:
             if isinstance(card, PromptCard):
                 card.steps_locked = on
@@ -2487,7 +2458,7 @@ class MainWindow(QMainWindow):
                 return
             free = (total - used) / 1024
             self.gpu.setText(f"GPU {free:.1f} GB free of {total / 1024:.0f}")
-            self.gpu.setProperty("severity", "warning" if free < self.min_free.value() else "")
+            self.gpu.setProperty("severity", "warning" if free < 4 else "")
             repolish(self.gpu)
 
         p.finished.connect(done)
@@ -2519,25 +2490,9 @@ class MainWindow(QMainWindow):
             self._start([n.id for n in self.tree.leaves()])
 
     def _worker_key(self) -> tuple:
-        """What a loaded worker is bound to; a different key needs a new worker."""
-        comfy = self.current_backend() == "comfyui"
-        # only what the chosen generator uses: a change of the other one's settings must not reload the model
-        return (self.tree.options.get("model", T.DEFAULT_OPTIONS["model"]), bool(self.tree.options.get("audio", True)),
-                None if comfy else self.offload.value(),
-                None if comfy else (self.aitk.text().strip() or DEFAULT_AITK), self.current_backend(),
-                (self.comfy_url.text().strip() or DEFAULT_COMFY_URL) if comfy else DEFAULT_COMFY_URL,
-                self.comfy_dir.text().strip() if comfy else "", self.comfy_cleanup.isChecked() if comfy else True)
-
-    def current_backend(self) -> str:
-        return (self.tree.options.get("backend") if self.tree else None) or "comfyui"
-
-    def project_loras(self) -> list[str]:
-        """LoRA files of this project (its default and every clip's own), prepared when a worker loads."""
-        out = []
-        for lo in [self.tree.options.get("lora")] + [n.overrides.get("lora") for n in self.tree.nodes.values()]:
-            if lo and lo != T.NO_LORA and lo not in out and Path(lo).is_file():
-                out.append(lo)
-        return out
+        """What a running worker is bound to (which ComfyUI, its folder, cleanup); a change needs a new worker."""
+        return ((self.comfy_url.text().strip() or DEFAULT_COMFY_URL), self.comfy_dir.text().strip(),
+                self.comfy_cleanup.isChecked())
 
     def _start(self, targets: list[str]):
         if self.running or self.tree is None:
@@ -2556,14 +2511,10 @@ class MainWindow(QMainWindow):
         if ident.get("mode") == "reference":
             if not ident.get("images"):
                 problems.append("add a reference image (Identity) or switch it off")
-            elif self.current_backend() != "comfyui":
-                problems.append("reference images need the ComfyUI generator")
         turbo = self.tree.options.get("turbo") or {}
         if turbo.get("on"):
             if not turbo.get("lora"):
                 problems.append("choose a turbo LoRA (Clips → Turbo LoRA) or switch Speed to Normal")
-            elif self.current_backend() != "comfyui":
-                problems.append("turbo mode needs the ComfyUI generator")
         nodes = {n.id: n for t in targets for n in self.tree.path_to(t)}
         empty = [n for n in nodes.values() if not n.is_video and not n.prompt.strip()]
         if empty:
@@ -2578,13 +2529,6 @@ class MainWindow(QMainWindow):
                         and not Path(self.tree.nodes[n].source["file"]).is_file()]
                 if gone:
                     problems.append(f"the file of video #{gone[0][1:]} is missing (Edit the range… to choose it)")
-                if self.current_backend() != "comfyui":
-                    why = T.needs_comfy(self.tree, checker, todo)
-                    if why:
-                        problems.append(f"{why}: that needs the ComfyUI generator")
-            if checker.base() is not None and self.current_backend() != "comfyui":
-                if any(checker.settings(nid).get("extra_loras") for nid in nodes if not self.tree.nodes[nid].is_video):
-                    problems.append("several LoRAs on one clip need the ComfyUI generator")
             if checker.base() is not None:
                 for lo in T.loras_needed(self.tree, checker, list(nodes)):
                     if not Path(lo).is_file():
@@ -2597,11 +2541,14 @@ class MainWindow(QMainWindow):
             if empty and len(targets) > 1:
                 self.select(empty[0].id)
             return
+        if self.comfy_up is False and not self.worker_alive and self._autostart(targets):
+            return
+        self._waiting_comfy = None
         self._save_timer.stop()
         if not self._write_tree():
             return
         self.save_settings()
-        self._job = {"targets": targets, "sent": False, "restarted": False}
+        self._job = {"targets": targets, "sent": False}
         self._error, self._stopping, self._phase = "", False, "starting"
         self._targets, self._plan = targets, []
         self.live, self.progress_of = {}, {}
@@ -2618,25 +2565,22 @@ class MainWindow(QMainWindow):
             self.status.setText("Starting the generator again …")
             self._replace_worker = True
             self._quit_worker()
-        elif self.worker_alive:                    # loaded for other settings: replace it
-            self.status.setText("Settings changed: loading the model again …")
+        elif self.worker_alive:                    # bound to another ComfyUI address or folder: replace it
+            self.status.setText("ComfyUI settings changed: connecting again …")
             self._replace_worker = True
             self._quit_worker()
         else:
-            self._start_worker(self.project_loras())
+            self._start_worker()
 
     def _program(self) -> tuple[str, list[str]]:
         if self.command:
             return self.command[0], list(self.command[1:])
-        if self.current_backend() == "comfyui":            # no torch needed: this app's own Python
-            return sys.executable, ["-m", "video_chain"]
-        return str(LAUNCHER), []
+        return sys.executable, ["-m", "video_chain"]
 
-    def _start_worker(self, loras: list[str]):
+    def _start_worker(self):
         program, pre = self._program()
         self.proc = QProcess(self)
         env = QProcessEnvironment.systemEnvironment()
-        env.insert("AITK", self.aitk.text().strip() or DEFAULT_AITK)
         env.insert("PYTHONUNBUFFERED", "1")
         self.proc.setProcessEnvironment(env)
         self.proc.readyReadStandardOutput.connect(self._read_out)
@@ -2644,21 +2588,15 @@ class MainWindow(QMainWindow):
         self.proc.finished.connect(self._finished)
         self.proc.errorOccurred.connect(self._proc_error)
         self._buf = self._ebuf = ""
-        self._worker_idle, self._worker_bound, self._replace_worker, self._restart = False, self._worker_key(), \
-            False, False
-        self._worker_loras = list(loras)
+        self._worker_idle, self._worker_bound, self._replace_worker = False, self._worker_key(), False
         self._worker_leaving = False
         minutes = self.idle_minutes.value() if self.keep_loaded.isChecked() else 0
-        args = pre + ["--serve", "--events", "--offload", f"{self.offload.value() / 100:g}",
-                      "--min-free-gb", f"{self.min_free.value():g}", "--idle-minutes", f"{minutes:g}",
-                      "--model", self._worker_bound[0], "--loras", ",".join(loras),
-                      "--backend", self._worker_bound[4], "--comfy-url", self._worker_bound[5]]
-        if self._worker_bound[6]:
-            args += ["--comfy-dir", os.path.expanduser(self._worker_bound[6])]
-        if not self._worker_bound[7]:
+        url, comfy_dir, cleanup = self._worker_bound
+        args = pre + ["--serve", "--events", "--idle-minutes", f"{minutes:g}", "--comfy-url", url]
+        if comfy_dir:
+            args += ["--comfy-dir", os.path.expanduser(comfy_dir)]
+        if not cleanup:
             args.append("--keep-comfy-copies")
-        if not self._worker_bound[1]:
-            args.append("--no-audio")
         self.log.appendPlainText("$ " + " ".join([program, *args]))
         self.status.setText("Starting …")
         self.proc.start(program, args)
@@ -2754,12 +2692,12 @@ class MainWindow(QMainWindow):
         e = ev.get("e")
         if e == "loading":
             self._worker_idle = False
-            self.status.setText("Loading MiniMax-H3 … (a few minutes)")
+            self.status.setText("Connecting to ComfyUI …")
             self.progress.setRange(0, 0)
             self._model_state = "loading"
             self._update_model_label()
         elif e == "loaded":
-            self.status.setText("Model loaded.")
+            self.status.setText("Connected to ComfyUI.")
             self._model_state = "loaded"
         elif e == "idle":
             self._worker_idle = True
@@ -2775,9 +2713,6 @@ class MainWindow(QMainWindow):
             self._worker_leaving = True
             if ev.get("reason") == "idle" and not self.running:
                 self.status.setText("The model was unloaded after the idle time.")
-        elif e == "restart":
-            self._restart = True
-            self._restart_loras = list(dict.fromkeys(self._worker_loras + list(ev.get("loras") or [])))
         elif e == "start":
             self.status.setText(f"{ev.get('nodes', 0)} clips to make at {ev['width']}×{ev['height']}, "
                                 f"{ev['frames']} frames each.")
@@ -2878,20 +2813,16 @@ class MainWindow(QMainWindow):
         self._buf = self._ebuf = ""
         self._worker_idle = False
         self._model_state = ""
-        if self._job is not None and self._restart and not self._job["restarted"] and not self._stopping:
-            # the job needs a worker loaded differently (a LoRA of a higher rank, other sound or model)
-            self._job["restarted"], self._job["sent"] = True, False
-            self.status.setText("Loading the model again for this job …")
-            self._start_worker(self._restart_loras)
-        elif self._job is not None and self._replace_worker and not self._stopping:
+        if self._job is not None and self._replace_worker and not self._stopping:
             self._job["sent"] = False
-            self._start_worker(self.project_loras())
+            self._start_worker()
         elif self._job is not None:
             self._job_finished(code if code else 1)
             if code == 4:                                   # COMFY_DOWN
-                self.status.setText(f"ComfyUI is not running at {self.comfy_url.text().strip()}. "
-                                    "Start it (Advanced → Start ComfyUI) and generate again.")
                 self.comfy_up = False
+                if not self._autostart(self._targets):
+                    self.status.setText(f"ComfyUI is not running at {self.comfy_url.text().strip()}. "
+                                        "Start it (ComfyUI → Start ComfyUI) and generate again.")
                 self._update_comfy_label()
         self._update_model_label()
         self._update_buttons()
@@ -2912,18 +2843,34 @@ class MainWindow(QMainWindow):
             bridge.comfy.emit(ok)
         threading.Thread(target=check, daemon=True).start()
 
+    def _autostart(self, targets: list[str]) -> bool:
+        """ComfyUI is down: start it (if allowed) and generate targets once it answers. False: not started."""
+        if not self.comfy_autostart.isChecked():
+            return False
+        if not (self._comfy_starting and time.monotonic() - self._comfy_starting < 180):
+            if not self.start_comfy():
+                return False
+        self._waiting_comfy = list(targets)
+        self.status.setText("Starting ComfyUI … generating begins as soon as it runs.")
+        return True
+
     def _comfy_state(self, up: bool):
         self._comfy_polling = False
         was, self.comfy_up = self.comfy_up, up
         if up and was is False and self._comfy_starting:
             self._comfy_starting = 0.0
             self.status.setText("ComfyUI is running.")
+        if self._waiting_comfy is not None:
+            if up:
+                targets, self._waiting_comfy = self._waiting_comfy, None
+                if self.tree is not None and all(t in self.tree.nodes for t in targets):
+                    QTimer.singleShot(0, lambda: self._start(targets))
+            elif not (self._comfy_starting and time.monotonic() - self._comfy_starting < 180):
+                self._waiting_comfy = None
+                self.status.setText("ComfyUI did not start within 3 minutes; see its own log.")
         self._update_comfy_label()
 
     def _update_comfy_label(self):
-        if self.tree is not None and self.current_backend() != "comfyui":
-            self.comfy_label.setText("")
-            return
         if self.comfy_up:
             text, sev = "ComfyUI: running", ""
         elif self._comfy_starting and time.monotonic() - self._comfy_starting < 180:
@@ -2937,20 +2884,21 @@ class MainWindow(QMainWindow):
         repolish(self.comfy_label)
         self.b_start_comfy.setEnabled(not self.comfy_up)
 
-    def start_comfy(self):
+    def start_comfy(self) -> bool:
         """Start ComfyUI in the background with the user's launcher (it runs on its own, not tied to this app)."""
         cmd = os.path.expanduser(self.comfy_launcher.text().strip() or DEFAULT_COMFY_LAUNCHER)
         if not Path(cmd).is_file():
             self.status.setText(f"ComfyUI launcher not found: {cmd}")
-            return
+            return False
         ok = QProcess.startDetached(cmd, [])
         ok = ok[0] if isinstance(ok, tuple) else ok
         if not ok:
             self.status.setText(f"Could not start {cmd}")
-            return
+            return False
         self._comfy_starting = time.monotonic()
         self.status.setText("Starting ComfyUI … (the clips can be generated once it runs)")
         self._update_comfy_label()
+        return True
 
     def _update_model_label(self):
         if not self.worker_alive:
@@ -2961,8 +2909,7 @@ class MainWindow(QMainWindow):
             text, sev = "Model: working", ""
         elif self._idle_timeout:
             left = max(0.0, self._idle_timeout - (time.monotonic() - self._idle_since))
-            where = " in ComfyUI" if self._worker_bound and self._worker_bound[4] == "comfyui" else ""
-            text, sev = f"Model: loaded{where} · unloads in {max(1, round(left / 60))} min", ""
+            text, sev = f"Model: loaded in ComfyUI · unloads in {max(1, round(left / 60))} min", ""
         else:
             text, sev = "Model: loaded", ""
         self.model_label.setText(text)

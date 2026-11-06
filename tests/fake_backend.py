@@ -50,34 +50,28 @@ def tree_mode(a, emit) -> int:
 
 
 def serve_mode(a, emit) -> int:
-    """The real worker loop with fake clips. FAKE_BIG=<name> marks LoRA files whose rank does not fit unless they
-    were prepared at start (to test the restart); every load is logged to FAKE_LOADS (a file) if set."""
-    big = os.environ.get("FAKE_BIG", "")
-
-    def make(loras, current):
-        if a.backend == "comfyui" and os.environ.get("FAKE_COMFY_DOWN"):
+    """The real worker loop with fake clips. Every connect is logged to FAKE_LOADS (a file) if set;
+    FAKE_COMFY_DOWN: ComfyUI is not running; FAKE_COMFY_MISSING=<name>: LoRAs ComfyUI does not list."""
+    def make(current):
+        if os.environ.get("FAKE_COMFY_DOWN"):
             emit({"e": "error", "msg": f"ComfyUI is not reachable at {a.comfy_url}", "comfy_down": True})
             raise SystemExit(4)
         emit({"e": "loading"})
         if os.environ.get("FAKE_LOADS"):
             with open(os.environ["FAKE_LOADS"], "a") as f:
-                f.write(json.dumps({"loras": loras, "audio": not a.no_audio, "backend": a.backend}) + "\n")
+                f.write(json.dumps({"url": a.comfy_url}) + "\n")
         time.sleep(float(os.environ.get("FAKE_LOAD_DELAY", "0")))
         cls = Failing if os.environ.get("FAKE_FAIL") else FakeGenerator
-        gen = cls(frames=17, audio=not a.no_audio, size=None, step_delay=float(os.environ.get("FAKE_DELAY", "0")),
+        gen = cls(frames=17, audio=True, size=None, step_delay=float(os.environ.get("FAKE_DELAY", "0")),
                   progress=lambda i, n: emit({"e": "step", "id": current["id"], "i": i, "n": n}))
-        prepared = set(loras)
-        gen.can_use = lambda need: all(not (big and big in lo) or lo in prepared for lo in need)
-        if a.backend == "comfyui":                  # like ComfyGenerator: no restarts, LoRAs must be in ComfyUI
-            gen.restart_helps = False
-            missing = os.environ.get("FAKE_COMFY_MISSING", "")
-            gen.missing_loras = lambda need: [lo for lo in need if missing and missing in lo]
+        missing = os.environ.get("FAKE_COMFY_MISSING", "")
+        gen.missing_loras = lambda need: [lo for lo in need if missing and missing in lo]
 
-            def free():
-                if os.environ.get("FAKE_FREES"):
-                    with open(os.environ["FAKE_FREES"], "a") as f:
-                        f.write("free\n")
-            gen.free = free
+        def free():
+            if os.environ.get("FAKE_FREES"):
+                with open(os.environ["FAKE_FREES"], "a") as f:
+                    f.write("free\n")
+        gen.free = free
         emit({"e": "loaded"})
         return gen
     return cli.serve(a, emit, make)
@@ -93,7 +87,7 @@ def main() -> int:
             return tree_mode(a, emit)
         prompts = chain.read_prompts(a.prompts)
         w, h = chain.canvas_size(*chain.image_size(a.image), a.resolution)
-        settings = chain.settings_dict(model=a.model, lora=str(a.lora.resolve()) if a.lora else None,
+        settings = chain.settings_dict(model="Comfy-Org/MiniMax-H3", lora=str(a.lora.resolve()) if a.lora else None,
                                        strength=a.strength, frames=a.frames, steps=a.steps, width=w, height=h,
                                        audio=not a.no_audio)
         emit({"e": "start", "clips": len(prompts), "width": w, "height": h, "frames": a.frames, "steps": a.steps,

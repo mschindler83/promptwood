@@ -46,7 +46,6 @@ AI, VIDEO = "ai", "video"
 GUIDE_CHOICES = (5, 22, 39)        # motion guide lengths on H3's 17n+5 grid
 DEFAULT_OPTIONS = {"model": "Comfy-Org/MiniMax-H3", "lora": None, "strength": 1.0, "frames": 73, "steps": 28,
                    "resolution": 512, "audio": True, "keep_repeated": False, "seed": 42,
-                   "backend": "comfyui",         # comfyui | ai-toolkit (they sample differently)
                    "extra_loras": [],            # further LoRAs stacked after "lora": [{"path", "strength"}]
                    # turbo: a step-distilled LoRA + its sampler, few steps for every clip (ComfyUI only)
                    "turbo": {"on": False, "lora": None, "steps": 6, "strength": 1.0},
@@ -179,8 +178,7 @@ class Tree:
         if not isinstance(d, dict):
             raise ValueError("not a tree file")
         stored = copy.deepcopy(d.get("options") or {})
-        if stored and "backend" not in stored:           # saved before there was a choice: always ai-toolkit
-            stored["backend"] = "ai-toolkit"
+        stored.pop("backend", None)                       # ComfyUI is the only generator now
         t = cls(options={**copy.deepcopy(DEFAULT_OPTIONS), **stored},
                 image=d.get("image"),
                 selected=d.get("selected"), next_num=int(d.get("next_num") or 1))
@@ -285,7 +283,7 @@ def load(project: Path) -> Tree:
         t.image = old.get("image")
         s = dict(old.get("settings") or {})
         s.setdefault("backend", "ai-toolkit")        # linear chains were always made with ai-toolkit
-        for key in ("model", "lora", "strength", "frames", "steps", "audio", "backend"):
+        for key in ("model", "lora", "strength", "frames", "steps", "audio"):
             if key in s:
                 t.options[key] = s[key]
         parent = None
@@ -477,7 +475,8 @@ class Checker:
 
 
 def _old_record(s: dict | None) -> dict | None:
-    """Records written before the backend setting existed were made with ai-toolkit."""
+    """Records written before the backend setting existed were made with ai-toolkit (the generator of the first
+    versions). Clips it made sample differently, so they count as changed: ComfyUI makes them again."""
     if isinstance(s, dict) and "backend" not in s:
         return {**s, "backend": "ai-toolkit"}
     return s
@@ -506,7 +505,7 @@ def current_settings(project: Path, options: dict, tree: "Tree | None" = None) -
                                steps=int(turbo.get("steps", 6)) if turbo_on else options.get("steps", 28),
                                width=w, height=h, audio=options.get("audio", True),
                                turbo=(turbo["lora"], turbo.get("strength", 1.0)) if turbo_on else None,
-                               backend=options.get("backend", "comfyui"), refs=refs,
+                               backend="comfyui", refs=refs,
                                ref_size=ident.get("size", "match"), ref_hint=ident.get("hint", True))
 
 
@@ -533,7 +532,7 @@ def node_settings(base: dict, options: dict, node: Node) -> dict:
                                steps=base["steps"] if base.get("turbo") else ov.get("steps", options.get("steps", 28)),
                                width=base["width"], height=base["height"], audio=base["audio"],
                                turbo=(base["turbo"]["lora"], base["turbo"]["strength"]) if base.get("turbo") else None,
-                               backend=base.get("backend", "comfyui"), refs=base.get("refs"),
+                               backend="comfyui", refs=base.get("refs"),
                                ref_size=base.get("ref_size", "match"), ref_hint=base.get("ref_hint", True),
                                guide=int(ov.get("guide") or 0))
 
@@ -550,22 +549,6 @@ def loras_needed(tree: Tree, checker: "Checker", nids: list[str]) -> list[str]:
             if lora and lora not in out:
                 out.append(lora)
     return out
-
-
-def needs_comfy(tree: Tree, checker: "Checker", nids: list[str]) -> str | None:
-    """Why these generated clips cannot be made by ai-toolkit (it has no end frame, motion guide or empty start),
-    or None."""
-    for nid in nids:
-        node = tree.nodes[nid]
-        if node.is_video:
-            continue
-        if tree.video_child(nid) is not None:
-            return f"clip #{nid[1:]} ends at a video (last frame)"
-        if int((node.overrides or {}).get("guide") or 0):
-            return f"clip #{nid[1:]} has a motion guide"
-        if checker.start_frame(node) is None:
-            return f"clip #{nid[1:]} has no start frame"
-    return None
 
 
 # ----------------------------------------------------------------------------- generating
