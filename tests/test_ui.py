@@ -1,4 +1,5 @@
 """GUI tests: offscreen, own QSettings file, the fake backend instead of ai-toolkit."""
+import json
 import os
 import sys
 import time
@@ -89,6 +90,7 @@ def new_project(win, tmp_path, image, prompts=("one", "two")):
 
 
 def run_and_wait(app, win, fn):
+    wait(app, lambda: not win._joins, timeout=30)           # a path still being joined blocks Generate
     fn()
     assert win.running
     wait(app, lambda: not win.running)
@@ -209,6 +211,8 @@ def test_failure_and_stop(app, win, tmp_path, image, monkeypatch):
     assert win.status.text().startswith("Failed:") and "fake failure in clip 2" in win.status.text()
     assert [win.state(i) for i in ids] == ["done", "failed", "new"]
     assert win.tabs.currentWidget() is win.log
+    win.unload()                                   # the loaded worker still has the failing generator
+    wait(app, lambda: not win.worker_alive, timeout=15)
     monkeypatch.delenv("FAKE_FAIL")
     monkeypatch.setenv("FAKE_DELAY", "0.5")
     win.generate_path()
@@ -345,3 +349,74 @@ def test_context_menu_action_runs_after_the_menu(app, win, tmp_path, image, monk
                            "Variant (same prompt, other seed)"]
     assert ids[1] in win.tree.nodes                                    # not inside the node's handler
     wait(app, lambda: ids[1] not in win.tree.nodes, timeout=5)
+
+
+def loads(path):
+    return [json.loads(x) for x in path.read_text().splitlines()] if path.exists() else []
+
+
+def test_model_stays_loaded_between_runs(app, win, tmp_path, image, monkeypatch):
+    log = tmp_path / "loads.jsonl"
+    monkeypatch.setenv("FAKE_LOADS", str(log))
+    ids = new_project(win, tmp_path, image, ("a",))
+    run_and_wait(app, win, win.generate_path)
+    assert win.worker_alive and win.model_label.text() == "Model: loaded · unloads in 15 min"
+    assert win.b_unload.isVisibleTo(win)
+    win.node_action("continue", ids[0])
+    type_prompt(win, win.selected_id(), "b")
+    flush(app, win)
+    run_and_wait(app, win, win.generate_path)
+    assert win.status.text().startswith("Done: 1 clip made") and len(loads(log)) == 1     # loaded once
+    win.unload()
+    wait(app, lambda: not win.worker_alive, timeout=15)
+    assert win.model_label.text() == "Model: not loaded" and not win.b_unload.isVisibleTo(win)
+
+
+def test_without_keep_loaded_the_worker_quits(app, win, tmp_path, image):
+    win.keep_loaded.setChecked(False)
+    new_project(win, tmp_path, image, ("a",))
+    run_and_wait(app, win, win.generate_path)
+    wait(app, lambda: not win.worker_alive, timeout=15)
+    assert win.status.text().startswith("Done: 1 clip made")
+
+
+def test_bigger_lora_and_sound_change_reload(app, win, tmp_path, image, monkeypatch):
+    log = tmp_path / "loads.jsonl"
+    monkeypatch.setenv("FAKE_LOADS", str(log))
+    monkeypatch.setenv("FAKE_BIG", "big")
+    big = tmp_path / "big_rank64.safetensors"
+    big.write_bytes(b"x")
+    ids = new_project(win, tmp_path, image, ("a",))
+    run_and_wait(app, win, win.generate_path)
+    win.node_action("continue", ids[0])
+    n2 = win.selected_id()
+    type_prompt(win, n2, "b")
+    flush(app, win)
+    win.tree.nodes[n2].overrides = {"lora": str(big)}       # added after the worker loaded: does not fit
+    flush(app, win)
+    win.refresh()
+    run_and_wait(app, win, win.generate_path)
+    wait(app, lambda: win.state(n2) == "done", timeout=20)
+    got = loads(log)
+    assert len(got) == 2 and got[0]["loras"] == [] and got[1]["loras"] == [str(big)]
+    win.audio.setChecked(False)                              # another sound setting: a new worker
+    flush(app, win)
+    run_and_wait(app, win, win.generate_path)
+    got = loads(log)
+    assert len(got) == 3 and got[2]["audio"] is False
+
+
+def test_worker_quits_after_the_idle_time(tmp_path):
+    import subprocess
+    p = subprocess.Popen([*FAKE, "--serve", "--events", "--idle-minutes", "0.01"], stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE, text=True)      # stdin stays open: only the timeout ends it
+    events, start = [], time.time()
+    for line in p.stdout:
+        if line.startswith("@@ "):
+            events.append(json.loads(line[3:]))
+        if events and events[-1]["e"] == "bye":
+            break
+    p.wait(timeout=10)
+    p.stdin.close()
+    assert [e["e"] for e in events] == ["loading", "loaded", "idle", "bye"]
+    assert events[-1]["reason"] == "idle" and p.returncode == 0 and time.time() - start < 20

@@ -10,6 +10,7 @@ import json
 import random
 import shutil
 import threading
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QSettings, Qt, QTimer, QUrl, Signal
@@ -387,6 +388,14 @@ class MainWindow(QMainWindow):
         self._targets: list[str] = []
         self._loading = False
         self._tree_stamp: tuple | None = None   # tree.json as this window last read or wrote it
+        self._job: dict | None = None           # the generation in progress
+        self._worker_idle = False
+        self._worker_bound: tuple | None = None
+        self._worker_loras: list[str] = []
+        self._replace_worker = self._restart = False
+        self._restart_loras: list[str] = []
+        self._idle_since, self._idle_timeout = 0.0, None
+        self._model_state = ""
         self._joins = 0                         # path joins still running
         self._kill_timer = QTimer(self, singleShot=True, interval=8000, timeout=self._kill)
         self.bridge = _Bridge()
@@ -516,6 +525,21 @@ class MainWindow(QMainWindow):
         a.addRow("Min. free GPU", self.min_free)
         self.aitk = QLineEdit(DEFAULT_AITK)
         a.addRow("ai-toolkit", self.aitk)
+        krow = QHBoxLayout()
+        self.keep_loaded = QCheckBox("Keep the model loaded for")
+        self.keep_loaded.setChecked(True)
+        self.keep_loaded.setToolTip("After generating, the model stays in memory, so the next clip starts at once "
+                                    "instead of loading for minutes. It is unloaded after this idle time, or with "
+                                    "Unload in the status bar.")
+        self.idle_minutes = QSpinBox()
+        self.idle_minutes.setRange(1, 240)
+        self.idle_minutes.setValue(15)
+        self.idle_minutes.setSuffix(" min")
+        krow.addWidget(self.keep_loaded)
+        krow.addWidget(self.idle_minutes)
+        krow.addStretch(1)
+        a.addRow("", krow)
+        self.keep_loaded.toggled.connect(self.idle_minutes.setEnabled)
         lv.addWidget(aw)
         lv.addStretch(1)
         ls.setWidget(left)
@@ -626,7 +650,16 @@ class MainWindow(QMainWindow):
         for w in (self.b_gen, self.b_gen_all, self.b_stop, self.progress):
             sb.addWidget(w)
         sb.addWidget(self.status, 1)
+        self.model_label = label("Model: not loaded", role="statusText")
+        self.b_unload = QPushButton("Unload")
+        self.b_unload.setToolTip("Free the GPU and RAM now (the next Generate loads the model again)")
+        self.b_unload.clicked.connect(self.unload)
+        self.b_unload.hide()
+        sb.addPermanentWidget(self.model_label)
+        sb.addPermanentWidget(self.b_unload)
         sb.addPermanentWidget(self.gpu)
+        self._model_timer = QTimer(self, interval=20000, timeout=self._update_model_label)
+        self._model_timer.start()
 
         self.start_tile.clicked.connect(lambda _t: self._choose_image())
         self.start_tile.dropped.connect(self.set_image)
@@ -648,6 +681,8 @@ class MainWindow(QMainWindow):
     def _load_settings(self):
         q = self.qs
         self.offload.setValue(q.value("offload", 90, type=int))
+        self.keep_loaded.setChecked(q.value("keepLoaded", True, type=bool))
+        self.idle_minutes.setValue(q.value("idleMinutes", 15, type=int))
         self.min_free.setValue(q.value("minFree", 18.0, type=float))
         self.aitk.setText(q.value("aitk", DEFAULT_AITK, type=str))
         if g := q.value("geometry"):
@@ -659,6 +694,8 @@ class MainWindow(QMainWindow):
     def save_settings(self):
         q = self.qs
         q.setValue("offload", self.offload.value())
+        q.setValue("keepLoaded", self.keep_loaded.isChecked())
+        q.setValue("idleMinutes", self.idle_minutes.value())
         q.setValue("minFree", self.min_free.value())
         q.setValue("aitk", self.aitk.text().strip())
         q.setValue("project", str(self.project) if self.project else "")
@@ -1213,8 +1250,17 @@ class MainWindow(QMainWindow):
         p.start("nvidia-smi", ["--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"])
 
     # ------------------------------------------------------------------ running
+    # The generator runs as a worker process: it loads the model once and then takes jobs (JSON lines on stdin).
+    # With "keep loaded" it waits for the next job and quits by itself after the idle time; without, it is told
+    # to quit after each job. Stop ends the worker (a clip cannot be interrupted cleanly).
+
     @property
     def running(self) -> bool:
+        """A generation job is in progress (editing is locked)."""
+        return self._job is not None
+
+    @property
+    def worker_alive(self) -> bool:
         return self.proc is not None
 
     def generate_path(self):
@@ -1227,6 +1273,19 @@ class MainWindow(QMainWindow):
     def generate_all(self):
         if self.tree is not None:
             self._start([n.id for n in self.tree.leaves()])
+
+    def _worker_key(self) -> tuple:
+        """What a loaded worker is bound to; a different key needs a new worker."""
+        return (self.tree.options.get("model", T.DEFAULT_OPTIONS["model"]), bool(self.tree.options.get("audio", True)),
+                self.offload.value(), self.aitk.text().strip() or DEFAULT_AITK)
+
+    def project_loras(self) -> list[str]:
+        """LoRA files of this project (its default and every clip's own), prepared when a worker loads."""
+        out = []
+        for lo in [self.tree.options.get("lora")] + [n.overrides.get("lora") for n in self.tree.nodes.values()]:
+            if lo and lo != T.NO_LORA and lo not in out and Path(lo).is_file():
+                out.append(lo)
+        return out
 
     def _start(self, targets: list[str]):
         if self.running or self.tree is None:
@@ -1259,6 +1318,31 @@ class MainWindow(QMainWindow):
         if not self._write_tree():
             return
         self.save_settings()
+        self._job = {"targets": targets, "sent": False, "restarted": False}
+        self._error, self._stopping, self._phase = "", False, "starting"
+        self._targets, self._plan = targets, []
+        self.live, self.progress_of = {}, {}
+        self.log.clear()
+        self.preview.stop()
+        for c in self.cards:
+            c.set_editable(False)
+        self._update_buttons()
+        self.progress.setRange(0, 0)
+        if self.worker_alive and self._worker_idle and self._worker_bound == self._worker_key():
+            self._send_job()
+        elif self.worker_alive:                    # loaded for other settings: replace it
+            self.status.setText("Settings changed: loading the model again …")
+            self._replace_worker = True
+            self._quit_worker()
+        else:
+            self._start_worker(self.project_loras())
+
+    def _program(self) -> tuple[str, list[str]]:
+        if self.command:
+            return self.command[0], list(self.command[1:])
+        return str(LAUNCHER), []
+
+    def _start_worker(self, loras: list[str]):
         program, pre = self._program()
         self.proc = QProcess(self)
         env = QProcessEnvironment.systemEnvironment()
@@ -1270,28 +1354,44 @@ class MainWindow(QMainWindow):
         self.proc.finished.connect(self._finished)
         self.proc.errorOccurred.connect(self._proc_error)
         self._buf = self._ebuf = ""
-        self._error, self._stopping, self._phase = "", False, "starting"
-        self._targets, self._plan = targets, []
-        self.live, self.progress_of = {}, {}
-        self.log.clear()
-        self.preview.stop()
-        for c in self.cards:
-            c.set_editable(False)
-        self._update_buttons()
-        self.progress.setRange(0, 0)
-        self.status.setText("Starting …")
-        args = pre + ["--tree", str(self.project), "--targets", ",".join(targets), "--events",
-                      "--offload", f"{self.offload.value() / 100:g}", "--min-free-gb", f"{self.min_free.value():g}"]
+        self._worker_idle, self._worker_bound, self._replace_worker, self._restart = False, self._worker_key(), \
+            False, False
+        self._worker_loras = list(loras)
+        minutes = self.idle_minutes.value() if self.keep_loaded.isChecked() else 0
+        args = pre + ["--serve", "--events", "--offload", f"{self.offload.value() / 100:g}",
+                      "--min-free-gb", f"{self.min_free.value():g}", "--idle-minutes", f"{minutes:g}",
+                      "--model", self._worker_bound[0], "--loras", ",".join(loras)]
+        if not self._worker_bound[1]:
+            args.append("--no-audio")
         self.log.appendPlainText("$ " + " ".join([program, *args]))
+        self.status.setText("Starting …")
         self.proc.start(program, args)
+        self._update_model_label()
 
-    def _program(self) -> tuple[str, list[str]]:
-        if self.command:
-            return self.command[0], list(self.command[1:])
-        return str(LAUNCHER), []
+    def _send_job(self):
+        if self._job is None or self.proc is None:
+            return
+        self._job["sent"] = True
+        self._worker_idle = False
+        cmd = {"cmd": "run", "tree": str(self.project), "targets": self._job["targets"]}
+        self.proc.write((json.dumps(cmd) + "\n").encode())
+        self._update_model_label()
+
+    def _quit_worker(self):
+        """Ask an idle worker to quit (frees the model); killed if it does not go."""
+        if self.proc is None:
+            return
+        if self.proc.state() == QProcess.Running:
+            self.proc.write(b'{"cmd": "quit"}\n')
+        self._kill_timer.start()
+
+    def unload(self):
+        if self.worker_alive and not self.running:
+            self.status.setText("Unloading the model …")
+            self._quit_worker()
 
     def stop(self):
-        if not self.running:
+        if not self.running or self.proc is None:
             return
         self._stopping = True
         self.status.setText("Stopping …")
@@ -1303,13 +1403,19 @@ class MainWindow(QMainWindow):
             self.proc.kill()
 
     def _read_out(self):
-        self._buf += bytes(self.proc.readAllStandardOutput()).decode(errors="replace")
+        p = self.proc
+        if p is None:
+            return
+        self._buf += bytes(p.readAllStandardOutput()).decode(errors="replace")
         *lines, self._buf = self._buf.split("\n")
         for line in lines:
             self._line(line)
 
     def _read_err(self):
-        self._ebuf += bytes(self.proc.readAllStandardError()).decode(errors="replace")
+        p = self.proc
+        if p is None:
+            return
+        self._ebuf += bytes(p.readAllStandardError()).decode(errors="replace")
         *lines, self._ebuf = self._ebuf.split("\n")
         for line in lines:
             line = line.split("\r")[-1].rstrip()
@@ -1350,14 +1456,34 @@ class MainWindow(QMainWindow):
 
     def _event(self, ev: dict):
         e = ev.get("e")
-        if e == "start":
-            self.status.setText(f"{ev.get('nodes', 0)} clips to make at {ev['width']}×{ev['height']}, "
-                                f"{ev['frames']} frames each.")
-        elif e == "loading":
+        if e == "loading":
+            self._worker_idle = False
             self.status.setText("Loading MiniMax-H3 … (a few minutes)")
             self.progress.setRange(0, 0)
+            self._model_state = "loading"
+            self._update_model_label()
         elif e == "loaded":
             self.status.setText("Model loaded.")
+            self._model_state = "loaded"
+        elif e == "idle":
+            self._worker_idle = True
+            self._idle_since = time.monotonic()
+            self._idle_timeout = ev.get("timeout")
+            if self._job is not None and not self._job["sent"]:
+                self._send_job()
+            elif self._job is not None:
+                self._job_finished()
+            self._update_model_label()
+        elif e == "bye":
+            self._worker_idle = False
+            if ev.get("reason") == "idle" and not self.running:
+                self.status.setText("The model was unloaded after the idle time.")
+        elif e == "restart":
+            self._restart = True
+            self._restart_loras = list(dict.fromkeys(self._worker_loras + list(ev.get("loras") or [])))
+        elif e == "start":
+            self.status.setText(f"{ev.get('nodes', 0)} clips to make at {ev['width']}×{ev['height']}, "
+                                f"{ev['frames']} frames each.")
         elif e == "plan":
             self._plan = list(ev.get("make", []))
         elif e == "node":
@@ -1397,34 +1523,16 @@ class MainWindow(QMainWindow):
         elif e == "error":
             self._error = ev.get("msg", "error")
 
-    def _proc_error(self, err):
-        if err == QProcess.FailedToStart:
-            # Qt sends no 'finished' for a process that never started: clean up here
-            self._error = f"could not start {self._program()[0]}"
-            p = self.proc
-            QTimer.singleShot(0, lambda: self.proc is p and self._finished(-1, None))
-
-    def _finished(self, code: int, _status):
-        self._kill_timer.stop()
-        p, self.proc = self.proc, None
-        if p is not None:
-            rest = bytes(p.readAllStandardOutput()).decode(errors="replace")
-            for line in (self._buf + rest).split("\n"):
-                self._line(line)
-            err = bytes(p.readAllStandardError()).decode(errors="replace")
-            for line in (self._ebuf + err).split("\n"):
-                line = line.split("\r")[-1].rstrip()
-                if line:
-                    self.log.appendPlainText(line)
-            p.deleteLater()
-        self._buf = self._ebuf = ""
-        ok = self._phase == "done" and code == 0
+    def _job_finished(self, code: int = 0):
+        """End of a job: the worker reported idle again (code 0), or the worker ended (its exit code)."""
+        ok = self._phase == "done" and code == 0 and not self._error
         for nid in [n for n, s in self.live.items() if s == "generating"]:
             self.live[nid] = "stopped" if self._stopping else "failed"
         if ok:
             self.live.clear()
         self.progress_of.clear()
         self._reload_made()
+        self._job = None
         for c in self.cards:
             c.set_editable(True)
         self.progress.setRange(0, 1000)
@@ -1445,7 +1553,63 @@ class MainWindow(QMainWindow):
             self.status.setText(f"Failed: {self._error or f'the generator exited with code {code}'}")
             self.tabs.setCurrentWidget(self.log)
         self._stopping = False
+        if self.worker_alive and not self.keep_loaded.isChecked():
+            self._quit_worker()
         self._update_buttons()
+        self._update_model_label()
+
+    def _proc_error(self, err):
+        if err == QProcess.FailedToStart:
+            # Qt sends no 'finished' for a process that never started: clean up here
+            self._error = f"could not start {self._program()[0]}"
+            p = self.proc
+            QTimer.singleShot(0, lambda: self.proc is p and self._finished(-1, None))
+
+    def _finished(self, code: int, _status=None):
+        self._kill_timer.stop()
+        p, self.proc = self.proc, None
+        if p is not None:
+            rest = bytes(p.readAllStandardOutput()).decode(errors="replace")
+            for line in (self._buf + rest).split("\n"):
+                self._line(line)
+            err = bytes(p.readAllStandardError()).decode(errors="replace")
+            for line in (self._ebuf + err).split("\n"):
+                line = line.split("\r")[-1].rstrip()
+                if line:
+                    self.log.appendPlainText(line)
+            p.deleteLater()
+        self._buf = self._ebuf = ""
+        self._worker_idle = False
+        self._model_state = ""
+        if self._job is not None and self._restart and not self._job["restarted"] and not self._stopping:
+            # the job needs a worker loaded differently (a LoRA of a higher rank, other sound or model)
+            self._job["restarted"], self._job["sent"] = True, False
+            self.status.setText("Loading the model again for this job …")
+            self._start_worker(self._restart_loras)
+        elif self._job is not None and self._replace_worker:
+            self._job["sent"] = False
+            self._start_worker(self.project_loras())
+        elif self._job is not None:
+            self._job_finished(code if code else 1)
+        self._update_model_label()
+        self._update_buttons()
+
+    def _update_model_label(self):
+        if not self.worker_alive:
+            text, sev = "Model: not loaded", ""
+        elif self.running and self._model_state == "loading":
+            text, sev = "Model: loading …", "warning"
+        elif self.running or not self._worker_idle:
+            text, sev = "Model: working", ""
+        elif self._idle_timeout:
+            left = max(0.0, self._idle_timeout - (time.monotonic() - self._idle_since))
+            text, sev = f"Model: loaded · unloads in {max(1, round(left / 60))} min", ""
+        else:
+            text, sev = "Model: loaded", ""
+        self.model_label.setText(text)
+        self.model_label.setProperty("severity", sev)
+        repolish(self.model_label)
+        self.b_unload.setVisible(self.worker_alive and not self.running and self._worker_idle)
 
     def closeEvent(self, e):
         if self.running:
@@ -1453,10 +1617,19 @@ class MainWindow(QMainWindow):
                     != QMessageBox.Yes:
                 e.ignore()
                 return
-            self.stop()
-            if self.proc is not None and not self.proc.waitForFinished(10000):
-                self.proc.kill()                     # never leave the generator running after the window closed
-                self.proc.waitForFinished(3000)
+        if self.proc is not None:                    # never leave the generator (and the model) behind
+            p, self.proc = self.proc, None
+            p.finished.disconnect()
+            if p.state() == QProcess.Running:
+                p.write(b'{"cmd": "quit"}\n')
+                p.closeWriteChannel()
+                if not p.waitForFinished(3000):
+                    p.terminate()
+                    if not p.waitForFinished(5000):
+                        p.kill()
+                        p.waitForFinished(3000)
+            self._job = None
+        self._model_timer.stop()
         self._gpu_timer.stop()
         if self._gpu_proc is not None:
             gp, self._gpu_proc = self._gpu_proc, None

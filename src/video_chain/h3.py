@@ -123,6 +123,7 @@ class H3Generator:
         log("loading MiniMax-H3 (this takes a few minutes)")
         self.sd.load_model()
         self.net = self.sd.assistant_lora if base else None
+        self.net_rank = self.info[base][0] if base else 0
         self.current: str | None = None
         if self.net is not None:
             self.use_lora(base, 1.0)                      # checks that it fits; the strength is set per clip
@@ -147,6 +148,20 @@ class H3Generator:
             return gen._orig_save(cfg_, image, count, max_count, **kw)
 
         h3mod.new_save_image_function = save_and_keep_last
+
+    def can_use(self, loras: list[str]) -> bool:
+        """Whether these LoRAs can be swapped into the loaded model (preparing new ones of a rank that fits)."""
+        for lo in loras:
+            if lo in self.info:
+                continue
+            if self.net is None or not Path(lo).is_file():
+                return False
+            info = lora_file_info(Path(lo))
+            if info[0] > self.net_rank:
+                return False
+            self.info[lo] = info
+            self.paths[lo] = str(Path(lo).resolve())
+        return True
 
     def use_lora(self, lora: str | None, strength: float) -> None:
         """Make lora (or none) the active LoRA at this strength."""

@@ -7,9 +7,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import select
 import sys
+import time
 import traceback
 from pathlib import Path
+from typing import Callable
 
 from . import chain
 from . import tree as treemod
@@ -43,6 +46,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="refuse to start with less free GPU memory (protects a running training; default 18)")
     p.add_argument("--model", default="Comfy-Org/MiniMax-H3")
     p.add_argument("--events", action="store_true", help="also print progress as '@@ {json}' lines (for the GUI)")
+    p.add_argument("--serve", action="store_true",
+                   help="worker mode (for the GUI): load the model once, then read jobs as JSON lines from stdin "
+                        '({"cmd": "run", "tree": DIR, "targets": [ids]} or {"cmd": "quit"})')
+    p.add_argument("--idle-minutes", type=float, default=15,
+                   help="worker mode: quit (and free the memory) after this long without a job; 0 = never")
+    p.add_argument("--loras", default="", help="worker mode: comma-separated LoRA files to prepare when loading")
     p.add_argument("--aitk", type=Path, default=Path("/path/to/ai/ai-toolkit"),
                    help="ai-toolkit folder")
     return p
@@ -73,6 +82,7 @@ def _fail(emit, msg: str) -> int:
 
 
 def _generator(a, emit, current, width, height, frames, steps, lora, strength, model, audio, loras=()):
+    """Load MiniMax-H3 (minutes). Step progress goes out as events for the node in current."""
     emit({"e": "loading"})
     from .h3 import H3Generator          # imports torch / ai-toolkit: only now, after the cheap checks
     gen = H3Generator(width=width, height=height, frames=frames, steps=steps, lora=lora, strength=strength,
@@ -84,46 +94,124 @@ def _generator(a, emit, current, width, height, frames, steps, lora, strength, m
     return gen
 
 
-def _main_tree(a, emit) -> int:
-    project = a.tree.expanduser().resolve()
+class JobError(Exception):
+    pass
+
+
+def prepare_job(project: Path, targets: list[str]) -> dict:
+    """Check a tree job without loading anything; raises JobError with a message for the user."""
+    project = Path(project).expanduser().resolve()
     tree = treemod.load(project)
-    targets = [t for t in a.targets.split(",") if t]
     if not targets:
-        return _fail(emit, "--targets: no node ids given")
+        raise JobError("no node ids given")
     unknown = [t for t in targets if t not in tree.nodes]
     if unknown:
-        return _fail(emit, f"unknown node {unknown[0]}")
+        raise JobError(f"unknown node {unknown[0]}")
     settings = treemod.current_settings(project, tree.options)
     if settings is None:
-        return _fail(emit, "the project has no start image")
+        raise JobError("the project has no start image")
     empty = treemod.empty_prompts(tree, targets)
     if empty:
-        return _fail(emit, f"empty prompt in node {empty[0]}")
+        raise JobError(f"empty prompt in node {empty[0]}")
     checker = treemod.Checker(project, tree)
     todo = treemod.plan(tree, checker, targets)
     loras = treemod.loras_needed(tree, checker, todo)
     missing = [lo for lo in loras if not Path(lo).is_file()]
     if missing:
-        return _fail(emit, f"LoRA not found: {missing[0]}")
-    emit({"e": "start", "nodes": len(todo), "width": settings["width"], "height": settings["height"],
-          "frames": settings["frames"], "steps": settings["steps"], "out": str(project)})
-    current = {"id": None, "k": 0}
+        raise JobError(f"LoRA not found: {missing[0]}")
+    return {"project": project, "targets": targets, "settings": settings, "todo": todo, "loras": loras}
+
+
+def run_job(job: dict, gen, emit, current: dict) -> None:
+    """Make what a prepared job needs with an already loaded generator (None if nothing is to be made)."""
+    s = job["settings"]
+    emit({"e": "start", "nodes": len(job["todo"]), "width": s["width"], "height": s["height"],
+          "frames": s["frames"], "steps": s["steps"], "out": str(job["project"])})
 
     def on_event(ev: dict) -> None:
         if ev.get("e") == "node" and ev.get("state") == "generating":
             current["id"], current["k"] = ev["id"], ev.get("k", 0)
         emit(ev)
 
-    if not todo:                                   # nothing to make: no need to load the model
-        treemod.run_tree(None, project, targets, events=on_event)
-        return 0
-    gen = _generator(a, emit, current, settings["width"], settings["height"], settings["frames"], settings["steps"],
-                     None, 1.0, settings["model"], settings["audio"], loras=loras)
-    treemod.run_tree(gen, project, targets, events=on_event)
+    treemod.run_tree(gen, job["project"], job["targets"], events=on_event)
+
+
+def _main_tree(a, emit) -> int:
+    try:
+        job = prepare_job(a.tree, [t for t in a.targets.split(",") if t])
+    except (JobError, ValueError) as e:
+        return _fail(emit, str(e))
+    current = {"id": None, "k": 0}
+    gen = None
+    if job["todo"]:                                # nothing to make: no need to load the model
+        s = job["settings"]
+        gen = _generator(a, emit, current, s["width"], s["height"], s["frames"], s["steps"], None, 1.0,
+                         s["model"], s["audio"], loras=job["loras"])
+    run_job(job, gen, emit, current)
     return 0
 
 
+RESTART = 3          # worker exit code: the job needs a fresh worker (other model, sound or a bigger LoRA)
+
+
+def serve(a, emit, make_generator: Callable[[list[str], dict], object], stdin=None) -> int:
+    """Worker: load once, then run jobs from stdin until 'quit', end of input, or the idle timeout.
+
+    make_generator(loras, current) loads the model with these LoRAs prepared. A job the loaded model cannot do
+    (another model or sound setting, or a LoRA of a higher rank than the prepared ones) is answered with a
+    'restart' event and exit code RESTART; the GUI then starts a new worker for it."""
+    stdin = stdin or sys.stdin
+    current = {"id": None, "k": 0}
+    model, audio = a.model, not a.no_audio
+    gen = make_generator([lo for lo in a.loras.split(",") if lo], current)
+    idle = a.idle_minutes * 60 if a.idle_minutes and a.idle_minutes > 0 else None
+    emit({"e": "idle", "timeout": idle})
+    while True:
+        if idle is not None:
+            ready, _, _ = select.select([stdin], [], [], idle)
+            if not ready:
+                emit({"e": "bye", "reason": "idle"})
+                return 0
+        line = stdin.readline()
+        if not line:                                # the GUI is gone
+            return 0
+        try:
+            cmd = json.loads(line)
+        except ValueError:
+            emit({"e": "error", "msg": f"bad command: {line.strip()[:80]}"})
+            continue
+        if cmd.get("cmd") == "quit":
+            emit({"e": "bye", "reason": "quit"})
+            return 0
+        if cmd.get("cmd") != "run":
+            emit({"e": "error", "msg": f"unknown command {cmd.get('cmd')!r}"})
+            continue
+        started = time.monotonic()
+        try:
+            job = prepare_job(Path(cmd["tree"]), list(cmd.get("targets") or []))
+            s = job["settings"]
+            if job["todo"] and (s["model"] != model or s["audio"] != audio
+                                or not gen.can_use(job["loras"])):
+                emit({"e": "restart", "model": s["model"], "audio": s["audio"], "loras": job["loras"]})
+                return RESTART
+            run_job(job, gen if job["todo"] else None, emit, current)
+        except (JobError, ValueError, FileNotFoundError, KeyError) as e:
+            emit({"e": "error", "msg": str(e)})
+        except Exception as e:  # noqa: BLE001
+            traceback.print_exc()
+            emit({"e": "error", "msg": f"{type(e).__name__}: {e}"})
+        emit({"e": "idle", "timeout": idle, "took": round(time.monotonic() - started, 1)})
+
+
+def _main_serve(a, emit) -> int:
+    def make(loras: list[str], current: dict):
+        return _generator(a, emit, current, 512, 512, 73, 28, None, 1.0, a.model, not a.no_audio, loras=loras)
+    return serve(a, emit, make)
+
+
 def _main(a, emit) -> int:
+    if a.serve:
+        return _main_serve(a, emit)
     if a.tree:
         return _main_tree(a, emit)
     if a.image is None or a.prompts is None or a.out is None:

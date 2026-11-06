@@ -1,8 +1,10 @@
 """Stands in for `video-chain` in GUI tests: same arguments and events, synthetic clips instead of H3.
 
 FAKE_FAIL=1 fails after clip 1, FAKE_DELAY=<s> waits that long per sampling step."""
+import json
 import os
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -47,10 +49,33 @@ def tree_mode(a, emit) -> int:
     return 0
 
 
+def serve_mode(a, emit) -> int:
+    """The real worker loop with fake clips. FAKE_BIG=<name> marks LoRA files whose rank does not fit unless they
+    were prepared at start (to test the restart); every load is logged to FAKE_LOADS (a file) if set."""
+    big = os.environ.get("FAKE_BIG", "")
+
+    def make(loras, current):
+        emit({"e": "loading"})
+        if os.environ.get("FAKE_LOADS"):
+            with open(os.environ["FAKE_LOADS"], "a") as f:
+                f.write(json.dumps({"loras": loras, "audio": not a.no_audio}) + "\n")
+        time.sleep(float(os.environ.get("FAKE_LOAD_DELAY", "0")))
+        cls = Failing if os.environ.get("FAKE_FAIL") else FakeGenerator
+        gen = cls(frames=17, audio=not a.no_audio, step_delay=float(os.environ.get("FAKE_DELAY", "0")),
+                  progress=lambda i, n: emit({"e": "step", "id": current["id"], "i": i, "n": n}))
+        prepared = set(loras)
+        gen.can_use = lambda need: all(not (big and big in lo) or lo in prepared for lo in need)
+        emit({"e": "loaded"})
+        return gen
+    return cli.serve(a, emit, make)
+
+
 def main() -> int:
     a = cli.build_parser().parse_args(sys.argv[1:])
     emit = cli._printer(a.events)
     try:
+        if a.serve:
+            return serve_mode(a, emit)
         if a.tree:
             return tree_mode(a, emit)
         prompts = chain.read_prompts(a.prompts)
