@@ -208,6 +208,8 @@ class H3Generator:
             raise RuntimeError("reference images (identity) need the ComfyUI generator; ai-toolkit cannot use them")
         if s.get("extra_loras"):
             raise RuntimeError("several LoRAs on one clip need the ComfyUI generator; ai-toolkit applies one")
+        if s.get("turbo"):
+            raise RuntimeError("turbo mode needs the ComfyUI generator (and ComfyUI-MiniMax-H3-Turbo)")
         frames = int(s.get("frames", self.frames))
         steps = int(s.get("steps", self.steps))
         width, height = int(s.get("width", self.width)), int(s.get("height", self.height))

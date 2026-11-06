@@ -96,6 +96,32 @@ def comfy_lora_roots(comfy_dir: Path) -> list[Path]:
     return [r for r in roots if r.is_dir()]
 
 
+_TURBO_CACHE: dict[tuple, bool] = {}
+
+
+def is_turbo_lora(path: Path) -> bool:
+    """A step-distilled H3 turbo LoRA (needs ComfyUI-MiniMax-H3-Turbo's own loader and sampler): 'turbo' in the
+    name, or it trains final_layer, which normal H3 LoRAs do not."""
+    if "turbo" in Path(path).name.lower():
+        return True
+    try:
+        st = Path(path).stat()
+    except OSError:
+        return False
+    key = (str(path), st.st_size, st.st_mtime_ns)
+    if key not in _TURBO_CACHE:
+        ok = False
+        try:
+            with open(path, "rb") as f:
+                n = int.from_bytes(f.read(8), "little")
+                if 0 < n < 100 * 2**20:
+                    ok = any(k.startswith("final_layer") or ".final_layer" in k for k in json.loads(f.read(n)))
+        except (OSError, ValueError):
+            ok = False
+        _TURBO_CACHE[key] = ok
+    return _TURBO_CACHE[key]
+
+
 _H3_ATTN = re.compile(r"blocks[._]\d+[._]attn[._]qkv_proj")
 _H3_MLP = re.compile(r"blocks[._]\d+[._]mlp[._]fc1")
 _H3_CACHE: dict[tuple, bool] = {}
@@ -124,7 +150,8 @@ def is_h3_lora(path: Path) -> bool:
 
 
 def find_h3_loras(roots: list[Path]) -> list[tuple[str, str]]:
-    """All H3 LoRAs in these folders (links followed) as (path, name relative to its folder), sorted by name."""
+    """All H3 LoRAs in these folders (links followed) as (path, name relative to its folder), sorted by name.
+    Turbo LoRAs are included; is_turbo_lora tells them apart."""
     out, seen = [], set()
     for root in roots:
         for dirpath, _dirs, files in os.walk(root, followlinks=True):
@@ -154,12 +181,16 @@ def with_ref_hint(prompt: str) -> str:
 
 def build_workflow(*, prompt: str, image: str, seed: int, width: int, height: int, frames: int, steps: int,
                    loras: list[tuple[str, float]], audio: bool, prefix: str, refs: list[str] = (),
-                   ref_size: str = "match", ref_key=lambda i: f"ref_images.ref_image_{i}") -> dict:
+                   ref_size: str = "match", ref_key=lambda i: f"ref_images.ref_image_{i}",
+                   turbo: tuple[str, float] | None = None) -> dict:
     """The API-format workflow for one clip (image = the uploaded start image, as LoadImage names it).
 
     With refs (uploaded reference images): the ref2va model; MiniMaxH3ReferenceToVideo gets the references
     (<Picture 1> ... in the prompt) and MiniMaxH3AddGuide anchors the start image at frame 0, so the clip starts
-    where the previous one ended and sees the same original face."""
+    where the previous one ended and sees the same original face.
+
+    With turbo (ComfyUI name of the turbo LoRA, strength): ComfyUI-MiniMax-H3-Turbo's loader (it handles the
+    pruned model's adaln layers) right after the model, the other LoRAs after it, and its own sampler."""
     wf: dict = {
         "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": UNET_REF if refs else UNET,
                                                          "weight_dtype": "default"}},
@@ -168,7 +199,8 @@ def build_workflow(*, prompt: str, image: str, seed: int, width: int, height: in
         "vae": {"class_type": "VAELoader", "inputs": {"vae_name": VIDEO_VAE}},
         "start": {"class_type": "LoadImage", "inputs": {"image": image}},
         "noise": {"class_type": "RandomNoise", "inputs": {"noise_seed": int(seed)}},
-        "sampler": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": SAMPLER}},
+        "sampler": ({"class_type": "MiniMaxH3TurboSampler", "inputs": {}} if turbo else
+                    {"class_type": "KSamplerSelect", "inputs": {"sampler_name": SAMPLER}}),
         "decode": {"class_type": "VAEDecode", "inputs": {"samples": ["sample", 0], "vae": ["vae", 0]}},
         "last": {"class_type": "ImageFromBatch", "inputs": {"image": ["decode", 0], "batch_index": int(frames) - 1,
                                                              "length": 1}},
@@ -192,6 +224,11 @@ def build_workflow(*, prompt: str, image: str, seed: int, width: int, height: in
                                  "height": int(height), "length": int(frames), "first_frame": ["start", 0]}}
         latent = ["cond", 1]
     model = ["unet", 0]
+    if turbo:
+        wf["turbo"] = {"class_type": "MiniMaxH3TurboLoRA",
+                       "inputs": {"model": model, "lora_name": turbo[0], "strength": float(turbo[1]),
+                                  "low_vram": False}}
+        model = ["turbo", 0]
     for k, (name, strength) in enumerate(loras):
         wf[f"lora{k}"] = {"class_type": "LoraLoaderModelOnly",
                           "inputs": {"model": model, "lora_name": name, "strength_model": float(strength)}}
@@ -293,6 +330,11 @@ class ComfyGenerator:
         if not self._object_info("MiniMaxH3ReferenceToVideo"):
             raise ComfyError("this ComfyUI has no MiniMax H3 Reference to Video node")
 
+    def check_turbo(self):
+        for node in ("MiniMaxH3TurboLoRA", "MiniMaxH3TurboSampler"):
+            if not self._object_info(node):
+                raise ComfyError(f"this ComfyUI has no {node} node (install ComfyUI-MiniMax-H3-Turbo)")
+
     def lora_names(self, refresh: bool = False) -> list[str]:
         if self._loras is None or refresh:
             req = self._object_info("LoraLoaderModelOnly").get("input", {}).get("required", {})
@@ -354,6 +396,13 @@ class ComfyGenerator:
             if name is None:
                 raise ComfyError(f"{Path(path).name} is not in ComfyUI's LoRA folders")
             loras.append((name, float(strength)))
+        turbo = None
+        if s.get("turbo"):
+            self.check_turbo()
+            name = self.name_for(s["turbo"]["lora"])
+            if name is None:
+                raise ComfyError(f"{Path(s['turbo']['lora']).name} is not in ComfyUI's LoRA folders")
+            turbo = (name, float(s["turbo"].get("strength", 1.0)))
         image = self.upload(Path(start_image))
         refs = []
         if s.get("ref_paths"):
@@ -365,7 +414,8 @@ class ComfyGenerator:
         wf = build_workflow(prompt=prompt, image=image, seed=seed, width=s.get("width", 512),
                             height=s.get("height", 512), frames=s.get("frames", 73), steps=s.get("steps", 20),
                             loras=loras, audio=bool(s.get("audio", True)), prefix=prefix, refs=refs,
-                            ref_size=s.get("ref_size", "match"), ref_key=self.ref_key() if refs else None)
+                            ref_size=s.get("ref_size", "match"), ref_key=self.ref_key() if refs else None,
+                            turbo=turbo)
         ws = self._connect_ws()
         try:
             res = self._json("POST", "/prompt", {"prompt": wf, "client_id": self.client_id})

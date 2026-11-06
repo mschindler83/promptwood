@@ -219,7 +219,8 @@ def _load_previous(out_dir: Path) -> dict[int, dict]:
 
 def settings_dict(*, model: str, lora: str | None, strength: float, frames: int, steps: int, width: int,
                   height: int, audio: bool, backend: str = "ai-toolkit", refs: list | None = None,
-                  ref_size: str = "match", ref_hint: bool = True, extra_loras: list | None = None) -> dict:
+                  ref_size: str = "match", ref_hint: bool = True, extra_loras: list | None = None,
+                  turbo: tuple[str, float] | None = None) -> dict:
     """What a clip depends on besides prompt, seed and start image; a clip is reused only if this is unchanged.
     The LoRA counts by content (lora_sha1), so a LoRA retrained into the same file makes its clips change.
     extra_loras: further LoRAs stacked after the first ([(path, strength)]), only present when there are any, so
@@ -230,6 +231,8 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
          "strength": float(strength) if lora else 1.0,
          "frames": int(frames), "steps": int(steps), "width": int(width), "height": int(height),
          "audio": bool(audio), "backend": backend}
+    if turbo:                                   # (turbo LoRA, strength); steps are already the turbo steps
+        s["turbo"] = {"lora": turbo[0], "sha1": file_signature(turbo[0]), "strength": float(turbo[1])}
     if extra_loras:
         s["extra_loras"] = [{"lora": p, "sha1": file_signature(p), "strength": float(st)} for p, st in extra_loras]
     if refs:

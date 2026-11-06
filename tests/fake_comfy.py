@@ -11,7 +11,7 @@ from pathlib import Path
 KNOWN = {"UNETLoader", "CLIPLoader", "VAELoader", "LoadImage", "MiniMaxH3ImageToVideo", "RandomNoise",
          "KSamplerSelect", "BasicScheduler", "BasicGuider", "SamplerCustomAdvanced", "VAEDecode", "VAEDecodeAudio",
          "ImageFromBatch", "SaveImage", "CreateVideo", "SaveVideo", "LoraLoaderModelOnly",
-         "MiniMaxH3ReferenceToVideo", "MiniMaxH3AddGuide"}
+         "MiniMaxH3ReferenceToVideo", "MiniMaxH3AddGuide", "MiniMaxH3TurboLoRA", "MiniMaxH3TurboSampler"}
 
 
 class FakeComfy:
@@ -21,6 +21,7 @@ class FakeComfy:
         (self.root / "input").mkdir(parents=True, exist_ok=True)
         (self.root / "output").mkdir(parents=True, exist_ok=True)
         self.loras, self.fail_with, self.models_missing = list(loras), fail_with, models_missing
+        self.turbo_nodes = True
         self.prompts, self.calls, self.history = [], [], {}
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
@@ -35,8 +36,8 @@ class FakeComfy:
         files = {"UNETLoader": ("unet_name", [C.UNET, C.UNET_REF]), "CLIPLoader": ("clip_name", [C.TEXT_ENCODER]),
                  "VAELoader": ("vae_name", [C.VIDEO_VAE, C.AUDIO_VAE]),
                  "LoraLoaderModelOnly": ("lora_name", self.loras)}
-        if node == "MiniMaxH3ImageToVideo":
-            return {node: {"input": {"required": {}}}}
+        if node in ("MiniMaxH3ImageToVideo", "MiniMaxH3TurboSampler", "MiniMaxH3TurboLoRA"):
+            return {} if node.startswith("MiniMaxH3Turbo") and not self.turbo_nodes else {node: {"input": {"required": {}}}}
         if node == "MiniMaxH3ReferenceToVideo":
             return {node: {"input": {"required": {}, "optional": {"ref_images": [
                 "COMFY_AUTOGROW_V3", {"template": {"prefix": "ref_image_", "min": 0, "max": 9}}]}}}}

@@ -253,6 +253,7 @@ class PromptCard(QFrame):
 
         # own settings of this clip; "default" = the project's
         self.ov = dict(node.overrides or {})
+        self.steps_locked = False                 # turbo mode: the turbo steps apply to every clip
         grid = QFormLayout()
         grid.setContentsMargins(0, 2, 0, 0)
         grid.setHorizontalSpacing(8)
@@ -326,6 +327,9 @@ class PromptCard(QFrame):
             select_frames(self.length, self.ov.get("frames"))
             self.steps.setValue(int(self.ov.get("steps", STEPS_DEFAULT)))
             self.steps.setToolTip(f"Sampling steps of this clip (lowest value = the project's: {project_steps})")
+            self.steps.setEnabled(not self.edit.isReadOnly() and not self.steps_locked)
+            if self.steps_locked:
+                self.steps.setToolTip("Turbo mode: every clip uses the turbo steps (Clips → Speed)")
         finally:
             for w in widgets:
                 w.blockSignals(False)
@@ -384,6 +388,7 @@ class PromptCard(QFrame):
         self.edit.setReadOnly(not on)
         for w in (self.seed, self.lora, self.b_lora, self.length, self.steps, self.extras, *self.buttons):
             w.setEnabled(on)
+        self.steps.setEnabled(on and not self.steps_locked)
         self._enable_strength()
 
     def _restyle(self):
@@ -543,6 +548,7 @@ class MainWindow(QMainWindow):
         self.bridge.comfy.connect(self._comfy_state)
         self.bridge.loras.connect(self._loras_found)
         self.h3_loras: list[tuple[str, str]] = []
+        self.turbo_loras: list[tuple[str, str]] = []
         self.comfy_up: bool | None = None
         self._comfy_polling = False
         self._comfy_starting = 0.0
@@ -710,6 +716,33 @@ class MainWindow(QMainWindow):
         self.steps.setValue(28)
         self.steps.setToolTip("Sampling steps per clip. The trainer's samples use 20, ai-toolkit's H3 default is 28")
         c.addRow("Steps", self.steps)
+        self.speed = QComboBox()
+        self.speed.addItem("Normal", "normal")
+        self.speed.addItem("Turbo (turbo LoRA, 4-8 steps)", "turbo")
+        self.speed.setToolTip("Turbo: a step-distilled LoRA with its own sampler renders every clip in 4-8 steps "
+                              "instead of ~20 (needs ComfyUI and the ComfyUI-MiniMax-H3-Turbo nodes)")
+        c.addRow("Speed", self.speed)
+        self.turbo_lora = QComboBox()
+        self.turbo_lora.setToolTip("The turbo LoRA (only turbo LoRAs are listed here, and they are left out of the "
+                                   "normal LoRA lists); v4 step600 ema is the recommended one")
+        c.addRow("Turbo LoRA", self.turbo_lora)
+        trow = QHBoxLayout()
+        self.turbo_steps = QSpinBox()
+        self.turbo_steps.setRange(4, 8)
+        self.turbo_steps.setValue(6)
+        self.turbo_steps.setSuffix(" steps")
+        self.turbo_steps.setToolTip("4 is the minimum, 6-8 look clearly better; above 8 it gets over-sharp")
+        self.turbo_strength = QDoubleSpinBox()
+        self.turbo_strength.setRange(0.5, 1.5)
+        self.turbo_strength.setSingleStep(0.05)
+        self.turbo_strength.setValue(1.0)
+        self.turbo_strength.setToolTip("Keep 1.0; smear/ghosting -> a bit higher (1.05-1.2), over-sharp grain -> "
+                                       "a bit lower (0.8-0.95)")
+        trow.addWidget(self.turbo_steps)
+        trow.addWidget(label("strength", level="tertiary"))
+        trow.addWidget(self.turbo_strength)
+        trow.addStretch(1)
+        c.addRow("", trow)
         self.backend = QComboBox()
         for key, text in BACKENDS:
             self.backend.addItem(text, key)
@@ -908,7 +941,9 @@ class MainWindow(QMainWindow):
         self.start_tile.dropped.connect(self.set_image)
         for sig in (self.strength.valueChanged, self.frames.currentIndexChanged, self.resolution.currentIndexChanged,
                     self.steps.valueChanged, self.audio.toggled, self.keep_rep.toggled,
-                    self.backend.currentIndexChanged):
+                    self.backend.currentIndexChanged, self.speed.currentIndexChanged,
+                    self.turbo_lora.currentIndexChanged, self.turbo_steps.valueChanged,
+                    self.turbo_strength.valueChanged):
             sig.connect(self._options_changed)
         self.lora.currentIndexChanged.connect(self._options_changed)
         for keys, fn in (("Ctrl+N", lambda: self.node_action("continue", self.selected_id())),
@@ -1036,6 +1071,11 @@ class MainWindow(QMainWindow):
             self.ident_mode.setCurrentIndex(max(0, self.ident_mode.findData(ident.get("mode", "off"))))
             self.ref_size.setCurrentIndex(max(0, self.ref_size.findData(ident.get("size", "match"))))
             self.ref_hint.setChecked(bool(ident.get("hint", True)))
+            turbo = o.get("turbo") or {}
+            self.speed.setCurrentIndex(1 if turbo.get("on") else 0)
+            self.turbo_steps.setValue(int(turbo.get("steps", 6)))
+            self.turbo_strength.setValue(float(turbo.get("strength", 1.0)))
+            self._fill_turbo(turbo.get("lora"))
             self.keep_rep.setChecked(bool(o.get("keep_repeated", False)))
         finally:
             self._loading = False
@@ -1048,9 +1088,12 @@ class MainWindow(QMainWindow):
             "lora": lora_path(lora) if lora else None, "strength": self.strength.value(),
             "frames": self.frames.currentData(), "resolution": self.resolution.currentData(),
             "steps": self.steps.value(), "audio": self.audio.isChecked(), "keep_repeated": self.keep_rep.isChecked(),
-            "backend": self.backend.currentData(), "extra_loras": self.extra_loras.items()})
+            "backend": self.backend.currentData(), "extra_loras": self.extra_loras.items(),
+            "turbo": {"on": self.speed.currentData() == "turbo", "lora": self.turbo_lora.currentData(),
+                      "steps": self.turbo_steps.value(), "strength": round(self.turbo_strength.value(), 2)}})
         self._update_size_info()
         self._show_references()
+        self._turbo_widgets()
         self._refresh_card_choices()
         self._changed()
 
@@ -1352,8 +1395,9 @@ class MainWindow(QMainWindow):
         for w in (self.start_tile, self.lora, self.b_lora, self.strength, self.frames, self.resolution, self.steps,
                   self.audio, self.keep_rep, self.offload, self.min_free, self.aitk, self.b_project, self.backend,
                   self.comfy_url, self.ident_mode, self.ref_size, self.ref_hint, self.b_ref_add, self.b_ref_start,
-                  self.b_ref_del):
+                  self.b_ref_del, self.speed):
             w.setEnabled(idle)
+        self._turbo_widgets()                      # after the loop: turbo locks the steps fields again
 
     def select(self, nid):
         if self.tree is None:
@@ -1403,6 +1447,34 @@ class MainWindow(QMainWindow):
         return next((text for p, text in self.known_loras() if p == lo or os.path.realpath(p) == real),
                     lora_label(lo))
 
+    def _fill_turbo(self, current: str | None):
+        """The turbo LoRA list; without a choice yet the recommended v4 ema (or the first) is selected."""
+        self.turbo_lora.blockSignals(True)
+        try:
+            self.turbo_lora.clear()
+            known = [(p, Path(n).stem) for p, n in self.turbo_loras]
+            if not current and known:
+                current = next((p for p, n in known if "v4" in n and "ema" in n), known[0][0])
+            if known or current:
+                fill_lora_combo(self.turbo_lora, known, current)
+            else:
+                self.turbo_lora.addItem("no turbo LoRA found", None)
+        finally:
+            self.turbo_lora.blockSignals(False)
+        self._turbo_widgets()
+
+    def _turbo_widgets(self):
+        on = self.speed.currentData() == "turbo"
+        idle = not self.running
+        for w in (self.turbo_lora, self.turbo_steps, self.turbo_strength):
+            w.setEnabled(on and idle)
+        self.steps.setEnabled(idle and not on)
+        self.steps.setToolTip("Turbo mode: every clip uses the turbo steps" if on else
+                              "Sampling steps per clip. The trainer's samples use 20, ai-toolkit's H3 default is 28")
+        for card in self.cards:
+            card.steps_locked = on
+            card.steps.setEnabled(idle and not on and not card.edit.isReadOnly())
+
     def _fill_project_lora(self, current: str | None):
         self.lora.blockSignals(True)
         try:
@@ -1419,14 +1491,18 @@ class MainWindow(QMainWindow):
         def work():
             try:
                 from ..comfy import comfy_lora_roots, find_h3_loras
-                found = find_h3_loras(comfy_lora_roots(comfy_dir))
+                from ..comfy import is_turbo_lora
+                found = [(p, n, is_turbo_lora(Path(p))) for p, n in find_h3_loras(comfy_lora_roots(comfy_dir))]
             except Exception:  # noqa: BLE001
                 found = []
             bridge.loras.emit(found)
         threading.Thread(target=work, daemon=True).start()
 
     def _loras_found(self, found: list):
-        self.h3_loras = list(found)
+        self.h3_loras = [(p, n) for p, n, *t in found if not (t and t[0])]
+        self.turbo_loras = [(p, n) for p, n, *t in found if t and t[0]]
+        if self.tree is not None:
+            self._fill_turbo((self.tree.options.get("turbo") or {}).get("lora"))
         if self.tree is None:
             return
         self._fill_project_lora(self.tree.options.get("lora"))
@@ -1724,6 +1800,12 @@ class MainWindow(QMainWindow):
                 problems.append("add a reference image (Identity) or switch it off")
             elif self.current_backend() != "comfyui":
                 problems.append("reference images need the ComfyUI generator")
+        turbo = self.tree.options.get("turbo") or {}
+        if turbo.get("on"):
+            if not turbo.get("lora"):
+                problems.append("choose a turbo LoRA (Clips → Turbo LoRA) or switch Speed to Normal")
+            elif self.current_backend() != "comfyui":
+                problems.append("turbo mode needs the ComfyUI generator")
         nodes = {n.id: n for t in targets for n in self.tree.path_to(t)}
         empty = [n for n in nodes.values() if not n.prompt.strip()]
         if empty:

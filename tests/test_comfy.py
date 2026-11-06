@@ -276,3 +276,31 @@ def test_stacked_loras_are_chained(server, start, tmp_path):
     assert wf["lora0"]["inputs"]["lora_name"] == "MiniMax H3/glow.safetensors" and wf["lora0"]["inputs"]["strength_model"] == 0.8
     assert wf["lora1"]["inputs"]["lora_name"] == "MiniMax H3/motion.safetensors" and wf["lora1"]["inputs"]["model"] == ["lora0", 0]
     assert wf["lora1"]["inputs"]["strength_model"] == 0.4 and wf["guider"]["inputs"]["model"] == ["lora1", 0]
+
+
+def test_turbo_workflow_and_generation(server, start, tmp_path):
+    wf = C.build_workflow(prompt="x", image="s.png", seed=1, width=512, height=512, frames=73, steps=6,
+                          loras=[("MiniMax H3/glow.safetensors", 0.8)], audio=True, prefix="p",
+                          turbo=("MiniMax H3/minimax_h3_turbo_v4_step600_ema.safetensors", 1.0))
+    assert wf["turbo"]["class_type"] == "MiniMaxH3TurboLoRA" and wf["turbo"]["inputs"]["model"] == ["unet", 0]
+    assert wf["turbo"]["inputs"]["low_vram"] is False and wf["lora0"]["inputs"]["model"] == ["turbo", 0]
+    assert wf["sampler"]["class_type"] == "MiniMaxH3TurboSampler" and wf["sigmas"]["inputs"]["steps"] == 6
+    assert wf["sigmas"]["inputs"]["scheduler"] == "simple"
+    server.loras = ["MiniMax H3/minimax_h3_turbo_v4_step600_ema.safetensors"]
+    gen = C.ComfyGenerator(server.url)
+    s = settings(steps=6, turbo={"lora": "/m/MiniMax H3/minimax_h3_turbo_v4_step600_ema.safetensors", "sha1": "x",
+                                 "strength": 1.0})
+    gen.generate("x", start, tmp_path / "v.mp4", tmp_path / "v.png", 1, s)
+    assert server.prompts[-1]["turbo"]["inputs"]["lora_name"] == "MiniMax H3/minimax_h3_turbo_v4_step600_ema.safetensors"
+    server.turbo_nodes = False
+    with pytest.raises(C.ComfyError, match="ComfyUI-MiniMax-H3-Turbo"):
+        gen.generate("x", start, tmp_path / "w.mp4", tmp_path / "w.png", 1, s)
+
+
+def test_turbo_lora_detection(tmp_path):
+    from test_ui import H3_KEYS, write_lora
+    write_lora(tmp_path / "minimax_h3_turbo_v9.safetensors", H3_KEYS)
+    write_lora(tmp_path / "fast.safetensors", H3_KEYS + ["final_layer.linear.lora_A.weight"])
+    write_lora(tmp_path / "normal.safetensors", H3_KEYS)
+    assert C.is_turbo_lora(tmp_path / "minimax_h3_turbo_v9.safetensors") and C.is_turbo_lora(tmp_path / "fast.safetensors")
+    assert not C.is_turbo_lora(tmp_path / "normal.safetensors")

@@ -37,6 +37,8 @@ DEFAULT_OPTIONS = {"model": "Comfy-Org/MiniMax-H3", "lora": None, "strength": 1.
                    "resolution": 512, "audio": True, "keep_repeated": False, "seed": 42,
                    "backend": "comfyui",         # comfyui | ai-toolkit (they sample differently)
                    "extra_loras": [],            # further LoRAs stacked after "lora": [{"path", "strength"}]
+                   # turbo: a step-distilled LoRA + its sampler, few steps for every clip (ComfyUI only)
+                   "turbo": {"on": False, "lora": None, "steps": 6, "strength": 1.0},
                    # identity: reference images (copies in refs/) every clip sees, so the face stays the same
                    "identity": {"mode": "off", "images": [], "size": "match", "hint": True}}
 REFS_DIR = "refs"
@@ -344,9 +346,13 @@ def current_settings(project: Path, options: dict) -> dict | None:
             if sha is None:
                 raise FileNotFoundError(f"reference image missing: {rel}")
             refs.append({"file": rel, "sha1": sha})
+    turbo = options.get("turbo") or {}
+    turbo_on = bool(turbo.get("on") and turbo.get("lora"))
     return chain.settings_dict(model=options.get("model", DEFAULT_OPTIONS["model"]), lora=options.get("lora"),
                                strength=options.get("strength", 1.0), frames=options.get("frames", 73),
-                               steps=options.get("steps", 28), width=w, height=h, audio=options.get("audio", True),
+                               steps=int(turbo.get("steps", 6)) if turbo_on else options.get("steps", 28),
+                               width=w, height=h, audio=options.get("audio", True),
+                               turbo=(turbo["lora"], turbo.get("strength", 1.0)) if turbo_on else None,
                                backend=options.get("backend", "comfyui"), refs=refs,
                                ref_size=ident.get("size", "match"), ref_hint=ident.get("hint", True))
 
@@ -370,8 +376,10 @@ def node_settings(base: dict, options: dict, node: Node) -> dict:
     return chain.settings_dict(model=base["model"], lora=lora, extra_loras=extras,
                                strength=ov.get("strength", options.get("strength", 1.0)),
                                frames=ov.get("frames", options.get("frames", 73)),
-                               steps=ov.get("steps", options.get("steps", 28)),
+                               # turbo: its steps for every clip (a clip's own steps would break it)
+                               steps=base["steps"] if base.get("turbo") else ov.get("steps", options.get("steps", 28)),
                                width=base["width"], height=base["height"], audio=base["audio"],
+                               turbo=(base["turbo"]["lora"], base["turbo"]["strength"]) if base.get("turbo") else None,
                                backend=base.get("backend", "comfyui"), refs=base.get("refs"),
                                ref_size=base.get("ref_size", "match"), ref_hint=base.get("ref_hint", True))
 
@@ -381,7 +389,8 @@ def loras_needed(tree: Tree, checker: "Checker", nids: list[str]) -> list[str]:
     out: list[str] = []
     for nid in nids:
         s = checker.settings(nid)
-        for lora in [s["lora"]] + [e["lora"] for e in s.get("extra_loras") or []]:
+        for lora in ([s["lora"]] + [e["lora"] for e in s.get("extra_loras") or []]
+                     + ([s["turbo"]["lora"]] if s.get("turbo") else [])):
             if lora and lora not in out:
                 out.append(lora)
     return out

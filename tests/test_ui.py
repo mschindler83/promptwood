@@ -613,3 +613,38 @@ def test_clip_lengths_3_to_15_seconds(app, win, tmp_path, image):
     assert win.cards[0].length.currentData() == 56
     win.open_project(tmp_path / "other")
     assert win.frames.count() == len(values)                                # the extra entry is gone again
+
+
+def test_turbo_in_the_window(app, tmp_path, image, monkeypatch):
+    from video_chain.ui.main_window import MainWindow
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    comfy = tmp_path / "ComfyUI"
+    (comfy / "models" / "loras").mkdir(parents=True)
+    (comfy / "main.py").write_text("")
+    d = comfy / "models" / "loras" / "MiniMax H3"
+    write_lora(d / "nose.safetensors", H3_KEYS)
+    write_lora(d / "minimax_h3_turbo_v4_step600.safetensors", H3_KEYS)
+    write_lora(d / "minimax_h3_turbo_v4_step600_ema.safetensors", H3_KEYS)
+    q = settings(tmp_path, "tu.ini")
+    q.setValue("comfyDir", str(comfy))
+    w = MainWindow(q, command=FAKE)
+    ids = new_project(w, tmp_path, image, ("a",))
+    wait(app, lambda: w.turbo_loras, timeout=10)
+    assert [Path(p).name for p, _n in w.h3_loras] == ["nose.safetensors"]          # turbo kept out of the lists
+    assert [w.lora.itemText(i) for i in range(w.lora.count())] == ["none (base model)", "glow"]
+    assert w.turbo_lora.currentText() == "minimax_h3_turbo_v4_step600_ema"         # the recommended one
+    run_and_wait(app, w, w.generate_path)
+    w.speed.setCurrentIndex(w.speed.findData("turbo"))
+    flush(app, w)
+    assert w.tree.options["turbo"]["on"] and w.tree.options["turbo"]["lora"].endswith("_ema.safetensors")
+    assert not w.steps.isEnabled() and not w.cards[0].steps.isEnabled() and w.state(ids[0]) == "changed"
+    wait(app, lambda: not w._joins, timeout=30)
+    run_and_wait(app, w, w.generate_path)
+    made = T.load(w.project).nodes[ids[0]].made["settings"]
+    assert made["steps"] == 6 and made["turbo"]["lora"].endswith("_ema.safetensors")
+    w.backend.setCurrentIndex(w.backend.findData("ai-toolkit"))
+    flush(app, w)
+    wait(app, lambda: not w._joins, timeout=30)
+    w.generate_path()
+    assert not w.running and "turbo mode needs the ComfyUI generator" in w.status.text()
+    w.close()

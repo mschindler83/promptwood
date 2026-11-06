@@ -436,3 +436,27 @@ def test_stale_cleanup_also_takes_old_fixed_names(project):
     T.remove_stale_files(project, T.load(project))
     assert sorted(f.name for f in d.iterdir()) == sorted([f.name for f in T.clip_files(project,
                                                           T.load(project).nodes[a.id])] + ["notes.txt"])
+
+
+def test_turbo_mode(project, tmp_path):
+    turbo = tmp_path / "turbo.safetensors"
+    turbo.write_bytes(b"t")
+    t, a, b1, b2, c = build(project)
+    t = T.load(project)
+    t.nodes[b1.id].overrides = {"steps": 20}
+    t.options["turbo"] = {"on": True, "lora": str(turbo), "steps": 6, "strength": 1.0}
+    T.save(project, t)
+    t = T.load(project)
+    ch = T.Checker(project, t)
+    for n in (a, b1, c):
+        st = ch.settings(n.id)
+        assert st["steps"] == 6 and st["turbo"]["lora"] == str(turbo)            # also over a clip's own steps
+    assert str(turbo) in T.loras_needed(t, ch, [a.id])
+    run(project, [c.id])
+    t = T.load(project)
+    t.options["turbo"]["on"] = False
+    T.save(project, t)
+    assert statuses(project)["a"] == "changed"
+    t.options["turbo"]["on"] = True
+    T.save(project, t)
+    assert statuses(project)["a"] == "done"
