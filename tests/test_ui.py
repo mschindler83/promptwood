@@ -648,3 +648,39 @@ def test_turbo_in_the_window(app, tmp_path, image, monkeypatch):
     w.generate_path()
     assert not w.running and "turbo mode needs the ComfyUI generator" in w.status.text()
     w.close()
+
+
+def test_new_open_recent_save_close(app, win, tmp_path, image, monkeypatch):
+    from PySide6.QtWidgets import QDialogButtonBox
+
+    from video_chain.ui.main_window import NewProjectDialog
+    assert win.create_project(tmp_path / "projects" / "first", str(image))
+    assert win.windowTitle() == "first — Promptwood" and (tmp_path / "projects" / "first" / T.START_FILE).is_file()
+    type_prompt(win, win.selected_id(), "hello")
+    win.save_project()
+    assert "Saved first" in win.status.text()
+    assert T.load(tmp_path / "projects" / "first").nodes[win.selected_id()].prompt == "hello"
+    assert not win.create_project(tmp_path / "projects" / "first")            # already a project
+    win.create_project(tmp_path / "projects" / "second")
+    assert win.recent_projects()[:2] == [str((tmp_path / "projects" / "second").resolve()),
+                                         str((tmp_path / "projects" / "first").resolve())]
+    texts = [a.text() for a in win.recent_file_menu.actions()]
+    assert texts[0].startswith("second") and texts[1].startswith("first")
+    win.recent_file_menu.actions()[1].trigger()                                 # reopen 'first' from the list
+    assert win.project.name == "first"
+    assert T.load(win.project).nodes[win.selected_id()].prompt == "hello"
+    # dialog: name + location -> folder, refuses existing projects
+    dlg = NewProjectDialog(win, str(tmp_path / "projects"))
+    dlg.name.setText("first")
+    assert "already a project" in dlg.target.text() and not dlg.buttons.button(QDialogButtonBox.Ok).isEnabled()
+    dlg.name.setText("third")
+    assert dlg.folder() == tmp_path / "projects" / "third" and dlg.buttons.button(QDialogButtonBox.Ok).isEnabled()
+    dlg.deleteLater()
+    # save as: a full copy, and the window continues in it
+    win.copy_project_to(tmp_path / "projects" / "first-copy")
+    wait(app, lambda: win.project and win.project.name == "first-copy", timeout=20)
+    assert (win.project / T.START_FILE).is_file() and win.windowTitle().startswith("first-copy")
+    assert T.load(win.project).nodes[win.selected_id()].prompt == "hello"
+    win.close_project()
+    assert win.project is None and win.windowTitle() == "Promptwood" and not win.act_save.isEnabled()
+    assert win.graph.items_by_id == {}

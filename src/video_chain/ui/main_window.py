@@ -18,7 +18,8 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QSettings, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QIcon, QImage, QKeySequence, QPixmap, QShortcut
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
+                               QFileDialog, QFormLayout,
                                QFrame, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu,
                                QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
                                QScrollArea, QSlider, QSpinBox, QSplitter, QStackedWidget, QTabWidget, QVBoxLayout,
@@ -69,10 +70,80 @@ def fmt_time(seconds: float) -> str:
     return f"{int(m)}:{s:04.1f}"
 
 
+MAX_RECENT = 10
+
+
+class NewProjectDialog(QDialog):
+    """Name + location (+ an optional start image) for a new project."""
+
+    def __init__(self, parent, location: str, image: str = ""):
+        super().__init__(parent)
+        self.setWindowTitle("New project")
+        self.setMinimumWidth(520)
+        f = QFormLayout(self)
+        self.name = QLineEdit()
+        self.name.setPlaceholderText("e.g. smoke-scene-1")
+        f.addRow("Name", self.name)
+        lrow = QHBoxLayout()
+        self.location = QLineEdit(location)
+        b = icon_button("fopen", "Choose the folder the project is created in")
+        b.clicked.connect(self._choose_location)
+        lrow.addWidget(self.location, 1)
+        lrow.addWidget(b)
+        f.addRow("Location", lrow)
+        irow = QHBoxLayout()
+        self.image = QLineEdit(image)
+        self.image.setPlaceholderText("optional: start image")
+        b2 = icon_button("fopen", "Choose the start image")
+        b2.clicked.connect(self._choose_image)
+        irow.addWidget(self.image, 1)
+        irow.addWidget(b2)
+        f.addRow("Start image", irow)
+        self.target = label("", level="tertiary")
+        self.target.setWordWrap(True)
+        f.addRow("", self.target)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.buttons.button(QDialogButtonBox.Ok).setText("Create")
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        f.addRow(self.buttons)
+        for w in (self.name, self.location):
+            w.textChanged.connect(self._check)
+        self._check()
+
+    def folder(self) -> Path | None:
+        name = "".join(ch for ch in self.name.text().strip() if ch not in '/\\:*?"<>|').strip()
+        loc = self.location.text().strip()
+        return Path(os.path.expanduser(loc)) / name if name and loc else None
+
+    def _check(self):
+        f = self.folder()
+        problem = ""
+        if f is None:
+            problem = "Enter a name and a location."
+        elif (f / T.TREE_FILE).exists():
+            problem = f"{f} is already a project (use Open)."
+        elif f.exists() and any(f.iterdir()):
+            problem = f"{f} exists and is not empty."
+        self.target.setText(problem or f"Creates {f}")
+        self.buttons.button(QDialogButtonBox.Ok).setEnabled(not problem)
+
+    def _choose_location(self):
+        d = QFileDialog.getExistingDirectory(self, "Location", self.location.text().strip())
+        if d:
+            self.location.setText(d)
+
+    def _choose_image(self):
+        f, _ = QFileDialog.getOpenFileName(self, "Start image", "", IMAGE_FILTER)
+        if f:
+            self.image.setText(f)
+
+
 class _Bridge(QObject):
     joined = Signal(object, object, str, str, str)  # path or None, error or None, purpose, status prefix, project
     comfy = Signal(bool)                       # ComfyUI reachable
     loras = Signal(list)                       # H3 LoRAs found in ComfyUI's LoRA folders
+    copied = Signal(str, str)                  # Save as: target folder, error ('' = done)
 
 
 # ----------------------------------------------------------------------------- path card
@@ -515,6 +586,7 @@ class MainWindow(QMainWindow):
     def __init__(self, settings: QSettings | None = None, command: list[str] | None = None):
         super().__init__()
         self.setWindowTitle("Promptwood")
+        self._build_menu()
         self.qs = settings or QSettings()
         self.command = command                  # tests replace the launcher with a fake backend
         self.project: Path | None = None
@@ -547,6 +619,7 @@ class MainWindow(QMainWindow):
         self.bridge.joined.connect(self._joined)
         self.bridge.comfy.connect(self._comfy_state)
         self.bridge.loras.connect(self._loras_found)
+        self.bridge.copied.connect(self._copied)
         self.h3_loras: list[tuple[str, str]] = []
         self.turbo_loras: list[tuple[str, str]] = []
         self.comfy_up: bool | None = None
@@ -600,6 +673,21 @@ class MainWindow(QMainWindow):
         prow.addWidget(self.b_project)
         prow.addWidget(self.b_open_dir)
         pf.addRow("Folder", prow)
+        brow = QHBoxLayout()
+        self.b_new = QPushButton("New…")
+        self.b_new.setToolTip("Create a new project (Ctrl+Shift+N)")
+        self.b_new.clicked.connect(self.new_project)
+        self.b_open = QPushButton("Open…")
+        self.b_open.setToolTip("Open a project folder (Ctrl+O)")
+        self.b_open.clicked.connect(self._choose_project)
+        self.b_recent = QPushButton("Recent")
+        self.b_recent.setToolTip("Open one of the last projects")
+        self.recent_menu = QMenu(self)
+        self.b_recent.setMenu(self.recent_menu)
+        for b in (self.b_new, self.b_open, self.b_recent):
+            brow.addWidget(b)
+        brow.addStretch(1)
+        pf.addRow("", brow)
         lv.addWidget(pw)
 
         bar, _ = section_bar("Start image", left)
@@ -970,6 +1058,7 @@ class MainWindow(QMainWindow):
         self.aitk.setText(q.value("aitk", DEFAULT_AITK, type=str))
         if g := q.value("geometry"):
             self.restoreGeometry(g)
+        self._fill_recent()
         proj = q.value("project", "", type=str)
         if proj and Path(proj).is_dir():
             self.open_project(Path(proj), quiet=True)
@@ -992,13 +1081,177 @@ class MainWindow(QMainWindow):
         q.sync()
 
     # ------------------------------------------------------------------ project
+    def _build_menu(self):
+        m = self.menuBar().addMenu("&File")
+        self.act_new = m.addAction("New project…", self.new_project)
+        self.act_new.setShortcut(QKeySequence("Ctrl+Shift+N"))
+        self.act_open = m.addAction("Open project…", self._choose_project)
+        self.act_open.setShortcut(QKeySequence("Ctrl+O"))
+        self.recent_file_menu = m.addMenu("Recent projects")
+        m.addSeparator()
+        self.act_save = m.addAction("Save", self.save_project)
+        self.act_save.setShortcut(QKeySequence("Ctrl+S"))
+        self.act_save_as = m.addAction("Save as…", self.save_project_as)
+        self.act_save_as.setShortcut(QKeySequence("Ctrl+Shift+S"))
+        m.addSeparator()
+        self.act_close = m.addAction("Close project", self.close_project)
+        m.addAction("Show project folder", self._open_dir)
+        m.addSeparator()
+        m.addAction("Quit", self.close).setShortcut(QKeySequence("Ctrl+Q"))
+
+    # ---- recent projects
+    def recent_projects(self) -> list[str]:
+        try:
+            items = json.loads(self.qs.value("recentProjects", "[]", type=str))
+        except ValueError:
+            items = []
+        return [p for p in items if isinstance(p, str)]
+
+    def _remember_project(self, folder: Path):
+        items = [str(folder)] + [p for p in self.recent_projects() if p != str(folder)]
+        self.qs.setValue("recentProjects", json.dumps(items[:MAX_RECENT]))
+        self._fill_recent()
+
+    def _fill_recent(self):
+        for menu in (self.recent_menu, self.recent_file_menu):
+            menu.clear()
+            items = [p for p in self.recent_projects() if (Path(p) / T.TREE_FILE).exists() or
+                     (Path(p) / "chain.json").exists()]
+            for p in items:
+                act = menu.addAction(f"{Path(p).name}   —   {Path(p).parent}")
+                act.triggered.connect(lambda _=False, f=p: self.open_project(Path(f)))
+            if not items:
+                menu.addAction("no recent projects").setEnabled(False)
+        self.b_recent.setEnabled(bool(self.recent_projects()))
+
+    def _update_title(self):
+        self.setWindowTitle(f"{self.project.name} — Promptwood" if self.project else "Promptwood")
+
+    # ---- new / open / save / close
+    def new_project(self):
+        if self.running:
+            return
+        last = self.recent_projects()
+        location = str(Path(last[0]).parent) if last else str(Path.home())
+        dlg = NewProjectDialog(self, location)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        self.create_project(dlg.folder(), dlg.image.text().strip())
+
+    def create_project(self, folder: Path, image: str = "") -> bool:
+        """Create a new project folder (it must not be a project yet) and open it; optionally with a start image."""
+        folder = Path(folder).expanduser()
+        if (folder / T.TREE_FILE).exists():
+            self.status.setText(f"{folder.name} is already a project.")
+            return False
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            self.status.setText(f"Could not create {folder}: {e}")
+            return False
+        if not self.open_project(folder):
+            return False
+        if image:
+            self.set_image(image)
+        self.status.setText(f"New project {folder.name}." + ("" if image else " Choose a start image."))
+        return True
+
     def _choose_project(self):
         if self.running:
             return
-        f = QFileDialog.getExistingDirectory(self, "Project folder (new or existing)",
-                                             str(self.project.parent) if self.project else "")
-        if f:
-            self.open_project(Path(f))
+        last = self.recent_projects()
+        start = str(self.project.parent) if self.project else (str(Path(last[0]).parent) if last else "")
+        f = QFileDialog.getExistingDirectory(self, "Open project folder", start)
+        if not f:
+            return
+        folder = Path(f)
+        if not (folder / T.TREE_FILE).exists() and not (folder / "chain.json").exists():
+            if QMessageBox.question(self, "Open project", f"{folder.name} is not a Promptwood project yet.\n\n"
+                                    "Create a new project in this folder?") != QMessageBox.Yes:
+                return
+        self.open_project(folder)
+
+    def save_project(self):
+        if self.project is None or self.tree is None:
+            self.status.setText("No project open.")
+            return
+        if self.running:
+            self.status.setText("The project is saved by the generator while it runs.")
+            return
+        self._save_timer.stop()
+        if self._write_tree():
+            self.status.setText(f"Saved {self.project.name} ({time.strftime('%H:%M:%S')}).")
+
+    def save_project_as(self):
+        """Copy the whole project (clips included) to a new folder and continue there."""
+        if self.project is None or self.running:
+            return
+        d = QFileDialog.getExistingDirectory(self, "Save the project as (choose the folder to put the copy in)",
+                                             str(self.project.parent))
+        if not d:
+            return
+        from PySide6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(self, "Save as", "Name of the copy:", text=f"{self.project.name}-copy")
+        if not ok or not name.strip():
+            return
+        self.copy_project_to(Path(d) / name.strip())
+
+    def copy_project_to(self, target: Path):
+        if self.project is None or self.running:
+            return
+        target = Path(target).expanduser()
+        if target.exists() and any(target.iterdir()):
+            self.status.setText(f"{target} exists and is not empty.")
+            return
+        self._save_timer.stop()
+        if not self._write_tree():
+            return
+        source, bridge = self.project, self.bridge
+        self.status.setText(f"Copying the project to {target} …")
+        self.act_save_as.setEnabled(False)
+
+        def work():
+            try:
+                shutil.copytree(source, target, dirs_exist_ok=True,
+                                ignore=shutil.ignore_patterns("*.part", "*.part.*", "video-chain-*"))
+                tree = T.load(target)                 # the copy remembers where its start image came from
+                T.save(target, tree)
+                bridge.copied.emit(str(target), "")
+            except Exception as e:  # noqa: BLE001
+                bridge.copied.emit(str(target), str(e))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _copied(self, target: str, error: str):
+        self.act_save_as.setEnabled(True)
+        if error:
+            self.status.setText(f"Could not copy the project: {error}")
+            return
+        if self.open_project(Path(target)):
+            self.status.setText(f"Saved as {Path(target).name}; you are working in the copy now.")
+
+    def close_project(self):
+        if self.running or self.project is None:
+            return
+        self._save_timer.stop()
+        self._save_tree()
+        self.preview.stop()
+        self.project = self.tree = None
+        self.project_edit.clear()
+        self.qs.setValue("project", "")
+        for c in self.cards:
+            self.path_box.removeWidget(c)
+            c.setParent(None)
+            c.deleteLater()
+        self.cards = []
+        self.start_tile.clear_frame("Click or drop an image")
+        self.size_info.setText("")
+        self.refs.clear()
+        self.graph.show_nodes([])
+        self.path_info.setText("")
+        self.tree_info.setText("")
+        self._update_title()
+        self._update_buttons()
+        self.status.setText("No project open. New… or Open… under Project, or the File menu.")
 
     def open_project(self, folder: Path, quiet: bool = False) -> bool:
         if self.running:
@@ -1036,6 +1289,8 @@ class MainWindow(QMainWindow):
         self._tree_stamp = self._stamp()
         self._write_tree()
         self.qs.setValue("project", str(folder))
+        self._remember_project(folder)
+        self._update_title()
         self.refresh(rebuild_path=True)
         QTimer.singleShot(0, self.graph.fit)
         self.status.setText(f"Project {folder.name}: {len(tree.nodes)} clip{'s' if len(tree.nodes) != 1 else ''}.")
@@ -1379,6 +1634,10 @@ class MainWindow(QMainWindow):
         is_clip = bool(has and sel and sel != START)
         idle = not self.running
         self.b_continue.setEnabled(has and idle)
+        for w in (self.act_save, self.act_save_as, self.act_close):
+            w.setEnabled(has and idle)
+        for w in (self.act_new, self.act_open, self.b_new, self.b_open, self.b_recent, self.recent_file_menu):
+            w.setEnabled(idle)
         for b in (self.b_branch, self.b_variant, self.b_delete):
             b.setEnabled(is_clip and idle)
         path = self.selected_path()
