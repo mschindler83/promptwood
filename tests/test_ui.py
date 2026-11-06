@@ -684,3 +684,36 @@ def test_new_open_recent_save_close(app, win, tmp_path, image, monkeypatch):
     win.close_project()
     assert win.project is None and win.windowTitle() == "Promptwood" and not win.act_save.isEnabled()
     assert win.graph.items_by_id == {}
+
+
+def test_image_picker(app, tmp_path):
+    from PySide6.QtCore import Qt
+
+    from video_chain.ui.image_picker import ImagePickerDialog
+    d = tmp_path / "pics"
+    (d / "sub").mkdir(parents=True)
+    Image.new("RGB", (800, 600), (200, 0, 0)).save(d / "b_big.jpg")
+    Image.new("RGB", (64, 64), (0, 200, 0)).save(d / "a_small.png")
+    Image.new("RGB", (64, 64), (0, 0, 200)).save(d / "sub" / "inner.webp")
+    (d / "notes.txt").write_text("not an image")
+    q = settings(tmp_path, "pick.ini")
+    dlg = ImagePickerDialog(None, "Start image", str(d), q)
+    names = [dlg.grid.item(i).text() for i in range(dlg.grid.count())]
+    assert names == ["sub", "a_small.png", "b_big.jpg"]                         # folders first, no txt
+    big = dlg.grid.item(2)
+    wait(app, lambda: big.data(Qt.UserRole + 1) is not None, timeout=10)       # thumbnail made in the background
+    assert big.data(Qt.UserRole + 1) == "320×240"                              # read at reduced size
+    dlg.grid.setCurrentItem(big)
+    assert "800×600 px" in dlg.info.text() and dlg.buttons.button(dlg.buttons.StandardButton.Open).isEnabled()
+    dlg._activated(dlg.grid.item(0))                                            # into the subfolder
+    assert dlg.folder == (d / "sub").resolve() and dlg.grid.item(0).text() == "inner.webp"
+    dlg.go_up()
+    assert dlg.folder == d.resolve()
+    dlg.sort.setCurrentIndex(dlg.sort.findData("date"))
+    dlg._activated(dlg.grid.item(next(i for i in range(dlg.grid.count()) if dlg.grid.item(i).text() == "a_small.png")))
+    assert dlg.result() == dlg.DialogCode.Accepted and dlg.chosen() == str((d / "a_small.png").resolve())
+    assert q.value("pickerDir") == str(d.resolve())                             # remembered for next time
+    dlg2 = ImagePickerDialog(None, "again", None, q)
+    assert dlg2.folder == d.resolve()
+    assert any(dlg2.places.item(i).data(Qt.UserRole) == str(d.resolve()) for i in range(dlg2.places.count()))
+    dlg2.reject()

@@ -29,6 +29,7 @@ from .. import chain
 from .. import tree as T
 from ..comfy import REF_HINT
 from .graph import START, GraphView, NodeInfo
+from .image_picker import pick_image
 from .theme import icon, repolish, theme
 from .widgets import FrameTile, icon_button, label, section_bar
 
@@ -134,7 +135,8 @@ class NewProjectDialog(QDialog):
             self.location.setText(d)
 
     def _choose_image(self):
-        f, _ = QFileDialog.getOpenFileName(self, "Start image", "", IMAGE_FILTER)
+        start = str(Path(self.image.text()).parent) if self.image.text().strip() else None
+        f = pick_image(self, "Start image", getattr(self.parent(), "qs", None), start)
         if f:
             self.image.setText(f)
 
@@ -1367,7 +1369,7 @@ class MainWindow(QMainWindow):
         if self.project is None:
             self.status.setText("Open or create a project folder first.")
             return
-        f, _ = QFileDialog.getOpenFileName(self, "Reference image (best a close-up of the face)", "", IMAGE_FILTER)
+        f = pick_image(self, "Reference image (best a close-up of the face)", self.qs, None, self._picker_places())
         if f:
             self.add_reference(f)
 
@@ -1459,9 +1461,20 @@ class MainWindow(QMainWindow):
             self._choose_project()
             if self.project is None:
                 return
-        f, _ = QFileDialog.getOpenFileName(self, "Start image", "", IMAGE_FILTER)
+        start = str(Path(self.tree.image).parent) if self.tree and self.tree.image and \
+            Path(self.tree.image).parent.is_dir() else None
+        f = pick_image(self, "Start image", self.qs, start, self._picker_places())
         if f:
             self.set_image(f)
+
+    def _picker_places(self) -> list[tuple[str, str]]:
+        """Extra places in the image picker: the open project (its clips' last frames are there)."""
+        if self.project is None:
+            return []
+        out = [(f"Project {self.project.name}", str(self.project))]
+        if (self.project / "nodes").is_dir():
+            out.append(("Project clips (last frames)", str(self.project / "nodes")))
+        return out
 
     def set_image(self, path: str):
         if self.running:
