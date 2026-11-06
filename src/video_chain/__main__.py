@@ -6,7 +6,9 @@ Run it with ai-toolkit's Python (see the video-chain launcher next to this proje
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+import traceback
 from pathlib import Path
 
 from . import chain
@@ -35,42 +37,76 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--min-free-gb", type=float, default=18.0,
                    help="refuse to start with less free GPU memory (protects a running training; default 18)")
     p.add_argument("--model", default="Comfy-Org/MiniMax-H3")
+    p.add_argument("--events", action="store_true", help="also print progress as '@@ {json}' lines (for the GUI)")
     p.add_argument("--aitk", type=Path, default=Path("/path/to/ai/ai-toolkit"),
                    help="ai-toolkit folder")
     return p
 
 
+def _printer(enabled: bool):
+    def emit(event: dict) -> None:
+        if enabled:
+            print("@@ " + json.dumps(event, ensure_ascii=False), flush=True)
+    return emit
+
+
 def main(argv: list[str] | None = None) -> int:
     a = build_parser().parse_args(argv)
+    emit = _printer(a.events)
+    try:
+        return _main(a, emit)
+    except Exception as e:  # noqa: BLE001
+        traceback.print_exc()
+        emit({"e": "error", "msg": f"{type(e).__name__}: {e}"})
+        return 1
+
+
+def _fail(emit, msg: str) -> int:
+    print(msg, file=sys.stderr)
+    emit({"e": "error", "msg": msg})
+    return 2
+
+
+def _main(a, emit) -> int:
     if a.frames < 22 or a.frames % 17 != 5:
-        print(f"--frames must be on H3's 17n+5 grid (39, 56, 73, 90, 107, 124), got {a.frames}", file=sys.stderr)
-        return 2
+        return _fail(emit, f"--frames must be on H3's 17n+5 grid (39, 56, 73, 90, 107, 124), got {a.frames}")
+    if not a.prompts.is_file():
+        return _fail(emit, f"prompt file not found: {a.prompts}")
     prompts = chain.read_prompts(a.prompts)
     if not prompts:
-        print(f"no prompts in {a.prompts}", file=sys.stderr)
-        return 2
+        return _fail(emit, f"no prompts in {a.prompts}")
     if not a.image.is_file():
-        print(f"start image not found: {a.image}", file=sys.stderr)
-        return 2
+        return _fail(emit, f"start image not found: {a.image}")
     try:
         width, height = chain.parse_size(a.size) if a.size else chain.canvas_size(*chain.image_size(a.image),
                                                                                    a.resolution)
     except ValueError as e:
-        print(e, file=sys.stderr)
-        return 2
+        return _fail(emit, str(e))
     image, prompts_file, out = a.image.resolve(), a.prompts.resolve(), a.out.expanduser().resolve()
     lora = a.lora.resolve() if a.lora else None
-    settings = {"model": a.model, "lora": str(lora) if lora else None, "strength": a.strength, "frames": a.frames,
-                "steps": a.steps, "width": width, "height": height, "audio": not a.no_audio}
+    settings = chain.settings_dict(model=a.model, lora=str(lora) if lora else None, strength=a.strength,
+                                   frames=a.frames, steps=a.steps, width=width, height=height, audio=not a.no_audio)
     print(f"{len(prompts)} prompts, {width}x{height}, {a.frames} frames ({a.frames / 24:.1f} s) per clip, "
           f"{a.steps} steps, seed {a.seed}{' (same for all)' if a.same_seed else '+'}")
 
+    emit({"e": "start", "clips": len(prompts), "width": width, "height": height, "frames": a.frames,
+          "steps": a.steps, "out": str(out)})
+    current = {"k": 0}
+
+    def on_event(ev: dict) -> None:
+        if ev.get("e") == "clip":
+            current["k"] = ev["k"]
+        emit(ev)
+
+    emit({"e": "loading"})
     from .h3 import H3Generator          # imports torch / ai-toolkit: only now, after the cheap checks
     gen = H3Generator(width=width, height=height, frames=a.frames, steps=a.steps, lora=lora, strength=a.strength,
                       model=a.model, offload=a.offload, audio=not a.no_audio, aitk=a.aitk,
-                      min_free_gb=a.min_free_gb)
+                      min_free_gb=a.min_free_gb,
+                      progress=lambda i, n: emit({"e": "step", "k": current["k"], "i": i, "n": n}))
+    emit({"e": "loaded"})
     result = chain.run_chain(gen, image, prompts, out, seed=a.seed, same_seed=a.same_seed, settings=settings,
-                             resume=not a.redo, drop_first=not a.keep_repeated_frames)
+                             resume=not a.redo, drop_first=not a.keep_repeated_frames, events=on_event)
     chain.copy_prompts(prompts_file, out)
     print(f"done: {result}")
     return 0

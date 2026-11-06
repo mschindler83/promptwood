@@ -10,38 +10,10 @@ from PIL import Image
 from video_chain import chain
 from video_chain.__main__ import main
 from video_chain.h3 import model_config_dict
+from fakes import COLOURS, FakeGenerator  # noqa: F401
 
 if not shutil.which("ffmpeg"):
     pytest.skip("ffmpeg not installed", allow_module_level=True)
-
-COLOURS = ["red", "green", "blue", "yellow", "magenta", "cyan"]
-
-
-class FakeGenerator:
-    """Clip k: N-1 grey frames, then one frame in a colour that depends on the call; optional sine sound."""
-
-    def __init__(self, frames=17, audio=True, size=(64, 64)):
-        self.frames, self.audio, self.size = frames, audio, size
-        self.calls = []
-
-    def generate(self, prompt, start_image, out_video, out_last_frame, seed):
-        k = len(self.calls)
-        self.calls.append({"prompt": prompt, "start": Path(start_image).name, "seed": seed,
-                           "start_rgb": Image.open(start_image).convert("RGB").getpixel((5, 5))})
-        w, h = self.size
-        colour = COLOURS[k % len(COLOURS)]
-        n = self.frames
-        args = ["-f", "lavfi", "-i", f"color=gray:s={w}x{h}:r=24:d={(n - 1) / 24:.6f}",
-                "-f", "lavfi", "-i", f"color={colour}:s={w}x{h}:r=24:d={1 / 24:.6f}"]
-        filt = "[0:v][1:v]concat=n=2:v=1:a=0[v]"
-        maps = ["-map", "[v]"]
-        if self.audio:
-            args += ["-f", "lavfi", "-i", f"sine=f={300 + 100 * k}:d={n / 24:.6f}"]
-            maps += ["-map", "2:a", "-c:a", "aac"]
-        subprocess.run(["ffmpeg", "-v", "error", "-y", *args, "-filter_complex", filt, *maps, "-frames:v", str(n),
-                        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-qp", "0", str(out_video)], check=True)
-        chain.last_frame(Path(out_video), Path(out_last_frame))
-
 
 @pytest.fixture
 def start(tmp_path):

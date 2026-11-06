@@ -191,8 +191,16 @@ def _load_previous(out_dir: Path) -> dict[int, dict]:
         return {}
 
 
-def _write_record(out_dir: Path, settings: dict, clips: list[Clip], done: bool) -> None:
-    data = {"tool": "video-chain", "settings": settings, "done": done,
+def settings_dict(*, model: str, lora: str | None, strength: float, frames: int, steps: int, width: int,
+                  height: int, audio: bool) -> dict:
+    """What a clip depends on besides prompt, seed and start image; a clip is reused only if this is unchanged."""
+    return {"model": model, "lora": lora or None, "strength": float(strength) if lora else 1.0,
+            "frames": int(frames), "steps": int(steps), "width": int(width), "height": int(height),
+            "audio": bool(audio)}
+
+
+def _write_record(out_dir: Path, settings: dict, clips: list[Clip], done: bool, image: Path | None = None) -> None:
+    data = {"tool": "video-chain", "image": str(image) if image else None, "settings": settings, "done": done,
             "chain": "chain.mp4" if done else None, "clips": [asdict(c) for c in clips]}
     tmp = out_dir / "chain.json.part"
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -201,7 +209,8 @@ def _write_record(out_dir: Path, settings: dict, clips: list[Clip], done: bool) 
 
 def run_chain(generator: Generator, image: Path, prompts: list[str], out_dir: Path, *, seed: int = 42,
               same_seed: bool = False, settings: dict | None = None, resume: bool = True,
-              drop_first: bool = True, log: Callable[[str], None] = print) -> Path:
+              drop_first: bool = True, log: Callable[[str], None] = print,
+              events: Callable[[dict], None] | None = None) -> Path:
     """Make the clips one after another and join them. With resume, a clip whose prompt, seed, start image and
     settings are unchanged since the last run (and whose files exist) is reused instead of generated again."""
     if not prompts:
@@ -212,6 +221,7 @@ def run_chain(generator: Generator, image: Path, prompts: list[str], out_dir: Pa
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     settings = dict(settings or {})
+    emit = events or (lambda _e: None)
     previous = _load_previous(out_dir) if resume else {}
 
     start = out_dir / "start.png"
@@ -231,15 +241,18 @@ def run_chain(generator: Generator, image: Path, prompts: list[str], out_dir: Pa
         if same:
             clip.reused = True
             log(f"[{k}/{len(prompts)}] unchanged, reusing {video.name}")
+            emit({"e": "clip", "k": k, "n": len(prompts), "state": "reused", "video": str(video), "frame": str(last)})
         else:
             log(f"[{k}/{len(prompts)}] generating {video.name} (seed {s}) from {current.name}")
+            emit({"e": "clip", "k": k, "n": len(prompts), "state": "generating"})
             for f in (video, last):
                 f.unlink(missing_ok=True)
             generator.generate(prompt, current, video, last, s)
             if not video.exists() or not last.exists():
                 raise RuntimeError(f"the generator did not write {video.name} and {last.name}")
+            emit({"e": "clip", "k": k, "n": len(prompts), "state": "done", "video": str(video), "frame": str(last)})
         clips.append(clip)
-        _write_record(out_dir, settings, clips, done=False)
+        _write_record(out_dir, settings, clips, done=False, image=image.resolve())
         current = last
 
     for old_num in sorted(n for n in previous if n > len(prompts)):      # clips of a longer earlier chain
@@ -249,10 +262,24 @@ def run_chain(generator: Generator, image: Path, prompts: list[str], out_dir: Pa
 
     chain = out_dir / "chain.mp4"
     log(f"joining {len(clips)} clips into {chain.name}")
+    emit({"e": "joining"})
     concat([out_dir / c.video for c in clips], chain, drop_first=drop_first)
-    _write_record(out_dir, settings, clips, done=True)
+    _write_record(out_dir, settings, clips, done=True, image=image.resolve())
+    emit({"e": "done", "chain": str(chain)})
     return chain
 
 
 def copy_prompts(prompts_file: Path, out_dir: Path) -> None:
-    shutil.copyfile(prompts_file, Path(out_dir) / "prompts.txt")
+    target = Path(out_dir) / "prompts.txt"
+    if target.exists() and target.resolve() == Path(prompts_file).resolve():
+        return
+    shutil.copyfile(prompts_file, target)
+
+
+def load_record(out_dir: Path) -> dict | None:
+    """chain.json of an earlier run, or None."""
+    p = Path(out_dir) / "chain.json"
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None

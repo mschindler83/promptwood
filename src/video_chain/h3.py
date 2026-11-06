@@ -49,7 +49,7 @@ class H3Generator:
     def __init__(self, *, width: int, height: int, frames: int = 73, steps: int = 28, lora: Path | None = None,
                  strength: float = 1.0, model: str = DEFAULT_MODEL, offload: float = 0.9, low_vram: bool = True,
                  audio: bool = True, aitk: Path = DEFAULT_AITK, device: str = "cuda:0", min_free_gb: float = 18.0,
-                 log=print):
+                 log=print, progress=None):
         self.width, self.height, self.frames, self.steps = width, height, frames, steps
         self.log = log
         aitk = Path(aitk).resolve()
@@ -89,6 +89,9 @@ class H3Generator:
             net.multiplier = float(strength)
             net._update_torch_multiplier()
             log(f"LoRA {Path(lora).name} applied (strength {strength:g}, {len(weights)} weights)")
+
+        if progress is not None:          # H3's sampler reports every denoising step through this hook
+            self.sd.sample_step_hook = lambda idx, num, _latents: progress(idx + 1, num)
 
         # keep the decoded frames: the last one becomes the next start image without a trip through H.264
         import extensions_built_in.diffusion_models.minimax_h3.minimax_h3 as h3mod
