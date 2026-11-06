@@ -758,3 +758,22 @@ def test_keep_this_branch(app, win, tmp_path, image):
     assert win.tree.others_than_path(ids[1])
     win.keep_branch(ids[1], whole_path=True, confirm=False)
     assert set(win.tree.nodes) == {ids[0], ids[1], kept_child} and root_sibling not in win.tree.nodes
+
+
+def test_review_fixes_in_the_window(app, win, tmp_path, image, monkeypatch):
+    # a new project does not take over the references of the last one
+    new_project(win, tmp_path, image, ("a",))
+    face = tmp_path / "face.png"
+    Image.new("RGB", (40, 40), (1, 2, 3)).save(face)
+    win.add_reference(str(face))
+    win.save_settings()
+    win.create_project(tmp_path / "fresh")
+    assert win.tree.options["identity"]["images"] == [] and win.refs.count() == 0
+    # an auto-selected turbo LoRA is stored, so turbo really runs with it
+    win.turbo_loras = [("/l/minimax_h3_turbo_v4_step600_ema.safetensors", "minimax_h3_turbo_v4_step600_ema.safetensors")]
+    win.tree.options["turbo"] = {"on": True, "lora": None, "steps": 6, "strength": 1.0}
+    win._fill_turbo(None)
+    assert win.tree.options["turbo"]["lora"] == "/l/minimax_h3_turbo_v4_step600_ema.safetensors"
+    # a failed save is shown, not swallowed
+    monkeypatch.setattr(T, "save", lambda *a, **k: (_ for _ in ()).throw(OSError(5, "Input/output error")))
+    assert win._write_tree() is False and "Could not save the project" in win.status.text()

@@ -460,3 +460,28 @@ def test_turbo_mode(project, tmp_path):
     t.options["turbo"]["on"] = True
     T.save(project, t)
     assert statuses(project)["a"] == "done"
+
+
+def test_old_records_and_options_count_as_ai_toolkit(project):
+    t, a, b1, b2, c = build(project)
+    run(project, [a.id])
+    d = json.loads((project / T.TREE_FILE).read_text())
+    d["options"].pop("backend")                                     # a tree.json from before the backend choice
+    for nd in d["nodes"]:
+        if nd.get("made"):
+            nd["made"]["settings"].pop("backend")          # and records without it
+    (project / T.TREE_FILE).write_text(json.dumps(d))
+    t = T.load(project)
+    assert t.options["backend"] == "ai-toolkit"
+    assert statuses(project)["a"] == "done"
+
+
+def test_records_never_point_outside_the_project(project, tmp_path):
+    t, a, b1, b2, c = build(project)
+    victim = tmp_path / "precious.txt"
+    victim.write_text("keep me")
+    t = T.load(project)
+    t.nodes[a.id].made = {"video": "../precious.txt", "frame": str(victim)}
+    assert T.clip_files(project, t.nodes[a.id]) == []
+    t.remove(a.id, project)
+    assert victim.read_text() == "keep me"

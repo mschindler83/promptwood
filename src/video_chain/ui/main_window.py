@@ -636,6 +636,8 @@ class MainWindow(QMainWindow):
         self._targets: list[str] = []
         self._loading = False
         self._tree_stamp: tuple | None = None   # tree.json as this window last read or wrote it
+        self._copying: str | None = None        # Save as in progress (the source project)
+        self._worker_leaving = False            # the worker said bye (idle timeout) and is quitting
         self._job: dict | None = None           # the generation in progress
         self._worker_idle = False
         self._worker_bound: tuple | None = None
@@ -1238,8 +1240,10 @@ class MainWindow(QMainWindow):
         if not self._write_tree():
             return
         source, bridge = self.project, self.bridge
+        existed = target.exists()
         self.status.setText(f"Copying the project to {target} …")
         self.act_save_as.setEnabled(False)
+        self._copying = str(source)
 
         def work():
             try:
@@ -1249,13 +1253,20 @@ class MainWindow(QMainWindow):
                 T.save(target, tree)
                 bridge.copied.emit(str(target), "")
             except Exception as e:  # noqa: BLE001
+                if not existed:                       # a half copy would block the next try
+                    shutil.rmtree(target, ignore_errors=True)
                 bridge.copied.emit(str(target), str(e))
         threading.Thread(target=work, daemon=True).start()
 
     def _copied(self, target: str, error: str):
+        source, self._copying = self._copying, None
         self.act_save_as.setEnabled(True)
+        self._update_buttons()
         if error:
             self.status.setText(f"Could not copy the project: {error}")
+            return
+        if self.project is None or str(self.project) != source:
+            self.status.setText(f"Copied the project to {target}.")
             return
         if self.open_project(Path(target)):
             self.status.setText(f"Saved as {Path(target).name}; you are working in the copy now.")
@@ -1302,7 +1313,7 @@ class MainWindow(QMainWindow):
         if not (folder / T.TREE_FILE).exists() and not tree.nodes:
             try:                                 # a new project starts with the last used settings
                 last = json.loads(self.qs.value("lastOptions", "{}", type=str))
-                tree.options.update({k: v for k, v in last.items() if k in T.DEFAULT_OPTIONS})
+                tree.options.update({k: v for k, v in last.items() if k in T.DEFAULT_OPTIONS and k != "identity"})
             except ValueError:
                 pass
         self.project, self.tree = folder, tree
@@ -1322,6 +1333,7 @@ class MainWindow(QMainWindow):
         self.qs.setValue("project", str(folder))
         self._remember_project(folder)
         self._update_title()
+        self._warm_lora_hashes()
         self.refresh(rebuild_path=True)
         QTimer.singleShot(0, self.graph.fit)
         self.status.setText(f"Project {folder.name}: {len(tree.nodes)} clip{'s' if len(tree.nodes) != 1 else ''}.")
@@ -1477,7 +1489,11 @@ class MainWindow(QMainWindow):
             self.status.setText("tree.json was changed outside this window (another window or a command-line "
                                 "run). Nothing was saved; reopen the project to continue.")
             return False
-        T.save(self.project, self.tree)
+        try:
+            T.save(self.project, self.tree)
+        except OSError as e:
+            self.status.setText(f"Could not save the project: {e}")
+            return False
         self._tree_stamp = self._stamp()
         return True
 
@@ -1756,6 +1772,11 @@ class MainWindow(QMainWindow):
             known = [(p, Path(n).stem) for p, n in self.turbo_loras]
             if not current and known:
                 current = next((p for p, n in known if "v4" in n and "ema" in n), known[0][0])
+                if self.tree is not None and not self.running:   # store what the list shows
+                    turbo = dict(self.tree.options.get("turbo") or {})
+                    turbo["lora"] = current
+                    self.tree.options["turbo"] = turbo
+                    self._changed()
             if known or current:
                 fill_lora_combo(self.turbo_lora, known, current)
             else:
@@ -1784,6 +1805,21 @@ class MainWindow(QMainWindow):
             fill_lora_combo(self.lora, self.known_loras(), current)
         finally:
             self.lora.blockSignals(False)
+
+    def _warm_lora_hashes(self):
+        """Hash the LoRAs this project uses in the background, so the clip states need not wait for it."""
+        if self.tree is None:
+            return
+        o = self.tree.options
+        files = [o.get("lora"), (o.get("turbo") or {}).get("lora")] + \
+            [e.get("path") for e in o.get("extra_loras") or []] + \
+            [n.overrides.get("lora") for n in self.tree.nodes.values()] + \
+            [e.get("path") for n in self.tree.nodes.values() for e in n.overrides.get("extra_loras") or []]
+        files = [f for f in dict.fromkeys(files) if f and f != T.NO_LORA]
+        def work():
+            for f in files:
+                chain.file_signature(f)               # cached by (path, size, date) for the clip states
+        threading.Thread(target=work, daemon=True).start()
 
     def scan_loras(self):
         """Find the H3 LoRAs in ComfyUI's LoRA folders (header reads only), in the background."""
@@ -2036,7 +2072,9 @@ class MainWindow(QMainWindow):
         def work():
             with lock:
                 try:
-                    bridge.joined.emit(T.join_path(project, tree, nid, out), None, purpose, pre, str(project))
+                    joined = T.join_path(project, tree, nid, out)
+                    secs = chain.probe(joined)["frames"] / 24           # not in the GUI thread (network shares)
+                    bridge.joined.emit((joined, secs), None, purpose, pre, str(project))
                 except Exception as e:  # noqa: BLE001
                     bridge.joined.emit(None, str(e), purpose, pre, str(project))
         threading.Thread(target=work, daemon=True).start()
@@ -2049,7 +2087,7 @@ class MainWindow(QMainWindow):
         if error:
             self.status.setText(f"{pre}Could not join the path: {error}")
             return
-        secs = chain.probe(path)["frames"] / 24
+        path, secs = path
         if purpose == "play":
             self.tabs.setCurrentIndex(0)
             self.preview.open(path, f"Path to clip #{Path(path).stem[1:]} · {fmt_time(secs)}")
@@ -2134,10 +2172,13 @@ class MainWindow(QMainWindow):
 
     def _worker_key(self) -> tuple:
         """What a loaded worker is bound to; a different key needs a new worker."""
+        comfy = self.current_backend() == "comfyui"
+        # only what the chosen generator uses: a change of the other one's settings must not reload the model
         return (self.tree.options.get("model", T.DEFAULT_OPTIONS["model"]), bool(self.tree.options.get("audio", True)),
-                self.offload.value(), self.aitk.text().strip() or DEFAULT_AITK, self.current_backend(),
-                self.comfy_url.text().strip() or DEFAULT_COMFY_URL, self.comfy_dir.text().strip(),
-                self.comfy_cleanup.isChecked())
+                None if comfy else self.offload.value(),
+                None if comfy else (self.aitk.text().strip() or DEFAULT_AITK), self.current_backend(),
+                (self.comfy_url.text().strip() or DEFAULT_COMFY_URL) if comfy else DEFAULT_COMFY_URL,
+                self.comfy_dir.text().strip() if comfy else "", self.comfy_cleanup.isChecked() if comfy else True)
 
     def current_backend(self) -> str:
         return (self.tree.options.get("backend") if self.tree else None) or "comfyui"
@@ -2155,6 +2196,9 @@ class MainWindow(QMainWindow):
             return
         if self._joins:
             self.status.setText("Wait until the path is joined.")
+            return
+        if self._copying:
+            self.status.setText("Wait until the project is copied (Save as).")
             return
         problems = []
         if not (self.project / T.START_FILE).is_file():
@@ -2206,8 +2250,13 @@ class MainWindow(QMainWindow):
             c.set_editable(False)
         self._update_buttons()
         self.progress.setRange(0, 0)
-        if self.worker_alive and self._worker_idle and self._worker_bound == self._worker_key():
+        if (self.worker_alive and self._worker_idle and not self._worker_leaving
+                and self._worker_bound == self._worker_key()):
             self._send_job()
+        elif self.worker_alive and self._worker_leaving:  # it just said bye (idle timeout): start a new one
+            self.status.setText("Starting the generator again …")
+            self._replace_worker = True
+            self._quit_worker()
         elif self.worker_alive:                    # loaded for other settings: replace it
             self.status.setText("Settings changed: loading the model again …")
             self._replace_worker = True
@@ -2237,6 +2286,7 @@ class MainWindow(QMainWindow):
         self._worker_idle, self._worker_bound, self._replace_worker, self._restart = False, self._worker_key(), \
             False, False
         self._worker_loras = list(loras)
+        self._worker_leaving = False
         minutes = self.idle_minutes.value() if self.keep_loaded.isChecked() else 0
         args = pre + ["--serve", "--events", "--offload", f"{self.offload.value() / 100:g}",
                       "--min-free-gb", f"{self.min_free.value():g}", "--idle-minutes", f"{minutes:g}",
@@ -2361,6 +2411,7 @@ class MainWindow(QMainWindow):
             self._update_model_label()
         elif e == "bye":
             self._worker_idle = False
+            self._worker_leaving = True
             if ev.get("reason") == "idle" and not self.running:
                 self.status.setText("The model was unloaded after the idle time.")
         elif e == "restart":
@@ -2471,7 +2522,7 @@ class MainWindow(QMainWindow):
             self._job["restarted"], self._job["sent"] = True, False
             self.status.setText("Loading the model again for this job …")
             self._start_worker(self._restart_loras)
-        elif self._job is not None and self._replace_worker:
+        elif self._job is not None and self._replace_worker and not self._stopping:
             self._job["sent"] = False
             self._start_worker(self.project_loras())
         elif self._job is not None:
@@ -2568,7 +2619,7 @@ class MainWindow(QMainWindow):
             p, self.proc = self.proc, None
             p.finished.disconnect()
             if p.state() == QProcess.Running:
-                p.write(b'{"cmd": "quit"}\n')
+                p.write(b'{"cmd": "quit", "free": true}\n')     # ComfyUI: give the memory back too
                 p.closeWriteChannel()
                 if not p.waitForFinished(3000):
                     p.terminate()

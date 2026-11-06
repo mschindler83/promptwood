@@ -57,12 +57,19 @@ def lora_name_for(path: str, names: list[str], roots: list[Path] = ()) -> str | 
     """ComfyUI's name for a LoRA file: the listed name the path ends with (longest match), else the listed name
     that is the same file (followed links) in one of ComfyUI's LoRA folders (roots)."""
     p = Path(path).as_posix()
-    hits = [n for n in names if p.endswith("/" + n.replace("\\", "/")) or p == n]
-    if hits:
-        return max(hits, key=len)
     try:
         real = os.path.realpath(path)
     except OSError:
+        real = None
+    hits = [n for n in names if p.endswith("/" + n.replace("\\", "/")) or p == n]
+    if hits and roots:
+        # with the folders known, a name only counts if it is this very file (a 'style.safetensors' elsewhere
+        # is another LoRA than ComfyUI's 'style.safetensors')
+        hits = [n for n in hits if any((Path(r) / n).exists() and os.path.realpath(Path(r) / n) == real
+                                       for r in roots)]
+    if hits:
+        return max(hits, key=len)
+    if real is None:
         return None
     for root in roots:
         for n in names:
@@ -510,6 +517,7 @@ class ComfyGenerator:
     def _wait(self, pid: str, ws) -> dict:
         end = time.monotonic() + self.timeout
         last_poll = 0.0
+        poll_errors = 0
         while time.monotonic() < end:
             if ws is not None:
                 try:
@@ -526,7 +534,14 @@ class ComfyGenerator:
                 time.sleep(0.5)
             if ws is None or time.monotonic() - last_poll > 5:
                 last_poll = time.monotonic()
-                entry = self._history(pid)
+                try:
+                    entry = self._history(pid)
+                    poll_errors = 0
+                except ComfyUnavailable:
+                    poll_errors += 1
+                    if poll_errors >= 5:                 # ~5 tries in a row: ComfyUI is really gone
+                        raise
+                    continue
                 if entry is not None:
                     st = entry.get("status") or {}
                     if st.get("status_str") == "error":

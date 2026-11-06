@@ -112,7 +112,7 @@ class Tree:
                 for f in list(node_files(project, g)) + clip_files(project, node):
                     _unlink(f)
                 for ext in (".mp4", ".json"):
-                    (Path(project) / "paths" / f"{g}{ext}").unlink(missing_ok=True)
+                    _unlink(Path(project) / "paths" / f"{g}{ext}")
         if self.selected in gone:
             self.selected = parent
         return gone
@@ -140,7 +140,10 @@ class Tree:
         """Raises ValueError for a tree that cannot be right (duplicate ids, missing parents, cycles)."""
         if not isinstance(d, dict):
             raise ValueError("not a tree file")
-        t = cls(options={**copy.deepcopy(DEFAULT_OPTIONS), **copy.deepcopy(d.get("options") or {})},
+        stored = copy.deepcopy(d.get("options") or {})
+        if stored and "backend" not in stored:           # saved before there was a choice: always ai-toolkit
+            stored["backend"] = "ai-toolkit"
+        t = cls(options={**copy.deepcopy(DEFAULT_OPTIONS), **stored},
                 image=d.get("image"),
                 selected=d.get("selected"), next_num=int(d.get("next_num") or 1))
         for nd in d.get("nodes", []):
@@ -183,7 +186,14 @@ def clip_files(project: Path, node: "Node") -> list[Path]:
     """The files a node's current record points to."""
     if not node.made:
         return []
-    return [Path(project) / node.made[k] for k in ("video", "frame") if node.made.get(k)]
+    area = (Path(project) / "nodes").resolve()
+    out = []
+    for k in ("video", "frame"):
+        if node.made.get(k):
+            f = Path(project) / node.made[k]
+            if area in f.resolve().parents:           # a damaged/hand-edited record never reaches elsewhere
+                out.append(f)
+    return out
 
 
 def new_clip_files(project: Path, nid: str) -> tuple[Path, Path]:
@@ -330,7 +340,8 @@ class Checker:
         m = node.made
         if not m or not (self.project / m.get("video", "")).is_file() or not (self.project / m.get("frame", "")).is_file():
             st = "new"
-        elif (m.get("prompt") != node.prompt or m.get("seed") != node.seed or m.get("settings") != self.settings(nid)
+        elif (m.get("prompt") != node.prompt or m.get("seed") != node.seed
+              or _old_record(m.get("settings")) != self.settings(nid)
               or (node.parent is not None and self.status(node.parent) != "done")
               or m.get("start_sha1") != self.sha(self.start_frame(node))):
             st = "changed"
@@ -338,6 +349,13 @@ class Checker:
             st = "done"
         self._status[nid] = st
         return st
+
+
+def _old_record(s: dict | None) -> dict | None:
+    """Records written before the backend setting existed were made with ai-toolkit."""
+    if isinstance(s, dict) and "backend" not in s:
+        return {**s, "backend": "ai-toolkit"}
+    return s
 
 
 def current_settings(project: Path, options: dict) -> dict | None:

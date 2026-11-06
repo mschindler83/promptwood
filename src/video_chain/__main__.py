@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import select
 import signal
 import sys
@@ -158,6 +159,31 @@ def _main_tree(a, emit) -> int:
     return 0
 
 
+class _LineReader:
+    """Lines from stdin without Python's buffering, so select() sees every waiting line (two jobs in one read
+    would otherwise leave the second one in the buffer until the idle timeout)."""
+
+    def __init__(self, stream):
+        self.fd = stream.fileno()
+        self.buf = b""
+
+    def ready(self, timeout: float) -> bool:
+        if b"\n" in self.buf:
+            return True
+        r, _, _ = select.select([self.fd], [], [], timeout)
+        return bool(r)
+
+    def readline(self) -> str:
+        while b"\n" not in self.buf:
+            chunk = os.read(self.fd, 65536)
+            if not chunk:                           # end of input
+                line, self.buf = self.buf, b""
+                return line.decode(errors="replace")
+            self.buf += chunk
+        line, self.buf = self.buf.split(b"\n", 1)
+        return line.decode(errors="replace") + "\n"
+
+
 RESTART = 3          # worker exit code: the job needs a fresh worker (other model, sound or a bigger LoRA)
 
 
@@ -168,20 +194,19 @@ def serve(a, emit, make_generator: Callable[[list[str], dict], object], stdin=No
     (another model or sound setting, or a LoRA of a higher rank than the prepared ones) is answered with a
     'restart' event and exit code RESTART; the GUI then starts a new worker for it."""
     stdin = stdin or sys.stdin
+    lines = _LineReader(stdin)
     current = {"id": None, "k": 0}
     model, audio = a.model, not a.no_audio
     gen = make_generator([lo for lo in a.loras.split(",") if lo], current)
     idle = a.idle_minutes * 60 if a.idle_minutes and a.idle_minutes > 0 else None
     emit({"e": "idle", "timeout": idle})
     while True:
-        if idle is not None:
-            ready, _, _ = select.select([stdin], [], [], idle)
-            if not ready:
-                if hasattr(gen, "free"):
-                    gen.free()                      # ComfyUI: unload its models after the idle time
-                emit({"e": "bye", "reason": "idle"})
-                return 0
-        line = stdin.readline()
+        if idle is not None and not lines.ready(idle):
+            if hasattr(gen, "free"):
+                gen.free()                          # ComfyUI: unload its models after the idle time
+            emit({"e": "bye", "reason": "idle"})
+            return 0
+        line = lines.readline()
         if not line:                                # the GUI is gone
             return 0
         try:

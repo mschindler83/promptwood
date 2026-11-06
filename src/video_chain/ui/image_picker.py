@@ -190,20 +190,22 @@ class ImagePickerDialog(QDialog):
             it.setToolTip(e.name)
             self.grid.addItem(it)
             self._items[e.path] = it
-            st = e.stat()
-            key = (e.path, st.st_mtime_ns, st.st_size)
-            if key in self._cache:
-                self._set_icon(it, self._cache[key])
-            else:
-                self._pool.submit(self._make_thumb, gen, e.path, key)
+            self._pool.submit(self._make_thumb, gen, e.path)   # file details are read there (network shares)
         n = len(imgs)
         self.setWindowTitle(f"{self.windowTitle().split(' — ')[0]} — {folder.name or folder} ({n} images)")
 
-    def _make_thumb(self, gen: int, path: str, key: tuple):
+    def _make_thumb(self, gen: int, path: str):
         if gen != self._gen:                      # the folder changed meanwhile
             return
-        img = _thumbnail(path)
-        self._cache[key] = img
+        try:
+            st = os.stat(path)
+            key = (path, st.st_mtime_ns, st.st_size)
+        except OSError:
+            return
+        img = self._cache.get(key)
+        if img is None:
+            img = _thumbnail(path)
+            self._cache[key] = img
         self._thumbs.ready.emit(gen, path, img)
 
     def _thumb_ready(self, gen: int, path: str, img: QImage):

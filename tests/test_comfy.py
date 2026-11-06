@@ -304,3 +304,15 @@ def test_turbo_lora_detection(tmp_path):
     write_lora(tmp_path / "normal.safetensors", H3_KEYS)
     assert C.is_turbo_lora(tmp_path / "minimax_h3_turbo_v9.safetensors") and C.is_turbo_lora(tmp_path / "fast.safetensors")
     assert not C.is_turbo_lora(tmp_path / "normal.safetensors")
+
+
+def test_same_name_elsewhere_is_not_comfyuis_lora(tmp_path):
+    root = tmp_path / "loras"
+    (root).mkdir()
+    (root / "style.safetensors").write_bytes(b"comfy's")
+    other = tmp_path / "mine" / "style.safetensors"
+    other.parent.mkdir()
+    other.write_bytes(b"another one")
+    assert C.lora_name_for(str(other), ["style.safetensors"], [root]) is None
+    assert C.lora_name_for(str(root / "style.safetensors"), ["style.safetensors"], [root]) == "style.safetensors"
+    assert C.lora_name_for(str(other), ["style.safetensors"]) == "style.safetensors"   # no folders known: by name
