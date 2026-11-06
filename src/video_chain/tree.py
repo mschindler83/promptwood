@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -99,7 +100,8 @@ class Tree:
             if project is not None:
                 for f in node_files(project, g):
                     f.unlink(missing_ok=True)
-                (Path(project) / "paths" / f"{g}.mp4").unlink(missing_ok=True)
+                for ext in (".mp4", ".json"):
+                    (Path(project) / "paths" / f"{g}{ext}").unlink(missing_ok=True)
         if self.selected in gone:
             self.selected = parent
         return gone
@@ -115,12 +117,29 @@ class Tree:
 
     @classmethod
     def from_json(cls, d: dict) -> "Tree":
+        """Raises ValueError for a tree that cannot be right (duplicate ids, missing parents, cycles)."""
+        if not isinstance(d, dict):
+            raise ValueError("not a tree file")
         t = cls(options={**DEFAULT_OPTIONS, **(d.get("options") or {})}, image=d.get("image"),
                 selected=d.get("selected"), next_num=int(d.get("next_num") or 1))
         for nd in d.get("nodes", []):
+            if not isinstance(nd, dict) or not nd.get("id"):
+                raise ValueError("a node without id")
+            if nd["id"] in t.nodes:
+                raise ValueError(f"node {nd['id']} appears twice")
             ov = {k: v for k, v in (nd.get("overrides") or {}).items() if k in OVERRIDE_KEYS and v is not None}
             n = Node(nd["id"], nd.get("parent"), nd.get("prompt", ""), int(nd.get("seed", 42)), nd.get("made"), ov)
             t.nodes[n.id] = n
+        for n in t.nodes.values():
+            if n.parent is not None and n.parent not in t.nodes:
+                raise ValueError(f"node {n.id} has a missing parent {n.parent}")
+        for n in t.nodes.values():                 # every chain of parents must end at the start image
+            seen, cur = set(), n.id
+            while cur is not None:
+                if cur in seen:
+                    raise ValueError(f"node {n.id} is part of a loop")
+                seen.add(cur)
+                cur = t.nodes[cur].parent
         t.next_num = max([t.next_num] + [t.number(i) + 1 for i in t.nodes])
         if t.selected not in t.nodes:
             t.selected = None
@@ -137,7 +156,10 @@ def load(project: Path) -> Tree:
     project = Path(project)
     p = project / TREE_FILE
     if p.exists():
-        return Tree.from_json(json.loads(p.read_text(encoding="utf-8")))
+        try:
+            return Tree.from_json(json.loads(p.read_text(encoding="utf-8")))
+        except (ValueError, KeyError, TypeError) as e:
+            raise ValueError(f"{p} is damaged ({e})") from e
     old = chain.load_record(project)
     t = Tree()
     if old:
@@ -262,6 +284,11 @@ def loras_needed(tree: Tree, checker: "Checker", nids: list[str]) -> list[str]:
 
 # ----------------------------------------------------------------------------- generating
 
+def empty_prompts(tree: Tree, targets: list[str]) -> list[str]:
+    """Nodes on the target paths without a prompt."""
+    return [n.id for t in targets for n in tree.path_to(t) if not n.prompt.strip()]
+
+
 def plan(tree: Tree, checker: Checker, targets: list[str]) -> list[str]:
     """Nodes to make for these targets: every not-done node on their paths, parents first, each once."""
     out: list[str] = []
@@ -283,7 +310,7 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
             raise KeyError(f"no node {t}")
     if not (project / START_FILE).is_file():
         raise FileNotFoundError("the project has no start image")
-    empty = [n.id for t in targets for n in tree.path_to(t) if not n.prompt.strip()]
+    empty = empty_prompts(tree, targets)
     if empty:
         raise ValueError(f"empty prompt in node {empty[0]}")
     checker = Checker(project, tree)
@@ -295,23 +322,29 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
     for nid in sorted(on_paths - set(todo), key=lambda i: tree.depth(i)):
         emit({"e": "node", "id": nid, "state": "reused"})
     emit({"e": "plan", "make": todo})
-    (project / "nodes").mkdir(exist_ok=True)
+    nodes_dir = project / "nodes"
+    nodes_dir.mkdir(exist_ok=True)
+    for left in list(nodes_dir.glob("*.new.*")) + list(nodes_dir.glob("video-chain-*")):   # from a killed run
+        shutil.rmtree(left, ignore_errors=True) if left.is_dir() else left.unlink(missing_ok=True)
     for k, nid in enumerate(todo, start=1):
         node = tree.nodes[nid]
         start = checker.start_frame(node)
         video, frame = node_files(project, nid)
         log(f"[{k}/{len(todo)}] {nid}: generating (seed {node.seed}) from {start.name}")
         emit({"e": "node", "id": nid, "state": "generating", "k": k, "n": len(todo)})
-        for f in (video, frame):
+        # made under new names: a failed or stopped generation keeps the previous clip and its record
+        new_video, new_frame = video.with_name(f"{nid}.new.mp4"), frame.with_name(f"{nid}.new.png")
+        for f in (new_video, new_frame):
             f.unlink(missing_ok=True)
-        node.made = None
-        save(project, tree)
         settings = checker.settings(nid)
-        generator.generate(node.prompt, start, video, frame, node.seed, settings=settings)
-        if not video.exists() or not frame.exists():
+        start_sha = checker.sha(start)
+        generator.generate(node.prompt, start, new_video, new_frame, node.seed, settings=settings)
+        if not new_video.exists() or not new_frame.exists():
             raise RuntimeError(f"the generator did not write {video.name} and {frame.name}")
+        new_video.replace(video)
+        new_frame.replace(frame)
         node.made = {"prompt": node.prompt, "seed": node.seed, "settings": settings,
-                     "start_sha1": checker.sha(start), "video": f"nodes/{video.name}", "frame": f"nodes/{frame.name}"}
+                     "start_sha1": start_sha, "video": f"nodes/{video.name}", "frame": f"nodes/{frame.name}"}
         save(project, tree)
         checker = Checker(project, tree)          # the new frame changes what depends on it
         emit({"e": "node", "id": nid, "state": "done"})

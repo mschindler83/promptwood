@@ -106,7 +106,14 @@ def last_frame(video: Path, png: Path) -> None:
 
 
 def to_png(image: Path, png: Path) -> None:
-    _run(["ffmpeg", "-v", "error", "-y", "-i", str(image), "-frames:v", "1", str(png)])
+    """Convert to PNG; written under a temporary name first, so a failed conversion never leaves a broken file."""
+    png = Path(png)
+    tmp = png.with_name(png.stem + ".part.png")
+    try:
+        _run(["ffmpeg", "-v", "error", "-y", "-i", str(image), "-frames:v", "1", str(tmp)])
+        tmp.replace(png)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def image_size(path: Path) -> tuple[int, int]:
@@ -156,6 +163,23 @@ def concat(videos: list[Path], out: Path, drop_first: bool = True, fps: int = FP
     tmp.replace(out)
 
 
+_SHA_CACHE: dict[tuple, str] = {}
+
+
+def file_signature(path: str | Path | None) -> str | None:
+    """SHA-1 of a file's content, cached by (path, size, mtime); None for no file or a missing one."""
+    if not path:
+        return None
+    try:
+        st = Path(path).stat()
+    except OSError:
+        return None
+    key = (str(path), st.st_size, st.st_mtime_ns)
+    if key not in _SHA_CACHE:
+        _SHA_CACHE[key] = sha1_file(Path(path))
+    return _SHA_CACHE[key]
+
+
 def sha1_file(path: Path) -> str:
     h = hashlib.sha1()
     with open(path, "rb") as f:
@@ -195,8 +219,10 @@ def _load_previous(out_dir: Path) -> dict[int, dict]:
 
 def settings_dict(*, model: str, lora: str | None, strength: float, frames: int, steps: int, width: int,
                   height: int, audio: bool) -> dict:
-    """What a clip depends on besides prompt, seed and start image; a clip is reused only if this is unchanged."""
-    return {"model": model, "lora": lora or None, "strength": float(strength) if lora else 1.0,
+    """What a clip depends on besides prompt, seed and start image; a clip is reused only if this is unchanged.
+    The LoRA counts by content (lora_sha1), so a LoRA retrained into the same file makes its clips change."""
+    return {"model": model, "lora": lora or None, "lora_sha1": file_signature(lora) if lora else None,
+            "strength": float(strength) if lora else 1.0,
             "frames": int(frames), "steps": int(steps), "width": int(width), "height": int(height),
             "audio": bool(audio)}
 
@@ -247,11 +273,14 @@ def run_chain(generator: Generator, image: Path, prompts: list[str], out_dir: Pa
         else:
             log(f"[{k}/{len(prompts)}] generating {video.name} (seed {s}) from {current.name}")
             emit({"e": "clip", "k": k, "n": len(prompts), "state": "generating"})
-            for f in (video, last):
+            new_video, new_last = video.with_name(video.stem + ".new.mp4"), last.with_name(last.stem + ".new.png")
+            for f in (new_video, new_last):
                 f.unlink(missing_ok=True)
-            generator.generate(prompt, current, video, last, s)
-            if not video.exists() or not last.exists():
+            generator.generate(prompt, current, new_video, new_last, s)
+            if not new_video.exists() or not new_last.exists():
                 raise RuntimeError(f"the generator did not write {video.name} and {last.name}")
+            new_video.replace(video)              # the old clip is replaced only once the new one exists
+            new_last.replace(last)
             emit({"e": "clip", "k": k, "n": len(prompts), "state": "done", "video": str(video), "frame": str(last)})
         clips.append(clip)
         _write_record(out_dir, settings, clips, done=False, image=image.resolve())

@@ -51,13 +51,23 @@ def lora_file_info(path: Path) -> tuple[int, float]:
     from safetensors import safe_open
 
     ranks: dict[str, int] = {}
-    alphas: dict[str, float] = {}
+    alpha_keys: list[str] = []
     with safe_open(str(path), framework="numpy") as f:
         for key in f.keys():
             if key.endswith((".lora_A.weight", ".lora_down.weight")):
                 ranks[key.rsplit(".", 2)[0]] = int(f.get_slice(key).get_shape()[0])
             elif key.endswith(".alpha"):
-                alphas[key[: -len(".alpha")]] = float(f.get_tensor(key).reshape(-1)[0])
+                alpha_keys.append(key)
+    alphas: dict[str, float] = {}
+    if alpha_keys:
+        try:
+            with safe_open(str(path), framework="numpy") as f:
+                for key in alpha_keys:
+                    alphas[key[: -len(".alpha")]] = float(f.get_tensor(key).reshape(-1)[0])
+        except (TypeError, ValueError):     # e.g. bf16 alphas, which numpy cannot hold
+            with safe_open(str(path), framework="pt") as f:
+                for key in alpha_keys:
+                    alphas[key[: -len(".alpha")]] = float(f.get_tensor(key).float().reshape(-1)[0])
     if not ranks:
         raise ValueError(f"{Path(path).name} contains no LoRA weights")
     scales = {round(alphas.get(m, r) / r, 6) for m, r in ranks.items()}
@@ -90,6 +100,8 @@ class H3Generator:
         for lo in wanted:
             if not Path(lo).is_file():
                 raise FileNotFoundError(lo)
+        # absolute paths: ai-toolkit needs the working directory changed below
+        self.paths = {lo: str(Path(lo).resolve()) for lo in wanted}
         self.info = {lo: lora_file_info(Path(lo)) for lo in wanted}       # rank, scale
         base = max(wanted, key=lambda lo: self.info[lo][0]) if wanted else None
 
@@ -105,7 +117,7 @@ class H3Generator:
         from toolkit.config_modules import ModelConfig
         from toolkit.util.get_model import get_model_class
 
-        cfg = ModelConfig(**model_config_dict(model, base, offload, low_vram, audio))
+        cfg = ModelConfig(**model_config_dict(model, self.paths[base] if base else None, offload, low_vram, audio))
         cls = get_model_class(cfg)
         self.sd = cls(device=device, model_config=cfg, dtype="bf16", noise_scheduler=cls.get_train_scheduler())
         log("loading MiniMax-H3 (this takes a few minutes)")
@@ -150,7 +162,7 @@ class H3Generator:
         if net is None or lora not in self.info:
             raise RuntimeError(f"LoRA {Path(lora).name} was not prepared for this run")
         if lora != self.current:
-            weights = self.sd.convert_lora_weights_before_load(load_file(lora))
+            weights = self.sd.convert_lora_weights_before_load(load_file(self.paths[lora]))
             with torch.no_grad():
                 for p in net.parameters():
                     p.zero_()
@@ -167,6 +179,10 @@ class H3Generator:
             self.log(f"LoRA {Path(lora).name} loaded (rank {rank}, scale {scale:g})")
         net.multiplier = float(strength)
         net._update_torch_multiplier()
+        # ai-toolkit moves the LoRA to the CPU after every sample and back before the next one, but builds this
+        # tensor on the device the weights are on right now; it is a plain attribute, so moving the network
+        # does not move it. Put it where the model runs, or the next clip fails with a CPU/CUDA mix.
+        net.torch_multiplier = net.torch_multiplier.to(self.sd.device_torch)
 
     def generate(self, prompt: str, start_image: Path, out_video: Path, out_last_frame: Path, seed: int,
                  settings: dict | None = None) -> None:
@@ -182,10 +198,13 @@ class H3Generator:
             self.use_lora(self.default_lora, self.default_strength)
         with tempfile.TemporaryDirectory(prefix="video-chain-", dir=str(Path(out_video).parent)) as tmp:
             cfg = GenerateImageConfig(
-                prompt=prompt, negative_prompt="", width=width, height=height,
+                prompt="", negative_prompt="", width=width, height=height,
                 num_inference_steps=steps, guidance_scale=1.0,      # H3 is guidance-distilled
                 seed=int(seed), num_frames=frames, fps=24, ctrl_img=str(start_image),
                 output_folder=tmp, output_ext="mp4")
+            # set afterwards: ai-toolkit parses '--w 512', '--seed 3' etc. out of a prompt given to the constructor
+            # and cuts the prompt at the first '--'
+            cfg.prompt = cfg.prompt_2 = prompt
             self._last_png = Path(out_last_frame)
             try:
                 self.sd.generate_images([cfg])

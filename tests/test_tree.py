@@ -260,3 +260,73 @@ def test_lora_file_info(tmp_path):
     save_file({"x": np.zeros(2, np.float32)}, str(empty))
     with pytest.raises(ValueError, match="no LoRA weights"):
         lora_file_info(empty)
+
+
+def test_retrained_lora_in_the_same_file_changes_its_clips(project, tmp_path):
+    lora = tmp_path / "nose.safetensors"
+    lora.write_bytes(b"weights v1")
+    t, a, b1, b2, c = build(project)
+    t = T.load(project)
+    t.nodes[b1.id].overrides = {"lora": str(lora)}
+    T.save(project, t)
+    run(project, [c.id, b2.id])
+    assert set(statuses(project).values()) == {"done"}
+    lora.write_bytes(b"weights v2, retrained")                       # same path, new content
+    assert statuses(project) == {"a": "done", "b1": "changed", "c": "changed", "b2": "done"}
+
+
+def test_failed_regeneration_keeps_the_old_clip(project):
+    t, a, b1, b2, c = build(project)
+    run(project, [c.id])
+    old = T.node_files(project, b1.id)[0].read_bytes()
+    t = T.load(project)
+    t.nodes[b1.id].prompt = "b1 new"
+    T.save(project, t)
+
+    class Dies(FakeGenerator):
+        def generate(self, *args, **kw):
+            raise RuntimeError("out of memory")
+    with pytest.raises(RuntimeError):
+        run(project, [c.id], Dies(frames=17))
+    assert T.node_files(project, b1.id)[0].read_bytes() == old         # still there, still recorded
+    assert statuses(project) == {"a": "done", "b1 new": "changed", "c": "changed", "b2": "new"}
+    run(project, [c.id])
+    assert not list((project / "nodes").glob("*.new.*"))
+
+
+def test_damaged_tree_files_are_refused(project):
+    t, a, b1, b2, c = build(project)
+    good = (project / T.TREE_FILE).read_text()
+    (project / T.TREE_FILE).write_text("{ not json")
+    with pytest.raises(ValueError, match="damaged"):
+        T.load(project)
+    d = json.loads(good)
+    d["nodes"][0]["parent"] = d["nodes"][-1]["id"]                     # a loop
+    (project / T.TREE_FILE).write_text(json.dumps(d))
+    with pytest.raises(ValueError, match="loop"):
+        T.load(project)
+    d = json.loads(good)
+    d["nodes"][1]["parent"] = "n99"
+    (project / T.TREE_FILE).write_text(json.dumps(d))
+    with pytest.raises(ValueError, match="missing parent"):
+        T.load(project)
+
+
+def test_cli_checks_prompts_before_loading_the_model(project, capsys):
+    from video_chain.__main__ import main
+    t = T.load(project)
+    n = t.add(None, "")
+    T.save(project, t)
+    assert main(["--tree", str(project), "--targets", n.id, "--events"]) == 2
+    out = capsys.readouterr().out
+    assert "empty prompt" in out and '"loading"' not in out
+
+
+def test_start_image_conversion_failure_leaves_the_old_one(project, tmp_path):
+    before = (project / T.START_FILE).read_bytes()
+    bad = tmp_path / "bad.png"
+    bad.write_bytes(b"not an image")
+    with pytest.raises(RuntimeError):
+        T.set_start_image(project, bad, T.load(project))
+    assert (project / T.START_FILE).read_bytes() == before
+    assert not list(project.glob("*.part.png"))

@@ -96,6 +96,9 @@ def _main_tree(a, emit) -> int:
     settings = treemod.current_settings(project, tree.options)
     if settings is None:
         return _fail(emit, "the project has no start image")
+    empty = treemod.empty_prompts(tree, targets)
+    if empty:
+        return _fail(emit, f"empty prompt in node {empty[0]}")
     checker = treemod.Checker(project, tree)
     todo = treemod.plan(tree, checker, targets)
     loras = treemod.loras_needed(tree, checker, todo)

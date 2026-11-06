@@ -285,3 +285,63 @@ def test_missing_node_lora_stops_the_start(app, win, tmp_path, image):
     win.tree.nodes[ids[0]].overrides = {"lora": str(tmp_path / "gone.safetensors")}
     win.generate_path()
     assert not win.running and "LoRA file does not exist (gone.safetensors)" in win.status.text()
+
+
+def test_launcher_that_cannot_start(app, tmp_path, image, monkeypatch):
+    from video_chain.ui.main_window import MainWindow
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    w = MainWindow(settings(tmp_path, "f.ini"), command=[str(tmp_path / "no-such-launcher")])
+    new_project(w, tmp_path, image, ("a",))
+    w.generate_path()
+    wait(app, lambda: not w.running, timeout=10)
+    assert w.status.text().startswith("Failed: could not start") and w.b_gen.isEnabled()
+    assert not w.cards[0].edit.isReadOnly()
+    w.close()
+
+
+def test_damaged_project_does_not_break_the_window(app, win, tmp_path, monkeypatch):
+    bad = tmp_path / "bad"
+    bad.mkdir()
+    (bad / T.TREE_FILE).write_text("{ broken")
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))
+    assert win.open_project(bad) is False
+    assert warned and "damaged" in warned[0] and (bad / T.TREE_FILE).read_text() == "{ broken"
+    assert win.project is None or win.project != bad.resolve()
+
+
+def test_outside_change_is_not_overwritten(app, win, tmp_path, image):
+    ids = new_project(win, tmp_path, image, ("a",))
+    flush(app, win)
+    f = tmp_path / "proj" / T.TREE_FILE
+    other = T.load(tmp_path / "proj")
+    other.nodes[ids[0]].prompt = "changed elsewhere"
+    time.sleep(0.01)
+    T.save(tmp_path / "proj", other)                                  # e.g. a second window
+    type_prompt(win, ids[0], "edited here")
+    flush(app, win)
+    assert T.load(tmp_path / "proj").nodes[ids[0]].prompt == "changed elsewhere"
+    assert "changed outside this window" in win.status.text()
+    assert f.exists()
+
+
+def test_event_after_unterminated_text(app, win):
+    seen = []
+    win._event = seen.append
+    win._line('some progress text @@ {"e": "done", "made": []}')
+    assert seen == [{"e": "done", "made": []}] and "some progress text" in win.log.toPlainText()
+
+
+def test_context_menu_action_runs_after_the_menu(app, win, tmp_path, image, monkeypatch):
+    ids = new_project(win, tmp_path, image, ("a", "b"))
+    offered = []
+
+    def pick_delete(menu, _pos):
+        offered.extend(a.text() for a in menu.actions() if a.text())
+        return [a for a in menu.actions() if a.text().startswith("Delete")][0]
+    monkeypatch.setattr(win, "_exec_menu", pick_delete)
+    win._context(ids[1], win.graph.mapToGlobal(win.graph.rect().center()))
+    assert offered[:3] == ["Continue from here", "Branch (another continuation)",
+                           "Variant (same prompt, other seed)"]
+    assert ids[1] in win.tree.nodes                                    # not inside the node's handler
+    wait(app, lambda: ids[1] not in win.tree.nodes, timeout=5)

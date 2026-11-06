@@ -42,7 +42,7 @@ def fmt_time(seconds: float) -> str:
 
 
 class _Bridge(QObject):
-    joined = Signal(object, object, str, str)  # path or None, error or None, purpose, status prefix
+    joined = Signal(object, object, str, str, str)  # path or None, error or None, purpose, status prefix, project
 
 
 # ----------------------------------------------------------------------------- path card
@@ -386,6 +386,9 @@ class MainWindow(QMainWindow):
         self._plan: list[str] = []
         self._targets: list[str] = []
         self._loading = False
+        self._tree_stamp: tuple | None = None   # tree.json as this window last read or wrote it
+        self._joins = 0                         # path joins still running
+        self._kill_timer = QTimer(self, singleShot=True, interval=8000, timeout=self._kill)
         self.bridge = _Bridge()
         self.bridge.joined.connect(self._joined)
         self._join_lock = threading.Lock()      # joins run one after another (play after generating + export)
@@ -651,7 +654,7 @@ class MainWindow(QMainWindow):
             self.restoreGeometry(g)
         proj = q.value("project", "", type=str)
         if proj and Path(proj).is_dir():
-            self.open_project(Path(proj))
+            self.open_project(Path(proj), quiet=True)
 
     def save_settings(self):
         q = self.qs
@@ -673,14 +676,21 @@ class MainWindow(QMainWindow):
         if f:
             self.open_project(Path(f))
 
-    def open_project(self, folder: Path):
+    def open_project(self, folder: Path, quiet: bool = False) -> bool:
         if self.running:
-            return
+            return False
         self._save_timer.stop()
         self._save_tree()
         folder = Path(folder).expanduser().resolve()
-        folder.mkdir(parents=True, exist_ok=True)
-        tree = T.load(folder)
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            tree = T.load(folder)
+        except (OSError, ValueError) as e:
+            msg = f"Could not open the project: {e}"
+            self.status.setText(msg)
+            if not quiet:
+                QMessageBox.warning(self, "Promptwood", msg + "\n\nThe files were not changed.")
+            return False
         if not (folder / T.TREE_FILE).exists() and not tree.nodes:
             try:                                 # a new project starts with the last used settings
                 last = json.loads(self.qs.value("lastOptions", "{}", type=str))
@@ -698,11 +708,13 @@ class MainWindow(QMainWindow):
             tree.selected = tree.add(None, "").id
         if tree.selected is None:
             tree.selected = START
-        T.save(folder, tree)
+        self._tree_stamp = self._stamp()
+        self._write_tree()
         self.qs.setValue("project", str(folder))
         self.refresh(rebuild_path=True)
         QTimer.singleShot(0, self.graph.fit)
         self.status.setText(f"Project {folder.name}: {len(tree.nodes)} clip{'s' if len(tree.nodes) != 1 else ''}.")
+        return True
 
     def _open_dir(self):
         if self.project and self.project.is_dir():
@@ -742,7 +754,28 @@ class MainWindow(QMainWindow):
 
     def _save_tree(self):
         if self.project is not None and self.tree is not None and not self.running:
-            T.save(self.project, self.tree)
+            self._write_tree()
+
+    def _stamp(self) -> tuple | None:
+        try:
+            st = (self.project / T.TREE_FILE).stat()
+            return st.st_mtime_ns, st.st_size
+        except (OSError, TypeError):
+            return None
+
+    def _write_tree(self) -> bool:
+        """Save tree.json unless something else (another window, a command-line run) changed it since this window
+        read it; then nothing is overwritten and the project has to be reopened."""
+        if self.project is None or self.tree is None:
+            return False
+        now = self._stamp()
+        if now is not None and self._tree_stamp is not None and now != self._tree_stamp:
+            self.status.setText("tree.json was changed outside this window (another window or a command-line "
+                                "run). Nothing was saved; reopen the project to continue.")
+            return False
+        T.save(self.project, self.tree)
+        self._tree_stamp = self._stamp()
+        return True
 
     # ------------------------------------------------------------------ start image
     def _choose_image(self):
@@ -766,9 +799,13 @@ class MainWindow(QMainWindow):
         if QImage(path).isNull():
             self.status.setText(f"Not an image: {Path(path).name}")
             return
-        T.set_start_image(self.project, Path(path), self.tree)
+        try:
+            T.set_start_image(self.project, Path(path), self.tree)
+        except (OSError, RuntimeError) as e:
+            self.status.setText(f"Could not use {Path(path).name}: {e}")
+            return
         self._pix.clear()
-        T.save(self.project, self.tree)
+        self._write_tree()
         self._show_start_image()
         self.refresh()
 
@@ -926,8 +963,10 @@ class MainWindow(QMainWindow):
             b.setEnabled(is_clip and idle)
         path = self.selected_path()
         all_done = bool(path) and all(self.state(n.id) == "done" for n in path)
-        self.b_gen.setEnabled(idle and bool(path))
-        self.b_gen_all.setEnabled(idle and has and bool(self.tree.nodes))
+        free = idle and not self._joins           # a join reads clips a new run would replace
+        self.b_gen.setEnabled(free and bool(path))
+        self.b_gen_all.setEnabled(free and has and bool(self.tree.nodes))
+        self.b_delete.setEnabled(is_clip and free)
         self.b_play_path.setEnabled(all_done and idle)
         self.b_export.setEnabled(all_done and idle)
         self.b_stop.setEnabled(not idle)
@@ -1034,13 +1073,13 @@ class MainWindow(QMainWindow):
             self.tree.remove(node.id, self.project)
             if self.tree.selected is None:
                 self.tree.selected = START
-            T.save(self.project, self.tree)
+            self._write_tree()
             self.refresh()
             return
         else:
             return
         self.tree.selected = new.id
-        T.save(self.project, self.tree)
+        self._write_tree()
         self.refresh()
         self.graph.reveal(new.id)
         if self.cards and self.cards[-1].nid == new.id:
@@ -1061,17 +1100,23 @@ class MainWindow(QMainWindow):
             gen = m.addAction("Generate the path to here")
             m.addSeparator()
             delete = m.addAction("Delete (with everything after it)")
-        chosen = m.exec(pos.toPoint() if hasattr(pos, "toPoint") else pos)
+        chosen = self._exec_menu(m, pos.toPoint() if hasattr(pos, "toPoint") else pos)
         if chosen is None:
             return
+        # run it later: this is still inside the node's mouse handler, and the action may rebuild the graph
+        # (deleting that very node)
         if chosen in acts:
-            self.node_action(acts[chosen], nid)
+            act = acts[chosen]
+            QTimer.singleShot(0, lambda: self.node_action(act, nid))
         elif chosen is play:
-            self._play_node(nid)
+            QTimer.singleShot(0, lambda: self._play_node(nid))
         elif chosen is gen:
-            self.generate_path()
+            QTimer.singleShot(0, self.generate_path)
         elif chosen is delete:
-            self.node_action("delete", nid)
+            QTimer.singleShot(0, lambda: self.node_action("delete", nid))
+
+    def _exec_menu(self, menu: QMenu, pos):
+        return menu.exec(pos)
 
     def _play_node(self, nid: str):
         if self.tree is None or nid not in self.tree.nodes:
@@ -1091,16 +1136,22 @@ class MainWindow(QMainWindow):
         pre = f"{prefix} " if prefix else ""
         self.status.setText(f"{pre}Joining the path …")
         bridge, lock = self.bridge, self._join_lock
+        self._joins += 1
+        self._update_buttons()
 
         def work():
             with lock:
                 try:
-                    bridge.joined.emit(T.join_path(project, tree, nid, out), None, purpose, pre)
+                    bridge.joined.emit(T.join_path(project, tree, nid, out), None, purpose, pre, str(project))
                 except Exception as e:  # noqa: BLE001
-                    bridge.joined.emit(None, str(e), purpose, pre)
+                    bridge.joined.emit(None, str(e), purpose, pre, str(project))
         threading.Thread(target=work, daemon=True).start()
 
-    def _joined(self, path, error, purpose, pre):
+    def _joined(self, path, error, purpose, pre, project):
+        self._joins = max(0, self._joins - 1)
+        self._update_buttons()
+        if project != str(self.project):            # another project was opened meanwhile
+            return
         if error:
             self.status.setText(f"{pre}Could not join the path: {error}")
             return
@@ -1142,7 +1193,10 @@ class MainWindow(QMainWindow):
         def done(*_):
             if self._gpu_proc is not p:          # window closing: the query was abandoned
                 return
-            out = bytes(p.readAllStandardOutput()).decode(errors="replace").strip().splitlines()
+            try:
+                out = bytes(p.readAllStandardOutput()).decode(errors="replace").strip().splitlines()
+            except RuntimeError:                 # Qt is destroying the window (and with it the query)
+                return
             self._gpu_proc = None
             p.deleteLater()
             try:
@@ -1177,6 +1231,9 @@ class MainWindow(QMainWindow):
     def _start(self, targets: list[str]):
         if self.running or self.tree is None:
             return
+        if self._joins:
+            self.status.setText("Wait until the path is joined.")
+            return
         problems = []
         if not (self.project / T.START_FILE).is_file():
             problems.append("choose a start image")
@@ -1199,7 +1256,8 @@ class MainWindow(QMainWindow):
                 self.select(empty[0].id)
             return
         self._save_timer.stop()
-        T.save(self.project, self.tree)
+        if not self._write_tree():
+            return
         self.save_settings()
         program, pre = self._program()
         self.proc = QProcess(self)
@@ -1238,8 +1296,11 @@ class MainWindow(QMainWindow):
         self._stopping = True
         self.status.setText("Stopping …")
         self.proc.terminate()
-        p = self.proc
-        QTimer.singleShot(8000, lambda: p.state() != QProcess.NotRunning and p.kill())
+        self._kill_timer.start()
+
+    def _kill(self):
+        if self.proc is not None and self.proc.state() != QProcess.NotRunning:
+            self.proc.kill()
 
     def _read_out(self):
         self._buf += bytes(self.proc.readAllStandardOutput()).decode(errors="replace")
@@ -1257,12 +1318,17 @@ class MainWindow(QMainWindow):
 
     def _line(self, line: str):
         line = line.split("\r")[-1].rstrip()
-        if line.startswith("@@ "):
+        at = line.find("@@ {")                    # an event can follow text printed without a newline
+        if at >= 0:
             try:
-                self._event(json.loads(line[3:]))
-                return
+                ev = json.loads(line[at + 3:])
             except ValueError:
-                pass
+                ev = None
+            if ev is not None:
+                if line[:at].strip():
+                    self.log.appendPlainText(line[:at].rstrip())
+                self._event(ev)
+                return
         if line:
             self.log.appendPlainText(line)
 
@@ -1280,6 +1346,7 @@ class MainWindow(QMainWindow):
         for nid, n in fresh.nodes.items():
             if nid in self.tree.nodes:
                 self.tree.nodes[nid].made = n.made
+        self._tree_stamp = self._stamp()            # the generator wrote it; this window is up to date
 
     def _event(self, ev: dict):
         e = ev.get("e")
@@ -1332,16 +1399,25 @@ class MainWindow(QMainWindow):
 
     def _proc_error(self, err):
         if err == QProcess.FailedToStart:
+            # Qt sends no 'finished' for a process that never started: clean up here
             self._error = f"could not start {self._program()[0]}"
+            p = self.proc
+            QTimer.singleShot(0, lambda: self.proc is p and self._finished(-1, None))
 
     def _finished(self, code: int, _status):
+        self._kill_timer.stop()
         p, self.proc = self.proc, None
         if p is not None:
             rest = bytes(p.readAllStandardOutput()).decode(errors="replace")
             for line in (self._buf + rest).split("\n"):
                 self._line(line)
+            err = bytes(p.readAllStandardError()).decode(errors="replace")
+            for line in (self._ebuf + err).split("\n"):
+                line = line.split("\r")[-1].rstrip()
+                if line:
+                    self.log.appendPlainText(line)
             p.deleteLater()
-        self._buf = ""
+        self._buf = self._ebuf = ""
         ok = self._phase == "done" and code == 0
         for nid in [n for n, s in self.live.items() if s == "generating"]:
             self.live[nid] = "stopped" if self._stopping else "failed"
@@ -1378,8 +1454,9 @@ class MainWindow(QMainWindow):
                 e.ignore()
                 return
             self.stop()
-            if self.proc is not None:
-                self.proc.waitForFinished(10000)
+            if self.proc is not None and not self.proc.waitForFinished(10000):
+                self.proc.kill()                     # never leave the generator running after the window closed
+                self.proc.waitForFinished(3000)
         self._gpu_timer.stop()
         if self._gpu_proc is not None:
             gp, self._gpu_proc = self._gpu_proc, None
