@@ -1,6 +1,7 @@
 """Branching tree with the fake generator (synthetic clips); no model."""
 import json
 import shutil
+from pathlib import Path
 
 import pytest
 from fakes import FakeGenerator
@@ -61,10 +62,11 @@ def test_generate_a_path_makes_only_that_path(project):
     t, a, b1, b2, c = build(project)
     gen = run(project, [c.id])
     assert [x["prompt"] for x in gen.calls] == ["a", "b1", "c"]
-    assert [x["start"] for x in gen.calls] == ["start.png", f"{a.id}.png", f"{b1.id}.png"]
+    starts = [x["start"] for x in gen.calls]
+    assert starts[0] == "start.png" and starts[1].startswith(f"{a.id}_") and starts[2].startswith(f"{b1.id}_")
     assert statuses(project) == {"a": "done", "b1": "done", "c": "done", "b2": "new"}
     gen2 = run(project, [b2.id])                                        # the branch reuses a
-    assert [x["prompt"] for x in gen2.calls] == ["b2"] and gen2.calls[0]["start"] == f"{a.id}.png"
+    assert [x["prompt"] for x in gen2.calls] == ["b2"] and gen2.calls[0]["start"].startswith(f"{a.id}_")
     assert set(statuses(project).values()) == {"done"}
 
 
@@ -143,10 +145,11 @@ def test_remove_subtree_and_files(project):
     t, a, b1, b2, c = build(project)
     run(project, [c.id, b2.id])
     t = T.load(project)
+    c_files = T.clip_files(project, t.nodes[c.id])
     t.selected = c.id
     gone = t.remove(b1.id, project)
     assert set(gone) == {b1.id, c.id} and t.selected == a.id
-    assert not T.node_files(project, c.id)[0].exists() and T.node_files(project, b2.id)[0].exists()
+    assert not c_files[0].exists() and T.clip_files(project, t.nodes[b2.id])[0].exists()
     assert set(t.nodes) == {a.id, b2.id}
 
 
@@ -278,7 +281,8 @@ def test_retrained_lora_in_the_same_file_changes_its_clips(project, tmp_path):
 def test_failed_regeneration_keeps_the_old_clip(project):
     t, a, b1, b2, c = build(project)
     run(project, [c.id])
-    old = T.node_files(project, b1.id)[0].read_bytes()
+    old_file = T.clip_files(project, T.load(project).nodes[b1.id])[0]
+    old = old_file.read_bytes()
     t = T.load(project)
     t.nodes[b1.id].prompt = "b1 new"
     T.save(project, t)
@@ -288,7 +292,7 @@ def test_failed_regeneration_keeps_the_old_clip(project):
             raise RuntimeError("out of memory")
     with pytest.raises(RuntimeError):
         run(project, [c.id], Dies(frames=17))
-    assert T.node_files(project, b1.id)[0].read_bytes() == old         # still there, still recorded
+    assert T.clip_files(project, T.load(project).nodes[b1.id])[0] == old_file and old_file.read_bytes() == old
     assert statuses(project) == {"a": "done", "b1 new": "changed", "c": "changed", "b2": "new"}
     run(project, [c.id])
     assert not list((project / "nodes").glob("*.new.*"))
@@ -391,3 +395,44 @@ def test_single_lora_record_unchanged(project, tmp_path):
                             audio=True, backend="comfyui", extra_loras=[])
     assert "extra_loras" not in s and set(s) == {"model", "lora", "lora_sha1", "strength", "frames", "steps",
                                                  "width", "height", "audio", "backend"}
+
+
+def test_regenerating_never_overwrites_and_tolerates_open_files(project, monkeypatch):
+    """SMB shares refuse to replace or delete a file that is open somewhere: a new clip gets new names, the old
+    file is removed if possible, else on a later run."""
+    t, a, b1, b2, c = build(project)
+    run(project, [a.id])
+    first = T.clip_files(project, T.load(project).nodes[a.id])
+    t = T.load(project)
+    t.nodes[a.id].prompt = "a again"
+    T.save(project, t)
+    real_unlink = Path.unlink
+    busy = {first[0]}
+
+    def unlink(self, missing_ok=False):
+        if self in busy:
+            raise PermissionError(13, "Permission denied", str(self))     # open in a player on the share
+        return real_unlink(self, missing_ok=missing_ok)
+    monkeypatch.setattr(Path, "unlink", unlink)
+    gen = FakeGenerator(frames=17)
+    gen.calls = [{}]                                                      # other frames than the first version
+    run(project, [a.id], gen)
+    now = T.clip_files(project, T.load(project).nodes[a.id])
+    assert now != first and all(f.exists() for f in now)
+    assert first[0].exists() and not first[1].exists()                   # the open one stays, the other is gone
+    assert statuses(project)["a again"] == "done"
+    busy.clear()                                                          # closed again: the next run cleans up
+    assert T.remove_stale_files(project, T.load(project)) == [] and not first[0].exists()
+
+
+def test_stale_cleanup_also_takes_old_fixed_names(project):
+    t, a, b1, b2, c = build(project)
+    run(project, [a.id])
+    d = project / "nodes"
+    for name in ("n1.mp4", "n1.png", "n1.new.mp4", "n7_0123abcd.mp4"):
+        (d / name).write_bytes(b"old")
+    keep = d / "notes.txt"
+    keep.write_text("not ours")
+    T.remove_stale_files(project, T.load(project))
+    assert sorted(f.name for f in d.iterdir()) == sorted([f.name for f in T.clip_files(project,
+                                                          T.load(project).nodes[a.id])] + ["notes.txt"])

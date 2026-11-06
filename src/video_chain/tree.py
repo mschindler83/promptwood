@@ -20,7 +20,9 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import shutil
+import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -105,8 +107,8 @@ class Tree:
         for g in gone:
             node = self.nodes.pop(g)
             if project is not None:
-                for f in node_files(project, g):
-                    f.unlink(missing_ok=True)
+                for f in list(node_files(project, g)) + clip_files(project, node):
+                    _unlink(f)
                 for ext in (".mp4", ".json"):
                     (Path(project) / "paths" / f"{g}{ext}").unlink(missing_ok=True)
         if self.selected in gone:
@@ -152,6 +154,49 @@ class Tree:
         if t.selected not in t.nodes:
             t.selected = None
         return t
+
+
+_CLIP_NAME = re.compile(r"^n\d+(_[0-9a-f]{8})?\.(mp4|png)$")   # also the fixed names of older versions
+
+
+def _unlink(f: Path) -> bool:
+    """Delete a file; False if that is not possible right now (e.g. open in a player on an SMB share)."""
+    try:
+        f.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
+def clip_files(project: Path, node: "Node") -> list[Path]:
+    """The files a node's current record points to."""
+    if not node.made:
+        return []
+    return [Path(project) / node.made[k] for k in ("video", "frame") if node.made.get(k)]
+
+
+def new_clip_files(project: Path, nid: str) -> tuple[Path, Path]:
+    """Fresh, unique names for a node's next clip and last frame. A clip is never written over an existing file:
+    on SMB/CIFS shares a file that is open anywhere cannot be replaced."""
+    tag = uuid.uuid4().hex[:8]
+    d = Path(project) / "nodes"
+    return d / f"{nid}_{tag}.mp4", d / f"{nid}_{tag}.png"
+
+
+def remove_stale_files(project: Path, tree: "Tree") -> list[Path]:
+    """Delete clip files of this app that no record points to any more (old versions that could not be deleted
+    while they were open, leftovers of a stopped run). Returns what could not be deleted."""
+    d = Path(project) / "nodes"
+    if not d.is_dir():
+        return []
+    used = {Path(project) / n.made[k] for n in tree.nodes.values() if n.made for k in ("video", "frame")
+            if n.made.get(k)}
+    stuck = []
+    for f in d.iterdir():
+        if f.is_file() and (_CLIP_NAME.match(f.name) or ".new." in f.name) and f not in used:
+            if not _unlink(f):
+                stuck.append(f)
+    return stuck
 
 
 def node_files(project: Path, nid: str) -> tuple[Path, Path]:
@@ -384,31 +429,37 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
     emit({"e": "plan", "make": todo})
     nodes_dir = project / "nodes"
     nodes_dir.mkdir(exist_ok=True)
-    for left in list(nodes_dir.glob("*.new.*")) + list(nodes_dir.glob("video-chain-*")):   # from a killed run
-        shutil.rmtree(left, ignore_errors=True) if left.is_dir() else left.unlink(missing_ok=True)
+    for left in list(nodes_dir.glob("video-chain-*")):                  # temp folders of a killed run
+        shutil.rmtree(left, ignore_errors=True)
+    remove_stale_files(project, tree)
     for k, nid in enumerate(todo, start=1):
         node = tree.nodes[nid]
         start = checker.start_frame(node)
-        video, frame = node_files(project, nid)
         log(f"[{k}/{len(todo)}] {nid}: generating (seed {node.seed}) from {start.name}")
         emit({"e": "node", "id": nid, "state": "generating", "k": k, "n": len(todo)})
-        # made under new names: a failed or stopped generation keeps the previous clip and its record
-        new_video, new_frame = video.with_name(f"{nid}.new.mp4"), frame.with_name(f"{nid}.new.png")
-        for f in (new_video, new_frame):
-            f.unlink(missing_ok=True)
+        # a new clip gets new file names: nothing is overwritten, a failed or stopped generation keeps the
+        # previous clip and its record, and a still-open old file (SMB) does not stop anything
+        new_video, new_frame = new_clip_files(project, nid)
+        old = clip_files(project, node)
         settings = checker.settings(nid)
         start_sha = checker.sha(start)
         call = dict(settings)
         if settings.get("refs"):                   # the generator gets the files; the record keeps names + hashes
             call["ref_paths"] = [str(project / r["file"]) for r in settings["refs"]]
-        generator.generate(node.prompt, start, new_video, new_frame, node.seed, settings=call)
-        if not new_video.exists() or not new_frame.exists():
-            raise RuntimeError(f"the generator did not write {video.name} and {frame.name}")
-        new_video.replace(video)
-        new_frame.replace(frame)
+        try:
+            generator.generate(node.prompt, start, new_video, new_frame, node.seed, settings=call)
+            if not new_video.exists() or not new_frame.exists():
+                raise RuntimeError(f"the generator did not write the clip of {nid}")
+        except BaseException:
+            for f in (new_video, new_frame):
+                _unlink(f)
+            raise
         node.made = {"prompt": node.prompt, "seed": node.seed, "settings": settings,
-                     "start_sha1": start_sha, "video": f"nodes/{video.name}", "frame": f"nodes/{frame.name}"}
+                     "start_sha1": start_sha, "video": f"nodes/{new_video.name}", "frame": f"nodes/{new_frame.name}"}
         save(project, tree)
+        for f in old:                              # the previous version; left for later if it is open somewhere
+            if f not in (new_video, new_frame) and not _unlink(f):
+                log(f"{f.name} is still in use; it is removed on a later run")
         checker = Checker(project, tree)          # the new frame changes what depends on it
         emit({"e": "node", "id": nid, "state": "done"})
     emit({"e": "done", "made": todo})
