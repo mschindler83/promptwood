@@ -350,7 +350,7 @@ def test_context_menu_action_runs_after_the_menu(app, win, tmp_path, image, monk
         return [a for a in menu.actions() if a.text().startswith("Delete")][0]
     monkeypatch.setattr(win, "_exec_menu", pick_delete)
     win._context(ids[1], win.graph.mapToGlobal(win.graph.rect().center()))
-    assert offered[:3] == ["Continue from here", "Branch (another continuation)",
+    assert offered[:4] == ["Continue from here", "Add a real video after this…", "Branch (another continuation)",
                            "Variant (same prompt, other seed)"]
     assert ids[1] in win.tree.nodes                                    # not inside the node's handler
     wait(app, lambda: ids[1] not in win.tree.nodes, timeout=5)
@@ -831,3 +831,112 @@ def test_thumbnails_are_cached_on_disk_and_desktop_ones_used(app, tmp_path):
     # pruning keeps the newest
     IP.prune_cache(cache, keep=2)
     assert len([f for sub in cache.iterdir() for f in sub.iterdir()]) == 2
+
+
+# ----------------------------------------------------------------------------- real videos
+
+def make_real_video(path, secs=2.0):
+    """A synthetic 'real' video: red, then blue; 30 fps, 16:9, with sound."""
+    import subprocess
+    half = secs / 2
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"color=red:s=320x180:r=30:d={half}",
+                    "-f", "lavfi", "-i", f"color=blue:s=320x180:r=30:d={half}", "-f", "lavfi", "-i",
+                    f"sine=f=500:d={secs}", "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]", "-map", "[v]",
+                    "-map", "2:a", "-c:a", "aac", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(path)], check=True)
+    return path
+
+
+def test_video_first_then_generated_clip(app, win, tmp_path):
+    from video_chain.ui.main_window import PromptCard, VideoCard
+    src = make_real_video(tmp_path / "real.mp4")
+    win.open_project(tmp_path / "proj")
+    win.node_action("delete", "n1")
+    v = win.add_video(None, str(src), 0.0, 1.5)
+    assert v and win.live.get(v) == "converting" and not win.b_gen.isEnabled()
+    wait(app, lambda: not win._converts)
+    assert win.state(v) == "done" and win.tree.nodes[v].made["frames"] == 36
+    assert isinstance(win.cards[0], VideoCard) and "real.mp4" in win.cards[0].file.text()
+    assert "follows the first video" in win.size_info.text()
+    assert win.graph.items_by_id[v].info.kind == "video"
+    win.node_action("continue", v)
+    a = win.selected_id()
+    assert isinstance(win.cards[1], PromptCard)
+    type_prompt(win, a, "after the real video")
+    run_and_wait(app, win, win.generate_path)
+    assert win.state(a) == "done", win.status.text()
+    wait(app, lambda: win.played)
+    assert chain.probe(win.played[-1])["frames"] == 36 + 16
+    # a later start, same last frame: converted again, but the clip after it stays (it starts from that frame)
+    win.set_video_range(v, str(src), 0.5, 1.5)
+    wait(app, lambda: not win._converts)
+    assert win.state(v) == "done" and win.state(a) == "done"
+    assert win.tree.nodes[v].made["frames"] == 24
+    # another last frame (still red): the clip after it must be made again
+    win.set_video_range(v, str(src), 0.0, 0.8)
+    wait(app, lambda: not win._converts)
+    assert win.state(v) == "done" and win.state(a) == "changed"
+
+
+def test_clip_into_video_and_variants(app, win, tmp_path, image):
+    src = make_real_video(tmp_path / "real.mp4")
+    ids = new_project(win, tmp_path, image, ("walks toward the door",))
+    a = ids[0]
+    v = win.add_video(a, str(src), 1.0, 2.0)
+    wait(app, lambda: not win._converts)
+    assert win.add_video(a, str(src), 0.0, 1.0) is None                 # one video per generated clip
+    assert "already leads into" in win.status.text()
+    assert "ends at video" in win.cards[0].span.text()
+    run_and_wait(app, win, win.generate_path)                             # path start -> a -> v
+    assert win.state(a) == "done" and win.state(v) == "done", win.status.text()
+    assert win.tree.nodes[a].made["end_key"] == win.tree.nodes[v].made["key"]
+    wait(app, lambda: win.played)
+    assert chain.probe(win.played[-1])["frames"] == 16 + 24              # the clip's repeated last frame is cut
+    new = win.create_variants(a, 2, generate=False)
+    for nid in new:
+        vc = win.tree.video_child(nid)
+        assert vc is not None and vc.id != v and vc.source == win.tree.nodes[v].source
+        assert win.state(vc.id) == "done" and vc.made["video"] != win.tree.nodes[v].made["video"]
+    win.node_action("variant", v)                                         # not for real videos
+    assert "Variants are for generated clips" in win.status.text()
+
+
+def test_ai_toolkit_cannot_end_at_a_video(app, win, tmp_path, image):
+    src = make_real_video(tmp_path / "real.mp4")
+    ids = new_project(win, tmp_path, image, ("x",))
+    win.add_video(ids[0], str(src), 0.0, 1.0)
+    wait(app, lambda: not win._converts)
+    win.backend.setCurrentIndex(win.backend.findData("ai-toolkit"))
+    win.generate_path()
+    assert not win.running and "needs the ComfyUI generator" in win.status.text()
+
+
+def test_motion_guide_choice_on_the_card(app, win, tmp_path, image):
+    ids = new_project(win, tmp_path, image, ("x", "y"))
+    card = win.cards[1]
+    card.guide.setCurrentIndex(card.guide.findData(22))
+    assert win.tree.nodes[ids[1]].overrides["guide"] == 22
+    assert "guide 22" in win.badge(win.tree.nodes[ids[1]])
+    flush(app, win)
+    assert win.cards[1].span.text().startswith("0:03.0 – 0:05.2")          # 22 guide frames left out
+
+
+def test_video_range_dialog(app, tmp_path):
+    from video_chain.ui.video_editor import VideoRangeDialog
+    src = make_real_video(tmp_path / "real.mp4", secs=2.0)
+    dlg = VideoRangeDialog(None, str(src), canvas=(672, 384), player=False)
+    assert dlg.info["fps"] == 30 and abs(dlg.end - 2.0) < 0.05 and dlg.frames() == 48
+    dlg.set_range(0.5, 1.0)
+    assert dlg.frames() == 12 and "12 frames" in dlg.summary.text() and "672×384" in dlg.summary.text()
+    dlg.set_range(1.0, 0.2)                                   # never shorter than one frame
+    assert dlg.end - dlg.start >= 1 / 24 - 1e-6
+    dlg.end_spin.setValue(0.1)                                # moving the end below the start moves the start
+    assert dlg.end == 0.1 and dlg.start < 0.1
+    dlg.seek(1.5)
+    dlg.step_frames(3)
+    assert abs(dlg.position() - 1.6) < 1e-6
+    dlg.set_range(0.0, 1.0)
+    dlg._update_frames()
+    wait(app, lambda: dlg.first_tile.has_image() and dlg.last_tile.has_image(), timeout=30)
+    from PySide6.QtWidgets import QDialogButtonBox
+    assert dlg.buttons.button(QDialogButtonBox.Ok).isEnabled()
+    dlg.close()

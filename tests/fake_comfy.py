@@ -11,7 +11,8 @@ from pathlib import Path
 KNOWN = {"UNETLoader", "CLIPLoader", "VAELoader", "LoadImage", "MiniMaxH3ImageToVideo", "RandomNoise",
          "KSamplerSelect", "BasicScheduler", "BasicGuider", "SamplerCustomAdvanced", "VAEDecode", "VAEDecodeAudio",
          "ImageFromBatch", "SaveImage", "CreateVideo", "SaveVideo", "LoraLoaderModelOnly",
-         "MiniMaxH3ReferenceToVideo", "MiniMaxH3AddGuide", "MiniMaxH3TurboLoRA", "MiniMaxH3TurboSampler"}
+         "MiniMaxH3ReferenceToVideo", "MiniMaxH3AddGuide", "MiniMaxH3TurboLoRA", "MiniMaxH3TurboSampler",
+         "LoadVideo", "GetVideoComponents"}
 
 
 class FakeComfy:
@@ -36,7 +37,8 @@ class FakeComfy:
         files = {"UNETLoader": ("unet_name", [C.UNET, C.UNET_REF]), "CLIPLoader": ("clip_name", [C.TEXT_ENCODER]),
                  "VAELoader": ("vae_name", [C.VIDEO_VAE, C.AUDIO_VAE]),
                  "LoraLoaderModelOnly": ("lora_name", self.loras)}
-        if node in ("MiniMaxH3ImageToVideo", "MiniMaxH3TurboSampler", "MiniMaxH3TurboLoRA"):
+        if node in ("MiniMaxH3ImageToVideo", "MiniMaxH3TurboSampler", "MiniMaxH3TurboLoRA", "MiniMaxH3AddGuide",
+                    "LoadVideo", "GetVideoComponents"):
             return {} if node.startswith("MiniMaxH3Turbo") and not self.turbo_nodes else {node: {"input": {"required": {}}}}
         if node == "MiniMaxH3ReferenceToVideo":
             return {node: {"input": {"required": {}, "optional": {"ref_images": [
@@ -55,16 +57,21 @@ class FakeComfy:
                     assert v[0] in wf, f"{nid} links to missing node {v[0]}"
         if "refcond" in wf:                         # identity references: ref2va + the start image as guide
             cond = wf["refcond"]["inputs"]
-            assert wf["cond"]["class_type"] == "MiniMaxH3AddGuide" and wf["cond"]["inputs"]["image"] == ["start", 0]
             assert wf["unet"]["inputs"]["unet_name"].startswith("minimax_h3_ref2va")
+            if "start" in wf:
+                assert wf["cond"]["class_type"] == "MiniMaxH3AddGuide" and wf["cond"]["inputs"]["image"] == ["start", 0]
             for k, v in cond.items():
                 if k.startswith("ref_images."):
                     assert (self.root / "input" / wf[v[0]]["inputs"]["image"]).is_file(), "reference not uploaded"
         else:
             cond = wf["cond"]["inputs"]
-            assert cond["first_frame"] == ["start", 0]
-        image = self.root / "input" / wf["start"]["inputs"]["image"]
-        assert image.is_file(), "start image was not uploaded"
+            assert ("first_frame" in cond) == ("start" in wf) and ("last_frame" in cond) == ("end" in wf)
+        for name in ("start", "end"):
+            if name in wf:
+                assert (self.root / "input" / wf[name]["inputs"]["image"]).is_file(), f"{name} image not uploaded"
+        for nid, node in wf.items():
+            if node["class_type"] == "LoadVideo":
+                assert (self.root / "input" / node["inputs"]["file"]).is_file(), "guide clip not uploaded"
         w, h, n = cond["width"], cond["height"], cond["length"]
         prefix = wf["save_video"]["inputs"]["filename_prefix"]
         out = self.root / "output" / (prefix + "_00001_.mp4")

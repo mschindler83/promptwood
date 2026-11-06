@@ -5,6 +5,8 @@ the video and audio VAE, MiniMaxH3ImageToVideo with the start image as first fra
 res_multistep + the simple scheduler and guidance 1 (BasicGuider), VAEDecode + VAEDecodeAudio, CreateVideo at
 24 fps. LoRAs are chained with LoraLoaderModelOnly. The clip's last frame is saved as a PNG by ComfyUI itself
 (ImageFromBatch + SaveImage), so the next clip starts from the decoded frame, not from the H.264 file.
+A clip that leads into a real video gets the video's first frame as last_frame; motion guides (short clips with
+their sound) are anchored with MiniMaxH3AddGuide (LoadVideo + GetVideoComponents).
 
 ComfyUI loads the model once and keeps it as long as memory allows; free() asks it to unload.
 Needs no torch: only the standard library (+ websocket-client for step progress; without it the result is
@@ -186,11 +188,17 @@ def with_ref_hint(prompt: str) -> str:
     return prompt if "<Picture" in prompt else f"{prompt.rstrip()} {REF_HINT}"
 
 
-def build_workflow(*, prompt: str, image: str, seed: int, width: int, height: int, frames: int, steps: int,
+def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, height: int, frames: int, steps: int,
                    loras: list[tuple[str, float]], audio: bool, prefix: str, refs: list[str] = (),
                    ref_size: str = "match", ref_key=lambda i: f"ref_images.ref_image_{i}",
-                   turbo: tuple[str, float] | None = None) -> dict:
-    """The API-format workflow for one clip (image = the uploaded start image, as LoadImage names it).
+                   turbo: tuple[str, float] | None = None, end_image: str | None = None,
+                   guides: list[dict] = ()) -> dict:
+    """The API-format workflow for one clip (image = the uploaded start image, as LoadImage names it; None: a
+    clip without a start frame).
+
+    end_image: the uploaded frame the clip must end at (the first frame of the video after it).
+    guides: motion guides, [{"name": uploaded clip, "frame_idx", "audio": bool, "at": "start" | "end"}]; a guide
+    at the start replaces the start image, one at the end replaces end_image (the guide clip ends / begins with it).
 
     With refs (uploaded reference images): the ref2va model; MiniMaxH3ReferenceToVideo gets the references
     (<Picture 1> ... in the prompt) and MiniMaxH3AddGuide anchors the start image at frame 0, so the clip starts
@@ -204,7 +212,6 @@ def build_workflow(*, prompt: str, image: str, seed: int, width: int, height: in
         "clip": {"class_type": "CLIPLoader", "inputs": {"clip_name": TEXT_ENCODER, "type": "minimax",
                                                          "device": "default"}},
         "vae": {"class_type": "VAELoader", "inputs": {"vae_name": VIDEO_VAE}},
-        "start": {"class_type": "LoadImage", "inputs": {"image": image}},
         "noise": {"class_type": "RandomNoise", "inputs": {"noise_seed": int(seed)}},
         "sampler": ({"class_type": "MiniMaxH3TurboSampler", "inputs": {}} if turbo else
                     {"class_type": "KSamplerSelect", "inputs": {"sampler_name": SAMPLER}}),
@@ -214,6 +221,15 @@ def build_workflow(*, prompt: str, image: str, seed: int, width: int, height: in
         "save_last": {"class_type": "SaveImage", "inputs": {"images": ["last", 0],
                                                             "filename_prefix": f"{prefix}_last"}},
     }
+    guided = {g.get("at") for g in guides}
+    use_start = image is not None and "start" not in guided
+    use_end = end_image is not None and "end" not in guided
+    if use_start:
+        wf["start"] = {"class_type": "LoadImage", "inputs": {"image": image}}
+    if use_end:
+        wf["end"] = {"class_type": "LoadImage", "inputs": {"image": end_image}}
+    if audio:
+        wf["audio_vae"] = {"class_type": "VAELoader", "inputs": {"vae_name": AUDIO_VAE}}
     if refs:
         inputs = {"clip": ["clip", 0], "vae": ["vae", 0], "prompt": prompt, "width": int(width),
                   "height": int(height), "length": int(frames), "ref_image_size": ref_size}
@@ -221,15 +237,35 @@ def build_workflow(*, prompt: str, image: str, seed: int, width: int, height: in
             wf[f"ref{i}"] = {"class_type": "LoadImage", "inputs": {"image": ref}}
             inputs[ref_key(i)] = [f"ref{i}", 0]
         wf["refcond"] = {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": inputs}
-        wf["cond"] = {"class_type": "MiniMaxH3AddGuide",
-                      "inputs": {"positive": ["refcond", 0], "vae": ["vae", 0], "latent": ["refcond", 1],
-                                 "image": ["start", 0], "frame_idx": 0}}
-        latent = ["refcond", 1]
+        latent, positive = ["refcond", 1], ["refcond", 0]
+        if use_start:
+            wf["cond"] = {"class_type": "MiniMaxH3AddGuide",
+                          "inputs": {"positive": positive, "vae": ["vae", 0], "latent": latent,
+                                     "image": ["start", 0], "frame_idx": 0}}
+            positive = ["cond", 0]
+        if use_end:
+            wf["end_guide"] = {"class_type": "MiniMaxH3AddGuide",
+                               "inputs": {"positive": positive, "vae": ["vae", 0], "latent": latent,
+                                          "image": ["end", 0], "frame_idx": -1}}
+            positive = ["end_guide", 0]
     else:
-        wf["cond"] = {"class_type": "MiniMaxH3ImageToVideo",
-                      "inputs": {"clip": ["clip", 0], "vae": ["vae", 0], "prompt": prompt, "width": int(width),
-                                 "height": int(height), "length": int(frames), "first_frame": ["start", 0]}}
-        latent = ["cond", 1]
+        inputs = {"clip": ["clip", 0], "vae": ["vae", 0], "prompt": prompt, "width": int(width),
+                  "height": int(height), "length": int(frames)}
+        if use_start:
+            inputs["first_frame"] = ["start", 0]
+        if use_end:
+            inputs["last_frame"] = ["end", 0]
+        wf["cond"] = {"class_type": "MiniMaxH3ImageToVideo", "inputs": inputs}
+        latent, positive = ["cond", 1], ["cond", 0]
+    for k, g in enumerate(guides):                 # motion guides: frames (+ sound) of the neighbouring clips
+        wf[f"gvideo{k}"] = {"class_type": "LoadVideo", "inputs": {"file": g["name"]}}
+        wf[f"gparts{k}"] = {"class_type": "GetVideoComponents", "inputs": {"video": [f"gvideo{k}", 0]}}
+        gin = {"positive": positive, "vae": ["vae", 0], "latent": latent, "image": [f"gparts{k}", 0],
+               "frame_idx": int(g["frame_idx"])}
+        if audio and g.get("audio"):
+            gin.update({"audio": [f"gparts{k}", 1], "audio_vae": ["audio_vae", 0]})
+        wf[f"guide{k}"] = {"class_type": "MiniMaxH3AddGuide", "inputs": gin}
+        positive = [f"guide{k}", 0]
     model = ["unet", 0]
     if turbo:
         wf["turbo"] = {"class_type": "MiniMaxH3TurboLoRA",
@@ -242,13 +278,12 @@ def build_workflow(*, prompt: str, image: str, seed: int, width: int, height: in
         model = [f"lora{k}", 0]
     wf["sigmas"] = {"class_type": "BasicScheduler", "inputs": {"model": model, "scheduler": SCHEDULER,
                                                                 "steps": int(steps), "denoise": 1.0}}
-    wf["guider"] = {"class_type": "BasicGuider", "inputs": {"model": model, "conditioning": ["cond", 0]}}
+    wf["guider"] = {"class_type": "BasicGuider", "inputs": {"model": model, "conditioning": positive}}
     wf["sample"] = {"class_type": "SamplerCustomAdvanced",
                     "inputs": {"noise": ["noise", 0], "guider": ["guider", 0], "sampler": ["sampler", 0],
                                "sigmas": ["sigmas", 0], "latent_image": latent}}
     video_inputs: dict = {"images": ["decode", 0], "fps": 24.0}
     if audio:
-        wf["audio_vae"] = {"class_type": "VAELoader", "inputs": {"vae_name": AUDIO_VAE}}
         wf["decode_audio"] = {"class_type": "VAEDecodeAudio", "inputs": {"samples": ["sample", 0],
                                                                          "vae": ["audio_vae", 0]}}
         video_inputs["audio"] = ["decode_audio", 0]
@@ -337,6 +372,11 @@ class ComfyGenerator:
         if not self._object_info("MiniMaxH3ReferenceToVideo"):
             raise ComfyError("this ComfyUI has no MiniMax H3 Reference to Video node")
 
+    def check_guides(self):
+        for node in ("MiniMaxH3AddGuide", "LoadVideo", "GetVideoComponents"):
+            if not self._object_info(node):
+                raise ComfyError(f"this ComfyUI has no {node} node (update ComfyUI)")
+
     def check_turbo(self):
         for node in ("MiniMaxH3TurboLoRA", "MiniMaxH3TurboSampler"):
             if not self._object_info(node):
@@ -379,14 +419,17 @@ class ComfyGenerator:
 
     # ---- one clip
     def upload(self, image: Path) -> str:
+        """Upload a file (an image, or a guide clip) into ComfyUI's input/video-chain; returns its name there."""
         data = Path(image).read_bytes()
-        name = hashlib.sha1(data).hexdigest()[:20] + ".png"
+        suffix = Path(image).suffix.lower() or ".png"
+        name = hashlib.sha1(data).hexdigest()[:20] + suffix
+        ctype = {".png": "image/png", ".mp4": "video/mp4"}.get(suffix, "application/octet-stream")
         boundary = uuid.uuid4().hex
         parts = []
         for field, value in (("subfolder", SUBFOLDER), ("type", "input"), ("overwrite", "true")):
             parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{field}"\r\n\r\n{value}\r\n'.encode())
         parts.append((f'--{boundary}\r\nContent-Disposition: form-data; name="image"; filename="{name}"\r\n'
-                      f"Content-Type: image/png\r\n\r\n").encode() + data + b"\r\n")
+                      f"Content-Type: {ctype}\r\n\r\n").encode() + data + b"\r\n")
         parts.append(f"--{boundary}--\r\n".encode())
         res = json.loads(self._request("POST", "/upload/image", b"".join(parts),
                                        {"Content-Type": f"multipart/form-data; boundary={boundary}"}, 120))
@@ -410,7 +453,19 @@ class ComfyGenerator:
             if name is None:
                 raise ComfyError(f"{Path(s['turbo']['lora']).name} is not in ComfyUI's LoRA folders")
             turbo = (name, float(s["turbo"].get("strength", 1.0)))
-        image = self.upload(Path(start_image))
+        image = self.upload(Path(start_image)) if start_image is not None else None
+        uploads = [(image, start_image)] if image else []
+        guides = []
+        if s.get("guides"):
+            self.check_guides()
+            for g in s["guides"]:
+                name = self.upload(Path(g["video"]))
+                uploads.append((name, g["video"]))
+                guides.append({**g, "name": name})
+        end_image = None
+        if s.get("end_image") and not any(g.get("at") == "end" for g in guides):
+            end_image = self.upload(Path(s["end_image"]))
+            uploads.append((end_image, s["end_image"]))
         refs = []
         if s.get("ref_paths"):
             self.check_ref_model()
@@ -422,7 +477,7 @@ class ComfyGenerator:
                             height=s.get("height", 512), frames=s.get("frames", 73), steps=s.get("steps", 20),
                             loras=loras, audio=bool(s.get("audio", True)), prefix=prefix, refs=refs,
                             ref_size=s.get("ref_size", "match"), ref_key=self.ref_key() if refs else None,
-                            turbo=turbo)
+                            turbo=turbo, end_image=end_image, guides=guides)
         ws = self._connect_ws()
         try:
             res = self._json("POST", "/prompt", {"prompt": wf, "client_id": self.client_id})
@@ -447,7 +502,7 @@ class ComfyGenerator:
         if self.cleanup:
             self._remove(self.output_dir, video, Path(out_video))
             self._remove(self.output_dir, frame, Path(out_last_frame))
-            for up, local in [(image, Path(start_image))] + list(zip(refs, s.get("ref_paths") or [])):
+            for up, local in uploads + list(zip(refs, s.get("ref_paths") or [])):
                 self._remove(self.input_dir, {"filename": Path(up).name, "subfolder": str(Path(up).parent)},
                              Path(local), same_size=False)
 

@@ -24,9 +24,15 @@ class FakeGenerator:
             for i in range(1, self.steps + 1):
                 time.sleep(self.step_delay)
                 self.progress(i, self.steps)
-        self.calls.append({"prompt": prompt, "start": Path(start_image).name, "seed": seed, "settings": settings,
-                           "start_rgb": Image.open(start_image).convert("RGB").getpixel((5, 5))})
-        w, h = self.size
+        s = settings or {}
+        self.calls.append({"prompt": prompt, "start": Path(start_image).name if start_image else None, "seed": seed,
+                           "settings": settings,
+                           "start_rgb": Image.open(start_image).convert("RGB").getpixel((5, 5)) if start_image
+                           else None,
+                           "end_rgb": Image.open(s["end_image"]).convert("RGB").getpixel((5, 5))
+                           if s.get("end_image") else None,
+                           "guides": [{**g, "probe": chain.probe(Path(g["video"]))} for g in s.get("guides") or []]})
+        w, h = self.size or (s.get("width", 64), s.get("height", 64))   # None: the real clip size
         colour = COLOURS[k % len(COLOURS)]
         n = self.frames
         args = ["-f", "lavfi", "-i", f"color=gray:s={w}x{h}:r=24:d={(n - 1) / 24:.6f}",

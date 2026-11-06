@@ -1,5 +1,6 @@
 """Node view of the clip tree: the start image on the left, every clip a node, lines to its continuations.
-Clicking a node selects it (the path from the start to it is highlighted); double-click plays its clip."""
+Clicking a node selects it (the path from the start to it is highlighted); double-click plays its clip (a real
+video: opens its range editor)."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -29,16 +30,18 @@ class NodeInfo:
     on_path: bool = False
     selected: bool = False
     badge: str = ""               # the clip's own settings (LoRA, strength, length, steps)
+    kind: str = "ai"              # ai | video (a range of a real video)
 
 
 STATUS_TEXT = {"done": "done", "changed": "changed", "new": "not made", "generating": "generating",
-               "failed": "failed", "stopped": "stopped", "reused": "done", "start": "start image"}
+               "failed": "failed", "stopped": "stopped", "reused": "done", "start": "start image",
+               "converting": "converting"}
 
 
 def status_colour(status: str) -> QColor:
     t = theme()
     return {"done": t.positive, "reused": t.positive, "changed": t.warning, "generating": t.accent,
-            "failed": t.negative, "stopped": t.warning}.get(status, t.textTertiary)
+            "converting": t.accent, "failed": t.negative, "stopped": t.warning}.get(status, t.textTertiary)
 
 
 class NodeItem(QGraphicsObject):
@@ -94,7 +97,8 @@ class NodeItem(QGraphicsObject):
             p.setOpacity(1.0)
         else:
             p.setPen(t.textTertiary)
-            p.drawText(thumb, Qt.AlignCenter, "not made yet" if i.status != "start" else "no start image")
+            p.drawText(thumb, Qt.AlignCenter, "no start image" if i.status == "start" else
+                       "not converted yet" if i.kind == "video" else "not made yet")
         if i.badge:
             base_font = QFont(p.font())
             bf = QFont(base_font)
@@ -114,6 +118,11 @@ class NodeItem(QGraphicsObject):
         f = QFont(p.font())
         f.setBold(True)
         p.setFont(f)
+        if i.kind == "video":                   # a strip of film holes: this is real footage, not generated
+            p.setPen(Qt.NoPen)
+            p.setBrush(with_alpha(t.textPrimary, 0.55))
+            for k in range(int((thumb.width() - 8) // 12)):      # (bottom edge only: the badge is at the top)
+                p.drawRoundedRect(QRectF(thumb.x() + 6 + 12 * k, thumb.bottom() - 6, 6, 4), 1, 1)
         p.setPen(t.textPrimary)
         y = 8 + THUMB_H + 8
         p.setBrush(status_colour(i.status))

@@ -115,9 +115,9 @@ def prepare_job(project: Path, targets: list[str]) -> dict:
     unknown = [t for t in targets if t not in tree.nodes]
     if unknown:
         raise JobError(f"unknown node {unknown[0]}")
-    settings = treemod.current_settings(project, tree.options)
+    settings = treemod.current_settings(project, tree.options, tree)
     if settings is None:
-        raise JobError("the project has no start image")
+        raise JobError("the project has no start image (and no video to take the size from)")
     empty = treemod.empty_prompts(tree, targets)
     if empty:
         raise JobError(f"empty prompt in node {empty[0]}")
@@ -127,7 +127,13 @@ def prepare_job(project: Path, targets: list[str]) -> dict:
     missing = [lo for lo in loras if not Path(lo).is_file()]
     if missing:
         raise JobError(f"LoRA not found: {missing[0]}")
-    return {"project": project, "targets": targets, "settings": settings, "todo": todo, "loras": loras}
+    ai_todo = [nid for nid in todo if not tree.nodes[nid].is_video]     # what needs the model
+    if settings.get("backend") == "ai-toolkit":
+        why = treemod.needs_comfy(tree, checker, ai_todo)
+        if why:
+            raise JobError(f"{why}: that needs the ComfyUI generator")
+    return {"project": project, "targets": targets, "settings": settings, "todo": todo, "loras": loras,
+            "ai_todo": ai_todo}
 
 
 def run_job(job: dict, gen, emit, current: dict) -> None:
@@ -151,7 +157,7 @@ def _main_tree(a, emit) -> int:
         return _fail(emit, str(e))
     current = {"id": None, "k": 0}
     gen = None
-    if job["todo"]:                                # nothing to make: no need to load the model
+    if job["ai_todo"]:                             # nothing to generate: no need to load the model
         s = job["settings"]
         gen = _generator(a, emit, current, s["width"], s["height"], s["frames"], s["steps"], None, 1.0,
                          s["model"], s["audio"], loras=job["loras"])
@@ -226,19 +232,19 @@ def serve(a, emit, make_generator: Callable[[list[str], dict], object], stdin=No
         try:
             job = prepare_job(Path(cmd["tree"]), list(cmd.get("targets") or []))
             s = job["settings"]
-            if job["todo"] and s.get("backend", a.backend) != a.backend:
+            if job["ai_todo"] and s.get("backend", a.backend) != a.backend:
                 emit({"e": "restart", "backend": s.get("backend"), "loras": job["loras"]})
                 return RESTART
-            if job["todo"] and getattr(gen, "restart_helps", True):
+            if job["ai_todo"] and getattr(gen, "restart_helps", True):
                 if s["model"] != model or s["audio"] != audio or not gen.can_use(job["loras"]):
                     emit({"e": "restart", "model": s["model"], "audio": s["audio"], "loras": job["loras"]})
                     return RESTART
-            elif job["todo"]:
+            elif job["ai_todo"]:
                 missing = gen.missing_loras(job["loras"])
                 if missing:
                     raise JobError(f"{Path(missing[0]).name} is not in ComfyUI's LoRA folders; copy or link it "
                                    "there (e.g. into my_models/loras)")
-            run_job(job, gen if job["todo"] else None, emit, current)
+            run_job(job, gen if job["ai_todo"] else None, emit, current)
         except (JobError, ValueError, FileNotFoundError, KeyError) as e:
             emit({"e": "error", "msg": str(e)})
         except Exception as e:  # noqa: BLE001

@@ -123,12 +123,107 @@ def image_size(path: Path) -> tuple[int, int]:
     return int(w), int(h)
 
 
-def concat(videos: list[Path], out: Path, drop_first: bool = True, fps: int = FPS) -> None:
+def probe_source(path: Path) -> dict:
+    """Size, frame rate, duration and sound of any video file, without decoding it (fast, also on a share)."""
+    out = _run(["ffprobe", "-v", "error", "-print_format", "json", "-show_streams", "-show_format", str(path)])
+    data = json.loads(out)
+    streams = data.get("streams") or []
+    v = next((s for s in streams if s.get("codec_type") == "video"), None)
+    if v is None:
+        raise RuntimeError(f"{Path(path).name} has no video stream")
+
+    def rate(text):
+        num, _, den = (text or "0/1").partition("/")
+        try:
+            return float(num) / float(den or 1)
+        except (ValueError, ZeroDivisionError):
+            return 0.0
+    fps = rate(v.get("avg_frame_rate")) or rate(v.get("r_frame_rate")) or float(FPS)
+    try:
+        duration = float(v.get("duration") or (data.get("format") or {}).get("duration") or 0)
+    except ValueError:
+        duration = 0.0
+    w, h = int(v["width"]), int(v["height"])
+    rot = 0
+    for sd in v.get("side_data_list") or []:            # phone videos: stored sideways + a rotation flag
+        if "rotation" in sd:
+            rot = int(float(sd["rotation"]))
+    rot = rot or int(float((v.get("tags") or {}).get("rotate", 0) or 0))
+    if rot % 180:
+        w, h = h, w
+    return {"width": w, "height": h, "fps": fps, "duration": duration,
+            "audio": any(s.get("codec_type") == "audio" for s in streams)}
+
+
+def range_frames(start: float, end: float, fps: int = FPS) -> int:
+    """Frames of a time range at the chain's frame rate."""
+    return max(0, round((float(end) - float(start)) * fps))
+
+
+def convert_range(source: Path, out: Path, start: float, end: float, width: int, height: int,
+                  fps: int = FPS) -> int:
+    """Cut start..end (seconds) out of a real video and turn it into a chain clip: fps frames per second (frames
+    dropped or repeated, no interpolation), scaled to fill width x height and cut to it at the centre, sound as
+    48 kHz stereo (if the source has sound). Written under a temporary name first. Returns the frame count."""
+    n = range_frames(start, end, fps)
+    if n < 1:
+        raise ValueError("the range is shorter than one frame")
+    info = probe_source(source)
+    out = Path(out)
+    tmp = out.with_name(out.stem + ".part" + out.suffix)
+    vf = (f"fps={fps},scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,"
+          f"crop={width}:{height},setsar=1,format=yuv420p")
+    cmd = ["ffmpeg", "-v", "error", "-y", "-ss", f"{float(start):.6f}", "-i", str(source), "-map", "0:v:0",
+           "-vf", vf, "-frames:v", str(n), "-c:v", "libx264", "-crf", "12", "-preset", "slow"]
+    if info["audio"]:
+        cmd += ["-map", "0:a:0", "-af", f"aresample=48000,aformat=channel_layouts=stereo,apad,"
+                                        f"atrim=0:{n / fps:.6f}", "-c:a", "aac", "-b:a", "256k"]
+    cmd += ["-map_metadata", "-1", "-r", str(fps), str(tmp)]
+    try:
+        _run(cmd)
+        made = probe(tmp)["frames"]
+        if made < 1:
+            raise RuntimeError(f"no frames in {Path(source).name} between {start:.2f} s and {end:.2f} s")
+        tmp.replace(out)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return made
+
+
+def frame_at(video: Path, index: int, png: Path) -> None:
+    """Frame number index (0-based) of a video as PNG."""
+    _run(["ffmpeg", "-v", "error", "-y", "-i", str(video), "-vf", f"select=eq(n\\,{int(index)})", "-frames:v", "1",
+          "-update", "1", str(png)])
+    if not Path(png).is_file():
+        raise RuntimeError(f"{Path(video).name} has no frame {index}")
+
+
+def cut_frames(video: Path, out: Path, first: int, count: int, fps: int = FPS) -> bool:
+    """Frames first .. first+count-1 of a chain clip (and their sound) as a clip of their own, nearly lossless.
+    Returns whether it has sound."""
+    has_audio = probe(video)["audio"]
+    cmd = ["ffmpeg", "-v", "error", "-y", "-i", str(video), "-map", "0:v:0",
+           "-vf", f"trim=start_frame={first}:end_frame={first + count},setpts=PTS-STARTPTS",
+           "-c:v", "libx264", "-crf", "8", "-preset", "slow", "-pix_fmt", "yuv420p"]
+    if has_audio:
+        cmd += ["-map", "0:a:0", "-af", f"atrim=start={first / fps:.6f}:end={(first + count) / fps:.6f},"
+                                        "asetpts=PTS-STARTPTS", "-c:a", "aac", "-b:a", "256k"]
+    _run(cmd + ["-r", str(fps), str(out)])
+    if probe(out)["frames"] != count:
+        raise RuntimeError(f"could not cut {count} frames from {Path(video).name}")
+    return has_audio
+
+
+def concat(videos: list[Path], out: Path, drop_first: bool = True, fps: int = FPS,
+           cuts: list[tuple[int, int]] | None = None) -> None:
     """Join clips into one video. With drop_first, clips 2..n lose their first frame (and its 1/24 s of sound),
-    which repeats the last frame of the clip before. Clips without sound get silence, so sound stays in sync."""
+    which repeats the last frame of the clip before. cuts instead gives (frames cut at the start, frames cut at
+    the end) per clip. Clips without sound get silence, so sound stays in sync."""
     if not videos:
         raise ValueError("nothing to join")
     infos = [probe(v) for v in videos]
+    if cuts is None:
+        cuts = [(1 if (drop_first and k > 0) else 0, 0) for k in range(len(videos))]
     any_audio = any(i["audio"] for i in infos)
     args: list[str] = []
     for v in videos:
@@ -136,11 +231,14 @@ def concat(videos: list[Path], out: Path, drop_first: bool = True, fps: int = FP
     filters, labels = [], []
     extra = len(videos)
     for k, info in enumerate(infos):
-        skip = 1 if (drop_first and k > 0 and info["frames"] > 1) else 0
-        filters.append(f"[{k}:v]trim=start_frame={skip},setpts=PTS-STARTPTS,fps={fps}[v{k}]")
+        skip, cut_end = cuts[k]
+        if info["frames"] - skip - cut_end < 1:              # never cut a clip away completely
+            skip, cut_end = 0, 0
+        stop = info["frames"] - cut_end
+        filters.append(f"[{k}:v]trim=start_frame={skip}:end_frame={stop},setpts=PTS-STARTPTS,fps={fps}[v{k}]")
         labels.append(f"[v{k}]")
         if any_audio:
-            start, end = skip / fps, info["frames"] / fps
+            start, end = skip / fps, stop / fps
             if info["audio"]:
                 src = f"[{k}:a]"
             else:
@@ -220,7 +318,7 @@ def _load_previous(out_dir: Path) -> dict[int, dict]:
 def settings_dict(*, model: str, lora: str | None, strength: float, frames: int, steps: int, width: int,
                   height: int, audio: bool, backend: str = "ai-toolkit", refs: list | None = None,
                   ref_size: str = "match", ref_hint: bool = True, extra_loras: list | None = None,
-                  turbo: tuple[str, float] | None = None) -> dict:
+                  turbo: tuple[str, float] | None = None, guide: int = 0) -> dict:
     """What a clip depends on besides prompt, seed and start image; a clip is reused only if this is unchanged.
     The LoRA counts by content (lora_sha1), so a LoRA retrained into the same file makes its clips change.
     extra_loras: further LoRAs stacked after the first ([(path, strength)]), only present when there are any, so
@@ -238,6 +336,8 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
     if refs:
         s.update({"refs": [{"file": r["file"], "sha1": r["sha1"]} for r in refs], "ref_size": ref_size,
                   "ref_hint": bool(ref_hint)})
+    if guide:                                   # motion guide: frames of the neighbouring clips anchored
+        s["guide"] = int(guide)
     return s
 
 

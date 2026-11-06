@@ -210,6 +210,9 @@ class H3Generator:
             raise RuntimeError("several LoRAs on one clip need the ComfyUI generator; ai-toolkit applies one")
         if s.get("turbo"):
             raise RuntimeError("turbo mode needs the ComfyUI generator (and ComfyUI-MiniMax-H3-Turbo)")
+        if s.get("end_image") or s.get("guides") or start_image is None:
+            raise RuntimeError("a clip that ends at a video, has a motion guide or no start frame needs the "
+                               "ComfyUI generator")
         frames = int(s.get("frames", self.frames))
         steps = int(s.get("steps", self.steps))
         width, height = int(s.get("width", self.width)), int(s.get("height", self.height))

@@ -27,7 +27,7 @@ def tree_mode(a, emit) -> int:
     project = a.tree.resolve()
     tree = T.load(project)
     targets = [t for t in a.targets.split(",") if t]
-    settings = T.current_settings(project, tree.options)
+    settings = T.current_settings(project, tree.options, tree)
     todo = T.plan(tree, T.Checker(project, tree), targets)
     emit({"e": "start", "nodes": len(todo), "width": settings["width"], "height": settings["height"],
           "frames": settings["frames"], "steps": settings["steps"], "out": str(project)})
@@ -42,7 +42,7 @@ def tree_mode(a, emit) -> int:
         emit({"e": "loading"})
         emit({"e": "loaded"})
     cls = Failing if os.environ.get("FAKE_FAIL") else FakeGenerator
-    gen = cls(frames=17, audio=bool(tree.options.get("audio", True)),
+    gen = cls(frames=17, audio=bool(tree.options.get("audio", True)), size=None,
               step_delay=float(os.environ.get("FAKE_DELAY", "0")),
               progress=lambda i, n: emit({"e": "step", "id": cur["id"], "i": i, "n": n}))
     T.run_tree(gen, project, targets, events=on_event, log=lambda m: print(m, flush=True))
@@ -64,7 +64,7 @@ def serve_mode(a, emit) -> int:
                 f.write(json.dumps({"loras": loras, "audio": not a.no_audio, "backend": a.backend}) + "\n")
         time.sleep(float(os.environ.get("FAKE_LOAD_DELAY", "0")))
         cls = Failing if os.environ.get("FAKE_FAIL") else FakeGenerator
-        gen = cls(frames=17, audio=not a.no_audio, step_delay=float(os.environ.get("FAKE_DELAY", "0")),
+        gen = cls(frames=17, audio=not a.no_audio, size=None, step_delay=float(os.environ.get("FAKE_DELAY", "0")),
                   progress=lambda i, n: emit({"e": "step", "id": current["id"], "i": i, "n": n}))
         prepared = set(loras)
         gen.can_use = lambda need: all(not (big and big in lo) or lo in prepared for lo in need)
@@ -108,7 +108,7 @@ def main() -> int:
             emit(ev)
 
         cls = Failing if os.environ.get("FAKE_FAIL") else FakeGenerator
-        gen = cls(frames=17, audio=not a.no_audio, step_delay=float(os.environ.get("FAKE_DELAY", "0")),
+        gen = cls(frames=17, audio=not a.no_audio, size=None, step_delay=float(os.environ.get("FAKE_DELAY", "0")),
                   progress=lambda i, n: emit({"e": "step", "k": cur["k"], "i": i, "n": n}))
         chain.run_chain(gen, a.image.resolve(), prompts, a.out.resolve(), seed=a.seed, same_seed=a.same_seed,
                         settings=settings, resume=not a.redo, drop_first=not a.keep_repeated_frames,

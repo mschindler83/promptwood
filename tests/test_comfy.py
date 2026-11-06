@@ -316,3 +316,52 @@ def test_same_name_elsewhere_is_not_comfyuis_lora(tmp_path):
     assert C.lora_name_for(str(other), ["style.safetensors"], [root]) is None
     assert C.lora_name_for(str(root / "style.safetensors"), ["style.safetensors"], [root]) == "style.safetensors"
     assert C.lora_name_for(str(other), ["style.safetensors"]) == "style.safetensors"   # no folders known: by name
+
+
+def test_end_frame_and_guide_workflows():
+    wf = C.build_workflow(prompt="x", image="s.png", seed=1, width=512, height=512, frames=73, steps=20, loras=[],
+                          audio=True, prefix="p", end_image="e.png")
+    cond = wf["cond"]["inputs"]
+    assert cond["first_frame"] == ["start", 0] and cond["last_frame"] == ["end", 0]
+    assert wf["end"]["inputs"]["image"] == "e.png"
+    wf = C.build_workflow(prompt="x", image=None, seed=1, width=512, height=512, frames=73, steps=20, loras=[],
+                          audio=True, prefix="p", end_image="e.png")                 # no start frame at all
+    assert "first_frame" not in wf["cond"]["inputs"] and "start" not in wf
+    guides = [{"name": "g0.mp4", "frame_idx": 0, "audio": True, "at": "start"},
+              {"name": "g1.mp4", "frame_idx": 68, "audio": False, "at": "end"}]
+    wf = C.build_workflow(prompt="x", image="s.png", seed=1, width=512, height=512, frames=73, steps=20, loras=[],
+                          audio=True, prefix="p", end_image="e.png", guides=guides)
+    assert "start" not in wf and "end" not in wf                # the guides replace the single frames
+    assert set(wf["cond"]["inputs"]) >= {"width", "length"} and "first_frame" not in wf["cond"]["inputs"]
+    g0, g1 = wf["guide0"]["inputs"], wf["guide1"]["inputs"]
+    assert wf["gvideo0"]["inputs"]["file"] == "g0.mp4" and g0["image"] == ["gparts0", 0] and g0["frame_idx"] == 0
+    assert g0["audio"] == ["gparts0", 1] and g0["audio_vae"] == ["audio_vae", 0] and g0["positive"] == ["cond", 0]
+    assert "audio" not in g1 and g1["positive"] == ["guide0", 0] and g1["frame_idx"] == 68
+    assert g1["latent"] == ["cond", 1] and wf["guider"]["inputs"]["conditioning"] == ["guide1", 0]
+    # identity references: the end frame is a guide at the last frame
+    wf = C.build_workflow(prompt="x", image="s.png", seed=1, width=512, height=512, frames=73, steps=20, loras=[],
+                          audio=False, prefix="p", refs=["r.png"], end_image="e.png")
+    assert wf["end_guide"]["inputs"]["frame_idx"] == -1 and wf["end_guide"]["inputs"]["positive"] == ["cond", 0]
+    assert wf["guider"]["inputs"]["conditioning"] == ["end_guide", 0]
+
+
+def test_generate_with_end_frame_and_guides(server, start, tmp_path):
+    (server.root / "main.py").write_text("")
+    end = tmp_path / "end.png"
+    Image.new("RGB", (192, 108), (0, 0, 250)).save(end)
+    clip = tmp_path / "g.mp4"
+    import subprocess
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=red:s=672x384:r=24", "-f", "lavfi",
+                    "-i", "sine=d=1", "-frames:v", "5", "-t", "0.2083", "-c:a", "aac", str(clip)], check=True)
+    gen = C.ComfyGenerator(server.url, comfy_dir=server.root)
+    gen.generate("x", start, tmp_path / "v.mp4", tmp_path / "v.png", 1, settings(end_image=str(end)))
+    wf = server.prompts[-1]
+    assert wf["cond"]["inputs"]["last_frame"] == ["end", 0]
+    s = settings(end_image=str(end), guides=[{"video": str(clip), "frame_idx": 0, "frames": 5, "audio": True,
+                                              "at": "start"}])
+    gen.generate("x", start, tmp_path / "w.mp4", tmp_path / "w.png", 1, s)
+    wf = server.prompts[-1]
+    assert wf["gvideo0"]["inputs"]["file"].endswith(".mp4") and "start" not in wf and "end" in wf
+    assert not list((server.root / "input" / "video-chain").glob("*"))      # uploads cleaned up
+    gen.generate("x", None, tmp_path / "u.mp4", tmp_path / "u.png", 1, settings(end_image=str(end)))
+    assert "start" not in server.prompts[-1]

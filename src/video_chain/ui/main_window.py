@@ -1,5 +1,7 @@
 """Promptwood window: a start image and a tree of clips. Every clip continues from the last frame of the clip
 before it; any clip can be continued in several ways (branches). A path from the start to a clip is one video.
+Real videos can be put into the chain too (a range of a file): a generated clip before one ends at its first frame,
+one after it starts from its last frame.
 
 The project folder holds tree.json, start.png and the clips (see tree.py). Generation runs in a separate process
 (the video-chain launcher with ai-toolkit's Python) that reports '@@ {json}' events; Stop ends only that process.
@@ -31,6 +33,7 @@ from .. import tree as T
 from ..comfy import REF_HINT
 from .graph import START, GraphView, NodeInfo
 from .image_picker import pick_image
+from .video_editor import VideoRangeDialog, choose_video
 from .theme import icon, repolish, theme
 from .widgets import FrameTile, icon_button, label, section_bar
 
@@ -62,9 +65,10 @@ def select_frames(combo: QComboBox, frames: int | None) -> None:
     combo.setCurrentIndex(i)
 IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff)"
 STATE_TEXT = {"done": "DONE", "reused": "DONE", "changed": "CHANGED", "new": "NOT MADE", "generating": "GENERATING",
-              "failed": "FAILED", "stopped": "STOPPED"}
+              "failed": "FAILED", "stopped": "STOPPED", "converting": "CONVERTING"}
 STATE_STYLE = {"done": "done", "reused": "done", "generating": "target", "failed": "failed", "stopped": "missing",
-               "changed": "missing", "new": ""}
+               "changed": "missing", "new": "", "converting": "target"}
+GUIDE_TEXT = [(None, "single frame"), (5, "5 frames (0.2 s)"), (22, "22 frames (0.9 s)"), (39, "39 frames (1.6 s)")]
 
 
 def fmt_time(seconds: float) -> str:
@@ -173,6 +177,7 @@ class _Bridge(QObject):
     comfy = Signal(bool)                       # ComfyUI reachable
     loras = Signal(list)                       # H3 LoRAs found in ComfyUI's LoRA folders
     copied = Signal(str, str)                  # Save as: target folder, error ('' = done)
+    converted = Signal(str, object, str, str, str)  # video node id, record or None, error, token, project
 
 
 # ----------------------------------------------------------------------------- path card
@@ -337,7 +342,8 @@ class PromptCard(QFrame):
         self.thumb.clicked.connect(lambda _t: self.play.emit(self.nid))
         v.addWidget(self.thumb)
         self.edit = QPlainTextEdit(node.prompt)
-        self.edit.setPlaceholderText("What happens in this clip? It starts from the last frame of the clip before.")
+        self.edit.setPlaceholderText("What happens in this clip? It starts from the last frame of the clip before "
+                                     "(and ends at the first frame of a real video after it).")
         self.edit.setTabChangesFocus(True)
         self.edit.setMinimumHeight(96)
         v.addWidget(self.edit, 1)
@@ -389,7 +395,17 @@ class PromptCard(QFrame):
         self.extras.setToolTip("LoRAs stacked on top of the one above (with 'project default' also on top of the "
                                "project's own extra LoRAs)")
         grid.addRow("More", self.extras)
+        self.guide = QComboBox()
+        for n, text in GUIDE_TEXT:
+            self.guide.addItem(text, n)
+        self.guide.setToolTip("How this clip joins its neighbours. Single frame: it starts at the last frame of the "
+                              "clip before (and ends at the first frame of a real video after it). Motion guide: "
+                              "the last frames of the clip before and the first frames of a video after it, with "
+                              "their sound, are anchored in this clip, so motion and voice carry over (ComfyUI only; "
+                              "those frames are left out when the path is joined)")
+        grid.addRow("Join", self.guide)
         v.addLayout(grid)
+        self.guide.currentIndexChanged.connect(self._ov_changed)
         self.extras.changed.connect(self._ov_changed)
         self.lora.currentIndexChanged.connect(self._ov_changed)
         self.strength.valueChanged.connect(self._ov_changed)
@@ -410,7 +426,7 @@ class PromptCard(QFrame):
     def set_choices(self, project_label: str, project_frames: int, project_steps: int,
                     known: list[tuple[str, str]]):
         """Fill the setting widgets (without emitting changes). known: (path, label) of the LoRAs to offer."""
-        widgets = (self.lora, self.strength, self.length, self.steps)
+        widgets = (self.lora, self.strength, self.length, self.steps, self.guide)
         for w in widgets:
             w.blockSignals(True)
         try:
@@ -428,6 +444,11 @@ class PromptCard(QFrame):
                 self.length.addItem(frames_text(n), n)
             select_frames(self.length, self.ov.get("frames"))
             self.steps.setValue(int(self.ov.get("steps", STEPS_DEFAULT)))
+            g = self.guide.findData(self.ov.get("guide"))
+            if g < 0:
+                self.guide.addItem(f"{self.ov['guide']} frames", self.ov["guide"])
+                g = self.guide.count() - 1
+            self.guide.setCurrentIndex(g)
             self.steps.setToolTip(f"Sampling steps of this clip (lowest value = the project's: {project_steps})")
             self.steps.setEnabled(not self.edit.isReadOnly() and not self.steps_locked)
             if self.steps_locked:
@@ -453,6 +474,8 @@ class PromptCard(QFrame):
         extras = self.extras.items()
         if extras:
             ov["extra_loras"] = extras
+        if self.guide.currentData():
+            ov["guide"] = self.guide.currentData()
         self.ov = ov
         self._enable_strength()
         self.overridesChanged.emit(self.nid, ov)
@@ -488,7 +511,7 @@ class PromptCard(QFrame):
 
     def set_editable(self, on: bool):
         self.edit.setReadOnly(not on)
-        for w in (self.seed, self.lora, self.b_lora, self.length, self.steps, self.extras, *self.buttons):
+        for w in (self.seed, self.lora, self.b_lora, self.length, self.steps, self.extras, self.guide, *self.buttons):
             w.setEnabled(on)
         self.steps.setEnabled(on and not self.steps_locked)
         self._enable_strength()
@@ -497,6 +520,100 @@ class PromptCard(QFrame):
         t = theme()
         border = t.accent.name() if self.state == "generating" else t.lineSubtle.name()
         self.setStyleSheet(f"QFrame#promptCard {{ background: {t.bgRaised.name()}; border: 1px solid {border};"
+                           f" border-radius: 6px; }} QFrame#promptCard QLabel {{ background: transparent; }}")
+
+
+class VideoCard(QFrame):
+    """A real video in the selected path: its file and range, status; edit the range, play, delete."""
+    action = Signal(str, str)                  # action, node id
+    play = Signal(str)
+
+    def __init__(self, node: T.Node, parent=None):
+        super().__init__(parent)
+        self.nid = node.id
+        self.setObjectName("promptCard")
+        self.setAttribute(Qt.WA_StyledBackground)
+        self.setFixedWidth(330)
+        self.state = ""
+        v = QVBoxLayout(self)
+        v.setContentsMargins(10, 8, 8, 10)
+        v.setSpacing(6)
+        head = QHBoxLayout()
+        head.setSpacing(6)
+        self.title = label("Video", type_="heading")
+        self.sub = label(f"#{node.id[1:]}", level="tertiary")
+        self.tag = label("", role="statusTag")
+        head.addWidget(self.title)
+        head.addWidget(self.sub)
+        head.addWidget(self.tag)
+        head.addStretch(1)
+        self.buttons = []
+        for act, ic, tip in (("edit", "pen", "Edit the range (or choose another file)"),
+                             ("branch", "split", "Branch: another continuation from the same point (Ctrl+B)"),
+                             ("delete", "trash", "Remove this video and everything after it from the chain")):
+            b = icon_button(ic, tip)
+            b.clicked.connect(lambda _=False, a=act: self.action.emit(a, self.nid))
+            head.addWidget(b)
+            self.buttons.append(b)
+        v.addLayout(head)
+        self.span = label("", level="tertiary")
+        v.addWidget(self.span)
+        self.thumb = FrameTile(312, 176)
+        self.thumb.setToolTip("Last frame of the range; click to play the converted clip")
+        self.thumb.clicked.connect(lambda _t: self.play.emit(self.nid))
+        v.addWidget(self.thumb)
+        self.file = label("", level="secondary")
+        self.file.setWordWrap(True)
+        v.addWidget(self.file)
+        self.range = label("", level="tertiary")
+        self.range.setWordWrap(True)
+        v.addWidget(self.range)
+        self.b_edit = QPushButton("Edit range…")
+        self.b_edit.clicked.connect(lambda: self.action.emit("edit", self.nid))
+        v.addWidget(self.b_edit, 0, Qt.AlignLeft)
+        v.addStretch(1)
+        self.step = label("", level="tertiary")
+        v.addWidget(self.step)
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 0)
+        self.bar.hide()
+        v.addWidget(self.bar)
+        self.set_source(node)
+        self._restyle()
+
+    def set_source(self, node: T.Node):
+        src = node.source or {}
+        f = Path(src.get("file", ""))
+        self.file.setText(f.name + ("" if f.is_file() else "  (file not found)"))
+        self.file.setToolTip(str(f))
+        n = chain.range_frames(src.get("start", 0), src.get("end", 0))
+        self.range.setText(f"{fmt_time(src.get('start', 0))} – {fmt_time(src.get('end', 0))} of the file · "
+                           f"{n} frames at 24 fps")
+
+    def set_state(self, state: str, pixmap: QPixmap | None, step: str = ""):
+        self.state = state
+        self.tag.setText(STATE_TEXT.get(state, state.upper()))
+        self.tag.setProperty("state", STATE_STYLE.get(state, ""))
+        repolish(self.tag)
+        if pixmap is not None and not pixmap.isNull():
+            self.thumb.set_image(pixmap.toImage())
+        else:
+            self.thumb.clear_frame("not converted yet")
+        self.step.setText(step)
+        self.bar.setVisible(state in ("generating", "converting"))
+        self._restyle()
+
+    def set_progress(self, i: int, n: int):
+        pass
+
+    def set_editable(self, on: bool):
+        for w in (self.b_edit, *self.buttons):
+            w.setEnabled(on)
+
+    def _restyle(self):
+        t = theme()
+        border = t.accent.name() if self.state in ("generating", "converting") else t.lineSubtle.name()
+        self.setStyleSheet(f"QFrame#promptCard {{ background: {t.bgSunken.name()}; border: 1px solid {border};"
                            f" border-radius: 6px; }} QFrame#promptCard QLabel {{ background: transparent; }}")
 
 
@@ -625,7 +742,7 @@ class MainWindow(QMainWindow):
         self.status_of: dict[str, str] = {}
         self.live: dict[str, str] = {}          # states during a run (generating / failed / stopped)
         self.progress_of: dict[str, float] = {}
-        self.cards: list[PromptCard] = []
+        self.cards: list[PromptCard | VideoCard] = []
         self._pix: dict[tuple, QPixmap] = {}
         self.proc: QProcess | None = None
         self._buf = self._ebuf = ""
@@ -647,12 +764,14 @@ class MainWindow(QMainWindow):
         self._idle_since, self._idle_timeout = 0.0, None
         self._model_state = ""
         self._joins = 0                         # path joins still running
+        self._converts: dict[str, str] = {}     # video node -> token of its conversion in progress
         self._kill_timer = QTimer(self, singleShot=True, interval=8000, timeout=self._kill)
         self.bridge = _Bridge()
         self.bridge.joined.connect(self._joined)
         self.bridge.comfy.connect(self._comfy_state)
         self.bridge.loras.connect(self._loras_found)
         self.bridge.copied.connect(self._copied)
+        self.bridge.converted.connect(self._converted)
         self.h3_loras: list[tuple[str, str]] = []
         self.turbo_loras: list[tuple[str, str]] = []
         self.comfy_up: bool | None = None
@@ -953,12 +1072,15 @@ class MainWindow(QMainWindow):
         bh.addWidget(self.tree_info)
         bh.addSpacing(8)
         self.b_continue = icon_button("plus", "Continue: a new clip after the selected one (Ctrl+N)")
+        self.b_add_video = icon_button("camera", "Add a real video after the selected clip (Ctrl+Shift+V): a "
+                                                 "generated clip before it ends at its first frame, one after it "
+                                                 "starts from its last frame")
         self.b_branch = icon_button("split", "Branch: another continuation from the same point (Ctrl+B)")
         self.b_variant = icon_button("clone", "Variant: same prompt, other seed (Ctrl+D)")
         self.b_delete = icon_button("trash", "Delete the selected clip and everything after it (Del)")
         self.b_fit = icon_button("frame", "Fit the view (F)")
-        for btn, act in ((self.b_continue, "continue"), (self.b_branch, "branch"), (self.b_variant, "variant"),
-                         (self.b_delete, "delete")):
+        for btn, act in ((self.b_continue, "continue"), (self.b_add_video, "video"), (self.b_branch, "branch"),
+                         (self.b_variant, "variant"), (self.b_delete, "delete")):
             btn.clicked.connect(lambda _=False, a=act: self.node_action(a, self.selected_id()))
             bh.addWidget(btn)
         bh.addSpacing(6)
@@ -967,7 +1089,7 @@ class MainWindow(QMainWindow):
         gv.addWidget(bar)
         self.graph = GraphView()
         self.graph.selected.connect(self.select)
-        self.graph.activated.connect(self._play_node)
+        self.graph.activated.connect(self._activate)
         self.graph.contextMenu.connect(self._context)
         gv.addWidget(self.graph, 1)
         mid.addWidget(gw)
@@ -1068,6 +1190,7 @@ class MainWindow(QMainWindow):
             sig.connect(self._options_changed)
         self.lora.currentIndexChanged.connect(self._options_changed)
         for keys, fn in (("Ctrl+N", lambda: self.node_action("continue", self.selected_id())),
+                         ("Ctrl+Shift+V", lambda: self.node_action("video", self.selected_id())),
                          ("Ctrl+B", lambda: self.node_action("branch", self.selected_id())),
                          ("Ctrl+D", lambda: self.node_action("variant", self.selected_id())),
                          ("Ctrl+Return", self.generate_path), ("Ctrl+Shift+Return", self.generate_all)):
@@ -1552,7 +1675,17 @@ class MainWindow(QMainWindow):
     def _update_size_info(self):
         start = self.project / T.START_FILE if self.project else None
         if not start or not start.is_file():
-            self.size_info.setText("")
+            dims = None
+            try:
+                dims = T.size_source(self.project, self.tree) if self.project else None
+            except Exception:  # noqa: BLE001
+                pass
+            if dims:
+                vw, vh = chain.canvas_size(*dims, self.resolution.currentData())
+                self.size_info.setText(f"No start image: the size follows the first video ({dims[0]}×{dims[1]} → "
+                                       f"{vw}×{vh}); a first generated clip starts without a start frame.")
+            else:
+                self.size_info.setText("Choose a start image, or begin with a real video (Clips → camera button).")
             return
         img = QImage(str(start))
         w, h = img.width(), img.height()
@@ -1604,10 +1737,15 @@ class MainWindow(QMainWindow):
         infos = [NodeInfo(START, None, "Start", "", Path(self.tree.image).name if self.tree.image else "",
                           "start", start_pm, on_path=True, selected=sel == START)]
         for n in sorted(self.tree.nodes.values(), key=lambda n: self.tree.number(n.id)):
-            infos.append(NodeInfo(n.id, n.parent or START, f"Clip {self.tree.depth(n.id)}", f"#{n.id[1:]}",
-                                  n.prompt, self.state(n.id), self._pixmap(self._node_frame(n)),
+            text = n.prompt
+            if n.is_video:
+                text = (f"{Path(n.source['file']).name} · {fmt_time(n.source['start'])}–"
+                        f"{fmt_time(n.source['end'])}")
+            infos.append(NodeInfo(n.id, n.parent or START,
+                                  f"{'Video' if n.is_video else 'Clip'} {self.tree.depth(n.id)}", f"#{n.id[1:]}",
+                                  text, self.state(n.id), self._pixmap(self._node_frame(n)),
                                   self.progress_of.get(n.id, 0.0), n.id in on_path, n.id == sel,
-                                  self.badge(n)))
+                                  self.badge(n), n.kind))
         self.graph.show_nodes(infos)
         if rebuild_path or [c.nid for c in self.cards] != [n.id for n in self.selected_path()]:
             self._rebuild_path()
@@ -1615,12 +1753,15 @@ class MainWindow(QMainWindow):
             self._update_cards()
         made = sum(1 for s in self.status_of.values() if s == "done")
         branches = len(self.tree.leaves())
-        self.tree_info.setText(f"{len(self.tree.nodes)} clips · {branches} branch{'es' if branches != 1 else ''}"
-                               f" · {made} made")
+        videos = sum(1 for n in self.tree.nodes.values() if n.is_video)
+        self.tree_info.setText(f"{len(self.tree.nodes)} clips" + (f" ({videos} real)" if videos else "") +
+                               f" · {branches} branch{'es' if branches != 1 else ''} · {made} made")
         self._update_buttons()
 
     def badge(self, n: T.Node) -> str:
         """Short text for a clip's own settings, shown on its node ('' = all project defaults)."""
+        if n.is_video:
+            return f"real video · {T.clip_length(self.tree, n) / 24:.1f} s"
         ov, parts = n.overrides or {}, []
         if "lora" in ov:
             parts.append("no LoRA" if ov["lora"] == T.NO_LORA else lora_label(ov["lora"])[:18])
@@ -1632,6 +1773,8 @@ class MainWindow(QMainWindow):
             parts.append(f"{ov['frames'] / 24:.1f} s")
         if "steps" in ov:
             parts.append(f"{ov['steps']} steps")
+        if ov.get("guide"):
+            parts.append(f"guide {ov['guide']}")
         return " · ".join(parts)
 
     def _rebuild_path(self):
@@ -1645,6 +1788,14 @@ class MainWindow(QMainWindow):
         self.path_hint.setText("The start image is selected. Select a clip to see its path, or press Continue "
                                "(Ctrl+N) to add a clip after the start image.")
         for k, n in enumerate(path):
+            if n.is_video:
+                card = VideoCard(n)
+                card.action.connect(self.node_action)
+                card.play.connect(self._play_node)
+                self.path_box.insertWidget(k, card)
+                self.cards.append(card)
+                card.set_editable(not self.running)
+                continue
             card = PromptCard(n)
             card.edited.connect(self._card_edited)
             card.seedChanged.connect(self._seed_changed)
@@ -1663,20 +1814,34 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, lambda: self.path_area.ensureWidgetVisible(last))
 
     def _update_cards(self):
-        drop = not self.tree.options.get("keep_repeated")
+        path_nodes = [self.tree.nodes[c.nid] for c in self.cards if c.nid in self.tree.nodes]
+        cuts = dict(zip([n.id for n in path_nodes],
+                        T.path_cuts(self.tree, path_nodes, bool(self.tree.options.get("keep_repeated")),
+                                    planned=True)))
         t = 0.0
         for k, card in enumerate(self.cards):
             n = self.tree.nodes.get(card.nid)
             if n is None:
                 continue
-            frames = int(n.overrides.get("frames", self.tree.options.get("frames", 73)))
-            length = (frames - (1 if drop and k > 0 else 0)) / 24
-            card.title.setText(f"Clip {k + 1}")
-            card.span.setText(f"{fmt_time(t)} – {fmt_time(t + length)} in this path")
+            frames = T.clip_length(self.tree, n)
+            cut = cuts.get(n.id, (0, 0))
+            length = max(0, frames - cut[0] - cut[1]) / 24
+            card.title.setText(f"{'Video' if n.is_video else 'Clip'} {k + 1}")
+            span = f"{fmt_time(t)} – {fmt_time(t + length)} in this path"
+            vc = self.tree.video_child(n.id)
+            if vc is not None:
+                span += f" · ends at video #{vc.id[1:]}"
+            card.span.setText(span)
             t += length
             st = self.state(n.id)
-            card.set_state(st, self._pixmap(self._node_frame(n)), "will be made again" if st == "changed" else "")
-            if st == "generating" and n.id in self.progress_of:
+            if n.is_video:
+                card.set_source(n)
+                step = ("will be converted again" if st == "changed" else
+                        "" if Path(n.source["file"]).is_file() or st == "done" else "the video file is missing")
+            else:
+                step = "will be made again" if st == "changed" else ""
+            card.set_state(st, self._pixmap(self._node_frame(n)), step)
+            if st == "generating" and n.id in self.progress_of and not n.is_video:
                 card.bar.setValue(round(100 * self.progress_of[n.id]))
         path = self.selected_path()
         if path:
@@ -1692,15 +1857,17 @@ class MainWindow(QMainWindow):
         is_clip = bool(has and sel and sel != START)
         idle = not self.running
         self.b_continue.setEnabled(has and idle)
+        self.b_add_video.setEnabled(has and idle)
         for w in (self.act_save, self.act_save_as, self.act_close):
             w.setEnabled(has and idle)
         for w in (self.act_new, self.act_open, self.b_new, self.b_open, self.b_recent, self.recent_file_menu):
             w.setEnabled(idle)
         for b in (self.b_branch, self.b_variant, self.b_delete):
             b.setEnabled(is_clip and idle)
+        self.b_variant.setEnabled(is_clip and idle and sel in self.tree.nodes and not self.tree.nodes[sel].is_video)
         path = self.selected_path()
         all_done = bool(path) and all(self.state(n.id) == "done" for n in path)
-        free = idle and not self._joins           # a join reads clips a new run would replace
+        free = idle and not self._joins and not self._converts   # a join reads clips a new run would replace
         self.b_gen.setEnabled(free and bool(path))
         self.b_gen_all.setEnabled(free and has and bool(self.tree.nodes))
         self.b_delete.setEnabled(is_clip and free)
@@ -1724,7 +1891,7 @@ class MainWindow(QMainWindow):
         self.refresh()
 
     def _card_edited(self, nid: str):
-        card = next((c for c in self.cards if c.nid == nid), None)
+        card = next((c for c in self.cards if c.nid == nid and isinstance(c, PromptCard)), None)
         if card is None or self.tree is None or nid not in self.tree.nodes:
             return
         self.tree.nodes[nid].prompt = card.text()
@@ -1794,8 +1961,9 @@ class MainWindow(QMainWindow):
         self.steps.setToolTip("Turbo mode: every clip uses the turbo steps" if on else
                               "Sampling steps per clip. The trainer's samples use 20, ai-toolkit's H3 default is 28")
         for card in self.cards:
-            card.steps_locked = on
-            card.steps.setEnabled(idle and not on and not card.edit.isReadOnly())
+            if isinstance(card, PromptCard):
+                card.steps_locked = on
+                card.steps.setEnabled(idle and not on and not card.edit.isReadOnly())
 
     def _fill_project_lora(self, current: str | None):
         self.lora.blockSignals(True)
@@ -1853,7 +2021,7 @@ class MainWindow(QMainWindow):
         if self.tree is None:
             return
         known = self.known_loras()
-        for card in self.cards:
+        for card in [c for c in self.cards if isinstance(c, PromptCard)]:
             card.set_choices(self._project_lora_label(), int(self.tree.options.get("frames", 73)),
                              int(self.tree.options.get("steps", 28)), known)
 
@@ -1881,7 +2049,7 @@ class MainWindow(QMainWindow):
             self._changed()
 
     def _choose_node_lora(self, nid: str):
-        card = next((c for c in self.cards if c.nid == nid), None)
+        card = next((c for c in self.cards if c.nid == nid and isinstance(c, PromptCard)), None)
         if card is None:
             return
         cur = card.lora.currentData()
@@ -1922,6 +2090,15 @@ class MainWindow(QMainWindow):
         if self.tree is None or self.running:
             return
         node = self.tree.nodes.get(nid) if nid and nid != START else None
+        if action in ("variant", "variants") and node is not None and node.is_video:
+            self.status.setText("Variants are for generated clips; a real video stays as it is.")
+            return
+        if action == "video":
+            self._ask_video(node.id if node else None)
+            return
+        if action == "edit" and node is not None and node.is_video:
+            self.edit_video(node.id)
+            return
         if action == "continue":
             new = self.tree.add(node.id if node else None, "")
         elif action == "variants" and node is not None:
@@ -1934,6 +2111,7 @@ class MainWindow(QMainWindow):
                                 self._new_seed() if action == "variant" else None)
             if action == "variant":                # the same clip with another seed: its own settings too
                 new.overrides = copy.deepcopy(node.overrides)
+                self._copy_video_child(node.id, new.id)
         elif action == "delete" and node is not None:
             below = len(self.tree.descendants(node.id))
             made = node.made is not None or any(d.made for d in self.tree.descendants(node.id))
@@ -1955,8 +2133,166 @@ class MainWindow(QMainWindow):
         self._write_tree()
         self.refresh()
         self.graph.reveal(new.id)
-        if self.cards and self.cards[-1].nid == new.id:
+        if self.cards and self.cards[-1].nid == new.id and isinstance(self.cards[-1], PromptCard):
             self.cards[-1].edit.setFocus()
+
+    def _copy_video_child(self, source: str, target: str) -> None:
+        """A variant of a clip that leads into a real video leads into its own copy of that video."""
+        vc = self.tree.video_child(source)
+        if vc is not None and self.tree.can_add_video(target):
+            T.copy_video(self.project, self.tree, vc, target)
+
+    # ---- real videos
+    def _canvas_for(self, file: str | None = None) -> tuple[int, int] | None:
+        """The video size clips are made in; without a start image or video yet, the one this file would give."""
+        try:
+            base = T.Checker(self.project, self.tree).base()
+            if base is not None:
+                return base["width"], base["height"]
+            if file:
+                info = chain.probe_source(Path(file))
+                return chain.canvas_size(info["width"], info["height"], int(self.tree.options.get("resolution", 512)))
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+    def _ask_video(self, parent: str | None):
+        if self.project is None:
+            self.status.setText("Open or create a project folder first.")
+            return
+        if not self.tree.can_add_video(parent):
+            vc = self.tree.video_child(parent)
+            self.status.setText(f"Clip #{parent[1:]} already leads into video #{vc.id[1:]}: a generated clip can "
+                                "end at one video only. Branch from the clip before it for another one.")
+            return
+        f = choose_video(self, self.qs)
+        if not f:
+            return
+        dlg = VideoRangeDialog(self, f, canvas=self._canvas_for(f), settings=self.qs)
+        if dlg.exec() != QDialog.Accepted or not dlg.file:
+            return
+        self.add_video(parent, dlg.file, dlg.start, dlg.end)
+
+    def add_video(self, parent: str | None, file: str, start: float, end: float) -> str | None:
+        """Put a range of a real video after parent (None: at the start) and convert it right away."""
+        if self.tree is None or self.running:
+            return None
+        try:
+            node = self.tree.add_video(parent, os.path.abspath(file), start, end)
+        except ValueError as e:
+            self.status.setText(str(e))
+            return None
+        self._remember_video(file)
+        self.tree.selected = node.id
+        self._write_tree()
+        self._show_start_image()                  # the size may follow this video now
+        self.refresh()
+        self.graph.reveal(node.id)
+        self.convert_video(node.id)
+        return node.id
+
+    def edit_video(self, nid: str):
+        node = self.tree.nodes.get(nid) if self.tree else None
+        if node is None or not node.is_video or self.running:
+            return
+        src = node.source
+        f = src["file"]
+        if not Path(f).is_file():
+            self.status.setText(f"{Path(f).name} is not there any more; choose the file again.")
+        dlg = VideoRangeDialog(self, f if Path(f).is_file() else "", src["start"], src["end"],
+                               canvas=self._canvas_for(f), settings=self.qs)
+        if dlg.exec() != QDialog.Accepted or not dlg.file:
+            return
+        self.set_video_range(nid, dlg.file, dlg.start, dlg.end)
+
+    def set_video_range(self, nid: str, file: str, start: float, end: float) -> None:
+        if self.tree is None or self.running or nid not in self.tree.nodes:
+            return
+        node = self.tree.nodes[nid]
+        new = {"file": os.path.abspath(file), "start": round(float(start), 4), "end": round(float(end), 4)}
+        if new["end"] <= new["start"]:
+            self.status.setText("The end of the range must be after its start.")
+            return
+        if new == node.source:
+            return
+        node.source = new
+        self._remember_video(file)
+        self._write_tree()
+        self._show_start_image()
+        self.refresh(rebuild_path=True)
+        self.convert_video(nid)
+
+    def _remember_video(self, file: str):
+        self.qs.setValue("videoDir", str(Path(file).parent))
+
+    def convert_video(self, nid: str) -> None:
+        """Convert a video node's range in the background (the generator does it too if this is not done)."""
+        if self.tree is None or nid not in self.tree.nodes:
+            return
+        node = self.tree.nodes[nid]
+        try:
+            checker = T.Checker(self.project, self.tree)
+            base = checker.base()
+            if base is None or checker.status(nid) == "done" or not Path(node.source["file"]).is_file():
+                return
+        except Exception as e:  # noqa: BLE001
+            self.status.setText(f"Could not convert the video: {e}")
+            return
+        token = os.urandom(6).hex()
+        self._converts[nid] = token
+        self.live[nid] = "converting"
+        work_node, project, bridge = copy.deepcopy(node), self.project, self.bridge
+        self.status.setText(f"Converting video #{nid[1:]} …")
+
+        def work():
+            try:
+                made = T.make_video(project, work_node, base)
+                bridge.converted.emit(nid, made, "", token, str(project))
+            except Exception as e:  # noqa: BLE001
+                bridge.converted.emit(nid, None, str(e), token, str(project))
+        threading.Thread(target=work, daemon=True).start()
+        self.refresh()
+
+    def _converted(self, nid: str, made, error: str, token: str, project: str):
+        def discard():
+            for k in ("video", "frame", "first"):
+                if made and made.get(k):
+                    T._unlink(Path(project) / made[k])
+        if self._converts.get(nid) != token:         # a newer conversion of this node is running
+            discard()
+            return
+        self._converts.pop(nid, None)
+        if self.live.get(nid) == "converting":
+            self.live.pop(nid, None)
+        node = self.tree.nodes.get(nid) if self.tree is not None else None
+        if project != str(self.project) or node is None or self.running:
+            discard()
+            self._update_buttons()
+            return
+        if error:
+            self.status.setText(f"Could not convert video #{nid[1:]}: {error}")
+            self.refresh()
+            return
+        key = made.get("key") or {}
+        if {k: key.get(k) for k in ("file", "start", "end")} != node.source:     # changed meanwhile
+            discard()
+            self.refresh()
+            return
+        old = T.clip_files(self.project, node)
+        node.made = made
+        if self._write_tree():
+            for f in old:
+                T._unlink(f)
+        self._pix.clear()
+        self.status.setText(f"Video #{nid[1:]} is ready ({made['frames']} frames).")
+        self.refresh()
+
+    def _activate(self, nid: str):
+        """Double-click on a node: a real video opens its range editor, a generated clip plays."""
+        if self.tree is not None and nid in self.tree.nodes and self.tree.nodes[nid].is_video and not self.running:
+            QTimer.singleShot(0, lambda: self.edit_video(nid))
+        else:
+            self._play_node(nid)
 
     def keep_branch(self, nid: str, whole_path: bool = False, confirm: bool = True) -> list[str]:
         """Delete the other branches at this clip's point (its siblings), or along its whole path; the clip and
@@ -1994,9 +2330,12 @@ class MainWindow(QMainWindow):
             return []
         node = self.tree.nodes[nid]
         ids = []
+        if node.is_video:
+            return []
         for _ in range(max(1, int(count))):
             new = self.tree.add(node.parent, node.prompt, self._new_seed())
             new.overrides = copy.deepcopy(node.overrides)
+            self._copy_video_child(nid, new.id)
             ids.append(new.id)
         self._write_tree()
         self.refresh()
@@ -2011,11 +2350,18 @@ class MainWindow(QMainWindow):
             return
         m = QMenu(self)
         acts = {m.addAction("Continue from here"): "continue"}
+        node = self.tree.nodes.get(nid)
+        vid = m.addAction("Add a real video after this…")
+        vid.setEnabled(self.tree.can_add_video(None if nid == START else nid))
+        acts[vid] = "video"
         play = gen = delete = keep_here = keep_path = None
         if nid != START:
+            if node is not None and node.is_video:
+                acts[m.addAction("Edit the range…")] = "edit"
             acts[m.addAction("Branch (another continuation)")] = "branch"
-            acts[m.addAction("Variant (same prompt, other seed)")] = "variant"
-            acts[m.addAction("Variants… (several, generated at once)")] = "variants"
+            if node is not None and not node.is_video:
+                acts[m.addAction("Variant (same prompt, other seed)")] = "variant"
+                acts[m.addAction("Variants… (several, generated at once)")] = "variants"
             m.addSeparator()
             play = m.addAction("Play this clip")
             play.setEnabled(bool(self.tree.nodes[nid].made))
@@ -2054,7 +2400,9 @@ class MainWindow(QMainWindow):
         n = self.tree.nodes[nid]
         if n.made and (self.project / n.made["video"]).is_file():
             self.tabs.setCurrentIndex(0)
-            self.preview.open(self.project / n.made["video"], f"Clip #{nid[1:]} · {n.prompt[:60]}")
+            what = Path(n.source["file"]).name if n.is_video else n.prompt[:60]
+            self.preview.open(self.project / n.made["video"],
+                              f"{'Video' if n.is_video else 'Clip'} #{nid[1:]} · {what}")
 
     # ------------------------------------------------------------------ paths
     def join_selected(self, purpose: str, out: Path | None = None, prefix: str = ""):
@@ -2200,9 +2548,10 @@ class MainWindow(QMainWindow):
         if self._copying:
             self.status.setText("Wait until the project is copied (Save as).")
             return
+        if self._converts:
+            self.status.setText("Wait until the video is converted.")
+            return
         problems = []
-        if not (self.project / T.START_FILE).is_file():
-            problems.append("choose a start image")
         ident = self.tree.options.get("identity") or {}
         if ident.get("mode") == "reference":
             if not ident.get("images"):
@@ -2216,13 +2565,25 @@ class MainWindow(QMainWindow):
             elif self.current_backend() != "comfyui":
                 problems.append("turbo mode needs the ComfyUI generator")
         nodes = {n.id: n for t in targets for n in self.tree.path_to(t)}
-        empty = [n for n in nodes.values() if not n.prompt.strip()]
+        empty = [n for n in nodes.values() if not n.is_video and not n.prompt.strip()]
         if empty:
             problems.append(f"write the prompt of clip #{empty[0].id[1:]}")
         try:
             checker = T.Checker(self.project, self.tree)
+            if checker.base() is None:
+                problems.append("choose a start image (or begin with a real video)")
+            else:
+                todo = T.plan(self.tree, checker, targets)
+                gone = [n for n in todo if self.tree.nodes[n].is_video
+                        and not Path(self.tree.nodes[n].source["file"]).is_file()]
+                if gone:
+                    problems.append(f"the file of video #{gone[0][1:]} is missing (Edit the range… to choose it)")
+                if self.current_backend() != "comfyui":
+                    why = T.needs_comfy(self.tree, checker, todo)
+                    if why:
+                        problems.append(f"{why}: that needs the ComfyUI generator")
             if checker.base() is not None and self.current_backend() != "comfyui":
-                if any(checker.settings(nid).get("extra_loras") for nid in nodes):
+                if any(checker.settings(nid).get("extra_loras") for nid in nodes if not self.tree.nodes[nid].is_video):
                     problems.append("several LoRAs on one clip need the ComfyUI generator")
             if checker.base() is not None:
                 for lo in T.loras_needed(self.tree, checker, list(nodes)):
