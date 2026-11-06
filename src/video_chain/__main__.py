@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import select
+import signal
 import sys
 import time
 import traceback
@@ -52,6 +53,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--idle-minutes", type=float, default=15,
                    help="worker mode: quit (and free the memory) after this long without a job; 0 = never")
     p.add_argument("--loras", default="", help="worker mode: comma-separated LoRA files to prepare when loading")
+    p.add_argument("--backend", choices=["ai-toolkit", "comfyui"], default="ai-toolkit",
+                   help="worker mode: render with ai-toolkit (loads the model itself) or a running ComfyUI")
+    p.add_argument("--comfy-url", default="http://127.0.0.1:8188", help="ComfyUI address (backend comfyui)")
     p.add_argument("--aitk", type=Path, default=Path("/path/to/ai/ai-toolkit"),
                    help="ai-toolkit folder")
     return p
@@ -170,6 +174,8 @@ def serve(a, emit, make_generator: Callable[[list[str], dict], object], stdin=No
         if idle is not None:
             ready, _, _ = select.select([stdin], [], [], idle)
             if not ready:
+                if hasattr(gen, "free"):
+                    gen.free()                      # ComfyUI: unload its models after the idle time
                 emit({"e": "bye", "reason": "idle"})
                 return 0
         line = stdin.readline()
@@ -181,6 +187,8 @@ def serve(a, emit, make_generator: Callable[[list[str], dict], object], stdin=No
             emit({"e": "error", "msg": f"bad command: {line.strip()[:80]}"})
             continue
         if cmd.get("cmd") == "quit":
+            if cmd.get("free") and hasattr(gen, "free"):
+                gen.free()
             emit({"e": "bye", "reason": "quit"})
             return 0
         if cmd.get("cmd") != "run":
@@ -190,10 +198,18 @@ def serve(a, emit, make_generator: Callable[[list[str], dict], object], stdin=No
         try:
             job = prepare_job(Path(cmd["tree"]), list(cmd.get("targets") or []))
             s = job["settings"]
-            if job["todo"] and (s["model"] != model or s["audio"] != audio
-                                or not gen.can_use(job["loras"])):
-                emit({"e": "restart", "model": s["model"], "audio": s["audio"], "loras": job["loras"]})
+            if job["todo"] and s.get("backend", a.backend) != a.backend:
+                emit({"e": "restart", "backend": s.get("backend"), "loras": job["loras"]})
                 return RESTART
+            if job["todo"] and getattr(gen, "restart_helps", True):
+                if s["model"] != model or s["audio"] != audio or not gen.can_use(job["loras"]):
+                    emit({"e": "restart", "model": s["model"], "audio": s["audio"], "loras": job["loras"]})
+                    return RESTART
+            elif job["todo"]:
+                missing = gen.missing_loras(job["loras"])
+                if missing:
+                    raise JobError(f"{Path(missing[0]).name} is not in ComfyUI's LoRA folders; copy or link it "
+                                   "there (e.g. into my_models/loras)")
             run_job(job, gen if job["todo"] else None, emit, current)
         except (JobError, ValueError, FileNotFoundError, KeyError) as e:
             emit({"e": "error", "msg": str(e)})
@@ -203,9 +219,38 @@ def serve(a, emit, make_generator: Callable[[list[str], dict], object], stdin=No
         emit({"e": "idle", "timeout": idle, "took": round(time.monotonic() - started, 1)})
 
 
+COMFY_DOWN = 4      # worker exit code: ComfyUI is not running
+
+
 def _main_serve(a, emit) -> int:
-    def make(loras: list[str], current: dict):
-        return _generator(a, emit, current, 512, 512, 73, 28, None, 1.0, a.model, not a.no_audio, loras=loras)
+    holder: dict = {}
+
+    def on_term(_sig, _frame):                       # Stop in the GUI: cancel the clip in ComfyUI too
+        gen = holder.get("gen")
+        if gen is not None and hasattr(gen, "interrupt"):
+            gen.interrupt()
+        raise SystemExit(143)
+    signal.signal(signal.SIGTERM, on_term)
+
+    if a.backend == "comfyui":
+        from .comfy import ComfyGenerator, ComfyUnavailable
+
+        def make(_loras: list[str], current: dict):
+            emit({"e": "loading", "what": "comfyui"})
+            try:
+                gen = ComfyGenerator(a.comfy_url, progress=lambda i, n: emit(
+                    {"e": "step", "id": current["id"], "k": current["k"], "i": i, "n": n}))
+            except ComfyUnavailable as e:
+                emit({"e": "error", "msg": str(e), "comfy_down": True})
+                raise SystemExit(COMFY_DOWN)
+            holder["gen"] = gen
+            emit({"e": "loaded", "what": "comfyui"})
+            return gen
+    else:
+        def make(loras: list[str], current: dict):
+            gen = _generator(a, emit, current, 512, 512, 73, 28, None, 1.0, a.model, not a.no_audio, loras=loras)
+            holder["gen"] = gen
+            return gen
     return serve(a, emit, make)
 
 

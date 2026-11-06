@@ -55,16 +55,29 @@ def serve_mode(a, emit) -> int:
     big = os.environ.get("FAKE_BIG", "")
 
     def make(loras, current):
+        if a.backend == "comfyui" and os.environ.get("FAKE_COMFY_DOWN"):
+            emit({"e": "error", "msg": f"ComfyUI is not reachable at {a.comfy_url}", "comfy_down": True})
+            raise SystemExit(4)
         emit({"e": "loading"})
         if os.environ.get("FAKE_LOADS"):
             with open(os.environ["FAKE_LOADS"], "a") as f:
-                f.write(json.dumps({"loras": loras, "audio": not a.no_audio}) + "\n")
+                f.write(json.dumps({"loras": loras, "audio": not a.no_audio, "backend": a.backend}) + "\n")
         time.sleep(float(os.environ.get("FAKE_LOAD_DELAY", "0")))
         cls = Failing if os.environ.get("FAKE_FAIL") else FakeGenerator
         gen = cls(frames=17, audio=not a.no_audio, step_delay=float(os.environ.get("FAKE_DELAY", "0")),
                   progress=lambda i, n: emit({"e": "step", "id": current["id"], "i": i, "n": n}))
         prepared = set(loras)
         gen.can_use = lambda need: all(not (big and big in lo) or lo in prepared for lo in need)
+        if a.backend == "comfyui":                  # like ComfyGenerator: no restarts, LoRAs must be in ComfyUI
+            gen.restart_helps = False
+            missing = os.environ.get("FAKE_COMFY_MISSING", "")
+            gen.missing_loras = lambda need: [lo for lo in need if missing and missing in lo]
+
+            def free():
+                if os.environ.get("FAKE_FREES"):
+                    with open(os.environ["FAKE_FREES"], "a") as f:
+                        f.write("free\n")
+            gen.free = free
         emit({"e": "loaded"})
         return gen
     return cli.serve(a, emit, make)

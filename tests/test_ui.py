@@ -360,7 +360,7 @@ def test_model_stays_loaded_between_runs(app, win, tmp_path, image, monkeypatch)
     monkeypatch.setenv("FAKE_LOADS", str(log))
     ids = new_project(win, tmp_path, image, ("a",))
     run_and_wait(app, win, win.generate_path)
-    assert win.worker_alive and win.model_label.text() == "Model: loaded · unloads in 15 min"
+    assert win.worker_alive and win.model_label.text() == "Model: loaded in ComfyUI · unloads in 15 min"
     assert win.b_unload.isVisibleTo(win)
     win.node_action("continue", ids[0])
     type_prompt(win, win.selected_id(), "b")
@@ -387,6 +387,8 @@ def test_bigger_lora_and_sound_change_reload(app, win, tmp_path, image, monkeypa
     big = tmp_path / "big_rank64.safetensors"
     big.write_bytes(b"x")
     ids = new_project(win, tmp_path, image, ("a",))
+    win.backend.setCurrentIndex(win.backend.findData("ai-toolkit"))    # only ai-toolkit prepares LoRA ranks
+    flush(app, win)
     run_and_wait(app, win, win.generate_path)
     win.node_action("continue", ids[0])
     n2 = win.selected_id()
@@ -420,3 +422,42 @@ def test_worker_quits_after_the_idle_time(tmp_path):
     p.stdin.close()
     assert [e["e"] for e in events] == ["loading", "loaded", "idle", "bye"]
     assert events[-1]["reason"] == "idle" and p.returncode == 0 and time.time() - start < 20
+
+
+def test_unload_frees_comfyui(app, win, tmp_path, image, monkeypatch):
+    frees = tmp_path / "frees.txt"
+    monkeypatch.setenv("FAKE_FREES", str(frees))
+    new_project(win, tmp_path, image, ("a",))
+    run_and_wait(app, win, win.generate_path)
+    win.unload()
+    wait(app, lambda: not win.worker_alive, timeout=15)
+    assert frees.read_text().split() == ["free"]
+
+
+def test_lora_missing_in_comfyui(app, win, tmp_path, image, monkeypatch):
+    monkeypatch.setenv("FAKE_COMFY_MISSING", "own_lora")
+    lora = tmp_path / "own_lora.safetensors"
+    lora.write_bytes(b"x")
+    ids = new_project(win, tmp_path, image, ("a",))
+    win.set_node_lora(ids[0], str(lora))
+    flush(app, win)
+    run_and_wait(app, win, win.generate_path)
+    assert "own_lora.safetensors is not in ComfyUI's LoRA folders" in win.status.text()
+    assert win.state(ids[0]) == "new"
+
+
+def test_comfyui_not_running(app, win, tmp_path, image, monkeypatch):
+    monkeypatch.setenv("FAKE_COMFY_DOWN", "1")
+    new_project(win, tmp_path, image, ("a",))
+    run_and_wait(app, win, win.generate_path)
+    assert "ComfyUI is not running" in win.status.text() and win.comfy_label.text() == "ComfyUI: not running"
+    assert win.b_start_comfy.isEnabled()
+
+
+def test_backend_change_marks_clips(app, win, tmp_path, image):
+    ids = new_project(win, tmp_path, image, ("a",))
+    run_and_wait(app, win, win.generate_path)
+    assert win.state(ids[0]) == "done"
+    win.backend.setCurrentIndex(win.backend.findData("ai-toolkit"))
+    flush(app, win)
+    assert win.state(ids[0]) == "changed" and win.tree.options["backend"] == "ai-toolkit"

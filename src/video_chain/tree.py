@@ -31,7 +31,8 @@ START_FILE = "start.png"
 NO_LORA = "none"                   # override value: this node without any LoRA
 OVERRIDE_KEYS = ("lora", "strength", "frames", "steps")
 DEFAULT_OPTIONS = {"model": "Comfy-Org/MiniMax-H3", "lora": None, "strength": 1.0, "frames": 73, "steps": 28,
-                   "resolution": 512, "audio": True, "keep_repeated": False, "seed": 42}
+                   "resolution": 512, "audio": True, "keep_repeated": False, "seed": 42,
+                   "backend": "comfyui"}         # comfyui | ai-toolkit (they sample differently)
 
 
 @dataclass
@@ -164,8 +165,9 @@ def load(project: Path) -> Tree:
     t = Tree()
     if old:
         t.image = old.get("image")
-        s = old.get("settings") or {}
-        for key in ("model", "lora", "strength", "frames", "steps", "audio"):
+        s = dict(old.get("settings") or {})
+        s.setdefault("backend", "ai-toolkit")        # linear chains were always made with ai-toolkit
+        for key in ("model", "lora", "strength", "frames", "steps", "audio", "backend"):
             if key in s:
                 t.options[key] = s[key]
         parent = None
@@ -255,7 +257,8 @@ def current_settings(project: Path, options: dict) -> dict | None:
     w, h = chain.canvas_size(*chain.image_size(start), int(options.get("resolution", 512)))
     return chain.settings_dict(model=options.get("model", DEFAULT_OPTIONS["model"]), lora=options.get("lora"),
                                strength=options.get("strength", 1.0), frames=options.get("frames", 73),
-                               steps=options.get("steps", 28), width=w, height=h, audio=options.get("audio", True))
+                               steps=options.get("steps", 28), width=w, height=h, audio=options.get("audio", True),
+                               backend=options.get("backend", "comfyui"))
 
 
 def node_settings(base: dict, options: dict, node: Node) -> dict:
@@ -269,7 +272,8 @@ def node_settings(base: dict, options: dict, node: Node) -> dict:
                                strength=ov.get("strength", options.get("strength", 1.0)),
                                frames=ov.get("frames", options.get("frames", 73)),
                                steps=ov.get("steps", options.get("steps", 28)),
-                               width=base["width"], height=base["height"], audio=base["audio"])
+                               width=base["width"], height=base["height"], audio=base["audio"],
+                               backend=base.get("backend", "comfyui"))
 
 
 def loras_needed(tree: Tree, checker: "Checker", nids: list[str]) -> list[str]:

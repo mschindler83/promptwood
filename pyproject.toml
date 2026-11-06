@@ -3,7 +3,7 @@ name = "video-chain"
 version = "0.1.0"
 description = "Chain MiniMax-H3 image-to-video clips: each prompt continues from the last frame of the clip before"
 requires-python = ">=3.12"
-dependencies = ["PySide6>=6.8"]
+dependencies = ["PySide6>=6.8", "websocket-client>=1.7"]
 
 [project.optional-dependencies]
 dev = ["pytest", "pillow", "numpy", "safetensors"]
