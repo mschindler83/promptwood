@@ -218,13 +218,20 @@ def _load_previous(out_dir: Path) -> dict[int, dict]:
 
 
 def settings_dict(*, model: str, lora: str | None, strength: float, frames: int, steps: int, width: int,
-                  height: int, audio: bool, backend: str = "ai-toolkit") -> dict:
+                  height: int, audio: bool, backend: str = "ai-toolkit", refs: list | None = None,
+                  ref_size: str = "match", ref_hint: bool = True) -> dict:
     """What a clip depends on besides prompt, seed and start image; a clip is reused only if this is unchanged.
-    The LoRA counts by content (lora_sha1), so a LoRA retrained into the same file makes its clips change."""
-    return {"model": model, "lora": lora or None, "lora_sha1": file_signature(lora) if lora else None,
-            "strength": float(strength) if lora else 1.0,
-            "frames": int(frames), "steps": int(steps), "width": int(width), "height": int(height),
-            "audio": bool(audio), "backend": backend}
+    The LoRA counts by content (lora_sha1), so a LoRA retrained into the same file makes its clips change.
+    refs: reference images for the face/identity ([{"file": path in the project, "sha1": ...}]), only present when
+    the identity references are on."""
+    s = {"model": model, "lora": lora or None, "lora_sha1": file_signature(lora) if lora else None,
+         "strength": float(strength) if lora else 1.0,
+         "frames": int(frames), "steps": int(steps), "width": int(width), "height": int(height),
+         "audio": bool(audio), "backend": backend}
+    if refs:
+        s.update({"refs": [{"file": r["file"], "sha1": r["sha1"]} for r in refs], "ref_size": ref_size,
+                  "ref_hint": bool(ref_hint)})
+    return s
 
 
 def _write_record(out_dir: Path, settings: dict, clips: list[Clip], done: bool, image: Path | None = None) -> None:

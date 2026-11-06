@@ -17,6 +17,7 @@ and is made again when a path through it is generated. Other branches are not to
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 import shutil
@@ -32,7 +33,11 @@ NO_LORA = "none"                   # override value: this node without any LoRA
 OVERRIDE_KEYS = ("lora", "strength", "frames", "steps")
 DEFAULT_OPTIONS = {"model": "Comfy-Org/MiniMax-H3", "lora": None, "strength": 1.0, "frames": 73, "steps": 28,
                    "resolution": 512, "audio": True, "keep_repeated": False, "seed": 42,
-                   "backend": "comfyui"}         # comfyui | ai-toolkit (they sample differently)
+                   "backend": "comfyui",         # comfyui | ai-toolkit (they sample differently)
+                   # identity: reference images (copies in refs/) every clip sees, so the face stays the same
+                   "identity": {"mode": "off", "images": [], "size": "match", "hint": True}}
+REFS_DIR = "refs"
+MAX_REFS = 9
 
 
 @dataclass
@@ -48,7 +53,7 @@ class Node:
 @dataclass
 class Tree:
     nodes: dict[str, Node] = field(default_factory=dict)
-    options: dict = field(default_factory=lambda: dict(DEFAULT_OPTIONS))
+    options: dict = field(default_factory=lambda: copy.deepcopy(DEFAULT_OPTIONS))
     image: str | None = None       # where the start image came from (start.png is the copy that counts)
     selected: str | None = None
     next_num: int = 1
@@ -121,7 +126,8 @@ class Tree:
         """Raises ValueError for a tree that cannot be right (duplicate ids, missing parents, cycles)."""
         if not isinstance(d, dict):
             raise ValueError("not a tree file")
-        t = cls(options={**DEFAULT_OPTIONS, **(d.get("options") or {})}, image=d.get("image"),
+        t = cls(options={**copy.deepcopy(DEFAULT_OPTIONS), **copy.deepcopy(d.get("options") or {})},
+                image=d.get("image"),
                 selected=d.get("selected"), next_num=int(d.get("next_num") or 1))
         for nd in d.get("nodes", []):
             if not isinstance(nd, dict) or not nd.get("id"):
@@ -190,6 +196,34 @@ def save(project: Path, tree: Tree) -> None:
     tmp.replace(project / TREE_FILE)
 
 
+def add_reference(project: Path, image: Path, tree: Tree) -> str:
+    """Copy an image into refs/ as a reference for the face; returns its name in the project."""
+    ident = dict(tree.options.get("identity") or DEFAULT_OPTIONS["identity"])
+    images = list(ident.get("images") or [])
+    if len(images) >= MAX_REFS:
+        raise ValueError(f"at most {MAX_REFS} reference images")
+    d = Path(project) / REFS_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    k = 1
+    while (d / f"ref{k}.png").exists() or f"{REFS_DIR}/ref{k}.png" in images:
+        k += 1
+    rel = f"{REFS_DIR}/ref{k}.png"
+    chain.to_png(Path(image), Path(project) / rel)
+    images.append(rel)
+    ident["images"] = images
+    tree.options["identity"] = ident
+    return rel
+
+
+def remove_reference(project: Path, rel: str, tree: Tree) -> None:
+    ident = dict(tree.options.get("identity") or {})
+    ident["images"] = [r for r in ident.get("images") or [] if r != rel]
+    tree.options["identity"] = ident
+    target = (Path(project) / rel).resolve()
+    if (Path(project) / REFS_DIR).resolve() in target.parents:
+        target.unlink(missing_ok=True)
+
+
 def set_start_image(project: Path, image: Path, tree: Tree) -> None:
     chain.to_png(Path(image), Path(project) / START_FILE)
     tree.image = str(Path(image).resolve())
@@ -255,10 +289,20 @@ def current_settings(project: Path, options: dict) -> dict | None:
     if not start.is_file():
         return None
     w, h = chain.canvas_size(*chain.image_size(start), int(options.get("resolution", 512)))
+    ident = options.get("identity") or {}
+    refs = None
+    if ident.get("mode") == "reference" and ident.get("images"):
+        refs = []
+        for rel in ident["images"]:
+            sha = chain.file_signature(Path(project) / rel)
+            if sha is None:
+                raise FileNotFoundError(f"reference image missing: {rel}")
+            refs.append({"file": rel, "sha1": sha})
     return chain.settings_dict(model=options.get("model", DEFAULT_OPTIONS["model"]), lora=options.get("lora"),
                                strength=options.get("strength", 1.0), frames=options.get("frames", 73),
                                steps=options.get("steps", 28), width=w, height=h, audio=options.get("audio", True),
-                               backend=options.get("backend", "comfyui"))
+                               backend=options.get("backend", "comfyui"), refs=refs,
+                               ref_size=ident.get("size", "match"), ref_hint=ident.get("hint", True))
 
 
 def node_settings(base: dict, options: dict, node: Node) -> dict:
@@ -273,7 +317,8 @@ def node_settings(base: dict, options: dict, node: Node) -> dict:
                                frames=ov.get("frames", options.get("frames", 73)),
                                steps=ov.get("steps", options.get("steps", 28)),
                                width=base["width"], height=base["height"], audio=base["audio"],
-                               backend=base.get("backend", "comfyui"))
+                               backend=base.get("backend", "comfyui"), refs=base.get("refs"),
+                               ref_size=base.get("ref_size", "match"), ref_hint=base.get("ref_hint", True))
 
 
 def loras_needed(tree: Tree, checker: "Checker", nids: list[str]) -> list[str]:
@@ -342,7 +387,10 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
             f.unlink(missing_ok=True)
         settings = checker.settings(nid)
         start_sha = checker.sha(start)
-        generator.generate(node.prompt, start, new_video, new_frame, node.seed, settings=settings)
+        call = dict(settings)
+        if settings.get("refs"):                   # the generator gets the files; the record keeps names + hashes
+            call["ref_paths"] = [str(project / r["file"]) for r in settings["refs"]]
+        generator.generate(node.prompt, start, new_video, new_frame, node.seed, settings=call)
         if not new_video.exists() or not new_frame.exists():
             raise RuntimeError(f"the generator did not write {video.name} and {frame.name}")
         new_video.replace(video)

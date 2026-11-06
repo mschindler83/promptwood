@@ -504,3 +504,36 @@ def test_lora_lists_offer_the_h3_loras(app, tmp_path, image, monkeypatch):
     flush(app, w)
     assert w.tree.nodes[ids[0]].overrides == {"lora": T.NO_LORA}
     w.close()
+
+
+def test_identity_references_in_the_window(app, win, tmp_path, image):
+    ids = new_project(win, tmp_path, image, ("a", "b"))
+    run_and_wait(app, win, win.generate_path)
+    face = tmp_path / "face.png"
+    Image.new("RGB", (80, 100), (190, 150, 120)).save(face)
+    win.add_reference(str(face))
+    flush(app, win)
+    assert win.ident_mode.currentData() == "reference" and win.refs.count() == 1
+    assert win.refs.item(0).text() == "<Picture 1>" and (tmp_path / "proj" / "refs" / "ref1.png").is_file()
+    assert [win.state(i) for i in ids] == ["changed", "changed"]               # every clip sees the reference now
+    run_and_wait(app, win, win.generate_path)
+    made = T.load(tmp_path / "proj").nodes[ids[0]].made["settings"]
+    assert made["refs"][0]["file"] == "refs/ref1.png" and made["ref_size"] == "match"
+    win.ref_size.setCurrentIndex(win.ref_size.findData("max"))
+    flush(app, win)
+    assert win.state(ids[0]) == "changed"
+    win.backend.setCurrentIndex(win.backend.findData("ai-toolkit"))
+    flush(app, win)
+    wait(app, lambda: not win._joins, timeout=30)                              # the auto-play join of the run
+    win.generate_path()
+    assert not win.running and "reference images need the ComfyUI generator" in win.status.text()
+    win.backend.setCurrentIndex(win.backend.findData("comfyui"))
+    win.refs.setCurrentRow(0)
+    win._remove_reference()
+    flush(app, win)
+    assert win.refs.count() == 0 and not (tmp_path / "proj" / "refs" / "ref1.png").exists()
+    win.generate_path()
+    assert not win.running and "add a reference image" in win.status.text()
+    win.ident_mode.setCurrentIndex(win.ident_mode.findData("off"))
+    flush(app, win)
+    assert [win.state(i) for i in ids] == ["changed", "changed"]               # made with refs, now without

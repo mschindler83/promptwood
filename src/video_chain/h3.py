@@ -204,6 +204,8 @@ class H3Generator:
         from toolkit.config_modules import GenerateImageConfig
 
         s = settings or {}
+        if s.get("ref_paths"):
+            raise RuntimeError("reference images (identity) need the ComfyUI generator; ai-toolkit cannot use them")
         frames = int(s.get("frames", self.frames))
         steps = int(s.get("steps", self.steps))
         width, height = int(s.get("width", self.width)), int(s.get("height", self.height))

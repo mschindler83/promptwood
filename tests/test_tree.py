@@ -330,3 +330,27 @@ def test_start_image_conversion_failure_leaves_the_old_one(project, tmp_path):
         T.set_start_image(project, bad, T.load(project))
     assert (project / T.START_FILE).read_bytes() == before
     assert not list(project.glob("*.part.png"))
+
+
+def test_identity_references(project, tmp_path):
+    t, a, b1, b2, c = build(project)
+    run(project, [c.id])
+    t = T.load(project)
+    face = tmp_path / "face.jpg"
+    Image.new("RGB", (64, 80), (180, 140, 120)).save(face)
+    rel = T.add_reference(project, face, t)
+    assert rel == "refs/ref1.png" and (project / rel).is_file()
+    t.options["identity"]["mode"] = "reference"
+    T.save(project, t)
+    assert set(statuses(project).values()) == {"changed", "new"}               # references change every clip
+    gen = run(project, [c.id])
+    s = gen.calls[0]["settings"]
+    assert s["refs"][0]["file"] == rel and s["ref_paths"] == [str(project / rel)]
+    t = T.load(project)
+    assert "ref_paths" not in t.nodes[a.id].made["settings"]                    # the record keeps names + hashes
+    assert statuses(project)["c"] == "done"
+    Image.new("RGB", (64, 80), (10, 10, 10)).save(project / rel)                 # another reference image
+    assert statuses(project)["a"] == "changed"
+    T.remove_reference(project, rel, t)
+    assert not (project / rel).exists() and t.options["identity"]["images"] == []
+    assert T.Tree().options["identity"] is not T.Tree().options["identity"]     # defaults are not shared

@@ -25,6 +25,8 @@ from pathlib import Path
 
 DEFAULT_URL = "http://127.0.0.1:8188"
 UNET = "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
+UNET_REF = "minimax_h3_ref2va_pruned_int8_convrot.safetensors"      # reference-to-video (identity references)
+REF_HINT = "The person has exactly the face and look of the person in <Picture 1>."
 TEXT_ENCODER = "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
 VIDEO_VAE = "minimax_h3_video_vae_fp16.safetensors"
 AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors"
@@ -145,18 +147,26 @@ def _arg(argv: list, name: str) -> str | None:
     return None
 
 
+def with_ref_hint(prompt: str) -> str:
+    """Add the sentence that ties the person to the reference, unless the prompt already names <Picture ...>."""
+    return prompt if "<Picture" in prompt else f"{prompt.rstrip()} {REF_HINT}"
+
+
 def build_workflow(*, prompt: str, image: str, seed: int, width: int, height: int, frames: int, steps: int,
-                   loras: list[tuple[str, float]], audio: bool, prefix: str) -> dict:
-    """The API-format workflow for one clip (image = the uploaded start image, as LoadImage names it)."""
+                   loras: list[tuple[str, float]], audio: bool, prefix: str, refs: list[str] = (),
+                   ref_size: str = "match", ref_key=lambda i: f"ref_images.ref_image_{i}") -> dict:
+    """The API-format workflow for one clip (image = the uploaded start image, as LoadImage names it).
+
+    With refs (uploaded reference images): the ref2va model; MiniMaxH3ReferenceToVideo gets the references
+    (<Picture 1> ... in the prompt) and MiniMaxH3AddGuide anchors the start image at frame 0, so the clip starts
+    where the previous one ended and sees the same original face."""
     wf: dict = {
-        "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": UNET, "weight_dtype": "default"}},
+        "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": UNET_REF if refs else UNET,
+                                                         "weight_dtype": "default"}},
         "clip": {"class_type": "CLIPLoader", "inputs": {"clip_name": TEXT_ENCODER, "type": "minimax",
                                                          "device": "default"}},
         "vae": {"class_type": "VAELoader", "inputs": {"vae_name": VIDEO_VAE}},
         "start": {"class_type": "LoadImage", "inputs": {"image": image}},
-        "cond": {"class_type": "MiniMaxH3ImageToVideo",
-                 "inputs": {"clip": ["clip", 0], "vae": ["vae", 0], "prompt": prompt, "width": int(width),
-                            "height": int(height), "length": int(frames), "first_frame": ["start", 0]}},
         "noise": {"class_type": "RandomNoise", "inputs": {"noise_seed": int(seed)}},
         "sampler": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": SAMPLER}},
         "decode": {"class_type": "VAEDecode", "inputs": {"samples": ["sample", 0], "vae": ["vae", 0]}},
@@ -165,6 +175,22 @@ def build_workflow(*, prompt: str, image: str, seed: int, width: int, height: in
         "save_last": {"class_type": "SaveImage", "inputs": {"images": ["last", 0],
                                                             "filename_prefix": f"{prefix}_last"}},
     }
+    if refs:
+        inputs = {"clip": ["clip", 0], "vae": ["vae", 0], "prompt": prompt, "width": int(width),
+                  "height": int(height), "length": int(frames), "ref_image_size": ref_size}
+        for i, ref in enumerate(refs):
+            wf[f"ref{i}"] = {"class_type": "LoadImage", "inputs": {"image": ref}}
+            inputs[ref_key(i)] = [f"ref{i}", 0]
+        wf["refcond"] = {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": inputs}
+        wf["cond"] = {"class_type": "MiniMaxH3AddGuide",
+                      "inputs": {"positive": ["refcond", 0], "vae": ["vae", 0], "latent": ["refcond", 1],
+                                 "image": ["start", 0], "frame_idx": 0}}
+        latent = ["refcond", 1]
+    else:
+        wf["cond"] = {"class_type": "MiniMaxH3ImageToVideo",
+                      "inputs": {"clip": ["clip", 0], "vae": ["vae", 0], "prompt": prompt, "width": int(width),
+                                 "height": int(height), "length": int(frames), "first_frame": ["start", 0]}}
+        latent = ["cond", 1]
     model = ["unet", 0]
     for k, (name, strength) in enumerate(loras):
         wf[f"lora{k}"] = {"class_type": "LoraLoaderModelOnly",
@@ -175,7 +201,7 @@ def build_workflow(*, prompt: str, image: str, seed: int, width: int, height: in
     wf["guider"] = {"class_type": "BasicGuider", "inputs": {"model": model, "conditioning": ["cond", 0]}}
     wf["sample"] = {"class_type": "SamplerCustomAdvanced",
                     "inputs": {"noise": ["noise", 0], "guider": ["guider", 0], "sampler": ["sampler", 0],
-                               "sigmas": ["sigmas", 0], "latent_image": ["cond", 1]}}
+                               "sigmas": ["sigmas", 0], "latent_image": latent}}
     video_inputs: dict = {"images": ["decode", 0], "fps": 24.0}
     if audio:
         wf["audio_vae"] = {"class_type": "VAELoader", "inputs": {"vae_name": AUDIO_VAE}}
@@ -251,6 +277,22 @@ class ComfyGenerator:
             if name not in _combo_options(req.get(field)):
                 raise ComfyError(f"ComfyUI does not list {name} ({node}); is it in its model folders?")
 
+    def ref_key(self):
+        """How this ComfyUI names the reference image inputs in the API (from its node description)."""
+        opt = self._object_info("MiniMaxH3ReferenceToVideo").get("input", {}).get("optional", {})
+        spec = opt.get("ref_images")
+        prefix = "ref_image_"
+        if isinstance(spec, list) and len(spec) > 1 and isinstance(spec[1], dict):
+            prefix = (spec[1].get("template") or {}).get("prefix", prefix)
+        return lambda i: f"ref_images.{prefix}{i}"
+
+    def check_ref_model(self):
+        req = self._object_info("UNETLoader").get("input", {}).get("required", {})
+        if UNET_REF not in _combo_options(req.get("unet_name")):
+            raise ComfyError(f"ComfyUI does not list {UNET_REF} (needed for reference images)")
+        if not self._object_info("MiniMaxH3ReferenceToVideo"):
+            raise ComfyError("this ComfyUI has no MiniMax H3 Reference to Video node")
+
     def lora_names(self, refresh: bool = False) -> list[str]:
         if self._loras is None or refresh:
             req = self._object_info("LoraLoaderModelOnly").get("input", {}).get("required", {})
@@ -311,10 +353,17 @@ class ComfyGenerator:
                 raise ComfyError(f"{Path(s['lora']).name} is not in ComfyUI's LoRA folders")
             loras.append((name, float(s.get("strength", 1.0))))
         image = self.upload(Path(start_image))
+        refs = []
+        if s.get("ref_paths"):
+            self.check_ref_model()
+            refs = [self.upload(Path(r)) for r in s["ref_paths"]]
+            if s.get("ref_hint", True):
+                prompt = with_ref_hint(prompt)
         prefix = f"{SUBFOLDER}/{uuid.uuid4().hex[:12]}"
         wf = build_workflow(prompt=prompt, image=image, seed=seed, width=s.get("width", 512),
                             height=s.get("height", 512), frames=s.get("frames", 73), steps=s.get("steps", 20),
-                            loras=loras, audio=bool(s.get("audio", True)), prefix=prefix)
+                            loras=loras, audio=bool(s.get("audio", True)), prefix=prefix, refs=refs,
+                            ref_size=s.get("ref_size", "match"), ref_key=self.ref_key() if refs else None)
         ws = self._connect_ws()
         try:
             res = self._json("POST", "/prompt", {"prompt": wf, "client_id": self.client_id})
@@ -339,8 +388,9 @@ class ComfyGenerator:
         if self.cleanup:
             self._remove(self.output_dir, video, Path(out_video))
             self._remove(self.output_dir, frame, Path(out_last_frame))
-            self._remove(self.input_dir, {"filename": Path(image).name, "subfolder": str(Path(image).parent)},
-                         Path(start_image), same_size=False)
+            for up, local in [(image, Path(start_image))] + list(zip(refs, s.get("ref_paths") or [])):
+                self._remove(self.input_dir, {"filename": Path(up).name, "subfolder": str(Path(up).parent)},
+                             Path(local), same_size=False)
 
     def _remove(self, top: Path | None, f: dict, local: Path, same_size: bool = True) -> None:
         """Delete ComfyUI's copy of a file, only inside its video-chain subfolder and (for outputs) only if the

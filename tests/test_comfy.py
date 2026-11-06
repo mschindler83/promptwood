@@ -235,3 +235,32 @@ def test_find_h3_loras_in_folders_and_links(tmp_path):
     (root / "MiniMax H3" / "mine_step500.safetensors").symlink_to(tmp_path / "training" / "mine.safetensors")
     names = [n for _p, n in C.find_h3_loras([root])]
     assert names == ["a.safetensors", "MiniMax H3/b.safetensors", "MiniMax H3/mine_step500.safetensors"]
+
+
+def test_reference_workflow():
+    wf = C.build_workflow(prompt="She exhales.", image="video-chain/s.png", seed=1, width=512, height=512,
+                          frames=39, steps=20, loras=[], audio=True, prefix="p",
+                          refs=["video-chain/r1.png", "video-chain/r2.png"], ref_size="max")
+    assert wf["unet"]["inputs"]["unet_name"] == C.UNET_REF
+    ref = wf["refcond"]
+    assert ref["class_type"] == "MiniMaxH3ReferenceToVideo" and ref["inputs"]["ref_image_size"] == "max"
+    assert ref["inputs"]["ref_images.ref_image_0"] == ["ref0", 0] and ref["inputs"]["ref_images.ref_image_1"] == ["ref1", 0]
+    guide = wf["cond"]
+    assert guide["class_type"] == "MiniMaxH3AddGuide" and guide["inputs"]["frame_idx"] == 0
+    assert guide["inputs"]["image"] == ["start", 0] and guide["inputs"]["latent"] == ["refcond", 1]
+    assert wf["guider"]["inputs"]["conditioning"] == ["cond", 0] and wf["sample"]["inputs"]["latent_image"] == ["refcond", 1]
+    assert C.with_ref_hint("She exhales.") == "She exhales. " + C.REF_HINT
+    assert C.with_ref_hint("The woman from <Picture 1> exhales.") == "The woman from <Picture 1> exhales."
+
+
+def test_generate_with_references(server, start, tmp_path):
+    (server.root / "main.py").write_text("")
+    ref = tmp_path / "face.png"
+    Image.new("RGB", (300, 400), (200, 150, 120)).save(ref)
+    gen = C.ComfyGenerator(server.url, comfy_dir=server.root)
+    s = settings(ref_paths=[str(ref)], ref_size="match", ref_hint=True)
+    gen.generate("a soft glow appears", start, tmp_path / "v.mp4", tmp_path / "v.png", 3, s)
+    wf = server.prompts[-1]
+    assert wf["refcond"]["inputs"]["prompt"].endswith(C.REF_HINT)
+    assert chain.probe(tmp_path / "v.mp4")["frames"] == 39
+    assert not list((server.root / "input" / "video-chain").glob("*"))           # start + reference cleaned up

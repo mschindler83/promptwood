@@ -10,7 +10,8 @@ from pathlib import Path
 
 KNOWN = {"UNETLoader", "CLIPLoader", "VAELoader", "LoadImage", "MiniMaxH3ImageToVideo", "RandomNoise",
          "KSamplerSelect", "BasicScheduler", "BasicGuider", "SamplerCustomAdvanced", "VAEDecode", "VAEDecodeAudio",
-         "ImageFromBatch", "SaveImage", "CreateVideo", "SaveVideo", "LoraLoaderModelOnly"}
+         "ImageFromBatch", "SaveImage", "CreateVideo", "SaveVideo", "LoraLoaderModelOnly",
+         "MiniMaxH3ReferenceToVideo", "MiniMaxH3AddGuide"}
 
 
 class FakeComfy:
@@ -31,11 +32,14 @@ class FakeComfy:
 
     def object_info(self, node):
         from video_chain import comfy as C
-        files = {"UNETLoader": ("unet_name", [C.UNET]), "CLIPLoader": ("clip_name", [C.TEXT_ENCODER]),
+        files = {"UNETLoader": ("unet_name", [C.UNET, C.UNET_REF]), "CLIPLoader": ("clip_name", [C.TEXT_ENCODER]),
                  "VAELoader": ("vae_name", [C.VIDEO_VAE, C.AUDIO_VAE]),
                  "LoraLoaderModelOnly": ("lora_name", self.loras)}
         if node == "MiniMaxH3ImageToVideo":
             return {node: {"input": {"required": {}}}}
+        if node == "MiniMaxH3ReferenceToVideo":
+            return {node: {"input": {"required": {}, "optional": {"ref_images": [
+                "COMFY_AUTOGROW_V3", {"template": {"prefix": "ref_image_", "min": 0, "max": 9}}]}}}}
         if node in files:
             field, names = files[node]
             names = [] if self.models_missing and node == "UNETLoader" else names
@@ -48,8 +52,16 @@ class FakeComfy:
             for v in n["inputs"].values():
                 if isinstance(v, list) and len(v) == 2 and isinstance(v[1], int):
                     assert v[0] in wf, f"{nid} links to missing node {v[0]}"
-        cond = wf["cond"]["inputs"]
-        assert cond["first_frame"] == ["start", 0]
+        if "refcond" in wf:                         # identity references: ref2va + the start image as guide
+            cond = wf["refcond"]["inputs"]
+            assert wf["cond"]["class_type"] == "MiniMaxH3AddGuide" and wf["cond"]["inputs"]["image"] == ["start", 0]
+            assert wf["unet"]["inputs"]["unet_name"].startswith("minimax_h3_ref2va")
+            for k, v in cond.items():
+                if k.startswith("ref_images."):
+                    assert (self.root / "input" / wf[v[0]]["inputs"]["image"]).is_file(), "reference not uploaded"
+        else:
+            cond = wf["cond"]["inputs"]
+            assert cond["first_frame"] == ["start", 0]
         image = self.root / "input" / wf["start"]["inputs"]["image"]
         assert image.is_file(), "start image was not uploaded"
         w, h, n = cond["width"], cond["height"], cond["length"]

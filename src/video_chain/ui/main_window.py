@@ -16,15 +16,17 @@ import time
 import urllib.request
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QSettings, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QImage, QKeySequence, QPixmap, QShortcut
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
-                               QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
+from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QSettings, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QIcon, QImage, QKeySequence, QPixmap, QShortcut
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
+                               QFrame, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu,
+                               QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
                                QScrollArea, QSlider, QSpinBox, QSplitter, QStackedWidget, QTabWidget, QVBoxLayout,
                                QWidget)
 
 from .. import chain
 from .. import tree as T
+from ..comfy import REF_HINT
 from .graph import START, GraphView, NodeInfo
 from .theme import icon, repolish, theme
 from .widgets import FrameTile, icon_button, label, section_bar
@@ -499,6 +501,57 @@ class MainWindow(QMainWindow):
         sv.addWidget(self.size_info)
         lv.addWidget(sw)
 
+        bar, _ = section_bar("Identity (face)", left)
+        lv.addWidget(bar)
+        iw = QWidget()
+        iv = QVBoxLayout(iw)
+        iv.setContentsMargins(10, 6, 10, 8)
+        iv.setSpacing(6)
+        self.ident_mode = QComboBox()
+        self.ident_mode.addItem("Off", "off")
+        self.ident_mode.addItem("Reference images (H3 ref2va)", "reference")
+        self.ident_mode.setToolTip("With reference images every clip sees the same original face (<Picture 1> ...), "
+                                   "not only the last frame of the clip before, so the face does not drift along "
+                                   "the chain. Uses H3's reference-to-video model (ComfyUI generator only).")
+        iv.addWidget(self.ident_mode)
+        self.refs = QListWidget()
+        self.refs.setViewMode(QListWidget.IconMode)
+        self.refs.setIconSize(QSize(72, 72))
+        self.refs.setFixedHeight(100)
+        self.refs.setMovement(QListWidget.Static)
+        self.refs.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.refs.setToolTip("Reference images: best a sharp close-up of the face; <Picture 1> is the first")
+        iv.addWidget(self.refs)
+        rrow = QHBoxLayout()
+        self.b_ref_add = QPushButton("Add…")
+        self.b_ref_add.clicked.connect(self._add_reference)
+        self.b_ref_start = QPushButton("Use start image")
+        self.b_ref_start.clicked.connect(lambda: self.add_reference(str(self.project / T.START_FILE))
+                                         if self.project else None)
+        self.b_ref_del = QPushButton("Remove")
+        self.b_ref_del.clicked.connect(self._remove_reference)
+        for b in (self.b_ref_add, self.b_ref_start, self.b_ref_del):
+            rrow.addWidget(b)
+        iv.addLayout(rrow)
+        irow = QFormLayout()
+        irow.setContentsMargins(0, 0, 0, 0)
+        self.ref_size = QComboBox()
+        self.ref_size.addItem("match (fast)", "match")
+        self.ref_size.addItem("max 2048 px (best likeness, slower)", "max")
+        irow.addRow("Size", self.ref_size)
+        iv.addLayout(irow)
+        self.ref_hint = QCheckBox("Add a <Picture 1> hint to prompts")
+        self.ref_hint.setChecked(True)
+        self.ref_hint.setToolTip(f"Prompts that do not mention <Picture ...> get: \"{REF_HINT}\"")
+        iv.addWidget(self.ref_hint)
+        self.ident_info = label("", level="tertiary")
+        self.ident_info.setWordWrap(True)
+        iv.addWidget(self.ident_info)
+        lv.addWidget(iw)
+        self.ident_mode.currentIndexChanged.connect(self._identity_changed)
+        self.ref_size.currentIndexChanged.connect(self._identity_changed)
+        self.ref_hint.toggled.connect(self._identity_changed)
+
         bar, _ = section_bar("LoRA", left)
         lv.addWidget(bar)
         fw = QWidget()
@@ -825,6 +878,7 @@ class MainWindow(QMainWindow):
         self.live, self.progress_of = {}, {}
         self._options_to_widgets()
         self._show_start_image()
+        self._show_references()
         if not tree.nodes:
             tree.selected = tree.add(None, "").id
         if tree.selected is None:
@@ -855,6 +909,10 @@ class MainWindow(QMainWindow):
             self.audio.setChecked(bool(o.get("audio", True)))
             i = self.backend.findData(o.get("backend", "comfyui"))
             self.backend.setCurrentIndex(i if i >= 0 else 0)
+            ident = o.get("identity") or {}
+            self.ident_mode.setCurrentIndex(max(0, self.ident_mode.findData(ident.get("mode", "off"))))
+            self.ref_size.setCurrentIndex(max(0, self.ref_size.findData(ident.get("size", "match"))))
+            self.ref_hint.setChecked(bool(ident.get("hint", True)))
             self.keep_rep.setChecked(bool(o.get("keep_repeated", False)))
         finally:
             self._loading = False
@@ -869,8 +927,77 @@ class MainWindow(QMainWindow):
             "steps": self.steps.value(), "audio": self.audio.isChecked(), "keep_repeated": self.keep_rep.isChecked(),
             "backend": self.backend.currentData()})
         self._update_size_info()
+        self._show_references()
         self._refresh_card_choices()
         self._changed()
+
+    # ---- identity references
+    def _identity_changed(self, *_):
+        if self._loading or self.tree is None or self.running:
+            return
+        ident = dict(self.tree.options.get("identity") or {})
+        ident.update({"mode": self.ident_mode.currentData(), "size": self.ref_size.currentData(),
+                      "hint": self.ref_hint.isChecked()})
+        self.tree.options["identity"] = ident
+        self._show_references()
+        self._changed()
+
+    def _add_reference(self):
+        if self.project is None:
+            self.status.setText("Open or create a project folder first.")
+            return
+        f, _ = QFileDialog.getOpenFileName(self, "Reference image (best a close-up of the face)", "", IMAGE_FILTER)
+        if f:
+            self.add_reference(f)
+
+    def add_reference(self, path: str):
+        if self.project is None or self.running:
+            return
+        if QImage(path).isNull():
+            self.status.setText(f"Not an image: {Path(path).name}")
+            return
+        try:
+            T.add_reference(self.project, Path(path), self.tree)
+        except (ValueError, OSError, RuntimeError) as e:
+            self.status.setText(f"Could not add the reference: {e}")
+            return
+        if self.ident_mode.currentData() == "off":      # adding one means using them
+            self.ident_mode.setCurrentIndex(self.ident_mode.findData("reference"))
+        self._show_references()
+        self._write_tree()
+        self._changed()
+
+    def _remove_reference(self):
+        item = self.refs.currentItem()
+        if item is None or self.project is None or self.running:
+            return
+        T.remove_reference(self.project, item.data(Qt.UserRole), self.tree)
+        self._pix.clear()
+        self._show_references()
+        self._write_tree()
+        self._changed()
+
+    def _show_references(self):
+        self.refs.clear()
+        ident = (self.tree.options.get("identity") or {}) if self.tree else {}
+        for k, rel in enumerate(ident.get("images") or [], start=1):
+            pm = self._pixmap(self.project / rel) if self.project else None
+            item = QListWidgetItem(QIcon(pm) if pm else QIcon(), f"<Picture {k}>")
+            item.setData(Qt.UserRole, rel)
+            item.setToolTip(rel)
+            self.refs.addItem(item)
+        on = ident.get("mode") == "reference"
+        n = len(ident.get("images") or [])
+        if not on:
+            text = "Off: every clip only continues from the last frame of the clip before."
+        elif not n:
+            text = "Add a reference image (best a sharp close-up of the face)."
+        elif self.current_backend() != "comfyui":
+            text = "Reference images need the ComfyUI generator (Clips → Generator)."
+        else:
+            text = (f"{n} reference image{'s' if n != 1 else ''}: every clip sees the same face. Uses H3's ref2va "
+                    "model; LoRAs trained on the normal model may act weaker there.")
+        self.ident_info.setText(text)
 
     def _changed(self):
         """Something the clips depend on changed: save soon and update the states."""
@@ -1098,7 +1225,8 @@ class MainWindow(QMainWindow):
         self._update_comfy_label()
         for w in (self.start_tile, self.lora, self.b_lora, self.strength, self.frames, self.resolution, self.steps,
                   self.audio, self.keep_rep, self.offload, self.min_free, self.aitk, self.b_project, self.backend,
-                  self.comfy_url):
+                  self.comfy_url, self.ident_mode, self.ref_size, self.ref_hint, self.b_ref_add, self.b_ref_start,
+                  self.b_ref_del):
             w.setEnabled(idle)
 
     def select(self, nid):
@@ -1454,6 +1582,12 @@ class MainWindow(QMainWindow):
         problems = []
         if not (self.project / T.START_FILE).is_file():
             problems.append("choose a start image")
+        ident = self.tree.options.get("identity") or {}
+        if ident.get("mode") == "reference":
+            if not ident.get("images"):
+                problems.append("add a reference image (Identity) or switch it off")
+            elif self.current_backend() != "comfyui":
+                problems.append("reference images need the ComfyUI generator")
         nodes = {n.id: n for t in targets for n in self.tree.path_to(t)}
         empty = [n for n in nodes.values() if not n.prompt.strip()]
         if empty:
