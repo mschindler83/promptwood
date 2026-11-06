@@ -12,14 +12,19 @@ import traceback
 from pathlib import Path
 
 from . import chain
+from . import tree as treemod
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="video-chain", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("image", type=Path, help="start image of the first clip")
-    p.add_argument("prompts", type=Path, help="text file, one prompt per line (# comments and empty lines skipped)")
-    p.add_argument("--out", type=Path, required=True, help="output folder (clips, last frames, chain.mp4)")
+    p.add_argument("image", type=Path, nargs="?", help="start image of the first clip")
+    p.add_argument("prompts", type=Path, nargs="?",
+                   help="text file, one prompt per line (# comments and empty lines skipped)")
+    p.add_argument("--out", type=Path, help="output folder (clips, last frames, chain.mp4)")
+    p.add_argument("--tree", type=Path, help="branching mode: a project folder with tree.json (made by the GUI); "
+                                             "image, prompts and clip settings come from there")
+    p.add_argument("--targets", default="", help="branching mode: comma-separated node ids whose paths to make")
     p.add_argument("--lora", type=Path, help="H3 LoRA (.safetensors) to apply; none = base model")
     p.add_argument("--strength", type=float, default=1.0, help="LoRA strength (default 1.0)")
     p.add_argument("--frames", type=int, default=73, help="frames per clip, 17n+5: 39, 56, 73 (default), 90, 107, 124")
@@ -67,7 +72,56 @@ def _fail(emit, msg: str) -> int:
     return 2
 
 
+def _generator(a, emit, current, width, height, frames, steps, lora, strength, model, audio):
+    emit({"e": "loading"})
+    from .h3 import H3Generator          # imports torch / ai-toolkit: only now, after the cheap checks
+    gen = H3Generator(width=width, height=height, frames=frames, steps=steps, lora=lora, strength=strength,
+                      model=model, offload=a.offload, audio=audio, aitk=a.aitk, min_free_gb=a.min_free_gb,
+                      progress=lambda i, n: emit({"e": "step", "id": current["id"], "k": current["k"],
+                                                  "i": i, "n": n}))
+    emit({"e": "loaded"})
+    return gen
+
+
+def _main_tree(a, emit) -> int:
+    project = a.tree.expanduser().resolve()
+    tree = treemod.load(project)
+    targets = [t for t in a.targets.split(",") if t]
+    if not targets:
+        return _fail(emit, "--targets: no node ids given")
+    unknown = [t for t in targets if t not in tree.nodes]
+    if unknown:
+        return _fail(emit, f"unknown node {unknown[0]}")
+    settings = treemod.current_settings(project, tree.options)
+    if settings is None:
+        return _fail(emit, "the project has no start image")
+    checker = treemod.Checker(project, tree)
+    todo = treemod.plan(tree, checker, targets)
+    emit({"e": "start", "nodes": len(todo), "width": settings["width"], "height": settings["height"],
+          "frames": settings["frames"], "steps": settings["steps"], "out": str(project)})
+    current = {"id": None, "k": 0}
+
+    def on_event(ev: dict) -> None:
+        if ev.get("e") == "node" and ev.get("state") == "generating":
+            current["id"], current["k"] = ev["id"], ev.get("k", 0)
+        emit(ev)
+
+    if not todo:                                   # nothing to make: no need to load the model
+        treemod.run_tree(None, project, targets, events=on_event)
+        return 0
+    o = tree.options
+    lora = Path(o["lora"]) if o.get("lora") else None
+    gen = _generator(a, emit, current, settings["width"], settings["height"], settings["frames"], settings["steps"],
+                     lora, settings["strength"], settings["model"], settings["audio"])
+    treemod.run_tree(gen, project, targets, events=on_event)
+    return 0
+
+
 def _main(a, emit) -> int:
+    if a.tree:
+        return _main_tree(a, emit)
+    if a.image is None or a.prompts is None or a.out is None:
+        return _fail(emit, "give IMAGE PROMPTS --out DIR, or --tree PROJECT --targets IDS")
     if a.frames < 22 or a.frames % 17 != 5:
         return _fail(emit, f"--frames must be on H3's 17n+5 grid (39, 56, 73, 90, 107, 124), got {a.frames}")
     if not a.prompts.is_file():
@@ -98,13 +152,8 @@ def _main(a, emit) -> int:
             current["k"] = ev["k"]
         emit(ev)
 
-    emit({"e": "loading"})
-    from .h3 import H3Generator          # imports torch / ai-toolkit: only now, after the cheap checks
-    gen = H3Generator(width=width, height=height, frames=a.frames, steps=a.steps, lora=lora, strength=a.strength,
-                      model=a.model, offload=a.offload, audio=not a.no_audio, aitk=a.aitk,
-                      min_free_gb=a.min_free_gb,
-                      progress=lambda i, n: emit({"e": "step", "k": current["k"], "i": i, "n": n}))
-    emit({"e": "loaded"})
+    current.setdefault("id", None)
+    gen = _generator(a, emit, current, width, height, a.frames, a.steps, lora, a.strength, a.model, not a.no_audio)
     result = chain.run_chain(gen, image, prompts, out, seed=a.seed, same_seed=a.same_seed, settings=settings,
                              resume=not a.redo, drop_first=not a.keep_repeated_frames, events=on_event)
     chain.copy_prompts(prompts_file, out)

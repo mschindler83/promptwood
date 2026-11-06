@@ -1,22 +1,27 @@
-"""Promptwood window: start image + prompt cards -> chained MiniMax-H3 clips.
+"""Promptwood window: a start image and a tree of clips. Every clip continues from the last frame of the clip
+before it; any clip can be continued in several ways (branches). A path from the start to a clip is one video.
 
-Generation runs in a separate process (the video-chain launcher with ai-toolkit's Python) that reports progress as
-'@@ {json}' lines; this window only edits, starts, stops and shows. Stopping ends only that process.
+The project folder holds tree.json, start.png and the clips (see tree.py). Generation runs in a separate process
+(the video-chain launcher with ai-toolkit's Python) that reports '@@ {json}' events; Stop ends only that process.
 """
 from __future__ import annotations
 
 import json
+import random
 import shutil
+import threading
 from pathlib import Path
 
-from PySide6.QtCore import QProcess, QProcessEnvironment, QSettings, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QImage, QKeySequence, QShortcut
+from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QSettings, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
-                               QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
-                               QScrollArea, QSlider, QSpinBox, QSplitter, QStackedWidget, QTabWidget,
-                               QVBoxLayout, QWidget)
+                               QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
+                               QScrollArea, QSlider, QSpinBox, QSplitter, QStackedWidget, QTabWidget, QVBoxLayout,
+                               QWidget)
 
 from .. import chain
+from .. import tree as T
+from .graph import START, GraphView, NodeInfo
 from .theme import icon, repolish, theme
 from .widgets import FrameTile, icon_button, label, section_bar
 
@@ -25,15 +30,10 @@ LAUNCHER = PROJECT_DIR / "video-chain"
 DEFAULT_AITK = "/path/to/ai/ai-toolkit"
 FRAME_CHOICES = [39, 56, 73, 90, 107, 124]
 IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff)"
-STATE_TEXT = {"": "", "waiting": "WAITING", "generating": "GENERATING", "done": "DONE", "reused": "REUSED",
-              "failed": "FAILED", "stopped": "STOPPED", "changed": "CHANGED"}
+STATE_TEXT = {"done": "DONE", "reused": "DONE", "changed": "CHANGED", "new": "NOT MADE", "generating": "GENERATING",
+              "failed": "FAILED", "stopped": "STOPPED"}
 STATE_STYLE = {"done": "done", "reused": "done", "generating": "target", "failed": "failed", "stopped": "missing",
-               "changed": "missing", "waiting": ""}
-
-
-def qimage(path: Path | str) -> QImage:
-    img = QImage(str(path))
-    return img
+               "changed": "missing", "new": ""}
 
 
 def fmt_time(seconds: float) -> str:
@@ -41,101 +41,102 @@ def fmt_time(seconds: float) -> str:
     return f"{int(m)}:{s:04.1f}"
 
 
-# ----------------------------------------------------------------------------- prompt card
+class _Bridge(QObject):
+    joined = Signal(object, object, str, str)  # path or None, error or None, purpose, status prefix
+
+
+# ----------------------------------------------------------------------------- path card
 
 class PromptCard(QFrame):
-    changed = Signal()
-    moveUp = Signal(object)
-    moveDown = Signal(object)
-    remove = Signal(object)
-    play = Signal(object)
+    """One clip of the selected path: prompt, seed, status, last frame."""
+    edited = Signal(str)
+    seedChanged = Signal(str, int)
+    action = Signal(str, str)                  # action, node id
+    play = Signal(str)
 
-    def __init__(self, text: str = "", parent=None):
+    def __init__(self, node: T.Node, parent=None):
         super().__init__(parent)
+        self.nid = node.id
         self.setObjectName("promptCard")
         self.setAttribute(Qt.WA_StyledBackground)
-        self.video: Path | None = None
+        self.setFixedWidth(330)
         self.state = ""
         v = QVBoxLayout(self)
         v.setContentsMargins(10, 8, 8, 10)
         v.setSpacing(6)
         head = QHBoxLayout()
         head.setSpacing(6)
-        self.title = label("Clip 1", type_="heading")
-        self.span = label("", level="tertiary")
+        self.title = label("Clip", type_="heading")
+        self.sub = label(f"#{node.id[1:]}", level="tertiary")
         self.tag = label("", role="statusTag")
-        self.tag.hide()
         head.addWidget(self.title)
-        head.addWidget(self.span)
+        head.addWidget(self.sub)
         head.addWidget(self.tag)
         head.addStretch(1)
-        self.b_up = icon_button("chu", "Move up")
-        self.b_down = icon_button("chd", "Move down")
-        self.b_del = icon_button("trash", "Remove this prompt")
-        for b in (self.b_up, self.b_down, self.b_del):
+        self.buttons = []
+        for act, ic, tip in (("variant", "clone", "Variant: same prompt, other seed, as a new branch (Ctrl+D)"),
+                             ("branch", "split", "Branch: another continuation from the same point (Ctrl+B)"),
+                             ("delete", "trash", "Delete this clip and everything after it")):
+            b = icon_button(ic, tip)
+            b.clicked.connect(lambda _=False, a=act: self.action.emit(a, self.nid))
             head.addWidget(b)
+            self.buttons.append(b)
         v.addLayout(head)
-        body = QHBoxLayout()
-        body.setSpacing(8)
-        self.edit = QPlainTextEdit(text)
-        self.edit.setPlaceholderText("Describe what happens in this clip. It starts from the last frame of the clip "
-                                     "before (clip 1: from the start image).")
-        self.edit.setTabChangesFocus(True)
-        self.edit.setMinimumHeight(86)
-        self.edit.setMaximumHeight(140)
-        body.addWidget(self.edit, 1)
-        self.thumb = FrameTile(144, 81)
+        self.span = label("", level="tertiary")
+        v.addWidget(self.span)
+        self.thumb = FrameTile(312, 176)
         self.thumb.setToolTip("Last frame of this clip; click to play the clip")
-        self.thumb.clear_frame("not made yet")
-        body.addWidget(self.thumb, 0, Qt.AlignTop)
-        v.addLayout(body)
+        self.thumb.clicked.connect(lambda _t: self.play.emit(self.nid))
+        v.addWidget(self.thumb)
+        self.edit = QPlainTextEdit(node.prompt)
+        self.edit.setPlaceholderText("What happens in this clip? It starts from the last frame of the clip before.")
+        self.edit.setTabChangesFocus(True)
+        self.edit.setMinimumHeight(96)
+        v.addWidget(self.edit, 1)
         foot = QHBoxLayout()
         self.words = label("", level="tertiary")
-        self.step = label("", level="tertiary")
         foot.addWidget(self.words)
         foot.addStretch(1)
-        foot.addWidget(self.step)
+        foot.addWidget(label("Seed", level="tertiary"))
+        self.seed = QSpinBox()
+        self.seed.setRange(0, 2_000_000_000)
+        self.seed.setValue(node.seed)
+        self.seed.setToolTip("Seed of this clip; another seed gives another version")
+        foot.addWidget(self.seed)
         v.addLayout(foot)
+        self.step = label("", level="tertiary")
+        v.addWidget(self.step)
         self.bar = QProgressBar()
         self.bar.setRange(0, 100)
         self.bar.hide()
         v.addWidget(self.bar)
-
-        self.edit.textChanged.connect(self._text_changed)
-        self.b_up.clicked.connect(lambda: self.moveUp.emit(self))
-        self.b_down.clicked.connect(lambda: self.moveDown.emit(self))
-        self.b_del.clicked.connect(lambda: self.remove.emit(self))
-        self.thumb.clicked.connect(lambda _t: self.play.emit(self))
-        self._update_words()
+        self.edit.textChanged.connect(self._text)
+        self.seed.valueChanged.connect(lambda s: self.seedChanged.emit(self.nid, s))
+        self._words()
         self._restyle()
 
     def text(self) -> str:
         return " ".join(self.edit.toPlainText().split())
 
-    def _text_changed(self):
-        self._update_words()
-        self.changed.emit()
+    def _text(self):
+        self._words()
+        self.edited.emit(self.nid)
 
-    def _update_words(self):
+    def _words(self):
         n = len(self.text().split())
-        self.words.setText(f"{n} words" if n else "empty")
+        self.words.setText(f"{n} words" if n else "empty prompt")
 
-    def set_number(self, k: int, start: float, end: float, first: bool, last: bool):
-        self.title.setText(f"Clip {k}")
-        self.span.setText(f"{fmt_time(start)} – {fmt_time(end)}")
-        self.b_up.setEnabled(not first)
-        self.b_down.setEnabled(not last)
-
-    def set_state(self, state: str, step: str = ""):
+    def set_state(self, state: str, pixmap: QPixmap | None, step: str = ""):
         self.state = state
-        self.tag.setVisible(bool(STATE_TEXT.get(state)))
         self.tag.setText(STATE_TEXT.get(state, state.upper()))
         self.tag.setProperty("state", STATE_STYLE.get(state, ""))
         repolish(self.tag)
+        if pixmap is not None and not pixmap.isNull():
+            self.thumb.set_image(pixmap.toImage())
+        else:
+            self.thumb.clear_frame("not made yet")
         self.step.setText(step)
         self.bar.setVisible(state == "generating")
-        if state != "generating":
-            self.bar.setValue(0)
         self._restyle()
 
     def set_progress(self, i: int, n: int):
@@ -143,29 +144,20 @@ class PromptCard(QFrame):
             self.bar.setValue(round(100 * i / n))
             self.step.setText(f"step {i} / {n}")
 
-    def set_result(self, video: Path | None, frame: Path | None):
-        self.video = video if video and video.exists() else None
-        if frame and frame.exists():
-            self.thumb.set_image(qimage(frame))
-        else:
-            self.thumb.clear_frame("not made yet")
-        self.thumb.setCursor(Qt.PointingHandCursor if self.video else Qt.ArrowCursor)
-
     def set_editable(self, on: bool):
         self.edit.setReadOnly(not on)
-        for b in (self.b_up, self.b_down, self.b_del):
-            b.setVisible(on)
+        self.seed.setEnabled(on)
+        for b in self.buttons:
+            b.setEnabled(on)
 
     def _restyle(self):
         t = theme()
         border = t.accent.name() if self.state == "generating" else t.lineSubtle.name()
-        self.setStyleSheet(
-            f"QFrame#promptCard {{ background: {t.bgRaised.name()}; border: 1px solid {border};"
-            f" border-radius: 6px; }}"
-            f"QFrame#promptCard QLabel {{ background: transparent; }}")
+        self.setStyleSheet(f"QFrame#promptCard {{ background: {t.bgRaised.name()}; border: 1px solid {border};"
+                           f" border-radius: 6px; }} QFrame#promptCard QLabel {{ background: transparent; }}")
 
 
-# ----------------------------------------------------------------------------- start image tile
+# ----------------------------------------------------------------------------- start image tile, preview
 
 class StartTile(FrameTile):
     dropped = Signal(str)
@@ -187,10 +179,8 @@ class StartTile(FrameTile):
                 break
 
 
-# ----------------------------------------------------------------------------- preview
-
 class Preview(QWidget):
-    """Video player for clips and the chain. The media player is created on first use."""
+    """Video player for clips and paths. The media player is created on first use."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -199,16 +189,16 @@ class Preview(QWidget):
         v.setContentsMargins(8, 8, 8, 8)
         v.setSpacing(6)
         self.stack = QStackedWidget()
-        self.placeholder = label("Nothing to play yet.\nClick a clip's picture, or play the whole chain.",
+        self.placeholder = label("Nothing to play yet.\nDouble-click a clip, or play the selected path.",
                                  level="tertiary")
         self.placeholder.setAlignment(Qt.AlignCenter)
-        self.placeholder.setMinimumHeight(220)
+        self.placeholder.setMinimumHeight(200)
         self.stack.addWidget(self.placeholder)
         v.addWidget(self.stack, 1)
         self.name = label("", level="secondary")
         v.addWidget(self.name)
         row = QHBoxLayout()
-        self.b_play = icon_button("play", "Play / pause (Space)")
+        self.b_play = icon_button("play", "Play / pause")
         self.b_play.setEnabled(False)
         self.slider = QSlider(Qt.Horizontal)
         self.slider.setEnabled(False)
@@ -230,7 +220,7 @@ class Preview(QWidget):
             self.placeholder.setText("Video playback is not available (QtMultimedia missing).")
             return False
         self.video = QVideoWidget()
-        self.video.setMinimumHeight(220)
+        self.video.setMinimumHeight(200)
         self.stack.addWidget(self.video)
         self.audio = QAudioOutput(self)
         self.player = QMediaPlayer(self)
@@ -245,6 +235,7 @@ class Preview(QWidget):
         if not path or not Path(path).exists() or not self._ensure_player():
             return
         self.player.stop()
+        self.player.setSource(QUrl())
         self.player.setSource(QUrl.fromLocalFile(str(path)))
         self.stack.setCurrentWidget(self.video)
         self.name.setText(title)
@@ -284,33 +275,42 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Promptwood")
         self.qs = settings or QSettings()
-        self.command = command          # tests replace the launcher with a fake backend
+        self.command = command                  # tests replace the launcher with a fake backend
+        self.project: Path | None = None
+        self.tree: T.Tree | None = None
+        self.status_of: dict[str, str] = {}
+        self.live: dict[str, str] = {}          # states during a run (generating / failed / stopped)
+        self.progress_of: dict[str, float] = {}
         self.cards: list[PromptCard] = []
+        self._pix: dict[tuple, QPixmap] = {}
         self.proc: QProcess | None = None
-        self._buf = ""
+        self._buf = self._ebuf = ""
         self._stopping = False
-        self._run_out: Path | None = None
-        self._clips_total = 0
         self._phase = ""
         self._error = ""
-        self._image_size: tuple[int, int] | None = None
+        self._plan: list[str] = []
+        self._targets: list[str] = []
+        self._loading = False
+        self.bridge = _Bridge()
+        self.bridge.joined.connect(self._joined)
+        self._join_lock = threading.Lock()      # joins run one after another (play after generating + export)
+        self._save_timer = QTimer(self, singleShot=True, interval=400, timeout=self._save_tree)
+        self._refresh_timer = QTimer(self, singleShot=True, interval=250, timeout=self.refresh)
         self._build()
         self._load_settings()
-        self._gpu_timer = QTimer(self)
-        self._gpu_timer.timeout.connect(self._poll_gpu)
-        self._gpu_timer.start(4000)
         self._gpu_proc: QProcess | None = None
+        self._gpu_timer = QTimer(self, interval=4000, timeout=self._poll_gpu)
+        self._gpu_timer.start()
         QTimer.singleShot(0, self._poll_gpu)
 
-    # ---- layout
+    # ------------------------------------------------------------------ layout
     def _build(self):
-        self.resize(1480, 900)
+        self.resize(1560, 940)
         split = QSplitter(Qt.Horizontal, self)
         split.setChildrenCollapsible(False)
         self.setCentralWidget(split)
         self.split = split
 
-        # left: settings
         ls = QScrollArea()
         ls.setWidgetResizable(True)
         ls.setFrameShape(QFrame.NoFrame)
@@ -319,6 +319,25 @@ class MainWindow(QMainWindow):
         lv.setContentsMargins(0, 0, 0, 0)
         lv.setSpacing(0)
 
+        bar, _ = section_bar("Project", left)
+        lv.addWidget(bar)
+        pw = QWidget()
+        pf = QFormLayout(pw)
+        pf.setContentsMargins(10, 6, 10, 8)
+        prow = QHBoxLayout()
+        self.project_edit = QLineEdit()
+        self.project_edit.setPlaceholderText("a folder for this chain (new or existing)")
+        self.project_edit.setReadOnly(True)
+        self.b_project = icon_button("fopen", "Open or create a project folder")
+        self.b_project.clicked.connect(self._choose_project)
+        self.b_open_dir = icon_button("folder", "Show the project folder")
+        self.b_open_dir.clicked.connect(self._open_dir)
+        prow.addWidget(self.project_edit, 1)
+        prow.addWidget(self.b_project)
+        prow.addWidget(self.b_open_dir)
+        pf.addRow("Folder", prow)
+        lv.addWidget(pw)
+
         bar, _ = section_bar("Start image", left)
         lv.addWidget(bar)
         sw = QWidget()
@@ -326,11 +345,8 @@ class MainWindow(QMainWindow):
         sv.setContentsMargins(10, 8, 10, 8)
         self.start_tile = StartTile(320, 180)
         sv.addWidget(self.start_tile, 0, Qt.AlignHCenter)
-        self.image_path = label("", level="secondary")
-        self.image_path.setWordWrap(True)
         self.size_info = label("", level="tertiary")
         self.size_info.setWordWrap(True)
-        sv.addWidget(self.image_path)
         sv.addWidget(self.size_info)
         lv.addWidget(sw)
 
@@ -342,15 +358,14 @@ class MainWindow(QMainWindow):
         lrow = QHBoxLayout()
         self.lora = QLineEdit()
         self.lora.setPlaceholderText("none: base model")
-        b = icon_button("fopen", "Choose a LoRA (.safetensors)")
-        b.clicked.connect(self._choose_lora)
+        self.b_lora = icon_button("fopen", "Choose a LoRA (.safetensors)")
+        self.b_lora.clicked.connect(self._choose_lora)
         lrow.addWidget(self.lora, 1)
-        lrow.addWidget(b)
+        lrow.addWidget(self.b_lora)
         f.addRow("File", lrow)
         self.strength = QDoubleSpinBox()
         self.strength.setRange(0.0, 2.0)
         self.strength.setSingleStep(0.05)
-        self.strength.setDecimals(2)
         self.strength.setValue(1.0)
         f.addRow("Strength", self.strength)
         lv.addWidget(fw)
@@ -364,64 +379,26 @@ class MainWindow(QMainWindow):
         for n in FRAME_CHOICES:
             self.frames.addItem(f"{n} frames ({n / 24:.1f} s)", n)
         self.frames.setCurrentIndex(FRAME_CHOICES.index(73))
-        self.frames.setToolTip("Length of every clip. Longer clips need more GPU memory and time")
         c.addRow("Length", self.frames)
         self.resolution = QComboBox()
         for r, txt in ((384, "384 (fast draft)"), (512, "512 (like the training)"), (640, "640"), (768, "768")):
             self.resolution.addItem(txt, r)
         self.resolution.setCurrentIndex(1)
-        self.resolution.setToolTip("About this many pixels squared, in the start image's aspect ratio. "
-                                   "Larger sizes need more GPU memory")
+        self.resolution.setToolTip("About this many pixels squared, in the start image's aspect ratio")
         c.addRow("Size", self.resolution)
         self.steps = QSpinBox()
         self.steps.setRange(4, 80)
         self.steps.setValue(28)
         self.steps.setToolTip("Sampling steps per clip. The trainer's samples use 20, ai-toolkit's H3 default is 28")
         c.addRow("Steps", self.steps)
-        srow = QHBoxLayout()
-        self.seed = QSpinBox()
-        self.seed.setRange(0, 2_000_000_000)
-        self.seed.setValue(42)
-        self.same_seed = QCheckBox("same for all")
-        self.same_seed.setToolTip("Off: clip k uses seed + k - 1")
-        srow.addWidget(self.seed, 1)
-        srow.addWidget(self.same_seed)
-        c.addRow("Seed", srow)
         self.audio = QCheckBox("Generate sound")
         self.audio.setChecked(True)
         c.addRow("", self.audio)
-        self.keep_rep = QCheckBox("Keep repeated frames in the chain")
+        self.keep_rep = QCheckBox("Keep repeated frames in paths")
         self.keep_rep.setToolTip("Each clip starts with the last frame of the clip before; by default that repeated "
-                                 "frame is left out of chain.mp4")
+                                 "frame is left out when a path is joined")
         c.addRow("", self.keep_rep)
         lv.addWidget(cw)
-
-        bar, _ = section_bar("Output", left)
-        lv.addWidget(bar)
-        ow = QWidget()
-        o = QFormLayout(ow)
-        o.setContentsMargins(10, 6, 10, 8)
-        orow = QHBoxLayout()
-        self.out = QLineEdit()
-        self.out.setPlaceholderText("folder for the clips and chain.mp4")
-        b = icon_button("fopen", "Choose the output folder")
-        b.clicked.connect(self._choose_out)
-        self.b_open_out = icon_button("folder", "Open the output folder")
-        self.b_open_out.clicked.connect(self._open_out)
-        orow.addWidget(self.out, 1)
-        orow.addWidget(b)
-        orow.addWidget(self.b_open_out)
-        o.addRow("Folder", orow)
-        self.reuse = QCheckBox("Reuse unchanged clips")
-        self.reuse.setChecked(True)
-        self.reuse.setToolTip("Clips whose prompt, seed, start image and settings did not change are not generated "
-                              "again")
-        o.addRow("", self.reuse)
-        self.b_load_chain = QPushButton("Load prompts from this folder")
-        self.b_load_chain.setToolTip("Take the prompts and start image of the chain saved in this folder")
-        self.b_load_chain.clicked.connect(self._load_chain_from_out)
-        o.addRow("", self.b_load_chain)
-        lv.addWidget(ow)
 
         bar, _ = section_bar("Advanced", left)
         lv.addWidget(bar)
@@ -444,41 +421,62 @@ class MainWindow(QMainWindow):
         lv.addWidget(aw)
         lv.addStretch(1)
         ls.setWidget(left)
-        ls.setMinimumWidth(360)
+        ls.setMinimumWidth(350)
         split.addWidget(ls)
 
-        # middle: prompts
-        mid = QWidget()
-        mv = QVBoxLayout(mid)
-        mv.setContentsMargins(0, 0, 0, 0)
-        mv.setSpacing(0)
-        bar, bh = section_bar("Prompts", mid)
-        self.total = label("", level="tertiary")
-        bh.addWidget(self.total)
+        # middle: graph over the path
+        mid = QSplitter(Qt.Vertical)
+        mid.setChildrenCollapsible(False)
+        gw = QWidget()
+        gv = QVBoxLayout(gw)
+        gv.setContentsMargins(0, 0, 0, 0)
+        gv.setSpacing(0)
+        bar, bh = section_bar("Clips", gw)
+        self.tree_info = label("", level="tertiary")
+        bh.addWidget(self.tree_info)
         bh.addSpacing(8)
-        b_open = icon_button("import", "Load prompts from a text file (one per line)")
-        b_open.clicked.connect(self._import_prompts)
-        b_save = icon_button("save", "Save the prompts to a text file")
-        b_save.clicked.connect(self._export_prompts)
-        self.b_add = icon_button("plus", "Add a prompt (Ctrl+N)")
-        self.b_add.clicked.connect(lambda: self.add_card("", focus=True))
-        for b in (b_open, b_save, self.b_add):
-            bh.addWidget(b)
-        mv.addWidget(bar)
-        self.cards_area = QScrollArea()
-        self.cards_area.setWidgetResizable(True)
-        self.cards_area.setFrameShape(QFrame.NoFrame)
+        self.b_continue = icon_button("plus", "Continue: a new clip after the selected one (Ctrl+N)")
+        self.b_branch = icon_button("split", "Branch: another continuation from the same point (Ctrl+B)")
+        self.b_variant = icon_button("clone", "Variant: same prompt, other seed (Ctrl+D)")
+        self.b_delete = icon_button("trash", "Delete the selected clip and everything after it (Del)")
+        self.b_fit = icon_button("frame", "Fit the view (F)")
+        for btn, act in ((self.b_continue, "continue"), (self.b_branch, "branch"), (self.b_variant, "variant"),
+                         (self.b_delete, "delete")):
+            btn.clicked.connect(lambda _=False, a=act: self.node_action(a, self.selected_id()))
+            bh.addWidget(btn)
+        bh.addSpacing(6)
+        self.b_fit.clicked.connect(lambda: self.graph.fit())
+        bh.addWidget(self.b_fit)
+        gv.addWidget(bar)
+        self.graph = GraphView()
+        self.graph.selected.connect(self.select)
+        self.graph.activated.connect(self._play_node)
+        self.graph.contextMenu.connect(self._context)
+        gv.addWidget(self.graph, 1)
+        mid.addWidget(gw)
+
+        pw2 = QWidget()
+        pv = QVBoxLayout(pw2)
+        pv.setContentsMargins(0, 0, 0, 0)
+        pv.setSpacing(0)
+        bar, bh = section_bar("Selected path", pw2)
+        self.path_info = label("", level="tertiary")
+        bh.addWidget(self.path_info)
+        pv.addWidget(bar)
+        self.path_area = QScrollArea()
+        self.path_area.setWidgetResizable(True)
+        self.path_area.setFrameShape(QFrame.NoFrame)
         holder = QWidget()
-        self.cards_box = QVBoxLayout(holder)
-        self.cards_box.setContentsMargins(10, 10, 10, 10)
-        self.cards_box.setSpacing(10)
-        self.b_add_big = QPushButton("Add prompt")
-        self.b_add_big.setIcon(icon("plus"))
-        self.b_add_big.clicked.connect(lambda: self.add_card("", focus=True))
-        self.cards_box.addWidget(self.b_add_big)
-        self.cards_box.addStretch(1)
-        self.cards_area.setWidget(holder)
-        mv.addWidget(self.cards_area, 1)
+        self.path_box = QHBoxLayout(holder)
+        self.path_box.setContentsMargins(10, 10, 10, 10)
+        self.path_box.setSpacing(10)
+        self.path_hint = label("", level="tertiary")
+        self.path_box.addWidget(self.path_hint)
+        self.path_box.addStretch(1)
+        self.path_area.setWidget(holder)
+        pv.addWidget(self.path_area, 1)
+        mid.addWidget(pw2)
+        mid.setSizes([460, 420])
         split.addWidget(mid)
 
         # right: preview + log
@@ -490,10 +488,14 @@ class MainWindow(QMainWindow):
         rv.addWidget(self.preview, 1)
         prow = QHBoxLayout()
         prow.setContentsMargins(8, 0, 8, 8)
-        self.b_chain = QPushButton("Play chain")
-        self.b_chain.setEnabled(False)
-        self.b_chain.clicked.connect(self.play_chain)
-        prow.addWidget(self.b_chain)
+        self.b_play_path = QPushButton("Play path")
+        self.b_play_path.setToolTip("Join the clips of the selected path and play them")
+        self.b_play_path.clicked.connect(lambda: self.join_selected("play"))
+        self.b_export = QPushButton("Export path…")
+        self.b_export.setToolTip("Save the selected path as one video")
+        self.b_export.clicked.connect(self.export_path)
+        prow.addWidget(self.b_play_path)
+        prow.addWidget(self.b_export)
         prow.addStretch(1)
         rv.addLayout(prow)
         self.tabs.addTab(rp, "Preview")
@@ -504,332 +506,476 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.log, "Log")
         split.addWidget(self.tabs)
         split.setStretchFactor(1, 1)
-        split.setSizes([380, 640, 460])
+        split.setSizes([360, 760, 440])
 
-        # bottom: run bar
         sb = self.statusBar()
-        self.b_gen = QPushButton("Generate")
+        self.b_gen = QPushButton("Generate path")
         self.b_gen.setProperty("variant", "primary")
-        self.b_gen.setMinimumWidth(130)
-        self.b_gen.clicked.connect(self.generate)
+        self.b_gen.setToolTip("Make every clip on the selected path that is not made yet (Ctrl+Enter)")
+        self.b_gen.clicked.connect(self.generate_path)
+        self.b_gen_all = QPushButton("Generate all")
+        self.b_gen_all.setToolTip("Make every clip of every branch that is not made yet (Ctrl+Shift+Enter)")
+        self.b_gen_all.clicked.connect(self.generate_all)
         self.b_stop = QPushButton("Stop")
         self.b_stop.setProperty("variant", "danger")
         self.b_stop.setEnabled(False)
         self.b_stop.clicked.connect(self.stop)
         self.progress = QProgressBar()
-        self.progress.setFixedWidth(240)
+        self.progress.setFixedWidth(220)
         self.progress.setRange(0, 1000)
-        self.progress.setValue(0)
-        self.status = label("Choose a start image and write the prompts.", role="statusText")
+        self.status = label("Open or create a project folder.", role="statusText")
         self.gpu = label("GPU …", role="statusText")
-        sb.addWidget(self.b_gen)
-        sb.addWidget(self.b_stop)
-        sb.addWidget(self.progress)
+        for w in (self.b_gen, self.b_gen_all, self.b_stop, self.progress):
+            sb.addWidget(w)
         sb.addWidget(self.status, 1)
         sb.addPermanentWidget(self.gpu)
 
         self.start_tile.clicked.connect(lambda _t: self._choose_image())
         self.start_tile.dropped.connect(self.set_image)
-        self.resolution.currentIndexChanged.connect(self._update_size_info)
-        self.frames.currentIndexChanged.connect(self._renumber)
-        self.keep_rep.toggled.connect(self._renumber)
-        self.out.editingFinished.connect(self._out_changed)
-        for sig in (self.lora.editingFinished, self.strength.valueChanged, self.frames.currentIndexChanged,
-                    self.steps.valueChanged, self.seed.valueChanged, self.same_seed.toggled,
-                    self.resolution.currentIndexChanged, self.audio.toggled, self.reuse.toggled):
-            sig.connect(self._mark_changed)
-        QShortcut(QKeySequence("Ctrl+N"), self, activated=lambda: self.add_card("", focus=True))
-        QShortcut(QKeySequence("Ctrl+Return"), self, activated=self.generate)
+        for sig in (self.strength.valueChanged, self.frames.currentIndexChanged, self.resolution.currentIndexChanged,
+                    self.steps.valueChanged, self.audio.toggled, self.keep_rep.toggled):
+            sig.connect(self._options_changed)
+        self.lora.editingFinished.connect(self._options_changed)
+        for keys, fn in (("Ctrl+N", lambda: self.node_action("continue", self.selected_id())),
+                         ("Ctrl+B", lambda: self.node_action("branch", self.selected_id())),
+                         ("Ctrl+D", lambda: self.node_action("variant", self.selected_id())),
+                         ("Ctrl+Return", self.generate_path), ("Ctrl+Shift+Return", self.generate_all)):
+            QShortcut(QKeySequence(keys), self, activated=fn)
+        QShortcut(QKeySequence("Delete"), self.graph,
+                  activated=lambda: self.node_action("delete", self.selected_id()))
+        QShortcut(QKeySequence("F"), self.graph, activated=self.graph.fit)
+        self._update_buttons()
 
-    # ---- settings
+    # ------------------------------------------------------------------ settings
     def _load_settings(self):
         q = self.qs
-        self.lora.setText(q.value("lora", "", type=str))
-        self.strength.setValue(q.value("strength", 1.0, type=float))
-        fr = q.value("frames", 73, type=int)
-        self.frames.setCurrentIndex(FRAME_CHOICES.index(fr) if fr in FRAME_CHOICES else 2)
-        i = self.resolution.findData(q.value("resolution", 512, type=int))
-        self.resolution.setCurrentIndex(i if i >= 0 else 1)
-        self.steps.setValue(q.value("steps", 28, type=int))
-        self.seed.setValue(q.value("seed", 42, type=int))
-        self.same_seed.setChecked(q.value("sameSeed", False, type=bool))
-        self.audio.setChecked(q.value("audio", True, type=bool))
-        self.keep_rep.setChecked(q.value("keepRepeated", False, type=bool))
-        self.out.setText(q.value("out", "", type=str))
-        self.reuse.setChecked(q.value("reuse", True, type=bool))
         self.offload.setValue(q.value("offload", 90, type=int))
         self.min_free.setValue(q.value("minFree", 18.0, type=float))
         self.aitk.setText(q.value("aitk", DEFAULT_AITK, type=str))
-        try:
-            prompts = json.loads(q.value("prompts", "[]", type=str))
-        except ValueError:
-            prompts = []
-        for p in prompts or [""]:
-            self.add_card(p)
-        img = q.value("image", "", type=str)
-        if img and Path(img).is_file():
-            self.set_image(img)
         if g := q.value("geometry"):
             self.restoreGeometry(g)
-        self._out_changed()
+        proj = q.value("project", "", type=str)
+        if proj and Path(proj).is_dir():
+            self.open_project(Path(proj))
 
     def save_settings(self):
         q = self.qs
-        for k, v in (("lora", self.lora.text().strip()), ("strength", self.strength.value()),
-                     ("frames", self.frames.currentData()), ("resolution", self.resolution.currentData()),
-                     ("steps", self.steps.value()), ("seed", self.seed.value()),
-                     ("sameSeed", self.same_seed.isChecked()), ("audio", self.audio.isChecked()),
-                     ("keepRepeated", self.keep_rep.isChecked()), ("out", self.out.text().strip()),
-                     ("reuse", self.reuse.isChecked()), ("offload", self.offload.value()),
-                     ("minFree", self.min_free.value()), ("aitk", self.aitk.text().strip()),
-                     ("image", self.image_file or ""),
-                     ("prompts", json.dumps([c.edit.toPlainText() for c in self.cards], ensure_ascii=False))):
-            q.setValue(k, v)
+        q.setValue("offload", self.offload.value())
+        q.setValue("minFree", self.min_free.value())
+        q.setValue("aitk", self.aitk.text().strip())
+        q.setValue("project", str(self.project) if self.project else "")
+        if self.tree is not None:
+            q.setValue("lastOptions", json.dumps(self.tree.options))
         q.setValue("geometry", self.saveGeometry())
         q.sync()
 
-    # ---- start image
-    image_file: str | None = None
+    # ------------------------------------------------------------------ project
+    def _choose_project(self):
+        if self.running:
+            return
+        f = QFileDialog.getExistingDirectory(self, "Project folder (new or existing)",
+                                             str(self.project.parent) if self.project else "")
+        if f:
+            self.open_project(Path(f))
 
+    def open_project(self, folder: Path):
+        if self.running:
+            return
+        self._save_timer.stop()
+        self._save_tree()
+        folder = Path(folder).expanduser().resolve()
+        folder.mkdir(parents=True, exist_ok=True)
+        tree = T.load(folder)
+        if not (folder / T.TREE_FILE).exists() and not tree.nodes:
+            try:                                 # a new project starts with the last used settings
+                last = json.loads(self.qs.value("lastOptions", "{}", type=str))
+                tree.options.update({k: v for k, v in last.items() if k in T.DEFAULT_OPTIONS})
+            except ValueError:
+                pass
+        self.project, self.tree = folder, tree
+        self.project_edit.setText(str(folder))
+        self.project_edit.setToolTip(str(folder))
+        self.preview.stop()
+        self.live, self.progress_of = {}, {}
+        self._options_to_widgets()
+        self._show_start_image()
+        if not tree.nodes:
+            tree.selected = tree.add(None, "").id
+        if tree.selected is None:
+            tree.selected = START
+        T.save(folder, tree)
+        self.qs.setValue("project", str(folder))
+        self.refresh(rebuild_path=True)
+        QTimer.singleShot(0, self.graph.fit)
+        self.status.setText(f"Project {folder.name}: {len(tree.nodes)} clip{'s' if len(tree.nodes) != 1 else ''}.")
+
+    def _open_dir(self):
+        if self.project and self.project.is_dir():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.project)))
+
+    def _options_to_widgets(self):
+        o = self.tree.options
+        self._loading = True
+        try:
+            self.lora.setText(o.get("lora") or "")
+            self.strength.setValue(float(o.get("strength", 1.0)))
+            fr = int(o.get("frames", 73))
+            self.frames.setCurrentIndex(FRAME_CHOICES.index(fr) if fr in FRAME_CHOICES else 2)
+            i = self.resolution.findData(int(o.get("resolution", 512)))
+            self.resolution.setCurrentIndex(i if i >= 0 else 1)
+            self.steps.setValue(int(o.get("steps", 28)))
+            self.audio.setChecked(bool(o.get("audio", True)))
+            self.keep_rep.setChecked(bool(o.get("keep_repeated", False)))
+        finally:
+            self._loading = False
+
+    def _options_changed(self, *_):
+        if self._loading or self.tree is None or self.running:
+            return
+        lora = self.lora.text().strip()
+        self.tree.options.update({
+            "lora": str(Path(lora).expanduser().resolve()) if lora else None, "strength": self.strength.value(),
+            "frames": self.frames.currentData(), "resolution": self.resolution.currentData(),
+            "steps": self.steps.value(), "audio": self.audio.isChecked(), "keep_repeated": self.keep_rep.isChecked()})
+        self._update_size_info()
+        self._changed()
+
+    def _changed(self):
+        """Something the clips depend on changed: save soon and update the states."""
+        self._save_timer.start()
+        self._refresh_timer.start()
+
+    def _save_tree(self):
+        if self.project is not None and self.tree is not None and not self.running:
+            T.save(self.project, self.tree)
+
+    # ------------------------------------------------------------------ start image
     def _choose_image(self):
         if self.running:
             return
-        start = str(Path(self.image_file).parent) if self.image_file else ""
-        f, _ = QFileDialog.getOpenFileName(self, "Start image", start, IMAGE_FILTER)
+        if self.project is None:
+            self.status.setText("Open or create a project folder first.")
+            self._choose_project()
+            if self.project is None:
+                return
+        f, _ = QFileDialog.getOpenFileName(self, "Start image", "", IMAGE_FILTER)
         if f:
             self.set_image(f)
 
     def set_image(self, path: str):
         if self.running:
             return
-        img = qimage(path)
-        if img.isNull():
+        if self.project is None:
+            self.status.setText("Open or create a project folder first.")
+            return
+        if QImage(path).isNull():
             self.status.setText(f"Not an image: {Path(path).name}")
             return
-        self.image_file = str(Path(path).resolve())
-        self._image_size = (img.width(), img.height())
-        self.start_tile.set_image(img)
-        self.image_path.setText(Path(path).name)
-        self.image_path.setToolTip(self.image_file)
-        self._update_size_info()
-        self._mark_changed()
+        T.set_start_image(self.project, Path(path), self.tree)
+        self._pix.clear()
+        T.save(self.project, self.tree)
+        self._show_start_image()
+        self.refresh()
 
-    def video_size(self) -> tuple[int, int] | None:
-        if not self._image_size:
-            return None
-        return chain.canvas_size(*self._image_size, self.resolution.currentData())
+    def _show_start_image(self):
+        start = self.project / T.START_FILE if self.project else None
+        if start and start.is_file():
+            self.start_tile.set_image(QImage(str(start)))
+            self.start_tile.setToolTip(self.tree.image or str(start))
+        else:
+            self.start_tile.clear_frame("Click or drop an image")
+        self._update_size_info()
 
     def _update_size_info(self):
-        if not self._image_size:
+        start = self.project / T.START_FILE if self.project else None
+        if not start or not start.is_file():
             self.size_info.setText("")
             return
-        w, h = self._image_size
-        vw, vh = self.video_size()
+        img = QImage(str(start))
+        w, h = img.width(), img.height()
+        vw, vh = chain.canvas_size(w, h, self.resolution.currentData())
         r = (w / h) / (vw / vh)
-        note = "" if 0.97 < r < 1.03 else " (image ratio outside 2:5 … 5:2, it gets stretched)"
-        self.size_info.setText(f"{w}×{h} image → {vw}×{vh} video{note}")
+        note = "" if 0.97 < r < 1.03 else " (ratio outside 2:5 … 5:2, it gets stretched)"
+        name = Path(self.tree.image).name if self.tree and self.tree.image else T.START_FILE
+        self.size_info.setText(f"{name}: {w}×{h} → {vw}×{vh} video{note}")
 
-    # ---- cards
-    def add_card(self, text: str = "", focus: bool = False, index: int | None = None) -> PromptCard:
-        card = PromptCard(text)
-        card.changed.connect(self._card_changed)
-        card.moveUp.connect(lambda c: self._move(c, -1))
-        card.moveDown.connect(lambda c: self._move(c, 1))
-        card.remove.connect(self._remove)
-        card.play.connect(self._play_card)
-        index = len(self.cards) if index is None else index
-        self.cards.insert(index, card)
-        self.cards_box.insertWidget(index, card)
-        self._renumber()
-        if focus:
-            card.edit.setFocus()
-            QTimer.singleShot(0, lambda: self.cards_area.ensureWidgetVisible(card))
-        return card
+    # ------------------------------------------------------------------ tree view
+    def selected_id(self) -> str | None:
+        return self.tree.selected if self.tree else None
 
-    def _remove(self, card: PromptCard):
-        if self.running:
-            return
-        if card.text() and QMessageBox.question(self, "Remove prompt", f"Remove {card.title.text()}?") \
-                != QMessageBox.Yes:
-            return
-        self.cards.remove(card)
-        card.setParent(None)
-        card.deleteLater()
-        if not self.cards:
-            self.add_card("")
-        self._renumber()
-        self._mark_changed()
+    def selected_path(self) -> list[T.Node]:
+        sel = self.selected_id()
+        return self.tree.path_to(sel) if self.tree and sel and sel != START and sel in self.tree.nodes else []
 
-    def _move(self, card: PromptCard, d: int):
-        i = self.cards.index(card)
-        j = i + d
-        if self.running or not 0 <= j < len(self.cards):
-            return
-        self.cards[i], self.cards[j] = self.cards[j], self.cards[i]
-        self.cards_box.removeWidget(card)
-        self.cards_box.insertWidget(j, card)
-        self._renumber()
-        self._mark_changed()
-
-    def _renumber(self, *_):
-        frames = self.frames.currentData() or 73
-        drop = not self.keep_rep.isChecked()
-        t = 0.0
-        for k, c in enumerate(self.cards):
-            n = frames - (1 if (drop and k > 0) else 0)
-            c.set_number(k + 1, t, t + n / 24, k == 0, k == len(self.cards) - 1)
-            t += n / 24
-        filled = sum(1 for c in self.cards if c.text())
-        self.total.setText(f"{filled} clip{'s' if filled != 1 else ''} · {fmt_time(t if filled else 0)}")
-
-    def _card_changed(self):
-        self._renumber()
-        self._mark_changed()
-
-    def prompts(self) -> list[str]:
-        return [c.text() for c in self.cards if c.text()]
-
-    def expected_settings(self) -> dict | None:
-        """The settings record the generator will write for the current inputs (see chain.settings_dict)."""
-        size = self.video_size()
-        if size is None:
+    def _pixmap(self, path: Path | None) -> QPixmap | None:
+        if path is None or not path.is_file():
             return None
-        lora = self.lora.text().strip()
-        return chain.settings_dict(model="Comfy-Org/MiniMax-H3",
-                                   lora=str(Path(lora).resolve()) if lora else None,
-                                   strength=self.strength.value(), frames=self.frames.currentData(),
-                                   steps=self.steps.value(), width=size[0], height=size[1],
-                                   audio=self.audio.isChecked())
+        st = path.stat()
+        key = (str(path), st.st_mtime_ns, st.st_size)
+        if key not in self._pix:
+            self._pix[key] = QPixmap.fromImage(QImage(str(path)))
+        return self._pix[key]
 
-    def expected_seed(self, k: int) -> int:
-        return self.seed.value() if self.same_seed.isChecked() else self.seed.value() + k - 1
+    def _node_frame(self, n: T.Node) -> Path | None:
+        if n.made and self.project:
+            return self.project / n.made["frame"]
+        return None
 
-    def _mark_changed(self, *_):
-        """Compare the cards with the last chain in the output folder: which clips would be reused, which redone.
-        Mirrors run_chain's rule: same prompt, seed, settings and start image (a changed clip changes all after)."""
-        if self.running:
+    def state(self, nid: str) -> str:
+        return self.live.get(nid) or self.status_of.get(nid, "new")
+
+    def refresh(self, rebuild_path: bool = False):
+        if self.tree is None:
+            self.graph.show_nodes([])
+            self._update_buttons()
             return
-        out = Path(self.out.text().strip()).expanduser() if self.out.text().strip() else None
-        rec = chain.load_record(out) if out else None
-        clips = {c["num"]: c for c in (rec or {}).get("clips", [])}
-        still_same = bool(rec and self.image_file and rec.get("image") == self.image_file
-                          and rec.get("settings") == self.expected_settings() and self.reuse.isChecked())
-        for k, card in enumerate(self.cards, start=1):
-            old = clips.get(k)
-            if (old and out and still_same and old.get("prompt") == card.text()
-                    and old.get("seed") == self.expected_seed(k) and (out / old["video"]).exists()):
-                card.set_result(out / old["video"], out / old["last_frame"])
-                card.set_state("done")
-            else:
-                still_same = False           # every clip after a changed one starts from a new frame
-                if old and out and (out / old["video"]).exists():
-                    card.set_result(out / old["video"], out / old["last_frame"])
-                    card.set_state("changed", "will be made again")
-                else:
-                    card.set_result(None, None)
-                    card.set_state("")
-        chain_file = out / "chain.mp4" if out else None
-        self.b_chain.setEnabled(bool(chain_file and chain_file.exists()))
+        checker = T.Checker(self.project, self.tree)
+        try:
+            self.status_of = {nid: checker.status(nid) for nid in self.tree.nodes}
+        except Exception as e:  # noqa: BLE001  (e.g. an unreadable start image)
+            self.status_of = {nid: "new" for nid in self.tree.nodes}
+            self.status.setText(f"Could not check the clips: {e}")
+        sel = self.selected_id()
+        on_path = {n.id for n in self.selected_path()}
+        start_pm = self._pixmap(self.project / T.START_FILE)
+        infos = [NodeInfo(START, None, "Start", "", Path(self.tree.image).name if self.tree.image else "",
+                          "start", start_pm, on_path=True, selected=sel == START)]
+        for n in sorted(self.tree.nodes.values(), key=lambda n: self.tree.number(n.id)):
+            infos.append(NodeInfo(n.id, n.parent or START, f"Clip {self.tree.depth(n.id)}", f"#{n.id[1:]}",
+                                  n.prompt, self.state(n.id), self._pixmap(self._node_frame(n)),
+                                  self.progress_of.get(n.id, 0.0), n.id in on_path, n.id == sel))
+        self.graph.show_nodes(infos)
+        if rebuild_path or [c.nid for c in self.cards] != [n.id for n in self.selected_path()]:
+            self._rebuild_path()
+        else:
+            self._update_cards()
+        made = sum(1 for s in self.status_of.values() if s == "done")
+        branches = len(self.tree.leaves())
+        self.tree_info.setText(f"{len(self.tree.nodes)} clips · {branches} branch{'es' if branches != 1 else ''}"
+                               f" · {made} made")
+        self._update_buttons()
 
-    def _play_card(self, card: PromptCard):
-        if card.video:
-            self.tabs.setCurrentIndex(0)
-            self.preview.open(card.video, f"{card.title.text()} · {card.video.name}")
-
-    def play_chain(self):
-        out = Path(self.out.text().strip())
-        if (out / "chain.mp4").exists():
-            self.tabs.setCurrentIndex(0)
-            self.preview.open(out / "chain.mp4", "Whole chain · chain.mp4")
-
-    def _import_prompts(self):
-        if self.running:
-            return
-        f, _ = QFileDialog.getOpenFileName(self, "Load prompts", "", "Text (*.txt);;All files (*)")
-        if not f:
-            return
-        prompts = chain.read_prompts(Path(f))
-        if not prompts:
-            self.status.setText("No prompts in that file.")
-            return
-        self.set_prompts(prompts)
-
-    def set_prompts(self, prompts: list[str]):
-        for c in list(self.cards):
-            self.cards.remove(c)
+    def _rebuild_path(self):
+        for c in self.cards:
+            self.path_box.removeWidget(c)
             c.setParent(None)
             c.deleteLater()
-        for p in prompts or [""]:
-            self.add_card(p)
-        self._mark_changed()
+        self.cards = []
+        path = self.selected_path()
+        self.path_hint.setVisible(not path)
+        self.path_hint.setText("The start image is selected. Select a clip to see its path, or press Continue "
+                               "(Ctrl+N) to add a clip after the start image.")
+        for k, n in enumerate(path):
+            card = PromptCard(n)
+            card.edited.connect(self._card_edited)
+            card.seedChanged.connect(self._seed_changed)
+            card.action.connect(self.node_action)
+            card.play.connect(self._play_node)
+            self.path_box.insertWidget(k, card)
+            self.cards.append(card)
+            card.set_editable(not self.running)
+        self._update_cards()
+        if self.cards:
+            last = self.cards[-1]
+            QTimer.singleShot(0, lambda: self.path_area.ensureWidgetVisible(last))
 
-    def _export_prompts(self):
-        f, _ = QFileDialog.getSaveFileName(self, "Save prompts", "prompts.txt", "Text (*.txt)")
-        if f:
-            Path(f).write_text("\n".join(self.prompts()) + "\n", encoding="utf-8")
-            self.status.setText(f"Saved {len(self.prompts())} prompts to {Path(f).name}.")
+    def _update_cards(self):
+        frames = self.tree.options.get("frames", 73)
+        drop = not self.tree.options.get("keep_repeated")
+        t = 0.0
+        for k, card in enumerate(self.cards):
+            n = self.tree.nodes.get(card.nid)
+            if n is None:
+                continue
+            length = (frames - (1 if drop and k > 0 else 0)) / 24
+            card.title.setText(f"Clip {k + 1}")
+            card.span.setText(f"{fmt_time(t)} – {fmt_time(t + length)} in this path")
+            t += length
+            st = self.state(n.id)
+            card.set_state(st, self._pixmap(self._node_frame(n)), "will be made again" if st == "changed" else "")
+            if st == "generating" and n.id in self.progress_of:
+                card.bar.setValue(round(100 * self.progress_of[n.id]))
+        path = self.selected_path()
+        if path:
+            todo = sum(1 for n in path if self.state(n.id) != "done")
+            self.path_info.setText(f"{len(path)} clips · {fmt_time(t)}" + (f" · {todo} to make" if todo
+                                                                           else " · all made"))
+        else:
+            self.path_info.setText("")
 
-    # ---- output
-    def _choose_out(self):
-        f = QFileDialog.getExistingDirectory(self, "Output folder", self.out.text().strip())
-        if f:
-            self.out.setText(f)
-            self._out_changed()
+    def _update_buttons(self):
+        has = self.tree is not None
+        sel = self.selected_id() if has else None
+        is_clip = bool(has and sel and sel != START)
+        idle = not self.running
+        self.b_continue.setEnabled(has and idle)
+        for b in (self.b_branch, self.b_variant, self.b_delete):
+            b.setEnabled(is_clip and idle)
+        path = self.selected_path()
+        all_done = bool(path) and all(self.state(n.id) == "done" for n in path)
+        self.b_gen.setEnabled(idle and bool(path))
+        self.b_gen_all.setEnabled(idle and has and bool(self.tree.nodes))
+        self.b_play_path.setEnabled(all_done and idle)
+        self.b_export.setEnabled(all_done and idle)
+        self.b_stop.setEnabled(not idle)
+        for w in (self.start_tile, self.lora, self.b_lora, self.strength, self.frames, self.resolution, self.steps,
+                  self.audio, self.keep_rep, self.offload, self.min_free, self.aitk, self.b_project):
+            w.setEnabled(idle)
 
-    def _out_changed(self):
-        out = self.out.text().strip()
-        rec = chain.load_record(Path(out)) if out else None
-        self.b_load_chain.setVisible(bool(rec))
-        self.b_open_out.setEnabled(bool(out) and Path(out).is_dir())
-        self._mark_changed()
-
-    def _open_out(self):
-        out = self.out.text().strip()
-        if out and Path(out).is_dir():
-            QDesktopServices.openUrl(QUrl.fromLocalFile(out))
-
-    def _load_chain_from_out(self):
-        out = Path(self.out.text().strip())
-        rec = chain.load_record(out)
-        if not rec:
+    def select(self, nid):
+        if self.tree is None:
             return
-        prompts = [c["prompt"] for c in rec.get("clips", [])]
-        img = rec.get("image")
-        if img and Path(img).is_file():
-            self.set_image(img)
-        elif (out / "start.png").exists():
-            self.set_image(str(out / "start.png"))
-        self.set_prompts(prompts)
-        s = rec.get("settings") or {}
-        if s.get("frames") in FRAME_CHOICES:
-            self.frames.setCurrentIndex(FRAME_CHOICES.index(s["frames"]))
-        if s.get("steps"):
-            self.steps.setValue(int(s["steps"]))
-        if "lora" in s:
-            self.lora.setText(s.get("lora") or "")
-        if s.get("strength") is not None:
-            self.strength.setValue(float(s["strength"]))
-        if "audio" in s:
-            self.audio.setChecked(bool(s["audio"]))
-        self._mark_changed()
-        self.status.setText(f"Loaded {len(prompts)} prompts from {out.name}.")
+        self.tree.selected = nid if (nid == START or nid in self.tree.nodes) else START
+        self._save_timer.start()
+        self.refresh()
+
+    def _card_edited(self, nid: str):
+        card = next((c for c in self.cards if c.nid == nid), None)
+        if card is None or self.tree is None or nid not in self.tree.nodes:
+            return
+        self.tree.nodes[nid].prompt = card.text()
+        self._changed()
+
+    def _seed_changed(self, nid: str, seed: int):
+        if self.tree and nid in self.tree.nodes:
+            self.tree.nodes[nid].seed = int(seed)
+            self._changed()
+
+    def _new_seed(self) -> int:
+        used = {n.seed for n in self.tree.nodes.values()}
+        while True:
+            s = random.randint(1, 2_000_000_000)
+            if s not in used:
+                return s
+
+    def node_action(self, action: str, nid: str | None):
+        if self.tree is None or self.running:
+            return
+        node = self.tree.nodes.get(nid) if nid and nid != START else None
+        if action == "continue":
+            new = self.tree.add(node.id if node else None, "")
+        elif action in ("branch", "variant") and node is not None:
+            new = self.tree.add(node.parent, node.prompt if action == "variant" else "",
+                                self._new_seed() if action == "variant" else None)
+        elif action == "delete" and node is not None:
+            below = len(self.tree.descendants(node.id))
+            made = node.made is not None or any(d.made for d in self.tree.descendants(node.id))
+            msg = f"Delete clip #{node.id[1:]}" + (f" and the {below} clip{'s' if below != 1 else ''} after it"
+                                                   if below else "") + "?"
+            if made:
+                msg += "\nTheir video files are deleted too."
+            if QMessageBox.question(self, "Delete", msg) != QMessageBox.Yes:
+                return
+            self.tree.remove(node.id, self.project)
+            if self.tree.selected is None:
+                self.tree.selected = START
+            T.save(self.project, self.tree)
+            self.refresh()
+            return
+        else:
+            return
+        self.tree.selected = new.id
+        T.save(self.project, self.tree)
+        self.refresh()
+        self.graph.reveal(new.id)
+        if self.cards and self.cards[-1].nid == new.id:
+            self.cards[-1].edit.setFocus()
+
+    def _context(self, nid: str, pos):
+        if self.running or self.tree is None:
+            return
+        m = QMenu(self)
+        acts = {m.addAction("Continue from here"): "continue"}
+        play = gen = delete = None
+        if nid != START:
+            acts[m.addAction("Branch (another continuation)")] = "branch"
+            acts[m.addAction("Variant (same prompt, other seed)")] = "variant"
+            m.addSeparator()
+            play = m.addAction("Play this clip")
+            play.setEnabled(bool(self.tree.nodes[nid].made))
+            gen = m.addAction("Generate the path to here")
+            m.addSeparator()
+            delete = m.addAction("Delete (with everything after it)")
+        chosen = m.exec(pos.toPoint() if hasattr(pos, "toPoint") else pos)
+        if chosen is None:
+            return
+        if chosen in acts:
+            self.node_action(acts[chosen], nid)
+        elif chosen is play:
+            self._play_node(nid)
+        elif chosen is gen:
+            self.generate_path()
+        elif chosen is delete:
+            self.node_action("delete", nid)
+
+    def _play_node(self, nid: str):
+        if self.tree is None or nid not in self.tree.nodes:
+            return
+        n = self.tree.nodes[nid]
+        if n.made and (self.project / n.made["video"]).is_file():
+            self.tabs.setCurrentIndex(0)
+            self.preview.open(self.project / n.made["video"], f"Clip #{nid[1:]} · {n.prompt[:60]}")
+
+    # ------------------------------------------------------------------ paths
+    def join_selected(self, purpose: str, out: Path | None = None, prefix: str = ""):
+        path = self.selected_path()
+        if not path or self.tree is None:
+            return
+        nid, project = path[-1].id, self.project
+        tree = T.Tree.from_json(self.tree.to_json())
+        pre = f"{prefix} " if prefix else ""
+        self.status.setText(f"{pre}Joining the path …")
+        bridge, lock = self.bridge, self._join_lock
+
+        def work():
+            with lock:
+                try:
+                    bridge.joined.emit(T.join_path(project, tree, nid, out), None, purpose, pre)
+                except Exception as e:  # noqa: BLE001
+                    bridge.joined.emit(None, str(e), purpose, pre)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _joined(self, path, error, purpose, pre):
+        if error:
+            self.status.setText(f"{pre}Could not join the path: {error}")
+            return
+        secs = chain.probe(path)["frames"] / 24
+        if purpose == "play":
+            self.tabs.setCurrentIndex(0)
+            self.preview.open(path, f"Path to clip #{Path(path).stem[1:]} · {fmt_time(secs)}")
+            self.status.setText(f"{pre}Path joined: {fmt_time(secs)}.")
+        else:
+            self.status.setText(f"{pre}Exported {Path(path).name} ({fmt_time(secs)}).")
+
+    def export_path(self):
+        path = self.selected_path()
+        if not path:
+            return
+        default = str(self.project / f"{self.project.name}-{path[-1].id}.mp4")
+        f, _ = QFileDialog.getSaveFileName(self, "Export path", default, "Video (*.mp4)")
+        if f:
+            self.join_selected("export", Path(f if f.endswith(".mp4") else f + ".mp4"))
 
     def _choose_lora(self):
         start = str(Path(self.lora.text()).parent) if self.lora.text().strip() else ""
         f, _ = QFileDialog.getOpenFileName(self, "LoRA", start, "LoRA (*.safetensors)")
         if f:
             self.lora.setText(f)
+            self._options_changed()
 
-    # ---- GPU
+    # ------------------------------------------------------------------ GPU
     def _poll_gpu(self):
-        if self._gpu_proc is not None or not shutil.which("nvidia-smi"):
-            if not shutil.which("nvidia-smi"):
-                self.gpu.setText("GPU: nvidia-smi not found")
+        if not shutil.which("nvidia-smi"):
+            self.gpu.setText("GPU: nvidia-smi not found")
+            return
+        if self._gpu_proc is not None:
             return
         p = QProcess(self)
         self._gpu_proc = p
 
         def done(*_):
+            if self._gpu_proc is not p:          # window closing: the query was abandoned
+                return
             out = bytes(p.readAllStandardOutput()).decode(errors="replace").strip().splitlines()
             self._gpu_proc = None
             p.deleteLater()
@@ -846,54 +992,43 @@ class MainWindow(QMainWindow):
         p.finished.connect(done)
         p.start("nvidia-smi", ["--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"])
 
-    # ---- running
+    # ------------------------------------------------------------------ running
     @property
     def running(self) -> bool:
         return self.proc is not None
 
-    def _args(self, prompts_file: Path, out: Path) -> list[str]:
-        args = [self.image_file, str(prompts_file), "--out", str(out), "--events",
-                "--frames", str(self.frames.currentData()), "--steps", str(self.steps.value()),
-                "--seed", str(self.seed.value()), "--resolution", str(self.resolution.currentData()),
-                "--offload", f"{self.offload.value() / 100:g}", "--min-free-gb", f"{self.min_free.value():g}"]
-        if self.lora.text().strip():
-            args += ["--lora", self.lora.text().strip(), "--strength", f"{self.strength.value():g}"]
-        if self.same_seed.isChecked():
-            args.append("--same-seed")
-        if not self.audio.isChecked():
-            args.append("--no-audio")
-        if self.keep_rep.isChecked():
-            args.append("--keep-repeated-frames")
-        if not self.reuse.isChecked():
-            args.append("--redo")
-        return args
-
-    def generate(self):
-        if self.running:
+    def generate_path(self):
+        path = self.selected_path()
+        if not path:
+            self.status.setText("Select the last clip of the path you want to make.")
             return
-        prompts = self.prompts()
-        out_text = self.out.text().strip()
+        self._start([path[-1].id])
+
+    def generate_all(self):
+        if self.tree is not None:
+            self._start([n.id for n in self.tree.leaves()])
+
+    def _start(self, targets: list[str]):
+        if self.running or self.tree is None:
+            return
         problems = []
-        if not self.image_file or not Path(self.image_file).is_file():
+        if not (self.project / T.START_FILE).is_file():
             problems.append("choose a start image")
-        if not prompts:
-            problems.append("write at least one prompt")
-        if not out_text:
-            problems.append("choose an output folder")
-        lora = self.lora.text().strip()
+        nodes = {n.id: n for t in targets for n in self.tree.path_to(t)}
+        empty = [n for n in nodes.values() if not n.prompt.strip()]
+        if empty:
+            problems.append(f"write the prompt of clip #{empty[0].id[1:]}")
+        lora = self.tree.options.get("lora")
         if lora and not Path(lora).is_file():
             problems.append(f"the LoRA file does not exist ({Path(lora).name})")
         if problems:
             self.status.setText("To start: " + ", ".join(problems) + ".")
+            if empty and len(targets) > 1:
+                self.select(empty[0].id)
             return
-        if len(prompts) != len(self.cards):        # drop empty cards so card k = clip k
-            self.set_prompts(prompts)
-        out = Path(out_text).expanduser()
-        out.mkdir(parents=True, exist_ok=True)
-        prompts_file = out / "prompts.txt"
-        prompts_file.write_text("\n".join(prompts) + "\n", encoding="utf-8")
+        self._save_timer.stop()
+        T.save(self.project, self.tree)
         self.save_settings()
-
         program, pre = self._program()
         self.proc = QProcess(self)
         env = QProcessEnvironment.systemEnvironment()
@@ -904,17 +1039,19 @@ class MainWindow(QMainWindow):
         self.proc.readyReadStandardError.connect(self._read_err)
         self.proc.finished.connect(self._finished)
         self.proc.errorOccurred.connect(self._proc_error)
-        self._buf, self._ebuf, self._error, self._stopping = "", "", "", False
-        self._run_out, self._clips_total, self._phase = out, len(prompts), "starting"
+        self._buf = self._ebuf = ""
+        self._error, self._stopping, self._phase = "", False, "starting"
+        self._targets, self._plan = targets, []
+        self.live, self.progress_of = {}, {}
         self.log.clear()
         self.preview.stop()
         for c in self.cards:
-            c.set_state("waiting")
             c.set_editable(False)
-        self._set_running(True)
+        self._update_buttons()
         self.progress.setRange(0, 0)
         self.status.setText("Starting …")
-        args = pre + self._args(prompts_file, out)
+        args = pre + ["--tree", str(self.project), "--targets", ",".join(targets), "--events",
+                      "--offload", f"{self.offload.value() / 100:g}", "--min-free-gb", f"{self.min_free.value():g}"]
         self.log.appendPlainText("$ " + " ".join([program, *args]))
         self.proc.start(program, args)
 
@@ -922,14 +1059,6 @@ class MainWindow(QMainWindow):
         if self.command:
             return self.command[0], list(self.command[1:])
         return str(LAUNCHER), []
-
-    def _set_running(self, on: bool):
-        self.b_gen.setEnabled(not on)
-        self.b_stop.setEnabled(on)
-        for w in (self.start_tile, self.lora, self.strength, self.frames, self.resolution, self.steps, self.seed,
-                  self.same_seed, self.audio, self.keep_rep, self.out, self.reuse, self.offload, self.min_free,
-                  self.aitk, self.b_add, self.b_add_big, self.b_load_chain):
-            w.setEnabled(not on)
 
     def stop(self):
         if not self.running:
@@ -965,50 +1094,67 @@ class MainWindow(QMainWindow):
         if line:
             self.log.appendPlainText(line)
 
-    def _card(self, k: int) -> PromptCard | None:
-        return self.cards[k - 1] if 1 <= k <= len(self.cards) else None
-
     def _overall(self, k: int, frac: float):
-        if self._clips_total:
+        if self._plan:
             self.progress.setRange(0, 1000)
-            self.progress.setValue(round(1000 * ((k - 1) + frac) / self._clips_total))
+            self.progress.setValue(round(1000 * ((k - 1) + frac) / len(self._plan)))
+
+    def _reload_made(self):
+        """Take what the generator recorded (made) from tree.json; nothing else changes during a run."""
+        try:
+            fresh = T.load(self.project)
+        except (OSError, ValueError):
+            return
+        for nid, n in fresh.nodes.items():
+            if nid in self.tree.nodes:
+                self.tree.nodes[nid].made = n.made
 
     def _event(self, ev: dict):
         e = ev.get("e")
         if e == "start":
-            self.status.setText(f"{ev['clips']} clips at {ev['width']}×{ev['height']}, {ev['frames']} frames each.")
+            self.status.setText(f"{ev.get('nodes', 0)} clips to make at {ev['width']}×{ev['height']}, "
+                                f"{ev['frames']} frames each.")
         elif e == "loading":
-            self._phase = "loading"
             self.status.setText("Loading MiniMax-H3 … (a few minutes)")
             self.progress.setRange(0, 0)
         elif e == "loaded":
             self.status.setText("Model loaded.")
-        elif e == "clip":
-            k, card = ev["k"], self._card(ev["k"])
-            if card is None:
-                return
-            st = ev["state"]
+        elif e == "plan":
+            self._plan = list(ev.get("make", []))
+        elif e == "node":
+            nid, st = ev["id"], ev["state"]
             if st == "generating":
-                card.set_state("generating", "starting …")
+                self.live[nid] = "generating"
+                self.progress_of[nid] = 0.0
+                k = self._plan.index(nid) + 1 if nid in self._plan else 1
                 self._overall(k, 0)
-                self.status.setText(f"Clip {k} of {ev['n']} …")
-                self.cards_area.ensureWidgetVisible(card)
+                self.status.setText(f"Clip #{nid[1:]} ({k} of {len(self._plan)}) …")
             else:
-                card.set_state(st)
-                card.set_result(Path(ev["video"]), Path(ev["frame"]))
-                self._overall(k, 1)
+                self.live.pop(nid, None)
+                self.progress_of.pop(nid, None)
+                if nid in self._plan:
+                    self._overall(self._plan.index(nid) + 1, 1)
+                self._reload_made()
+            self.refresh()
+            if st == "generating":
+                self.graph.reveal(nid)
         elif e == "step":
-            card = self._card(ev.get("k", 0))
-            if card is not None and ev.get("n"):
-                card.set_progress(ev["i"], ev["n"])
-                self._overall(ev["k"], ev["i"] / ev["n"])
-                self.status.setText(f"Clip {ev['k']} of {self._clips_total}: step {ev['i']} / {ev['n']}")
-        elif e == "joining":
-            self.status.setText("Joining the clips …")
+            nid = ev.get("id")
+            if nid and ev.get("n"):
+                frac = ev["i"] / ev["n"]
+                self.progress_of[nid] = frac
+                k = self._plan.index(nid) + 1 if nid in self._plan else 1
+                self._overall(k, frac)
+                self.status.setText(f"Clip #{nid[1:]} ({k} of {len(self._plan)}): step {ev['i']} / {ev['n']}")
+                item = self.graph.items_by_id.get(nid)
+                if item is not None:
+                    item.info.progress = frac
+                    item.update()
+                card = next((c for c in self.cards if c.nid == nid), None)
+                if card is not None:
+                    card.set_progress(ev["i"], ev["n"])
         elif e == "done":
             self._phase = "done"
-            self.progress.setRange(0, 1000)
-            self.progress.setValue(1000)
         elif e == "error":
             self._error = ev.get("msg", "error")
 
@@ -1024,39 +1170,52 @@ class MainWindow(QMainWindow):
                 self._line(line)
             p.deleteLater()
         self._buf = ""
-        self._set_running(False)
+        ok = self._phase == "done" and code == 0
+        for nid in [n for n, s in self.live.items() if s == "generating"]:
+            self.live[nid] = "stopped" if self._stopping else "failed"
+        if ok:
+            self.live.clear()
+        self.progress_of.clear()
+        self._reload_made()
         for c in self.cards:
             c.set_editable(True)
-            if c.state == "generating":
-                c.set_state("stopped" if self._stopping else "failed")
-            elif c.state == "waiting":
-                c.set_state("")
         self.progress.setRange(0, 1000)
-        out = self._run_out
-        if self._phase == "done" and code == 0:
-            secs = chain.probe(out / "chain.mp4")["frames"] / 24 if (out / "chain.mp4").exists() else 0
-            self.status.setText(f"Done: {len(self.cards)} clips, chain.mp4 ({fmt_time(secs)}).")
-            self.b_chain.setEnabled(True)
-            self.play_chain()
+        self.refresh()
+        if ok:
+            self.progress.setValue(1000)
+            made = len(self._plan)
+            msg = f"Done: {made} clip{'s' if made != 1 else ''} made." if made else "Everything was already made."
+            self.status.setText(msg)
+            path = self.selected_path()
+            if len(self._targets) == 1 and path and path[-1].id == self._targets[0]:
+                self.join_selected("play", prefix=msg)
         elif self._stopping:
             self.progress.setValue(0)
-            self.status.setText("Stopped. Finished clips are kept and reused next time.")
+            self.status.setText("Stopped. Finished clips are kept.")
         else:
             self.progress.setValue(0)
-            msg = self._error or f"the generator exited with code {code}"
-            self.status.setText(f"Failed: {msg}")
+            self.status.setText(f"Failed: {self._error or f'the generator exited with code {code}'}")
             self.tabs.setCurrentWidget(self.log)
         self._stopping = False
+        self._update_buttons()
 
     def closeEvent(self, e):
         if self.running:
-            if QMessageBox.question(self, "Promptwood", "A chain is being generated. Stop it and quit?") \
+            if QMessageBox.question(self, "Promptwood", "Clips are being generated. Stop and quit?") \
                     != QMessageBox.Yes:
                 e.ignore()
                 return
             self.stop()
             if self.proc is not None:
                 self.proc.waitForFinished(10000)
+        self._gpu_timer.stop()
+        if self._gpu_proc is not None:
+            gp, self._gpu_proc = self._gpu_proc, None
+            gp.finished.disconnect()
+            gp.kill()
+            gp.waitForFinished(1000)
+        self._save_timer.stop()
+        self._save_tree()
         self.preview.stop()
         self.save_settings()
         super().closeEvent(e)

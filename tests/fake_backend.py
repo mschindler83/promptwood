@@ -20,10 +20,39 @@ class Failing(FakeGenerator):
         super().generate(*a, **kw)
 
 
+def tree_mode(a, emit) -> int:
+    from video_chain import tree as T
+    project = a.tree.resolve()
+    tree = T.load(project)
+    targets = [t for t in a.targets.split(",") if t]
+    settings = T.current_settings(project, tree.options)
+    todo = T.plan(tree, T.Checker(project, tree), targets)
+    emit({"e": "start", "nodes": len(todo), "width": settings["width"], "height": settings["height"],
+          "frames": settings["frames"], "steps": settings["steps"], "out": str(project)})
+    cur = {"id": None}
+
+    def on_event(ev):
+        if ev.get("e") == "node" and ev.get("state") == "generating":
+            cur["id"] = ev["id"]
+        emit(ev)
+
+    if todo:
+        emit({"e": "loading"})
+        emit({"e": "loaded"})
+    cls = Failing if os.environ.get("FAKE_FAIL") else FakeGenerator
+    gen = cls(frames=17, audio=bool(tree.options.get("audio", True)),
+              step_delay=float(os.environ.get("FAKE_DELAY", "0")),
+              progress=lambda i, n: emit({"e": "step", "id": cur["id"], "i": i, "n": n}))
+    T.run_tree(gen, project, targets, events=on_event, log=lambda m: print(m, flush=True))
+    return 0
+
+
 def main() -> int:
     a = cli.build_parser().parse_args(sys.argv[1:])
     emit = cli._printer(a.events)
     try:
+        if a.tree:
+            return tree_mode(a, emit)
         prompts = chain.read_prompts(a.prompts)
         w, h = chain.canvas_size(*chain.image_size(a.image), a.resolution)
         settings = chain.settings_dict(model=a.model, lora=str(a.lora.resolve()) if a.lora else None,
