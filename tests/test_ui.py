@@ -492,13 +492,13 @@ def test_lora_lists_offer_the_h3_loras(app, tmp_path, image, monkeypatch):
     assert [n for _p, n in w.h3_loras] == ["MiniMax H3/smoke.safetensors"]          # the Wan LoRA is left out
     card = w.cards[0]
     items = [card.lora.itemText(i) for i in range(card.lora.count())]
-    assert items == ["project default (none)", "no LoRA", "MiniMax H3/smoke"]
+    assert items == ["project default (none)", "no LoRA", "smoke"]
     project = [w.lora.itemText(i) for i in range(w.lora.count())]
-    assert project == ["none (base model)", "MiniMax H3/smoke"]
+    assert project == ["none (base model)", "smoke"]
     w.lora.setCurrentIndex(1)                                                        # project LoRA from the list
     flush(app, w)
     assert w.tree.options["lora"] == str(comfy / "models" / "loras" / "MiniMax H3" / "smoke.safetensors")
-    assert w.cards[0].lora.itemText(0) == "project default (MiniMax H3/smoke)"
+    assert w.cards[0].lora.itemText(0) == "project default (smoke)"
     card = w.cards[0]
     card.lora.setCurrentIndex(card.lora.findText("no LoRA"))
     flush(app, w)
@@ -584,3 +584,11 @@ def test_stacked_loras_in_the_window(app, tmp_path, image, monkeypatch):
     w.generate_path()
     assert not w.running and "several LoRAs on one clip need the ComfyUI generator" in w.status.text()
     w.close()
+
+
+def test_lora_names_are_short_unless_they_clash(app, win):
+    win.h3_loras = [("/l/MiniMax H3/a.safetensors", "MiniMax H3/a.safetensors"),
+                    ("/l/MiniMax H3/b.safetensors", "MiniMax H3/b.safetensors"),
+                    ("/l/old/b.safetensors", "old/b.safetensors")]
+    labels = [text for _p, text in win.known_loras()]
+    assert labels == ["a", "b (MiniMax H3)", "b (old)"]

@@ -1348,8 +1348,12 @@ class MainWindow(QMainWindow):
     def known_loras(self) -> list[tuple[str, str]]:
         """(path, label) of the LoRAs to offer: every H3 LoRA in ComfyUI's LoRA folders, then LoRAs from
         elsewhere that this project uses or that were chosen recently."""
-        out = [(p, name[:-len(".safetensors")] if name.endswith(".safetensors") else name)
-               for p, name in self.h3_loras]
+        stems = [Path(name).stem for _p, name in self.h3_loras]
+        out = []
+        for (p, name), stem in zip(self.h3_loras, stems):
+            folder = str(Path(name).parent)
+            # just the file name; the folder only where two LoRAs share a name
+            out.append((p, f"{stem} ({folder})" if stems.count(stem) > 1 and folder != "." else stem))
         listed = {p for p, _ in out} | {os.path.realpath(p) for p, _ in out}
         try:
             recent = json.loads(self.qs.value("recentLoras", "[]", type=str))
