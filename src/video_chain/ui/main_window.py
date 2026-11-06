@@ -53,6 +53,7 @@ def fmt_time(seconds: float) -> str:
 class _Bridge(QObject):
     joined = Signal(object, object, str, str, str)  # path or None, error or None, purpose, status prefix, project
     comfy = Signal(bool)                       # ComfyUI reachable
+    loras = Signal(list)                       # H3 LoRAs found in ComfyUI's LoRA folders
 
 
 # ----------------------------------------------------------------------------- path card
@@ -61,8 +62,34 @@ STRENGTH_DEFAULT = -0.05          # spin box minimum = "default"
 STEPS_DEFAULT = 3
 
 
+def lora_path(p: str) -> str:
+    """How a chosen LoRA file is stored: absolute, links kept as they are (a link in ComfyUI's LoRA folder keeps
+    its own name)."""
+    return os.path.abspath(os.path.expanduser(p))
+
+
 def lora_label(path: str | None) -> str:
     return Path(path).stem if path else "none"
+
+
+def fill_lora_combo(combo: QComboBox, known: list[tuple[str, str]], current: str | None) -> None:
+    """Append the offered LoRAs to a combo box and select current (also when it is stored as the target of a
+    listed link, or is not in the list at all)."""
+    for path, text in known:
+        combo.addItem(text, path)
+        combo.setItemData(combo.count() - 1, path, Qt.ToolTipRole)
+    if not current or current == T.NO_LORA:
+        combo.setCurrentIndex(1 if current == T.NO_LORA and combo.findData(T.NO_LORA) >= 0 else 0)
+        return
+    i = combo.findData(current)
+    if i < 0:
+        real = os.path.realpath(current)
+        i = next((k for k in range(combo.count()) if isinstance(combo.itemData(k), str)
+                  and combo.itemData(k) != T.NO_LORA and os.path.realpath(combo.itemData(k)) == real), -1)
+    if i < 0:
+        combo.addItem(lora_label(current) + ("" if Path(current).is_file() else " (missing)"), current)
+        i = combo.count() - 1
+    combo.setCurrentIndex(i)
 
 
 class PromptCard(QFrame):
@@ -173,22 +200,17 @@ class PromptCard(QFrame):
         self._words()
         self._restyle()
 
-    def set_choices(self, project_lora: str | None, project_frames: int, project_steps: int, known: list[str]):
-        """Fill the setting widgets (without emitting changes)."""
+    def set_choices(self, project_label: str, project_frames: int, project_steps: int,
+                    known: list[tuple[str, str]]):
+        """Fill the setting widgets (without emitting changes). known: (path, label) of the LoRAs to offer."""
         widgets = (self.lora, self.strength, self.length, self.steps)
         for w in widgets:
             w.blockSignals(True)
         try:
             self.lora.clear()
-            self.lora.addItem(f"project default ({lora_label(project_lora)})", None)
+            self.lora.addItem(f"project default ({project_label})", None)
             self.lora.addItem("no LoRA", T.NO_LORA)
-            for k in known:
-                self.lora.addItem(lora_label(k), k)
-                self.lora.setItemData(self.lora.count() - 1, k, Qt.ToolTipRole)
-            cur = self.ov.get("lora")
-            if cur and cur != T.NO_LORA and self.lora.findData(cur) < 0:
-                self.lora.addItem(lora_label(cur), cur)
-            self.lora.setCurrentIndex(max(0, self.lora.findData(cur)) if cur else 0)
+            fill_lora_combo(self.lora, known, self.ov.get("lora"))
             self.strength.setValue(float(self.ov.get("strength", STRENGTH_DEFAULT)))
             self.length.clear()
             self.length.addItem(f"default ({project_frames / 24:.1f} s)", None)
@@ -410,6 +432,8 @@ class MainWindow(QMainWindow):
         self.bridge = _Bridge()
         self.bridge.joined.connect(self._joined)
         self.bridge.comfy.connect(self._comfy_state)
+        self.bridge.loras.connect(self._loras_found)
+        self.h3_loras: list[tuple[str, str]] = []
         self.comfy_up: bool | None = None
         self._comfy_polling = False
         self._comfy_starting = 0.0
@@ -424,6 +448,8 @@ class MainWindow(QMainWindow):
         self._comfy_timer = QTimer(self, interval=4000, timeout=self._poll_comfy)
         self._comfy_timer.start()
         QTimer.singleShot(0, self._poll_comfy)
+        QTimer.singleShot(0, self.scan_loras)
+        self.comfy_dir.editingFinished.connect(self.scan_loras)
         QTimer.singleShot(0, self._poll_gpu)
 
     # ------------------------------------------------------------------ layout
@@ -479,9 +505,11 @@ class MainWindow(QMainWindow):
         f = QFormLayout(fw)
         f.setContentsMargins(10, 6, 10, 8)
         lrow = QHBoxLayout()
-        self.lora = QLineEdit()
-        self.lora.setPlaceholderText("none: base model")
-        self.b_lora = icon_button("fopen", "Choose a LoRA (.safetensors)")
+        self.lora = QComboBox()
+        self.lora.setToolTip("The LoRA every clip uses unless it has its own; the list shows every H3 LoRA in "
+                             "ComfyUI's LoRA folders")
+        self.lora.addItem("none (base model)", None)
+        self.b_lora = icon_button("fopen", "Choose a LoRA file (.safetensors)")
         self.b_lora.clicked.connect(self._choose_lora)
         lrow.addWidget(self.lora, 1)
         lrow.addWidget(self.b_lora)
@@ -714,7 +742,7 @@ class MainWindow(QMainWindow):
                     self.steps.valueChanged, self.audio.toggled, self.keep_rep.toggled,
                     self.backend.currentIndexChanged):
             sig.connect(self._options_changed)
-        self.lora.editingFinished.connect(self._options_changed)
+        self.lora.currentIndexChanged.connect(self._options_changed)
         for keys, fn in (("Ctrl+N", lambda: self.node_action("continue", self.selected_id())),
                          ("Ctrl+B", lambda: self.node_action("branch", self.selected_id())),
                          ("Ctrl+D", lambda: self.node_action("variant", self.selected_id())),
@@ -817,7 +845,7 @@ class MainWindow(QMainWindow):
         o = self.tree.options
         self._loading = True
         try:
-            self.lora.setText(o.get("lora") or "")
+            self._fill_project_lora(o.get("lora"))
             self.strength.setValue(float(o.get("strength", 1.0)))
             fr = int(o.get("frames", 73))
             self.frames.setCurrentIndex(FRAME_CHOICES.index(fr) if fr in FRAME_CHOICES else 2)
@@ -834,13 +862,14 @@ class MainWindow(QMainWindow):
     def _options_changed(self, *_):
         if self._loading or self.tree is None or self.running:
             return
-        lora = self.lora.text().strip()
+        lora = self.lora.currentData()
         self.tree.options.update({
-            "lora": str(Path(lora).expanduser().resolve()) if lora else None, "strength": self.strength.value(),
+            "lora": lora_path(lora) if lora else None, "strength": self.strength.value(),
             "frames": self.frames.currentData(), "resolution": self.resolution.currentData(),
             "steps": self.steps.value(), "audio": self.audio.isChecked(), "keep_repeated": self.keep_rep.isChecked(),
             "backend": self.backend.currentData()})
         self._update_size_info()
+        self._refresh_card_choices()
         self._changed()
 
     def _changed(self):
@@ -1013,7 +1042,7 @@ class MainWindow(QMainWindow):
             card.seedChanged.connect(self._seed_changed)
             card.overridesChanged.connect(self._overrides_changed)
             card.chooseLora.connect(self._choose_node_lora)
-            card.set_choices(self.tree.options.get("lora"), int(self.tree.options.get("frames", 73)),
+            card.set_choices(self._project_lora_label(), int(self.tree.options.get("frames", 73)),
                              int(self.tree.options.get("steps", 28)), self.known_loras())
             card.action.connect(self.node_action)
             card.play.connect(self._play_node)
@@ -1086,18 +1115,70 @@ class MainWindow(QMainWindow):
         self.tree.nodes[nid].prompt = card.text()
         self._changed()
 
-    def known_loras(self) -> list[str]:
-        """LoRAs used in this project (project default and every node's own) plus recently chosen ones."""
-        out: list[str] = []
+    def known_loras(self) -> list[tuple[str, str]]:
+        """(path, label) of the LoRAs to offer: every H3 LoRA in ComfyUI's LoRA folders, then LoRAs from
+        elsewhere that this project uses or that were chosen recently."""
+        out = [(p, name[:-len(".safetensors")] if name.endswith(".safetensors") else name)
+               for p, name in self.h3_loras]
+        listed = {p for p, _ in out} | {os.path.realpath(p) for p, _ in out}
         try:
             recent = json.loads(self.qs.value("recentLoras", "[]", type=str))
         except ValueError:
             recent = []
-        cands = [self.tree.options.get("lora")] + [n.overrides.get("lora") for n in self.tree.nodes.values()] + recent
+        cands = ([self.tree.options.get("lora")] if self.tree else []) + \
+            ([n.overrides.get("lora") for n in self.tree.nodes.values()] if self.tree else []) + recent
         for lo in cands:
-            if lo and lo != T.NO_LORA and lo not in out and Path(lo).is_file():
-                out.append(lo)
+            if lo and lo != T.NO_LORA and lo not in listed and os.path.realpath(lo) not in listed \
+                    and Path(lo).is_file():
+                out.append((lo, lora_label(lo)))
+                listed.add(lo)
         return out
+
+    def _project_lora_label(self) -> str:
+        lo = self.tree.options.get("lora") if self.tree else None
+        if not lo:
+            return "none"
+        real = os.path.realpath(lo)
+        return next((text for p, text in self.known_loras() if p == lo or os.path.realpath(p) == real),
+                    lora_label(lo))
+
+    def _fill_project_lora(self, current: str | None):
+        self.lora.blockSignals(True)
+        try:
+            self.lora.clear()
+            self.lora.addItem("none (base model)", None)
+            fill_lora_combo(self.lora, self.known_loras(), current)
+        finally:
+            self.lora.blockSignals(False)
+
+    def scan_loras(self):
+        """Find the H3 LoRAs in ComfyUI's LoRA folders (header reads only), in the background."""
+        comfy_dir, bridge = Path(os.path.expanduser(self.comfy_dir.text().strip() or DEFAULT_COMFY_DIR)), self.bridge
+
+        def work():
+            try:
+                from ..comfy import comfy_lora_roots, find_h3_loras
+                found = find_h3_loras(comfy_lora_roots(comfy_dir))
+            except Exception:  # noqa: BLE001
+                found = []
+            bridge.loras.emit(found)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _loras_found(self, found: list):
+        self.h3_loras = list(found)
+        if self.tree is None:
+            return
+        self._fill_project_lora(self.tree.options.get("lora"))
+        self._refresh_card_choices()
+
+    def _refresh_card_choices(self):
+        """The cards' lists show the project's LoRA, length and steps as 'default': update them in place."""
+        if self.tree is None:
+            return
+        known = self.known_loras()
+        for card in self.cards:
+            card.set_choices(self._project_lora_label(), int(self.tree.options.get("frames", 73)),
+                             int(self.tree.options.get("steps", 28)), known)
 
     def _lora_dir(self) -> str:
         """Where to start looking for LoRA files: ComfyUI's first LoRA folder (the ones it can load)."""
@@ -1141,7 +1222,7 @@ class MainWindow(QMainWindow):
         if path is None:
             ov.pop("lora", None)
         else:
-            ov["lora"] = path if path == T.NO_LORA else str(Path(path).expanduser().resolve())
+            ov["lora"] = path if path == T.NO_LORA else lora_path(path)
             if path != T.NO_LORA:
                 self._remember_lora(ov["lora"])
         self.tree.nodes[nid].overrides = ov
@@ -1281,11 +1362,12 @@ class MainWindow(QMainWindow):
             self.join_selected("export", Path(f if f.endswith(".mp4") else f + ".mp4"))
 
     def _choose_lora(self):
-        start = str(Path(self.lora.text()).parent) if self.lora.text().strip() else self._lora_dir()
+        cur = self.lora.currentData()
+        start = str(Path(cur).parent) if cur else self._lora_dir()
         f, _ = QFileDialog.getOpenFileName(self, "LoRA", start, "LoRA (*.safetensors)")
         if f:
-            self.lora.setText(f)
-            self._remember_lora(str(Path(f).resolve()))
+            self._remember_lora(lora_path(f))
+            self._fill_project_lora(lora_path(f))
             self._options_changed()
 
     # ------------------------------------------------------------------ GPU

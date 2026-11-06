@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -91,6 +92,49 @@ def comfy_lora_roots(comfy_dir: Path) -> list[Path]:
                     roots.append(root if root.is_absolute() else (comfy_dir / base / root if not base.is_absolute()
                                                                   else base / root))
     return [r for r in roots if r.is_dir()]
+
+
+_H3_ATTN = re.compile(r"blocks[._]\d+[._]attn[._]qkv_proj")
+_H3_MLP = re.compile(r"blocks[._]\d+[._]mlp[._]fc1")
+_H3_CACHE: dict[tuple, bool] = {}
+
+
+def is_h3_lora(path: Path) -> bool:
+    """Whether a .safetensors file is a MiniMax-H3 LoRA (any format: ai-toolkit/peft, kohya, LoKr), from the
+    tensor names in its header only: H3's blocks have attn.qkv_proj and mlp.fc1."""
+    try:
+        st = Path(path).stat()
+    except OSError:
+        return False
+    key = (str(path), st.st_size, st.st_mtime_ns)
+    if key not in _H3_CACHE:
+        ok = False
+        try:
+            with open(path, "rb") as f:
+                n = int.from_bytes(f.read(8), "little")
+                if 0 < n < 100 * 2**20:
+                    names = json.loads(f.read(n)).keys()
+                    ok = any(_H3_ATTN.search(k) for k in names) and any(_H3_MLP.search(k) for k in names)
+        except (OSError, ValueError):
+            ok = False
+        _H3_CACHE[key] = ok
+    return _H3_CACHE[key]
+
+
+def find_h3_loras(roots: list[Path]) -> list[tuple[str, str]]:
+    """All H3 LoRAs in these folders (links followed) as (path, name relative to its folder), sorted by name."""
+    out, seen = [], set()
+    for root in roots:
+        for dirpath, _dirs, files in os.walk(root, followlinks=True):
+            for f in files:
+                if not f.endswith(".safetensors"):
+                    continue
+                full = os.path.join(dirpath, f)
+                if full in seen or not is_h3_lora(Path(full)):
+                    continue
+                seen.add(full)
+                out.append((full, os.path.relpath(full, root)))
+    return sorted(out, key=lambda x: x[1].lower())
 
 
 def _arg(argv: list, name: str) -> str | None:

@@ -27,7 +27,10 @@ def app():
 
 def settings(tmp_path, name="s.ini"):
     from PySide6.QtCore import QSettings
-    return QSettings(str(tmp_path / name), QSettings.IniFormat)
+    q = QSettings(str(tmp_path / name), QSettings.IniFormat)
+    if q.value("comfyDir") is None:                  # never the real ComfyUI folder in tests
+        q.setValue("comfyDir", str(tmp_path / "no-comfyui"))
+    return q
 
 
 @pytest.fixture
@@ -461,3 +464,43 @@ def test_backend_change_marks_clips(app, win, tmp_path, image):
     win.backend.setCurrentIndex(win.backend.findData("ai-toolkit"))
     flush(app, win)
     assert win.state(ids[0]) == "changed" and win.tree.options["backend"] == "ai-toolkit"
+
+
+def write_lora(path, names):
+    import numpy as np
+    from safetensors.numpy import save_file
+    path.parent.mkdir(parents=True, exist_ok=True)
+    save_file({n: np.zeros((2, 2), np.float32) for n in names}, str(path))
+
+
+H3_KEYS = ["diffusion_model.blocks.0.attn.qkv_proj.lora_A.weight", "diffusion_model.blocks.0.mlp.fc1.lora_A.weight"]
+
+
+def test_lora_lists_offer_the_h3_loras(app, tmp_path, image, monkeypatch):
+    from video_chain.ui.main_window import MainWindow
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    comfy = tmp_path / "ComfyUI"
+    (comfy / "models" / "loras").mkdir(parents=True)
+    (comfy / "main.py").write_text("")
+    write_lora(comfy / "models" / "loras" / "MiniMax H3" / "smoke.safetensors", H3_KEYS)
+    write_lora(comfy / "models" / "loras" / "wan" / "other.safetensors", ["blocks.0.self_attn.q.lora_A.weight"])
+    q = settings(tmp_path, "l.ini")
+    q.setValue("comfyDir", str(comfy))
+    w = MainWindow(q, command=FAKE)
+    ids = new_project(w, tmp_path, image, ("a",))
+    wait(app, lambda: w.h3_loras, timeout=10)
+    assert [n for _p, n in w.h3_loras] == ["MiniMax H3/smoke.safetensors"]          # the Wan LoRA is left out
+    card = w.cards[0]
+    items = [card.lora.itemText(i) for i in range(card.lora.count())]
+    assert items == ["project default (none)", "no LoRA", "MiniMax H3/smoke"]
+    project = [w.lora.itemText(i) for i in range(w.lora.count())]
+    assert project == ["none (base model)", "MiniMax H3/smoke"]
+    w.lora.setCurrentIndex(1)                                                        # project LoRA from the list
+    flush(app, w)
+    assert w.tree.options["lora"] == str(comfy / "models" / "loras" / "MiniMax H3" / "smoke.safetensors")
+    assert w.cards[0].lora.itemText(0) == "project default (MiniMax H3/smoke)"
+    card = w.cards[0]
+    card.lora.setCurrentIndex(card.lora.findText("no LoRA"))
+    flush(app, w)
+    assert w.tree.nodes[ids[0]].overrides == {"lora": T.NO_LORA}
+    w.close()

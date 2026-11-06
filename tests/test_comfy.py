@@ -207,3 +207,31 @@ def test_lora_found_through_a_link(tmp_path):
     names = ["MiniMax H3/glow_step500.safetensors", "MiniMax H3/other.safetensors"]
     assert C.lora_name_for(str(trained), names, roots) == "MiniMax H3/glow_step500.safetensors"
     assert C.lora_name_for(str(trained), names) is None                         # without the folders: unknown
+
+
+
+def test_h3_lora_detection(tmp_path):
+    from test_ui import H3_KEYS, write_lora
+    write_lora(tmp_path / "peft.safetensors", H3_KEYS)
+    write_lora(tmp_path / "kohya.safetensors", ["lora_unet_blocks_3_attn_qkv_proj.lora_down.weight",
+                                                "lora_unet_blocks_3_mlp_fc1.lora_down.weight"])
+    write_lora(tmp_path / "lokr.safetensors", ["diffusion_model.blocks.0.attn.qkv_proj.lokr_w1",
+                                               "diffusion_model.blocks.0.mlp.fc1.lokr_w1"])
+    write_lora(tmp_path / "wan.safetensors", ["diffusion_model.blocks.0.self_attn.q.lora_A.weight",
+                                              "diffusion_model.blocks.0.ffn.0.lora_A.weight"])
+    write_lora(tmp_path / "flux.safetensors", ["transformer.double_blocks.0.img_attn.qkv.lora_A.weight"])
+    (tmp_path / "broken.safetensors").write_bytes(b"\xff" * 20)
+    got = {p.name: C.is_h3_lora(p) for p in tmp_path.glob("*.safetensors")}
+    assert got == {"peft.safetensors": True, "kohya.safetensors": True, "lokr.safetensors": True,
+                   "wan.safetensors": False, "flux.safetensors": False, "broken.safetensors": False}
+
+
+def test_find_h3_loras_in_folders_and_links(tmp_path):
+    from test_ui import H3_KEYS, write_lora
+    root = tmp_path / "loras"
+    write_lora(root / "MiniMax H3" / "b.safetensors", H3_KEYS)
+    write_lora(root / "a.safetensors", H3_KEYS)
+    write_lora(tmp_path / "training" / "mine.safetensors", H3_KEYS)
+    (root / "MiniMax H3" / "mine_step500.safetensors").symlink_to(tmp_path / "training" / "mine.safetensors")
+    names = [n for _p, n in C.find_h3_loras([root])]
+    assert names == ["a.safetensors", "MiniMax H3/b.safetensors", "MiniMax H3/mine_step500.safetensors"]
