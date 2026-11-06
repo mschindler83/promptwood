@@ -1,10 +1,16 @@
 """Image picker with thumbnails: folders first, then the images of the folder as a grid, a large preview of the
-selected one. Thumbnails are made in background threads (folders on network shares stay responsive)."""
+selected one. Thumbnails are made in background threads (folders on network shares stay responsive).
+
+Thumbnails are kept on the local disk (~/.cache/video-chain/thumbs, keyed by path, size and date), so an image
+on a network share is read in full only once; thumbnails the desktop already made (the freedesktop cache in
+~/.cache/thumbnails, e.g. from the file manager) are used without reading the image at all."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -19,10 +25,45 @@ from .widgets import icon_button, label
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 MAX_RECENT_DIRS = 8
 THUMB_MAX = 320                    # thumbnails are made at this size once and scaled for the grid
+THREADS = 8                        # parallel reads: on a network share every file costs round trips
+CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "video-chain" / "thumbs"
+DESKTOP_THUMBS = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "thumbnails"
+MAX_CACHED = 20000                 # beyond this many cached thumbnails the oldest are removed
 
 
 class _Thumbs(QObject):
     ready = Signal(int, str, QImage)            # generation, path, thumbnail
+
+
+def _cache_file(cache_dir: Path, path: str, st: os.stat_result) -> Path:
+    key = hashlib.sha1(f"{path}|{st.st_size}|{st.st_mtime_ns}|{THUMB_MAX}".encode()).hexdigest()
+    return cache_dir / key[:2] / f"{key}.jpg"
+
+
+def _desktop_thumbnail(desktop: Path, path: str, st: os.stat_result) -> QImage:
+    """A thumbnail the desktop already made (freedesktop thumbnail spec), if it is for this version of the file."""
+    uri = "file://" + urllib.parse.quote(path)
+    name = hashlib.md5(uri.encode()).hexdigest() + ".png"
+    for size in ("x-large", "large", "normal"):
+        f = desktop / size / name
+        if f.is_file():
+            img = QImage(str(f))
+            if not img.isNull() and img.text("Thumb::MTime") == str(int(st.st_mtime)):
+                return img
+    return QImage()
+
+
+def prune_cache(cache_dir: Path, keep: int = MAX_CACHED) -> None:
+    """Remove the oldest cached thumbnails when there are more than keep."""
+    try:
+        files = [f for d in Path(cache_dir).iterdir() if d.is_dir() for f in d.iterdir() if f.suffix == ".jpg"]
+    except OSError:
+        return
+    if len(files) <= keep:
+        return
+    files.sort(key=lambda f: f.stat().st_mtime)
+    for f in files[:len(files) - keep]:
+        f.unlink(missing_ok=True)
 
 
 def _thumbnail(path: str) -> QImage:
@@ -38,13 +79,19 @@ def _thumbnail(path: str) -> QImage:
 
 class ImagePickerDialog(QDialog):
     def __init__(self, parent=None, title: str = "Choose an image", start_dir: str | None = None,
-                 settings: QSettings | None = None, places: list[tuple[str, str]] | None = None):
+                 settings: QSettings | None = None, places: list[tuple[str, str]] | None = None,
+                 cache_dir: Path | None = CACHE_DIR, desktop_thumbs: Path | None = DESKTOP_THUMBS):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.resize(1100, 700)
         self.qs = settings or QSettings()
         self._gen = 0
-        self._pool = ThreadPoolExecutor(max_workers=4)
+        self._pool = ThreadPoolExecutor(max_workers=THREADS)
+        self.cache_dir = Path(cache_dir) if cache_dir else None
+        self.desktop_thumbs = Path(desktop_thumbs) if desktop_thumbs else None
+        self.stats = {"memory": 0, "disk": 0, "desktop": 0, "read": 0}
+        if self.cache_dir is not None:
+            self._pool.submit(prune_cache, self.cache_dir)
         self._thumbs = _Thumbs()
         self._thumbs.ready.connect(self._thumb_ready)
         self._items: dict[str, QListWidgetItem] = {}
@@ -203,9 +250,38 @@ class ImagePickerDialog(QDialog):
         except OSError:
             return
         img = self._cache.get(key)
-        if img is None:
+        if img is not None:
+            self.stats["memory"] += 1
+        if img is None and self.cache_dir is not None:          # local disk: no network read
+            f = _cache_file(self.cache_dir, path, st)
+            if f.is_file():
+                img = QImage(str(f))
+                if img.isNull():
+                    img = None
+                else:
+                    self.stats["disk"] += 1
+                    os.utime(f)                                  # recently used: kept when pruning
+        if img is None and self.desktop_thumbs is not None:     # the file manager's thumbnail
+            img = _desktop_thumbnail(self.desktop_thumbs, path, st)
+            if img.isNull():
+                img = None
+            else:
+                self.stats["desktop"] += 1
+        if img is None:                                          # read the image (over the network)
+            if gen != self._gen:
+                return
             img = _thumbnail(path)
-            self._cache[key] = img
+            self.stats["read"] += 1
+            if not img.isNull() and self.cache_dir is not None:
+                f = _cache_file(self.cache_dir, path, st)
+                try:
+                    f.parent.mkdir(parents=True, exist_ok=True)
+                    tmp = f.with_name(f.stem + ".part.jpg")
+                    if img.save(str(tmp), "JPG", 85):
+                        tmp.replace(f)
+                except OSError:
+                    pass
+        self._cache[key] = img
         self._thumbs.ready.emit(gen, path, img)
 
     def _thumb_ready(self, gen: int, path: str, img: QImage):
@@ -299,8 +375,12 @@ class ImagePickerDialog(QDialog):
 
 def pick_image(parent, title: str, settings: QSettings | None = None, start_dir: str | None = None,
                places: list[tuple[str, str]] | None = None) -> str | None:
-    """Show the picker; the chosen image's path or None."""
-    dlg = ImagePickerDialog(parent, title, start_dir, settings, places)
+    """Show the picker; the chosen image's path or None. The thumbnail cache can be moved with the setting
+    'thumbCacheDir' (empty = no disk cache)."""
+    qs = settings or QSettings()
+    cache = qs.value("thumbCacheDir", None)
+    cache_dir = CACHE_DIR if cache is None else (Path(cache) if cache else None)
+    dlg = ImagePickerDialog(parent, title, start_dir, qs, places, cache_dir=cache_dir)
     try:
         return dlg.chosen() if dlg.exec() == QDialog.Accepted else None
     finally:

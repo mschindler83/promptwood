@@ -30,6 +30,8 @@ def settings(tmp_path, name="s.ini"):
     q = QSettings(str(tmp_path / name), QSettings.IniFormat)
     if q.value("comfyDir") is None:                  # never the real ComfyUI folder in tests
         q.setValue("comfyDir", str(tmp_path / "no-comfyui"))
+    if q.value("thumbCacheDir") is None:             # nor the real thumbnail cache
+        q.setValue("thumbCacheDir", str(tmp_path / "thumb-cache"))
     return q
 
 
@@ -697,7 +699,8 @@ def test_image_picker(app, tmp_path):
     Image.new("RGB", (64, 64), (0, 0, 200)).save(d / "sub" / "inner.webp")
     (d / "notes.txt").write_text("not an image")
     q = settings(tmp_path, "pick.ini")
-    dlg = ImagePickerDialog(None, "Start image", str(d), q)
+    dlg = ImagePickerDialog(None, "Start image", str(d), q, cache_dir=tmp_path / "thumbs",
+                            desktop_thumbs=tmp_path / "desktop-thumbs")
     names = [dlg.grid.item(i).text() for i in range(dlg.grid.count())]
     assert names == ["sub", "a_small.png", "b_big.jpg"]                         # folders first, no txt
     big = dlg.grid.item(2)
@@ -713,7 +716,7 @@ def test_image_picker(app, tmp_path):
     dlg._activated(dlg.grid.item(next(i for i in range(dlg.grid.count()) if dlg.grid.item(i).text() == "a_small.png")))
     assert dlg.result() == dlg.DialogCode.Accepted and dlg.chosen() == str((d / "a_small.png").resolve())
     assert q.value("pickerDir") == str(d.resolve())                             # remembered for next time
-    dlg2 = ImagePickerDialog(None, "again", None, q)
+    dlg2 = ImagePickerDialog(None, "again", None, q, cache_dir=tmp_path / "thumbs", desktop_thumbs=None)
     assert dlg2.folder == d.resolve()
     assert any(dlg2.places.item(i).data(Qt.UserRole) == str(d.resolve()) for i in range(dlg2.places.count()))
     dlg2.reject()
@@ -777,3 +780,54 @@ def test_review_fixes_in_the_window(app, win, tmp_path, image, monkeypatch):
     # a failed save is shown, not swallowed
     monkeypatch.setattr(T, "save", lambda *a, **k: (_ for _ in ()).throw(OSError(5, "Input/output error")))
     assert win._write_tree() is False and "Could not save the project" in win.status.text()
+
+
+def test_thumbnails_are_cached_on_disk_and_desktop_ones_used(app, tmp_path):
+    import hashlib
+    import urllib.parse
+
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QImage
+
+    from video_chain.ui import image_picker as IP
+    d = tmp_path / "share"
+    d.mkdir()
+    for k in range(5):
+        Image.new("RGB", (900, 600), (k * 40, 0, 0)).save(d / f"img{k}.jpg")
+    cache, desktop = tmp_path / "thumbs", tmp_path / "desk"
+    q = settings(tmp_path, "c.ini")
+
+    def thumbs_of(dlg):
+        wait(app, lambda: all(dlg.grid.item(i).data(Qt.UserRole + 1) for i in range(dlg.grid.count())), timeout=10)
+        return dict(dlg.stats)
+    first = IP.ImagePickerDialog(None, "x", str(d), q, cache_dir=cache, desktop_thumbs=desktop)
+    assert thumbs_of(first)["read"] == 5                                   # read once over the "network"
+    first.reject()
+    second = IP.ImagePickerDialog(None, "x", str(d), q, cache_dir=cache, desktop_thumbs=desktop)
+    st = thumbs_of(second)
+    assert st["read"] == 0 and st["disk"] == 5                             # then from the local disk
+    second.reject()
+    # a changed image is read again
+    Image.new("RGB", (900, 600), (0, 0, 255)).save(d / "img0.jpg")
+    os.utime(d / "img0.jpg", (time.time() + 5, time.time() + 5))
+    third = IP.ImagePickerDialog(None, "x", str(d), q, cache_dir=cache, desktop_thumbs=desktop)
+    st = thumbs_of(third)
+    assert st["read"] == 1 and st["disk"] == 4
+    third.reject()
+    # a fresh image with a matching desktop thumbnail is not read at all
+    new = d / "fresh.jpg"
+    Image.new("RGB", (900, 600), (0, 255, 0)).save(new)
+    uri = "file://" + urllib.parse.quote(str(new.resolve()))
+    thumb = QImage(128, 85, QImage.Format_RGB32)
+    thumb.fill(0x00ff00)
+    thumb.setText("Thumb::URI", uri)
+    thumb.setText("Thumb::MTime", str(int(new.stat().st_mtime)))
+    (desktop / "large").mkdir(parents=True)
+    thumb.save(str(desktop / "large" / (hashlib.md5(uri.encode()).hexdigest() + ".png")))
+    fourth = IP.ImagePickerDialog(None, "x", str(d), q, cache_dir=cache, desktop_thumbs=desktop)
+    st = thumbs_of(fourth)
+    assert st["desktop"] == 1 and st["read"] == 0
+    fourth.reject()
+    # pruning keeps the newest
+    IP.prune_cache(cache, keep=2)
+    assert len([f for sub in cache.iterdir() for f in sub.iterdir()]) == 2
