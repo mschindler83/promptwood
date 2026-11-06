@@ -717,3 +717,23 @@ def test_image_picker(app, tmp_path):
     assert dlg2.folder == d.resolve()
     assert any(dlg2.places.item(i).data(Qt.UserRole) == str(d.resolve()) for i in range(dlg2.places.count()))
     dlg2.reject()
+
+
+def test_create_variants(app, win, tmp_path, image):
+    lora = tmp_path / "x.safetensors"
+    lora.write_bytes(b"x")
+    ids = new_project(win, tmp_path, image, ("a", "b"))
+    win.tree.nodes[ids[1]].overrides = {"lora": str(lora), "strength": 0.7, "frames": 90}
+    new = win.create_variants(ids[1], 3, generate=True)
+    assert len(new) == 3 and win.running
+    nodes = [win.tree.nodes[n] for n in new]
+    assert all(n.parent == ids[0] and n.prompt == "b" for n in nodes)
+    assert all(n.overrides == {"lora": str(lora), "strength": 0.7, "frames": 90} for n in nodes)
+    seeds = {n.seed for n in nodes} | {win.tree.nodes[ids[1]].seed}
+    assert len(seeds) == 4                                                    # every variant its own seed
+    wait(app, lambda: not win.running)
+    assert all(win.state(n) == "done" for n in new) and win.state(ids[0]) == "done"
+    assert win.state(ids[1]) == "new"                                         # the original was not asked for
+    assert len(win.tree.leaves()) == 4
+    only = win.create_variants(ids[0], 2, generate=False)
+    assert not win.running and all(win.state(n) == "new" for n in only)

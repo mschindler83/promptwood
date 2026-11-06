@@ -6,6 +6,7 @@ The project folder holds tree.json, start.png and the clips (see tree.py). Gener
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 import random
@@ -139,6 +140,32 @@ class NewProjectDialog(QDialog):
         f = pick_image(self, "Start image", getattr(self.parent(), "qs", None), start)
         if f:
             self.image.setText(f)
+
+
+class VariantsDialog(QDialog):
+    """How many variants of a clip, and whether to generate them right away."""
+
+    def __init__(self, parent, node):
+        super().__init__(parent)
+        self.setWindowTitle("Create variants")
+        f = QFormLayout(self)
+        text = node.prompt if len(node.prompt) < 90 else node.prompt[:87] + "…"
+        info = label(f"Clip #{node.id[1:]}: “{text}”\nEach variant is a new branch from the same point with the same "
+                     "prompt and settings and another seed.", level="secondary")
+        info.setWordWrap(True)
+        f.addRow(info)
+        self.count = QSpinBox()
+        self.count.setRange(1, 20)
+        self.count.setValue(3)
+        f.addRow("Variants", self.count)
+        self.generate = QCheckBox("Generate them now")
+        self.generate.setChecked(True)
+        f.addRow("", self.generate)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Create")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        f.addRow(buttons)
 
 
 class _Bridge(QObject):
@@ -294,6 +321,8 @@ class PromptCard(QFrame):
         head.addStretch(1)
         self.buttons = []
         for act, ic, tip in (("variant", "clone", "Variant: same prompt, other seed, as a new branch (Ctrl+D)"),
+                             ("variants", "layers", "Variants…: several new branches with the same prompt and "
+                                                    "settings but other seeds, generated at once"),
                              ("branch", "split", "Branch: another continuation from the same point (Ctrl+B)"),
                              ("delete", "trash", "Delete this clip and everything after it")):
             b = icon_button(ic, tip)
@@ -1859,9 +1888,16 @@ class MainWindow(QMainWindow):
         node = self.tree.nodes.get(nid) if nid and nid != START else None
         if action == "continue":
             new = self.tree.add(node.id if node else None, "")
+        elif action == "variants" and node is not None:
+            dlg = VariantsDialog(self, node)
+            if dlg.exec() == QDialog.Accepted:
+                self.create_variants(node.id, dlg.count.value(), dlg.generate.isChecked())
+            return
         elif action in ("branch", "variant") and node is not None:
             new = self.tree.add(node.parent, node.prompt if action == "variant" else "",
                                 self._new_seed() if action == "variant" else None)
+            if action == "variant":                # the same clip with another seed: its own settings too
+                new.overrides = copy.deepcopy(node.overrides)
         elif action == "delete" and node is not None:
             below = len(self.tree.descendants(node.id))
             made = node.made is not None or any(d.made for d in self.tree.descendants(node.id))
@@ -1886,6 +1922,25 @@ class MainWindow(QMainWindow):
         if self.cards and self.cards[-1].nid == new.id:
             self.cards[-1].edit.setFocus()
 
+    def create_variants(self, nid: str, count: int, generate: bool = True) -> list[str]:
+        """count new branches next to nid: same prompt and clip settings, each its own new seed; then (optionally)
+        generate them in one run. Returns the new node ids."""
+        if self.tree is None or self.running or nid not in self.tree.nodes:
+            return []
+        node = self.tree.nodes[nid]
+        ids = []
+        for _ in range(max(1, int(count))):
+            new = self.tree.add(node.parent, node.prompt, self._new_seed())
+            new.overrides = copy.deepcopy(node.overrides)
+            ids.append(new.id)
+        self._write_tree()
+        self.refresh()
+        self.graph.reveal(ids[-1])
+        self.status.setText(f"{len(ids)} variant{'s' if len(ids) != 1 else ''} of clip #{nid[1:]} added.")
+        if generate:
+            self._start(ids)
+        return ids
+
     def _context(self, nid: str, pos):
         if self.running or self.tree is None:
             return
@@ -1895,6 +1950,7 @@ class MainWindow(QMainWindow):
         if nid != START:
             acts[m.addAction("Branch (another continuation)")] = "branch"
             acts[m.addAction("Variant (same prompt, other seed)")] = "variant"
+            acts[m.addAction("Variants… (several, generated at once)")] = "variants"
             m.addSeparator()
             play = m.addAction("Play this clip")
             play.setEnabled(bool(self.tree.nodes[nid].made))
