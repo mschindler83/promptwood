@@ -189,7 +189,7 @@ def test_project_is_restored(app, tmp_path, image, monkeypatch):
 
 def test_new_project_takes_the_last_settings(app, win, tmp_path, image):
     win.open_project(tmp_path / "p1")
-    win.frames.setCurrentIndex(5)
+    win.frames.setCurrentIndex(win.frames.findData(124))
     win.save_settings()
     win.open_project(tmp_path / "p2")
     assert win.frames.currentData() == 124 and win.tree.options["frames"] == 124
@@ -592,3 +592,24 @@ def test_lora_names_are_short_unless_they_clash(app, win):
                     ("/l/old/b.safetensors", "old/b.safetensors")]
     labels = [text for _p, text in win.known_loras()]
     assert labels == ["a", "b (MiniMax H3)", "b (old)"]
+
+
+def test_clip_lengths_3_to_15_seconds(app, win, tmp_path, image):
+    ids = new_project(win, tmp_path, image, ("a",))
+    values = [win.frames.itemData(i) for i in range(win.frames.count())]
+    assert values[0] == 73 and values[-1] == 362 and all(v % 17 == 5 for v in values) and 39 not in values
+    card = win.cards[0]
+    assert [card.length.itemData(i) for i in range(card.length.count())][1:] == values
+    win.frames.setCurrentIndex(win.frames.findData(362))
+    flush(app, win)
+    assert win.tree.options["frames"] == 362 and win.cards[0].span.text().startswith("0:00.0 – 0:15.1")
+    # a project saved with 39 frames keeps showing them (not silently another length)
+    t = T.load(win.project)
+    t.options["frames"] = 39
+    t.nodes[ids[0]].overrides = {"frames": 56}
+    T.save(win.project, t)
+    win.open_project(win.project)
+    assert win.frames.currentData() == 39 and "no longer offered" in win.frames.currentText()
+    assert win.cards[0].length.currentData() == 56
+    win.open_project(tmp_path / "other")
+    assert win.frames.count() == len(values)                                # the extra entry is gone again

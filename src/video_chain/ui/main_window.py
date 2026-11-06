@@ -39,7 +39,24 @@ DEFAULT_COMFY_LAUNCHER = str(Path.home() / "bin" / "comfyui")
 DEFAULT_COMFY_DIR = str(Path.home() / "ComfyUI")
 BACKENDS = (("comfyui", "ComfyUI (fast, keeps the model loaded)"),
             ("ai-toolkit", "ai-toolkit (the trainer's sampler)"))
-FRAME_CHOICES = [39, 56, 73, 90, 107, 124]
+# H3's 17n+5 frame grid from 3 s to 15 s (362 frames = 15.1 s, the top of its trained range of ~124-362)
+FRAME_CHOICES = [17 * n + 5 for n in range(4, 22)]
+
+
+def frames_text(n: int) -> str:
+    return f"{n / 24:.1f} s ({n} frames)"
+
+
+def select_frames(combo: QComboBox, frames: int | None) -> None:
+    """Select a frame count; a saved one that is no longer offered is shown as it is, not replaced."""
+    if frames is None:
+        combo.setCurrentIndex(0)
+        return
+    i = combo.findData(int(frames))
+    if i < 0:
+        combo.addItem(frames_text(int(frames)) + " – no longer offered", int(frames))
+        i = combo.count() - 1
+    combo.setCurrentIndex(i)
 IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff)"
 STATE_TEXT = {"done": "DONE", "reused": "DONE", "changed": "CHANGED", "new": "NOT MADE", "generating": "GENERATING",
               "failed": "FAILED", "stopped": "STOPPED"}
@@ -305,9 +322,8 @@ class PromptCard(QFrame):
             self.length.clear()
             self.length.addItem(f"default ({project_frames / 24:.1f} s)", None)
             for n in FRAME_CHOICES:
-                self.length.addItem(f"{n / 24:.1f} s ({n} frames)", n)
-            fr = self.ov.get("frames")
-            self.length.setCurrentIndex(max(0, self.length.findData(fr)) if fr else 0)
+                self.length.addItem(frames_text(n), n)
+            select_frames(self.length, self.ov.get("frames"))
             self.steps.setValue(int(self.ov.get("steps", STEPS_DEFAULT)))
             self.steps.setToolTip(f"Sampling steps of this clip (lowest value = the project's: {project_steps})")
         finally:
@@ -677,8 +693,11 @@ class MainWindow(QMainWindow):
         c.setContentsMargins(10, 6, 10, 8)
         self.frames = QComboBox()
         for n in FRAME_CHOICES:
-            self.frames.addItem(f"{n} frames ({n / 24:.1f} s)", n)
+            self.frames.addItem(frames_text(n), n)
         self.frames.setCurrentIndex(FRAME_CHOICES.index(73))
+        self.frames.setToolTip("Length of every clip (a clip can have its own). Longer clips mean fewer hand-overs "
+                               "between clips, so the face drifts less; they take longer and need more memory "
+                               "(with ai-toolkit beyond 124 frames possibly too much for 24 GB)")
         c.addRow("Length", self.frames)
         self.resolution = QComboBox()
         for r, txt in ((384, "384 (fast draft)"), (512, "512 (like the training)"), (640, "640"), (768, "768")):
@@ -1000,8 +1019,13 @@ class MainWindow(QMainWindow):
             self.extra_loras.set_items(self.known_loras(), o.get("extra_loras") or [])
             self.extra_loras.blockSignals(False)
             self.strength.setValue(float(o.get("strength", 1.0)))
+            for k in range(self.frames.count() - 1, len(FRAME_CHOICES) - 1, -1):   # an old value added earlier
+                self.frames.removeItem(k)
             fr = int(o.get("frames", 73))
-            self.frames.setCurrentIndex(FRAME_CHOICES.index(fr) if fr in FRAME_CHOICES else 2)
+            if fr in FRAME_CHOICES:
+                self.frames.setCurrentIndex(FRAME_CHOICES.index(fr))
+            else:
+                select_frames(self.frames, fr)
             i = self.resolution.findData(int(o.get("resolution", 512)))
             self.resolution.setCurrentIndex(i if i >= 0 else 1)
             self.steps.setValue(int(o.get("steps", 28)))
