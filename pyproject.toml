@@ -1,0 +1,20 @@
+[project]
+name = "video-chain"
+version = "0.1.0"
+description = "Chain MiniMax-H3 image-to-video clips: each prompt continues from the last frame of the clip before"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest", "pillow"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]

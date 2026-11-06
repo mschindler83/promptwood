@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Runs video-chain with ai-toolkit's Python (torch, the H3 extension, the model files).
+# Override the ai-toolkit folder with AITK=/path/to/ai-toolkit.
+AITK="${AITK:-/path/to/ai/ai-toolkit}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHONPATH="$HERE/src${PYTHONPATH:+:$PYTHONPATH}" exec "$AITK/venv/bin/python" -m video_chain --aitk "$AITK" "$@"
