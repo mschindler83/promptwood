@@ -56,6 +56,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--backend", choices=["ai-toolkit", "comfyui"], default="ai-toolkit",
                    help="worker mode: render with ai-toolkit (loads the model itself) or a running ComfyUI")
     p.add_argument("--comfy-url", default="http://127.0.0.1:8188", help="ComfyUI address (backend comfyui)")
+    p.add_argument("--comfy-dir", type=Path, help="ComfyUI's folder (its LoRA folders; cleanup of its copies)")
+    p.add_argument("--keep-comfy-copies", action="store_true",
+                   help="leave ComfyUI's copies of clips and start images in its output/input folders")
     p.add_argument("--aitk", type=Path, default=Path("/path/to/ai/ai-toolkit"),
                    help="ai-toolkit folder")
     return p
@@ -239,7 +242,8 @@ def _main_serve(a, emit) -> int:
             emit({"e": "loading", "what": "comfyui"})
             try:
                 gen = ComfyGenerator(a.comfy_url, progress=lambda i, n: emit(
-                    {"e": "step", "id": current["id"], "k": current["k"], "i": i, "n": n}))
+                    {"e": "step", "id": current["id"], "k": current["k"], "i": i, "n": n}),
+                    comfy_dir=a.comfy_dir, cleanup=not a.keep_comfy_copies)
             except ComfyUnavailable as e:
                 emit({"e": "error", "msg": str(e), "comfy_down": True})
                 raise SystemExit(COMFY_DOWN)

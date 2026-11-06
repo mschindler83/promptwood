@@ -172,3 +172,38 @@ def test_real_worker_with_comfyui_backend(server, tmp_path):
     # clip 2 started from clip 1's last frame (uploaded to ComfyUI)
     assert len(list((server.root / "input" / "video-chain").glob("*.png"))) == 2
     assert ("BODY", "/free", {"unload_models": True, "free_memory": True}) in server.calls
+
+
+def test_cleanup_removes_only_comfyuis_copies(server, start, tmp_path):
+    (server.root / "main.py").write_text("# fake ComfyUI folder\n")
+    keep = server.root / "output" / "other.png"
+    keep.write_bytes(b"not ours")
+    gen = C.ComfyGenerator(server.url, comfy_dir=server.root)
+    gen.generate("x", start, tmp_path / "v.mp4", tmp_path / "v.png", 1, settings())
+    assert (tmp_path / "v.mp4").stat().st_size > 0 and (tmp_path / "v.png").stat().st_size > 0
+    assert not list((server.root / "output" / "video-chain").glob("*"))         # clip and last frame removed
+    assert not list((server.root / "input" / "video-chain").glob("*"))          # uploaded start image removed
+    assert keep.read_bytes() == b"not ours"
+    gen2 = C.ComfyGenerator(server.url, comfy_dir=server.root, cleanup=False)
+    gen2.generate("x", start, tmp_path / "w.mp4", tmp_path / "w.png", 1, settings())
+    assert len(list((server.root / "output" / "video-chain").glob("*"))) == 2
+
+
+def test_lora_found_through_a_link(tmp_path):
+    """A LoRA chosen at its original path is found when ComfyUI lists a link to it (extra_model_paths.yaml)."""
+    comfy = tmp_path / "ComfyUI"
+    comfy.mkdir()
+    (comfy / "main.py").write_text("")
+    models = tmp_path / "my_models"
+    (models / "loras" / "MiniMax H3").mkdir(parents=True)
+    (comfy / "extra_model_paths.yaml").write_text(
+        f"my_models:\n    base_path: {models}/\n    loras: loras/\n    vae: vae/\n")
+    trained = tmp_path / "training" / "glow_h3_lora.safetensors"
+    trained.parent.mkdir()
+    trained.write_bytes(b"weights")
+    (models / "loras" / "MiniMax H3" / "glow_step500.safetensors").symlink_to(trained)
+    roots = C.comfy_lora_roots(comfy)
+    assert models / "loras" in roots
+    names = ["MiniMax H3/glow_step500.safetensors", "MiniMax H3/other.safetensors"]
+    assert C.lora_name_for(str(trained), names, roots) == "MiniMax H3/glow_step500.safetensors"
+    assert C.lora_name_for(str(trained), names) is None                         # without the folders: unknown

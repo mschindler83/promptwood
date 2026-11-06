@@ -34,6 +34,7 @@ LAUNCHER = PROJECT_DIR / "video-chain"
 DEFAULT_AITK = "/path/to/ai/ai-toolkit"
 DEFAULT_COMFY_URL = "http://127.0.0.1:8188"
 DEFAULT_COMFY_LAUNCHER = str(Path.home() / "bin" / "comfyui")
+DEFAULT_COMFY_DIR = str(Path.home() / "ComfyUI")
 BACKENDS = (("comfyui", "ComfyUI (fast, keeps the model loaded)"),
             ("ai-toolkit", "ai-toolkit (the trainer's sampler)"))
 FRAME_CHOICES = [39, 56, 73, 90, 107, 124]
@@ -559,6 +560,16 @@ class MainWindow(QMainWindow):
         crow.addWidget(self.comfy_launcher, 1)
         crow.addWidget(self.b_start_comfy)
         a.addRow("Start with", crow)
+        self.comfy_dir = QLineEdit(DEFAULT_COMFY_DIR)
+        self.comfy_dir.setToolTip("ComfyUI's folder: its LoRA folders are searched for the chosen LoRA files, and "
+                                  "its copies of the clips are removed after they were taken over")
+        a.addRow("ComfyUI folder", self.comfy_dir)
+        self.comfy_cleanup = QCheckBox("Delete ComfyUI's copies of the clips")
+        self.comfy_cleanup.setChecked(True)
+        self.comfy_cleanup.setToolTip("ComfyUI keeps every clip and start image in output/video-chain and "
+                                      "input/video-chain; the project has its own copy, so they are removed after "
+                                      "the download (only there, never anything else)")
+        a.addRow("", self.comfy_cleanup)
         krow = QHBoxLayout()
         self.keep_loaded = QCheckBox("Keep the model loaded for")
         self.keep_loaded.setChecked(True)
@@ -721,6 +732,8 @@ class MainWindow(QMainWindow):
         self.keep_loaded.setChecked(q.value("keepLoaded", True, type=bool))
         self.comfy_url.setText(q.value("comfyUrl", DEFAULT_COMFY_URL, type=str))
         self.comfy_launcher.setText(q.value("comfyLauncher", DEFAULT_COMFY_LAUNCHER, type=str))
+        self.comfy_dir.setText(q.value("comfyDir", DEFAULT_COMFY_DIR, type=str))
+        self.comfy_cleanup.setChecked(q.value("comfyCleanup", True, type=bool))
         self.idle_minutes.setValue(q.value("idleMinutes", 15, type=int))
         self.min_free.setValue(q.value("minFree", 18.0, type=float))
         self.aitk.setText(q.value("aitk", DEFAULT_AITK, type=str))
@@ -736,6 +749,8 @@ class MainWindow(QMainWindow):
         q.setValue("keepLoaded", self.keep_loaded.isChecked())
         q.setValue("comfyUrl", self.comfy_url.text().strip())
         q.setValue("comfyLauncher", self.comfy_launcher.text().strip())
+        q.setValue("comfyDir", self.comfy_dir.text().strip())
+        q.setValue("comfyCleanup", self.comfy_cleanup.isChecked())
         q.setValue("idleMinutes", self.idle_minutes.value())
         q.setValue("minFree", self.min_free.value())
         q.setValue("aitk", self.aitk.text().strip())
@@ -1084,6 +1099,16 @@ class MainWindow(QMainWindow):
                 out.append(lo)
         return out
 
+    def _lora_dir(self) -> str:
+        """Where to start looking for LoRA files: ComfyUI's first LoRA folder (the ones it can load)."""
+        try:
+            from ..comfy import comfy_lora_roots
+            roots = comfy_lora_roots(Path(os.path.expanduser(self.comfy_dir.text().strip() or DEFAULT_COMFY_DIR)))
+            extra = [r for r in roots if "models/loras" not in r.as_posix()]
+            return str((extra or roots)[0]) if roots else ""
+        except Exception:  # noqa: BLE001
+            return ""
+
     def _remember_lora(self, path: str):
         try:
             recent = json.loads(self.qs.value("recentLoras", "[]", type=str))
@@ -1103,7 +1128,7 @@ class MainWindow(QMainWindow):
             return
         cur = card.lora.currentData()
         start = str(Path(cur).parent) if cur and cur != T.NO_LORA else (
-            str(Path(self.tree.options["lora"]).parent) if self.tree.options.get("lora") else "")
+            str(Path(self.tree.options["lora"]).parent) if self.tree.options.get("lora") else self._lora_dir())
         f, _ = QFileDialog.getOpenFileName(self, "LoRA for this clip", start, "LoRA (*.safetensors)")
         if f:
             self.set_node_lora(nid, f)
@@ -1256,7 +1281,7 @@ class MainWindow(QMainWindow):
             self.join_selected("export", Path(f if f.endswith(".mp4") else f + ".mp4"))
 
     def _choose_lora(self):
-        start = str(Path(self.lora.text()).parent) if self.lora.text().strip() else ""
+        start = str(Path(self.lora.text()).parent) if self.lora.text().strip() else self._lora_dir()
         f, _ = QFileDialog.getOpenFileName(self, "LoRA", start, "LoRA (*.safetensors)")
         if f:
             self.lora.setText(f)
@@ -1324,7 +1349,8 @@ class MainWindow(QMainWindow):
         """What a loaded worker is bound to; a different key needs a new worker."""
         return (self.tree.options.get("model", T.DEFAULT_OPTIONS["model"]), bool(self.tree.options.get("audio", True)),
                 self.offload.value(), self.aitk.text().strip() or DEFAULT_AITK, self.current_backend(),
-                self.comfy_url.text().strip() or DEFAULT_COMFY_URL)
+                self.comfy_url.text().strip() or DEFAULT_COMFY_URL, self.comfy_dir.text().strip(),
+                self.comfy_cleanup.isChecked())
 
     def current_backend(self) -> str:
         return (self.tree.options.get("backend") if self.tree else None) or "comfyui"
@@ -1414,6 +1440,10 @@ class MainWindow(QMainWindow):
                       "--min-free-gb", f"{self.min_free.value():g}", "--idle-minutes", f"{minutes:g}",
                       "--model", self._worker_bound[0], "--loras", ",".join(loras),
                       "--backend", self._worker_bound[4], "--comfy-url", self._worker_bound[5]]
+        if self._worker_bound[6]:
+            args += ["--comfy-dir", os.path.expanduser(self._worker_bound[6])]
+        if not self._worker_bound[7]:
+            args.append("--keep-comfy-copies")
         if not self._worker_bound[1]:
             args.append("--no-audio")
         self.log.appendPlainText("$ " + " ".join([program, *args]))

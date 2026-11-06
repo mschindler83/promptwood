@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import time
 import urllib.error
 import urllib.parse
@@ -49,11 +50,55 @@ def _combo_options(spec) -> list[str]:
     return []
 
 
-def lora_name_for(path: str, names: list[str]) -> str | None:
-    """ComfyUI's name for a LoRA file: the listed name the absolute path ends with (the longest match)."""
+def lora_name_for(path: str, names: list[str], roots: list[Path] = ()) -> str | None:
+    """ComfyUI's name for a LoRA file: the listed name the path ends with (longest match), else the listed name
+    that is the same file (followed links) in one of ComfyUI's LoRA folders (roots)."""
     p = Path(path).as_posix()
     hits = [n for n in names if p.endswith("/" + n.replace("\\", "/")) or p == n]
-    return max(hits, key=len) if hits else None
+    if hits:
+        return max(hits, key=len)
+    try:
+        real = os.path.realpath(path)
+    except OSError:
+        return None
+    for root in roots:
+        for n in names:
+            cand = Path(root) / n
+            if cand.exists() and os.path.realpath(cand) == real:
+                return n
+    return None
+
+
+def comfy_lora_roots(comfy_dir: Path) -> list[Path]:
+    """ComfyUI's LoRA folders: models/loras plus the 'loras' entries of extra_model_paths.yaml."""
+    comfy_dir = Path(comfy_dir).expanduser()
+    roots = [comfy_dir / "models" / "loras"]
+    cfg = comfy_dir / "extra_model_paths.yaml"
+    if cfg.is_file():
+        try:
+            import yaml
+            data = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
+        except Exception:  # noqa: BLE001
+            data = {}
+        for section in data.values():
+            if not isinstance(section, dict) or "loras" not in section:
+                continue
+            base = Path(os.path.expanduser(str(section.get("base_path", ""))))
+            for entry in str(section["loras"]).split("\n"):
+                entry = entry.strip()
+                if entry:
+                    root = Path(os.path.expanduser(entry))
+                    roots.append(root if root.is_absolute() else (comfy_dir / base / root if not base.is_absolute()
+                                                                  else base / root))
+    return [r for r in roots if r.is_dir()]
+
+
+def _arg(argv: list, name: str) -> str | None:
+    if name in argv:
+        i = argv.index(name)
+        if i + 1 < len(argv):
+            return argv[i + 1]
+    return None
 
 
 def build_workflow(*, prompt: str, image: str, seed: int, width: int, height: int, frames: int, steps: int,
@@ -104,7 +149,10 @@ class ComfyGenerator:
 
     restart_helps = False            # a missing LoRA is not fixed by starting a new worker
 
-    def __init__(self, url: str = DEFAULT_URL, log=print, progress=None, timeout: float = 3600):
+    def __init__(self, url: str = DEFAULT_URL, log=print, progress=None, timeout: float = 3600,
+                 comfy_dir: Path | None = None, cleanup: bool = True):
+        """comfy_dir: ComfyUI's folder on this machine (for its LoRA folders and, with cleanup, to delete the
+        copies it keeps of every clip and start image after they were downloaded)."""
         self.url = url.rstrip("/")
         self.log, self.progress, self.timeout = log, progress, timeout
         self.client_id = uuid.uuid4().hex
@@ -112,6 +160,20 @@ class ComfyGenerator:
         self._loras: list[str] | None = None
         self.stats = self._json("GET", "/system_stats")          # raises ComfyUnavailable if not running
         self._check_models()
+        self.comfy_dir = Path(comfy_dir).expanduser() if comfy_dir else None
+        if self.comfy_dir is not None and not (self.comfy_dir / "main.py").is_file():
+            self.log(f"{self.comfy_dir} does not look like ComfyUI's folder: no cleanup, LoRAs by name only")
+            self.comfy_dir = None
+        self.cleanup = bool(cleanup and self.comfy_dir is not None)
+        self.roots = comfy_lora_roots(self.comfy_dir) if self.comfy_dir else []
+        argv = list((self.stats.get("system") or {}).get("argv") or [])
+        base = self.comfy_dir
+        if base is not None and _arg(argv, "--base-directory"):
+            base = Path(_arg(argv, "--base-directory")).expanduser()
+        self.output_dir = (Path(_arg(argv, "--output-directory")).expanduser() if _arg(argv, "--output-directory")
+                           else (base / "output" if base else None))
+        self.input_dir = (Path(_arg(argv, "--input-directory")).expanduser() if _arg(argv, "--input-directory")
+                          else (base / "input" if base else None))
 
     # ---- HTTP
     def _request(self, method: str, path: str, data: bytes | None = None, headers: dict | None = None,
@@ -151,12 +213,13 @@ class ComfyGenerator:
             self._loras = _combo_options(req.get("lora_name"))
         return self._loras
 
+    def name_for(self, lora: str) -> str | None:
+        return (lora_name_for(lora, self.lora_names(), self.roots)
+                or lora_name_for(lora, self.lora_names(refresh=True), self.roots))
+
     def missing_loras(self, loras: list[str]) -> list[str]:
         """LoRA files ComfyUI cannot load (not in its LoRA folders)."""
-        missing = [lo for lo in loras if lora_name_for(lo, self.lora_names()) is None]
-        if missing:
-            missing = [lo for lo in loras if lora_name_for(lo, self.lora_names(refresh=True)) is None]
-        return missing
+        return [lo for lo in loras if self.name_for(lo) is None]
 
     def can_use(self, loras: list[str]) -> bool:
         return not self.missing_loras(loras)
@@ -199,8 +262,7 @@ class ComfyGenerator:
         s = settings or {}
         loras = []
         if s.get("lora"):
-            name = lora_name_for(s["lora"], self.lora_names()) or lora_name_for(s["lora"],
-                                                                               self.lora_names(refresh=True))
+            name = self.name_for(s["lora"])
             if name is None:
                 raise ComfyError(f"{Path(s['lora']).name} is not in ComfyUI's LoRA folders")
             loras.append((name, float(s.get("strength", 1.0))))
@@ -230,6 +292,27 @@ class ComfyGenerator:
             raise ComfyError("ComfyUI finished without the video or the last frame")
         Path(out_video).write_bytes(self._download(video))
         Path(out_last_frame).write_bytes(self._download(frame))
+        if self.cleanup:
+            self._remove(self.output_dir, video, Path(out_video))
+            self._remove(self.output_dir, frame, Path(out_last_frame))
+            self._remove(self.input_dir, {"filename": Path(image).name, "subfolder": str(Path(image).parent)},
+                         Path(start_image), same_size=False)
+
+    def _remove(self, top: Path | None, f: dict, local: Path, same_size: bool = True) -> None:
+        """Delete ComfyUI's copy of a file, only inside its video-chain subfolder and (for outputs) only if the
+        downloaded file has the same size."""
+        if top is None:
+            return
+        try:
+            area = (Path(top) / SUBFOLDER).resolve()
+            target = (Path(top) / (f.get("subfolder") or "") / f["filename"]).resolve()
+            if area not in target.parents or not target.is_file():
+                return
+            if same_size and target.stat().st_size != local.stat().st_size:
+                return
+            target.unlink()
+        except OSError:
+            pass
 
     @staticmethod
     def _first_file(out: dict | None) -> dict | None:
