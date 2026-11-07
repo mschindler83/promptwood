@@ -448,8 +448,19 @@ class ComfyGenerator:
             if name is None:
                 raise ComfyError(f"{Path(s['turbo']['lora']).name} is not in ComfyUI's LoRA folders")
             turbo = (name, float(s["turbo"].get("strength", 1.0)))
+        uploads: list[tuple[str, Path]] = []        # (ComfyUI name, local file); removed again even on errors
+        try:
+            self._run(prompt, start_image, out_video, out_last_frame, seed, s, loras, turbo, uploads)
+        finally:
+            if self.cleanup:
+                for up, local in uploads:
+                    self._remove(self.input_dir, {"filename": Path(up).name, "subfolder": str(Path(up).parent)},
+                                 Path(local), same_size=False)
+
+    def _run(self, prompt, start_image, out_video, out_last_frame, seed, s, loras, turbo, uploads) -> None:
         image = self.upload(Path(start_image)) if start_image is not None else None
-        uploads = [(image, start_image)] if image else []
+        if image:
+            uploads.append((image, start_image))
         guides = []
         if s.get("guides"):
             self.check_guides()
@@ -464,7 +475,9 @@ class ComfyGenerator:
         refs = []
         if s.get("ref_paths"):
             self.check_ref_model()
-            refs = [self.upload(Path(r)) for r in s["ref_paths"]]
+            for r in s["ref_paths"]:
+                refs.append(self.upload(Path(r)))
+                uploads.append((refs[-1], r))
             if s.get("ref_hint", True):
                 prompt = with_ref_hint(prompt)
         prefix = f"{SUBFOLDER}/{uuid.uuid4().hex[:12]}"
@@ -497,9 +510,6 @@ class ComfyGenerator:
         if self.cleanup:
             self._remove(self.output_dir, video, Path(out_video))
             self._remove(self.output_dir, frame, Path(out_last_frame))
-            for up, local in uploads + list(zip(refs, s.get("ref_paths") or [])):
-                self._remove(self.input_dir, {"filename": Path(up).name, "subfolder": str(Path(up).parent)},
-                             Path(local), same_size=False)
 
     def _remove(self, top: Path | None, f: dict, local: Path, same_size: bool = True) -> None:
         """Delete ComfyUI's copy of a file, only inside its video-chain subfolder and (for outputs) only if the

@@ -189,6 +189,18 @@ def test_cleanup_removes_only_comfyuis_copies(server, start, tmp_path):
     assert len(list((server.root / "output" / "video-chain").glob("*"))) == 2
 
 
+def test_uploads_removed_when_generation_fails(server, start, tmp_path):
+    (server.root / "main.py").write_text("# fake ComfyUI folder\n")
+    gen = C.ComfyGenerator(server.url, comfy_dir=server.root)
+
+    def fail(*_a, **_k):
+        raise C.ComfyError("stopped")
+    gen._wait = fail
+    with pytest.raises(C.ComfyError):
+        gen.generate("x", start, tmp_path / "v.mp4", tmp_path / "v.png", 1, settings())
+    assert not list((server.root / "input" / "video-chain").glob("*"))
+
+
 def test_lora_found_through_a_link(tmp_path):
     """A LoRA chosen at its original path is found when ComfyUI lists a link to it (extra_model_paths.yaml)."""
     comfy = tmp_path / "ComfyUI"

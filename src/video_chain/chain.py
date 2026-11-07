@@ -165,10 +165,12 @@ def convert_range(source: Path, out: Path, start: float, end: float, width: int,
     """Cut start..end (seconds) out of a real video and turn it into a chain clip: fps frames per second (frames
     dropped or repeated, no interpolation), scaled to fill width x height and cut to it at the centre, sound as
     48 kHz stereo (if the source has sound). Written under a temporary name first. Returns the frame count."""
+    info = probe_source(source)
+    if info["duration"] and float(end) > info["duration"]:
+        end = info["duration"]                       # the sound is cut to the frames, not to the asked range
     n = range_frames(start, end, fps)
     if n < 1:
         raise ValueError("the range is shorter than one frame")
-    info = probe_source(source)
     out = Path(out)
     tmp = out.with_name(out.stem + ".part" + out.suffix)
     vf = (f"fps={fps},scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,"

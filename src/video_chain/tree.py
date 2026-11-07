@@ -257,7 +257,7 @@ def remove_stale_files(project: Path, tree: "Tree") -> list[Path]:
             if n.made.get(k)}
     stuck = []
     for f in d.iterdir():
-        if f.is_file() and (_CLIP_NAME.match(f.name) or ".new." in f.name) and f not in used:
+        if f.is_file() and (_CLIP_NAME.match(f.name) or ".new." in f.name or ".part." in f.name) and f not in used:
             if not _unlink(f):
                 stuck.append(f)
     return stuck
@@ -445,6 +445,15 @@ class Checker:
             return None
         return vc.made.get("key") if self.status(vc.id) == "done" else False
 
+    def guide_from(self, node: Node) -> str | None:
+        """The parent clip a start motion guide is cut from (its file name: every new clip gets a new one), or None
+        without a start guide."""
+        s = self.settings(node.id)
+        if node.parent is None or not s or not int(s.get("guide") or 0):
+            return None
+        parent = self.tree.nodes[node.parent]
+        return parent.made.get("video") if parent.made else None
+
     def _files_there(self, node: Node) -> bool:
         m = node.made
         if not m or not m.get("video") or not m.get("frame") or (node.is_video and not m.get("first")):
@@ -466,7 +475,8 @@ class Checker:
               or _old_record(m.get("settings")) != self.settings(nid)
               or (node.parent is not None and self.status(node.parent) != "done")
               or m.get("start_sha1") != self.sha(self.start_frame(node))
-              or m.get("end_key") != self.end_key(node)):
+              or m.get("end_key") != self.end_key(node)
+              or m.get("guide_from") != self.guide_from(node)):
             st = "changed"
         else:
             st = "done"
@@ -676,6 +686,38 @@ def _guides(project: Path, tree: Tree, node: Node, settings: dict, tmp: Path) ->
     return guides, end_image
 
 
+def guide_problem(tree: Tree, checker: "Checker", todo: list[str]) -> str | None:
+    """Why a motion guide of a clip to be made cannot work (a neighbour shorter than the guide, a clip too short
+    for its guides), or None. Checked before anything is made, with the lengths the clips will have."""
+    def length(n: Node) -> int:
+        if n.is_video and n.id in todo:             # converted again: the current range
+            return chain.range_frames(n.source["start"], n.source["end"])
+        return clip_length(tree, n)                 # converted (a source that ends early gives fewer frames)
+
+    for nid in todo:
+        node = tree.nodes[nid]
+        s = checker.settings(nid) if not node.is_video else None
+        guide = int((s or {}).get("guide") or 0)
+        if not guide:
+            continue
+        used = 0
+        near = ([("clip", tree.nodes[node.parent])] if node.parent is not None else [])
+        vc = tree.video_child(nid)
+        if vc is not None:
+            near.append(("video", vc))
+        for what, other in near:
+            n = length(other)
+            if n < guide:
+                return (f"{what} #{other.id[1:]} ({n} frames) is shorter than the {guide}-frame motion guide "
+                        f"of clip #{nid[1:]}")
+            used += guide
+        frames = int(s["frames"])
+        if used and used >= frames:
+            return (f"clip #{nid[1:]} ({frames} frames) is too short for its motion guide ({used} frames); "
+                    "make it longer or the guide shorter")
+    return None
+
+
 def run_tree(generator: chain.Generator, project: Path, targets: list[str],
              events: Callable[[dict], None] | None = None, log: Callable[[str], None] = print) -> list[str]:
     """Make what the target paths need. Saves tree.json after every clip, so a stop keeps finished clips."""
@@ -699,6 +741,9 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
     gone = [nid for nid in todo if tree.nodes[nid].is_video and not Path(tree.nodes[nid].source["file"]).is_file()]
     if gone:
         raise FileNotFoundError(f"video file not found: {tree.nodes[gone[0]].source['file']}")
+    problem = guide_problem(tree, checker, todo)
+    if problem:
+        raise ValueError(problem)
     for nid in sorted(on_paths - set(todo), key=lambda i: tree.depth(i)):
         emit({"e": "node", "id": nid, "state": "reused"})
     emit({"e": "plan", "make": todo})
@@ -727,6 +772,7 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
             settings = checker.settings(nid)
             start_sha = checker.sha(start)
             end_key = checker.end_key(node)
+            guide_from = checker.guide_from(node)
             call = dict(settings)
             if settings.get("refs"):               # the generator gets the files; the record keeps names + hashes
                 call["ref_paths"] = [str(project / r["file"]) for r in settings["refs"]]
@@ -749,6 +795,8 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
                          "frame": f"nodes/{new_frame.name}"}
             if end_key is not None:
                 node.made["end_key"] = end_key
+            if guide_from is not None:
+                node.made["guide_from"] = guide_from
             new_files = [new_video, new_frame]
         save(project, tree)
         for f in old:                              # the previous version; left for later if it is open somewhere

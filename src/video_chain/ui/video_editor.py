@@ -240,6 +240,7 @@ class VideoRangeDialog(QDialog):
             from PySide6.QtGui import QKeySequence, QShortcut
             QShortcut(QKeySequence(key), self, activated=fn)
         self._pos = 0.0
+        self._keep = None if file else (start, end)   # a missing file: its range is kept for the one chosen again
         if file:
             self.load(file, start, end)
         self._update_enabled()
@@ -257,7 +258,8 @@ class VideoRangeDialog(QDialog):
     def _choose(self):
         f = choose_video(self, self.settings, str(Path(self.file).parent) if self.file else None)
         if f:
-            self.load(f)
+            keep, self._keep = self._keep or (None, None), None
+            self.load(f, *keep)
 
     def load(self, file: str, start: float | None = None, end: float | None = None) -> bool:
         try:
@@ -276,6 +278,8 @@ class VideoRangeDialog(QDialog):
             s.blockSignals(True)
             s.setRange(0.0, info["duration"])
             s.blockSignals(False)
+        if start is not None and end is not None and float(end) > info["duration"] + 0.05:
+            start = end = None                      # the range does not fit this file: all of it
         st = 0.0 if start is None else float(start)
         en = info["duration"] if end is None else float(end)
         self._open_player()
@@ -362,6 +366,8 @@ class VideoRangeDialog(QDialog):
 
         def work():
             for which, t in times:
+                if gen != self._gen:                      # the range moved on: skip the stale frame
+                    return
                 try:
                     r = subprocess.run(["ffmpeg", "-v", "error", "-ss", f"{t:.4f}", "-i", file, "-frames:v", "1",
                                         "-vf", vf, "-f", "image2pipe", "-c:v", "png", "-"],

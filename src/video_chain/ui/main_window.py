@@ -2251,7 +2251,7 @@ class MainWindow(QMainWindow):
             return
         old = T.clip_files(self.project, node)
         node.made = made
-        if self._write_tree():
+        if self._write_tree() and not self._joins:  # a running join may still read them; else the next run does
             for f in old:
                 T._unlink(f)
         self._pix.clear()
@@ -2529,6 +2529,9 @@ class MainWindow(QMainWindow):
                         and not Path(self.tree.nodes[n].source["file"]).is_file()]
                 if gone:
                     problems.append(f"the file of video #{gone[0][1:]} is missing (Edit the range… to choose it)")
+                problem = T.guide_problem(self.tree, checker, todo)
+                if problem:
+                    problems.append(problem)
             if checker.base() is not None:
                 for lo in T.loras_needed(self.tree, checker, list(nodes)):
                     if not Path(lo).is_file():

@@ -124,6 +124,9 @@ def prepare_job(project: Path, targets: list[str]) -> dict:
     missing = [lo for lo in loras if not Path(lo).is_file()]
     if missing:
         raise JobError(f"LoRA not found: {missing[0]}")
+    problem = treemod.guide_problem(tree, checker, todo)
+    if problem:
+        raise JobError(problem)
     ai_todo = [nid for nid in todo if not tree.nodes[nid].is_video]     # what needs the model
     return {"project": project, "targets": targets, "settings": settings, "todo": todo, "loras": loras,
             "ai_todo": ai_todo}

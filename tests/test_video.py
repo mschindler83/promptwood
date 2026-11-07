@@ -142,6 +142,14 @@ def test_motion_guide(project, source):
     assert T.path_cuts(t, t.path_to(v2.id)) == [(0, 0), (5, 5), (0, 0)]
     assert chain.probe(T.join_path(project, t, v2.id))["frames"] == 24 + 7 + 24
     assert not list((project / "nodes").glob("video-chain-*"))           # the guide clips are gone
+    # the guide comes from v1's clip: a new clip of v1 (same last frame) makes the bridge out of date
+    assert T.Checker(project, t).status(a.id) == "done"
+    old = project / t.nodes[v1.id].made["video"]
+    new = old.with_name(f"{v1.id}_0badcafe.mp4")
+    shutil.copyfile(old, new)
+    t.nodes[v1.id].made["video"] = f"nodes/{new.name}"
+    c = T.Checker(project, t)
+    assert c.status(v1.id) == "done" and c.status(a.id) == "changed"
 
 
 def test_guide_too_long(project, source):
@@ -150,10 +158,23 @@ def test_guide_too_long(project, source):
     a = t.add(v1.id, "x")
     a.overrides = {"guide": 5}
     T.save(project, t)
+    with pytest.raises(cli.JobError, match="shorter than the 5-frame"):
+        cli.prepare_job(project, [a.id])
+    gen = FakeGenerator(frames=17, size=None)
     with pytest.raises(ValueError, match="shorter than the 5-frame"):
-        T.run_tree(FakeGenerator(frames=17, size=None), project, [a.id], log=lambda _m: None)
-    t = T.load(project)
-    assert t.nodes[a.id].made is None and t.nodes[v1.id].made is not None
+        T.run_tree(gen, project, [a.id], log=lambda _m: None)
+    t = T.load(project)                                    # found before anything was made
+    assert t.nodes[a.id].made is None and t.nodes[v1.id].made is None and not gen.calls
+
+
+def test_range_past_the_end_of_the_source(tmp_path, source):
+    out = tmp_path / "c.mp4"
+    n = chain.convert_range(source, out, 1.5, 5.0, 64, 64)            # the source is 2 s long
+    info = chain.probe(out)
+    assert n == info["frames"] == 12
+    longest = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0",
+                              str(out)], capture_output=True, text=True, check=True).stdout
+    assert float(longest) < 0.6                                      # the sound is not padded to 3.5 s
 
 
 def test_one_video_per_clip_and_json(project, source):
