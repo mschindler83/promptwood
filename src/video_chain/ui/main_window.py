@@ -925,6 +925,12 @@ class MainWindow(QMainWindow):
         self._comfy_polling = False
         self._comfy_starting = 0.0
         self._waiting_comfy: list[str] | None = None   # targets to generate once ComfyUI answers
+        # the model this app last used in ComfyUI ("h3" clips, "qwen" image edits, None: none / unloaded). ComfyUI
+        # is asked to unload only when it changes: switching models frees the other one first instead of letting
+        # both fight over the memory; the same model again is used as it is (no reload)
+        self._comfy_model: str | None = None
+        self._quit_frees = True                 # the worker's next quit unloads the model
+        self._qwen_timer = QTimer(self, singleShot=True, timeout=self._qwen_idle)
         self._join_lock = threading.Lock()      # joins run one after another (play after generating + export)
         self._save_timer = QTimer(self, singleShot=True, interval=400, timeout=self._save_tree)
         self._refresh_timer = QTimer(self, singleShot=True, interval=250, timeout=self.refresh)
@@ -1181,9 +1187,10 @@ class MainWindow(QMainWindow):
         krow = QHBoxLayout()
         self.keep_loaded = QCheckBox("Keep the model loaded for")
         self.keep_loaded.setChecked(True)
-        self.keep_loaded.setToolTip("After generating, the model stays in memory, so the next clip starts at once "
-                                    "instead of loading for minutes. It is unloaded after this idle time, or with "
-                                    "Unload in the status bar.")
+        self.keep_loaded.setToolTip("After generating (or editing images), the model stays in memory, so the next "
+                                    "clip or edit starts at once instead of loading for minutes. It is unloaded "
+                                    "after this idle time, or with Unload in the status bar. Switching between "
+                                    "clips (MiniMax H3) and image edits (Qwen) unloads the other model first.")
         self.idle_minutes = QSpinBox()
         self.idle_minutes.setRange(1, 240)
         self.idle_minutes.setValue(15)
@@ -2563,10 +2570,22 @@ class MainWindow(QMainWindow):
         comfy_dir = os.path.expanduser(self.comfy_dir.text().strip()) or None
         cleanup = self.comfy_cleanup.isChecked()
 
-        def connect(progress):
+        switch = {"free": False}
+
+        def before_edit():                          # GUI thread, before each Generate
+            self._qwen_timer.stop()
+            switch["free"] = self._comfy_model == "h3"      # the clip model is loaded: unload it first
+            if self.worker_alive and not self.running:
+                self._quit_worker(free=False)               # its model goes now; it is started again for clips
+
+        def connect(progress):                      # worker thread
             from ..comfy import ComfyImageEditor
-            return ComfyImageEditor(url, log=lambda _m: None, progress=progress, comfy_dir=comfy_dir,
-                                    cleanup=cleanup)
+            ed = ComfyImageEditor(url, log=lambda _m: None, progress=progress, comfy_dir=comfy_dir, cleanup=cleanup)
+            if switch["free"]:
+                ed.free()
+                switch["free"] = False
+            self._comfy_model = "qwen"
+            return ed
 
         def use(kind: str, png: str) -> bool:
             if self.running:
@@ -2580,11 +2599,23 @@ class MainWindow(QMainWindow):
                                     (f" — {self.status.text()}" if "CHANGED" in self.status.text() else "."))
             return bool(ok)
         dlg = ImageEditDialog(self, self.project, sources, first, target, connect, use, self.qs,
-                              self._picker_places(), start_comfy=self.start_comfy)
+                              self._picker_places(), start_comfy=self.start_comfy, on_start=before_edit)
         if dialog:
             dlg.exec()
             dlg.deleteLater()
+            self.edits_closed()
         return dlg
+
+    def edits_closed(self):
+        """The edit dialog is closed: Qwen stays loaded for the idle time ('Keep the model loaded'), else it is
+        unloaded now."""
+        if self._comfy_model != "qwen" or self.running:
+            return
+        if self.keep_loaded.isChecked():
+            self._qwen_timer.start(self.idle_minutes.value() * 60_000)
+        else:
+            self._free_comfy()
+        self._update_model_label()
 
     # ---- hand-over frame
     def choose_handover(self, nid: str) -> None:
@@ -3265,22 +3296,50 @@ class MainWindow(QMainWindow):
             return
         self._job["sent"] = True
         self._worker_idle = False
-        cmd = {"cmd": "run", "tree": str(self.project), "targets": self._job["targets"]}
+        cmd = {"cmd": "run", "tree": str(self.project), "targets": self._job["targets"],
+               "free_first": self._comfy_model == "qwen"}          # an image edit model is loaded: unload it
+        self._qwen_timer.stop()
+        self._comfy_model = "h3"
         self.proc.write((json.dumps(cmd) + "\n").encode())
         self._update_model_label()
 
-    def _quit_worker(self):
-        """Ask an idle worker to quit (frees the model); killed if it does not go."""
+    def _quit_worker(self, free: bool = True):
+        """Ask an idle worker to quit (free: and unload the model); killed if it does not go."""
         if self.proc is None:
             return
+        self._quit_frees = free
         if self.proc.state() == QProcess.Running:
-            self.proc.write(b'{"cmd": "quit", "free": true}\n')     # ComfyUI: unload its models too
+            self.proc.write(b'{"cmd": "quit", "free": true}\n' if free else b'{"cmd": "quit"}\n')
         self._kill_timer.start()
 
     def unload(self):
         if self.worker_alive and not self.running:
             self.status.setText("Unloading the model …")
             self._quit_worker()
+        elif self._comfy_model == "qwen" and not self.running:
+            self.status.setText("Unloading Qwen Image Edit …")
+            self._free_comfy()
+
+    def _free_comfy(self):
+        """Ask ComfyUI to unload its models (in the background)."""
+        url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL).rstrip("/")
+        self._comfy_model = None
+        self._qwen_timer.stop()
+
+        def work():
+            try:
+                req = urllib.request.Request(url + "/free", data=b'{"unload_models": true, "free_memory": true}',
+                                             headers={"Content-Type": "application/json"}, method="POST")
+                urllib.request.urlopen(req, timeout=10).read()
+            except Exception:  # noqa: BLE001
+                pass
+        threading.Thread(target=work, daemon=True).start()
+        self._update_model_label()
+
+    def _qwen_idle(self):
+        if self._comfy_model == "qwen" and not self.running:
+            self._free_comfy()
+            self.status.setText("Qwen Image Edit was unloaded after the idle time.")
 
     def stop(self):
         if self._waiting_comfy is not None and not self.running:   # generating once ComfyUI runs: not any more
@@ -3376,6 +3435,8 @@ class MainWindow(QMainWindow):
         elif e == "bye":
             self._worker_idle = False
             self._worker_leaving = True
+            if self._comfy_model == "h3" and (ev.get("reason") == "idle" or self._quit_frees):
+                self._comfy_model = None                       # it unloaded the clip model
             if ev.get("reason") == "idle" and not self.running:
                 self.status.setText("The model was unloaded after the idle time.")
         elif e == "start":
@@ -3568,7 +3629,11 @@ class MainWindow(QMainWindow):
         return True
 
     def _update_model_label(self):
-        if not self.worker_alive:
+        if not self.worker_alive and self._comfy_model == "qwen":
+            left = self._qwen_timer.remainingTime() if self._qwen_timer.isActive() else -1
+            text, sev = ("Model: Qwen Image Edit loaded in ComfyUI" +
+                         (f" · unloads in {max(1, round(left / 60000))} min" if left >= 0 else "")), ""
+        elif not self.worker_alive:
             text, sev = "Model: not loaded", ""
         elif self.running and self._model_state == "loading":
             text, sev = "Model: loading …", "warning"
@@ -3582,7 +3647,8 @@ class MainWindow(QMainWindow):
         self.model_label.setText(text)
         self.model_label.setProperty("severity", sev)
         repolish(self.model_label)
-        self.b_unload.setVisible(self.worker_alive and not self.running and self._worker_idle)
+        self.b_unload.setVisible((self.worker_alive and not self.running and self._worker_idle) or
+                                 (not self.worker_alive and self._comfy_model == "qwen"))
 
     def changeEvent(self, e):
         """Back in this window (e.g. after training a LoRA): look for new LoRAs, at most every 30 s."""
@@ -3609,6 +3675,16 @@ class MainWindow(QMainWindow):
                         p.kill()
                         p.waitForFinished(3000)
             self._job = None
+        if self._comfy_model == "qwen":              # nor the image edit model
+            try:
+                url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL).rstrip("/")
+                urllib.request.urlopen(urllib.request.Request(
+                    url + "/free", data=b'{"unload_models": true, "free_memory": true}',
+                    headers={"Content-Type": "application/json"}, method="POST"), timeout=3).read()
+            except Exception:  # noqa: BLE001
+                pass
+            self._comfy_model = None
+        self._qwen_timer.stop()
         self._model_timer.stop()
         self._gpu_timer.stop()
         self._comfy_timer.stop()

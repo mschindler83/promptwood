@@ -1275,3 +1275,54 @@ def QImage_size(path):
     from PySide6.QtGui import QImage
     img = QImage(str(path))
     return img.width() // 2 * 2, img.height() // 2 * 2
+
+
+def test_switching_between_clips_and_image_edits_unloads_only_then(app, tmp_path, image, monkeypatch):
+    """ComfyUI is asked to unload only when the model changes: clips (H3) -> image edit (Qwen) frees H3 once;
+    more edits reuse Qwen; clips again free Qwen once; more clips reuse H3."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from fake_comfy import FakeComfy
+
+    from video_chain.ui.main_window import MainWindow
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    worker_frees = tmp_path / "frees.txt"
+    monkeypatch.setenv("FAKE_FREES", str(worker_frees))
+    server = FakeComfy(tmp_path / "comfy")
+
+    def comfy_frees():
+        return sum(1 for c in server.calls if c[0] == "BODY" and c[1] == "/free")
+
+    def worker_free_count():
+        return len(worker_frees.read_text().split()) if worker_frees.exists() else 0
+    try:
+        q = settings(tmp_path, "switch.ini")
+        q.setValue("comfyUrl", server.url)
+        w = MainWindow(q, command=FAKE)
+        ids = new_project(w, tmp_path, image, ("a",))
+        run_and_wait(app, w, w.generate_path)
+        assert w._comfy_model == "h3" and w.worker_alive
+        dlg = w.edit_image(ids[0], dialog=False)
+        dlg.prompt.setPlainText("night")
+        dlg.tries.setValue(1)
+        dlg.generate()
+        wait(app, lambda: not dlg._busy, timeout=60)
+        assert comfy_frees() == 1 and w._comfy_model == "qwen"          # H3 unloaded once, before Qwen
+        wait(app, lambda: not w.worker_alive, timeout=20)                # the worker left without unloading again
+        assert worker_free_count() == 0
+        dlg.generate()                                                    # another edit: Qwen stays
+        wait(app, lambda: not dlg._busy, timeout=60)
+        assert comfy_frees() == 1
+        dlg.b_use_end.click()
+        w.edits_closed()
+        assert w._qwen_timer.isActive() and "Qwen Image Edit loaded" in w.model_label.text()
+        assert not w.b_unload.isHidden()
+        wait(app, lambda: not w._joins, timeout=30)
+        run_and_wait(app, w, w.generate_path)                            # clips again: Qwen unloaded once
+        assert worker_free_count() == 1 and w._comfy_model == "h3" and not w._qwen_timer.isActive()
+        w.tree.nodes[ids[0]].prompt = "a2"
+        wait(app, lambda: not w._joins, timeout=30)
+        run_and_wait(app, w, w.generate_path)                            # more clips: nothing unloaded
+        assert worker_free_count() == 1
+        w.close()
+    finally:
+        server.close()

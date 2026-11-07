@@ -229,6 +229,8 @@ def serve(a, emit, make_generator: Callable[[dict], object], stdin=None) -> int:
             emit({"e": "error", "msg": f"unknown command {cmd.get('cmd')!r}"})
             continue
         started = time.monotonic()
+        if cmd.get("free_first") and hasattr(gen, "free"):
+            gen.free()                              # ComfyUI holds another model (an image edit): unload it first
         try:
             job = prepare_job(Path(cmd["tree"]), list(cmd.get("targets") or []))
             if job["ai_todo"]:

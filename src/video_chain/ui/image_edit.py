@@ -115,12 +115,14 @@ class ImageEditDialog(QDialog):
     on_use(kind 'start' | 'end', png) -> bool; start_comfy() -> bool."""
 
     def __init__(self, parent, project: Path, sources: list[tuple[str, str]], source: str | None,
-                 end_target: str | None, connect, on_use, settings=None, places=None, start_comfy=None):
+                 end_target: str | None, connect, on_use, settings=None, places=None, start_comfy=None,
+                 on_start=None):
         super().__init__(parent)
         self.setWindowTitle("Edit an image with AI (Qwen Image Edit)")
         self.resize(1240, 820)
         self.project, self.connect_editor, self.on_use = Path(project), connect, on_use
         self.end_target, self.qs, self.places, self.start_comfy = end_target, settings, places or [], start_comfy
+        self.on_start = on_start                         # called (GUI thread) before each Generate
         self.source: str | None = None
         self.editor = None
         self._busy = False
@@ -377,6 +379,8 @@ class ImageEditDialog(QDialog):
             size = (img.width() // 2 * 2, img.height() // 2 * 2)
         edits = self.project / EDITS_DIR
         sig, connect = self._sig, self.connect_editor
+        if self.on_start is not None:
+            self.on_start()
         self.bar.setValue(0)
         self.bar.show()
         self.b_start_comfy.hide()
