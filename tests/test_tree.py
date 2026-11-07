@@ -527,3 +527,69 @@ def test_clip_states_do_not_read_every_frame_again(project, monkeypatch):
     statuses(project)
     statuses(project)
     assert len(probes) == 1 and len([r for r in reads if Path(r).name == T.START_FILE]) <= 1
+
+
+def test_hand_over_at_an_earlier_frame(project):
+    """The clips after a clip start from the frame it hands over at; it stays done, the frames after that frame
+    are left out of the joined path, and the frame file goes with its clip version."""
+    t, a, b1, b2, c = build(project)
+    run(project, [c.id])
+    t = T.load(project)
+    assert T.made_frames(t.nodes[a.id]) == 17                      # the real count of the made clip
+    t.nodes[a.id].end_at = 5
+    h = T.ensure_handover(project, t, t.nodes[a.id])
+    assert h.is_file() and h.name.endswith("_f5.png")
+    T.save(project, t)
+    st = statuses(project)
+    assert st["a"] == "done" and st["b1"] == "changed" and st["c"] == "changed"
+    gen = run(project, [c.id])
+    assert [x["prompt"] for x in gen.calls] == ["b1", "c"] and gen.calls[0]["start"] == h.name
+    t = T.load(project)
+    path = t.path_to(c.id)
+    assert T.path_cuts(t, path) == [(0, 11), (1, 0), (1, 0)]       # a: frames 6..16 left out
+    joined = T.join_path(project, t, c.id)
+    assert chain.probe(joined)["frames"] == 6 + 16 + 16
+    assert not T.remove_stale_files(project, t) and h.is_file()   # kept: it is in use
+    # the clip made again: its old hand-over frame goes, the new version gets its own
+    t.nodes[a.id].prompt = "a2"
+    T.save(project, t)
+    run(project, [a.id])
+    t = T.load(project)
+    assert not h.exists() and T.handover_file(project, t, t.nodes[a.id]).is_file()
+    # back to the last frame: the clips after it are made from that again
+    t.nodes[a.id].end_at = None
+    assert T.handover_file(project, t, t.nodes[a.id]) is None
+    ch = T.Checker(project, t)
+    assert ch.start_frame(t.nodes[b1.id]) == project / t.nodes[a.id].made["frame"]
+
+
+def test_hand_over_with_a_motion_guide(project):
+    t, a, b1, b2, c = build(project)
+    t.nodes[b1.id].overrides = {"guide": 5}
+    T.save(project, t)
+    run(project, [b1.id])
+    t = T.load(project)
+    t.nodes[a.id].end_at = 8
+    T.save(project, t)
+    ch = T.Checker(project, t)
+    assert ch.guide_from(t.nodes[b1.id]).endswith("@8")
+    assert T.guide_problem(t, ch, [b1.id]) is None
+    t.nodes[a.id].end_at = 3                                        # 4 frames < the 5-frame guide
+    assert "shorter than the 5-frame motion guide" in T.guide_problem(t, T.Checker(project, t), [b1.id])
+
+
+def test_style_text_around_every_prompt(project):
+    t, a, b1, b2, c = build(project)
+    run(project, [c.id])
+    t = T.load(project)
+    t.options["style"] = {"prefix": "cinematic,", "suffix": "soft light"}
+    T.save(project, t)
+    assert set(statuses(project).values()) == {"changed", "new"}
+    gen = run(project, [b1.id])
+    assert [x["prompt"] for x in gen.calls] == ["cinematic, a soft light", "cinematic, b1 soft light"]
+    made = T.load(project).nodes[a.id].made
+    assert made["prompt"] == "a" and made["settings"]["prompt_prefix"] == "cinematic,"
+    t = T.load(project)
+    t.options["style"] = {"prefix": "", "suffix": ""}               # back: a and b1 (made with it) change
+    T.save(project, t)
+    assert statuses(project)["a"] == "changed" and "prompt_prefix" not in T.Checker(project, t).settings(c.id)

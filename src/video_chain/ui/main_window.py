@@ -34,6 +34,7 @@ from .. import tree as T
 from ..comfy import REF_HINT
 from .graph import START, GraphView, NodeInfo
 from .image_picker import pick_image
+from .clip_dialogs import CompareDialog, HandoverDialog
 from .video_editor import VideoRangeDialog, choose_video
 from .theme import icon, repolish, theme
 from .widgets import FrameTile, guard_wheel, icon_button, label, section_bar
@@ -357,17 +358,21 @@ class PromptCard(QFrame):
         for act, ic, tip in (("variant", "clone", "Variant: same prompt, other seed, as a new branch (Ctrl+D)"),
                              ("variants", "layers", "Variants…: several new branches with the same prompt and "
                                                     "settings but other seeds, generated at once"),
+                             ("compare", "cmp", "Compare: play this clip and its made variants side by side, keep one"),
                              ("branch", "split", "Branch: another continuation from the same point (Ctrl+B)"),
                              ("delete", "trash", "Delete this clip and everything after it")):
             b = icon_button(ic, tip)
             b.clicked.connect(lambda _=False, a=act: self.action.emit(a, self.nid))
             head.addWidget(b)
             self.buttons.append(b)
+            if act == "compare":
+                self.b_compare = b
+        self._can_compare = False
         v.addLayout(head)
         self.span = label("", level="tertiary")
         v.addWidget(self.span)
         self.thumb = FrameTile(312, 176)
-        self.thumb.setToolTip("Last frame of this clip; click to play the clip")
+        self.thumb.setToolTip("Last frame of this clip (or its hand-over frame); click to play the clip")
         self.thumb.clicked.connect(lambda _t: self.play.emit(self.nid))
         v.addWidget(self.thumb)
         self.edit = QPlainTextEdit(node.prompt)
@@ -443,6 +448,19 @@ class PromptCard(QFrame):
         erow.addWidget(self.b_end)
         erow.addWidget(self.b_end_clear)
         link.addRow("End", erow)
+        hrow = QHBoxLayout()
+        hrow.setSpacing(6)
+        self.hand_text = label("last frame", level="secondary")
+        self.b_hand = icon_button("keyf", "Hand over at an earlier frame: the clips after this one start from the "
+                                          "frame you choose; the rest of this clip is left out")
+        self.b_hand.clicked.connect(lambda: self.action.emit("handover", self.nid))
+        self.b_hand_clear = icon_button("x", "Hand over at the last frame again")
+        self.b_hand_clear.clicked.connect(lambda: self.action.emit("handover_clear", self.nid))
+        hrow.addWidget(self.hand_text, 1)
+        hrow.addWidget(self.b_hand)
+        hrow.addWidget(self.b_hand_clear)
+        link.addRow("Hand-over", hrow)
+        self._can_hand, self._has_hand = False, False
         self._end_free = True                    # no video after this clip: its own end image can be set
         self._has_end = False
         self._guide_useful = True                # there is a clip before it or a video after it
@@ -551,6 +569,8 @@ class PromptCard(QFrame):
         self.steps.setEnabled(on and not self.steps_locked)
         self._enable_guide()
         self._enable_end()
+        self._enable_hand()
+        self.b_compare.setEnabled(on and self._can_compare)
         self.b_revert.setEnabled(on)
 
     def _show_settings(self, on: bool):
@@ -572,6 +592,28 @@ class PromptCard(QFrame):
         if edited:
             self.b_revert.setToolTip(f"Back to the {' and '.join(edited)} this clip was made with, so it counts as "
                                      "done again and is not made again")
+
+    def set_handover(self, text: str, can: bool, has: bool, tip: str = ""):
+        """Where the clips after this one start: 'last frame' or an earlier frame. can: it can be chosen (made,
+        no video after it); has: an earlier frame is set."""
+        self.hand_text.setText(text)
+        self.hand_text.setToolTip(tip)
+        self._can_hand, self._has_hand = bool(can), bool(has)
+        self._enable_hand()
+
+    def _enable_hand(self):
+        on = not self.edit.isReadOnly()
+        self.b_hand.setEnabled(on and self._can_hand)
+        self.b_hand_clear.setEnabled(on and self._has_hand)
+
+    def set_compare(self, n: int):
+        """n: made clips next to this one (its variants / branches) that can be compared with it."""
+        self._can_compare = n > 0
+        self.b_compare.setEnabled(self._can_compare and not self.edit.isReadOnly())
+        self.b_compare.setToolTip(f"Compare: play this clip and its {n} made variant{'s' if n != 1 else ''} side by "
+                                  "side, keep one" if n else
+                                  "Compare: needs this clip and at least one other made clip from the same point "
+                                  "(Variant / Variants…)")
 
     def set_guide_useful(self, useful: bool):
         """Carry-over needs a clip before this one or a real video after it; a first clip without a video after it
@@ -1073,6 +1115,17 @@ class MainWindow(QMainWindow):
         self.keep_rep.setToolTip("Each clip starts with the last frame of the clip before; by default that repeated "
                                  "frame is left out when a path is joined")
         c.addRow("", self.keep_rep)
+        self.style_prefix = QLineEdit()
+        self.style_prefix.setPlaceholderText("e.g. cinematic, soft daylight, handheld camera")
+        self.style_prefix.setToolTip("Put before every prompt (look, camera, light, a LoRA's trigger word). "
+                                     "Changing it makes every generated clip again")
+        self.style_suffix = QLineEdit()
+        self.style_suffix.setPlaceholderText("optional")
+        self.style_suffix.setToolTip("Put after every prompt. Changing it makes every generated clip again")
+        c.addRow("Style before", self.style_prefix)
+        c.addRow("Style after", self.style_suffix)
+        for w in (self.style_prefix, self.style_suffix):
+            w.editingFinished.connect(self._style_changed)
         lv.addWidget(cw)
 
         bar, _ = section_bar("ComfyUI", left)
@@ -1507,7 +1560,8 @@ class MainWindow(QMainWindow):
         if not (folder / T.TREE_FILE).exists() and not tree.nodes:
             try:                                 # a new project starts with the last used settings
                 last = json.loads(self.qs.value("lastOptions", "{}", type=str))
-                tree.options.update({k: v for k, v in last.items() if k in T.DEFAULT_OPTIONS and k != "identity"})
+                tree.options.update({k: v for k, v in last.items()
+                                     if k in T.DEFAULT_OPTIONS and k not in ("identity", "style")})
             except ValueError:
                 pass
         self.project, self.tree = folder, tree
@@ -1524,6 +1578,7 @@ class MainWindow(QMainWindow):
             tree.selected = START
         self._tree_stamp = self._stamp()
         self._write_tree()
+        T.ensure_handovers(folder, tree)          # e.g. deleted by hand: the clips after them stay done
         self.qs.setValue("project", str(folder))
         self._remember_project(folder)
         self._update_title()
@@ -1562,6 +1617,9 @@ class MainWindow(QMainWindow):
             self.turbo_strength.setValue(float(turbo.get("strength", 1.0)))
             self._fill_turbo(turbo.get("lora"))
             self.keep_rep.setChecked(bool(o.get("keep_repeated", False)))
+            style = o.get("style") or {}
+            self.style_prefix.setText(style.get("prefix") or "")
+            self.style_suffix.setText(style.get("suffix") or "")
         finally:
             self._loading = False
 
@@ -1581,6 +1639,21 @@ class MainWindow(QMainWindow):
         self._changed()
         if not self._report_remade(before, "Project settings changed"):
             self.status.setText("Project settings changed.")
+
+    def _style_changed(self):
+        """The style text (before / after every prompt) was edited: it counts like a project setting."""
+        if self._loading or self.tree is None or self.running:
+            return
+        new = {"prefix": self.style_prefix.text().strip(), "suffix": self.style_suffix.text().strip()}
+        old = self.tree.options.get("style") or {}
+        if {k: (old.get(k) or "").strip() for k in new} == new:
+            return
+        before = self._done_clips()
+        self.tree.options["style"] = new
+        self._changed()
+        self._update_cards()
+        if not self._report_remade(before, "Style text changed"):
+            self.status.setText("Style text changed.")
 
     # ---- identity references
     def _identity_changed(self, *_):
@@ -1884,8 +1957,10 @@ class MainWindow(QMainWindow):
         return self._pix[key]
 
     def _node_frame(self, n: T.Node) -> Path | None:
+        """The frame shown for a node: where the clips after it start (its hand-over frame, else its last)."""
         if n.made and self.project:
-            return self.project / n.made["frame"]
+            h = T.handover_file(self.project, self.tree, n)
+            return h if h is not None and h.is_file() else self.project / n.made["frame"]
         return None
 
     def state(self, nid: str) -> str:
@@ -1940,6 +2015,9 @@ class MainWindow(QMainWindow):
             parts.append(f"carry-over {ov['guide']}")
         if T.end_image_used(self.tree, n):
             parts.append("end image")
+        k = T.handover_index(self.tree, n)
+        if k is not None:
+            parts.append(f"hands over at {k / 24:.1f} s")
         return " · ".join(parts)
 
     def _own_parts(self, n: T.Node) -> list[str]:
@@ -2026,6 +2104,24 @@ class MainWindow(QMainWindow):
                 step = f"Will be made again: {why}." if why else ("will be made again" if st == "changed" else "")
                 card.set_revert(T.changed_inputs(self.tree, n.id) if st == "changed" else [])
                 card.set_guide_useful(n.parent is not None or vc is not None)
+                k = T.handover_index(self.tree, n)
+                total = T.made_frames(n) or T.clip_length(self.tree, n)
+                if vc is not None:
+                    card.set_handover(f"first frame of video #{vc.id[1:]}", False, False,
+                                      "A clip that leads into a real video hands over at the video's start")
+                elif k is not None:
+                    card.set_handover(f"frame {k + 1} of {total} ({k / 24:.2f} s)", True, True,
+                                      f"The clips after it start from this frame; the last {total - 1 - k} frames "
+                                      "are left out of the path")
+                else:
+                    card.set_handover("last frame", bool(n.made), n.end_at is not None,
+                                      "" if n.made else "Make the clip first, then choose an earlier frame if its "
+                                                        "last one is not good")
+                card.set_compare(len(self.compare_candidates(n.id)) - 1 if n.made else 0)
+                card.words.setText(card.words.text().split(" + ")[0] +
+                                   (" + style" if T.full_prompt(self.tree.options, "x") != "x" else ""))
+                card.edit.setToolTip("Sent to the model: " + T.full_prompt(self.tree.options, n.prompt)
+                                     if T.full_prompt(self.tree.options, "x") != "x" else "")
                 card.set_summary(" · ".join(self._own_parts(n)))
                 end = self.project / n.end_image if n.end_image else None
                 if vc is not None:
@@ -2082,7 +2178,7 @@ class MainWindow(QMainWindow):
         for w in (self.start_tile, self.frames, self.resolution, self.steps,
                   self.audio, self.keep_rep, self.b_project,
                   self.comfy_url, self.ident_mode, self.ref_size, self.ref_hint, self.b_ref_add, self.b_ref_start,
-                  self.b_ref_del, self.speed):
+                  self.b_ref_del, self.speed, self.style_prefix, self.style_suffix):
             w.setEnabled(idle)
         self._turbo_widgets()                      # after the loop: turbo locks the steps fields again
         self._update_ref_start_button()            # after the loop too: they depend on the selection
@@ -2314,6 +2410,15 @@ class MainWindow(QMainWindow):
         if action == "revert" and node is not None and not node.is_video:
             self.revert_clip(node.id)
             return
+        if action == "handover" and node is not None and not node.is_video:
+            self.choose_handover(node.id)
+            return
+        if action == "handover_clear" and node is not None and not node.is_video:
+            self.set_handover(node.id, None)
+            return
+        if action == "compare" and node is not None:
+            self.compare_variants(node.id)
+            return
         if action == "continue":
             new = self.tree.add(node.id if node else None, "")
         elif action == "variants" and node is not None:
@@ -2386,6 +2491,115 @@ class MainWindow(QMainWindow):
         self.status.setText(f"Clip #{nid[1:]}: {' and '.join(done)} back as made" +
                             (f"; it is still changed: {why}." if why else "; it is done again."))
         return done
+
+    # ---- hand-over frame
+    def choose_handover(self, nid: str) -> None:
+        node = self.tree.nodes.get(nid) if self.tree else None
+        if node is None or node.is_video or self.running:
+            return
+        if self.tree.video_child(nid) is not None:
+            self.status.setText(f"Clip #{nid[1:]} ends at the video after it; it hands over there.")
+            return
+        if not node.made or not (self.project / node.made["video"]).is_file():
+            self.status.setText(f"Make clip #{nid[1:]} first; then choose the frame it hands over at.")
+            return
+        # a child with a motion guide needs that many frames up to the hand-over frame
+        need = max([int((c.overrides or {}).get("guide") or 0) for c in self.tree.children(nid)
+                    if not c.is_video] + [1])
+        dlg = HandoverDialog(self, self.project / node.made["video"], f"Hand-over frame of clip #{nid[1:]}",
+                             T.handover_index(self.tree, node), min_frame=max(1, need - 1))
+        if dlg.exec() != QDialog.Accepted:
+            return
+        self.set_handover(nid, dlg.frame())
+
+    def set_handover(self, nid: str, frame: int | None) -> bool:
+        """The clips after a made clip start from this frame of it (None: its last frame, as usual)."""
+        if self.tree is None or self.running or nid not in self.tree.nodes or self._busy_files():
+            return False
+        node = self.tree.nodes[nid]
+        if node.is_video:
+            return False
+        n = T.made_frames(node) or T.clip_length(self.tree, node)
+        frame = None if frame is None or int(frame) >= n - 1 else max(1, int(frame))
+        if frame == node.end_at:
+            return False
+        before = self._done_clips()
+        node.end_at = frame
+        try:
+            T.ensure_handover(self.project, self.tree, node)
+        except (OSError, RuntimeError) as e:
+            node.end_at = None
+            self.status.setText(f"Could not read that frame of clip #{nid[1:]}: {e}")
+            return False
+        self._pix.clear()
+        self._write_tree()
+        self.refresh()
+        what = (f"Clip #{nid[1:]} hands over at frame {frame + 1} ({frame / 24:.2f} s)" if frame is not None
+                else f"Clip #{nid[1:]} hands over at its last frame")
+        if not self._report_remade(before, what):
+            self.status.setText(what + ".")
+        return True
+
+    # ---- compare
+    def compare_candidates(self, nid: str) -> list[str]:
+        """The made clips from the same point as nid (nid first), in number order."""
+        node = self.tree.nodes.get(nid) if self.tree else None
+        if node is None:
+            return []
+        sibs = [n for n in self.tree.children(node.parent) if n.id != nid and n.made and not n.is_video
+                and self.status_of.get(n.id) == "done"]
+        own = [nid] if node.made else []
+        return own + [n.id for n in sorted(sibs, key=lambda n: self.tree.number(n.id))]
+
+    def compare_variants(self, nid: str, player: bool = True) -> CompareDialog | None:
+        """Play nid and the other made clips from the same point side by side; 'Keep this one' deletes the others
+        (and what follows them)."""
+        if self.tree is None or self.running:
+            return None
+        ids = self.compare_candidates(nid)[:9]
+        if len(ids) < 2:
+            self.status.setText("Nothing to compare: make variants of this clip first (Variant / Variants…).")
+            return None
+        items = []
+        for i in ids:
+            n = self.tree.nodes[i]
+            detail = " · ".join([f"seed {n.seed}"] + self._own_parts(n) +
+                                ([] if n.prompt == self.tree.nodes[nid].prompt else [f"“{n.prompt[:60]}”"]))
+            items.append((i, f"#{i[1:]}", detail, self.project / n.made["video"]))
+        self.preview.stop()
+
+        def keep(kid: str) -> bool:
+            others = [i for i in ids if i != kid and i in self.tree.nodes]
+            return bool(self.keep_only(kid, others))
+        dlg = CompareDialog(self, items, keep, player=player,
+                            title=f"Compare {len(ids)} clips from the same point as #{nid[1:]}")
+        if player:
+            dlg.exec()
+        return dlg
+
+    def keep_only(self, nid: str, others: list[str], confirm: bool = True) -> list[str]:
+        """Delete these other clips (with what follows them); nid stays and is selected."""
+        if self.tree is None or self.running or not others or self._busy_files():
+            return []
+        doomed = others + [d.id for r in others for d in self.tree.descendants(r)]
+        made = sum(1 for d in doomed if self.tree.nodes[d].made)
+        if confirm:
+            msg = (f"Keep clip #{nid[1:]} and delete {len(doomed)} clip{'s' if len(doomed) != 1 else ''} "
+                   f"({', '.join('#' + o[1:] for o in others)}" + (" and what follows them" if len(doomed) >
+                                                                  len(others) else "") + ")?")
+            if made:
+                msg += f"\n{made} of them are made; their video files are deleted too."
+            if QMessageBox.question(self, "Keep this one", msg) != QMessageBox.Yes:
+                return []
+        gone = []
+        for r in others:
+            if r in self.tree.nodes:
+                gone += self.tree.remove(r, self.project)
+        self.tree.selected = nid
+        self._write_tree()
+        self.refresh()
+        self.status.setText(f"Kept clip #{nid[1:]}; deleted {len(gone)} clip{'s' if len(gone) != 1 else ''}.")
+        return gone
 
     # ---- end images
     def choose_end_image(self, nid: str) -> None:
@@ -2625,7 +2839,8 @@ class MainWindow(QMainWindow):
         self._write_tree()
         self.refresh()
         self.graph.reveal(ids[-1])
-        self.status.setText(f"{len(ids)} variant{'s' if len(ids) != 1 else ''} of clip #{nid[1:]} added.")
+        self.status.setText(f"{len(ids)} variant{'s' if len(ids) != 1 else ''} of clip #{nid[1:]} added; once made, "
+                            "compare them side by side with the Compare button on the card.")
         if generate:
             self._start(ids)
         return ids
@@ -2655,6 +2870,14 @@ class MainWindow(QMainWindow):
                     acts[m.addAction("Clear end image")] = "end_clear"
                 if T.changed_inputs(self.tree, nid):
                     acts[m.addAction("Undo changes (back to the made clip)")] = "revert"
+                hand = m.addAction("Hand-over frame…")
+                hand.setEnabled(bool(node.made) and vc is None)
+                acts[hand] = "handover"
+                if T.handover_index(self.tree, node) is not None:
+                    acts[m.addAction("Hand over at the last frame")] = "handover_clear"
+                cmp_ = m.addAction("Compare with its variants…")
+                cmp_.setEnabled(len(self.compare_candidates(nid)) > 1)
+                acts[cmp_] = "compare"
             m.addSeparator()
             play = m.addAction("Play this video" if node is not None and node.is_video else "Play this clip")
             play.setEnabled(bool(self.tree.nodes[nid].made))
@@ -2818,6 +3041,7 @@ class MainWindow(QMainWindow):
     def _start(self, targets: list[str]):
         if self.running or self.tree is None:
             return
+        self._style_changed()                      # a style edit not finished with Enter / leaving the field
         if self._joins:
             self.status.setText("Wait until the path is joined.")
             return

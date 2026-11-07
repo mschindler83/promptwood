@@ -1148,3 +1148,70 @@ def test_no_delete_while_files_are_busy_and_small_card_fixes(app, win, tmp_path,
     assert n.prompt == "one\ntwo  three"
     win.cards[0].edit.setPlainText("one two four")
     assert n.prompt == "one two four"
+
+
+def test_hand_over_frame_in_the_window(app, win, tmp_path, image):
+    from video_chain.ui.clip_dialogs import HandoverDialog
+    ids = new_project(win, tmp_path, image, ("a", "b"))
+    card = win.cards[0]
+    assert not card.b_hand.isEnabled()                                  # not made yet
+    run_and_wait(app, win, win.generate_path)
+    flush(app, win)
+    a = win.tree.nodes[ids[0]]
+    dlg = HandoverDialog(None, win.project / a.made["video"], "x", None)
+    wait(app, lambda: dlg.frames, timeout=20)
+    assert len(dlg.frames) == 17 and dlg.frame() is None               # starts at the last frame
+    dlg.slider.setValue(9)
+    assert dlg.frame() == 9 and "7 frames" in dlg.summary.text()
+    dlg.reject()
+    assert win.cards[0].b_hand.isEnabled()
+    wait(app, lambda: not win._joins, timeout=30)                       # the path played after generating
+    assert win.set_handover(ids[0], 9)
+    assert a.end_at == 9 and [win.state(i) for i in ids] == ["done", "changed"]
+    assert "1 made clip is now CHANGED" in win.status.text()
+    assert win.cards[0].hand_text.text() == "frame 10 of 17 (0.38 s)" and "hands over at 0.4 s" in win.badge(a)
+    assert win._node_frame(a).name.endswith("_f9.png")
+    run_and_wait(app, win, win.generate_path)
+    flush(app, win)
+    assert [win.state(i) for i in ids] == ["done", "done"]
+    wait(app, lambda: not win._joins, timeout=30)
+    win.node_action("handover_clear", ids[0])                           # back to the last frame
+    assert a.end_at is None and win.state(ids[1]) == "changed"
+
+
+def test_compare_variants_and_keep_one(app, win, tmp_path, image):
+    ids = new_project(win, tmp_path, image, ("a", "b"))
+    new = win.create_variants(ids[1], 2, generate=True)
+    wait(app, lambda: not win.running)
+    run_and_wait(app, win, win.generate_all)
+    flush(app, win)
+    wait(app, lambda: not win._joins, timeout=30)
+    assert win.compare_candidates(ids[1]) == [ids[1]] + new
+    win.select(ids[1])
+    assert win.cards[1].b_compare.isEnabled() and not win.cards[0].b_compare.isEnabled()
+    dlg = win.compare_variants(ids[1], player=False)
+    assert len(dlg.keep_buttons) == 3 and "seed" in dlg.items[1][2]
+    dlg.keep_buttons[new[0]].click()                                    # keep the first variant
+    assert dlg.kept == new[0] and set(win.tree.nodes) == {ids[0], new[0]}
+    assert win.selected_id() == new[0]
+    assert win.compare_variants(new[0], player=False) is None and "Nothing to compare" in win.status.text()
+
+
+def test_style_text_in_the_window(app, win, tmp_path, image):
+    ids = new_project(win, tmp_path, image, ("walks in",))
+    run_and_wait(app, win, win.generate_path)
+    flush(app, win)
+    win.style_prefix.setText("cinematic,")
+    win.style_prefix.editingFinished.emit()
+    assert win.tree.options["style"] == {"prefix": "cinematic,", "suffix": ""}
+    assert "1 made clip is now CHANGED" in win.status.text()
+    flush(app, win)
+    assert win.cards[0].words.text().endswith("+ style")
+    assert win.cards[0].edit.toolTip() == "Sent to the model: cinematic, walks in"
+    win.style_suffix.setText("slow motion")                             # not finished with Enter: taken at Generate
+    run_and_wait(app, win, win.generate_path)
+    made = T.load(win.project).nodes[ids[0]].made["settings"]
+    assert made["prompt_prefix"] == "cinematic," and made["prompt_suffix"] == "slow motion"
+    win.close_project()
+    win.open_project(tmp_path / "proj2")                                 # a new project starts without it
+    assert win.style_prefix.text() == "" and (win.tree.options.get("style") or {}).get("prefix", "") == ""

@@ -320,13 +320,15 @@ def _load_previous(out_dir: Path) -> dict[int, dict]:
 def settings_dict(*, model: str, lora: str | None, strength: float, frames: int, steps: int, width: int,
                   height: int, audio: bool, backend: str = "comfyui", refs: list | None = None,
                   ref_size: str = "match", ref_hint: bool = True, extra_loras: list | None = None,
-                  turbo: tuple[str, float] | None = None, guide: int = 0) -> dict:
+                  turbo: tuple[str, float] | None = None, guide: int = 0,
+                  style: tuple[str, str] | None = None) -> dict:
     """What a clip depends on besides prompt, seed and start image; a clip is reused only if this is unchanged.
     The LoRA counts by content (lora_sha1), so a LoRA retrained into the same file makes its clips change.
     extra_loras: further LoRAs stacked after the first ([(path, strength)]), only present when there are any, so
     a single-LoRA setting is recorded exactly as before.
     refs: reference images for the face/identity ([{"file": path in the project, "sha1": ...}]), only present when
-    the identity references are on."""
+    the identity references are on.
+    style: the project's text before / after every prompt (only present when there is any)."""
     s = {"model": model, "lora": lora or None, "lora_sha1": file_signature(lora) if lora else None,
          "strength": float(strength) if lora else 1.0,
          "frames": int(frames), "steps": int(steps), "width": int(width), "height": int(height),
@@ -340,6 +342,11 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
                   "ref_hint": bool(ref_hint)})
     if guide:                                   # motion guide: frames of the neighbouring clips anchored
         s["guide"] = int(guide)
+    prefix, suffix = ((style[0] or "").strip(), (style[1] or "").strip()) if style else ("", "")
+    if prefix:
+        s["prompt_prefix"] = prefix
+    if suffix:
+        s["prompt_suffix"] = suffix
     return s
 
 

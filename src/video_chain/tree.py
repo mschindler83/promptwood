@@ -9,6 +9,10 @@ With a motion guide (override "guide": 5, 22 or 39 frames) a generated clip gets
 before and the first frames of a following video (with their sound) instead of a single frame at each end.
 A generated clip with no video after it can have an end image of its own (Node.end_image, a copy in ends/): the
 frame H3 steers the clip's end to. It is not a frame of the chain, so nothing is cut when the path is joined.
+A made generated clip without a video after it can hand over at an earlier frame (Node.end_at, a frame index): the
+clips after it start from that frame, and the frames after it are left out when a path is joined. The clip itself
+stays as made (nothing is generated again for it); only what follows it changes.
+The project's style text (options "style": prefix / suffix) is put around every prompt sent to the model.
 
 Project folder:
   tree.json            nodes (id, parent, prompt, seed, what was made), options, the selected node
@@ -16,6 +20,7 @@ Project folder:
   nodes/<id>_<tag>.mp4 a node's clip (a new name for every version)
   nodes/<id>_<tag>.png its last frame, the start image of its children
   nodes/<id>_<tag>_first.png   a video node's first frame (the end frame of the generated clip before it)
+  nodes/<id>_<tag>_f<k>.png    a clip's hand-over frame k (Node.end_at), the start image of its children
   paths/<id>.mp4       a joined path (start -> node), made on demand
   ends/<id>_<tag>.png  a generated clip's own end image
 
@@ -54,7 +59,9 @@ DEFAULT_OPTIONS = {"model": "Comfy-Org/MiniMax-H3", "frames": 73, "steps": 28,
                    # turbo: a step-distilled LoRA + its sampler, few steps for every clip (ComfyUI only)
                    "turbo": {"on": False, "lora": None, "steps": 6, "strength": 1.0},
                    # identity: reference images (copies in refs/) every clip sees, so the face stays the same
-                   "identity": {"mode": "off", "images": [], "size": "match", "hint": True}}
+                   "identity": {"mode": "off", "images": [], "size": "match", "hint": True},
+                   # style text put before / after every prompt (e.g. look, camera, a LoRA's trigger word)
+                   "style": {"prefix": "", "suffix": ""}}
 REFS_DIR = "refs"
 ENDS_DIR = "ends"
 MAX_REFS = 9
@@ -71,6 +78,7 @@ class Node:
     kind: str = AI                 # AI: generated clip; VIDEO: a range of a real video file
     source: dict | None = None     # VIDEO: {"file": absolute path, "start": s, "end": s}
     end_image: str | None = None   # AI: its own end image (ends/..., project-relative); a video after it wins
+    end_at: int | None = None      # AI: hand over at this frame instead of the last one (see handover_index)
 
     @property
     def is_video(self) -> bool:
@@ -212,8 +220,11 @@ class Tree:
             if kind == VIDEO and not (isinstance(src, dict) and src.get("file") and "start" in src and "end" in src):
                 raise ValueError(f"video node {nd['id']} has no source")
             end = nd.get("end_image") if kind == AI and isinstance(nd.get("end_image"), str) else None
+            at = nd.get("end_at")
+            at = int(at) if kind == AI and isinstance(at, (int, float)) and not isinstance(at, bool) and at >= 1 \
+                else None
             n = Node(nd["id"], nd.get("parent"), nd.get("prompt", ""), int(nd.get("seed", 42)), nd.get("made"), ov,
-                     kind, dict(src) if kind == VIDEO else None, end)
+                     kind, dict(src) if kind == VIDEO else None, end, at)
             t.nodes[n.id] = n
         for n in t.nodes.values():
             if n.parent is not None and n.parent not in t.nodes:
@@ -231,7 +242,7 @@ class Tree:
         return t
 
 
-_CLIP_NAME = re.compile(r"^n\d+(_[0-9a-f]{8})?(_first)?\.(mp4|png)$")   # also the fixed names of older versions
+_CLIP_NAME = re.compile(r"^n\d+(_[0-9a-f]{8})?(_first|_f\d+)?\.(mp4|png)$")   # also the fixed names of older versions
 
 
 def _unlink(f: Path) -> bool:
@@ -254,6 +265,10 @@ def clip_files(project: Path, node: "Node") -> list[Path]:
             f = Path(project) / node.made[k]
             if area in f.resolve().parents:           # a damaged/hand-edited record never reaches elsewhere
                 out.append(f)
+    if node.made.get("video"):                    # hand-over frames of this version
+        v = Path(project) / node.made["video"]
+        if area in v.resolve().parents and v.parent.is_dir():
+            out += sorted(v.parent.glob(f"{v.stem}_f*.png"))
     return out
 
 
@@ -273,6 +288,7 @@ def remove_stale_files(project: Path, tree: "Tree") -> list[Path]:
         return []
     used = {Path(project) / n.made[k] for n in tree.nodes.values() if n.made for k in ("video", "frame", "first")
             if n.made.get(k)}
+    used |= {h for n in tree.nodes.values() if (h := handover_file(project, tree, n)) is not None}
     stuck = []
     for f in d.iterdir():
         if f.is_file() and (_CLIP_NAME.match(f.name) or ".new." in f.name or ".part." in f.name) and f not in used:
@@ -542,7 +558,9 @@ class Checker:
             start = self.project / START_FILE
             return start if start.is_file() else None
         parent = self.tree.nodes[node.parent]
-        return self.project / parent.made["frame"] if parent.made else node_files(self.project, node.parent)[1]
+        if not parent.made:
+            return node_files(self.project, node.parent)[1]
+        return handover_file(self.project, self.tree, parent) or self.project / parent.made["frame"]
 
     def end_key(self, node: Node):
         """What a generated clip's end depends on: the key of the video it leads into (False: that video is not
@@ -560,7 +578,11 @@ class Checker:
         if node.parent is None or not s or not int(s.get("guide") or 0):
             return None
         parent = self.tree.nodes[node.parent]
-        return parent.made.get("video") if parent.made else None
+        if not parent.made:
+            return None
+        k = handover_index(self.tree, parent)            # an earlier hand-over: other guide frames
+        v = parent.made.get("video")
+        return None if v is None else v + (f"@{k}" if k is not None else "")
 
     def _files_there(self, node: Node) -> bool:
         m = node.made
@@ -646,13 +668,15 @@ def current_settings(project: Path, options: dict, tree: "Tree | None" = None) -
             refs.append({"file": rel, "sha1": sha})
     turbo = options.get("turbo") or {}
     turbo_on = bool(turbo.get("on") and turbo.get("lora"))
+    style = options.get("style") or {}
     return chain.settings_dict(model=options.get("model", DEFAULT_OPTIONS["model"]), lora=None,
                                strength=1.0, frames=options.get("frames", 73),
                                steps=int(turbo.get("steps", 6)) if turbo_on else options.get("steps", 28),
                                width=w, height=h, audio=options.get("audio", True),
                                turbo=(turbo["lora"], turbo.get("strength", 1.0)) if turbo_on else None,
                                backend="comfyui", refs=refs,
-                               ref_size=ident.get("size", "match"), ref_hint=ident.get("hint", True))
+                               ref_size=ident.get("size", "match"), ref_hint=ident.get("hint", True),
+                               style=(style.get("prefix") or "", style.get("suffix") or ""))
 
 
 def _extras(items) -> list[tuple[str, float]]:
@@ -701,7 +725,8 @@ def node_settings(base: dict, options: dict, node: Node) -> dict:
                                turbo=(base["turbo"]["lora"], base["turbo"]["strength"]) if base.get("turbo") else None,
                                backend="comfyui", refs=base.get("refs"),
                                ref_size=base.get("ref_size", "match"), ref_hint=base.get("ref_hint", True),
-                               guide=int(ov.get("guide") or 0))
+                               guide=int(ov.get("guide") or 0),
+                               style=(base.get("prompt_prefix", ""), base.get("prompt_suffix", "")))
 
 
 def loras_needed(tree: Tree, checker: "Checker", nids: list[str]) -> list[str]:
@@ -803,6 +828,69 @@ def clip_length(tree: Tree, node: Node) -> int:
     return int((node.overrides or {}).get("frames", tree.options.get("frames", 73)))
 
 
+def made_frames(node: Node) -> int | None:
+    """Frames of a node's made clip (from its record), or None."""
+    if not node.made:
+        return None
+    if node.made.get("frames"):
+        return int(node.made["frames"])
+    if node.is_video:
+        return None
+    return int(((node.made.get("settings") or {}).get("frames")) or 0) or None   # older records
+
+
+def handover_index(tree: Tree, node: Node, frames: int | None = None) -> int | None:
+    """The frame (0-based) the clips after a generated clip start from, when it is not its last frame (end_at);
+    None: the last frame. Not for a clip that leads into a video (its end is that video's start). frames: the clip's
+    length (default: the made clip's, else its length setting)."""
+    if node.is_video or node.end_at is None or tree.video_child(node.id) is not None:
+        return None
+    n = frames or made_frames(node) or clip_length(tree, node)
+    if node.end_at >= n - 1:
+        return None
+    return max(1, int(node.end_at))
+
+
+def handover_file(project: Path, tree: Tree, node: Node) -> Path | None:
+    """The PNG of a made clip's hand-over frame (named after its clip version), or None (the last frame counts)."""
+    k = handover_index(tree, node)
+    if k is None or not node.made or not node.made.get("video"):
+        return None
+    v = Path(node.made["video"])
+    return Path(project) / v.parent / f"{v.stem}_f{k}.png"
+
+
+def ensure_handover(project: Path, tree: Tree, node: Node) -> Path | None:
+    """Write the hand-over frame of a made clip if it is not there yet; returns it (None: the last frame counts)."""
+    f = handover_file(project, tree, node)
+    if f is not None and not f.is_file():
+        tmp = f.with_name(f.stem + ".part.png")
+        try:
+            chain.frame_at(Path(project) / node.made["video"], handover_index(tree, node), tmp)
+            tmp.replace(f)
+        finally:
+            tmp.unlink(missing_ok=True)
+    return f
+
+
+def ensure_handovers(project: Path, tree: Tree) -> list[str]:
+    """All hand-over frames of the tree (e.g. after a copy); returns the nodes whose frame could not be made."""
+    bad = []
+    for n in tree.nodes.values():
+        try:
+            ensure_handover(project, tree, n)
+        except (OSError, RuntimeError):
+            bad.append(n.id)
+    return bad
+
+
+def full_prompt(options: dict, prompt: str) -> str:
+    """A clip's prompt as the model gets it: the project's style text before and after it."""
+    style = options.get("style") or {}
+    return " ".join(x for x in ((style.get("prefix") or "").strip(), prompt.strip(),
+                                (style.get("suffix") or "").strip()) if x)
+
+
 def _clip_frames(project: Path, node: Node) -> int:
     if node.is_video and node.made.get("frames"):
         return int(node.made["frames"])
@@ -818,6 +906,9 @@ def _guides(project: Path, tree: Tree, node: Node, settings: dict, tmp: Path) ->
     if guide and node.parent is not None:
         parent = tree.nodes[node.parent]
         clip, n = project / parent.made["video"], _clip_frames(project, parent)
+        k = handover_index(tree, parent, n)
+        if k is not None:                           # it hands over earlier: the frames up to that one
+            n = k + 1
         if n < guide:
             raise ValueError(f"clip #{parent.id[1:]} ({n} frames) is shorter than the {guide}-frame motion guide "
                              f"of clip #{node.id[1:]}")
@@ -866,6 +957,9 @@ def guide_problem(tree: Tree, checker: "Checker", todo: list[str]) -> str | None
             near.append(("video", vc))
         for what, other in near:
             n = length(other)
+            k = handover_index(tree, other, n) if what == "clip" else None
+            if k is not None:                       # it hands over earlier
+                n = k + 1
             if n < guide:
                 return (f"{what} #{other.id[1:]} ({n} frames) is shorter than the {guide}-frame motion guide "
                         f"of clip #{nid[1:]}")
@@ -889,6 +983,7 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
     empty = empty_prompts(tree, targets)
     if empty:
         raise ValueError(f"empty prompt in node {empty[0]}")
+    ensure_handovers(project, tree)               # before the states: children start from them
     checker = Checker(project, tree)
     if checker.base() is None:
         raise FileNotFoundError("the project has no start image (and no video to take the size from)")
@@ -945,9 +1040,11 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
                         call["guides"] = guides
                     if end_image is not None:
                         call["end_image"] = str(end_image)
-                    generator.generate(node.prompt, start, new_video, new_frame, node.seed, settings=call)
+                    generator.generate(full_prompt(tree.options, node.prompt), start, new_video, new_frame,
+                                       node.seed, settings=call)
                 if not new_video.exists() or not new_frame.exists():
                     raise RuntimeError(f"the generator did not write the clip of {nid}")
+                made_n = chain.probe(new_video)["frames"]      # the real count (hand-over frames, joins)
             except BaseException:
                 for f in (new_video, new_frame):
                     _unlink(f)
@@ -956,7 +1053,7 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
             node.made = {"prompt": node.prompt, "seed": node.seed, "settings": settings,
                          "overrides": copy.deepcopy(node.overrides or {}), "end_image": node.end_image,
                          "start_sha1": start_sha, "video": f"nodes/{new_video.name}",
-                         "frame": f"nodes/{new_frame.name}"}
+                         "frame": f"nodes/{new_frame.name}", "frames": made_n}
             if old_end and old_end != node.end_image and _in_ends(project, old_end):
                 old.append(project / old_end)          # the end image of the previous version
             if end_key is not None:
@@ -964,6 +1061,9 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
             if guide_from is not None:
                 node.made["guide_from"] = guide_from
             new_files = [new_video, new_frame]
+            h = ensure_handover(project, tree, node)   # its children start from it
+            if h is not None:
+                new_files.append(h)
         save(project, tree)
         for f in old:                              # the previous version; left for later if it is open somewhere
             if f not in new_files and not _unlink(f):
@@ -986,8 +1086,14 @@ def path_cuts(tree: Tree, path: list[Node], keep_repeated: bool = False,
     clip continues from the clip before, its first frame (or its motion guide frames) repeats that clip's end;
     where it leads into a video, its last frame (or guide frames) repeats the video's start. Two videos in a row
     and a first clip lose nothing. The repeated frames of generated clips are left out, real ones are kept.
+    A clip that hands over at an earlier frame (end_at) loses the frames after it.
     planned: the motion guides as set now (for display), not as the clips were made."""
     cuts = [[0, 0] for _ in path]
+    for k, a in enumerate(path):                   # an earlier hand-over: the frames after it are left out
+        n = (clip_length(tree, a) if planned else made_frames(a)) or clip_length(tree, a)
+        h = handover_index(tree, a, n)
+        if h is not None:
+            cuts[k][1] = n - 1 - h
     if not keep_repeated:
         for k in range(1, len(path)):
             a, b = path[k - 1], path[k]
