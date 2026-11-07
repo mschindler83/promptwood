@@ -457,7 +457,7 @@ class PromptCard(QFrame):
             self.steps.setToolTip(f"Sampling steps of this clip (lowest value = the project's: {project_steps})")
             self.steps.setEnabled(not self.edit.isReadOnly() and not self.steps_locked)
             if self.steps_locked:
-                self.steps.setToolTip("Turbo / HyperFlow: every clip uses their own steps (Clips → Speed)")
+                self.steps.setToolTip("Turbo / HyperFlow / Pika H3 Flex: every clip uses their own steps (Clips → Speed)")
         finally:
             for w in widgets:
                 w.blockSignals(False)

@@ -162,6 +162,9 @@ def _main_tree(a, emit) -> int:
         missing = gen.missing_loras(job["loras"])
         if missing:
             return _fail(emit, _missing_msg(missing[0]))
+        problem = _speed_problem(gen, job["settings"])
+        if problem:
+            return _fail(emit, problem)
     run_job(job, gen, emit, current)
     return 0
 
@@ -189,6 +192,18 @@ class _LineReader:
             self.buf += chunk
         line, self.buf = self.buf.split(b"\n", 1)
         return line.decode(errors="replace") + "\n"
+
+
+def _speed_problem(gen, settings: dict) -> str | None:
+    """Why the HyperFlow weights / Pika LoRA these settings need cannot be used (None: fine, or nothing needed)."""
+    if not hasattr(gen, "check_speed"):
+        return None
+    from .comfy import ComfyError
+    try:
+        gen.check_speed(settings)
+    except ComfyError as e:
+        return str(e)
+    return None
 
 
 def _missing_msg(lora: str) -> str:
@@ -258,6 +273,9 @@ def serve(a, emit, make_generator: Callable[[dict], object], stdin=None) -> int:
                 missing = gen.missing_loras(job["loras"])
                 if missing:
                     raise JobError(_missing_msg(missing[0]))
+                problem = _speed_problem(gen, job["settings"])
+                if problem:
+                    raise JobError(problem)
             run_job(job, gen if job["ai_todo"] else None, emit, current)
         except (JobError, ValueError, FileNotFoundError, KeyError) as e:
             emit({"e": "error", "msg": str(e)})

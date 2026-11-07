@@ -317,6 +317,8 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
         wf[f"guide{k}"] = {"class_type": "MiniMaxH3AddGuide", "inputs": gin}
         positive = [f"guide{k}", 0]
     model = ["unet", 0]
+    if pika and (turbo or hyperflow):
+        raise ValueError("Pika H3 Flex cannot be combined with Turbo or HyperFlow")
     if pika:
         wf["pika"] = {"class_type": "LoraLoaderModelOnly",
                       "inputs": {"model": model, "lora_name": pika[0], "strength_model": float(pika[1])}}
@@ -469,6 +471,14 @@ class ComfyGenerator:
             raise ComfyError(f"ComfyUI lists no Pika H3 Flex LoRA for {kind} (pika_h3_flex_{kind}_v1_bf16"
                              ".safetensors in a LoRA folder)")
         return sorted(names, key=len)[0]
+
+    def check_speed(self, s: dict) -> None:
+        """Before a run: the HyperFlow weights / Pika LoRA these settings need are listed by ComfyUI (raises
+        ComfyError otherwise, so the run stops up front instead of failing clip by clip)."""
+        if s.get("hyperflow"):
+            self.hyperflow_file()
+        if s.get("pika"):
+            self.pika_lora(bool(s.get("refs") or s.get("ref_paths")))
 
     def check_turbo(self):
         for node in ("MiniMaxH3TurboLoRA", "MiniMaxH3TurboSampler"):

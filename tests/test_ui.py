@@ -41,8 +41,8 @@ def settings(tmp_path, name="s.ini"):
 def silent_player(monkeypatch):
     """No test plays anything: the test clips have a 440 Hz tone, and offscreen only hides the picture, not the
     sound (windows made without the win fixture played their joined paths aloud)."""
-    from video_chain.ui import main_window
-    monkeypatch.setattr(main_window.Preview, "open", lambda self, path, title, autoplay=True: None)
+    from PySide6.QtMultimedia import QMediaPlayer
+    monkeypatch.setattr(QMediaPlayer, "play", lambda self: None)     # Preview.open itself still runs
 
 
 @pytest.fixture
@@ -1395,6 +1395,19 @@ def test_export_refined_and_hyperflow_speed(app, win, tmp_path, image):
     from video_chain.comfy import refine_size
     assert (info["width"], info["height"]) == refine_size(base["width"], base["height"], "2k")
     assert win.status.text().startswith(f"Exported {out.name} (2k, refined; 2 clips refined now")
+
+
+def test_pika_speed_saved_and_steps_locked(app, win, tmp_path, image):
+    ids = new_project(win, tmp_path, image, ("a",))
+    win.speed.setCurrentIndex(win.speed.findData("pika"))
+    o = win.tree.options
+    assert o["pika"]["on"] and not o["hyperflow"]["on"] and not o["turbo"]["on"] and not win.steps.isEnabled()
+    assert T.Checker(win.project, win.tree).settings(ids[0])["steps"] == 6
+    win.open_project(tmp_path / "proj")                                   # saved with the project
+    assert win.speed.currentData() == "pika" and not win.steps.isEnabled()
+    win.speed.setCurrentIndex(win.speed.findData("normal"))
+    assert not win.tree.options["pika"]["on"] and win.steps.isEnabled()
+    assert "pika" not in T.Checker(win.project, win.tree).settings(ids[0])
 
 
 def test_stop_looks_disabled_when_nothing_runs(app, win):

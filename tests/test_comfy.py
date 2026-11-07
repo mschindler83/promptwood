@@ -647,3 +647,17 @@ def test_pika_h3_flex_workflow(server, start, tmp_path):
     assert wf["sigmas"]["inputs"]["sigmas"] == C.PIKA_SIGMAS and len(C.PIKA_SIGMAS.split(",")) == 7
     assert gen.pika_lora(True).endswith("pika_h3_flex_ref2va_v1_bf16.safetensors")
     assert not [n for _p, n in C.find_h3_loras([tmp_path])]                     # never offered as a normal LoRA
+    with pytest.raises(ValueError):                                               # one speed mode at a time
+        C.build_workflow(prompt="x", image="s.png", seed=1, width=672, height=384, frames=73, steps=6, loras=[],
+                         audio=True, prefix="x", turbo=("t.safetensors", 1.0), pika=("p.safetensors", 1.0))
+
+
+def test_speed_files_checked_before_the_run(server, monkeypatch):
+    """A missing HyperFlow / Pika file stops the run up front, not clip by clip."""
+    gen = C.ComfyGenerator(server.url)
+    gen.check_speed({"pika": {"strength": 1.0}, "refs": [{"file": "r.png"}]})       # both listed by the fake
+    import fake_comfy
+    monkeypatch.setattr(fake_comfy, "IMAGE_LORAS", [n for n in fake_comfy.IMAGE_LORAS if "ref2va" not in n])
+    gen.check_speed({"pika": {"strength": 1.0}})
+    with pytest.raises(C.ComfyError, match="ref2va"):
+        gen.check_speed({"pika": {"strength": 1.0}, "refs": [{"file": "r.png"}]})
