@@ -506,3 +506,33 @@ def test_refine_with_sol_attn(server, start, tmp_path):
     assert wf["sparse"]["class_type"] == "BlockSparseAttention" and sp["selection"] == "sol-attn"
     assert sp["selection.tau"] == 1.3 and wf["guider"]["inputs"]["model"] == ["sparse", 0]
     assert sp["model"] == ["lora0", 0]                                          # after the refiner LoRA
+
+
+def _write_lora(path, keys):
+    import json as _json
+    import struct
+    path.parent.mkdir(parents=True, exist_ok=True)
+    head = _json.dumps({k: {"dtype": "F32", "shape": [1], "data_offsets": [0, 4]} for k in keys}).encode()
+    path.write_bytes(struct.pack("<Q", len(head)) + head + b"\0\0\0\0")
+
+
+def test_qwen_loras_found_and_chained_before_lightning(server, start, tmp_path):
+    qwen = ["diffusion_model.transformer_blocks.0.img_mlp.net.0.proj.lora_A.weight",
+            "diffusion_model.transformer_blocks.0.txt_mlp.net.0.proj.lora_A.weight"]
+    flux = qwen + ["single_transformer_blocks.0.proj_out.lora_A.weight"]
+    root = tmp_path / "loras"
+    _write_lora(root / "qwen-image-edit" / "style.safetensors", qwen)
+    _write_lora(root / "qwen-image-edit" / "Qwen-Image-Edit-2511-Lightning-4steps.safetensors", qwen)
+    _write_lora(root / "flux" / "flux.safetensors", flux)
+    _write_lora(root / "h3" / "nose.safetensors", ["blocks.0.attn.qkv_proj.lora_A.weight",
+                                                   "blocks.0.mlp.fc1.lora_A.weight"])
+    assert [n for _p, n in C.find_qwen_loras([root])] == ["qwen-image-edit/style.safetensors"]
+    assert [n for _p, n in C.find_h3_loras([root])] == ["h3/glow.safetensors"]
+    ed = C.ComfyImageEditor(server.url)
+    meta = ed.edit(start, "x", tmp_path / "e.png", 1, "fast", [], [("/any/MiniMax H3/glow.safetensors", 0.6)])
+    wf = server.prompts[-1]
+    assert wf["lora0"]["inputs"]["lora_name"] == "MiniMax H3/glow.safetensors" and wf["lora0"]["inputs"]["model"] == ["unet", 0]
+    assert wf["lightning"]["inputs"]["model"] == ["lora0", 0] and wf["lora0"]["inputs"]["strength_model"] == 0.6
+    assert meta["loras"] == [{"path": "/any/MiniMax H3/glow.safetensors", "strength": 0.6}]
+    with pytest.raises(C.ComfyError, match="not in ComfyUI's LoRA folders"):
+        ed.edit(start, "x", tmp_path / "e.png", 1, "fast", [], [("/any/unknown.safetensors", 1.0)])

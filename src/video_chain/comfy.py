@@ -162,9 +162,46 @@ def is_h3_lora(path: Path) -> bool:
     return _H3_CACHE[key]
 
 
+_QWEN_IMG = re.compile(r"transformer_blocks[._]\d+[._]img_mlp")
+_QWEN_TXT = re.compile(r"transformer_blocks[._]\d+[._]txt_mlp")
+_QWEN_CACHE: dict[tuple, bool] = {}
+
+
+def is_qwen_lora(path: Path) -> bool:
+    """Whether a .safetensors file is a Qwen-Image / Qwen-Image-Edit LoRA, from the tensor names in its header: the
+    MMDiT's blocks have img_mlp and txt_mlp (Flux's have no such names; it also has single_transformer_blocks)."""
+    try:
+        st = Path(path).stat()
+    except OSError:
+        return False
+    key = (str(path), st.st_size, st.st_mtime_ns)
+    if key not in _QWEN_CACHE:
+        ok = False
+        try:
+            with open(path, "rb") as f:
+                n = int.from_bytes(f.read(8), "little")
+                if 0 < n < 100 * 2**20:
+                    names = json.loads(f.read(n)).keys()
+                    ok = (any(_QWEN_IMG.search(k) for k in names) and any(_QWEN_TXT.search(k) for k in names)
+                          and not any("single_transformer_blocks" in k for k in names))
+        except (OSError, ValueError):
+            ok = False
+        _QWEN_CACHE[key] = ok
+    return _QWEN_CACHE[key]
+
+
+def find_qwen_loras(roots: list[Path]) -> list[tuple[str, str]]:
+    """Qwen Image (Edit) LoRAs in these folders, without the Lightning speed LoRAs (Fast mode applies those)."""
+    return [(p, n) for p, n in _find_loras(roots, is_qwen_lora) if "lightning" not in n.lower()]
+
+
 def find_h3_loras(roots: list[Path]) -> list[tuple[str, str]]:
     """All H3 LoRAs in these folders (links followed) as (path, name relative to its folder), sorted by name.
     Turbo LoRAs are included; is_turbo_lora tells them apart."""
+    return _find_loras(roots, is_h3_lora)
+
+
+def _find_loras(roots: list[Path], test) -> list[tuple[str, str]]:
     out, seen = [], set()
     for root in roots:
         for dirpath, _dirs, files in os.walk(root, followlinks=True):
@@ -172,7 +209,7 @@ def find_h3_loras(roots: list[Path]) -> list[tuple[str, str]]:
                 if not f.endswith(".safetensors"):
                     continue
                 full = os.path.join(dirpath, f)
-                if full in seen or not is_h3_lora(Path(full)):
+                if full in seen or not test(Path(full)):
                     continue
                 seen.add(full)
                 out.append((full, os.path.relpath(full, root)))
@@ -701,9 +738,11 @@ def pick_qwen_files(unets: list[str], clips: list[str], vaes: list[str], loras: 
 
 
 def build_edit_workflow(*, prompt: str, image: str, refs: list[str] = (), seed: int, steps: int, cfg: float,
-                        files: dict, lightning: str | None, prefix: str) -> dict:
+                        files: dict, lightning: str | None, prefix: str,
+                        loras: list[tuple[str, float]] = ()) -> dict:
     """One Qwen Image Edit: the source image (scaled to the model's size) edited by the prompt; refs: up to two more
-    pictures (Picture 2, Picture 3 in the prompt), e.g. a face. As ComfyUI's blueprint 'Image Edit (Qwen 2511)'."""
+    pictures (Picture 2, Picture 3 in the prompt), e.g. a face. As ComfyUI's blueprint 'Image Edit (Qwen 2511)'.
+    loras: (ComfyUI name, strength) chained after the model, in this order, before the Lightning LoRA."""
     wf: dict = {
         "clip": {"class_type": "CLIPLoader", "inputs": {"clip_name": files["clip"], "type": "qwen_image",
                                                          "device": "default"}},
@@ -713,6 +752,10 @@ def build_edit_workflow(*, prompt: str, image: str, refs: list[str] = (), seed: 
         "scale": {"class_type": "FluxKontextImageScale", "inputs": {"image": ["src", 0]}},
     }
     model = ["unet", 0]
+    for k, (name, strength) in enumerate(loras):
+        wf[f"lora{k}"] = {"class_type": "LoraLoaderModelOnly",
+                          "inputs": {"model": model, "lora_name": name, "strength_model": float(strength)}}
+        model = [f"lora{k}", 0]
     if lightning:
         wf["lightning"] = {"class_type": "LoraLoaderModelOnly",
                            "inputs": {"model": model, "lora_name": lightning, "strength_model": 1.0}}
@@ -761,8 +804,15 @@ class ComfyImageEditor(ComfyGenerator):
         return (["fast"] if self.files.get("lightning") else []) + ["standard", "best"]
 
     def edit(self, image: Path, prompt: str, out_png: Path, seed: int, quality: str = "fast",
-             refs: list[Path] = ()) -> dict:
-        """Edit image by prompt; the result goes to out_png. Returns what it was made with."""
+             refs: list[Path] = (), loras: list[tuple[str, float]] = ()) -> dict:
+        """Edit image by prompt; the result goes to out_png. loras: (file, strength) in ComfyUI's LoRA folders.
+        Returns what it was made with."""
+        names = []
+        for path, strength in loras:
+            name = self.name_for(path)
+            if name is None:
+                raise ComfyError(f"{Path(path).name} is not in ComfyUI's LoRA folders")
+            names.append((name, float(strength)))
         light = self.files.get("lightning") if quality == "fast" else None
         if quality == "fast" and not light:
             quality = "standard"
@@ -777,7 +827,8 @@ class ComfyImageEditor(ComfyGenerator):
                 uploads.append((ref_names[-1], Path(r)))
             prefix = f"{SUBFOLDER}/edit_{uuid.uuid4().hex[:12]}"
             wf = build_edit_workflow(prompt=prompt, image=name, refs=ref_names, seed=seed, steps=steps, cfg=cfg,
-                                     files=self.files, lightning=light[0] if light else None, prefix=prefix)
+                                     files=self.files, lightning=light[0] if light else None, prefix=prefix,
+                                     loras=names)
             ws = self._connect_ws()
             try:
                 res = self._json("POST", "/prompt", {"prompt": wf, "client_id": self.client_id})
@@ -809,7 +860,8 @@ class ComfyImageEditor(ComfyGenerator):
                     self._remove(self.input_dir, {"filename": Path(up).name, "subfolder": str(Path(up).parent)},
                                  Path(local), same_size=False)
         return {"quality": quality, "steps": steps, "cfg": cfg, "model": self.files["unet"],
-                "lightning": light[0] if light else None}
+                "lightning": light[0] if light else None,
+                "loras": [{"path": str(p), "strength": float(st)} for p, st in loras]}
 
 
 # ----------------------------------------------------------------------------- 2K refine (Open-H3-Regenerate-2K)

@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
                                QVBoxLayout, QWidget)
 
 from .image_picker import pick_image
+from .lora_stack import LoraStack, lora_label
 from .widgets import FrameTile, guard_wheel, icon_button, label
 
 EDITS_DIR = "edits"
@@ -116,7 +117,7 @@ class ImageEditDialog(QDialog):
 
     def __init__(self, parent, project: Path, sources: list[tuple[str, str]], source: str | None,
                  end_target: str | None, connect, on_use, settings=None, places=None, start_comfy=None,
-                 on_start=None):
+                 on_start=None, known_loras: list[tuple[str, str]] | None = None, lora_dir: str = ""):
         super().__init__(parent)
         self.setWindowTitle("Edit an image with AI (Qwen Image Edit)")
         self.resize(1240, 820)
@@ -170,6 +171,15 @@ class ImageEditDialog(QDialog):
         prow.addWidget(self.pic3)
         prow.addStretch(1)
         left.addLayout(prow)
+        left.addWidget(label("LoRAs (optional): Qwen Image / Image Edit LoRAs from ComfyUI's LoRA folders, applied in "
+                             "this order. Text-to-image Qwen LoRAs often work for edits too, not always.",
+                             level="tertiary"))
+        self.known_loras, self.lora_dir = list(known_loras or []), lora_dir
+        self.loras = LoraStack(self)
+        self.loras.fileWanted.connect(self._lora_file)
+        self.loras.set_items(self._known(), self._remembered_loras())
+        self.loras.changed.connect(self._remember_loras)
+        left.addWidget(self.loras)
 
         opts = QGridLayout()
         self.quality = QComboBox()
@@ -267,8 +277,8 @@ class ImageEditDialog(QDialog):
         self.b_use_ref.setToolTip("Add this result to the project's face references (left panel), e.g. a face or an "
                                   "outfit made here; the dialog stays open, so you can add several")
         self.b_use_ref.clicked.connect(self._add_reference)
-        self.b_again = QPushButton("Use its prompt")
-        self.b_again.setToolTip("Put the prompt this result was made with into the prompt field")
+        self.b_again = QPushButton("Use its prompt and LoRAs")
+        self.b_again.setToolTip("Put the prompt and the LoRAs this result was made with into the fields")
         self.b_again.clicked.connect(self._prompt_again)
         for b in (self.b_use_start, self.b_use_end, self.b_use_ref, self.b_further, self.b_again):
             arow.addWidget(b)
@@ -353,9 +363,10 @@ class ImageEditDialog(QDialog):
             show = orig if self.b_before.isChecked() and orig and Path(orig).is_file() else png
             self.view.set_image(QImage(show))
             when = time.strftime("%Y-%m-%d %H:%M", time.localtime(Path(png).stat().st_mtime))
+            used = " · ".join(f"{lora_label(lo['path'])} ×{lo['strength']:g}" for lo in meta.get("loras") or [])
             self.res_info.setText(("ORIGINAL · " if show != png else "") +
                                   f"“{meta.get('prompt', '')}” · {QUALITY_TEXT.get(meta.get('quality'), '')} · "
-                                  f"seed {meta.get('seed', '?')} · {when}")
+                                  + (f"{used} · " if used else "") + f"seed {meta.get('seed', '?')} · {when}")
         self._update_buttons()
 
     def _update_buttons(self):
@@ -377,6 +388,7 @@ class ImageEditDialog(QDialog):
         prompt = " ".join(self.prompt.toPlainText().split())
         source, quality, n = self.source, self.quality.currentData(), self.tries.value()
         refs = [p for p in (self.pic2.path, self.pic3.path) if p]
+        loras = [(it["path"], it["strength"]) for it in self.loras.items()]
         size = None
         if self.keep_size.isChecked():
             img = QImage(source)
@@ -409,7 +421,7 @@ class ImageEditDialog(QDialog):
                     seed = random.randint(1, 2**31 - 1)
                     stem = f"edit_{time.strftime('%Y%m%d-%H%M%S')}_{seed}"
                     out = edits / f"{stem}.png"
-                    meta = self.editor.edit(Path(source), prompt, out, seed, quality, [Path(r) for r in refs])
+                    meta = self.editor.edit(Path(source), prompt, out, seed, quality, [Path(r) for r in refs], loras)
                     if size is not None:
                         scale_to(out, out, size)
                     meta.update({"prompt": prompt, "seed": seed, "source": source, "source_copy": str(kept),
@@ -498,6 +510,50 @@ class ImageEditDialog(QDialog):
         sel = self.selected()
         if sel is not None:
             self.prompt.setPlainText(sel[1].get("prompt", ""))
+            self.loras.set_items(self._known(), sel[1].get("loras") or [])
+            self._remember_loras()
+
+    # ---- LoRAs
+    def _known(self) -> list[tuple[str, str]]:
+        """The Qwen LoRAs ComfyUI has, then LoRA files chosen here earlier (from other folders)."""
+        out = list(self.known_loras)
+        listed = {p for p, _ in out}
+        for p in self._recent_files():
+            if p not in listed and Path(p).is_file():
+                out.append((p, lora_label(p)))
+        return out
+
+    def _recent_files(self) -> list[str]:
+        try:
+            return [p for p in json.loads(self.qs.value("editLoraFiles", "[]", type=str)) if isinstance(p, str)]
+        except (ValueError, AttributeError):
+            return []
+
+    def _remembered_loras(self) -> list[dict]:
+        try:
+            items = json.loads(self.qs.value("editLoras", "[]", type=str)) if self.qs is not None else []
+        except ValueError:
+            items = []
+        return [it for it in items if isinstance(it, dict) and it.get("path") and Path(it["path"]).is_file()]
+
+    def _remember_loras(self):
+        if self.qs is not None:
+            self.qs.setValue("editLoras", json.dumps(self.loras.items()))
+
+    def _lora_file(self):
+        from PySide6.QtWidgets import QFileDialog
+        f, _ = QFileDialog.getOpenFileName(self, "Qwen LoRA", self.lora_dir, "LoRA (*.safetensors)")
+        if f:
+            self.add_lora_file(f)
+
+    def add_lora_file(self, path: str, strength: float = 1.0):
+        """A LoRA file from any folder at the end of the list (ComfyUI must find it in its LoRA folders)."""
+        import os
+        p = os.path.abspath(path)
+        if self.qs is not None:
+            self.qs.setValue("editLoraFiles", json.dumps([p] + [r for r in self._recent_files() if r != p][:11]))
+        self.loras.set_items(self._known(), self.loras.items() + [{"path": p, "strength": float(strength)}])
+        self._remember_loras()
 
     def done(self, r):
         if self._busy:

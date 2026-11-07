@@ -1238,10 +1238,17 @@ def test_ai_image_edit_for_start_and_end_images(app, tmp_path, image, monkeypatc
         assert dlg.b_use_end.text() == f"Use as end image of clip #{ids[1][1:]}"
         dlg.prompt.setPlainText("she smiles at the camera")
         dlg.tries.setValue(2)
+        lora = tmp_path / "loras" / "MiniMax H3" / "nose.safetensors"     # ComfyUI (fake) lists it by this name
+        lora.parent.mkdir(parents=True)
+        lora.write_bytes(b"x")
+        dlg.add_lora_file(str(lora), 0.7)
+        assert dlg.loras.items() == [{"path": str(lora), "strength": 0.7}]
         dlg.generate()
         wait(app, lambda: not dlg._busy, timeout=60)
         assert dlg.state.text().startswith("Done") and dlg.results.count() == 2
         png, meta = dlg.selected()
+        assert meta["loras"] == [{"path": str(lora), "strength": 0.7}] and "nose ×0.7" in dlg.res_info.text()
+        assert server.prompts[-1]["lora0"]["inputs"]["lora_name"] == "MiniMax H3/glow.safetensors"
         size = QImage_size(meta["source"])
         assert QImage_size(png) == size and meta["prompt"] == "she smiles at the camera"   # back to the source size
         assert Path(meta["source_copy"]).is_file()
@@ -1257,6 +1264,10 @@ def test_ai_image_edit_for_start_and_end_images(app, tmp_path, image, monkeypatc
         # from the start image section: a result as the new start image; earlier results are listed
         dlg2 = w.edit_image(start=True, dialog=False)
         assert dlg2.results.count() == 2 and dlg2.source == str(w.project / T.START_FILE)
+        assert dlg2.loras.items() == [{"path": str(lora), "strength": 0.7}]      # remembered for next time
+        dlg2.loras.set_items(dlg2._known(), [])
+        dlg2._prompt_again()                                        # back to the selected result's prompt and LoRAs
+        assert dlg2.loras.items() == [{"path": str(lora), "strength": 0.7}]
         assert dlg2.b_use_end.isEnabled() is False
         before = (w.project / T.START_FILE).read_bytes()
         dlg2.b_use_start.click()
