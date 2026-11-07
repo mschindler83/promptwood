@@ -209,8 +209,10 @@ class ExportDialog(QDialog):
             self.size.addItem(text, key)
         self.size.setToolTip("Refined: every clip of the path is re-rendered at the higher size in ComfyUI (3 steps "
                              "with the refiner LoRA after a latent upscale), as it was made: its prompt, LoRAs and "
-                             "sound. It takes minutes per clip; refined clips are kept, so the next export of the "
-                             "same clips is quick. Real videos are converted again from their file at that size.")
+                             "sound. Each clip starts exactly where the refined clip before it hands over, so the "
+                             "joins stay seamless. Measured on an RTX 4090: about 1.7 min (1080p) and 4-5 min (2K) "
+                             "per 3 s clip. Refined clips are kept, so the next export of the same clips is quick. "
+                             "Real videos are converted again from their file at that size.")
         f.addRow("Size", self.size)
         note = label("Refined export needs ComfyUI with the H3 2K nodes, the latent upscaler and the refiner LoRA. "
                      "Generating and the preview stay at the normal size.", level="tertiary")
@@ -1152,8 +1154,9 @@ class MainWindow(QMainWindow):
         self.speed.addItem("Normal", "normal")
         self.speed.addItem("Turbo (turbo LoRA, 4-8 steps)", "turbo")
         self.speed.addItem("HyperFlow (8 steps)", "hyperflow")
-        self.speed.setToolTip("HyperFlow: Video Rebirth's 8-step LoRA (about 3× faster than Normal, similar "
-                              "quality; needs the ComfyUI-HyperFlow-H3 nodes and its pruned weights). "
+        self.speed.setToolTip("HyperFlow: Video Rebirth's 8-step LoRA, about 2× faster than Normal (measured on an "
+                              "RTX 4090: 19 s instead of 42 s for a 3 s clip at 672×384; needs the "
+                              "ComfyUI-HyperFlow-H3 nodes and its pruned weights). "
                               "Turbo: a step-distilled LoRA with its own sampler renders every clip in 4-8 steps "
                               "instead of ~20 (needs the ComfyUI-MiniMax-H3-Turbo nodes)")
         c.addRow("Speed", self.speed)

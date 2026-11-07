@@ -814,10 +814,13 @@ def pick_refine_files(loras: list[str], upscalers: list[str]) -> dict:
 
 
 def build_refine_workflow(*, prompt: str, draft: str, seed: int, width: int, height: int, frames: int,
-                          loras: list[tuple[str, float]], refiner: str, upscaler: str, prefix: str) -> dict:
+                          loras: list[tuple[str, float]], refiner: str, upscaler: str, prefix: str,
+                          first_frame: str | None = None, last_frame: str | None = None) -> dict:
     """Re-render a finished clip (the uploaded draft video, with sound) at width x height: its video and sound are
     encoded into H3's AV latent, the video upscaled with the latent upscaler, then refined in 3 steps with the
-    refiner LoRA (and the clip's own LoRAs, as it was made); the clip's own sound is kept."""
+    refiner LoRA (and the clip's own LoRAs, as it was made); the clip's own sound is kept.
+    first_frame / last_frame (uploaded images): pinned as keyframes, so a refined clip starts exactly where the
+    refined clip before it hands over (and ends at a real video's refined first frame)."""
     wf: dict = {
         "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": UNET, "weight_dtype": "default"}},
         "clip": {"class_type": "CLIPLoader", "inputs": {"clip_name": TEXT_ENCODER, "type": "minimax",
@@ -834,11 +837,17 @@ def build_refine_workflow(*, prompt: str, draft: str, seed: int, width: int, hei
                "inputs": {"model": ["upmodel", 0], "samples": ["av", 0], "width": int(width), "height": int(height)}},
         "cond": {"class_type": "MiniMaxH3ImageToVideo",
                  "inputs": {"clip": ["clip", 0], "vae": ["vae", 0], "prompt": prompt, "width": int(width),
-                            "height": int(height), "length": int(frames)}},
+                            "height": int(height), "length": int(frames),
+                            **({"first_frame": ["first", 0]} if first_frame else {}),
+                            **({"last_frame": ["last", 0]} if last_frame else {})}},
         "noise": {"class_type": "RandomNoise", "inputs": {"noise_seed": int(seed)}},
         "sampler": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
         "sigmas": {"class_type": "ManualSigmas", "inputs": {"sigmas": REFINE_SIGMAS}},
     }
+    if first_frame:
+        wf["first"] = {"class_type": "LoadImage", "inputs": {"image": first_frame}}
+    if last_frame:
+        wf["last"] = {"class_type": "LoadImage", "inputs": {"image": last_frame}}
     model = ["unet", 0]
     for k, (name, strength) in enumerate(list(loras) + [(refiner, 1.0)]):
         wf[f"lora{k}"] = {"class_type": "LoraLoaderModelOnly",
@@ -878,7 +887,7 @@ def _with_audio(video: Path, out: Path) -> Path:
 
 
 def _refine(self, draft: Path, prompt: str, out: Path, seed: int, size: tuple[int, int], frames: int,
-            loras: list[tuple[str, float]]) -> None:
+            loras: list[tuple[str, float]], first_frame: Path | None = None, last_frame: Path | None = None) -> None:
     """ComfyGenerator.refine: re-render one finished clip at size (see build_refine_workflow)."""
     for node in REFINE_NODES:
         if not self._object_info(node):
@@ -905,10 +914,15 @@ def _refine(self, draft: Path, prompt: str, out: Path, seed: int, size: tuple[in
         try:
             name = self.upload(src)
             uploads.append((name, src))
+            pins = {}
+            for key, img in (("first_frame", first_frame), ("last_frame", last_frame)):
+                if img is not None:
+                    pins[key] = self.upload(Path(img))
+                    uploads.append((pins[key], Path(img)))
             prefix = f"{SUBFOLDER}/refine_{uuid.uuid4().hex[:12]}"
             wf = build_refine_workflow(prompt=prompt, draft=name, seed=seed, width=size[0], height=size[1],
                                        frames=frames, loras=names, refiner=files["refiner"],
-                                       upscaler=files["upscaler"], prefix=prefix)
+                                       upscaler=files["upscaler"], prefix=prefix, **pins)
             ws = self._connect_ws()
             try:
                 res = self._json("POST", "/prompt", {"prompt": wf, "client_id": self.client_id})

@@ -630,6 +630,8 @@ def test_export_a_path_refined(project, tmp_path):
     out = tmp_path / "out2k.mp4"
     T.refine_path(gen, project, b1.id, "2k", out, log=lambda _m: None)
     assert [r["prompt"] for r in gen.refines] == ["cinematic, a", "cinematic, b1"]
+    # pinned: the first clip at the start image, the next at the refined hand-over frame of the clip before
+    assert gen.refines[0]["first"] == T.START_FILE and gen.refines[1]["first"] == f"{b1.id}_first.png"
     t = T.load(project)
     w, h = gen.refines[0]["size"]
     info = chain.probe(out)

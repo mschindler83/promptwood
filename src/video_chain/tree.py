@@ -245,7 +245,7 @@ class Tree:
 
 
 REFINED = ("1080p", "2k")          # refined copies of a clip version for export: nodes/<id>_<tag>_<size>.mp4
-_CLIP_NAME = re.compile(r"^n\d+(_[0-9a-f]{8})?(_first|_f\d+|_1080p|_2k)?\.(mp4|png)$")   # also the fixed names of older versions
+_CLIP_NAME = re.compile(r"^n\d+(_[0-9a-f]{8})?((_first|_f\d+)?\.(mp4|png)|_(1080p|2k)\.(mp4|json))$")   # also the fixed names of older versions
 
 
 def _unlink(f: Path) -> bool:
@@ -272,7 +272,9 @@ def clip_files(project: Path, node: "Node") -> list[Path]:
         v = Path(project) / node.made["video"]
         if area in v.resolve().parents and v.parent.is_dir():
             out += sorted(v.parent.glob(f"{v.stem}_f*.png"))
-            out += [r for size in REFINED if (r := refined_file(project, node, size)).is_file()]
+            out += [r for size in REFINED for r in (refined_file(project, node, size),
+                                                     refined_file(project, node, size).with_suffix(".json"))
+                    if r.is_file()]
     return out
 
 
@@ -293,7 +295,8 @@ def remove_stale_files(project: Path, tree: "Tree") -> list[Path]:
     used = {Path(project) / n.made[k] for n in tree.nodes.values() if n.made for k in ("video", "frame", "first")
             if n.made.get(k)}
     used |= {h for n in tree.nodes.values() if (h := handover_file(project, tree, n)) is not None}
-    used |= {refined_file(project, n, size) for n in tree.nodes.values() if n.made for size in REFINED}
+    used |= {f for n in tree.nodes.values() if n.made for size in REFINED
+             for f in (refined_file(project, n, size), refined_file(project, n, size).with_suffix(".json"))}
     stuck = []
     for f in d.iterdir():
         if f.is_file() and (_CLIP_NAME.match(f.name) or ".new." in f.name or ".part." in f.name) and f not in used:
@@ -1131,11 +1134,22 @@ def refined_file(project: Path, node: Node, size: str) -> Path:
     return Path(project) / v.parent / f"{v.stem}_{size}.mp4"
 
 
+def _refine_record(target: Path) -> dict:
+    try:
+        return json.loads(target.with_suffix(".json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
 def refine_path(generator, project: Path, nid: str, size: str, out: Path,
-                events: Callable[[dict], None] | None = None, log: Callable[[str], None] = print) -> Path:
+                events: Callable[[dict], None] | None = None, log: Callable[[str], None] = print,
+                pin: bool = True) -> Path:
     """Export the path start -> nid at a higher size ('1080p' / '2k'): every generated clip is re-rendered by
     generator.refine (Open-H3-Regenerate-2K) as it was made (its prompt, style text, LoRAs, seed), every real video
-    is converted again from its file at that size; refined copies are kept (nodes/<clip>_<size>.mp4) and reused.
+    is converted again from its file at that size. Refined copies are kept (nodes/<clip>_<size>.mp4) and reused.
+    pin: a refined clip starts exactly at the frame the refined clip before it hands over at (the first one at the
+    start image) and ends at the refined first frame of a real video after it, so the joins stay seamless at the
+    higher size; a kept copy is reused only while those frames are the same (its .json records them).
     Then the path is joined (the same frames left out as at the normal size) into out."""
     from .comfy import refine_size
     if size not in REFINED:
@@ -1148,34 +1162,55 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
     missing = [n.id for n in path if checker.status(n.id) != "done"]
     if missing:
         raise ValueError(f"not made yet: {', '.join(missing)}")
-    todo = [n.id for n in path if not refined_file(project, n, size).is_file()]
-    for n in path:
-        if n.id not in todo:
-            emit({"e": "node", "id": n.id, "state": "reused"})
-    emit({"e": "plan", "make": todo})
-    for k, nid_ in enumerate(todo, start=1):
-        node = tree.nodes[nid_]
-        target = refined_file(project, node, size)
-        emit({"e": "node", "id": nid_, "state": "generating", "k": k, "n": len(todo)})
-        s = node.made.get("settings") or {}
-        if node.is_video:
-            src = node.source
-            if not Path(src["file"]).is_file():
-                raise FileNotFoundError(f"video file not found: {src['file']}")
-            key = node.made.get("key") or {}
-            w, h = refine_size(int(key["width"]), int(key["height"]), size)
-            log(f"[{k}/{len(todo)}] {nid_}: converting {Path(src['file']).name} at {w}x{h}")
-            chain.convert_range(Path(src["file"]), target, src["start"], src["end"], w, h)
-        else:
-            w, h = refine_size(int(s["width"]), int(s["height"]), size)
-            prompt = " ".join(x for x in (s.get("prompt_prefix", ""), node.made.get("prompt", node.prompt),
-                                          s.get("prompt_suffix", "")) if x)
-            loras = ([(s["lora"], s.get("strength", 1.0))] if s.get("lora") else []) + \
-                [(e["lora"], e.get("strength", 1.0)) for e in s.get("extra_loras") or []]
-            log(f"[{k}/{len(todo)}] {nid_}: refining at {w}x{h}")
-            generator.refine(project / node.made["video"], prompt, target, node.seed, (w, h),
-                             made_frames(node) or _clip_frames(project, node), loras)
-        emit({"e": "node", "id": nid_, "state": "done"})
+    order = [n for n in path if n.is_video] + [n for n in path if not n.is_video]   # videos first: pins
+    emit({"e": "plan", "make": [n.id for n in order]})
+    made_now = []
+    with tempfile.TemporaryDirectory(prefix="video-chain-", dir=str(project / "nodes")) as tmp:
+        tmp = Path(tmp)
+        for k, node in enumerate(order, start=1):
+            target = refined_file(project, node, size)
+            first = last = None
+            if pin and not node.is_video:
+                i = path.index(node)
+                if i == 0:
+                    start = project / START_FILE
+                    first = start if start.is_file() else None
+                else:
+                    before = path[i - 1]
+                    n_before = made_frames(before) or _clip_frames(project, before)
+                    at = handover_index(tree, before, n_before)
+                    first = tmp / f"{node.id}_first.png"
+                    chain.frame_at(refined_file(project, before, size), n_before - 1 if at is None else at, first)
+                vc = tree.video_child(node.id)
+                if vc is not None and vc in path:
+                    last = tmp / f"{node.id}_last.png"
+                    chain.frame_at(refined_file(project, vc, size), 0, last)
+            pins = {"first": chain.file_signature(first), "last": chain.file_signature(last)}
+            if target.is_file() and (node.is_video or _refine_record(target) == pins):
+                emit({"e": "node", "id": node.id, "state": "reused"})
+                continue
+            emit({"e": "node", "id": node.id, "state": "generating", "k": k, "n": len(order)})
+            if node.is_video:
+                src = node.source
+                if not Path(src["file"]).is_file():
+                    raise FileNotFoundError(f"video file not found: {src['file']}")
+                key = node.made.get("key") or {}
+                w, h = refine_size(int(key["width"]), int(key["height"]), size)
+                log(f"[{k}/{len(order)}] {node.id}: converting {Path(src['file']).name} at {w}x{h}")
+                chain.convert_range(Path(src["file"]), target, src["start"], src["end"], w, h)
+            else:
+                s = node.made.get("settings") or {}
+                w, h = refine_size(int(s["width"]), int(s["height"]), size)
+                prompt = " ".join(x for x in (s.get("prompt_prefix", ""), node.made.get("prompt", node.prompt),
+                                              s.get("prompt_suffix", "")) if x)
+                loras = ([(s["lora"], s.get("strength", 1.0))] if s.get("lora") else []) + \
+                    [(e["lora"], e.get("strength", 1.0)) for e in s.get("extra_loras") or []]
+                log(f"[{k}/{len(order)}] {node.id}: refining at {w}x{h}")
+                generator.refine(project / node.made["video"], prompt, target, node.seed, (w, h),
+                                 made_frames(node) or _clip_frames(project, node), loras, first, last)
+                target.with_suffix(".json").write_text(json.dumps(pins), encoding="utf-8")
+            made_now.append(node.id)
+            emit({"e": "node", "id": node.id, "state": "done"})
     videos = [refined_file(project, n, size) for n in path]
     cuts = path_cuts(tree, path, bool(tree.options.get("keep_repeated")))
     out = Path(out)
@@ -1183,7 +1218,7 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
     emit({"e": "joining"})
     chain.concat(videos, out, cuts=cuts)
     emit({"e": "exported", "file": str(out)})
-    emit({"e": "done", "made": todo})
+    emit({"e": "done", "made": made_now})
     return out
 
 
