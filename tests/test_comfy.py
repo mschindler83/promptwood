@@ -399,3 +399,26 @@ def test_a_clip_that_is_given_up_is_cancelled_in_comfyui(server, start, tmp_path
         assert not any(c[0] == "BODY" and c[1] == "/interrupt" for c in failed.calls)
     finally:
         failed.close()
+
+
+def test_qwen_image_edit(server, start, tmp_path):
+    """Qwen Image Edit as ComfyUI's blueprint: Lightning LoRA for Fast, refs as Picture 2/3, uploads removed."""
+    ed = C.ComfyImageEditor(server.url, comfy_dir=None)
+    assert ed.files["unet"].endswith("qwen_image_edit_2511_fp8mixed.safetensors")
+    assert ed.qualities() == ["fast", "standard", "best"]
+    face = tmp_path / "face.png"
+    Image.new("RGB", (64, 64), (200, 150, 120)).save(face)
+    out = tmp_path / "e.png"
+    meta = ed.edit(start, "she smiles", out, 7, "fast", [face])
+    assert Image.open(out).size == (1024, 576) and meta["steps"] == 4 and meta["cfg"] == 1.0
+    wf = server.prompts[-1]
+    assert wf["lightning"]["inputs"]["lora_name"].endswith("Lightning-4steps-V1.0-bf16.safetensors")
+    assert wf["pos"]["inputs"]["prompt"] == "she smiles" and wf["neg"]["inputs"]["prompt"] == ""
+    assert wf["pos"]["inputs"]["image2"] == ["ref0", 0] and wf["sample"]["inputs"]["seed"] == 7
+    ed.edit(start, "night", out, 8, "best")
+    wf = server.prompts[-1]
+    assert "lightning" not in wf and wf["sample"]["inputs"]["steps"] == 40 and wf["sample"]["inputs"]["cfg"] == 4.0
+    assert C.pick_qwen_files(["x.safetensors"], [], [], [])["unet"] is None
+    server.qwen = False
+    with pytest.raises(C.ComfyError, match="Qwen Image Edit model"):
+        C.ComfyImageEditor(server.url)

@@ -1215,3 +1215,63 @@ def test_style_text_in_the_window(app, win, tmp_path, image):
     win.close_project()
     win.open_project(tmp_path / "proj2")                                 # a new project starts without it
     assert win.style_prefix.text() == "" and (win.tree.options.get("style") or {}).get("prefix", "") == ""
+
+
+def test_ai_image_edit_for_start_and_end_images(app, tmp_path, image, monkeypatch):
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from fake_comfy import FakeComfy
+
+    from video_chain.ui.main_window import MainWindow
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    server = FakeComfy(tmp_path / "comfy")
+    try:
+        q = settings(tmp_path, "edit.ini")
+        q.setValue("comfyUrl", server.url)
+        w = MainWindow(q, command=FAKE)
+        ids = new_project(w, tmp_path, image, ("a", "b"))
+        run_and_wait(app, w, w.generate_path)
+        flush(app, w)
+        dlg = w.edit_image(ids[1], dialog=False)
+        texts = [dlg.src_combo.itemText(i) for i in range(dlg.src_combo.count())]
+        assert texts[0] == f"Last frame of clip #{ids[1][1:]}" and "Start image" in texts and texts[-1] == "Choose file…"
+        assert dlg.source.endswith(".png") and not dlg.b_gen.isEnabled()          # no prompt yet
+        assert dlg.b_use_end.text() == f"Use as end image of clip #{ids[1][1:]}"
+        dlg.prompt.setPlainText("she smiles at the camera")
+        dlg.tries.setValue(2)
+        dlg.generate()
+        wait(app, lambda: not dlg._busy, timeout=60)
+        assert dlg.state.text().startswith("Done") and dlg.results.count() == 2
+        png, meta = dlg.selected()
+        size = QImage_size(meta["source"])
+        assert QImage_size(png) == size and meta["prompt"] == "she smiles at the camera"   # back to the source size
+        assert Path(meta["source_copy"]).is_file()
+        dlg.b_before.setChecked(True)
+        assert dlg.res_info.text().startswith("ORIGINAL")
+        dlg.b_use_end.click()                                       # the clip's end image
+        assert dlg.used == ("end", png) and w.tree.nodes[ids[1]].end_image and w.state(ids[1]) == "changed"
+        # from the start image section: a result as the new start image; earlier results are listed
+        dlg2 = w.edit_image(start=True, dialog=False)
+        assert dlg2.results.count() == 2 and dlg2.source == str(w.project / T.START_FILE)
+        assert dlg2.b_use_end.isEnabled() is False
+        before = (w.project / T.START_FILE).read_bytes()
+        dlg2.b_use_start.click()
+        assert (w.project / T.START_FILE).read_bytes() != before and w.state(ids[0]) == "changed"
+        assert any(text == "Project AI edits" for text, _p in w._picker_places())
+        server.close()                                              # ComfyUI gone: a clear message
+        dlg3 = w.edit_image(start=True, dialog=False)
+        dlg3.prompt.setPlainText("x")
+        dlg3.generate()
+        wait(app, lambda: not dlg3._busy, timeout=60)
+        assert "ComfyUI is not running" in dlg3.state.text() and not dlg3.b_start_comfy.isHidden()
+        w.close()
+    finally:
+        try:
+            server.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def QImage_size(path):
+    from PySide6.QtGui import QImage
+    img = QImage(str(path))
+    return img.width() // 2 * 2, img.height() // 2 * 2

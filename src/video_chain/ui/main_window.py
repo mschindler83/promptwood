@@ -35,6 +35,7 @@ from ..comfy import REF_HINT
 from .graph import START, GraphView, NodeInfo
 from .image_picker import pick_image
 from .clip_dialogs import CompareDialog, HandoverDialog
+from .image_edit import EDITS_DIR, ImageEditDialog
 from .video_editor import VideoRangeDialog, choose_video
 from .theme import icon, repolish, theme
 from .widgets import FrameTile, guard_wheel, icon_button, label, section_bar
@@ -443,9 +444,13 @@ class PromptCard(QFrame):
         self.b_end.clicked.connect(lambda: self.action.emit("end_image", self.nid))
         self.b_end_clear = icon_button("x", "No end image: the clip ends freely")
         self.b_end_clear.clicked.connect(lambda: self.action.emit("end_clear", self.nid))
+        self.b_end_ai = icon_button("brush", "Make an end image with AI: edit this clip's frame (or any image) by a "
+                                             "prompt, e.g. “she now sits on the sofa”")
+        self.b_end_ai.clicked.connect(lambda: self.action.emit("end_ai", self.nid))
         erow.addWidget(self.end_thumb)
         erow.addWidget(self.end_text, 1)
         erow.addWidget(self.b_end)
+        erow.addWidget(self.b_end_ai)
         erow.addWidget(self.b_end_clear)
         link.addRow("End", erow)
         hrow = QHBoxLayout()
@@ -633,6 +638,7 @@ class PromptCard(QFrame):
     def _enable_end(self):
         on = not self.edit.isReadOnly()
         self.b_end.setEnabled(on and self._end_free)
+        self.b_end_ai.setEnabled(on and self._end_free)
         self.b_end_clear.setEnabled(on and self._has_end)
 
     def set_end(self, image: Path | None, video_after: str | None, pixmap: QPixmap | None):
@@ -994,6 +1000,11 @@ class MainWindow(QMainWindow):
         self.size_info = label("", level="tertiary")
         self.size_info.setWordWrap(True)
         sv.addWidget(self.size_info)
+        self.b_ai_edit = QPushButton("Edit with AI…")
+        self.b_ai_edit.setToolTip("Change an image by a prompt (Qwen Image Edit in ComfyUI) and use the result as "
+                                  "the start image or as a clip's end image")
+        self.b_ai_edit.clicked.connect(lambda: self.edit_image(start=True))
+        sv.addWidget(self.b_ai_edit, 0, Qt.AlignLeft)
         lv.addWidget(sw)
 
         bar, _ = section_bar("Face reference", left)
@@ -1376,6 +1387,7 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         self.act_close = m.addAction("Close project", self.close_project)
         m.addAction("Show project folder", self._open_dir)
+        self.act_ai_edit = m.addAction("Edit an image with AI…", lambda: self.edit_image(start=True))
         m.addSeparator()
         m.addAction("Quit", self.close).setShortcut(QKeySequence("Ctrl+Q"))
 
@@ -1849,6 +1861,8 @@ class MainWindow(QMainWindow):
         out = [(f"Project {self.project.name}", str(self.project))]
         if (self.project / "nodes").is_dir():
             out.append(("Project clips (last frames)", str(self.project / "nodes")))
+        if (self.project / EDITS_DIR).is_dir():
+            out.append(("Project AI edits", str(self.project / EDITS_DIR)))
         return out
 
     def made_from_start(self) -> list[str]:
@@ -1859,16 +1873,16 @@ class MainWindow(QMainWindow):
         ids = [r.id for r in roots] + [d.id for r in roots for d in self.tree.descendants(r.id)]
         return [i for i in ids if self.status_of.get(i) == "done"]
 
-    def set_image(self, path: str, confirm: bool = False):
+    def set_image(self, path: str, confirm: bool = False) -> bool:
         """Use an image as the start image. confirm: ask first when made clips start from the current one."""
         if self.running:
-            return
+            return False
         if self.project is None:
             self.status.setText("Open or create a project folder first.")
-            return
+            return False
         if QImage(path).isNull():
             self.status.setText(f"Not an image: {Path(path).name}")
-            return
+            return False
         made = self.made_from_start()
         try:                                        # another aspect ratio: another video size for every clip
             base = T.Checker(self.project, self.tree).base()
@@ -1882,19 +1896,20 @@ class MainWindow(QMainWindow):
                 f"Use {Path(path).name} as the start image?\n\n{len(made)} made clip{'s depend' if len(made) != 1 else ' depends'}"
                 " on the current one (it starts from it, or it sets the video size); they will count as CHANGED and "
                 "be made again with their paths.") != QMessageBox.Yes:
-            return
+            return False
         before = self._done_clips()
         try:
             T.set_start_image(self.project, Path(path), self.tree)
         except (OSError, RuntimeError) as e:
             self.status.setText(f"Could not use {Path(path).name}: {e}")
-            return
+            return False
         self._pix.clear()
         self._write_tree()
         self._show_start_image()
         self.refresh()
         if not self._report_remade(before, "New start image"):
             self.status.setText(f"Start image: {Path(path).name}.")
+        return True
 
     def _update_ref_start_button(self):
         """Enable the 'Add: Start image / Selected clip' buttons and say exactly which frame they take."""
@@ -2185,7 +2200,7 @@ class MainWindow(QMainWindow):
         for w in (self.start_tile, self.frames, self.resolution, self.steps,
                   self.audio, self.keep_rep, self.b_project,
                   self.comfy_url, self.ident_mode, self.ref_size, self.ref_hint, self.b_ref_add, self.b_ref_start,
-                  self.b_ref_del, self.speed, self.style_prefix, self.style_suffix):
+                  self.b_ref_del, self.speed, self.style_prefix, self.style_suffix, self.b_ai_edit):
             w.setEnabled(idle)
         self._turbo_widgets()                      # after the loop: turbo locks the steps fields again
         self._update_ref_start_button()            # after the loop too: they depend on the selection
@@ -2411,6 +2426,12 @@ class MainWindow(QMainWindow):
         if action == "end_image" and node is not None and not node.is_video:
             self.choose_end_image(node.id)
             return
+        if action == "end_ai" and node is not None and not node.is_video:
+            self.edit_image(node.id)
+            return
+        if action == "edit_ai" and node is not None:
+            self.edit_image(node.id, from_node=True)
+            return
         if action == "end_clear" and node is not None and not node.is_video:
             self.set_end_image(node.id, None)
             return
@@ -2499,6 +2520,71 @@ class MainWindow(QMainWindow):
         self.status.setText(f"Clip #{nid[1:]}: {' and '.join(done)} back as made" +
                             (f"; it is still changed: {why}." if why else "; it is done again."))
         return done
+
+    # ---- AI image edit
+    def edit_image(self, nid: str | None = None, from_node: bool = False, start: bool = False,
+                   dialog: bool = True) -> ImageEditDialog | None:
+        """The image edit dialog. nid: the clip whose end image a result can become (its frame is offered first);
+        start: the start image first. Returns the dialog (dialog=False: not shown, for tests)."""
+        if self.project is None or self.tree is None:
+            self.status.setText("Open or create a project folder first.")
+            return None
+        if self.running:
+            self.status.setText("Wait until generating has finished.")
+            return None
+        node = self.tree.nodes.get(nid) if nid else None
+        sources: list[tuple[str, str]] = []
+
+        def add(text, path):
+            if path is not None and Path(path).is_file() and str(path) not in [p for _t, p in sources]:
+                sources.append((text, str(path)))
+        if node is not None and node.made:
+            f = self._node_frame(node)
+            add(("First frame of video" if node.is_video else
+                 "Hand-over frame of clip" if T.handover_index(self.tree, node) is not None else
+                 "Last frame of clip") + f" #{node.id[1:]}",
+                self.project / node.made["first"] if node.is_video else f)
+            if node.is_video:
+                add(f"Last frame of video #{node.id[1:]}", self.project / node.made["frame"])
+        if node is not None and node.end_image:
+            add(f"End image of clip #{node.id[1:]}", self.project / node.end_image)
+        add("Start image", self.project / T.START_FILE)
+        for n in self.selected_path():
+            if n.made and n.id != nid:
+                add(f"{'Video' if n.is_video else 'Clip'} #{n.id[1:]}: its last frame",
+                    self._node_frame(n) if not n.is_video else self.project / n.made["frame"])
+        for k, rel in enumerate((self.tree.options.get("identity") or {}).get("images") or [], start=1):
+            add(f"Face reference <Picture {k}>", self.project / rel)
+        first = None
+        if start:
+            first = str(self.project / T.START_FILE) if (self.project / T.START_FILE).is_file() else None
+        target = nid if node is not None and not node.is_video and self.tree.video_child(nid) is None else None
+        url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL)
+        comfy_dir = os.path.expanduser(self.comfy_dir.text().strip()) or None
+        cleanup = self.comfy_cleanup.isChecked()
+
+        def connect(progress):
+            from ..comfy import ComfyImageEditor
+            return ComfyImageEditor(url, log=lambda _m: None, progress=progress, comfy_dir=comfy_dir,
+                                    cleanup=cleanup)
+
+        def use(kind: str, png: str) -> bool:
+            if self.running:
+                self.status.setText("Wait until generating has finished.")
+                return False
+            ok = self.set_image(png, confirm=True) if kind == "start" else \
+                bool(target) and self.set_end_image(target, png)
+            if ok:
+                self.status.setText(("New start image from the AI edit" if kind == "start" else
+                                     f"Clip #{target[1:]} now ends at the AI-edited image") +
+                                    (f" — {self.status.text()}" if "CHANGED" in self.status.text() else "."))
+            return bool(ok)
+        dlg = ImageEditDialog(self, self.project, sources, first, target, connect, use, self.qs,
+                              self._picker_places(), start_comfy=self.start_comfy)
+        if dialog:
+            dlg.exec()
+            dlg.deleteLater()
+        return dlg
 
     # ---- hand-over frame
     def choose_handover(self, nid: str) -> None:
@@ -2894,6 +2980,8 @@ class MainWindow(QMainWindow):
                 acts[hand] = "handover"
                 if T.handover_index(self.tree, node) is not None:
                     acts[m.addAction("Hand over at the last frame")] = "handover_clear"
+                ai = m.addAction("Edit an image with AI…")
+                acts[ai] = "edit_ai"
                 cmp_ = m.addAction("Compare with its variants…")
                 cmp_.setEnabled(len(self.compare_candidates(nid)) > 1)
                 acts[cmp_] = "compare"

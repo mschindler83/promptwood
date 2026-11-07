@@ -623,3 +623,145 @@ class ComfyGenerator:
                     if st.get("completed", True):
                         return entry
         raise ComfyError(f"ComfyUI did not finish within {self.timeout / 60:.0f} min")
+
+
+# ----------------------------------------------------------------------------- image edit (Qwen Image Edit)
+
+QWEN_NODES = ("TextEncodeQwenImageEditPlus", "FluxKontextMultiReferenceLatentMethod", "FluxKontextImageScale",
+              "ModelSamplingAuraFlow", "CFGNorm", "KSampler", "VAEEncode")
+QWEN_SHIFT = 3.1                   # ComfyUI's blueprint "Image Edit (Qwen 2511)"
+QUALITY = {"fast": None, "standard": (20, 4.0), "best": (40, 4.0)}   # fast: the Lightning LoRA's steps, cfg 1
+
+
+def _steps_in(name: str) -> int | None:
+    m = re.search(r"(\d+)\s*-?\s*steps?", name.lower())
+    return int(m.group(1)) if m else None
+
+
+def pick_qwen_files(unets: list[str], clips: list[str], vaes: list[str], loras: list[str]) -> dict:
+    """ComfyUI's Qwen Image Edit files: the edit model (2511 preferred), its text encoder and VAE, and the Lightning
+    LoRA of the same model version (fewest steps) if there is one. Missing files are None."""
+    def low(n):
+        return n.lower().replace("-", "_")
+    edit = [u for u in unets if "qwen_image_edit" in low(u)]
+    unet = next((u for u in edit if "2511" in u), None) or (sorted(edit)[-1] if edit else None)
+    clip = next((c for c in clips if "qwen_2.5_vl_7b" in low(c)), None)
+    vae = next((v for v in vaes if "qwen_image_vae" in low(v)), None)
+    version = next((v for v in ("2511", "2509") if unet and v in unet), "")
+    light = [lo for lo in loras if "lightning" in lo.lower() and "edit" in lo.lower() and _steps_in(lo)
+             and (not version or version in lo)]
+    light.sort(key=lambda lo: (_steps_in(lo), "fp32" in lo.lower()))
+    return {"unet": unet, "clip": clip, "vae": vae,
+            "lightning": (light[0], _steps_in(light[0])) if light else None}
+
+
+def build_edit_workflow(*, prompt: str, image: str, refs: list[str] = (), seed: int, steps: int, cfg: float,
+                        files: dict, lightning: str | None, prefix: str) -> dict:
+    """One Qwen Image Edit: the source image (scaled to the model's size) edited by the prompt; refs: up to two more
+    pictures (Picture 2, Picture 3 in the prompt), e.g. a face. As ComfyUI's blueprint 'Image Edit (Qwen 2511)'."""
+    wf: dict = {
+        "clip": {"class_type": "CLIPLoader", "inputs": {"clip_name": files["clip"], "type": "qwen_image",
+                                                         "device": "default"}},
+        "vae": {"class_type": "VAELoader", "inputs": {"vae_name": files["vae"]}},
+        "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": files["unet"], "weight_dtype": "default"}},
+        "src": {"class_type": "LoadImage", "inputs": {"image": image}},
+        "scale": {"class_type": "FluxKontextImageScale", "inputs": {"image": ["src", 0]}},
+    }
+    model = ["unet", 0]
+    if lightning:
+        wf["lightning"] = {"class_type": "LoraLoaderModelOnly",
+                           "inputs": {"model": model, "lora_name": lightning, "strength_model": 1.0}}
+        model = ["lightning", 0]
+    wf["shift"] = {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": model, "shift": QWEN_SHIFT}}
+    wf["cfgnorm"] = {"class_type": "CFGNorm", "inputs": {"model": ["shift", 0], "strength": 1.0}}
+    pics = {"image1": ["scale", 0]}
+    for k, r in enumerate(list(refs)[:2]):
+        wf[f"ref{k}"] = {"class_type": "LoadImage", "inputs": {"image": r}}
+        pics[f"image{k + 2}"] = [f"ref{k}", 0]
+    for name, text in (("pos", prompt), ("neg", "")):
+        wf[name] = {"class_type": "TextEncodeQwenImageEditPlus",
+                    "inputs": {"clip": ["clip", 0], "prompt": text, "vae": ["vae", 0], **pics}}
+        wf[name + "_ref"] = {"class_type": "FluxKontextMultiReferenceLatentMethod",
+                             "inputs": {"conditioning": [name, 0], "reference_latents_method": "index_timestep_zero"}}
+    wf["latent"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["scale", 0], "vae": ["vae", 0]}}
+    wf["sample"] = {"class_type": "KSampler",
+                    "inputs": {"model": ["cfgnorm", 0], "seed": int(seed), "steps": int(steps), "cfg": float(cfg),
+                               "sampler_name": "euler", "scheduler": "simple", "positive": ["pos_ref", 0],
+                               "negative": ["neg_ref", 0], "latent_image": ["latent", 0], "denoise": 1.0}}
+    wf["decode"] = {"class_type": "VAEDecode", "inputs": {"samples": ["sample", 0], "vae": ["vae", 0]}}
+    wf["edit_save"] = {"class_type": "SaveImage", "inputs": {"images": ["decode", 0], "filename_prefix": prefix}}
+    return wf
+
+
+class ComfyImageEditor(ComfyGenerator):
+    """Edits an image by a prompt with Qwen Image Edit in ComfyUI (same connection, upload and cleanup as the
+    clip generator)."""
+
+    def _check_models(self):
+        def combo(node, field):
+            return _combo_options(self._object_info(node).get("input", {}).get("required", {}).get(field))
+        self.files = pick_qwen_files(combo("UNETLoader", "unet_name"), combo("CLIPLoader", "clip_name"),
+                                     combo("VAELoader", "vae_name"), combo("LoraLoaderModelOnly", "lora_name"))
+        missing = [what for what, key in (("the Qwen Image Edit model (e.g. qwen_image_edit_2511_*.safetensors in "
+                                           "models/diffusion_models)", "unet"),
+                                          ("its text encoder qwen_2.5_vl_7b*.safetensors", "clip"),
+                                          ("its VAE qwen_image_vae.safetensors", "vae")) if not self.files[key]]
+        if missing:
+            raise ComfyError("ComfyUI does not list " + "; ".join(missing))
+        for node in QWEN_NODES:
+            if not self._object_info(node):
+                raise ComfyError(f"this ComfyUI has no {node} node (update ComfyUI)")
+
+    def qualities(self) -> list[str]:
+        return (["fast"] if self.files.get("lightning") else []) + ["standard", "best"]
+
+    def edit(self, image: Path, prompt: str, out_png: Path, seed: int, quality: str = "fast",
+             refs: list[Path] = ()) -> dict:
+        """Edit image by prompt; the result goes to out_png. Returns what it was made with."""
+        light = self.files.get("lightning") if quality == "fast" else None
+        if quality == "fast" and not light:
+            quality = "standard"
+        steps, cfg = (light[1], 1.0) if light else QUALITY.get(quality) or QUALITY["standard"]
+        uploads: list[tuple[str, Path]] = []
+        try:
+            name = self.upload(Path(image))
+            uploads.append((name, Path(image)))
+            ref_names = []
+            for r in list(refs)[:2]:
+                ref_names.append(self.upload(Path(r)))
+                uploads.append((ref_names[-1], Path(r)))
+            prefix = f"{SUBFOLDER}/edit_{uuid.uuid4().hex[:12]}"
+            wf = build_edit_workflow(prompt=prompt, image=name, refs=ref_names, seed=seed, steps=steps, cfg=cfg,
+                                     files=self.files, lightning=light[0] if light else None, prefix=prefix)
+            ws = self._connect_ws()
+            try:
+                res = self._json("POST", "/prompt", {"prompt": wf, "client_id": self.client_id})
+                if res.get("node_errors"):
+                    raise ComfyError(f"ComfyUI rejected the workflow: {json.dumps(res['node_errors'])[:600]}")
+                self.current = res["prompt_id"]
+                entry = self._wait(self.current, ws)
+            except ComfyJobFailed:
+                raise
+            except Exception:
+                self.interrupt()
+                raise
+            finally:
+                if ws is not None:
+                    try:
+                        ws.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                self.current = None
+            out = self._first_file((entry.get("outputs") or {}).get("edit_save"))
+            if out is None:
+                raise ComfyError("ComfyUI finished without the edited image")
+            Path(out_png).write_bytes(self._download(out))
+            if self.cleanup:
+                self._remove(self.output_dir, out, Path(out_png))
+        finally:
+            if self.cleanup:
+                for up, local in uploads:
+                    self._remove(self.input_dir, {"filename": Path(up).name, "subfolder": str(Path(up).parent)},
+                                 Path(local), same_size=False)
+        return {"quality": quality, "steps": steps, "cfg": cfg, "model": self.files["unet"],
+                "lightning": light[0] if light else None}

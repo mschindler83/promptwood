@@ -12,7 +12,13 @@ KNOWN = {"UNETLoader", "CLIPLoader", "VAELoader", "LoadImage", "MiniMaxH3ImageTo
          "KSamplerSelect", "BasicScheduler", "BasicGuider", "SamplerCustomAdvanced", "VAEDecode", "VAEDecodeAudio",
          "ImageFromBatch", "SaveImage", "CreateVideo", "SaveVideo", "LoraLoaderModelOnly",
          "MiniMaxH3ReferenceToVideo", "MiniMaxH3AddGuide", "MiniMaxH3TurboLoRA", "MiniMaxH3TurboSampler",
-         "LoadVideo", "GetVideoComponents"}
+         "LoadVideo", "GetVideoComponents",
+         # Qwen Image Edit
+         "FluxKontextImageScale", "ModelSamplingAuraFlow", "CFGNorm", "TextEncodeQwenImageEditPlus",
+         "FluxKontextMultiReferenceLatentMethod", "VAEEncode", "KSampler"}
+QWEN_UNET, QWEN_CLIP, QWEN_VAE = ("qwen-image/qwen_image_edit_2511_fp8mixed.safetensors",
+                                  "qwen_2.5_vl_7b_fp8_scaled.safetensors", "qwen_image_vae.safetensors")
+QWEN_LIGHTNING = "qwen-image-edit/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
 
 
 class FakeComfy:
@@ -23,6 +29,7 @@ class FakeComfy:
         (self.root / "output").mkdir(parents=True, exist_ok=True)
         self.loras, self.fail_with, self.models_missing = list(loras), fail_with, models_missing
         self.turbo_nodes = True
+        self.qwen = True                           # the Qwen Image Edit files and nodes are there
         self.prompts, self.calls, self.history = [], [], {}
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
@@ -34,9 +41,13 @@ class FakeComfy:
 
     def object_info(self, node):
         from video_chain import comfy as C
-        files = {"UNETLoader": ("unet_name", [C.UNET, C.UNET_REF]), "CLIPLoader": ("clip_name", [C.TEXT_ENCODER]),
-                 "VAELoader": ("vae_name", [C.VIDEO_VAE, C.AUDIO_VAE]),
-                 "LoraLoaderModelOnly": ("lora_name", self.loras)}
+        q = self.qwen
+        files = {"UNETLoader": ("unet_name", [C.UNET, C.UNET_REF] + ([QWEN_UNET] if q else [])),
+                 "CLIPLoader": ("clip_name", [C.TEXT_ENCODER] + ([QWEN_CLIP] if q else [])),
+                 "VAELoader": ("vae_name", [C.VIDEO_VAE, C.AUDIO_VAE] + ([QWEN_VAE] if q else [])),
+                 "LoraLoaderModelOnly": ("lora_name", self.loras + ([QWEN_LIGHTNING] if q else []))}
+        if node in C.QWEN_NODES:
+            return {node: {"input": {"required": {}}}} if q else {}
         if node in ("MiniMaxH3ImageToVideo", "MiniMaxH3TurboSampler", "MiniMaxH3TurboLoRA", "MiniMaxH3AddGuide",
                     "LoadVideo", "GetVideoComponents"):
             return {} if node.startswith("MiniMaxH3Turbo") and not self.turbo_nodes else {node: {"input": {"required": {}}}}
@@ -55,6 +66,17 @@ class FakeComfy:
             for v in n["inputs"].values():
                 if isinstance(v, list) and len(v) == 2 and isinstance(v[1], int):
                     assert v[0] in wf, f"{nid} links to missing node {v[0]}"
+        if "edit_save" in wf:                        # Qwen Image Edit: a 1024x576 picture
+            for nid, node in wf.items():
+                if node["class_type"] == "LoadImage":
+                    assert (self.root / "input" / node["inputs"]["image"]).is_file(), f"{nid} not uploaded"
+            prefix = wf["edit_save"]["inputs"]["filename_prefix"]
+            out = self.root / "output" / (prefix + "_00001_.png")
+            out.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=blue:s=1024x576",
+                            "-frames:v", "1", str(out)], check=True)
+            return {"edit_save": {"images": [{"filename": out.name, "subfolder": str(Path(prefix).parent),
+                                              "type": "output"}]}}
         if "refcond" in wf:                         # identity references: ref2va + the start image as guide
             cond = wf["refcond"]["inputs"]
             assert wf["unet"]["inputs"]["unet_name"].startswith("minimax_h3_ref2va")
