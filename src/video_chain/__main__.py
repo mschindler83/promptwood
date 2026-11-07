@@ -127,6 +127,9 @@ def prepare_job(project: Path, targets: list[str]) -> dict:
     problem = treemod.guide_problem(tree, checker, todo)
     if problem:
         raise JobError(problem)
+    no_end = treemod.missing_end_images(project, tree, todo)
+    if no_end:
+        raise JobError(f"the end image of clip #{no_end[0][1:]} is missing")
     ai_todo = [nid for nid in todo if not tree.nodes[nid].is_video]     # what needs the model
     return {"project": project, "targets": targets, "settings": settings, "todo": todo, "loras": loras,
             "ai_todo": ai_todo}

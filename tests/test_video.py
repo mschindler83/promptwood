@@ -124,6 +124,50 @@ def test_clip_into_video_gets_end_frame(project, tmp_path, source):
     assert T.plan(t, ch, [a.id]) == [v.id, a.id]
 
 
+def test_own_end_image(project, tmp_path, source):
+    with_start(project, tmp_path)
+    t = T.load(project)
+    a = t.add(None, "toward the end image")
+    b = t.add(a.id, "after")
+    yellow = tmp_path / "yellow.png"
+    Image.new("RGB", (40, 30), (255, 255, 0)).save(yellow)
+    rel = T.set_end_image(project, t, a.id, yellow)
+    assert rel.startswith("ends/") and (project / rel).is_file()
+    T.save(project, t)
+    assert T.load(project).nodes[a.id].end_image == rel                       # kept in tree.json
+    gen = FakeGenerator(frames=17, size=None)
+    T.run_tree(gen, project, [b.id], log=lambda _m: None)
+    assert is_colour(gen.calls[0]["end_rgb"], "yellow") and gen.calls[1]["end_rgb"] is None
+    t = T.load(project)
+    assert T.path_cuts(t, t.path_to(b.id)) == [(0, 0), (1, 0)]              # nothing cut at the end image
+    ch = T.Checker(project, t)
+    assert (ch.status(a.id), ch.status(b.id)) == ("done", "done")
+    # another image: the clip (and what follows) is made again; the old copy is gone
+    Image.new("RGB", (40, 30), (0, 0, 255)).save(yellow)
+    T.set_end_image(project, t, a.id, yellow)
+    assert not (project / rel).exists()
+    ch = T.Checker(project, t)
+    assert (ch.status(a.id), ch.status(b.id)) == ("changed", "changed")
+    # a missing image is found before anything is made
+    (project / t.nodes[a.id].end_image).unlink()
+    T.save(project, t)
+    with pytest.raises(cli.JobError, match="end image of clip"):
+        cli.prepare_job(project, [b.id])
+    # a video after the clip wins; set_end_image refuses then
+    t = T.load(project)
+    T.clear_end_image(project, t, a.id)
+    assert t.nodes[a.id].end_image is None
+    c = t.add(None, "x")
+    T.set_end_image(project, t, c.id, yellow)
+    t.add_video(c.id, str(source), 0.0, 1.0)
+    assert T.end_image_used(t, t.nodes[c.id]) is None
+    with pytest.raises(ValueError, match="ends at the video"):
+        T.set_end_image(project, t, c.id, yellow)
+    end = project / t.nodes[c.id].end_image
+    t.remove(c.id, project)                                                  # its end image goes with it
+    assert not end.exists()
+
+
 def test_motion_guide(project, source):
     t = T.load(project)
     v1 = t.add_video(None, str(source), 0.0, 1.0)

@@ -7,6 +7,8 @@ last-frame input), one right after it starts from the video's last frame. So rea
 chained in any order. A generated clip can lead into at most one video (its end can only match one).
 With a motion guide (override "guide": 5, 22 or 39 frames) a generated clip gets the last frames of the clip
 before and the first frames of a following video (with their sound) instead of a single frame at each end.
+A generated clip with no video after it can have an end image of its own (Node.end_image, a copy in ends/): the
+frame H3 steers the clip's end to. It is not a frame of the chain, so nothing is cut when the path is joined.
 
 Project folder:
   tree.json            nodes (id, parent, prompt, seed, what was made), options, the selected node
@@ -15,6 +17,7 @@ Project folder:
   nodes/<id>_<tag>.png its last frame, the start image of its children
   nodes/<id>_<tag>_first.png   a video node's first frame (the end frame of the generated clip before it)
   paths/<id>.mp4       a joined path (start -> node), made on demand
+  ends/<id>_<tag>.png  a generated clip's own end image
 
 Every node can override the project's LoRA (another one or none), LoRA strength, clip length and steps
 (Node.overrides); the video size and sound stay per project, so the clips of a path fit together.
@@ -52,6 +55,7 @@ DEFAULT_OPTIONS = {"model": "Comfy-Org/MiniMax-H3", "lora": None, "strength": 1.
                    # identity: reference images (copies in refs/) every clip sees, so the face stays the same
                    "identity": {"mode": "off", "images": [], "size": "match", "hint": True}}
 REFS_DIR = "refs"
+ENDS_DIR = "ends"
 MAX_REFS = 9
 
 
@@ -65,6 +69,7 @@ class Node:
     overrides: dict = field(default_factory=dict)   # lora (path or NO_LORA), strength, frames, steps, guide
     kind: str = AI                 # AI: generated clip; VIDEO: a range of a real video file
     source: dict | None = None     # VIDEO: {"file": absolute path, "start": s, "end": s}
+    end_image: str | None = None   # AI: its own end image (ends/..., project-relative); a video after it wins
 
     @property
     def is_video(self) -> bool:
@@ -148,6 +153,8 @@ class Tree:
             if project is not None:
                 for f in list(node_files(project, g)) + clip_files(project, node):
                     _unlink(f)
+                if node.end_image and _in_ends(project, node.end_image):
+                    _unlink(Path(project) / node.end_image)
                 for ext in (".mp4", ".json"):
                     _unlink(Path(project) / "paths" / f"{g}{ext}")
         if self.selected in gone:
@@ -194,8 +201,9 @@ class Tree:
                 raise ValueError(f"node {nd['id']} has an unknown kind {kind!r}")
             if kind == VIDEO and not (isinstance(src, dict) and src.get("file") and "start" in src and "end" in src):
                 raise ValueError(f"video node {nd['id']} has no source")
+            end = nd.get("end_image") if kind == AI and isinstance(nd.get("end_image"), str) else None
             n = Node(nd["id"], nd.get("parent"), nd.get("prompt", ""), int(nd.get("seed", 42)), nd.get("made"), ov,
-                     kind, dict(src) if kind == VIDEO else None)
+                     kind, dict(src) if kind == VIDEO else None, end)
             t.nodes[n.id] = n
         for n in t.nodes.values():
             if n.parent is not None and n.parent not in t.nodes:
@@ -334,6 +342,54 @@ def remove_reference(project: Path, rel: str, tree: Tree) -> None:
         target.unlink(missing_ok=True)
 
 
+def _in_ends(project: Path, rel: str) -> bool:
+    """rel points into the project's ends/ folder (a damaged/hand-edited record never reaches elsewhere)."""
+    area = (Path(project) / ENDS_DIR).resolve()
+    return area in (Path(project) / rel).resolve().parents
+
+
+def set_end_image(project: Path, tree: Tree, nid: str, image: Path) -> str:
+    """Copy an image in as the end image of a generated clip (a new name every time; the old copy goes)."""
+    node = tree.nodes[nid]
+    if node.is_video:
+        raise ValueError("a real video has no end image of its own")
+    if tree.video_child(nid) is not None:
+        raise ValueError(f"clip #{nid[1:]} ends at the video after it")
+    d = Path(project) / ENDS_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    rel = f"{ENDS_DIR}/{nid}_{uuid.uuid4().hex[:8]}.png"
+    chain.to_png(Path(image), Path(project) / rel)
+    clear_end_image(project, tree, nid)
+    node.end_image = rel
+    return rel
+
+
+def clear_end_image(project: Path, tree: Tree, nid: str) -> None:
+    node = tree.nodes[nid]
+    if node.end_image and _in_ends(project, node.end_image):
+        _unlink(Path(project) / node.end_image)
+    node.end_image = None
+
+
+def copy_end_image(project: Path, tree: Tree, src: str, dst: str) -> None:
+    """A variant gets its own copy of the end image (deleting one never touches the other's)."""
+    rel = tree.nodes[src].end_image
+    if rel and (Path(project) / rel).is_file() and tree.video_child(dst) is None:
+        set_end_image(project, tree, dst, Path(project) / rel)
+
+
+def end_image_used(tree: Tree, node: Node) -> str | None:
+    """The end image a generated clip is made with: its own, unless a video follows (that one's first frame)."""
+    if node.is_video or not node.end_image or tree.video_child(node.id) is not None:
+        return None
+    return node.end_image
+
+
+def missing_end_images(project: Path, tree: Tree, todo: list[str]) -> list[str]:
+    return [nid for nid in todo if end_image_used(tree, tree.nodes[nid])
+            and not (Path(project) / tree.nodes[nid].end_image).is_file()]
+
+
 def set_start_image(project: Path, image: Path, tree: Tree) -> None:
     chain.to_png(Path(image), Path(project) / START_FILE)
     tree.image = str(Path(image).resolve())
@@ -438,11 +494,12 @@ class Checker:
         return self.project / parent.made["frame"] if parent.made else node_files(self.project, node.parent)[1]
 
     def end_key(self, node: Node):
-        """What a generated clip's end depends on: the key of the video it leads into (None: no video after it;
-        False: that video is not ready)."""
+        """What a generated clip's end depends on: the key of the video it leads into (False: that video is not
+        ready), its own end image ({"image": sha1}), or None (a free end)."""
         vc = self.tree.video_child(node.id)
         if vc is None:
-            return None
+            own = end_image_used(self.tree, node)
+            return {"image": self.sha(self.project / own)} if own else None
         return vc.made.get("key") if self.status(vc.id) == "done" else False
 
     def guide_from(self, node: Node) -> str | None:
@@ -679,6 +736,8 @@ def _guides(project: Path, tree: Tree, node: Node, settings: dict, tmp: Path) ->
                            "at": "end"})
         else:
             end_image = project / vc.made["first"]
+    elif end_image_used(tree, node):
+        end_image = project / node.end_image
     used = sum(g["frames"] for g in guides)
     if used and used >= frames:
         raise ValueError(f"clip #{node.id[1:]} ({frames} frames) is too short for its motion guide ({used} frames); "
@@ -744,6 +803,9 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
     problem = guide_problem(tree, checker, todo)
     if problem:
         raise ValueError(problem)
+    no_end = missing_end_images(project, tree, todo)
+    if no_end:
+        raise FileNotFoundError(f"the end image of clip #{no_end[0][1:]} is missing")
     for nid in sorted(on_paths - set(todo), key=lambda i: tree.depth(i)):
         emit({"e": "node", "id": nid, "state": "reused"})
     emit({"e": "plan", "make": todo})

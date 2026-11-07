@@ -899,6 +899,26 @@ def test_clip_into_video_and_variants(app, win, tmp_path, image):
     assert "Variants are for generated clips" in win.status.text()
 
 
+def test_end_image_on_the_card(app, win, tmp_path, image):
+    ids = new_project(win, tmp_path, image, ("a", "b"))
+    card = win.cards[0]
+    assert card.end_text.text() == "free" and card.b_end.isEnabled() and not card.b_end_clear.isEnabled()
+    end = tmp_path / "end.png"
+    Image.new("RGB", (40, 30), (255, 255, 0)).save(end)
+    assert win.set_end_image(ids[0], str(end))
+    card = win.cards[0]
+    assert card.end_text.text() == "own end image" and card.b_end_clear.isEnabled()
+    assert "end image" in win.badge(win.tree.nodes[ids[0]])
+    run_and_wait(app, win, win.generate_path)
+    assert win.state(ids[0]) == "done", win.status.text()
+    new = win.create_variants(ids[0], 1, generate=False)                    # a variant gets its own copy
+    assert win.tree.nodes[new[0]].end_image not in (None, win.tree.nodes[ids[0]].end_image)
+    win.node_action("end_clear", ids[0])
+    flush(app, win)
+    assert win.tree.nodes[ids[0]].end_image is None and win.state(ids[0]) == "changed"
+    assert win.cards[0].end_text.text() == "free"
+
+
 def test_motion_guide_choice_on_the_card(app, win, tmp_path, image):
     ids = new_project(win, tmp_path, image, ("x", "y"))
     card = win.cards[1]

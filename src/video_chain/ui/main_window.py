@@ -23,7 +23,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QSettings, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QIcon, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
-                               QFileDialog, QFormLayout,
+                               QFileDialog, QFormLayout, QLabel,
                                QFrame, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu,
                                QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
                                QScrollArea, QSlider, QSpinBox, QSplitter, QStackedWidget, QTabWidget, QVBoxLayout,
@@ -400,6 +400,24 @@ class PromptCard(QFrame):
                               "their sound, are anchored in this clip, so motion and voice carry over (those "
                               "frames are left out when the path is joined)")
         grid.addRow("Join", self.guide)
+        erow = QHBoxLayout()
+        erow.setSpacing(6)
+        self.end_thumb = QLabel()
+        self.end_thumb.setFixedSize(48, 27)
+        self.end_thumb.setScaledContents(True)
+        self.end_text = label("", level="secondary")
+        self.b_end = icon_button("frame", "Choose an end image: the frame this clip steers its end to (any image, "
+                                          "or a frame of a clip in the project)")
+        self.b_end.clicked.connect(lambda: self.action.emit("end_image", self.nid))
+        self.b_end_clear = icon_button("x", "No end image: the clip ends freely")
+        self.b_end_clear.clicked.connect(lambda: self.action.emit("end_clear", self.nid))
+        erow.addWidget(self.end_thumb)
+        erow.addWidget(self.end_text, 1)
+        erow.addWidget(self.b_end)
+        erow.addWidget(self.b_end_clear)
+        grid.addRow("End", erow)
+        self._end_free = True                    # no video after this clip: its own end image can be set
+        self._has_end = False
         v.addLayout(grid)
         self.guide.currentIndexChanged.connect(self._ov_changed)
         self.extras.changed.connect(self._ov_changed)
@@ -511,6 +529,31 @@ class PromptCard(QFrame):
             w.setEnabled(on)
         self.steps.setEnabled(on and not self.steps_locked)
         self._enable_strength()
+        self._enable_end()
+
+    def _enable_end(self):
+        on = not self.edit.isReadOnly()
+        self.b_end.setEnabled(on and self._end_free)
+        self.b_end_clear.setEnabled(on and self._has_end)
+
+    def set_end(self, image: Path | None, video_after: str | None, pixmap: QPixmap | None):
+        """How this clip ends: at the video after it, at its own end image, or freely."""
+        self._end_free, self._has_end = video_after is None, image is not None
+        if video_after is not None:
+            self.end_text.setText(f"first frame of video #{video_after[1:]}"
+                                  + (" (own end image not used)" if image is not None else ""))
+        elif image is not None:
+            self.end_text.setText("own end image" if image.is_file() else "end image missing")
+        else:
+            self.end_text.setText("free")
+        self.end_text.setToolTip(str(image) if image is not None else "")
+        if pixmap is not None and not pixmap.isNull():
+            self.end_thumb.setPixmap(pixmap)
+            self.end_thumb.show()
+        else:
+            self.end_thumb.clear()
+            self.end_thumb.hide()
+        self._enable_end()
 
     def _restyle(self):
         t = theme()
@@ -1785,6 +1828,8 @@ class MainWindow(QMainWindow):
             parts.append(f"{ov['steps']} steps")
         if ov.get("guide"):
             parts.append(f"guide {ov['guide']}")
+        if T.end_image_used(self.tree, n):
+            parts.append("end image")
         return " · ".join(parts)
 
     def _rebuild_path(self):
@@ -1850,6 +1895,11 @@ class MainWindow(QMainWindow):
                         "" if Path(n.source["file"]).is_file() or st == "done" else "the video file is missing")
             else:
                 step = "will be made again" if st == "changed" else ""
+                end = self.project / n.end_image if n.end_image else None
+                if vc is not None:
+                    card.set_end(end, vc.id, self._pixmap(self.project / vc.made["first"]) if vc.made else None)
+                else:
+                    card.set_end(end, None, self._pixmap(end) if end is not None and end.is_file() else None)
             card.set_state(st, self._pixmap(self._node_frame(n)), step)
             if st == "generating" and n.id in self.progress_of and not n.is_video:
                 card.bar.setValue(round(100 * self.progress_of[n.id]))
@@ -2109,6 +2159,12 @@ class MainWindow(QMainWindow):
         if action == "edit" and node is not None and node.is_video:
             self.edit_video(node.id)
             return
+        if action == "end_image" and node is not None and not node.is_video:
+            self.choose_end_image(node.id)
+            return
+        if action == "end_clear" and node is not None and not node.is_video:
+            self.set_end_image(node.id, None)
+            return
         if action == "continue":
             new = self.tree.add(node.id if node else None, "")
         elif action == "variants" and node is not None:
@@ -2147,10 +2203,52 @@ class MainWindow(QMainWindow):
             self.cards[-1].edit.setFocus()
 
     def _copy_video_child(self, source: str, target: str) -> None:
-        """A variant of a clip that leads into a real video leads into its own copy of that video."""
+        """A variant of a clip that leads into a real video leads into its own copy of that video; one with an
+        end image gets its own copy of the image."""
         vc = self.tree.video_child(source)
         if vc is not None and self.tree.can_add_video(target):
             T.copy_video(self.project, self.tree, vc, target)
+        try:
+            T.copy_end_image(self.project, self.tree, source, target)
+        except (OSError, RuntimeError, ValueError) as e:
+            self.status.setText(f"Could not copy the end image: {e}")
+
+    # ---- end images
+    def choose_end_image(self, nid: str) -> None:
+        node = self.tree.nodes.get(nid) if self.tree else None
+        if node is None or node.is_video or self.running:
+            return
+        if self.tree.video_child(nid) is not None:
+            self.status.setText(f"Clip #{nid[1:]} ends at the first frame of the video after it.")
+            return
+        start = str(Path(self.project / node.end_image).parent) if node.end_image else None
+        f = pick_image(self, f"End image of clip #{nid[1:]} (the frame it steers its end to)", self.qs, start,
+                       self._picker_places())
+        if f:
+            self.set_end_image(nid, f)
+
+    def set_end_image(self, nid: str, image: str | None) -> bool:
+        """Give a generated clip its own end image (None: remove it); the clip then counts as changed."""
+        if self.tree is None or self.running or nid not in self.tree.nodes:
+            return False
+        try:
+            if image is None:
+                if not self.tree.nodes[nid].end_image:
+                    return False
+                T.clear_end_image(self.project, self.tree, nid)
+            else:
+                if QImage(image).isNull():
+                    self.status.setText(f"Not an image: {Path(image).name}")
+                    return False
+                T.set_end_image(self.project, self.tree, nid, Path(image))
+        except (ValueError, OSError, RuntimeError) as e:
+            self.status.setText(f"Could not set the end image: {e}")
+            return False
+        self._pix.clear()
+        self._write_tree()
+        self.refresh()
+        self.status.setText(f"Clip #{nid[1:]} " + ("now ends at its end image." if image else "ends freely now."))
+        return True
 
     # ---- real videos
     def _canvas_for(self, file: str | None = None) -> tuple[int, int] | None:
@@ -2372,6 +2470,11 @@ class MainWindow(QMainWindow):
             if node is not None and not node.is_video:
                 acts[m.addAction("Variant (same prompt, other seed)")] = "variant"
                 acts[m.addAction("Variants… (several, generated at once)")] = "variants"
+                end = m.addAction("End image…")
+                end.setEnabled(self.tree.video_child(nid) is None)
+                acts[end] = "end_image"
+                if node.end_image:
+                    acts[m.addAction("Clear end image")] = "end_clear"
             m.addSeparator()
             play = m.addAction("Play this clip")
             play.setEnabled(bool(self.tree.nodes[nid].made))
@@ -2579,6 +2682,9 @@ class MainWindow(QMainWindow):
                 problem = T.guide_problem(self.tree, checker, todo)
                 if problem:
                     problems.append(problem)
+                no_end = T.missing_end_images(self.project, self.tree, todo)
+                if no_end:
+                    problems.append(f"the end image of clip #{no_end[0][1:]} is missing (choose it again)")
             if checker.base() is not None:
                 for lo in T.loras_needed(self.tree, checker, list(nodes)):
                     if not Path(lo).is_file():
