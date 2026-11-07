@@ -75,8 +75,11 @@ def pick_files(unets: list[str], ckpts: list[str], clips: list[str], vaes: list[
     qte = first(clips, "qwen_2.5_vl_7b")
     light = sorted([lo for lo in loras if "qwen_image_2512_lightning" in _low(lo)], key=len)
     edit = first(unets, "qwen_image_edit_2511", "qwen_image_edit")
+    edit_light = sorted([lo for lo in loras if "qwen_image_edit" in _low(lo) and "lightning" in _low(lo)
+                         and ("2511" in lo if edit and "2511" in edit else True) and "4steps" in _low(lo)], key=len)
     out["qwen"] = ({"models": qwen, "clip": qte, "vae": vae, "lightning4": next((lo for lo in light if "4steps" in lo), None),
-                    "lightning8": next((lo for lo in light if "8steps" in lo), None), "edit": edit}
+                    "lightning8": next((lo for lo in light if "8steps" in lo), None), "edit": edit,
+                    "edit_lightning": edit_light[0] if edit_light else None}
                    if qwen and qte and vae else {"missing": "Qwen-Image 2512 (qwen_image_2512_fp8) and qwen_2.5_vl_7b"})
     # FLUX.3 Image Klein
     f3 = [u for u in unets if "flux3_image_klein" in _low(u)]
@@ -168,7 +171,10 @@ def build_create_workflow(*, family: str, files: dict, model: str, prompt: str, 
         wf["latent"] = {"class_type": "EmptySD3LatentImage", "inputs": {"width": w, "height": h, "batch_size": 1}}
         m = _lora_chain(wf, ["unet", 0], loras)
         light = {"fast": files.get("lightning4"), "balanced": files.get("lightning8")}.get(quality)
-        if refs:
+        if refs and quality != "best" and files.get("edit_lightning"):    # the edit model's Lightning LoRA
+            m = _lora_chain(wf, m, [(files["edit_lightning"], 1.0)], "lightning")
+            steps, cfg = 4, 1.0
+        elif refs:
             steps, cfg = 40, 4.0
         elif light:
             m = _lora_chain(wf, m, [(light, 1.0)], "lightning")
