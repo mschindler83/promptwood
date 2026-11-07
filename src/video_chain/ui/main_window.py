@@ -26,8 +26,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog,
                                QFileDialog, QFormLayout, QLabel,
                                QFrame, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu,
                                QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
-                               QScrollArea, QSlider, QSpinBox, QSplitter, QStackedWidget, QTabWidget, QVBoxLayout,
-                               QWidget)
+                               QScrollArea, QSlider, QSpinBox, QSplitter, QStackedWidget, QTabWidget, QToolButton,
+                               QVBoxLayout, QWidget)
 
 from .. import chain
 from .. import tree as T
@@ -60,11 +60,17 @@ def select_frames(combo: QComboBox, frames: int | None) -> None:
         i = combo.count() - 1
     combo.setCurrentIndex(i)
 IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff)"
-STATE_TEXT = {"done": "DONE", "reused": "DONE", "changed": "CHANGED", "new": "NOT MADE", "generating": "GENERATING",
+STATE_TEXT = {"done": "DONE", "reused": "DONE", "changed": "CHANGED", "new": "NEW", "generating": "GENERATING",
               "failed": "FAILED", "stopped": "STOPPED", "converting": "CONVERTING"}
+STATE_TIP = {"done": "Made, and nothing it depends on changed: it is reused, not made again",
+             "reused": "Made, and nothing it depends on changed: it is reused, not made again",
+             "changed": "Something changed since it was made: it is made again with the path",
+             "new": "Not made yet: Generate path makes it",
+             "generating": "Being made now", "converting": "The video range is being converted",
+             "failed": "Making it failed (see the status bar)", "stopped": "Stopped before it was finished"}
 STATE_STYLE = {"done": "done", "reused": "done", "generating": "target", "failed": "failed", "stopped": "missing",
                "changed": "missing", "new": "", "converting": "target"}
-GUIDE_TEXT = [(None, "single frame"), (5, "5 frames (0.2 s)"), (22, "22 frames (0.9 s)"), (39, "39 frames (1.6 s)")]
+GUIDE_TEXT = [(None, "last frame only"), (5, "5 frames (0.2 s)"), (22, "22 frames (0.9 s)"), (39, "39 frames (1.6 s)")]
 
 
 def fmt_time(seconds: float) -> str:
@@ -178,7 +184,9 @@ class _Bridge(QObject):
 
 # ----------------------------------------------------------------------------- path card
 
-STEPS_TIP = "Sampling steps per clip (ComfyUI's H3 blueprint uses 20; more is slower, rarely better)"
+END_TIP = ("End image: a picture this clip steers its end to (any image, or a frame of a clip in the project). "
+           "The clip's last frame is what the model actually made; the next clip starts from that")
+STEPS_TIP = "Sampling steps per clip: more is slower and rarely better; 20-30 is typical"
 STRENGTH_DEFAULT = -0.05          # spin box minimum = "default"
 STEPS_DEFAULT = 3
 
@@ -294,6 +302,7 @@ class LoraStack(QWidget):
 
 class PromptCard(QFrame):
     """One clip of the selected path: prompt, seed, own settings (LoRA, strength, length, steps), status."""
+    settings_open = False                      # the own-settings part is open (the same on every card)
     edited = Signal(str)
     seedChanged = Signal(str, int)
     overridesChanged = Signal(str, dict)
@@ -358,8 +367,16 @@ class PromptCard(QFrame):
         # own settings of this clip; "default" = the project's
         self.ov = dict(node.overrides or {})
         self.steps_locked = False                 # turbo mode: the turbo steps apply to every clip
-        grid = QFormLayout()
-        grid.setContentsMargins(0, 2, 0, 0)
+        self.settings_toggle = QToolButton()
+        self.settings_toggle.setCheckable(True)
+        self.settings_toggle.setAutoRaise(True)
+        self.settings_toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.settings_toggle.setToolTip("This clip's own LoRA, strength, length and steps (unset: the project's)")
+        self.settings_toggle.toggled.connect(self._show_settings)
+        v.addWidget(self.settings_toggle)
+        self.own = QWidget()
+        grid = QFormLayout(self.own)
+        grid.setContentsMargins(0, 0, 0, 0)
         grid.setHorizontalSpacing(8)
         grid.setVerticalSpacing(4)
         lrow = QHBoxLayout()
@@ -383,31 +400,35 @@ class PromptCard(QFrame):
         self.steps.setRange(STEPS_DEFAULT, 80)
         self.steps.setSpecialValueText("default")
         self.steps.setToolTip("Sampling steps of this clip (lowest value = the project's)")
-        srow.addWidget(self.strength)
+        grid.addRow("Strength", self.strength)
         srow.addWidget(self.length, 1)
+        srow.addWidget(label("Steps", level="tertiary"))
         srow.addWidget(self.steps)
-        grid.addRow("Strength", srow)
+        grid.addRow("Length", srow)
         self.extras = LoraStack(self)
         self.extras.setToolTip("LoRAs stacked on top of the one above (with 'project default' also on top of the "
                                "project's own extra LoRAs)")
         grid.addRow("More", self.extras)
+        v.addWidget(self.own)
+        link = QFormLayout()
+        link.setContentsMargins(0, 2, 0, 0)
+        link.setHorizontalSpacing(8)
+        link.setVerticalSpacing(4)
         self.guide = QComboBox()
         for n, text in GUIDE_TEXT:
             self.guide.addItem(text, n)
-        self.guide.setToolTip("How this clip joins its neighbours. Single frame: it starts at the last frame of the "
-                              "clip before (and ends at the first frame of a real video after it). Motion guide: "
-                              "the last frames of the clip before and the first frames of a video after it, with "
-                              "their sound, are anchored in this clip, so motion and voice carry over (those "
-                              "frames are left out when the path is joined)")
-        grid.addRow("Join", self.guide)
+        self.guide.setToolTip("How much this clip takes over from the clip before it (and from a real video after "
+                              "it). Last frame only: it starts at that frame. 5-39 frames: those frames, with their "
+                              "sound, are put into this clip, so motion and voice carry over; they are left out "
+                              "when the path is played or exported")
+        link.addRow("Carry-over", self.guide)
         erow = QHBoxLayout()
         erow.setSpacing(6)
         self.end_thumb = QLabel()
         self.end_thumb.setFixedSize(48, 27)
         self.end_thumb.setScaledContents(True)
         self.end_text = label("", level="secondary")
-        self.b_end = icon_button("frame", "Choose an end image: the frame this clip steers its end to (any image, "
-                                          "or a frame of a clip in the project)")
+        self.b_end = icon_button("target", END_TIP)
         self.b_end.clicked.connect(lambda: self.action.emit("end_image", self.nid))
         self.b_end_clear = icon_button("x", "No end image: the clip ends freely")
         self.b_end_clear.clicked.connect(lambda: self.action.emit("end_clear", self.nid))
@@ -415,10 +436,11 @@ class PromptCard(QFrame):
         erow.addWidget(self.end_text, 1)
         erow.addWidget(self.b_end)
         erow.addWidget(self.b_end_clear)
-        grid.addRow("End", erow)
+        link.addRow("End", erow)
         self._end_free = True                    # no video after this clip: its own end image can be set
         self._has_end = False
-        v.addLayout(grid)
+        v.addLayout(link)
+        self._show_settings(PromptCard.settings_open)
         self.guide.currentIndexChanged.connect(self._ov_changed)
         self.extras.changed.connect(self._ov_changed)
         self.lora.currentIndexChanged.connect(self._ov_changed)
@@ -539,6 +561,18 @@ class PromptCard(QFrame):
         self._enable_end()
         self.b_revert.setEnabled(on)
 
+    def _show_settings(self, on: bool):
+        PromptCard.settings_open = bool(on)
+        self.own.setVisible(bool(on))
+        self.settings_toggle.blockSignals(True)
+        self.settings_toggle.setChecked(bool(on))
+        self.settings_toggle.blockSignals(False)
+        self.settings_toggle.setArrowType(Qt.DownArrow if on else Qt.RightArrow)
+
+    def set_summary(self, text: str):
+        """The own settings in a few words, shown on the (closed) settings toggle."""
+        self.settings_toggle.setText("Own settings: " + (text or "project defaults"))
+
     def set_revert(self, edited: list[str]):
         """Offer Undo changes when the prompt / seed / settings / end image differ from the made clip."""
         self.b_revert.setVisible(bool(edited))
@@ -555,6 +589,9 @@ class PromptCard(QFrame):
     def set_end(self, image: Path | None, video_after: str | None, pixmap: QPixmap | None):
         """How this clip ends: at the video after it, at its own end image, or freely."""
         self._end_free, self._has_end = video_after is None, image is not None
+        self.b_end.setToolTip(END_TIP if video_after is None else
+                              f"This clip ends at the first frame of video #{video_after[1:]}; remove that video "
+                              "to give it an end image of its own")
         if video_after is not None:
             self.end_text.setText(f"first frame of video #{video_after[1:]}"
                                   + (" (own end image not used)" if image is not None else ""))
@@ -603,9 +640,9 @@ class VideoCard(QFrame):
         head.addWidget(self.tag)
         head.addStretch(1)
         self.buttons = []
-        for act, ic, tip in (("edit", "pen", "Edit the range (or choose another file)"),
+        for act, ic, tip in (("edit", "pen", "Edit range… (or choose another file)"),
                              ("branch", "split", "Branch: another continuation from the same point (Ctrl+B)"),
-                             ("delete", "trash", "Remove this video and everything after it from the chain")):
+                             ("delete", "trash", "Delete this video and everything after it")):
             b = icon_button(ic, tip)
             b.clicked.connect(lambda _=False, a=act: self.action.emit(a, self.nid))
             head.addWidget(b)
@@ -909,18 +946,18 @@ class MainWindow(QMainWindow):
         sv.addWidget(self.size_info)
         lv.addWidget(sw)
 
-        bar, _ = section_bar("Identity (face)", left)
+        bar, _ = section_bar("Face reference", left)
         lv.addWidget(bar)
         iw = QWidget()
         iv = QVBoxLayout(iw)
         iv.setContentsMargins(10, 6, 10, 8)
         iv.setSpacing(6)
         self.ident_mode = QComboBox()
-        self.ident_mode.addItem("Off", "off")
-        self.ident_mode.addItem("Reference images (H3 ref2va)", "reference")
-        self.ident_mode.setToolTip("With reference images every clip sees the same original face (<Picture 1> ...), "
-                                   "not only the last frame of the clip before, so the face does not drift along "
-                                   "the chain. Uses H3's reference-to-video model.")
+        self.ident_mode.addItem("Off (each clip only follows the clip before)", "off")
+        self.ident_mode.addItem("On: use the reference images", "reference")
+        self.ident_mode.setToolTip("On: every generated clip is made with the same face reference images, so the "
+                                   "face does not drift along the chain. It uses another mode of the model, so "
+                                   "LoRAs can act weaker. Switching it changes every generated clip.")
         iv.addWidget(self.ident_mode)
         self.refs = QListWidget()
         self.refs.setViewMode(QListWidget.IconMode)
@@ -928,17 +965,25 @@ class MainWindow(QMainWindow):
         self.refs.setFixedHeight(100)
         self.refs.setMovement(QListWidget.Static)
         self.refs.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.refs.setToolTip("Reference images: best a sharp close-up of the face; <Picture 1> is the first")
+        self.refs.setToolTip("Face reference images: best a sharp close-up of the face. In prompts the first one "
+                             "is <Picture 1>, the second <Picture 2> ...")
         iv.addWidget(self.refs)
         rrow = QHBoxLayout()
-        self.b_ref_add = QPushButton("Add…")
+        self.b_ref_add = QPushButton("Image…")
+        self.b_ref_add.setToolTip("Add an image file as a face reference")
         self.b_ref_add.clicked.connect(self._add_reference)
-        self.b_ref_start = QPushButton("Use start image")
+        self.b_ref_start = QPushButton("Start image")
         self.b_ref_start.clicked.connect(self._reference_from_start)
+        self.b_ref_clip = QPushButton("Selected clip")
+        self.b_ref_clip.clicked.connect(self._reference_from_selected)
         self.b_ref_del = QPushButton("Remove")
+        self.b_ref_del.setToolTip("Remove the selected face reference")
         self.b_ref_del.clicked.connect(self._remove_reference)
-        for b in (self.b_ref_add, self.b_ref_start, self.b_ref_del):
+        rrow.addWidget(label("Add:", level="tertiary"))
+        for b in (self.b_ref_add, self.b_ref_start, self.b_ref_clip):
             rrow.addWidget(b)
+        rrow.addStretch(1)
+        rrow.addWidget(self.b_ref_del)
         iv.addLayout(rrow)
         irow = QFormLayout()
         irow.setContentsMargins(0, 0, 0, 0)
@@ -947,7 +992,7 @@ class MainWindow(QMainWindow):
         self.ref_size.addItem("max 2048 px (best likeness, slower)", "max")
         irow.addRow("Size", self.ref_size)
         iv.addLayout(irow)
-        self.ref_hint = QCheckBox("Add a <Picture 1> hint to prompts")
+        self.ref_hint = QCheckBox("Mention the face in prompts (<Picture 1>)")
         self.ref_hint.setChecked(True)
         self.ref_hint.setToolTip(f"Prompts that do not mention <Picture ...> get: \"{REF_HINT}\"")
         iv.addWidget(self.ref_hint)
@@ -1035,7 +1080,11 @@ class MainWindow(QMainWindow):
         trow.addWidget(label("strength", level="tertiary"))
         trow.addWidget(self.turbo_strength)
         trow.addStretch(1)
-        c.addRow("", trow)
+        self._turbo_row = QWidget()
+        self._turbo_row.setLayout(trow)
+        trow.setContentsMargins(0, 0, 0, 0)
+        c.addRow("", self._turbo_row)
+        self._clips_form = c
         self.audio = QCheckBox("Generate sound")
         self.audio.setChecked(True)
         c.addRow("", self.audio)
@@ -1066,7 +1115,7 @@ class MainWindow(QMainWindow):
         self.comfy_dir.setToolTip("ComfyUI's folder: its LoRA folders are searched for the chosen LoRA files, and "
                                   "its copies of the clips are removed after they were taken over")
         a.addRow("Folder", self.comfy_dir)
-        self.comfy_cleanup = QCheckBox("Delete ComfyUI's copies of the clips")
+        self.comfy_cleanup = QCheckBox("Clean up ComfyUI's copies after each clip")
         self.comfy_cleanup.setChecked(True)
         self.comfy_cleanup.setToolTip("ComfyUI keeps every clip and start image in output/video-chain and "
                                       "input/video-chain; the project has its own copy, so they are removed after "
@@ -1554,12 +1603,40 @@ class MainWindow(QMainWindow):
     def _identity_changed(self, *_):
         if self._loading or self.tree is None or self.running:
             return
+        before = self._done_clips()
         ident = dict(self.tree.options.get("identity") or {})
         ident.update({"mode": self.ident_mode.currentData(), "size": self.ref_size.currentData(),
                       "hint": self.ref_hint.isChecked()})
         self.tree.options["identity"] = ident
         self._show_references()
         self._changed()
+        self._report_remade(before, "Face reference changed")
+
+    def _done_clips(self) -> set[str]:
+        return {nid for nid, st in self.status_of.items() if st == "done"}
+
+    def _report_remade(self, before: set[str], what: str) -> int:
+        """Say how many made clips a change turned CHANGED (they are made again with their paths)."""
+        if self.tree is None:
+            return 0
+        try:
+            checker = T.Checker(self.project, self.tree)
+            lost = [n for n in before if n in self.tree.nodes and checker.status(n) != "done"]
+        except Exception:  # noqa: BLE001
+            return 0
+        if lost:
+            self.status.setText(f"{what}: {len(lost)} made clip{'s are' if len(lost) != 1 else ' is'} now CHANGED "
+                                "and will be made again with their paths.")
+        return len(lost)
+
+    def _reference_from_selected(self):
+        """The selected video's first frame, or a generated clip's last frame."""
+        nid = self.tree.selected if self.tree else None
+        node = self.tree.nodes.get(nid) if nid else None
+        if node is None or not node.made:
+            self.status.setText("Select a converted video or a made clip first.")
+            return
+        self.reference_from_node(nid, "first" if node.is_video else "last")
 
     def _add_reference(self):
         if self.project is None:
@@ -1573,18 +1650,8 @@ class MainWindow(QMainWindow):
         return bool(self.project and (self.project / T.START_FILE).is_file())
 
     def _reference_from_start(self):
-        """The start image; without one (a chain that begins with a video) the selected clip's frame."""
-        if self.project is None or self.tree is None:
-            return
-        if self._start_image_there():
+        if self.project is not None and self._start_image_there():
             self.add_reference(str(self.project / T.START_FILE))
-            return
-        nid = self.tree.selected
-        node = self.tree.nodes.get(nid) if nid else None
-        if node is None or not node.made:
-            self.status.setText("Select a converted video or a made clip first (or add an image with Add…).")
-            return
-        self.reference_from_node(nid, "first" if node.is_video else "last")
 
     def reference_from_node(self, nid: str, which: str) -> bool:
         """A clip's first (videos only) or last frame as a face reference."""
@@ -1594,7 +1661,8 @@ class MainWindow(QMainWindow):
             self.status.setText("That clip is not made yet.")
             return False
         if self.add_reference(str(self.project / rel)):
-            self.status.setText(f"The {which} frame of #{nid[1:]} is now a face reference.")
+            if not self.status.text().startswith("Face reference added:"):     # keep the CHANGED count
+                self.status.setText(f"The {which} frame of #{nid[1:]} is now a face reference.")
             return True
         return False
 
@@ -1604,27 +1672,39 @@ class MainWindow(QMainWindow):
         if QImage(path).isNull():
             self.status.setText(f"Not an image: {Path(path).name}")
             return False
+        before = self._done_clips()
         try:
             T.add_reference(self.project, Path(path), self.tree)
         except (ValueError, OSError, RuntimeError) as e:
             self.status.setText(f"Could not add the reference: {e}")
             return False
+        self.status.setText("Face reference added.")
         if self.ident_mode.currentData() == "off":      # adding one means using them
             self.ident_mode.setCurrentIndex(self.ident_mode.findData("reference"))
         self._show_references()
         self._write_tree()
         self._changed()
+        self._report_remade(before, "Face reference added")
         return True
 
     def _remove_reference(self):
         item = self.refs.currentItem()
         if item is None or self.project is None or self.running:
             return
+        before = self._done_clips()
+        on = (self.tree.options.get("identity") or {}).get("mode") == "reference"
+        made = [n for n in before if n in self.tree.nodes and not self.tree.nodes[n].is_video]
+        if on and made and QMessageBox.question(
+                self, "Remove face reference",
+                f"Remove {item.text()}? The {len(made)} made clip{'s' if len(made) != 1 else ''} that use the face "
+                "references will count as CHANGED and be made again.") != QMessageBox.Yes:
+            return
         T.remove_reference(self.project, item.data(Qt.UserRole), self.tree)
         self._pix.clear()
         self._show_references()
         self._write_tree()
         self._changed()
+        self._report_remade(before, "Face reference removed")
 
     def _show_references(self):
         self.refs.clear()
@@ -1639,12 +1719,14 @@ class MainWindow(QMainWindow):
         on = ident.get("mode") == "reference"
         n = len(ident.get("images") or [])
         if not on:
-            text = "Off: every clip only continues from the last frame of the clip before."
+            text = ("Off: each clip only continues from the last frame of the clip before, so the face can drift. "
+                    "Add a face (an image, the start image, a clip's frame, or in a video's Edit range…) to use it.")
         elif not n:
-            text = "Add a reference image (best a sharp close-up of the face)."
+            text = ("Add a face: an image file, the start image, the selected clip's frame, or any frame of a video "
+                    "(Edit range… → Add as face reference). Best a sharp close-up.")
         else:
-            text = (f"{n} reference image{'s' if n != 1 else ''}: every clip sees the same face. Uses H3's ref2va "
-                    "model; LoRAs trained on the normal model may act weaker there.")
+            text = (f"{n} face reference{'s' if n != 1 else ''}: every generated clip sees the same face. LoRAs can "
+                    "act weaker in this mode.")
         self.ident_info.setText(text)
 
     def _changed(self):
@@ -1725,12 +1807,21 @@ class MainWindow(QMainWindow):
         self.refresh()
 
     def _update_ref_start_button(self):
+        """Enable the 'Add: Start image / Selected clip' buttons and say exactly which frame they take."""
         start = self._start_image_there()
-        self.b_ref_start.setText("Use start image" if start else "Use selected clip")
-        self.b_ref_start.setToolTip("Add the start image as a reference" if start else
-                                    "No start image: add the selected video's first frame (or a generated clip's "
-                                    "last frame) as a reference. For any frame of a video: Edit the range… → "
-                                    "Face reference from this frame")
+        self.b_ref_start.setEnabled(start and not self.running)
+        self.b_ref_start.setToolTip("Add the start image as a face reference" if start else
+                                    "The project has no start image")
+        nid = self.tree.selected if self.tree else None
+        node = self.tree.nodes.get(nid) if self.tree and nid else None
+        made = node is not None and bool(node.made)
+        self.b_ref_clip.setEnabled(made and not self.running)
+        if made:
+            what = (f"the first frame of video #{nid[1:]}" if node.is_video else f"the last frame of clip #{nid[1:]}")
+            tip = f"Add {what} as a face reference"
+        else:
+            tip = "Select a converted video or a made clip"
+        self.b_ref_clip.setToolTip(tip + ". For any frame of a video: Edit range… → Add as face reference")
 
     def _show_start_image(self):
         self._update_ref_start_button()
@@ -1834,6 +1925,15 @@ class MainWindow(QMainWindow):
         """Short text for a clip's own settings, shown on its node ('' = all project defaults)."""
         if n.is_video:
             return f"real video · {T.clip_length(self.tree, n) / 24:.1f} s"
+        ov, parts = n.overrides or {}, self._own_parts(n)
+        if ov.get("guide"):
+            parts.append(f"carry-over {ov['guide']}")
+        if T.end_image_used(self.tree, n):
+            parts.append("end image")
+        return " · ".join(parts)
+
+    def _own_parts(self, n: T.Node) -> list[str]:
+        """A clip's own LoRA / strength / length / steps in a few words."""
         ov, parts = n.overrides or {}, []
         if "lora" in ov:
             parts.append("no LoRA" if ov["lora"] == T.NO_LORA else lora_label(ov["lora"])[:18])
@@ -1845,11 +1945,7 @@ class MainWindow(QMainWindow):
             parts.append(f"{ov['frames'] / 24:.1f} s")
         if "steps" in ov:
             parts.append(f"{ov['steps']} steps")
-        if ov.get("guide"):
-            parts.append(f"guide {ov['guide']}")
-        if T.end_image_used(self.tree, n):
-            parts.append("end image")
-        return " · ".join(parts)
+        return parts
 
     def _rebuild_path(self):
         for c in self.cards:
@@ -1875,6 +1971,7 @@ class MainWindow(QMainWindow):
             card.seedChanged.connect(self._seed_changed)
             card.overridesChanged.connect(self._overrides_changed)
             card.chooseLora.connect(self._choose_node_lora)
+            card.settings_toggle.toggled.connect(self._show_card_settings)
             card.set_choices(self._project_lora_label(), int(self.tree.options.get("frames", 73)),
                              int(self.tree.options.get("steps", 28)), self.known_loras())
             card.action.connect(self.node_action)
@@ -1886,6 +1983,12 @@ class MainWindow(QMainWindow):
         if self.cards:
             last = self.cards[-1]
             QTimer.singleShot(0, lambda: self.path_area.ensureWidgetVisible(last))
+
+    def _show_card_settings(self, on: bool):
+        """Open / close the own settings on every card at once."""
+        for c in self.cards:
+            if isinstance(c, PromptCard):
+                c._show_settings(on)
 
     def _update_cards(self):
         path_nodes = [self.tree.nodes[c.nid] for c in self.cards if c.nid in self.tree.nodes]
@@ -1916,12 +2019,15 @@ class MainWindow(QMainWindow):
                 why = self.why_of.get(n.id) if st == "changed" else ""
                 step = f"Will be made again: {why}." if why else ("will be made again" if st == "changed" else "")
                 card.set_revert(T.changed_inputs(self.tree, n.id) if st == "changed" else [])
+                card.set_summary(" · ".join(self._own_parts(n)))
                 end = self.project / n.end_image if n.end_image else None
                 if vc is not None:
                     card.set_end(end, vc.id, self._pixmap(self.project / vc.made["first"]) if vc.made else None)
                 else:
                     card.set_end(end, None, self._pixmap(end) if end is not None and end.is_file() else None)
             card.set_state(st, self._pixmap(self._node_frame(n)), step)
+            why = self.why_of.get(n.id) if st == "changed" else ""
+            card.tag.setToolTip(f"Changed: {why}. It is made again with the path." if why else STATE_TIP.get(st, ""))
             if st == "generating" and n.id in self.progress_of and not n.is_video:
                 card.bar.setValue(round(100 * self.progress_of[n.id]))
         path = self.selected_path()
@@ -1954,6 +2060,13 @@ class MainWindow(QMainWindow):
         self.b_delete.setEnabled(is_clip and free)
         self.b_play_path.setEnabled(all_done and idle)
         self.b_export.setEnabled(all_done and idle)
+        todo = sum(1 for n in path if self.state(n.id) != "done")
+        why = ("Select a clip first: its path is played" if not path else
+               f"Not ready: {todo} clip{'s' if todo != 1 else ''} on this path {'are' if todo != 1 else 'is'} new or "
+               "changed. Generate path first" if todo else
+               "Wait until generating has finished" if not idle else "")
+        self.b_play_path.setToolTip(why or "Join the clips of the selected path and play them")
+        self.b_export.setToolTip(why or "Save the selected path as one video")
         self.b_stop.setEnabled(not idle)
         self._update_comfy_label()
         self.extra_loras.setEnabled(idle)
@@ -1963,6 +2076,7 @@ class MainWindow(QMainWindow):
                   self.b_ref_del, self.speed):
             w.setEnabled(idle)
         self._turbo_widgets()                      # after the loop: turbo locks the steps fields again
+        self._update_ref_start_button()            # after the loop too: they depend on the selection
 
     def select(self, nid):
         if self.tree is None:
@@ -2038,6 +2152,8 @@ class MainWindow(QMainWindow):
         idle = not self.running
         for w in (self.turbo_lora, self.turbo_steps, self.turbo_strength):
             w.setEnabled(on and idle)
+        self._clips_form.setRowVisible(self.turbo_lora, on)      # the turbo settings only matter in turbo mode
+        self._clips_form.setRowVisible(self._turbo_row, on)
         self.steps.setEnabled(idle and not on)
         self.steps.setToolTip("Turbo mode: every clip uses the turbo steps" if on else
                               STEPS_TIP)
@@ -2205,7 +2321,7 @@ class MainWindow(QMainWindow):
         elif action == "delete" and node is not None:
             below = len(self.tree.descendants(node.id))
             made = node.made is not None or any(d.made for d in self.tree.descendants(node.id))
-            msg = f"Delete clip #{node.id[1:]}" + (f" and the {below} clip{'s' if below != 1 else ''} after it"
+            msg = f"Delete {'video' if node.is_video else 'clip'} #{node.id[1:]}" + (f" and the {below} clip{'s' if below != 1 else ''} after it"
                                                    if below else "") + "?"
             if made:
                 msg += "\nTheir video files are deleted too."
@@ -2362,12 +2478,15 @@ class MainWindow(QMainWindow):
             return
         if new == node.source:
             return
+        before = self._done_clips() - {nid}
         node.source = new
         self._remember_video(file)
         self._write_tree()
         self._show_start_image()
         self.refresh(rebuild_path=True)
         self.convert_video(nid)
+        if not self._report_remade(before, f"Video #{nid[1:]} has a new range (converting)"):
+            self.status.setText(f"Video #{nid[1:]} has a new range: converting.")
 
     def _remember_video(self, file: str):
         self.qs.setValue("videoDir", str(Path(file).parent))
@@ -2504,25 +2623,26 @@ class MainWindow(QMainWindow):
         play = gen = delete = keep_here = keep_path = ref_first = ref_last = None
         if nid != START:
             if node is not None and node.is_video:
-                acts[m.addAction("Edit the range…")] = "edit"
+                acts[m.addAction("Edit range…")] = "edit"
             acts[m.addAction("Branch (another continuation)")] = "branch"
             if node is not None and not node.is_video:
                 acts[m.addAction("Variant (same prompt, other seed)")] = "variant"
                 acts[m.addAction("Variants… (several, generated at once)")] = "variants"
-                end = m.addAction("End image…")
-                end.setEnabled(self.tree.video_child(nid) is None)
+                vc = self.tree.video_child(nid)
+                end = m.addAction("End image…" if vc is None else f"End image… (ends at video #{vc.id[1:]})")
+                end.setEnabled(vc is None)
                 acts[end] = "end_image"
                 if node.end_image:
                     acts[m.addAction("Clear end image")] = "end_clear"
                 if T.changed_inputs(self.tree, nid):
                     acts[m.addAction("Undo changes (back to the made clip)")] = "revert"
             m.addSeparator()
-            play = m.addAction("Play this clip")
+            play = m.addAction("Play this video" if node is not None and node.is_video else "Play this clip")
             play.setEnabled(bool(self.tree.nodes[nid].made))
             if node is not None and node.is_video:
-                ref_first = m.addAction("Face reference: first frame")
+                ref_first = m.addAction("Add first frame as face reference")
                 ref_first.setEnabled(bool(node.made))
-            ref_last = m.addAction("Face reference: last frame")
+            ref_last = m.addAction("Add last frame as face reference")
             ref_last.setEnabled(bool(node is not None and node.made))
             gen = m.addAction("Generate the path to here")
             m.addSeparator()
@@ -2719,7 +2839,7 @@ class MainWindow(QMainWindow):
                 gone = [n for n in todo if self.tree.nodes[n].is_video
                         and not Path(self.tree.nodes[n].source["file"]).is_file()]
                 if gone:
-                    problems.append(f"the file of video #{gone[0][1:]} is missing (Edit the range… to choose it)")
+                    problems.append(f"the file of video #{gone[0][1:]} is missing (Edit range… to choose it)")
                 problem = T.guide_problem(self.tree, checker, todo)
                 if problem:
                     problems.append(problem)

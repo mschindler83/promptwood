@@ -213,9 +213,9 @@ class VideoRangeDialog(QDialog):
         rrow.addWidget(self.end_spin)
         rrow.addWidget(b_set_end)
         rrow.addStretch(1)
-        self.b_ref = QPushButton("Face reference from this frame")
-        self.b_ref.setToolTip("Add the frame at the playhead (whole picture, full size) as a face reference image "
-                              "(Identity): every generated clip sees this face")
+        self.b_ref = QPushButton("Add as face reference")
+        self.b_ref.setToolTip("Add the frame at the playhead (whole picture, full size) as a face reference: "
+                              "every generated clip sees this face")
         self.b_ref.clicked.connect(self.reference_here)
         self.b_ref.setVisible(on_reference is not None)
         rrow.addWidget(self.b_ref)

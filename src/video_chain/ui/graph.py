@@ -33,7 +33,7 @@ class NodeInfo:
     kind: str = "ai"              # ai | video (a range of a real video)
 
 
-STATUS_TEXT = {"done": "done", "changed": "changed", "new": "not made", "generating": "generating",
+STATUS_TEXT = {"done": "done", "changed": "changed", "new": "new", "generating": "generating",
                "failed": "failed", "stopped": "stopped", "reused": "done", "start": "start image",
                "converting": "converting"}
 

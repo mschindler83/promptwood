@@ -522,6 +522,7 @@ def test_identity_references_in_the_window(app, win, tmp_path, image):
     Image.new("RGB", (80, 100), (190, 150, 120)).save(face)
     win.add_reference(str(face))
     flush(app, win)
+    assert "2 made clips are now CHANGED" in win.status.text()
     assert win.ident_mode.currentData() == "reference" and win.refs.count() == 1
     assert win.refs.item(0).text() == "<Picture 1>" and (tmp_path / "proj" / "refs" / "ref1.png").is_file()
     assert [win.state(i) for i in ids] == ["changed", "changed"]               # every clip sees the reference now
@@ -850,9 +851,10 @@ def test_video_first_then_generated_clip(app, win, tmp_path):
     assert "follows the first video" in win.size_info.text()
     assert win.graph.items_by_id[v].info.kind == "video"
     # no start image: the reference button takes the selected video's first frame
-    assert win.b_ref_start.text() == "Use selected clip"
-    win.tree.selected = v
-    win.b_ref_start.click()
+    assert not win.b_ref_start.isEnabled() and "no start image" in win.b_ref_start.toolTip()
+    win.select(v)
+    assert win.b_ref_clip.isEnabled() and f"first frame of video #{v[1:]}" in win.b_ref_clip.toolTip()
+    win.b_ref_clip.click()
     win.reference_from_node(v, "last")
     assert win.refs.count() == 2 and win.ident_mode.currentData() == "reference"
     assert "last frame of" in win.status.text()
@@ -936,12 +938,39 @@ def test_undo_changes_on_the_card(app, win, tmp_path, image):
     assert T.load(tmp_path / "proj").nodes[ids[0]].prompt == "walks in"
 
 
+def test_clearer_controls(app, win, tmp_path, image):
+    ids = new_project(win, tmp_path, image, ("a", "b"))
+    card = win.cards[0]
+    assert card.tag.text() == "NEW" and "Not made yet" in card.tag.toolTip()
+    assert not win.b_play_path.isEnabled() and "2 clips on this path are new or changed" in win.b_play_path.toolTip()
+    assert card.settings_toggle.text() == "Own settings: project defaults"
+    card.settings_toggle.click()
+    assert card.own.isVisibleTo(card) and PromptCard_open(win)
+    assert win.cards[1].own.isVisibleTo(win.cards[1])                    # every card opens together
+    card.length.setCurrentIndex(card.length.findData(90))
+    flush(app, win)
+    assert win.cards[0].settings_toggle.text() == "Own settings: 3.8 s" and win.cards[0].own.isVisibleTo(win.cards[0])
+    win.cards[0].settings_toggle.click()
+    assert not win.cards[1].own.isVisibleTo(win.cards[1]) and not PromptCard_open(win)
+    assert not win._clips_form.isRowVisible(win.turbo_lora)              # turbo settings only in turbo mode
+    win.speed.setCurrentIndex(win.speed.findData("turbo"))
+    assert win._clips_form.isRowVisible(win.turbo_lora)
+    win.speed.setCurrentIndex(win.speed.findData("normal"))
+    run_and_wait(app, win, win.generate_path)
+    assert win.b_play_path.toolTip() == "Join the clips of the selected path and play them"
+
+
+def PromptCard_open(win):
+    from video_chain.ui.main_window import PromptCard
+    return PromptCard.settings_open
+
+
 def test_motion_guide_choice_on_the_card(app, win, tmp_path, image):
     ids = new_project(win, tmp_path, image, ("x", "y"))
     card = win.cards[1]
     card.guide.setCurrentIndex(card.guide.findData(22))
     assert win.tree.nodes[ids[1]].overrides["guide"] == 22
-    assert "guide 22" in win.badge(win.tree.nodes[ids[1]])
+    assert "carry-over 22" in win.badge(win.tree.nodes[ids[1]])
     flush(app, win)
     assert win.cards[1].span.text().startswith("0:03.0 – 0:05.2")          # 22 guide frames left out
 
