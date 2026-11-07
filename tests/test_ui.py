@@ -262,7 +262,7 @@ def test_clip_settings_per_node(app, win, tmp_path, image):
     win.add_node_lora(ids[1], str(lora))
     win.add_node_lora(ids[1], str(other))
     card = next(c for c in win.cards if c.nid == ids[1])
-    assert [r[1].currentData() for r in card.loras.rows] == [str(lora.resolve()), str(other.resolve())]
+    assert [r[1].property("path") for r in card.loras.rows] == [str(lora.resolve()), str(other.resolve())]
     card.loras.rows[0][2].setValue(0.8)                                          # each LoRA its own strength
     card.loras.rows[1][2].setValue(0.4)
     card.length.setCurrentIndex(card.length.findData(124))
@@ -290,9 +290,7 @@ def test_clip_settings_per_node(app, win, tmp_path, image):
     assert win.tree.nodes[ids[2]].overrides == {} and win.state(ids[2]) == "done"
     # the chosen files are offered on every card
     card3 = next(c for c in win.cards if c.nid == ids[2])
-    card3.loras.b_add.click()
-    combo = card3.loras.rows[0][1]
-    assert str(lora.resolve()) in [combo.itemData(i) for i in range(combo.count())]
+    assert str(lora.resolve()) in [p for p, _t in card3.loras.known]
 
 
 def test_missing_node_lora_stops_the_start(app, win, tmp_path, image):
@@ -504,10 +502,12 @@ def test_lora_lists_offer_the_h3_loras(app, tmp_path, image, monkeypatch):
     wait(app, lambda: w.h3_loras, timeout=10)
     assert [n for _p, n in w.h3_loras] == ["MiniMax H3/smoke.safetensors"]          # the Wan LoRA is left out
     card = w.cards[0]
-    card.loras.b_add.click()
-    combo = card.loras.rows[0][1]
-    assert [combo.itemText(i) for i in range(combo.count())] == ["choose a LoRA …", "smoke"]
-    combo.setCurrentIndex(1)
+    from video_chain.ui.lora_stack import LoraStack
+    offered = []
+    monkeypatch.setattr(LoraStack, "pick", staticmethod(
+        lambda parent, known, current, used, file_dir: offered.append([t for _p, t in known]) or known[0][0]))
+    card.loras.b_add.click()                                        # '+ LoRA' opens the picker
+    assert offered == [["smoke"]]
     flush(app, w)
     smoke = str(comfy / "models" / "loras" / "MiniMax H3" / "smoke.safetensors")
     assert w.tree.nodes[ids[0]].overrides == {"loras": [{"path": smoke, "strength": 1.0}]}
@@ -627,10 +627,7 @@ def test_turbo_in_the_window(app, tmp_path, image, monkeypatch):
     ids = new_project(w, tmp_path, image, ("a",))
     wait(app, lambda: w.turbo_loras, timeout=10)
     assert [Path(p).name for p, _n in w.h3_loras] == ["nose.safetensors"]          # turbo kept out of the lists
-    w.cards[0].loras.b_add.click()
-    combo = w.cards[0].loras.rows[0][1]
-    assert [combo.itemText(i) for i in range(combo.count())] == ["choose a LoRA …", "glow"]
-    w.cards[0].loras._remove(w.cards[0].loras.rows[0])
+    assert [t for _p, t in w.cards[0].loras.known] == ["glow"]
     assert w.turbo_lora.currentText() == "minimax_h3_turbo_v4_step600_ema"         # the recommended one
     run_and_wait(app, w, w.generate_path)
     w.speed.setCurrentIndex(w.speed.findData("turbo"))
@@ -1071,7 +1068,7 @@ def test_project_changes_are_confirmed_and_counted(app, win, tmp_path, image, mo
     assert "New start image: 2 made clips are now CHANGED" in win.status.text()
 
 
-def test_lora_stack_keeps_paths_and_unchosen_rows(app, win, tmp_path, image):
+def test_lora_stack_keeps_paths_and_picks_from_the_picker(app, win, tmp_path, image, monkeypatch):
     ids = new_project(win, tmp_path, image, ("a", "b"))
     real = tmp_path / "loras" / "nose.safetensors"
     write_lora(real, H3_KEYS)
@@ -1083,13 +1080,15 @@ def test_lora_stack_keeps_paths_and_unchosen_rows(app, win, tmp_path, image):
     node.overrides = {"loras": [{"path": str(real), "strength": 0.8}]}   # the clip stores the file itself
     win.refresh(rebuild_path=True)
     card = win.cards[1]
-    assert card.loras.rows[0][1].currentData() == str(link)        # shown as the listed link
+    assert card.loras.rows[0][1].property("path") == str(real) and card.loras.rows[0][1].text() == "glow"
     card.guide.setCurrentIndex(card.guide.findData(5))             # touching another setting …
     assert node.overrides["loras"] == [{"path": str(real), "strength": 0.8}]   # … keeps the stored path
-    card.loras.b_add.click()                                        # '+ LoRA', nothing chosen yet
-    assert len(card.loras.rows) == 2
+    from video_chain.ui.lora_stack import LoraStack
+    monkeypatch.setattr(LoraStack, "pick", staticmethod(lambda parent, known, current, used, file_dir: str(link)))
+    card.loras.b_add.click()                                        # '+ LoRA': chosen in the picker
+    assert [it["path"] for it in node.overrides["loras"]] == [str(real), str(link)]
     win.frames.setCurrentIndex(win.frames.findData(90))             # the cards' lists are filled again
-    assert len(win.cards[1].loras.rows) == 2 and win.cards[1].loras.rows[1][1].currentData() is None
+    assert len(win.cards[1].loras.rows) == 2
 
 
 def test_lora_outside_comfyui_and_rescan(app, tmp_path, image, monkeypatch):
@@ -1374,3 +1373,42 @@ def test_stop_looks_disabled_when_nothing_runs(app, win):
     qss = ThemeManager.instance().qss
     assert 'QPushButton[variant="danger"]:disabled' in qss
     assert not win.running and not win.b_stop.isEnabled()
+
+
+def test_lora_picker_search_and_full_names(app, tmp_path):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    from video_chain.ui.lora_stack import LoraPickerDialog, LoraStack, matches
+    names = ["MiniMax H3/smoke_exhale_v2_very_long_name_that_used_to_be_cut_off", "MiniMax H3/glow_smoke",
+             "other/smile-strong"]
+    known = []
+    for n in names:
+        f = tmp_path / "loras" / f"{n}.safetensors"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(b"x")
+        known.append((str(f), Path(n).name))
+    assert matches("smoke exh", "smoke_exhale_v2") and not matches("smoke smile", "glow_smoke")
+    dlg = LoraPickerDialog(None, known, used={known[1][0]})
+    texts = [dlg.list.item(i).text() for i in range(dlg.list.count())]
+    assert texts[0].startswith("glow_smoke   · in use\n")                                 # marked, sorted by name
+    assert any(t.startswith(Path(names[0]).name + "\n") for t in texts)                    # the whole name
+    dlg.search.setText("smoke")
+    assert len(dlg.visible_paths()) == 2 and dlg.count.text() == "2 of 3 LoRAs"
+    dlg.search.setText("smoke exhale")
+    assert dlg.visible_paths() == [known[0][0]]
+    dlg.search.setText("other")                                                            # the folder counts too
+    assert dlg.visible_paths() == [known[2][0]]
+    QTest.keyClick(dlg.search, Qt.Key_Return)                                              # Enter takes the match
+    assert dlg.chosen() == known[2][0] and dlg.result() == dlg.DialogCode.Accepted
+    dlg2 = LoraPickerDialog(None, known, current=known[0][0])
+    assert dlg2.list.currentItem().data(Qt.UserRole) == known[0][0]                       # the row's LoRA selected
+    dlg2.search.setText("zzz")
+    assert dlg2.visible_paths() == [] and not dlg2.buttons.button(dlg2.buttons.StandardButton.Ok).isEnabled()
+    dlg2.reject()
+    stack = LoraStack()
+    stack.set_items(known, [{"path": known[0][0], "strength": 0.5}])
+    assert stack.rows[0][1].text() == Path(names[0]).name and known[0][0] in stack.rows[0][1].toolTip()
+    stack.pick = lambda parent, kn, current, used, file_dir: known[1][0]                  # click the row: swap
+    stack.rows[0][1].click()
+    assert stack.items() == [{"path": known[1][0], "strength": 0.5}]

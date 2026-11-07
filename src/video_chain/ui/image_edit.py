@@ -176,7 +176,8 @@ class ImageEditDialog(QDialog):
                              level="tertiary"))
         self.known_loras, self.lora_dir = list(known_loras or []), lora_dir
         self.loras = LoraStack(self)
-        self.loras.fileWanted.connect(self._lora_file)
+        self.loras.file_dir = lora_dir
+        self.loras.picked.connect(self._lora_picked)
         self.loras.set_items(self._known(), self._remembered_loras())
         self.loras.changed.connect(self._remember_loras)
         left.addWidget(self.loras)
@@ -540,11 +541,10 @@ class ImageEditDialog(QDialog):
         if self.qs is not None:
             self.qs.setValue("editLoras", json.dumps(self.loras.items()))
 
-    def _lora_file(self):
-        from PySide6.QtWidgets import QFileDialog
-        f, _ = QFileDialog.getOpenFileName(self, "Qwen LoRA", self.lora_dir, "LoRA (*.safetensors)")
-        if f:
-            self.add_lora_file(f)
+    def _lora_picked(self, path: str):
+        """A file from another folder chosen in the picker: offered again next time."""
+        if path not in {p for p, _ in self.known_loras} and self.qs is not None:
+            self.qs.setValue("editLoraFiles", json.dumps([path] + [r for r in self._recent_files() if r != path][:11]))
 
     def add_lora_file(self, path: str, strength: float = 1.0):
         """A LoRA file from any folder at the end of the list (ComfyUI must find it in its LoRA folders)."""

@@ -266,6 +266,7 @@ class PromptCard(QFrame):
     seedChanged = Signal(str, int)
     overridesChanged = Signal(str, dict)
     chooseLora = Signal(str)
+    lora_picked = Signal(str, str)             # node id, LoRA path chosen in the picker
     action = Signal(str, str)                  # action, node id
     play = Signal(str)
 
@@ -344,7 +345,7 @@ class PromptCard(QFrame):
         grid.setVerticalSpacing(4)
         self.loras = LoraStack(self)
         self.loras.setToolTip("The LoRAs of this clip and their strengths (none: the base model)")
-        self.loras.fileWanted.connect(lambda: self.chooseLora.emit(self.nid))
+        self.loras.picked.connect(lambda p: self.lora_picked.emit(self.nid, p))
         self.length = QComboBox()
         self.length.setToolTip("Length of this clip")
         self.steps = QSpinBox()
@@ -2025,6 +2026,8 @@ class MainWindow(QMainWindow):
             card.seedChanged.connect(self._seed_changed)
             card.overridesChanged.connect(self._overrides_changed)
             card.chooseLora.connect(self._choose_node_lora)
+            card.lora_picked.connect(self._lora_picked)
+            card.loras.file_dir = self._lora_dir()
             card.settings_toggle.toggled.connect(self._show_card_settings)
             card.set_choices(int(self.tree.options.get("frames", 73)), int(self.tree.options.get("steps", 28)),
                              self.known_loras())
@@ -2304,6 +2307,16 @@ class MainWindow(QMainWindow):
         if self.tree and nid in self.tree.nodes:
             self.tree.nodes[nid].overrides = dict(ov)
             self._changed()
+
+    def _lora_picked(self, nid: str, path: str):
+        """A LoRA chosen on a card: remembered (a file from elsewhere shows up in the lists later); a warning if
+        ComfyUI cannot load it."""
+        listed = {os.path.realpath(p) for p, _n in self.h3_loras}
+        if os.path.realpath(path) not in listed:
+            self._remember_lora(path)
+        if self.in_comfy_loras(path) is False:
+            self.status.setText(f"{Path(path).name} is not in ComfyUI's LoRA folders, so ComfyUI cannot load it: copy "
+                                f"or link it into {self._lora_dir() or 'its models/loras folder'} (then Rescan LoRAs).")
 
     def _choose_node_lora(self, nid: str):
         """Add a LoRA file from any folder to a clip's stack."""
