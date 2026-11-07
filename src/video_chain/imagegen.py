@@ -207,24 +207,19 @@ def build_create_workflow(*, family: str, files: dict, model: str, prompt: str, 
         m = _lora_chain(wf, ["unet", 0], loras)
         wf["pos"] = {"class_type": "CLIPTextEncode", "inputs": {"clip": ["clip", 0], "text": prompt}}
         wf["neg"] = {"class_type": "CLIPTextEncode", "inputs": {"clip": ["clip", 0], "text": negative or ""}}
-        pos = ["pos", 0]
-        if refs:
-            imgs = None
+        pos, neg = ["pos", 0], ["neg", 0]
+        if refs:                                   # FLUX.3: reference latents (like the template's Image Edit)
+            pics = {}
             for k, r in enumerate(refs[:3]):
                 wf[f"ref{k}"] = {"class_type": "LoadImage", "inputs": {"image": r}}
-                if imgs is None:
-                    imgs = [f"ref{k}", 0]
-                else:
-                    wf[f"batch{k}"] = {"class_type": "BatchImagesNode", "inputs": {"images.image0": imgs,
-                                                                                   "images.image1": [f"ref{k}", 0]}}
-                    imgs = [f"batch{k}", 0]
+                pics[f"images.image{k}"] = [f"ref{k}", 0]
             wf["refs"] = {"class_type": "ReferenceMultiLatent",
-                          "inputs": {"conditioning": pos, "vae": ["vae", 0], "images": imgs,
-                                     "resize": "resize", "resize.megapixels": 1.0}}
-            pos = ["refs", 0]
+                          "inputs": {"positive": pos, "negative": neg, "vae": ["vae", 0], "resolution": "resize",
+                                     "resolution.megapixels": 1.0, **pics}}
+            pos, neg = ["refs", 0], ["refs", 1]
         wf["sample"] = {"class_type": "KSampler",
                         "inputs": {"model": m, "seed": seed, "steps": steps, "cfg": cfg, "sampler_name": "euler",
-                                   "scheduler": "simple", "positive": pos, "negative": ["neg", 0],
+                                   "scheduler": "simple", "positive": pos, "negative": neg,
                                    "latent_image": ["latent", 0], "denoise": 1.0}}
     elif family == "flux1":
         wf["unet"] = {"class_type": "UNETLoader", "inputs": {"unet_name": model, "weight_dtype": "default"}}
@@ -384,3 +379,48 @@ class ComfyImageCreator(ComfyGenerator):
         return {"mode": "create", "family": family, "model": model, "quality": quality, "width": width,
                 "height": height, "negative": negative, "ref_strength": ref_strength if refs else None,
                 "loras": [{"path": str(p), "strength": float(s)} for p, s in loras]}
+
+
+_FAMILY_CACHE: dict[tuple, str | None] = {}
+
+
+def lora_file_family(path: str) -> str | None:
+    """lora_family of a .safetensors file (header only, cached by path, size and date)."""
+    import os
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    key = (path, st.st_size, st.st_mtime_ns)
+    if key not in _FAMILY_CACHE:
+        fam = None
+        try:
+            with open(path, "rb") as f:
+                n = int.from_bytes(f.read(8), "little")
+                if 0 < n < 100 * 2**20:
+                    fam = lora_family(k for k in json.loads(f.read(n)) if k != "__metadata__")
+        except (OSError, ValueError):
+            fam = None
+        _FAMILY_CACHE[key] = fam
+    return _FAMILY_CACHE[key]
+
+
+def find_image_loras(roots: list[Path]) -> dict[str, list[tuple[str, str]]]:
+    """The image-model LoRAs in ComfyUI's LoRA folders by family ('flux1', 'sdxl', 'krea2'; Qwen ones are found by
+    comfy.find_qwen_loras), as (path, name in its folder), sorted by name. Speed and style-reference LoRAs that the
+    workflows apply themselves are left out."""
+    import os
+    out: dict[str, list[tuple[str, str]]] = {"flux1": [], "sdxl": [], "krea2": []}
+    seen = set()
+    for root in roots:
+        for dirpath, _dirs, files in os.walk(root, followlinks=True):
+            for f in files:
+                full = os.path.join(dirpath, f)
+                if not f.endswith(".safetensors") or full in seen:
+                    continue
+                seen.add(full)
+                fam = lora_file_family(full)
+                name = os.path.relpath(full, root)
+                if fam in out and "style_reference" not in name.lower():
+                    out[fam].append((full, name))
+    return {k: sorted(v, key=lambda x: x[1].lower()) for k, v in out.items()}

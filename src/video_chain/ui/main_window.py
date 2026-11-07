@@ -859,6 +859,7 @@ class MainWindow(QMainWindow):
         self.bridge.converted.connect(self._converted)
         self.h3_loras: list[tuple[str, str]] = []
         self.qwen_loras: list[tuple[str, str]] = []
+        self.image_loras: dict[str, list[tuple[str, str]]] = {}
         self.turbo_loras: list[tuple[str, str]] = []
         self._scanned_at = 0.0                  # last LoRA scan (monotonic)
         self.comfy_up: bool | None = None
@@ -949,8 +950,17 @@ class MainWindow(QMainWindow):
         self.b_ai_edit = QPushButton("Edit with AI…")
         self.b_ai_edit.setToolTip("Change an image by a prompt (Qwen Image Edit in ComfyUI) and use the result as "
                                   "the start image or as a clip's end image")
-        self.b_ai_edit.clicked.connect(lambda: self.edit_image(start=True))
-        sv.addWidget(self.b_ai_edit, 0, Qt.AlignLeft)
+        self.b_ai_edit.clicked.connect(lambda: self.edit_image(start=True, mode="edit"))
+        self.b_ai_create = QPushButton("Create a new image…")
+        self.b_ai_create.setToolTip("Make a new image from a prompt or from reference pictures (Krea-2, Qwen-Image, "
+                                    "FLUX, Illustrious) and use it as the start image, an end image or a face "
+                                    "reference")
+        self.b_ai_create.clicked.connect(lambda: self.edit_image(start=True, mode="create"))
+        airow = QHBoxLayout()
+        airow.addWidget(self.b_ai_edit)
+        airow.addWidget(self.b_ai_create)
+        airow.addStretch(1)
+        sv.addLayout(airow)
         lv.addWidget(sw)
 
         bar, _ = section_bar("Face reference", left)
@@ -1338,7 +1348,9 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         self.act_close = m.addAction("Close project", self.close_project)
         m.addAction("Show project folder", self._open_dir)
-        self.act_ai_edit = m.addAction("Edit an image with AI…", lambda: self.edit_image(start=True))
+        self.act_ai_edit = m.addAction("Edit an image with AI…", lambda: self.edit_image(start=True, mode="edit"))
+        self.act_ai_create = m.addAction("Create a new image with AI…",
+                                         lambda: self.edit_image(start=True, mode="create"))
         m.addSeparator()
         m.addAction("Quit", self.close).setShortcut(QKeySequence("Ctrl+Q"))
 
@@ -2156,7 +2168,7 @@ class MainWindow(QMainWindow):
         for w in (self.start_tile, self.frames, self.resolution, self.steps,
                   self.audio, self.keep_rep, self.b_project,
                   self.comfy_url, self.ident_mode, self.ref_size, self.ref_hint, self.b_ref_add, self.b_ref_start,
-                  self.b_ref_del, self.speed, self.style_prefix, self.style_suffix, self.b_ai_edit):
+                  self.b_ref_del, self.speed, self.style_prefix, self.style_suffix, self.b_ai_edit, self.b_ai_create):
             w.setEnabled(idle)
         self._turbo_widgets()                      # after the loop: turbo locks the steps fields again
         self._update_ref_start_button()            # after the loop too: they depend on the selection
@@ -2263,6 +2275,9 @@ class MainWindow(QMainWindow):
                 roots = comfy_lora_roots(comfy_dir)
                 found = [(p, n, "turbo" if is_turbo_lora(Path(p)) else "h3") for p, n in find_h3_loras(roots)]
                 found += [(p, n, "qwen") for p, n in find_qwen_loras(roots)]
+                from ..imagegen import find_image_loras
+                for fam, items in find_image_loras(roots).items():
+                    found += [(p, n, fam) for p, n in items]
             except Exception:  # noqa: BLE001
                 found = []
             bridge.loras.emit(found, report)
@@ -2272,6 +2287,7 @@ class MainWindow(QMainWindow):
         self.h3_loras = [(p, n) for p, n, kind in found if kind == "h3"]
         self.turbo_loras = [(p, n) for p, n, kind in found if kind == "turbo"]
         self.qwen_loras = [(p, n) for p, n, kind in found if kind == "qwen"]     # for the image edit window
+        self.image_loras = {fam: [(p, n) for p, n, kind in found if kind == fam] for fam in ("flux1", "sdxl", "krea2")}
         if report:
             self.status.setText(f"{len(self.h3_loras)} LoRA{'s' if len(self.h3_loras) != 1 else ''} and "
                                 f"{len(self.turbo_loras)} turbo LoRA{'s' if len(self.turbo_loras) != 1 else ''} in "
@@ -2519,7 +2535,7 @@ class MainWindow(QMainWindow):
 
     # ---- AI image edit
     def edit_image(self, nid: str | None = None, from_node: bool = False, start: bool = False,
-                   dialog: bool = True) -> ImageEditDialog | None:
+                   dialog: bool = True, mode: str = "auto") -> ImageEditDialog | None:
         """The image edit dialog. nid: the clip whose end image a result can become (its frame is offered first);
         start: the start image first. Returns the dialog (dialog=False: not shown, for tests)."""
         if self.project is None or self.tree is None:
@@ -2576,6 +2592,16 @@ class MainWindow(QMainWindow):
             self._comfy_model = "qwen"
             return ed
 
+        def connect_create(progress):               # worker thread: the image creator (any image family)
+            from ..imagegen import ComfyImageCreator
+            ed = ComfyImageCreator(url, log=lambda _m: None, progress=progress, comfy_dir=comfy_dir, cleanup=cleanup)
+            if switch["free"]:
+                ed.free()
+                switch["free"] = False
+            if progress is not None:                # (None: only listing the models)
+                self._comfy_model = "qwen"          # an image model is loaded (unloaded before the next clips)
+            return ed
+
         def use(kind: str, png: str):
             if self.running:
                 self.status.setText("Wait until generating has finished.")
@@ -2600,11 +2626,22 @@ class MainWindow(QMainWindow):
         stems = [Path(n).stem for _p, n in self.qwen_loras]
         known = [(p, f"{Path(n).stem} ({Path(n).parent})" if stems.count(Path(n).stem) > 1 and str(Path(n).parent) != "."
                   else Path(n).stem) for p, n in self.qwen_loras]
+        def labelled(items):
+            st = [Path(n).stem for _p, n in items]
+            return [(p, f"{Path(n).stem} ({Path(n).parent})" if st.count(Path(n).stem) > 1 and str(Path(n).parent) != "."
+                     else Path(n).stem) for p, n in items]
+        family_loras = {fam: labelled(items) for fam, items in self.image_loras.items()}
+        family_loras["qwen"] = known
+        aspect = None
+        if (self.project / T.START_FILE).is_file():
+            img = QImage(str(self.project / T.START_FILE))
+            aspect = img.width() / img.height() if img.height() else None
         dlg = ImageEditDialog(self, self.project, sources, first, target, connect, use, self.qs,
                               self._picker_places(), start_comfy=self.start_comfy, on_start=before_edit,
                               known_loras=known, lora_dir=self._lora_dir(),
                               uses=lambda meta: uses_of(self.project, self.tree, meta),
-                              refine=self.refine_text)
+                              refine=self.refine_text, connect_create=connect_create, family_loras=family_loras,
+                              start_aspect=aspect, mode=mode)
         if dialog:
             dlg.exec()
             dlg.deleteLater()
@@ -3350,7 +3387,7 @@ class MainWindow(QMainWindow):
             self.status.setText("Unloading the model …")
             self._quit_worker()
         elif self._comfy_model == "qwen" and not self.running:
-            self.status.setText("Unloading Qwen Image Edit …")
+            self.status.setText("Unloading the image model …")
             self._free_comfy()
 
     def _free_comfy(self):
@@ -3372,7 +3409,7 @@ class MainWindow(QMainWindow):
     def _qwen_idle(self):
         if self._comfy_model == "qwen" and not self.running:
             self._free_comfy()
-            self.status.setText("Qwen Image Edit was unloaded after the idle time.")
+            self.status.setText("The image model was unloaded after the idle time.")
 
     def stop(self):
         if self._waiting_comfy is not None and not self.running:   # generating once ComfyUI runs: not any more
@@ -3678,7 +3715,7 @@ class MainWindow(QMainWindow):
     def _update_model_label(self):
         if not self.worker_alive and self._comfy_model == "qwen":
             left = self._qwen_timer.remainingTime() if self._qwen_timer.isActive() else -1
-            text, sev = ("Model: Qwen Image Edit loaded in ComfyUI" +
+            text, sev = ("Model: image model loaded in ComfyUI" +
                          (f" · unloads in {max(1, round(left / 60000))} min" if left >= 0 else "")), ""
         elif not self.worker_alive:
             text, sev = "Model: not loaded", ""

@@ -1351,7 +1351,7 @@ def test_switching_between_clips_and_image_edits_unloads_only_then(app, tmp_path
         assert comfy_frees() == 1
         dlg.b_use_end.click()
         w.edits_closed()
-        assert w._qwen_timer.isActive() and "Qwen Image Edit loaded" in w.model_label.text()
+        assert w._qwen_timer.isActive() and "image model loaded" in w.model_label.text()
         assert not w.b_unload.isHidden()
         wait(app, lambda: not w._joins, timeout=30)
         run_and_wait(app, w, w.generate_path)                            # clips again: Qwen unloaded once
@@ -1460,3 +1460,58 @@ def test_prompt_refiner_on_the_card(app, win, tmp_path, image, monkeypatch):
     assert win.tree.nodes[ids[0]].prompt == "A man walks slowly towards the camera; footsteps on gravel."
     card.edit.undo()                                              # one Ctrl+Z takes the refined text back
     assert card.edit.toPlainText() == "a man walks"
+
+
+def test_create_a_new_image_in_the_window(app, tmp_path, image, monkeypatch):
+    from PySide6.QtCore import Qt
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from fake_comfy import FakeComfy
+
+    from video_chain.ui.main_window import MainWindow
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    server = FakeComfy(tmp_path / "comfy")
+    try:
+        q = settings(tmp_path, "create.ini")
+        q.setValue("comfyUrl", server.url)
+        w = MainWindow(q, command=FAKE)
+        new_project(w, tmp_path, image, ("a",))
+        sdxl_lora = tmp_path / "loras" / "MiniMax H3" / "nose.safetensors"     # the fake lists it by this name
+        sdxl_lora.parent.mkdir(parents=True)
+        sdxl_lora.write_bytes(b"x")
+        w.image_loras = {"sdxl": [(str(sdxl_lora), "anime/style.safetensors")], "flux1": [], "krea2": []}
+        dlg = w.edit_image(start=True, dialog=False, mode="create")
+        assert dlg.mode() == "create" and not dlg.edit_box.isVisibleTo(dlg) and dlg.create_box.isVisibleTo(dlg)
+        wait(app, lambda: dlg.families, timeout=20)
+        labels = [dlg.family.itemText(i) for i in range(dlg.family.count())]
+        assert labels[0] == "Krea-2 Turbo" and "FLUX.3 Image Klein  (not available)" in labels
+        k3 = dlg.family.findData("flux3")
+        assert not dlg.family.model().item(k3).isEnabled() and "licence" in dlg.family.itemData(k3, Qt.ToolTipRole)
+        dlg.family.setCurrentIndex(dlg.family.findData("sdxl"))
+        assert [t for _p, t in dlg._known()] == ["style"] and dlg.negative.isVisibleTo(dlg) and dlg.tags.isVisibleTo(dlg)
+        assert dlg.prompt_kind() == "image" and "×" in dlg.size_text.text()
+        dlg.loras.set_items(dlg._known(), [{"path": str(sdxl_lora), "strength": 0.8}])
+        dlg.prompt.setPlainText("1girl, red coat, rainy street")
+        dlg.tries.setValue(1)
+        assert dlg.b_gen.isEnabled()
+        dlg.generate()
+        wait(app, lambda: not dlg._busy, timeout=60)
+        assert dlg.state.text().startswith("Done") and dlg.results.count() == 1
+        png, meta = dlg.selected()
+        assert meta["mode"] == "create" and meta["family"] == "sdxl" and meta["loras"][0]["strength"] == 0.8
+        assert server.created["lora0"]["class_type"] == "LoraLoader" and "Illustrious" in dlg.res_info.text()
+        dlg.use_refs.setChecked(True)                                   # from a picture: needs one first
+        assert not dlg.b_gen.isEnabled() and dlg.ref_strength.isVisibleTo(dlg)
+        dlg.cpics[0].set(str(w.project / T.START_FILE))
+        assert dlg.b_gen.isEnabled()
+        dlg.b_use_start.click()                                         # the new image as the start image
+        assert dlg.used == ("start", png)
+        dlg2 = w.edit_image(start=True, dialog=False)                  # remembered: create mode, the family
+        assert dlg2.mode() == "create"
+        wait(app, lambda: dlg2.families, timeout=20)
+        assert dlg2.family.currentData() == "sdxl" and dlg2.loras.items()[0]["strength"] == 0.8
+        dlg2.m_edit.click()
+        assert dlg2.mode() == "edit" and dlg2.edit_box.isVisibleTo(dlg2) and dlg2.prompt_kind() == "edit"
+        dlg2.reject()
+        w.close()
+    finally:
+        server.close()

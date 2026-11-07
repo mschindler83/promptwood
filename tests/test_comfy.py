@@ -565,3 +565,65 @@ def test_long_clips_are_refined_in_context_windows():
     assert wf["windows"]["class_type"] == "MiniMaxH3ContextWindows" and win["context_length"] == 124
     assert win["context_overlap"] == 39 and wf["guider"]["inputs"]["model"] == ["windows", 0]
     assert "windows" not in C.build_refine_workflow(width=2528, height=1440, frames=73, **common)
+
+
+def test_image_families_from_comfyui_lists():
+    from video_chain import imagegen as G
+    files = G.pick_files(
+        ["krea2Turbo_v10.safetensors", "krea2/krea2_turbo_fp8_scaled.safetensors", "sickOllie_krea2.safetensors",
+         "qwen-image/qwen_image_fp8_e4m3fn.safetensors", "qwen-image/qwen_image_2512_fp8_e4m3fn.safetensors",
+         "qwen-image/qwen_image_edit_2511_fp8mixed.safetensors", "FLUX1/flux1-dev-fp8.safetensors",
+         "FLUX1/flux1-schnell.safetensors"],
+        ["illustrij_v20.safetensors", "Qwen-Rapid-AIO-NSFW-v23.safetensors"],
+        ["qwen3vl_4b_fp8_scaled.safetensors", "qwen_2.5_vl_7b_fp8_scaled.safetensors", "clip_l.safetensors",
+         "t5xxl_fp8_e4m3fn_scaled.safetensors"],
+        ["qwen_image_vae.safetensors", "FLUX1/ae.safetensors"],
+        ["qwen-image/Qwen-Image-2512-Lightning-4steps-V1.0-bf16.safetensors", "krea2/krea2_style_reference.safetensors"])
+    assert files["krea2"]["models"][0] == "krea2/krea2_turbo_fp8_scaled.safetensors"        # official build first
+    assert set(files["krea2"]["models"]) >= {"krea2Turbo_v10.safetensors", "sickOllie_krea2.safetensors"}
+    assert files["qwen"]["models"][0].endswith("qwen_image_2512_fp8_e4m3fn.safetensors")
+    assert all("edit" not in m for m in files["qwen"]["models"]) and files["qwen"]["edit"].endswith("2511_fp8mixed.safetensors")
+    assert files["qwen"]["lightning4"] and files["qwen"]["lightning8"] is None
+    assert "licence" in files["flux3"]["missing"] and files["flux1"]["models"] == ["FLUX1/flux1-dev-fp8.safetensors"]
+    assert files["sdxl"]["models"] == ["illustrij_v20.safetensors"]
+    assert G.size_for("qwen", 16 / 9) == (1776, 992) and G.size_for("sdxl", 1.0) == (1024, 1024)
+    assert G.lora_family(["lora_unet_double_blocks_0_img_attn_proj.alpha"]) == "flux1"
+    assert G.lora_family(["lora_te2_text_model_encoder_layers_0_mlp_fc1.alpha"]) == "sdxl"
+    assert G.lora_family(["diffusion_model.layers.0.adaLN_modulation.0.lora_A.weight"]) == "krea2"
+    assert G.lora_family(["diffusion_model.blocks.0.self_attn.q.lora_A.weight"]) is None          # e.g. Wan
+
+
+def test_create_images_in_every_family(server, start, tmp_path):
+    from video_chain import imagegen as G
+    cr = G.ComfyImageCreator(server.url)
+    assert "missing" in cr.files["flux3"] and "models" in cr.files["krea2"]
+    out = tmp_path / "n.png"
+    meta = cr.create("krea2", None, "a red fox", out, 5, "standard", 1376, 768)
+    wf = server.created
+    assert wf["sample"]["inputs"]["steps"] == 8 and wf["sample"]["inputs"]["cfg"] == 1.0
+    assert wf["clip"]["inputs"]["type"] == "krea2" and wf["neg"]["class_type"] == "ConditioningZeroOut"
+    assert Image.open(out).size == (1376, 768) and meta["family"] == "krea2"
+    cr.create("krea2", None, "in this style", out, 5, "standard", 1024, 1024, refs=[start])     # style reference
+    wf = server.created
+    assert wf["style0"]["inputs"]["lora_name"].endswith("krea2_style_reference.safetensors")
+    assert wf["pos0"]["class_type"] == "TextEncodeQwenImageEditPlus" and wf["guider"]["inputs"]["cfg"] == 1.0
+    cr.create("qwen", None, "a lighthouse", out, 5, "fast", 1328, 1328, loras=[("/x/MiniMax H3/glow.safetensors", 0.5)])
+    wf = server.created
+    assert wf["lora0"]["inputs"]["model"] == ["unet", 0] and wf["lightning0"]["inputs"]["model"] == ["lora0", 0]
+    assert wf["sample"]["inputs"]["steps"] == 4 and wf["shift"]["inputs"]["shift"] == 3.1
+    assert wf["neg"]["inputs"]["text"] == G.QWEN_NEGATIVE
+    cr.create("qwen", None, "a lighthouse", out, 5, "best", 1328, 1328)
+    assert server.created["sample"]["inputs"]["steps"] == 50 and server.created["sample"]["inputs"]["cfg"] == 4.0
+    cr.create("qwen", None, "the woman from Picture 1 on a beach", out, 5, "fast", 1328, 1328, refs=[start])
+    assert server.created["unet"]["inputs"]["unet_name"].endswith("qwen_image_edit_2511_fp8mixed.safetensors")
+    cr.create("sdxl", None, "1girl, smiling", out, 5, "best", 1024, 1024,
+              loras=[("/x/MiniMax H3/glow.safetensors", 0.7)])
+    wf = server.created
+    assert wf["lora0"]["class_type"] == "LoraLoader" and wf["pos"]["inputs"]["clip"] == ["lora0", 1]
+    assert wf["pos"]["inputs"]["text"].startswith("masterpiece") and wf["sample"]["inputs"]["sampler_name"] == "dpmpp_2m"
+    cr.create("sdxl", None, "1girl", out, 5, "fast", 832, 1216, refs=[start], ref_strength=0.6)
+    assert server.created["sample"]["inputs"]["denoise"] == 0.6 and Image.open(out).size == (832, 1216)
+    cr.create("flux1", None, "a cat", out, 5, "standard", 1024, 1024)
+    assert server.created["pos"]["class_type"] == "FluxGuidance" and server.created["clip"]["inputs"]["type"] == "flux"
+    with pytest.raises(C.ComfyError, match="not available"):
+        cr.create("flux3", None, "x", out, 5, "fast", 1024, 1024)

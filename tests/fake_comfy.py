@@ -18,7 +18,18 @@ KNOWN = {"UNETLoader", "CLIPLoader", "VAELoader", "LoadImage", "MiniMaxH3ImageTo
          "FluxKontextMultiReferenceLatentMethod", "VAEEncode", "KSampler", "ApplyHyperFlowH3",
          # 2K refine
          "VAEEncodeAudio", "LTXVConcatAVLatent", "LatentUpscaleModelLoader", "MiniMaxH3LatentUpscaleWithModel",
-         "ManualSigmas", "VAEDecodeTiled", "BlockSparseAttention", "TextGenerate", "PreviewAny"}
+         "ManualSigmas", "VAEDecodeTiled", "BlockSparseAttention", "TextGenerate", "PreviewAny",
+         # image creation
+         "CLIPTextEncode", "ConditioningZeroOut", "EmptyLatentImage", "EmptySD3LatentImage", "CFGGuider",
+         "ModelSamplingFlux", "DualCLIPLoader", "FluxGuidance", "CheckpointLoaderSimple", "LoraLoader", "ImageScale",
+         "EmptyFlux2LatentImage", "ReferenceMultiLatent", "BatchImagesNode", "MiniMaxH3ContextWindows"}
+IMAGE_UNETS = ["krea2/krea2_turbo_fp8_scaled.safetensors", "qwen-image/qwen_image_2512_fp8_e4m3fn.safetensors",
+               "FLUX1/flux1-dev-fp8.safetensors"]
+IMAGE_CKPTS = ["illustrij_v20.safetensors"]
+IMAGE_CLIPS = ["qwen3vl_4b_fp8_scaled.safetensors", "t5xxl_fp8_e4m3fn_scaled.safetensors", "clip_l.safetensors"]
+IMAGE_VAES = ["FLUX1/ae.safetensors"]
+IMAGE_LORAS = ["qwen-image/Qwen-Image-2512-Lightning-4steps-V1.0-bf16.safetensors",
+               "qwen-image/Qwen-Image-2512-Lightning-8steps-V1.0-bf16.safetensors", "krea2/krea2_style_reference.safetensors"]
 LLM_FILES = ["gemma-3-12b-abliterated-text-encoder.safetensors", "qwen_2.5_vl_7b_fp8_scaled.safetensors"]
 REFINER = "minimax-h3-refiner/minimax_h3_open_regenerate_2k_refiner_rank_384_bf16.safetensors"
 UPSCALER = "minimax_h3_latent_upscaler_3d_conv_v1_bf16.safetensors"
@@ -53,11 +64,12 @@ class FakeComfy:
     def object_info(self, node):
         from video_chain import comfy as C
         q = self.qwen
-        files = {"UNETLoader": ("unet_name", [C.UNET, C.UNET_REF] + ([QWEN_UNET] if q else [])),
-                 "CLIPLoader": ("clip_name", [C.TEXT_ENCODER] + ([QWEN_CLIP] if q else []) + LLM_FILES),
-                 "VAELoader": ("vae_name", [C.VIDEO_VAE, C.AUDIO_VAE] + ([QWEN_VAE] if q else [])),
+        files = {"UNETLoader": ("unet_name", [C.UNET, C.UNET_REF] + ([QWEN_UNET] if q else []) + IMAGE_UNETS),
+                 "CLIPLoader": ("clip_name", [C.TEXT_ENCODER] + ([QWEN_CLIP] if q else []) + LLM_FILES + IMAGE_CLIPS),
+                 "VAELoader": ("vae_name", [C.VIDEO_VAE, C.AUDIO_VAE] + ([QWEN_VAE] if q else []) + IMAGE_VAES),
+                 "CheckpointLoaderSimple": ("ckpt_name", IMAGE_CKPTS),
                  "LoraLoaderModelOnly": ("lora_name", self.loras + ([QWEN_LIGHTNING] if q else [])
-                                         + ([REFINER] if self.refine else [])),
+                                         + ([REFINER] if self.refine else []) + IMAGE_LORAS),
                  "LatentUpscaleModelLoader": ("model_name", [UPSCALER] if self.refine else [])}
         if node in C.REFINE_NODES + ("BlockSparseAttention",) and node != "LatentUpscaleModelLoader":
             return {node: {"input": {"required": {}}}} if self.refine else {}
@@ -86,6 +98,20 @@ class FakeComfy:
             for v in n["inputs"].values():
                 if isinstance(v, list) and len(v) == 2 and isinstance(v[1], int):
                     assert v[0] in wf, f"{nid} links to missing node {v[0]}"
+        if "create_save" in wf:                      # a new image at the latent's size (or the scaled reference)
+            for nid, node in wf.items():
+                if node["class_type"] == "LoadImage":
+                    assert (self.root / "input" / node["inputs"]["image"]).is_file(), f"{nid} not uploaded"
+            lat = wf.get("refscale") or wf["latent"]
+            w, h = lat["inputs"]["width"], lat["inputs"]["height"]
+            prefix = wf["create_save"]["inputs"]["filename_prefix"]
+            out = self.root / "output" / (prefix + "_00001_.png")
+            out.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"color=orange:s={w}x{h}",
+                            "-frames:v", "1", str(out)], check=True)
+            self.created = wf
+            return {"create_save": {"images": [{"filename": out.name, "subfolder": str(Path(prefix).parent),
+                                                "type": "output"}]}}
         if "gen" in wf and wf["gen"]["class_type"] == "TextGenerate":     # the prompt refiner: a fake answer
             g = wf["gen"]["inputs"]
             self.refined = g

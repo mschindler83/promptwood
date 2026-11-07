@@ -693,6 +693,7 @@ class ImageEditDialog(QDialog):
         source, quality, n = self.source, self.quality.currentData(), self.tries.value()
         refs = [p for p in (self.pic2.path, self.pic3.path) if p]
         loras = [(it["path"], it["strength"]) for it in self.loras.items()]
+        self._remember_loras()
         size = None
         if self.keep_size.isChecked():
             img = QImage(source)
@@ -752,6 +753,7 @@ class ImageEditDialog(QDialog):
         quality, n = self.quality.currentData(), self.tries.value()
         refs = [s.path for s in self.cpics[:FAMILIES[fam]["refs"]] if s.path] if self.use_refs.isChecked() else []
         loras = [(it["path"], it["strength"]) for it in self.loras.items()]
+        self._remember_loras()                    # what it was made with is offered next time
         w, h = size_for(fam, self.aspect.currentData() or 1.0)
         strength, tags = self.ref_strength.value(), self.tags.isChecked()
         edits = self.project / EDITS_DIR
