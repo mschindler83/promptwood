@@ -874,8 +874,7 @@ class MainWindow(QMainWindow):
         self.b_ref_add = QPushButton("Add…")
         self.b_ref_add.clicked.connect(self._add_reference)
         self.b_ref_start = QPushButton("Use start image")
-        self.b_ref_start.clicked.connect(lambda: self.add_reference(str(self.project / T.START_FILE))
-                                         if self.project else None)
+        self.b_ref_start.clicked.connect(self._reference_from_start)
         self.b_ref_del = QPushButton("Remove")
         self.b_ref_del.clicked.connect(self._remove_reference)
         for b in (self.b_ref_add, self.b_ref_start, self.b_ref_del):
@@ -1510,22 +1509,52 @@ class MainWindow(QMainWindow):
         if f:
             self.add_reference(f)
 
-    def add_reference(self, path: str):
-        if self.project is None or self.running:
+    def _start_image_there(self) -> bool:
+        return bool(self.project and (self.project / T.START_FILE).is_file())
+
+    def _reference_from_start(self):
+        """The start image; without one (a chain that begins with a video) the selected clip's frame."""
+        if self.project is None or self.tree is None:
             return
+        if self._start_image_there():
+            self.add_reference(str(self.project / T.START_FILE))
+            return
+        nid = self.tree.selected
+        node = self.tree.nodes.get(nid) if nid else None
+        if node is None or not node.made:
+            self.status.setText("Select a converted video or a made clip first (or add an image with Add…).")
+            return
+        self.reference_from_node(nid, "first" if node.is_video else "last")
+
+    def reference_from_node(self, nid: str, which: str) -> bool:
+        """A clip's first (videos only) or last frame as a face reference."""
+        node = self.tree.nodes.get(nid) if self.tree else None
+        rel = (node.made or {}).get("first" if which == "first" else "frame") if node else None
+        if not rel:
+            self.status.setText("That clip is not made yet.")
+            return False
+        if self.add_reference(str(self.project / rel)):
+            self.status.setText(f"The {which} frame of #{nid[1:]} is now a face reference.")
+            return True
+        return False
+
+    def add_reference(self, path: str) -> bool:
+        if self.project is None or self.running:
+            return False
         if QImage(path).isNull():
             self.status.setText(f"Not an image: {Path(path).name}")
-            return
+            return False
         try:
             T.add_reference(self.project, Path(path), self.tree)
         except (ValueError, OSError, RuntimeError) as e:
             self.status.setText(f"Could not add the reference: {e}")
-            return
+            return False
         if self.ident_mode.currentData() == "off":      # adding one means using them
             self.ident_mode.setCurrentIndex(self.ident_mode.findData("reference"))
         self._show_references()
         self._write_tree()
         self._changed()
+        return True
 
     def _remove_reference(self):
         item = self.refs.currentItem()
@@ -1546,6 +1575,7 @@ class MainWindow(QMainWindow):
             item.setData(Qt.UserRole, rel)
             item.setToolTip(rel)
             self.refs.addItem(item)
+        self._update_ref_start_button()
         on = ident.get("mode") == "reference"
         n = len(ident.get("images") or [])
         if not on:
@@ -1634,7 +1664,16 @@ class MainWindow(QMainWindow):
         self._show_start_image()
         self.refresh()
 
+    def _update_ref_start_button(self):
+        start = self._start_image_there()
+        self.b_ref_start.setText("Use start image" if start else "Use selected clip")
+        self.b_ref_start.setToolTip("Add the start image as a reference" if start else
+                                    "No start image: add the selected video's first frame (or a generated clip's "
+                                    "last frame) as a reference. For any frame of a video: Edit the range… → "
+                                    "Face reference from this frame")
+
     def _show_start_image(self):
+        self._update_ref_start_button()
         start = self.project / T.START_FILE if self.project else None
         if start and start.is_file():
             self.start_tile.set_image(QImage(str(start)))
@@ -2171,7 +2210,7 @@ class MainWindow(QMainWindow):
         if not Path(f).is_file():
             self.status.setText(f"{Path(f).name} is not there any more; choose the file again.")
         dlg = VideoRangeDialog(self, f if Path(f).is_file() else "", src["start"], src["end"],
-                               canvas=self._canvas_for(f), settings=self.qs)
+                               canvas=self._canvas_for(f), settings=self.qs, on_reference=self.add_reference)
         if dlg.exec() != QDialog.Accepted or not dlg.file:
             return
         self.set_video_range(nid, dlg.file, dlg.start, dlg.end)
@@ -2325,7 +2364,7 @@ class MainWindow(QMainWindow):
         vid = m.addAction("Add a real video after this…")
         vid.setEnabled(self.tree.can_add_video(None if nid == START else nid))
         acts[vid] = "video"
-        play = gen = delete = keep_here = keep_path = None
+        play = gen = delete = keep_here = keep_path = ref_first = ref_last = None
         if nid != START:
             if node is not None and node.is_video:
                 acts[m.addAction("Edit the range…")] = "edit"
@@ -2336,6 +2375,11 @@ class MainWindow(QMainWindow):
             m.addSeparator()
             play = m.addAction("Play this clip")
             play.setEnabled(bool(self.tree.nodes[nid].made))
+            if node is not None and node.is_video:
+                ref_first = m.addAction("Face reference: first frame")
+                ref_first.setEnabled(bool(node.made))
+            ref_last = m.addAction("Face reference: last frame")
+            ref_last.setEnabled(bool(node is not None and node.made))
             gen = m.addAction("Generate the path to here")
             m.addSeparator()
             keep_here = m.addAction("Keep this branch, delete the other branches here")
@@ -2353,6 +2397,9 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, lambda: self.node_action(act, nid))
         elif chosen is play:
             QTimer.singleShot(0, lambda: self._play_node(nid))
+        elif chosen is not None and chosen in (ref_first, ref_last):
+            which = "first" if chosen is ref_first else "last"
+            QTimer.singleShot(0, lambda: self.reference_from_node(nid, which))
         elif chosen is gen:
             QTimer.singleShot(0, self.generate_path)
         elif chosen is delete:

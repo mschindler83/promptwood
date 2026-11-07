@@ -849,6 +849,14 @@ def test_video_first_then_generated_clip(app, win, tmp_path):
     assert isinstance(win.cards[0], VideoCard) and "real.mp4" in win.cards[0].file.text()
     assert "follows the first video" in win.size_info.text()
     assert win.graph.items_by_id[v].info.kind == "video"
+    # no start image: the reference button takes the selected video's first frame
+    assert win.b_ref_start.text() == "Use selected clip"
+    win.tree.selected = v
+    win.b_ref_start.click()
+    win.reference_from_node(v, "last")
+    assert win.refs.count() == 2 and win.ident_mode.currentData() == "reference"
+    assert "last frame of" in win.status.text()
+    win.ident_mode.setCurrentIndex(win.ident_mode.findData("off"))
     win.node_action("continue", v)
     a = win.selected_id()
     assert isinstance(win.cards[1], PromptCard)
@@ -904,7 +912,13 @@ def test_motion_guide_choice_on_the_card(app, win, tmp_path, image):
 def test_video_range_dialog(app, tmp_path):
     from video_chain.ui.video_editor import VideoRangeDialog
     src = make_real_video(tmp_path / "real.mp4", secs=2.0)
-    dlg = VideoRangeDialog(None, str(src), canvas=(672, 384), player=False)
+    from PySide6.QtGui import QImage
+    got = []
+    dlg = VideoRangeDialog(None, str(src), canvas=(672, 384), player=False,
+                           on_reference=lambda p: got.append(QImage(p).size().toTuple()) or True)
+    assert dlg.b_ref.isEnabled() and dlg.reference_here()
+    assert got == [(dlg.info["width"], dlg.info["height"])]  # the whole frame, not cut to the chain's size
+    assert "face reference" in dlg.summary.text()
     assert dlg.info["fps"] == 30 and abs(dlg.end - 2.0) < 0.05 and dlg.frames() == 48
     dlg.set_range(0.5, 1.0)
     assert dlg.frames() == 12 and "12 frames" in dlg.summary.text() and "672×384" in dlg.summary.text()

@@ -7,6 +7,7 @@ the first frame is where a generated clip before the video ends, the last one wh
 from __future__ import annotations
 
 import subprocess
+import tempfile
 import threading
 from pathlib import Path
 
@@ -132,11 +133,13 @@ class VideoRangeDialog(QDialog):
     """Pick a video file and a range of it. file / start / end hold the result."""
 
     def __init__(self, parent=None, file: str = "", start: float | None = None, end: float | None = None,
-                 canvas: tuple[int, int] | None = None, settings: QSettings | None = None, player: bool = True):
+                 canvas: tuple[int, int] | None = None, settings: QSettings | None = None, player: bool = True,
+                 on_reference=None):
         super().__init__(parent)
         self.setWindowTitle("Real video")
         self.resize(980, 760)
         self.settings, self.canvas, self.want_player = settings, canvas, player
+        self.on_reference = on_reference              # callable(png path) -> bool: add a face reference
         self.file, self.info = "", None
         self.start, self.end = 0.0, 0.0
         self.player = None
@@ -210,6 +213,12 @@ class VideoRangeDialog(QDialog):
         rrow.addWidget(self.end_spin)
         rrow.addWidget(b_set_end)
         rrow.addStretch(1)
+        self.b_ref = QPushButton("Face reference from this frame")
+        self.b_ref.setToolTip("Add the frame at the playhead (whole picture, full size) as a face reference image "
+                              "(Identity): every generated clip sees this face")
+        self.b_ref.clicked.connect(self.reference_here)
+        self.b_ref.setVisible(on_reference is not None)
+        rrow.addWidget(self.b_ref)
         v.addLayout(rrow)
         self.start_spin.valueChanged.connect(lambda x: self.set_range(x, self.end, moved="start"))
         self.end_spin.valueChanged.connect(lambda x: self.set_range(self.start, x, moved="end"))
@@ -313,11 +322,32 @@ class VideoRangeDialog(QDialog):
     def _update_enabled(self):
         on = self.info is not None
         for w in (self.bar, self.b_prev, self.b_play, self.b_next, self.b_back1, self.b_fwd1, self.b_play_sel,
-                  self.start_spin, self.end_spin):
+                  self.start_spin, self.end_spin, self.b_ref):
             w.setEnabled(on)
         self.b_play.setEnabled(on and self.player is not None)
         self.b_play_sel.setEnabled(on and self.player is not None)
         self.buttons.button(QDialogButtonBox.Ok).setEnabled(on and self.frames() >= 1)
+
+    # ---- face reference
+    def reference_here(self) -> bool:
+        """The frame at the playhead, uncropped at the source's size, handed to on_reference."""
+        if self.info is None or self.on_reference is None:
+            return False
+        t = self.position()
+        with tempfile.TemporaryDirectory(prefix="video-chain-ref-") as d:
+            png = Path(d) / "frame.png"
+            try:
+                subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{t:.4f}", "-i", self.file, "-frames:v", "1",
+                                "-update", "1", str(png)], capture_output=True, timeout=60)
+            except (OSError, subprocess.SubprocessError):
+                pass
+            if not png.is_file():
+                self.summary.setText(f"Could not read the frame at {fmt(t)}.")
+                return False
+            ok = bool(self.on_reference(str(png)))
+        self.summary.setText(f"The frame at {fmt(t)} is now a face reference." if ok
+                             else "Could not add the frame as a face reference (see the status bar).")
+        return ok
 
     # ---- range
     def frames(self) -> int:
