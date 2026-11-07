@@ -12,7 +12,7 @@ KNOWN = {"UNETLoader", "CLIPLoader", "VAELoader", "LoadImage", "MiniMaxH3ImageTo
          "KSamplerSelect", "BasicScheduler", "BasicGuider", "SamplerCustomAdvanced", "VAEDecode", "VAEDecodeAudio",
          "ImageFromBatch", "SaveImage", "CreateVideo", "SaveVideo", "LoraLoaderModelOnly",
          "MiniMaxH3ReferenceToVideo", "MiniMaxH3AddGuide", "MiniMaxH3TurboLoRA", "MiniMaxH3TurboSampler",
-         "LoadVideo", "GetVideoComponents",
+         "LoadVideo", "GetVideoComponents", "LoadAudio",
          # Qwen Image Edit
          "FluxKontextImageScale", "ModelSamplingAuraFlow", "CFGNorm", "TextEncodeQwenImageEditPlus",
          "FluxKontextMultiReferenceLatentMethod", "VAEEncode", "KSampler", "ApplyHyperFlowH3",
@@ -52,6 +52,7 @@ class FakeComfy:
         self.qwen = True                           # the Qwen Image Edit files and nodes are there
         self.hyperflow = True                      # ComfyUI-HyperFlow-H3 with its weights
         self.refine = True                         # the H3 2K nodes, the latent upscaler and the refiner LoRA
+        self.audio_refs = True                     # MiniMaxH3ReferenceToVideo takes reference sounds
         self.fail_next: str | None = None          # the next job fails with this message (once)
         self.prompts, self.calls, self.history = [], [], {}
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
@@ -85,8 +86,10 @@ class FakeComfy:
                     "LoadVideo", "GetVideoComponents"):
             return {} if node.startswith("MiniMaxH3Turbo") and not self.turbo_nodes else {node: {"input": {"required": {}}}}
         if node == "MiniMaxH3ReferenceToVideo":
-            return {node: {"input": {"required": {}, "optional": {"ref_images": [
-                "COMFY_AUTOGROW_V3", {"template": {"prefix": "ref_image_", "min": 0, "max": 9}}]}}}}
+            opt = {"ref_images": ["COMFY_AUTOGROW_V3", {"template": {"prefix": "ref_image_", "min": 0, "max": 9}}]}
+            if self.audio_refs:
+                opt["ref_audios"] = ["COMFY_AUTOGROW_V3", {"template": {"prefix": "ref_audio_", "min": 0, "max": 3}}]
+            return {node: {"input": {"required": {}, "optional": opt}}}
         if node in files:
             field, names = files[node]
             names = [] if self.models_missing and node == "UNETLoader" else names
@@ -149,6 +152,10 @@ class FakeComfy:
             for k, v in cond.items():
                 if k.startswith("ref_images."):
                     assert (self.root / "input" / wf[v[0]]["inputs"]["image"]).is_file(), "reference not uploaded"
+                if k.startswith("ref_audios."):
+                    assert self.audio_refs and wf[v[0]]["class_type"] == "LoadAudio"
+                    assert (self.root / "input" / wf[v[0]]["inputs"]["audio"]).is_file(), "sound not uploaded"
+                    assert cond["audio_vae"] == ["audio_vae", 0]
         else:
             cond = wf["cond"]["inputs"]
             assert ("first_frame" in cond) == ("start" in wf) and ("last_frame" in cond) == ("end" in wf)

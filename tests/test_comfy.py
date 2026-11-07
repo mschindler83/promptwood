@@ -278,6 +278,29 @@ def test_generate_with_references(server, start, tmp_path):
     assert not list((server.root / "input" / "video-chain").glob("*"))           # start + reference cleaned up
 
 
+def test_generate_with_sound_references(server, start, tmp_path):
+    """Sounds alone also take the ref2va model (with the audio VAE), the start image as guide; Pika picks ref2va."""
+    import subprocess
+    (server.root / "main.py").write_text("")
+    wav = tmp_path / "voice.wav"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=330:duration=3", str(wav)],
+                   check=True)
+    gen = C.ComfyGenerator(server.url, comfy_dir=server.root)
+    s = settings(audio_paths=[str(wav)], audio=False, steps=6, pika={"strength": 1.0})
+    gen.generate("she says hello in the voice of <Audio 1>", start, tmp_path / "v.mp4", tmp_path / "v.png", 3, s)
+    wf = server.prompts[-1]
+    cond = wf["refcond"]["inputs"]
+    assert wf["unet"]["inputs"]["unet_name"] == C.UNET_REF and cond["ref_audios.ref_audio_0"] == ["aref0", 0]
+    assert wf["aref0"]["class_type"] == "LoadAudio" and wf["audio_vae"]["inputs"]["vae_name"] == C.AUDIO_VAE
+    assert not [k for k in cond if k.startswith("ref_images.")] and cond["prompt"].endswith("<Audio 1>")  # no hint
+    assert wf["pika"]["inputs"]["lora_name"].endswith("pika_h3_flex_ref2va_v1_bf16.safetensors")
+    assert not list((server.root / "input" / "video-chain").glob("*"))           # the sound is cleaned up too
+    server.audio_refs = False                                                     # an older ComfyUI
+    gen = C.ComfyGenerator(server.url, comfy_dir=server.root)
+    with pytest.raises(C.ComfyError, match="no sound references"):
+        gen.generate("x <Audio 1>", start, tmp_path / "w.mp4", tmp_path / "w.png", 3, s)
+
+
 def test_stacked_loras_are_chained(server, start, tmp_path):
     server.loras = ["MiniMax H3/glow.safetensors", "MiniMax H3/motion.safetensors"]
     gen = C.ComfyGenerator(server.url)

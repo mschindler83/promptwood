@@ -235,7 +235,8 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
                    ref_size: str = "match", ref_key=lambda i: f"ref_images.ref_image_{i}",
                    turbo: tuple[str, float] | None = None, end_image: str | None = None,
                    guides: list[dict] = (), hyperflow: tuple[str, float] | None = None,
-                   pika: tuple[str, float] | None = None) -> dict:
+                   pika: tuple[str, float] | None = None, audio_refs: list[str] = (),
+                   audio_key=lambda i: f"ref_audios.ref_audio_{i}") -> dict:
     """The API-format workflow for one clip (image = the uploaded start image, as LoadImage names it; None: a
     clip without a start frame).
 
@@ -247,6 +248,10 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
     (<Picture 1> ... in the prompt) and MiniMaxH3AddGuide anchors the start image at frame 0, so the clip starts
     where the previous one ended and sees the same original face.
 
+    With audio_refs (uploaded sound files, <Audio 1> ... in the prompt): the ref2va model too (also without
+    reference images); MiniMaxH3ReferenceToVideo gets them with the audio VAE, the prompt says what each one is for
+    (a voice, a soundtrack to copy, a beat).
+
     With turbo (ComfyUI name of the turbo LoRA, strength): ComfyUI-MiniMax-H3-Turbo's loader (it handles the
     pruned model's adaln layers) right after the model, the other LoRAs after it, and its own sampler.
 
@@ -257,7 +262,7 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
     With pika (ComfyUI name of the Pika H3 Flex LoRA for this model, strength): that LoRA right after the model,
     the other LoRAs after it, the lcm sampler on ManualSigmas PIKA_SIGMAS (ComfyUI's Pika H3 Flex templates)."""
     wf: dict = {
-        "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": UNET_REF if refs else UNET,
+        "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": UNET_REF if refs or audio_refs else UNET,
                                                          "weight_dtype": "default"}},
         "clip": {"class_type": "CLIPLoader", "inputs": {"clip_name": TEXT_ENCODER, "type": "minimax",
                                                          "device": "default"}},
@@ -278,14 +283,19 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
         wf["start"] = {"class_type": "LoadImage", "inputs": {"image": image}}
     if use_end:
         wf["end"] = {"class_type": "LoadImage", "inputs": {"image": end_image}}
-    if audio:
+    if audio or audio_refs:
         wf["audio_vae"] = {"class_type": "VAELoader", "inputs": {"vae_name": AUDIO_VAE}}
-    if refs:
+    if refs or audio_refs:
         inputs = {"clip": ["clip", 0], "vae": ["vae", 0], "prompt": prompt, "width": int(width),
                   "height": int(height), "length": int(frames), "ref_image_size": ref_size}
         for i, ref in enumerate(refs):
             wf[f"ref{i}"] = {"class_type": "LoadImage", "inputs": {"image": ref}}
             inputs[ref_key(i)] = [f"ref{i}", 0]
+        for i, sound in enumerate(audio_refs):
+            wf[f"aref{i}"] = {"class_type": "LoadAudio", "inputs": {"audio": sound}}
+            inputs[audio_key(i)] = [f"aref{i}", 0]
+        if audio_refs:
+            inputs["audio_vae"] = ["audio_vae", 0]
         wf["refcond"] = {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": inputs}
         latent, positive = ["refcond", 1], ["refcond", 0]
         if use_start:
@@ -438,6 +448,18 @@ class ComfyGenerator:
             prefix = (spec[1].get("template") or {}).get("prefix", prefix)
         return lambda i: f"ref_images.{prefix}{i}"
 
+    def audio_key(self):
+        """How this ComfyUI names the reference sound inputs (raises ComfyError if its H3 nodes take none)."""
+        opt = self._object_info("MiniMaxH3ReferenceToVideo").get("input", {}).get("optional", {})
+        spec = opt.get("ref_audios")
+        if spec is None:
+            raise ComfyError("this ComfyUI's MiniMax H3 Reference to Video node takes no sound references "
+                             "(update ComfyUI)")
+        prefix = "ref_audio_"
+        if isinstance(spec, list) and len(spec) > 1 and isinstance(spec[1], dict):
+            prefix = (spec[1].get("template") or {}).get("prefix", prefix)
+        return lambda i: f"ref_audios.{prefix}{i}"
+
     def check_ref_model(self):
         req = self._object_info("UNETLoader").get("input", {}).get("required", {})
         if UNET_REF not in _combo_options(req.get("unet_name")):
@@ -478,7 +500,7 @@ class ComfyGenerator:
         if s.get("hyperflow"):
             self.hyperflow_file()
         if s.get("pika"):
-            self.pika_lora(bool(s.get("refs") or s.get("ref_paths")))
+            self.pika_lora(bool(s.get("refs") or s.get("ref_paths") or s.get("audio_refs") or s.get("audio_paths")))
 
     def check_turbo(self):
         for node in ("MiniMaxH3TurboLoRA", "MiniMaxH3TurboSampler"):
@@ -523,7 +545,7 @@ class ComfyGenerator:
         data = Path(image).read_bytes()
         suffix = Path(image).suffix.lower() or ".png"
         name = hashlib.sha1(data).hexdigest()[:20] + suffix
-        ctype = {".png": "image/png", ".mp4": "video/mp4"}.get(suffix, "application/octet-stream")
+        ctype = {".png": "image/png", ".mp4": "video/mp4", ".wav": "audio/wav"}.get(suffix, "application/octet-stream")
         boundary = uuid.uuid4().hex
         parts = []
         for field, value in (("subfolder", SUBFOLDER), ("type", "input"), ("overwrite", "true")):
@@ -554,7 +576,7 @@ class ComfyGenerator:
                 raise ComfyError(f"{Path(s['turbo']['lora']).name} is not in ComfyUI's LoRA folders")
             turbo = (name, float(s["turbo"].get("strength", 1.0)))
         hyper = (self.hyperflow_file(), float(s["hyperflow"].get("strength", 1.0))) if s.get("hyperflow") else None
-        pika = (self.pika_lora(bool(s.get("ref_paths"))), float(s["pika"].get("strength", 1.0))) \
+        pika = (self.pika_lora(bool(s.get("ref_paths") or s.get("audio_paths"))), float(s["pika"].get("strength", 1.0))) \
             if s.get("pika") else None
         if turbo and self.last_hyperflow:
             self.free()                              # HyperFlow's patch would break the turbo LoRA
@@ -603,12 +625,20 @@ class ComfyGenerator:
                 uploads.append((refs[-1], r))
             if s.get("ref_hint", True):
                 prompt = with_ref_hint(prompt)
+        sounds = []
+        if s.get("audio_paths"):
+            if not refs:
+                self.check_ref_model()
+            for a in s["audio_paths"]:
+                sounds.append(self.upload(Path(a)))
+                uploads.append((sounds[-1], a))
         prefix = f"{SUBFOLDER}/{uuid.uuid4().hex[:12]}"
         wf = build_workflow(prompt=prompt, image=image, seed=seed, width=s.get("width", 512),
                             height=s.get("height", 512), frames=s.get("frames", 73), steps=s.get("steps", 20),
                             loras=loras, audio=bool(s.get("audio", True)), prefix=prefix, refs=refs,
                             ref_size=s.get("ref_size", "match"), ref_key=self.ref_key() if refs else None,
-                            turbo=turbo, end_image=end_image, guides=guides, hyperflow=hyper, pika=pika)
+                            turbo=turbo, end_image=end_image, guides=guides, hyperflow=hyper, pika=pika,
+                            audio_refs=sounds, **({"audio_key": self.audio_key()} if sounds else {}))
         ws = self._connect_ws()
         try:
             res = self._json("POST", "/prompt", {"prompt": wf, "client_id": self.client_id})

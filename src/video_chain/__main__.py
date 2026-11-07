@@ -128,12 +128,17 @@ def prepare_job(project: Path, targets: list[str]) -> dict:
     problem = treemod.guide_problem(tree, checker, todo)
     if problem:
         raise JobError(problem)
+    sounds = treemod.audio_problems(project, tree, todo)
+    if sounds:
+        raise JobError(sounds[0])
     no_end = treemod.missing_end_images(project, tree, todo)
     if no_end:
         raise JobError(f"the end image of clip #{no_end[0][1:]} is missing")
     ai_todo = [nid for nid in todo if not tree.nodes[nid].is_video]     # what needs the model
+    # which H3 models the clips use: the reference one (face references or a sound) and/or the normal one
+    ref_kinds = sorted({bool(settings.get("refs") or checker.settings(nid).get("audio_refs")) for nid in ai_todo})
     return {"project": project, "targets": targets, "settings": settings, "todo": todo, "loras": loras,
-            "ai_todo": ai_todo}
+            "ai_todo": ai_todo, "ref_kinds": ref_kinds}
 
 
 def run_job(job: dict, gen, emit, current: dict) -> None:
@@ -162,7 +167,7 @@ def _main_tree(a, emit) -> int:
         missing = gen.missing_loras(job["loras"])
         if missing:
             return _fail(emit, _missing_msg(missing[0]))
-        problem = _speed_problem(gen, job["settings"])
+        problem = _speed_problem(gen, job["settings"], job["ref_kinds"])
         if problem:
             return _fail(emit, problem)
     run_job(job, gen, emit, current)
@@ -194,13 +199,15 @@ class _LineReader:
         return line.decode(errors="replace") + "\n"
 
 
-def _speed_problem(gen, settings: dict) -> str | None:
-    """Why the HyperFlow weights / Pika LoRA these settings need cannot be used (None: fine, or nothing needed)."""
+def _speed_problem(gen, settings: dict, ref_kinds=(None,)) -> str | None:
+    """Why the HyperFlow weights / Pika LoRA these settings need cannot be used (None: fine, or nothing needed).
+    ref_kinds: whether the clips use the reference model (True), the normal one (False), or both."""
     if not hasattr(gen, "check_speed"):
         return None
     from .comfy import ComfyError
     try:
-        gen.check_speed(settings)
+        for kind in ref_kinds:
+            gen.check_speed(settings if kind is None else {**settings, "refs": [True] if kind else None})
     except ComfyError as e:
         return str(e)
     return None
@@ -273,7 +280,7 @@ def serve(a, emit, make_generator: Callable[[dict], object], stdin=None) -> int:
                 missing = gen.missing_loras(job["loras"])
                 if missing:
                     raise JobError(_missing_msg(missing[0]))
-                problem = _speed_problem(gen, job["settings"])
+                problem = _speed_problem(gen, job["settings"], job["ref_kinds"])
                 if problem:
                     raise JobError(problem)
             run_job(job, gen if job["ai_todo"] else None, emit, current)

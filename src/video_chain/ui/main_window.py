@@ -1021,6 +1021,43 @@ class MainWindow(QMainWindow):
         self.ref_size.currentIndexChanged.connect(self._identity_changed)
         self.ref_hint.toggled.connect(self._identity_changed)
 
+        bar, _ = section_bar("Sound reference", left)
+        lv.addWidget(bar)
+        aw = QWidget()
+        av = QVBoxLayout(aw)
+        av.setContentsMargins(10, 6, 10, 8)
+        av.setSpacing(6)
+        self.sounds = QListWidget()
+        self.sounds.setFixedHeight(70)
+        self.sounds.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.sounds.setToolTip("Sound references: in a clip's prompt the first one is <Audio 1>, the second "
+                               "<Audio 2> ... Double-click to listen")
+        self.sounds.itemDoubleClicked.connect(lambda _i: self._play_sound())
+        self.sounds.currentRowChanged.connect(lambda _r: self._update_sound_buttons())
+        av.addWidget(self.sounds)
+        arow = QHBoxLayout()
+        self.b_sound_add = QPushButton("File…")
+        self.b_sound_add.setToolTip("Add the sound of an audio or video file (WAV, MP3, FLAC, MP4 …)")
+        self.b_sound_add.clicked.connect(self._add_sound)
+        self.b_sound_clip = QPushButton("Selected clip")
+        self.b_sound_clip.clicked.connect(self._sound_from_selected)
+        self.b_sound_play = icon_button("play", "Listen to the selected sound reference")
+        self.b_sound_play.clicked.connect(self._play_sound)
+        self.b_sound_del = QPushButton("Remove")
+        self.b_sound_del.setToolTip("Remove the selected sound reference")
+        self.b_sound_del.clicked.connect(self._remove_sound)
+        arow.addWidget(label("Add:", level="tertiary"))
+        arow.addWidget(self.b_sound_add)
+        arow.addWidget(self.b_sound_clip)
+        arow.addStretch(1)
+        arow.addWidget(self.b_sound_play)
+        arow.addWidget(self.b_sound_del)
+        av.addLayout(arow)
+        self.sound_info = label("", level="tertiary")
+        self.sound_info.setWordWrap(True)
+        av.addWidget(self.sound_info)
+        lv.addWidget(aw)
+
         bar, _ = section_bar("Clips", left)
         lv.addWidget(bar)
         cw = QWidget()
@@ -1539,7 +1576,7 @@ class MainWindow(QMainWindow):
             try:                                 # a new project starts with the last used settings
                 last = json.loads(self.qs.value("lastOptions", "{}", type=str))
                 tree.options.update({k: v for k, v in last.items()
-                                     if k in T.DEFAULT_OPTIONS and k not in ("identity", "style")})
+                                     if k in T.DEFAULT_OPTIONS and k not in ("identity", "style", "audio_refs")})
             except ValueError:
                 pass
         self.project, self.tree = folder, tree
@@ -1550,6 +1587,7 @@ class MainWindow(QMainWindow):
         self._options_to_widgets()
         self._show_start_image()
         self._show_references()
+        self._show_sounds()
         if not tree.nodes:
             tree.selected = tree.add(None, "").id
         if tree.selected is None:
@@ -1776,6 +1814,130 @@ class MainWindow(QMainWindow):
                     "act weaker in this mode.")
         self.ident_info.setText(text)
 
+    # ---- sound references (<Audio 1> ...)
+    def _sound_users(self, upto: int = 1) -> list[str]:
+        """Clips whose prompt names <Audio upto> or a later one (they get the sounds up to that one)."""
+        if self.tree is None:
+            return []
+        return [n.id for n in self.tree.nodes.values() if not n.is_video
+                and T.audio_mentioned(T.full_prompt(self.tree.options, n.prompt)) >= upto]
+
+    def _add_sound(self):
+        if self.project is None:
+            self.status.setText("Open or create a project folder first.")
+            return
+        start = self.qs.value("soundDir", "", type=str) or str(Path.home())
+        f, _ = QFileDialog.getOpenFileName(
+            self, "Sound reference (a voice, a soundtrack, a beat: 2-15 s)", start,
+            "Sound or video (*.wav *.mp3 *.flac *.ogg *.m4a *.aac *.opus *.mp4 *.mov *.mkv *.webm);;All files (*)")
+        if f:
+            self.qs.setValue("soundDir", str(Path(f).parent))
+            self.add_sound(f)
+
+    def _sound_from_selected(self):
+        nid = self.tree.selected if self.tree else None
+        node = self.tree.nodes.get(nid) if nid else None
+        if node is None or not (node.made or {}).get("video"):
+            self.status.setText("Select a made clip or a converted video first.")
+            return
+        what = f"{'Video' if node.is_video else 'Clip'} #{nid[1:]}"
+        self.add_sound(str(self.project / node.made["video"]), name=f"sound of {what.lower()}")
+
+    def add_sound(self, path: str, name: str | None = None) -> bool:
+        if self.project is None or self.tree is None or self.running:
+            return False
+        before = self._done_clips()
+        try:
+            entry = T.add_audio_reference(self.project, Path(path), self.tree, name=name)
+        except (ValueError, OSError, RuntimeError) as e:
+            self.status.setText(f"Could not add the sound: {e}")
+            return False
+        n = len(T.audio_refs(self.tree))
+        self._show_sounds(select=n - 1)
+        self._write_tree()
+        self._changed()
+        msg = (f"Sound reference <Audio {n}> added ({entry['secs']:.1f} s"
+               + (", the first part only: all sounds together may have 15 s" if entry.get("cut") else "")
+               + f"). Name it in a clip's prompt as <Audio {n}>.")
+        self.status.setText(msg)
+        if self._report_remade(before, "Sound reference added"):
+            self.status.setText(msg + " " + self.status.text())
+        return True
+
+    def _remove_sound(self):
+        row = self.sounds.currentRow()
+        refs = T.audio_refs(self.tree) if self.tree else []
+        if row < 0 or row >= len(refs) or self.project is None or self.running:
+            return
+        users = self._sound_users(row + 1)
+        later = row + 1 < len(refs)
+        if users:
+            text = (f"Remove <Audio {row + 1}>? {len(users)} clip prompt{'s name' if len(users) != 1 else ' names'} "
+                    f"it or a later sound; made ones count as CHANGED.")
+            if later:
+                text += (f" The sounds after it move up (<Audio {row + 2}> becomes <Audio {row + 1}>), so check "
+                         "those prompts.")
+            if QMessageBox.question(self, "Remove sound reference", text) != QMessageBox.Yes:
+                return
+        before = self._done_clips()
+        T.remove_audio_reference(self.project, refs[row]["file"], self.tree)
+        self._show_sounds()
+        self._write_tree()
+        self._changed()
+        self._report_remade(before, "Sound reference removed")
+
+    def _play_sound(self):
+        row = self.sounds.currentRow()
+        refs = T.audio_refs(self.tree) if self.tree else []
+        if 0 <= row < len(refs) and self.project is not None:
+            self.preview.open(self.project / refs[row]["file"], f"<Audio {row + 1}>: {refs[row].get('name', '')}")
+
+    def _show_sounds(self, select: int | None = None):
+        self.sounds.clear()
+        refs = T.audio_refs(self.tree) if self.tree else []
+        for k, a in enumerate(refs, start=1):
+            item = QListWidgetItem(f"<Audio {k}>   {a.get('name') or Path(a['file']).name}   "
+                                   f"{float(a.get('secs') or 0):.1f} s")
+            item.setToolTip(a["file"])
+            self.sounds.addItem(item)
+        if refs:
+            self.sounds.setCurrentRow(select if select is not None and 0 <= select < len(refs) else 0)
+        self._show_sound_info()
+        self._update_sound_buttons()
+
+    def _show_sound_info(self):
+        refs = T.audio_refs(self.tree) if self.tree else []
+        total = sum(float(a.get("secs") or 0) for a in refs)
+        if not refs:
+            text = ("A voice, music or a beat for clips: add a sound (2-15 s), then name it in a clip's prompt, e.g. "
+                    "\"<Audio 1> is the complete soundtrack\". Only clips that name a sound use it (with the "
+                    "reference model).")
+        else:
+            users = self._sound_users(1)
+            text = (f"{total:.1f} of 15 s used, {len(users)} clip{'s use' if len(users) != 1 else ' uses'} them. "
+                    "\"<Audio 1> is the complete soundtrack\" copies it (measured: works with a plain prompt). A voice "
+                    "only took effect in MiniMax's long reference format (\"<Audio 1> is the voice-timbre reference "
+                    "for <Subject 1> (S1)\" …); a plain \"in the voice of <Audio 1>\" did not in the test.")
+        self.sound_info.setText(text)
+
+    def _update_sound_buttons(self):
+        refs = T.audio_refs(self.tree) if self.tree else []
+        idle = self.project is not None and not self.running
+        total = sum(float(a.get("secs") or 0) for a in refs)
+        room = len(refs) < T.MAX_AUDIO_REFS and total <= T.AUDIO_REF_TOTAL - T.AUDIO_REF_MIN
+        self.b_sound_add.setEnabled(idle and room)
+        nid = self.tree.selected if self.tree else None
+        node = self.tree.nodes.get(nid) if self.tree and nid else None
+        has = node is not None and bool((node.made or {}).get("video"))
+        self.b_sound_clip.setEnabled(idle and room and has)
+        self.b_sound_clip.setToolTip(
+            (f"Add the sound of {'video' if node.is_video else 'clip'} #{nid[1:]} (its first seconds), e.g. to keep "
+             "a voice from an earlier clip" if has else "Select a made clip or a converted video")
+            if room else "There are already 3 sounds or 15 s; remove one first")
+        sel = 0 <= self.sounds.currentRow() < len(refs)
+        self.b_sound_del.setEnabled(idle and sel)
+        self.b_sound_play.setEnabled(sel)
+
     def _changed(self):
         """Something the clips depend on changed: save soon and update the states."""
         self._save_timer.start()
@@ -1884,6 +2046,7 @@ class MainWindow(QMainWindow):
 
     def _update_ref_start_button(self):
         """Enable the 'Add: Start image / Selected clip' buttons and say exactly which frame they take."""
+        self._update_sound_buttons()
         start = self._start_image_there()
         self.b_ref_start.setEnabled(start and not self.running)
         self.b_ref_start.setToolTip("Add the start image as a face reference" if start else
@@ -1964,6 +2127,8 @@ class MainWindow(QMainWindow):
             self.graph.show_nodes([])
             self._update_buttons()
             return
+        if self.tree.options.get("audio_refs"):
+            self._show_sound_info()                # how many clips name a sound (prompts change)
         checker = T.Checker(self.project, self.tree)
         try:
             self.status_of = {nid: checker.status(nid) for nid in self.tree.nodes}
@@ -3300,6 +3465,9 @@ class MainWindow(QMainWindow):
                 no_end = T.missing_end_images(self.project, self.tree, todo)
                 if no_end:
                     problems.append(f"the end image of clip #{no_end[0][1:]} is missing (choose it again)")
+                sounds = T.audio_problems(self.project, self.tree, todo)
+                if sounds:
+                    problems.append(sounds[0] + " (Sound reference)")
             if checker.base() is not None:
                 for lo in T.loras_needed(self.tree, checker, list(nodes)):
                     if not Path(lo).is_file():

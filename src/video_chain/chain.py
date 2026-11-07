@@ -118,6 +118,32 @@ def to_png(image: Path, png: Path) -> None:
         tmp.unlink(missing_ok=True)
 
 
+def audio_seconds(path: Path) -> float | None:
+    """Length of a file's first audio stream in seconds (None: it has no sound)."""
+    out = _run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=duration:format=duration",
+                "-print_format", "json", str(path)])
+    info = json.loads(out or "{}")
+    if not info.get("streams"):
+        return None
+    d = info["streams"][0].get("duration") or (info.get("format") or {}).get("duration")
+    return float(d) if d not in (None, "N/A") else None
+
+
+def to_wav(source: Path, wav: Path, start: float = 0.0, seconds: float | None = None) -> None:
+    """The sound of an audio or video file as 48 kHz stereo WAV (a part of it with start / seconds); written under
+    a temporary name first."""
+    wav = Path(wav)
+    tmp = wav.with_name(wav.stem + ".part.wav")
+    cmd = ["ffmpeg", "-v", "error", "-y", "-ss", f"{float(start):.3f}", "-i", str(source), "-map", "0:a:0", "-vn"]
+    if seconds is not None:
+        cmd += ["-t", f"{float(seconds):.3f}"]
+    try:
+        _run(cmd + ["-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le", str(tmp)])
+        tmp.replace(wav)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def image_size(path: Path) -> tuple[int, int]:
     out = _run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
                 "-of", "csv=p=0", str(path)])
@@ -324,7 +350,7 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
                   ref_size: str = "match", ref_hint: bool = True, extra_loras: list | None = None,
                   turbo: tuple[str, float] | None = None, guide: int = 0,
                   style: tuple[str, str] | None = None, hyperflow: float | None = None,
-                  pika: float | None = None) -> dict:
+                  pika: float | None = None, audio_refs: list | None = None) -> dict:
     """What a clip depends on besides prompt, seed and start image; a clip is reused only if this is unchanged.
     The LoRA counts by content (lora_sha1), so a LoRA retrained into the same file makes its clips change.
     extra_loras: further LoRAs stacked after the first ([(path, strength)]), only present when there are any, so
@@ -344,6 +370,8 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
         s["turbo"] = {"lora": turbo[0], "sha1": file_signature(turbo[0]), "strength": float(turbo[1])}
     if extra_loras:
         s["extra_loras"] = [{"lora": p, "sha1": file_signature(p), "strength": float(st)} for p, st in extra_loras]
+    if audio_refs:                              # sound references (<Audio 1> ...) this clip's prompt names
+        s["audio_refs"] = [{"file": a["file"], "sha1": a["sha1"]} for a in audio_refs]
     if refs:
         s.update({"refs": [{"file": r["file"], "sha1": r["sha1"]} for r in refs], "ref_size": ref_size,
                   "ref_hint": bool(ref_hint)})

@@ -64,11 +64,17 @@ DEFAULT_OPTIONS = {"model": "Comfy-Org/MiniMax-H3", "frames": 73, "steps": 28,
                    "pika": {"on": False, "strength": 1.0},
                    # identity: reference images (copies in refs/) every clip sees, so the face stays the same
                    "identity": {"mode": "off", "images": [], "size": "match", "hint": True},
+                   # sound references (WAV copies in refs/): <Audio 1> ... in a clip's prompt uses them (a voice,
+                   # a soundtrack to copy, a beat); only the clips that name one are made with them
+                   "audio_refs": [],
                    # style text put before / after every prompt (e.g. look, camera, a LoRA's trigger word)
                    "style": {"prefix": "", "suffix": ""}}
 REFS_DIR = "refs"
 ENDS_DIR = "ends"
 MAX_REFS = 9
+MAX_AUDIO_REFS = 3                 # MiniMax H3 ref2va: up to 3 sounds, each 2-15 s, together at most 15 s
+AUDIO_REF_MIN, AUDIO_REF_TOTAL = 2.0, 15.0
+AUDIO_TAG = re.compile(r"<Audio\s*(\d+)>", re.IGNORECASE)
 
 
 @dataclass
@@ -371,6 +377,75 @@ def add_reference(project: Path, image: Path, tree: Tree) -> str:
     return rel
 
 
+def audio_refs(tree: Tree) -> list[dict]:
+    """The project's sound references ({"file", "name", "secs"}), <Audio 1> first."""
+    return list(tree.options.get("audio_refs") or [])
+
+
+def add_audio_reference(project: Path, source: Path, tree: Tree, start: float = 0.0,
+                        name: str | None = None) -> dict:
+    """Copy the sound of an audio or video file into refs/ as <Audio N> (from start, cut to what is left of the
+    15 s all sounds may have together). Returns the new entry, with "cut": the source was longer."""
+    refs = audio_refs(tree)
+    if len(refs) >= MAX_AUDIO_REFS:
+        raise ValueError(f"at most {MAX_AUDIO_REFS} sound references")
+    total = sum(float(a.get("secs") or 0) for a in refs)
+    left = round(AUDIO_REF_TOTAL - total, 3)
+    if left < AUDIO_REF_MIN:
+        raise ValueError(f"the sounds already have {total:.1f} of the {AUDIO_REF_TOTAL:.0f} s MiniMax H3 takes; "
+                         "remove one first")
+    length = chain.audio_seconds(Path(source))
+    if length is None:
+        raise ValueError(f"{Path(source).name} has no sound")
+    have = length - float(start)
+    if have < AUDIO_REF_MIN:
+        raise ValueError(f"a sound reference needs at least {AUDIO_REF_MIN:.0f} s ({Path(source).name} has "
+                         f"{max(have, 0):.1f} s)")
+    secs = min(have, left)
+    d = Path(project) / REFS_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    used = {a["file"] for a in refs}
+    k = 1
+    while (d / f"audio{k}.wav").exists() or f"{REFS_DIR}/audio{k}.wav" in used:
+        k += 1
+    rel = f"{REFS_DIR}/audio{k}.wav"
+    chain.to_wav(Path(source), Path(project) / rel, start, secs if have > left else None)
+    real = chain.audio_seconds(Path(project) / rel) or secs
+    entry = {"file": rel, "name": name or Path(source).name, "secs": round(real, 2)}
+    tree.options["audio_refs"] = refs + [entry]
+    return {**entry, "cut": have > left + 0.01}
+
+
+def remove_audio_reference(project: Path, rel: str, tree: Tree) -> None:
+    tree.options["audio_refs"] = [a for a in audio_refs(tree) if a["file"] != rel]
+    target = (Path(project) / rel).resolve()
+    if (Path(project) / REFS_DIR).resolve() in target.parents:
+        target.unlink(missing_ok=True)
+
+
+def audio_mentioned(prompt: str) -> int:
+    """The highest <Audio N> a prompt names (0: none). The model numbers its sounds in order, so a clip naming
+    <Audio 2> gets <Audio 1> and <Audio 2>."""
+    return max((int(m) for m in AUDIO_TAG.findall(prompt or "")), default=0)
+
+
+def audio_problems(project: Path, tree: Tree, todo: list[str]) -> list[str]:
+    """Why clips to be made cannot get the sounds their prompts name (one message per problem)."""
+    refs = audio_refs(tree)
+    out = []
+    for nid in todo:
+        node = tree.nodes[nid]
+        if node.is_video:
+            continue
+        n = audio_mentioned(full_prompt(tree.options, node.prompt))
+        if n > len(refs):
+            out.append(f"clip #{nid[1:]} names <Audio {n}>, but there {'is' if len(refs) == 1 else 'are'} only "
+                       f"{len(refs)} sound reference{'' if len(refs) == 1 else 's'}")
+        elif any(not (Path(project) / a["file"]).is_file() for a in refs[:n]):
+            out.append(f"a sound reference of clip #{nid[1:]} is missing in refs/")
+    return out
+
+
 def remove_reference(project: Path, rel: str, tree: Tree) -> None:
     ident = dict(tree.options.get("identity") or {})
     ident["images"] = [r for r in ident.get("images") or [] if r != rel]
@@ -546,6 +621,7 @@ class Checker:
         self.project, self.tree = Path(project), tree
         self._status: dict[str, str] = {}
         self._settings: dict | None = None
+        self._audio: list[dict] | None = None
 
     def sha(self, path: Path | None) -> str | None:
         """SHA-1 of a frame, cached across checks by (path, size, date): a check after every edit must not read
@@ -557,9 +633,17 @@ class Checker:
             self._settings = current_settings(self.project, self.tree.options, self.tree)
         return self._settings
 
+    def audio_pool(self) -> list[dict]:
+        """The sound references with their content hash (None: the file is missing)."""
+        if self._audio is None:
+            self._audio = [{"file": a["file"], "sha1": self.sha(self.project / a["file"])}
+                           for a in audio_refs(self.tree)]
+        return self._audio
+
     def settings(self, nid: str) -> dict | None:
         base = self.base()
-        return None if base is None else node_settings(base, self.tree.options, self.tree.nodes[nid])
+        return None if base is None else node_settings(base, self.tree.options, self.tree.nodes[nid],
+                                                       self.audio_pool())
 
     def start_frame(self, node: Node) -> Path | None:
         """The frame a generated clip starts from: the parent's last frame, the start image, or None (a first
@@ -727,10 +811,13 @@ def node_loras(node: Node) -> list[tuple[str, float]]:
     return _extras((node.overrides or {}).get("loras"))
 
 
-def node_settings(base: dict, options: dict, node: Node) -> dict:
+def node_settings(base: dict, options: dict, node: Node, audio_pool: list[dict] | None = None) -> dict:
     """The settings one node is made with: the project's, with the node's own LoRA stack and overrides.
-    The first LoRA of the stack is recorded as "lora", the others as "extra_loras" (as before)."""
+    The first LoRA of the stack is recorded as "lora", the others as "extra_loras" (as before).
+    audio_pool: the project's sound references ({"file", "sha1"}); the clip records those up to the highest
+    <Audio N> its prompt names (none: nothing recorded, as before)."""
     ov = node.overrides or {}
+    n_audio = 0 if node.is_video else audio_mentioned(full_prompt(options, node.prompt))
     stack = node_loras(node)
     lora, strength = stack[0] if stack else (None, 1.0)
     return chain.settings_dict(model=base["model"], lora=lora, extra_loras=stack[1:],
@@ -746,7 +833,8 @@ def node_settings(base: dict, options: dict, node: Node) -> dict:
                                backend="comfyui", refs=base.get("refs"),
                                ref_size=base.get("ref_size", "match"), ref_hint=base.get("ref_hint", True),
                                guide=int(ov.get("guide") or 0),
-                               style=(base.get("prompt_prefix", ""), base.get("prompt_suffix", "")))
+                               style=(base.get("prompt_prefix", ""), base.get("prompt_suffix", "")),
+                               audio_refs=(audio_pool or [])[:n_audio] if n_audio else None)
 
 
 def loras_needed(tree: Tree, checker: "Checker", nids: list[str]) -> list[str]:
@@ -1061,6 +1149,8 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
             call = dict(settings)
             if settings.get("refs"):               # the generator gets the files; the record keeps names + hashes
                 call["ref_paths"] = [str(project / r["file"]) for r in settings["refs"]]
+            if settings.get("audio_refs"):
+                call["audio_paths"] = [str(project / a["file"]) for a in settings["audio_refs"]]
             try:
                 with tempfile.TemporaryDirectory(prefix="video-chain-", dir=str(nodes_dir)) as tmp:
                     guides, end_image = _guides(project, tree, node, settings, Path(tmp))

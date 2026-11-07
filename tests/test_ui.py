@@ -551,6 +551,47 @@ def test_identity_references_in_the_window(app, win, tmp_path, image):
     assert [win.state(i) for i in ids] == ["changed", "changed"]               # made with refs, now without
 
 
+def test_sound_references_in_the_window(app, win, tmp_path, image, monkeypatch):
+    import subprocess
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    ids = new_project(win, tmp_path, image, ("a", "b"))
+    run_and_wait(app, win, win.generate_path)
+    wait(app, lambda: not win._joins, timeout=30)
+    wav = tmp_path / "voice.wav"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=330:duration=4", str(wav)],
+                   check=True)
+    assert win.add_sound(str(wav))
+    flush(app, win)
+    assert win.sounds.count() == 1 and win.sounds.item(0).text().startswith("<Audio 1>   voice.wav   4.0 s")
+    assert "<Audio 1> added" in win.status.text() and [win.state(i) for i in ids] == ["done", "done"]
+    assert "4.0 of 15 s used, 0 clips use them" in win.sound_info.text() and win.b_sound_del.isEnabled()
+    type_prompt(win, ids[1], "b, in the voice of <Audio 2>")
+    flush(app, win)
+    assert win.state(ids[1]) == "changed"
+    win.generate_path()
+    assert not win.running and "names <Audio 2>, but there is only 1 sound reference" in win.status.text()
+    type_prompt(win, ids[1], "b, in the voice of <Audio 1>")
+    flush(app, win)
+    assert "1 clip uses them" in win.sound_info.text()
+    win.tree.selected = ids[0]
+    assert win.b_sound_clip.isEnabled()
+    win._sound_from_selected()                          # the test clips are 0.7 s: too short, and it says so
+    flush(app, win)
+    assert win.sounds.count() == 1 and "needs at least 2 s" in win.status.text()
+    win.select(ids[1])
+    run_and_wait(app, win, win.generate_path)
+    made = T.load(tmp_path / "proj").nodes[ids[1]].made["settings"]
+    assert [a["file"] for a in made["audio_refs"]] == ["refs/audio1.wav"]
+    wait(app, lambda: not win._joins, timeout=30)
+    win.open_project(tmp_path / "proj")                                         # kept with the project
+    assert win.sounds.count() == 1 and win.state(ids[1]) == "done"
+    win.sounds.setCurrentRow(0)
+    win._remove_sound()
+    flush(app, win)
+    assert win.sounds.count() == 0 and not (tmp_path / "proj" / "refs" / "audio1.wav").exists()
+    assert win.state(ids[1]) == "changed" and win.state(ids[0]) == "done"       # only the clip that named it
+
+
 def test_stacked_loras_in_the_window(app, tmp_path, image, monkeypatch):
     from video_chain.ui.main_window import MainWindow
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)

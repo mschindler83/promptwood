@@ -336,6 +336,56 @@ def test_identity_references(project, tmp_path):
     assert T.Tree().options["identity"] is not T.Tree().options["identity"]     # defaults are not shared
 
 
+def sound(path, secs, video=False):
+    import subprocess
+    cmd = ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"sine=frequency=330:duration={secs}"]
+    if video:
+        cmd += ["-f", "lavfi", "-i", f"color=gray:s=64x48:d={secs}", "-shortest"]
+    subprocess.run(cmd + [str(path)], check=True)
+    return path
+
+
+def test_sound_references(project, tmp_path):
+    """<Audio N> in a clip's prompt: only those clips record (and get) the sounds, up to the highest one named."""
+    t, a, b1, b2, c = build(project)
+    run(project, [c.id, b2.id])
+    t = T.load(project)
+    one = T.add_audio_reference(project, sound(tmp_path / "voice.mp3", 6), t)
+    assert one["file"] == "refs/audio1.wav" and one["name"] == "voice.mp3" and not one["cut"]
+    assert abs(one["secs"] - 6) < 0.1 and (project / one["file"]).is_file()
+    two = T.add_audio_reference(project, sound(tmp_path / "clip.mp4", 12, video=True), t, name="clip sound")
+    assert two["cut"] and abs(two["secs"] - 9) < 0.1                          # 15 s together at most
+    with pytest.raises(ValueError, match="15 s"):
+        T.add_audio_reference(project, sound(tmp_path / "beat.wav", 3), t)
+    T.save(project, t)
+    assert set(statuses(project).values()) == {"done"}                          # nobody names a sound yet
+    t = T.load(project)
+    t.nodes[b1.id].prompt = "b1, she speaks in the voice of <Audio 2>"
+    T.save(project, t)
+    st = statuses(project)
+    assert st["b1, she speaks in the voice of <Audio 2>"] == "changed" and st["b2"] == "done" and st["a"] == "done"
+    s = T.Checker(project, T.load(project)).settings(b1.id)
+    assert [x["file"] for x in s["audio_refs"]] == ["refs/audio1.wav", "refs/audio2.wav"]     # 1 too: numbered
+    gen = run(project, [c.id])
+    call = next(x["settings"] for x in gen.calls if x["prompt"].startswith("b1"))
+    assert call["audio_paths"] == [str(project / "refs/audio1.wav"), str(project / "refs/audio2.wav")]
+    assert "audio_paths" not in T.load(project).nodes[b1.id].made["settings"]
+    assert all("audio_refs" not in x["settings"] for x in gen.calls if not x["prompt"].startswith("b1"))
+    sound(project / "refs/audio2.wav", 4)                                       # another sound in its place
+    assert statuses(project)["b1, she speaks in the voice of <Audio 2>"] == "changed"
+    t = T.load(project)
+    t.nodes[b2.id].prompt = "b2 with <Audio 3>"
+    assert T.audio_problems(project, t, [b2.id]) == ["clip #" + b2.id[1:] + " names <Audio 3>, but there are only 2 "
+                                                      "sound references"]
+    T.remove_audio_reference(project, "refs/audio1.wav", t)
+    assert not (project / "refs/audio1.wav").exists() and [x["file"] for x in T.audio_refs(t)] == ["refs/audio2.wav"]
+    with pytest.raises(ValueError, match="no sound"):
+        T.add_audio_reference(project, tmp_path / "in.jpg", t)
+    with pytest.raises(ValueError, match="at least 2 s"):
+        T.add_audio_reference(project, sound(tmp_path / "short.wav", 1), t)
+    assert T.audio_mentioned("x <audio 1> and <Audio  3>") == 3 and T.audio_mentioned("none") == 0
+
+
 def test_old_project_loras_become_each_clips_own(project, tmp_path):
     """Older trees had a project LoRA (+ extra LoRAs) and per-clip overrides; on load every clip gets the stack it
     was made with, so its clips stay done."""
