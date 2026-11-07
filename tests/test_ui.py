@@ -1217,6 +1217,7 @@ def test_style_text_in_the_window(app, win, tmp_path, image):
 
 
 def test_ai_image_edit_for_start_and_end_images(app, tmp_path, image, monkeypatch):
+    from PySide6.QtCore import Qt
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from fake_comfy import FakeComfy
 
@@ -1267,10 +1268,31 @@ def test_ai_image_edit_for_start_and_end_images(app, tmp_path, image, monkeypatc
         dlg2.loras.set_items(dlg2._known(), [])
         dlg2._prompt_again()                                        # back to the selected result's prompt and LoRAs
         assert dlg2.loras.items() == [{"path": str(lora), "strength": 0.7}]
+        # bad results can be deleted; one that is in use (here: the end image of clip 2, a face reference) not
+        dlg2.results.setCurrentRow(next(i for i in range(dlg2.results.count())
+                                        if dlg2.results.item(i).data(Qt.UserRole)[0] == png))
+        assert not dlg2.b_delete.isEnabled() and dlg2.res_info.text().startswith(
+            f"IN USE: face reference <Picture 1>, the end image of clip #{ids[1][1:]} · ")
+        other = next(i for i in range(dlg2.results.count()) if dlg2.results.item(i).data(Qt.UserRole)[0] != png)
+        dlg2.results.setCurrentRow(other)
+        bad = dlg2.selected()[0]
+        assert dlg2.b_delete.isEnabled()
+        dlg2.b_delete.click()
+        assert dlg2.results.count() == 1 and not Path(bad).exists() and not dlg2.b_undo.isHidden()
+        dlg2.b_undo.click()                                         # undo: it is back
+        assert dlg2.results.count() == 2 and Path(bad).is_file()
+        dlg2.results.setCurrentRow(next(i for i in range(dlg2.results.count())
+                                        if dlg2.results.item(i).data(Qt.UserRole)[0] == bad))
+        dlg2.b_delete.click()
+        dlg2.results.setCurrentRow(0)
         assert dlg2.b_use_end.isEnabled() is False
         before = (w.project / T.START_FILE).read_bytes()
         dlg2.b_use_start.click()
         assert (w.project / T.START_FILE).read_bytes() != before and w.state(ids[0]) == "changed"
+        assert not (w.project / "edits" / ".deleted").exists() and not Path(bad).exists()   # gone for good on close
+        dlg4 = w.edit_image(start=True, dialog=False)
+        assert dlg4.results.count() == 1 and "the start image" in dlg4.res_info.text() and not dlg4.b_delete.isEnabled()
+        dlg4.reject()
         assert any(text == "Project AI edits" for text, _p in w._picker_places())
         server.close()                                              # ComfyUI gone: a clear message
         dlg3 = w.edit_image(start=True, dialog=False)

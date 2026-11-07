@@ -36,7 +36,7 @@ from .graph import START, GraphView, NodeInfo
 from .image_picker import pick_image
 from .clip_dialogs import CompareDialog, HandoverDialog
 from .lora_stack import LoraStack, fill_lora_combo, lora_label, lora_path
-from .image_edit import EDITS_DIR, ImageEditDialog
+from .image_edit import EDITS_DIR, ImageEditDialog, record_use, uses_of
 from .video_editor import VideoRangeDialog, choose_video
 from .theme import icon, repolish, theme
 from .widgets import FrameTile, guard_wheel, icon_button, label, section_bar
@@ -2552,12 +2552,16 @@ class MainWindow(QMainWindow):
             if kind == "ref":                       # one more face reference; the dialog stays open
                 if not self.add_reference(png):
                     return False
-                n = len((self.tree.options.get("identity") or {}).get("images") or [])
+                refs = (self.tree.options.get("identity") or {}).get("images") or []
+                record_use(png, {"kind": "ref", "file": refs[-1]})
+                n = len(refs)
                 return (f"Added as face reference <Picture {n}> (left panel); name it in prompts as "
                         f"<Picture {n}>." + (f" {self.status.text()}" if "CHANGED" in self.status.text() else ""))
             ok = self.set_image(png, confirm=True) if kind == "start" else \
                 bool(target) and self.set_end_image(target, png)
             if ok:
+                record_use(png, {"kind": "start", "sha1": chain.file_signature(self.project / T.START_FILE)}
+                           if kind == "start" else {"kind": "end", "file": self.tree.nodes[target].end_image})
                 self.status.setText(("New start image from the AI edit" if kind == "start" else
                                      f"Clip #{target[1:]} now ends at the AI-edited image") +
                                     (f" — {self.status.text()}" if "CHANGED" in self.status.text() else "."))
@@ -2567,7 +2571,8 @@ class MainWindow(QMainWindow):
                   else Path(n).stem) for p, n in self.qwen_loras]
         dlg = ImageEditDialog(self, self.project, sources, first, target, connect, use, self.qs,
                               self._picker_places(), start_comfy=self.start_comfy, on_start=before_edit,
-                              known_loras=known, lora_dir=self._lora_dir())
+                              known_loras=known, lora_dir=self._lora_dir(),
+                              uses=lambda meta: uses_of(self.project, self.tree, meta))
         if dialog:
             dlg.exec()
             dlg.deleteLater()

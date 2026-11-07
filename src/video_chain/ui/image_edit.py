@@ -61,6 +61,40 @@ def project_edits(project: Path) -> list[tuple[Path, dict]]:
     return sorted(out, key=lambda x: x[0].stat().st_mtime, reverse=True)
 
 
+def record_use(png: str | Path, use: dict) -> None:
+    """Note in a result's record which project copy it became ({"kind": "start", "sha1"} / {"kind": "end",
+    "file"} / {"kind": "ref", "file"}), so the window knows it is in use."""
+    meta_file = Path(png).with_suffix(".json")
+    try:
+        meta = json.loads(meta_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        meta = {}
+    uses = [u for u in meta.get("uses") or [] if u != use]
+    meta["uses"] = uses + [use]
+    meta_file.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def uses_of(project: Path, tree, meta: dict) -> list[str]:
+    """Where a result is used now, in words: the start image (still that picture), a clip's end image (set now or
+    made with), a face reference. Empty: it can go."""
+    from .. import chain
+    from .. import tree as T
+    out = []
+    ident = (tree.options.get("identity") or {}) if tree is not None else {}
+    refs = list(ident.get("images") or [])
+    for u in meta.get("uses") or []:
+        kind = u.get("kind")
+        if kind == "start" and u.get("sha1") and chain.file_signature(Path(project) / T.START_FILE) == u["sha1"]:
+            out.append("the start image")
+        elif kind == "end" and tree is not None:
+            for n in tree.nodes.values():
+                if u.get("file") and u["file"] in (n.end_image, (n.made or {}).get("end_image")):
+                    out.append(f"the end image of clip #{n.id[1:]}")
+        elif kind == "ref" and u.get("file") in refs:
+            out.append(f"face reference <Picture {refs.index(u['file']) + 1}>")
+    return list(dict.fromkeys(out))
+
+
 class _Sig(QObject):
     progress = Signal(int, int, int, int)       # try k, of n, step i, of steps
     result = Signal(str, object)                # png, meta
@@ -117,13 +151,16 @@ class ImageEditDialog(QDialog):
 
     def __init__(self, parent, project: Path, sources: list[tuple[str, str]], source: str | None,
                  end_target: str | None, connect, on_use, settings=None, places=None, start_comfy=None,
-                 on_start=None, known_loras: list[tuple[str, str]] | None = None, lora_dir: str = ""):
+                 on_start=None, known_loras: list[tuple[str, str]] | None = None, lora_dir: str = "",
+                 uses=None):
         super().__init__(parent)
         self.setWindowTitle("Edit an image with AI (Qwen Image Edit)")
         self.resize(1240, 820)
         self.project, self.connect_editor, self.on_use = Path(project), connect, on_use
         self.end_target, self.qs, self.places, self.start_comfy = end_target, settings, places or [], start_comfy
         self.on_start = on_start                         # called (GUI thread) before each Generate
+        self.uses = uses or (lambda _meta: [])           # uses(meta) -> where a result is used (words)
+        self._trash: Path | None = None                  # the result deleted last (Undo delete brings it back)
         self.source: str | None = None
         self.editor = None
         self._busy = False
@@ -281,9 +318,18 @@ class ImageEditDialog(QDialog):
         self.b_again = QPushButton("Use its prompt and LoRAs")
         self.b_again.setToolTip("Put the prompt and the LoRAs this result was made with into the fields")
         self.b_again.clicked.connect(self._prompt_again)
+        self.b_delete = QPushButton("Delete")
+        self.b_delete.setProperty("variant", "danger")
+        self.b_delete.clicked.connect(self.delete_selected)
+        self.b_undo = QPushButton("Undo delete")
+        self.b_undo.setToolTip("Bring the result deleted last back")
+        self.b_undo.clicked.connect(self.undo_delete)
+        self.b_undo.hide()
         for b in (self.b_use_start, self.b_use_end, self.b_use_ref, self.b_further, self.b_again):
             arow.addWidget(b)
         arow.addStretch(1)
+        arow.addWidget(self.b_undo)
+        arow.addWidget(self.b_delete)
         right.addLayout(arow)
         close = QDialogButtonBox(QDialogButtonBox.Close)
         close.rejected.connect(self.reject)
@@ -291,6 +337,7 @@ class ImageEditDialog(QDialog):
         top.addLayout(right, 1)
 
         QShortcut(QKeySequence("Ctrl+Return"), self, activated=self.generate)
+        QShortcut(QKeySequence("Delete"), self.results, activated=self.delete_selected)
         self._b = QShortcut(QKeySequence("B"), self.results, activated=self.b_before.toggle)
         guard_wheel(self)
         self._load_results()
@@ -365,7 +412,9 @@ class ImageEditDialog(QDialog):
             self.view.set_image(QImage(show))
             when = time.strftime("%Y-%m-%d %H:%M", time.localtime(Path(png).stat().st_mtime))
             used = " · ".join(f"{lora_label(lo['path'])} ×{lo['strength']:g}" for lo in meta.get("loras") or [])
+            where = self.uses(meta)
             self.res_info.setText(("ORIGINAL · " if show != png else "") +
+                                  (f"IN USE: {', '.join(where)} · " if where else "") +
                                   f"“{meta.get('prompt', '')}” · {QUALITY_TEXT.get(meta.get('quality'), '')} · "
                                   + (f"{used} · " if used else "") + f"seed {meta.get('seed', '?')} · {when}")
         self._update_buttons()
@@ -380,6 +429,11 @@ class ImageEditDialog(QDialog):
         for b in (self.b_use_start, self.b_use_ref, self.b_further, self.b_again, self.b_before):
             b.setEnabled(has)
         self.b_use_end.setEnabled(has and self.end_target is not None)
+        sel = self.selected()
+        where = self.uses(sel[1]) if sel is not None else []
+        self.b_delete.setEnabled(has and idle and not where)
+        self.b_delete.setToolTip("Delete this result (Del); Undo delete brings it back" if not where else
+                                 f"In use as {', '.join(where)}: it stays (the project keeps its own copy)")
 
     # ---- generating
     def generate(self):
@@ -486,6 +540,53 @@ class ImageEditDialog(QDialog):
             self.used = (kind, sel[0])
             self.accept()
 
+    # ---- deleting bad results
+    def delete_selected(self):
+        """Delete the selected result if it is not in use; it can be brought back until the window closes."""
+        sel = self.selected()
+        if sel is None or self._busy or self.uses(sel[1]):
+            return
+        png = Path(sel[0])
+        self._empty_trash()
+        trash = self.project / EDITS_DIR / ".deleted"
+        trash.mkdir(exist_ok=True)
+        row = self.results.currentRow()
+        for f in (png, png.with_suffix(".json")):
+            if f.exists():
+                f.replace(trash / f.name)
+        self._trash = trash / png.name
+        self._load_results()
+        if self.results.count():
+            self.results.setCurrentRow(min(row, self.results.count() - 1))
+        self.b_undo.show()
+        self.state.setText(f"Deleted {png.name}.")
+
+    def undo_delete(self):
+        if self._trash is None:
+            return
+        back = self.project / EDITS_DIR / self._trash.name
+        for f in (self._trash, self._trash.with_suffix(".json")):
+            if f.exists():
+                f.replace(back.with_suffix(f.suffix))
+        self._trash = None
+        self.b_undo.hide()
+        self._load_results(select=str(back))
+        self.state.setText(f"{back.name} is back.")
+
+    def _empty_trash(self):
+        """Delete for good what was deleted before, and originals no result needs any more."""
+        trash = self.project / EDITS_DIR / ".deleted"
+        if trash.is_dir():
+            for f in trash.iterdir():
+                f.unlink(missing_ok=True)
+            trash.rmdir()
+        self._trash = None
+        needed = {m.get("source_copy") for _p, m in project_edits(self.project)}
+        for f in (self.project / EDITS_DIR / "sources").glob("*") if (self.project / EDITS_DIR / "sources").is_dir() \
+                else []:
+            if str(f) not in needed and f.stat().st_mtime < time.time() - 5:
+                f.unlink(missing_ok=True)
+
     def _add_reference(self):
         """The selected result as one more face reference; the dialog stays open."""
         sel = self.selected()
@@ -558,4 +659,5 @@ class ImageEditDialog(QDialog):
     def done(self, r):
         if self._busy:
             self.cancel()
+        self._empty_trash()
         super().done(r)
