@@ -84,6 +84,7 @@ QPushButton[variant="primary"]:pressed { background: ${accentPressed}; }
 QPushButton[variant="primary"]:disabled { background: ${accent@.35}; color: ${onAccent}; }
 QPushButton[variant="danger"] { background: ${negative@.15}; color: ${negativeText}; }
 QPushButton[variant="danger"]:hover { background: ${negative@.24}; }
+QPushButton[variant="danger"]:disabled { background: ${bgRaised}; color: ${textDisabled}; }
 QPushButton[variant="ghost"] { background: transparent; color: ${textSecondary}; }
 QPushButton[variant="ghost"]:hover { background: ${white@.045}; color: ${textPrimary}; }
 QPushButton[size="large"] { min-height: 28px; padding: 0 14px; }

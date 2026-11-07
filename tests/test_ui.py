@@ -1350,3 +1350,11 @@ def test_export_refined_and_hyperflow_speed(app, win, tmp_path, image):
     from video_chain.comfy import refine_size
     assert (info["width"], info["height"]) == refine_size(base["width"], base["height"], "2k")
     assert win.status.text().startswith(f"Exported {out.name} (2k, refined; 2 clips refined now")
+
+
+def test_stop_looks_disabled_when_nothing_runs(app, win):
+    """The danger style must not hide that Stop is disabled (it looked active after a finished export)."""
+    from video_chain.ui.theme import ThemeManager
+    qss = ThemeManager.instance().qss
+    assert 'QPushButton[variant="danger"]:disabled' in qss
+    assert not win.running and not win.b_stop.isEnabled()
