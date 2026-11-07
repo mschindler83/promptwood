@@ -36,7 +36,7 @@ from .graph import START, GraphView, NodeInfo
 from .image_picker import pick_image
 from .video_editor import VideoRangeDialog, choose_video
 from .theme import icon, repolish, theme
-from .widgets import FrameTile, icon_button, label, section_bar
+from .widgets import FrameTile, guard_wheel, icon_button, label, section_bar
 
 DEFAULT_COMFY_URL = "http://127.0.0.1:8188"
 DEFAULT_COMFY_LAUNCHER = str(Path.home() / "bin" / "comfyui")
@@ -70,6 +70,9 @@ STATE_TIP = {"done": "Made, and nothing it depends on changed: it is reused, not
              "failed": "Making it failed (see the status bar)", "stopped": "Stopped before it was finished"}
 STATE_STYLE = {"done": "done", "reused": "done", "generating": "target", "failed": "failed", "stopped": "missing",
                "changed": "missing", "new": "", "converting": "target"}
+GUIDE_TIP = ("How much this clip takes over from the clip before it (and from a real video after it). Last frame "
+             "only: it starts at that frame. 5-39 frames: those frames, with their sound, are put into this clip, so "
+             "motion and voice carry over; they are left out when the path is played or exported")
 GUIDE_TEXT = [(None, "last frame only"), (5, "5 frames (0.2 s)"), (22, "22 frames (0.9 s)"), (39, "39 frames (1.6 s)")]
 
 
@@ -177,7 +180,7 @@ class VariantsDialog(QDialog):
 class _Bridge(QObject):
     joined = Signal(object, object, str, str, str)  # path or None, error or None, purpose, status prefix, project
     comfy = Signal(bool)                       # ComfyUI reachable
-    loras = Signal(list)                       # H3 LoRAs found in ComfyUI's LoRA folders
+    loras = Signal(list, bool)                 # H3 LoRAs found in ComfyUI's LoRA folders, report them
     copied = Signal(str, str)                  # Save as: target folder, error ('' = done)
     converted = Signal(str, object, str, str, str)  # video node id, record or None, error, token, project
 
@@ -250,6 +253,7 @@ class LoraStack(QWidget):
 
     def set_items(self, known: list[tuple[str, str]], items: list[dict]):
         self.known = list(known)
+        empty = sum(1 for _w, c, _s in self.rows if not c.currentData())   # '+ LoRA' rows not chosen yet stay
         for w, _c, _s in self.rows:
             self.v.removeWidget(w)
             w.setParent(None)
@@ -257,6 +261,8 @@ class LoraStack(QWidget):
         self.rows = []
         for it in items or []:
             self._add_row(it.get("path"), float(it.get("strength", 1.0)))
+        for _ in range(empty):
+            self._add_row(None, 1.0)
         self.none.setVisible(not self.rows)
 
     def _add_row(self, path: str | None, strength: float):
@@ -267,6 +273,7 @@ class LoraStack(QWidget):
         combo = QComboBox(w)
         combo.addItem("choose a LoRA …", None)
         fill_lora_combo(combo, self.known, path)
+        combo.setProperty("stored", path or "")   # the path as stored (the list may show a link to the same file)
         spin = QDoubleSpinBox(w)
         spin.setRange(0.0, 2.0)
         spin.setSingleStep(0.05)
@@ -285,6 +292,7 @@ class LoraStack(QWidget):
         rm.clicked.connect(lambda: self._remove(row))
         for x in (combo, spin, rm):
             x.setEnabled(self._enabled)
+        guard_wheel(combo, spin)
         self.none.hide()
 
     def _remove(self, row):
@@ -301,6 +309,9 @@ class LoraStack(QWidget):
         for _w, combo, spin in self.rows:
             path = combo.currentData()
             if path and path != T.NO_LORA:
+                stored = combo.property("stored") or ""
+                if stored and stored != path and os.path.realpath(stored) == os.path.realpath(path):
+                    path = stored                 # the same file: keep its path, so the clip stays done
                 out.append({"path": lora_path(path), "strength": round(spin.value(), 2)})
         return out
 
@@ -415,10 +426,7 @@ class PromptCard(QFrame):
         self.guide = QComboBox()
         for n, text in GUIDE_TEXT:
             self.guide.addItem(text, n)
-        self.guide.setToolTip("How much this clip takes over from the clip before it (and from a real video after "
-                              "it). Last frame only: it starts at that frame. 5-39 frames: those frames, with their "
-                              "sound, are put into this clip, so motion and voice carry over; they are left out "
-                              "when the path is played or exported")
+        self.guide.setToolTip(GUIDE_TIP)
         link.addRow("Carry-over", self.guide)
         erow = QHBoxLayout()
         erow.setSpacing(6)
@@ -437,6 +445,7 @@ class PromptCard(QFrame):
         link.addRow("End", erow)
         self._end_free = True                    # no video after this clip: its own end image can be set
         self._has_end = False
+        self._guide_useful = True                # there is a clip before it or a video after it
         v.addLayout(link)
         self._show_settings(PromptCard.settings_open)
         self.guide.currentIndexChanged.connect(self._ov_changed)
@@ -459,6 +468,8 @@ class PromptCard(QFrame):
         v.addWidget(self.bar)
         self.edit.textChanged.connect(self._text)
         self.seed.valueChanged.connect(lambda s: self.seedChanged.emit(self.nid, s))
+        self.guide.currentIndexChanged.connect(lambda *_: self._enable_guide())
+        guard_wheel(self)
         self._words()
         self._restyle()
 
@@ -480,6 +491,7 @@ class PromptCard(QFrame):
                 self.guide.addItem(f"{self.ov['guide']} frames", self.ov["guide"])
                 g = self.guide.count() - 1
             self.guide.setCurrentIndex(g)
+            self._enable_guide()
             self.steps.setToolTip(f"Sampling steps of this clip (lowest value = the project's: {project_steps})")
             self.steps.setEnabled(not self.edit.isReadOnly() and not self.steps_locked)
             if self.steps_locked:
@@ -537,6 +549,7 @@ class PromptCard(QFrame):
         for w in (self.seed, self.length, self.steps, self.loras, self.guide, *self.buttons):
             w.setEnabled(on)
         self.steps.setEnabled(on and not self.steps_locked)
+        self._enable_guide()
         self._enable_end()
         self.b_revert.setEnabled(on)
 
@@ -559,6 +572,21 @@ class PromptCard(QFrame):
         if edited:
             self.b_revert.setToolTip(f"Back to the {' and '.join(edited)} this clip was made with, so it counts as "
                                      "done again and is not made again")
+
+    def set_guide_useful(self, useful: bool):
+        """Carry-over needs a clip before this one or a real video after it; a first clip without a video after it
+        has nothing to carry over."""
+        self._guide_useful = bool(useful)
+        self._enable_guide()
+
+    def _enable_guide(self):
+        on = not self.edit.isReadOnly()
+        has = bool(self.guide.currentData())
+        self.guide.setEnabled(on and (self._guide_useful or has))   # a set value can always be taken back
+        self.guide.setToolTip(GUIDE_TIP if self._guide_useful else
+                              "The first clip has no clip before it (and no real video after it): there is "
+                              "nothing to carry over" + (" — this setting has no effect; set it back to "
+                                                         "'last frame only'" if has else ""))
 
     def _enable_end(self):
         on = not self.edit.isReadOnly()
@@ -844,6 +872,7 @@ class MainWindow(QMainWindow):
         self.bridge.converted.connect(self._converted)
         self.h3_loras: list[tuple[str, str]] = []
         self.turbo_loras: list[tuple[str, str]] = []
+        self._scanned_at = 0.0                  # last LoRA scan (monotonic)
         self.comfy_up: bool | None = None
         self._comfy_polling = False
         self._comfy_starting = 0.0
@@ -1066,7 +1095,14 @@ class MainWindow(QMainWindow):
         self.comfy_dir = QLineEdit(DEFAULT_COMFY_DIR)
         self.comfy_dir.setToolTip("ComfyUI's folder: its LoRA folders are searched for the chosen LoRA files, and "
                                   "its copies of the clips are removed after they were taken over")
-        a.addRow("Folder", self.comfy_dir)
+        drow = QHBoxLayout()
+        drow.addWidget(self.comfy_dir, 1)
+        self.b_rescan = QPushButton("Rescan LoRAs")
+        self.b_rescan.setToolTip("Look for new LoRAs in ComfyUI's LoRA folders (also done when you come back to "
+                                 "this window)")
+        self.b_rescan.clicked.connect(lambda: self.scan_loras(report=True))
+        drow.addWidget(self.b_rescan)
+        a.addRow("Folder", drow)
         self.comfy_cleanup = QCheckBox("Clean up ComfyUI's copies after each clip")
         self.comfy_cleanup.setChecked(True)
         self.comfy_cleanup.setToolTip("ComfyUI keeps every clip and start image in output/video-chain and "
@@ -1220,7 +1256,7 @@ class MainWindow(QMainWindow):
         self._model_timer.start()
 
         self.start_tile.clicked.connect(lambda _t: self._choose_image())
-        self.start_tile.dropped.connect(self.set_image)
+        self.start_tile.dropped.connect(lambda f: self.set_image(f, confirm=True))
         for sig in (self.frames.currentIndexChanged, self.resolution.currentIndexChanged,
                     self.steps.valueChanged, self.audio.toggled, self.keep_rep.toggled,
                     self.speed.currentIndexChanged,
@@ -1233,6 +1269,7 @@ class MainWindow(QMainWindow):
                          ("Ctrl+D", lambda: self.node_action("variant", self.selected_id())),
                          ("Ctrl+Return", self.generate_path), ("Ctrl+Shift+Return", self.generate_all)):
             QShortcut(QKeySequence(keys), self, activated=fn)
+        guard_wheel(left)
         QShortcut(QKeySequence("Delete"), self.graph,
                   activated=lambda: self.node_action("delete", self.selected_id()))
         QShortcut(QKeySequence("F"), self.graph, activated=self.graph.fit)
@@ -1531,6 +1568,7 @@ class MainWindow(QMainWindow):
     def _options_changed(self, *_):
         if self._loading or self.tree is None or self.running:
             return
+        before = self._done_clips()
         self.tree.options.update({
             "frames": self.frames.currentData(), "resolution": self.resolution.currentData(),
             "steps": self.steps.value(), "audio": self.audio.isChecked(), "keep_repeated": self.keep_rep.isChecked(),
@@ -1541,6 +1579,8 @@ class MainWindow(QMainWindow):
         self._turbo_widgets()
         self._refresh_card_choices()
         self._changed()
+        if not self._report_remade(before, "Project settings changed"):
+            self.status.setText("Project settings changed.")
 
     # ---- identity references
     def _identity_changed(self, *_):
@@ -1559,18 +1599,26 @@ class MainWindow(QMainWindow):
         return {nid for nid, st in self.status_of.items() if st == "done"}
 
     def _report_remade(self, before: set[str], what: str) -> int:
-        """Say how many made clips a change turned CHANGED (they are made again with their paths)."""
+        """Say how many made clips a change turned CHANGED (they are made again with their paths), and how many
+        are done again (a setting set back)."""
         if self.tree is None:
             return 0
         try:
             checker = T.Checker(self.project, self.tree)
-            lost = [n for n in before if n in self.tree.nodes and checker.status(n) != "done"]
+            now = {n for n in self.tree.nodes if checker.status(n) == "done"}
         except Exception:  # noqa: BLE001
             return 0
+        lost = [n for n in before if n in self.tree.nodes and n not in now]
+        back = [n for n in now if n not in before and n in self.status_of]   # e.g. a setting set back
+        parts = []
         if lost:
-            self.status.setText(f"{what}: {len(lost)} made clip{'s are' if len(lost) != 1 else ' is'} now CHANGED "
-                                "and will be made again with their paths.")
-        return len(lost)
+            parts.append(f"{len(lost)} made clip{'s are' if len(lost) != 1 else ' is'} now CHANGED and will be made "
+                         "again with their paths")
+        if back:
+            parts.append(f"{len(back)} clip{'s are' if len(back) != 1 else ' is'} DONE again")
+        if parts:
+            self.status.setText(f"{what}: " + "; ".join(parts) + ".")
+        return len(lost) + len(back)
 
     def _reference_from_selected(self):
         """The selected video's first frame, or a generated clip's last frame."""
@@ -1719,7 +1767,7 @@ class MainWindow(QMainWindow):
             Path(self.tree.image).parent.is_dir() else None
         f = pick_image(self, "Start image", self.qs, start, self._picker_places())
         if f:
-            self.set_image(f)
+            self.set_image(f, confirm=True)
 
     def _picker_places(self) -> list[tuple[str, str]]:
         """Extra places in the image picker: the open project (its clips' last frames are there)."""
@@ -1730,7 +1778,16 @@ class MainWindow(QMainWindow):
             out.append(("Project clips (last frames)", str(self.project / "nodes")))
         return out
 
-    def set_image(self, path: str):
+    def made_from_start(self) -> list[str]:
+        """Made generated clips that start (directly or along their path) from the start image."""
+        if self.tree is None:
+            return []
+        roots = [n for n in self.tree.children(None) if not n.is_video]
+        ids = [r.id for r in roots] + [d.id for r in roots for d in self.tree.descendants(r.id)]
+        return [i for i in ids if self.status_of.get(i) == "done"]
+
+    def set_image(self, path: str, confirm: bool = False):
+        """Use an image as the start image. confirm: ask first when made clips start from the current one."""
         if self.running:
             return
         if self.project is None:
@@ -1739,6 +1796,14 @@ class MainWindow(QMainWindow):
         if QImage(path).isNull():
             self.status.setText(f"Not an image: {Path(path).name}")
             return
+        made = self.made_from_start()
+        if confirm and made and QMessageBox.question(
+                self, "Replace the start image",
+                f"Use {Path(path).name} as the start image?\n\n{len(made)} made clip{'s start' if len(made) != 1 else ' starts'}"
+                " from the current one; they will count as CHANGED and be made again with their paths.") \
+                != QMessageBox.Yes:
+            return
+        before = self._done_clips()
         try:
             T.set_start_image(self.project, Path(path), self.tree)
         except (OSError, RuntimeError) as e:
@@ -1748,6 +1813,8 @@ class MainWindow(QMainWindow):
         self._write_tree()
         self._show_start_image()
         self.refresh()
+        if not self._report_remade(before, "New start image"):
+            self.status.setText(f"Start image: {Path(path).name}.")
 
     def _update_ref_start_button(self):
         """Enable the 'Add: Start image / Selected clip' buttons and say exactly which frame they take."""
@@ -1958,6 +2025,7 @@ class MainWindow(QMainWindow):
                 why = self.why_of.get(n.id) if st == "changed" else ""
                 step = f"Will be made again: {why}." if why else ("will be made again" if st == "changed" else "")
                 card.set_revert(T.changed_inputs(self.tree, n.id) if st == "changed" else [])
+                card.set_guide_useful(n.parent is not None or vc is not None)
                 card.set_summary(" · ".join(self._own_parts(n)))
                 end = self.project / n.end_image if n.end_image else None
                 if vc is not None:
@@ -2006,7 +2074,10 @@ class MainWindow(QMainWindow):
                "Wait until generating has finished" if not idle else "")
         self.b_play_path.setToolTip(why or "Join the clips of the selected path and play them")
         self.b_export.setToolTip(why or "Save the selected path as one video")
-        self.b_stop.setEnabled(not idle)
+        self.b_stop.setEnabled(not idle or self._waiting_comfy is not None)
+        self.b_stop.setToolTip("Stop generating; finished clips are kept" if not idle else
+                               "Do not generate when ComfyUI has started" if self._waiting_comfy is not None else
+                               "Stop generating")
         self._update_comfy_label()
         for w in (self.start_tile, self.frames, self.resolution, self.steps,
                   self.audio, self.keep_rep, self.b_project,
@@ -2027,7 +2098,10 @@ class MainWindow(QMainWindow):
         card = next((c for c in self.cards if c.nid == nid and isinstance(c, PromptCard)), None)
         if card is None or self.tree is None or nid not in self.tree.nodes:
             return
-        self.tree.nodes[nid].prompt = card.text()
+        node, text = self.tree.nodes[nid], card.text()
+        made = (node.made or {}).get("prompt")
+        # the card keeps words, not spacing: a made prompt that differs only in spaces / line breaks stays as made
+        node.prompt = made if isinstance(made, str) and " ".join(made.split()) == text else text
         self._changed()
 
     def known_loras(self) -> list[tuple[str, str]]:
@@ -2101,9 +2175,11 @@ class MainWindow(QMainWindow):
                 chain.file_signature(f)               # cached by (path, size, date) for the clip states
         threading.Thread(target=work, daemon=True).start()
 
-    def scan_loras(self):
-        """Find the H3 LoRAs in ComfyUI's LoRA folders (header reads only), in the background."""
+    def scan_loras(self, report: bool = False):
+        """Find the H3 LoRAs in ComfyUI's LoRA folders (header reads only), in the background. report: say in the
+        status bar how many were found."""
         comfy_dir, bridge = Path(os.path.expanduser(self.comfy_dir.text().strip() or DEFAULT_COMFY_DIR)), self.bridge
+        self._scanned_at = time.monotonic()
 
         def work():
             try:
@@ -2112,12 +2188,16 @@ class MainWindow(QMainWindow):
                 found = [(p, n, is_turbo_lora(Path(p))) for p, n in find_h3_loras(comfy_lora_roots(comfy_dir))]
             except Exception:  # noqa: BLE001
                 found = []
-            bridge.loras.emit(found)
+            bridge.loras.emit(found, report)
         threading.Thread(target=work, daemon=True).start()
 
-    def _loras_found(self, found: list):
+    def _loras_found(self, found: list, report: bool = False):
         self.h3_loras = [(p, n) for p, n, *t in found if not (t and t[0])]
         self.turbo_loras = [(p, n) for p, n, *t in found if t and t[0]]
+        if report:
+            self.status.setText(f"{len(self.h3_loras)} LoRA{'s' if len(self.h3_loras) != 1 else ''} and "
+                                f"{len(self.turbo_loras)} turbo LoRA{'s' if len(self.turbo_loras) != 1 else ''} in "
+                                "ComfyUI's LoRA folders.")
         if self.tree is not None:
             self._fill_turbo((self.tree.options.get("turbo") or {}).get("lora"))
         if self.tree is None:
@@ -2176,6 +2256,29 @@ class MainWindow(QMainWindow):
         self.tree.nodes[nid].overrides = ov
         self._changed()
         self.refresh(rebuild_path=True)
+        if self.in_comfy_loras(p) is False:
+            self.status.setText(f"{Path(p).name} is not in ComfyUI's LoRA folders, so ComfyUI cannot load it: copy or "
+                                f"link it into {self._lora_dir() or 'its models/loras folder'} (then Rescan LoRAs).")
+        else:
+            self.status.setText(f"Clip #{nid[1:]}: added {Path(p).stem}.")
+
+    def in_comfy_loras(self, path: str) -> bool | None:
+        """Whether ComfyUI can load this LoRA file: it lies in one of ComfyUI's LoRA folders (links followed), or
+        is a LoRA found there. None: ComfyUI's folder is not known here."""
+        try:
+            from ..comfy import comfy_lora_roots
+            roots = comfy_lora_roots(Path(os.path.expanduser(self.comfy_dir.text().strip() or DEFAULT_COMFY_DIR)))
+        except Exception:  # noqa: BLE001
+            roots = []
+        if not roots:
+            return None
+        real = os.path.realpath(path)
+        for r in roots:
+            for top in {str(r), os.path.realpath(r)}:
+                if os.path.abspath(path).startswith(top.rstrip(os.sep) + os.sep) or \
+                        real.startswith(top.rstrip(os.sep) + os.sep):
+                    return True
+        return any(os.path.realpath(q) == real for q, _n in self.h3_loras + self.turbo_loras)
 
     def _seed_changed(self, nid: str, seed: int):
         if self.tree and nid in self.tree.nodes:
@@ -2225,6 +2328,8 @@ class MainWindow(QMainWindow):
                 new.overrides = copy.deepcopy(node.overrides)
                 self._copy_video_child(node.id, new.id)
         elif action == "delete" and node is not None:
+            if self._busy_files():
+                return
             below = len(self.tree.descendants(node.id))
             made = node.made is not None or any(d.made for d in self.tree.descendants(node.id))
             msg = f"Delete {'video' if node.is_video else 'clip'} #{node.id[1:]}" + (f" and the {below} clip{'s' if below != 1 else ''} after it"
@@ -2247,6 +2352,14 @@ class MainWindow(QMainWindow):
         self.graph.reveal(new.id)
         if self.cards and self.cards[-1].nid == new.id and isinstance(self.cards[-1], PromptCard):
             self.cards[-1].edit.setFocus()
+
+    def _busy_files(self) -> bool:
+        """A path is being joined or a video converted (they read / write clip files): no deleting meanwhile."""
+        if self._joins:
+            self.status.setText("Wait until the path is joined, then delete.")
+        elif self._converts:
+            self.status.setText("Wait until the video is converted, then delete.")
+        return bool(self._joins or self._converts)
 
     def _copy_video_child(self, source: str, target: str) -> None:
         """A variant of a clip that leads into a real video leads into its own copy of that video; one with an
@@ -2472,7 +2585,7 @@ class MainWindow(QMainWindow):
         if self.tree is None or self.running or nid not in self.tree.nodes:
             return []
         roots = self.tree.others_than_path(nid) if whole_path else [n.id for n in self.tree.siblings(nid)]
-        if not roots:
+        if not roots or self._busy_files():
             return []
         doomed = [r for r in roots] + [d.id for r in roots for d in self.tree.descendants(r)]
         made = sum(1 for d in doomed if self.tree.nodes[d].made)
@@ -2839,6 +2952,12 @@ class MainWindow(QMainWindow):
             self._quit_worker()
 
     def stop(self):
+        if self._waiting_comfy is not None and not self.running:   # generating once ComfyUI runs: not any more
+            self._waiting_comfy = None
+            self.status.setText("Cancelled: nothing is generated when ComfyUI is up (ComfyUI itself keeps "
+                                "starting).")
+            self._update_buttons()
+            return
         if not self.running or self.proc is None:
             return
         self._stopping = True
@@ -3065,7 +3184,8 @@ class MainWindow(QMainWindow):
             if not self.start_comfy():
                 return False
         self._waiting_comfy = list(targets)
-        self.status.setText("Starting ComfyUI … generating begins as soon as it runs.")
+        self.status.setText("Starting ComfyUI … generating begins as soon as it runs (Stop cancels that).")
+        self._update_buttons()
         return True
 
     def _comfy_state(self, up: bool):
@@ -3082,6 +3202,7 @@ class MainWindow(QMainWindow):
             elif not (self._comfy_starting and time.monotonic() - self._comfy_starting < 180):
                 self._waiting_comfy = None
                 self.status.setText("ComfyUI did not start within 3 minutes; see its own log.")
+            self._update_buttons()
         self._update_comfy_label()
 
     def _update_comfy_label(self):
@@ -3130,6 +3251,13 @@ class MainWindow(QMainWindow):
         self.model_label.setProperty("severity", sev)
         repolish(self.model_label)
         self.b_unload.setVisible(self.worker_alive and not self.running and self._worker_idle)
+
+    def changeEvent(self, e):
+        """Back in this window (e.g. after training a LoRA): look for new LoRAs, at most every 30 s."""
+        super().changeEvent(e)
+        if e.type() == e.Type.ActivationChange and self.isActiveWindow() and \
+                time.monotonic() - getattr(self, "_scanned_at", 0.0) > 30:
+            self.scan_loras()
 
     def closeEvent(self, e):
         if self.running:

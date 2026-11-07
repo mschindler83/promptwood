@@ -1,9 +1,10 @@
 """Small themed widgets shared by the windows (same conventions as another app / the design)."""
 from __future__ import annotations
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QSize, Qt, Signal
 from PySide6.QtGui import QImage, QPixmap
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QSizePolicy, QToolButton, QWidget
+from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QHBoxLayout, QLabel, QSizePolicy,
+                               QToolButton, QWidget)
 
 from .theme import icon, theme
 
@@ -15,6 +16,39 @@ def label(text: str = "", *, level: str | None = None, type_: str | None = None,
         if v:
             lab.setProperty(k, v)
     return lab
+
+
+class _WheelGuard(QObject):
+    """The mouse wheel over a list or number field that does not have the keyboard focus scrolls the panel
+    around it instead of changing the value (scrolling through the settings must not change them)."""
+
+    def eventFilter(self, obj, e):                # noqa: N802  (Qt naming)
+        if e.type() == QEvent.Wheel and isinstance(obj, QWidget) and not obj.hasFocus():
+            parent = obj.parentWidget()
+            if parent is not None:
+                QApplication.sendEvent(parent, e)       # Qt passes it on up to the scroll area
+            return True
+        return False
+
+
+_GUARD: _WheelGuard | None = None
+
+
+def guard_wheel(*roots: QWidget) -> None:
+    """Give every combo box and spin box in these widgets (and the widgets themselves) the wheel guard; the
+    wheel changes a value only after the field was clicked or tabbed into."""
+    global _GUARD
+    if _GUARD is None:
+        _GUARD = _WheelGuard(QApplication.instance())
+    for root in roots:
+        if root is None:
+            continue
+        found = [root] + root.findChildren(QComboBox) + root.findChildren(QAbstractSpinBox)
+        for w in found:
+            if isinstance(w, (QComboBox, QAbstractSpinBox)) and not w.property("wheelGuard"):
+                w.setProperty("wheelGuard", True)
+                w.setFocusPolicy(Qt.StrongFocus)
+                w.installEventFilter(_GUARD)
 
 
 def badge(text: str, severity: str | None = None) -> QLabel:

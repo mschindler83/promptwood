@@ -1001,3 +1001,150 @@ def test_video_range_dialog(app, tmp_path):
     from PySide6.QtWidgets import QDialogButtonBox
     assert dlg.buttons.button(QDialogButtonBox.Ok).isEnabled()
     dlg.close()
+
+
+def test_picker_cells_show_whole_thumbnails(app, tmp_path):
+    """Every cell has room for the whole thumbnail (the first item, a folder icon, used to set a tiny size for
+    all of them), also after zooming."""
+    from video_chain.ui.image_picker import ImagePickerDialog
+    d = tmp_path / "pics"
+    (d / "sub").mkdir(parents=True)
+    Image.new("RGB", (1280, 720), (200, 0, 0)).save(d / "wide.png")
+    Image.new("RGB", (720, 1280), (0, 200, 0)).save(d / "tall.png")
+    dlg = ImagePickerDialog(None, "x", str(d), settings(tmp_path, "cells.ini"), cache_dir=None, desktop_thumbs=None)
+    dlg.show()
+    for px in (150, 240):
+        dlg.zoom.setValue(px)
+        app.processEvents()
+        for i in range(dlg.grid.count()):
+            r = dlg.grid.visualItemRect(dlg.grid.item(i))
+            assert r.width() >= px and r.height() >= px + dlg.grid.fontMetrics().height(), (px, r)
+    dlg.reject()
+
+
+def test_wheel_does_not_change_unfocused_fields(app, win, tmp_path, image):
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtGui import QWheelEvent
+    ids = new_project(win, tmp_path, image, ("a",))
+    card = win.cards[0]
+
+    def wheel(w):
+        e = QWheelEvent(QPointF(5, 5), QPointF(w.mapToGlobal(QPoint(5, 5))), QPoint(0, 0), QPoint(0, -120),
+                        Qt.NoButton, Qt.NoModifier, Qt.NoScrollPhase, False)
+        QApplication.sendEvent(w, e)
+    for field, value in ((win.resolution, lambda: win.resolution.currentIndex()), (card.seed, card.seed.value),
+                         (card.length, card.length.currentIndex)):
+        before = value()
+        wheel(field)
+        assert value() == before, field
+    flush(app, win)
+    assert win.state(ids[0]) == "new" and win.tree.nodes[ids[0]].seed == card.seed.value()
+    card.seed.setFocus()
+    app.processEvents()
+    if card.seed.hasFocus():                                     # focused (clicked into): the wheel works
+        before = card.seed.value()
+        wheel(card.seed)
+        assert card.seed.value() != before
+
+
+def test_project_changes_are_confirmed_and_counted(app, win, tmp_path, image, monkeypatch):
+    ids = new_project(win, tmp_path, image)
+    run_and_wait(app, win, win.generate_path)
+    flush(app, win)
+    asked = []
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: asked.append(a[2]) or QMessageBox.No)
+    other = tmp_path / "other.png"
+    Image.new("RGB", (192, 108), (10, 10, 10)).save(other)
+    before = (win.project / T.START_FILE).read_bytes()
+    win.start_tile.dropped.emit(str(other))                      # dropped by accident: asked, kept
+    assert asked and "2 made clips start" in asked[0] and (win.project / T.START_FILE).read_bytes() == before
+    assert [win.state(i) for i in ids] == ["done", "done"]
+    win.resolution.setCurrentIndex(win.resolution.findData(384))
+    assert "2 made clips are now CHANGED" in win.status.text()
+    flush(app, win)
+    win.resolution.setCurrentIndex(win.resolution.findData(512))
+    assert "2 clips are DONE again" in win.status.text()
+    flush(app, win)
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    win.start_tile.dropped.emit(str(other))
+    assert (win.project / T.START_FILE).read_bytes() != before
+    assert "New start image: 2 made clips are now CHANGED" in win.status.text()
+
+
+def test_lora_stack_keeps_paths_and_unchosen_rows(app, win, tmp_path, image):
+    ids = new_project(win, tmp_path, image, ("a", "b"))
+    real = tmp_path / "loras" / "nose.safetensors"
+    write_lora(real, H3_KEYS)
+    link = tmp_path / "comfy-loras" / "nose.safetensors"
+    link.parent.mkdir()
+    link.symlink_to(real)
+    win.h3_loras = [(str(link), "nose.safetensors")]               # ComfyUI lists the link
+    node = win.tree.nodes[ids[1]]
+    node.overrides = {"loras": [{"path": str(real), "strength": 0.8}]}   # the clip stores the file itself
+    win.refresh(rebuild_path=True)
+    card = win.cards[1]
+    assert card.loras.rows[0][1].currentData() == str(link)        # shown as the listed link
+    card.guide.setCurrentIndex(card.guide.findData(5))             # touching another setting …
+    assert node.overrides["loras"] == [{"path": str(real), "strength": 0.8}]   # … keeps the stored path
+    card.loras.b_add.click()                                        # '+ LoRA', nothing chosen yet
+    assert len(card.loras.rows) == 2
+    win.frames.setCurrentIndex(win.frames.findData(90))             # the cards' lists are filled again
+    assert len(win.cards[1].loras.rows) == 2 and win.cards[1].loras.rows[1][1].currentData() is None
+
+
+def test_lora_outside_comfyui_and_rescan(app, tmp_path, image, monkeypatch):
+    from video_chain.ui.main_window import MainWindow
+    comfy = tmp_path / "ComfyUI"
+    (comfy / "models" / "loras").mkdir(parents=True)
+    (comfy / "main.py").write_text("")
+    q = settings(tmp_path, "rescan.ini")
+    q.setValue("comfyDir", str(comfy))
+    w = MainWindow(q, command=FAKE)
+    ids = new_project(w, tmp_path, image, ("a",))
+    wait(app, lambda: w._scanned_at > 0, timeout=10)
+    outside = tmp_path / "elsewhere" / "mine.safetensors"
+    write_lora(outside, H3_KEYS)
+    w.add_node_lora(ids[0], str(outside))
+    assert "not in ComfyUI's LoRA folders" in w.status.text()
+    inside = comfy / "models" / "loras" / "new.safetensors"
+    write_lora(inside, H3_KEYS)
+    assert w.in_comfy_loras(str(inside)) is True and w.in_comfy_loras(str(outside)) is False
+    w.b_rescan.click()                                               # a freshly trained LoRA shows up
+    wait(app, lambda: any(Path(p).name == "new.safetensors" for p, _n in w.h3_loras), timeout=10)
+    assert "1 LoRA and 0 turbo LoRAs" in w.status.text()
+    w.close()
+
+
+def test_waiting_for_comfyui_can_be_cancelled(app, win, tmp_path, image, monkeypatch):
+    ids = new_project(win, tmp_path, image, ("a",))
+    win.comfy_up = False
+    win.comfy_autostart.setChecked(True)
+    monkeypatch.setattr(win, "start_comfy", lambda: True)
+    win.generate_path()
+    assert win._waiting_comfy == [ids[0]] and not win.running and win.b_stop.isEnabled()
+    win.stop()
+    assert win._waiting_comfy is None and not win.b_stop.isEnabled() and "Cancelled" in win.status.text()
+    win._comfy_state(True)                                            # ComfyUI comes up: nothing starts
+    app.processEvents()
+    assert not win.running
+
+
+def test_no_delete_while_files_are_busy_and_small_card_fixes(app, win, tmp_path, image):
+    ids = new_project(win, tmp_path, image)
+    win._joins = 1                                                    # a path is being joined
+    win.node_action("delete", ids[1])
+    assert ids[1] in win.tree.nodes and "Wait until the path is joined" in win.status.text()
+    win._joins = 0
+    win.refresh()
+    # carry-over has nothing to take from on the first clip
+    assert not win.cards[0].guide.isEnabled() and win.cards[1].guide.isEnabled()
+    # a made prompt that differs only in spacing stays as made
+    run_and_wait(app, win, win.generate_path)
+    flush(app, win)
+    n = win.tree.nodes[ids[0]]
+    n.made["prompt"] = n.prompt = "one\ntwo  three"
+    win.refresh(rebuild_path=True)
+    win.cards[0].edit.setPlainText("one two three")
+    assert n.prompt == "one\ntwo  three"
+    win.cards[0].edit.setPlainText("one two four")
+    assert n.prompt == "one two four"

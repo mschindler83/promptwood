@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QDoubleSpinBox, QFileD
 
 from .. import chain
 from .theme import icon, theme, with_alpha
-from .widgets import FrameTile, icon_button, label
+from .widgets import FrameTile, guard_wheel, icon_button, label
 
 VIDEO_FILTER = "Videos (*.mp4 *.mov *.mkv *.webm *.avi *.m4v *.mts *.m2ts *.wmv *.flv *.mpg *.mpeg)"
 FPS = chain.FPS
@@ -222,6 +222,7 @@ class VideoRangeDialog(QDialog):
         v.addLayout(rrow)
         self.start_spin.valueChanged.connect(lambda x: self.set_range(x, self.end, moved="start"))
         self.end_spin.valueChanged.connect(lambda x: self.set_range(self.start, x, moved="end"))
+        guard_wheel(self.start_spin, self.end_spin)
         self.summary = label("", level="secondary")
         self.summary.setWordWrap(True)
         v.addWidget(self.summary)
@@ -390,18 +391,22 @@ class VideoRangeDialog(QDialog):
         self._gen += 1
         gen, file, sig = self._gen, self.file, self._frames
         n = self.frames()
-        times = (("first", self.start), ("last", self.start + max(0, n - 1) / FPS))
+        start = self.start
         w, h = self.canvas or (self.info["width"], self.info["height"])
-        vf = (f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}" if self.canvas else "null")
+        size = (f",scale={w}:{h}:force_original_aspect_ratio=increase:flags=lanczos,crop={w}:{h}"
+                if self.canvas else "")
 
         def work():
-            for which, t in times:
+            # the frames exactly as the conversion picks them (chain.convert_range): seek to the start, then the
+            # 24 fps filter, then frame number 0 / n-1 of its output (decodes the range: exact, a bit slower)
+            for which, idx in (("first", 0), ("last", max(0, n - 1))):
                 if gen != self._gen:                      # the range moved on: skip the stale frame
                     return
                 try:
-                    r = subprocess.run(["ffmpeg", "-v", "error", "-ss", f"{t:.4f}", "-i", file, "-frames:v", "1",
-                                        "-vf", vf, "-f", "image2pipe", "-c:v", "png", "-"],
-                                       capture_output=True, timeout=60)
+                    r = subprocess.run(["ffmpeg", "-v", "error", "-ss", f"{float(start):.6f}", "-i", file,
+                                        "-map", "0:v:0", "-vf", f"fps={FPS},select=eq(n\\,{idx}){size}",
+                                        "-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "-"],
+                                       capture_output=True, timeout=120)
                     img = QImage.fromData(r.stdout, "PNG") if r.returncode == 0 else QImage()
                 except (OSError, subprocess.SubprocessError):
                     img = QImage()

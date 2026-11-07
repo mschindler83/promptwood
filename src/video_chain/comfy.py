@@ -45,6 +45,10 @@ class ComfyUnavailable(ComfyError):
     pass
 
 
+class ComfyJobFailed(ComfyError):
+    """ComfyUI itself ended the job with an error (or it was interrupted): nothing is left to cancel."""
+
+
 def _combo_options(spec) -> list[str]:
     """Options of a combo input in /object_info, old ([list]) or new (["COMBO", {"options": list}]) format."""
     if isinstance(spec, list) and spec:
@@ -493,6 +497,13 @@ class ComfyGenerator:
                 raise ComfyError(f"ComfyUI rejected the workflow: {json.dumps(res['node_errors'])[:600]}")
             self.current = res["prompt_id"]
             entry = self._wait(self.current, ws)
+        except ComfyJobFailed:
+            raise
+        except Exception:
+            # timed out, lost the connection, a bad answer: the job may still run in ComfyUI and would hold up
+            # the next clip, so cancel it (Stop cancels through the signal handler)
+            self.interrupt()
+            raise
         finally:
             if ws is not None:
                 try:
@@ -568,10 +579,10 @@ class ComfyGenerator:
         elif t == "execution_success" and d.get("prompt_id") == pid:
             return "done"
         elif t == "execution_error" and d.get("prompt_id") == pid:
-            raise ComfyError(f"ComfyUI: {d.get('exception_type', 'error')}: {d.get('exception_message', '')}"
+            raise ComfyJobFailed(f"ComfyUI: {d.get('exception_type', 'error')}: {d.get('exception_message', '')}"
                              f" (node {d.get('node_type', '?')})")
         elif t == "execution_interrupted" and d.get("prompt_id") == pid:
-            raise ComfyError("ComfyUI: the job was interrupted")
+            raise ComfyJobFailed("ComfyUI: the job was interrupted")
         return None
 
     def _wait(self, pid: str, ws) -> dict:
@@ -607,7 +618,7 @@ class ComfyGenerator:
                     if st.get("status_str") == "error":
                         msgs = [m for m in st.get("messages", []) if m and m[0] == "execution_error"]
                         detail = msgs[-1][1] if msgs else {}
-                        raise ComfyError(f"ComfyUI: {detail.get('exception_type', 'error')}: "
+                        raise ComfyJobFailed(f"ComfyUI: {detail.get('exception_type', 'error')}: "
                                          f"{detail.get('exception_message', '')}")
                     if st.get("completed", True):
                         return entry

@@ -132,7 +132,7 @@ class ImagePickerDialog(QDialog):
         self.grid.setViewMode(QListWidget.IconMode)
         self.grid.setResizeMode(QListWidget.Adjust)
         self.grid.setMovement(QListWidget.Static)
-        self.grid.setUniformItemSizes(True)
+        self.grid.setUniformItemSizes(True)     # every cell the size of the grid (see _cell)
         self.grid.setWordWrap(True)
         self.grid.setSpacing(6)
         self.grid.currentItemChanged.connect(self._selected)
@@ -229,12 +229,14 @@ class ImagePickerDialog(QDialog):
         for e in dirs:
             it = QListWidgetItem(dir_icon, e.name)
             it.setData(Qt.UserRole, ("dir", e.path))
+            it.setSizeHint(self._cell())
             self.grid.addItem(it)
         blank = self._blank_icon()
         for e in imgs:
             it = QListWidgetItem(blank, e.name)
             it.setData(Qt.UserRole, ("img", e.path))
             it.setToolTip(e.name)
+            it.setSizeHint(self._cell())
             self.grid.addItem(it)
             self._items[e.path] = it
             self._pool.submit(self._make_thumb, gen, e.path)   # file details are read there (network shares)
@@ -295,13 +297,23 @@ class ImagePickerDialog(QDialog):
             item.setData(Qt.UserRole + 1, f"{img.width()}×{img.height()}")
 
     def _blank_icon(self) -> QIcon:
-        pm = QPixmap(8, 8)
+        pm = QPixmap(THUMB_MAX, THUMB_MAX)
         pm.fill(theme().bgSunken)
         return QIcon(pm)
 
+    def _cell(self) -> QSize:
+        """The size of every grid cell: the whole thumbnail (icon size) plus two lines of the name. Set on every
+        item, because with uniform item sizes the view would otherwise take the first item's (a folder icon or
+        the placeholder) for all of them and cut the thumbnails off."""
+        px = self.grid.iconSize().width()
+        return QSize(px + 18, px + 2 * self.grid.fontMetrics().height() + 10)
+
     def _zoomed(self, px: int):
         self.grid.setIconSize(QSize(px, px))
-        self.grid.setGridSize(QSize(px + 24, px + 40))
+        cell = self._cell()
+        self.grid.setGridSize(QSize(cell.width() + 6, cell.height() + 6))
+        for i in range(self.grid.count()):
+            self.grid.item(i).setSizeHint(cell)
         self.qs.setValue("pickerZoom", px)
 
     # ---- selection

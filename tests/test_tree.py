@@ -507,3 +507,23 @@ def test_undo_changes_of_a_made_clip(project, tmp_path):
     T.save(project, t)
     run(project, [a.id])
     assert not (project / made_end).exists()
+
+
+def test_clip_states_do_not_read_every_frame_again(project, monkeypatch):
+    """The states are checked after every edit: the frames are hashed and the start image probed once per version
+    of the file, not on every check (slow on a network share)."""
+    t, a, b1, b2, c = build(project)
+    run(project, [c.id, b2.id])
+    assert set(statuses(project).values()) == {"done"}
+    reads, probes = [], []
+    real_sha, real_size = chain.sha1_file, chain.image_size
+    monkeypatch.setattr(chain, "sha1_file", lambda p: reads.append(p) or real_sha(p))
+    monkeypatch.setattr(chain, "image_size", lambda p: probes.append(p) or real_size(p))
+    for _ in range(3):
+        assert set(statuses(project).values()) == {"done"}
+    assert reads == [] and probes == []
+    T.set_start_image(project, project / "nodes" / Path(T.load(project).nodes[c.id].made["frame"]).name,
+                      T.load(project))                              # another start image: probed and hashed once
+    statuses(project)
+    statuses(project)
+    assert len(probes) == 1 and len([r for r in reads if Path(r).name == T.START_FILE]) <= 1

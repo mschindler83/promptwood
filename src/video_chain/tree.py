@@ -449,6 +449,7 @@ def set_start_image(project: Path, image: Path, tree: Tree) -> None:
 # ----------------------------------------------------------------------------- state
 
 _SRC_INFO: dict[tuple, dict] = {}
+_IMG_SIZE: dict[tuple, tuple[int, int]] = {}
 
 
 def source_info(file: str | Path) -> dict | None:
@@ -467,8 +468,15 @@ def size_source(project: Path, tree: "Tree | None") -> tuple[int, int] | None:
     """The picture whose aspect ratio the video size follows: the start image, else the first video of the tree
     (by number). None while there is neither."""
     start = Path(project) / START_FILE
-    if start.is_file():
-        return chain.image_size(start)
+    try:
+        st = start.stat()
+    except OSError:
+        st = None
+    if st is not None:
+        key = (str(start), st.st_size, st.st_mtime_ns)
+        if key not in _IMG_SIZE:                     # ffprobe once per version of the image, not per check
+            _IMG_SIZE[key] = chain.image_size(start)
+        return _IMG_SIZE[key]
     if tree is not None:
         for n in sorted(tree.nodes.values(), key=lambda n: tree.number(n.id)):
             if not n.is_video:
@@ -510,21 +518,13 @@ class Checker:
 
     def __init__(self, project: Path, tree: Tree):
         self.project, self.tree = Path(project), tree
-        self._sha: dict[tuple, str] = {}
         self._status: dict[str, str] = {}
         self._settings: dict | None = None
 
     def sha(self, path: Path | None) -> str | None:
-        if path is None:
-            return None
-        try:
-            st = path.stat()
-        except OSError:
-            return None
-        key = (str(path), st.st_mtime_ns, st.st_size)
-        if key not in self._sha:
-            self._sha[key] = chain.sha1_file(path)
-        return self._sha[key]
+        """SHA-1 of a frame, cached across checks by (path, size, date): a check after every edit must not read
+        every clip's frame again (slow on a network share)."""
+        return chain.file_signature(path) if path is not None else None
 
     def base(self) -> dict | None:
         if self._settings is None:

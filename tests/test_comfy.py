@@ -377,3 +377,25 @@ def test_generate_with_end_frame_and_guides(server, start, tmp_path):
     assert not list((server.root / "input" / "video-chain").glob("*"))      # uploads cleaned up
     gen.generate("x", None, tmp_path / "u.mp4", tmp_path / "u.png", 1, settings(end_image=str(end)))
     assert "start" not in server.prompts[-1]
+
+
+def test_a_clip_that_is_given_up_is_cancelled_in_comfyui(server, start, tmp_path, monkeypatch):
+    """A timeout (or a lost connection) leaves the job running in ComfyUI: it is cancelled, so the next clip does
+    not wait behind it. A job ComfyUI itself ended with an error is not 'cancelled' again."""
+    gen = C.ComfyGenerator(server.url)
+
+    def give_up(pid, ws):
+        raise C.ComfyError("ComfyUI did not finish within 60 min")
+    monkeypatch.setattr(gen, "_wait", give_up)
+    with pytest.raises(C.ComfyError, match="did not finish"):
+        gen.generate("x", start, tmp_path / "v.mp4", tmp_path / "v.png", 1, settings())
+    bodies = [c for c in server.calls if c[0] == "BODY"]
+    assert any(c[1] == "/interrupt" for c in bodies) and gen.current is None
+    failed = FakeComfy(tmp_path / "c4", fail_with="CUDA out of memory")
+    try:
+        g2 = C.ComfyGenerator(failed.url)
+        with pytest.raises(C.ComfyJobFailed):
+            g2.generate("x", start, tmp_path / "w.mp4", tmp_path / "w.png", 1, settings())
+        assert not any(c[0] == "BODY" and c[1] == "/interrupt" for c in failed.calls)
+    finally:
+        failed.close()
