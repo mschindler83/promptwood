@@ -2659,10 +2659,16 @@ class MainWindow(QMainWindow):
             self._comfy_model = "qwen"
             return ed
 
-        def use(kind: str, png: str) -> bool:
+        def use(kind: str, png: str):
             if self.running:
                 self.status.setText("Wait until generating has finished.")
                 return False
+            if kind == "ref":                       # one more face reference; the dialog stays open
+                if not self.add_reference(png):
+                    return False
+                n = len((self.tree.options.get("identity") or {}).get("images") or [])
+                return (f"Added as face reference <Picture {n}> (left panel); name it in prompts as "
+                        f"<Picture {n}>." + (f" {self.status.text()}" if "CHANGED" in self.status.text() else ""))
             ok = self.set_image(png, confirm=True) if kind == "start" else \
                 bool(target) and self.set_end_image(target, png)
             if ok:

@@ -1247,6 +1247,11 @@ def test_ai_image_edit_for_start_and_end_images(app, tmp_path, image, monkeypatc
         assert Path(meta["source_copy"]).is_file()
         dlg.b_before.setChecked(True)
         assert dlg.res_info.text().startswith("ORIGINAL")
+        dlg.b_use_ref.click()                                       # one more face reference, the dialog stays
+        refs = (w.tree.options.get("identity") or {}).get("images")
+        assert len(refs) == 1 and (w.project / refs[0]).is_file() and dlg.used is None
+        assert "<Picture 1>" in dlg.state.text() and w.refs.count() == 1
+        assert w.tree.options["identity"]["mode"] == "reference"     # adding one switches them on
         dlg.b_use_end.click()                                       # the clip's end image
         assert dlg.used == ("end", png) and w.tree.nodes[ids[1]].end_image and w.state(ids[1]) == "changed"
         # from the start image section: a result as the new start image; earlier results are listed

@@ -263,10 +263,14 @@ class ImageEditDialog(QDialog):
         self.b_further.setToolTip("Take this result as the image to edit (several small steps often work better "
                                   "than one big change)")
         self.b_further.clicked.connect(self._edit_further)
+        self.b_use_ref = QPushButton("Add as face reference")
+        self.b_use_ref.setToolTip("Add this result to the project's face references (left panel), e.g. a face or an "
+                                  "outfit made here; the dialog stays open, so you can add several")
+        self.b_use_ref.clicked.connect(self._add_reference)
         self.b_again = QPushButton("Use its prompt")
         self.b_again.setToolTip("Put the prompt this result was made with into the prompt field")
         self.b_again.clicked.connect(self._prompt_again)
-        for b in (self.b_use_start, self.b_use_end, self.b_further, self.b_again):
+        for b in (self.b_use_start, self.b_use_end, self.b_use_ref, self.b_further, self.b_again):
             arow.addWidget(b)
         arow.addStretch(1)
         right.addLayout(arow)
@@ -361,7 +365,7 @@ class ImageEditDialog(QDialog):
         self.b_gen.setToolTip("Edit the image with this prompt (Ctrl+Enter)" if self.b_gen.isEnabled() else
                               "Choose the image to edit and write what should change" if idle else "Working …")
         self.b_cancel.setEnabled(not idle)
-        for b in (self.b_use_start, self.b_further, self.b_again, self.b_before):
+        for b in (self.b_use_start, self.b_use_ref, self.b_further, self.b_again, self.b_before):
             b.setEnabled(has)
         self.b_use_end.setEnabled(has and self.end_target is not None)
 
@@ -468,6 +472,16 @@ class ImageEditDialog(QDialog):
         if self.on_use(kind, sel[0]):
             self.used = (kind, sel[0])
             self.accept()
+
+    def _add_reference(self):
+        """The selected result as one more face reference; the dialog stays open."""
+        sel = self.selected()
+        if sel is None:
+            return
+        msg = self.on_use("ref", sel[0])
+        self.state.setText(msg if isinstance(msg, str) and msg else
+                           "Added as a face reference." if msg else "Could not add it as a face reference "
+                                                                   "(see the status bar).")
 
     def _edit_further(self):
         sel = self.selected()
