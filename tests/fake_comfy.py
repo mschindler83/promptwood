@@ -39,6 +39,7 @@ class FakeComfy:
         self.qwen = True                           # the Qwen Image Edit files and nodes are there
         self.hyperflow = True                      # ComfyUI-HyperFlow-H3 with its weights
         self.refine = True                         # the H3 2K nodes, the latent upscaler and the refiner LoRA
+        self.fail_next: str | None = None          # the next job fails with this message (once)
         self.prompts, self.calls, self.history = [], [], {}
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
@@ -199,10 +200,11 @@ class FakeComfy:
                 if u.path == "/prompt":
                     fake.prompts.append(payload["prompt"])
                     pid = f"p{len(fake.prompts)}"
-                    if fake.fail_with:
+                    if fake.fail_with or fake.fail_next:
+                        msg, fake.fail_next = fake.fail_with or fake.fail_next, None
                         fake.history[pid] = {"outputs": {}, "status": {"status_str": "error", "completed": False,
                                              "messages": [["execution_error", {"exception_type": "RuntimeError",
-                                                                               "exception_message": fake.fail_with}]]}}
+                                                                               "exception_message": msg}]]}}
                     else:
                         fake.history[pid] = {"outputs": fake.render(payload["prompt"]),
                                              "status": {"status_str": "success", "completed": True}}

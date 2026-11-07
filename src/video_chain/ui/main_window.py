@@ -2639,7 +2639,7 @@ class MainWindow(QMainWindow):
 
         def before_edit():                          # GUI thread, before each Generate
             self._qwen_timer.stop()
-            switch["free"] = self._comfy_model == "h3"      # the clip model is loaded: unload it first
+            switch["free"] = self._comfy_model in ("h3", "h3-hyperflow")   # the clip model is loaded: unload it
             if self.worker_alive and not self.running:
                 self._quit_worker(free=False)               # its model goes now; it is started again for clips
 
@@ -3385,10 +3385,14 @@ class MainWindow(QMainWindow):
         self._worker_idle = False
         cmd = {"cmd": "run", "tree": str(self.project), "targets": self._job["targets"],
                "free_first": self._comfy_model == "qwen"}          # an image edit model is loaded: unload it
+        if self._comfy_model in ("h3", "h3-hyperflow"):             # earlier workers: was HyperFlow last?
+            cmd["last_hyperflow"] = self._comfy_model == "h3-hyperflow"
         if self._job.get("refine"):                                # export refined: re-render the path's clips
             cmd.update({"cmd": "refine", "target": self._job["targets"][0], **self._job["refine"]})
         self._qwen_timer.stop()
-        self._comfy_model = "h3"
+        hyper = bool((self.tree.options.get("hyperflow") or {}).get("on")) and not self._job.get("refine") \
+            if self.tree is not None else False
+        self._comfy_model = "h3-hyperflow" if hyper else "h3"
         self.proc.write((json.dumps(cmd) + "\n").encode())
         self._update_model_label()
 
@@ -3524,7 +3528,7 @@ class MainWindow(QMainWindow):
         elif e == "bye":
             self._worker_idle = False
             self._worker_leaving = True
-            if self._comfy_model == "h3" and (ev.get("reason") == "idle" or self._quit_frees):
+            if self._comfy_model in ("h3", "h3-hyperflow") and (ev.get("reason") == "idle" or self._quit_frees):
                 self._comfy_model = None                       # it unloaded the clip model
             if ev.get("reason") == "idle" and not self.running:
                 self.status.setText("The model was unloaded after the idle time.")

@@ -247,6 +247,8 @@ def serve(a, emit, make_generator: Callable[[dict], object], stdin=None) -> int:
         started = time.monotonic()
         if cmd.get("free_first") and hasattr(gen, "free"):
             gen.free()                              # ComfyUI holds another model (an image edit): unload it first
+        if "last_hyperflow" in cmd and getattr(gen, "last_hyperflow", False) is None:
+            gen.last_hyperflow = cmd["last_hyperflow"]          # what the window knows of earlier workers
         try:
             job = prepare_job(Path(cmd["tree"]), list(cmd.get("targets") or []))
             if job["ai_todo"]:

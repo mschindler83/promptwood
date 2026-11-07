@@ -467,3 +467,30 @@ def test_refine_a_clip_at_2k(server, start, tmp_path):
     server.refine = False
     with pytest.raises(C.ComfyError, match="update ComfyUI"):
         gen.refine(draft, "smoke", out, 5, size, 39, [])
+
+
+def test_models_unloaded_only_from_hyperflow_to_turbo(server, start, tmp_path):
+    """HyperFlow's patch on ComfyUI's cached model breaks the turbo LoRA after it (measured on the real GPU; every
+    other order gives identical clips): unload only for that switch; a patched model left from before this
+    process is unloaded once when turbo fails with that error."""
+    gen = C.ComfyGenerator(server.url)
+    turbo = {"lora": "/x/MiniMax H3/glow.safetensors", "strength": 1.0}
+
+    def frees():
+        return sum(1 for c in server.calls if c[0] == "BODY" and c[1] == "/free")
+
+    def make(**kw):
+        gen.generate("x", start, tmp_path / "v.mp4", tmp_path / "v.png", 1, settings(**kw))
+    make(turbo=turbo)
+    make(hyperflow={"strength": 1.0})
+    make()
+    assert frees() == 0                                            # turbo -> HyperFlow -> normal: nothing unloaded
+    make(hyperflow={"strength": 1.0})
+    make(turbo=turbo)
+    assert frees() == 1                                            # HyperFlow -> turbo: unloaded first
+    make(turbo=turbo)
+    assert frees() == 1
+    fresh = C.ComfyGenerator(server.url)                           # another process: does not know what ran before
+    server.fail_next = "mat1 and mat2 shapes cannot be multiplied (2x8 and 2688x16)"
+    fresh.generate("x", start, tmp_path / "w.mp4", tmp_path / "w.png", 1, settings(turbo=turbo))
+    assert frees() == 2 and (tmp_path / "w.mp4").is_file()

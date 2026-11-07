@@ -323,6 +323,10 @@ class ComfyGenerator:
         self.log, self.progress, self.timeout = log, progress, timeout
         self.client_id = uuid.uuid4().hex
         self.current: str | None = None          # prompt id being rendered
+        # HyperFlow's patch stays on ComfyUI's cached H3 model and breaks the turbo LoRA's adapters after it
+        # (measured: HyperFlow -> Turbo fails, every other order gives the very same clips): the models are
+        # unloaded only for that switch. None: not known (another process may have used HyperFlow).
+        self.last_hyperflow: bool | None = None
         self._loras: list[str] | None = None
         self.stats = self._json("GET", "/system_stats")          # raises ComfyUnavailable if not running
         self._check_models()
@@ -481,9 +485,20 @@ class ComfyGenerator:
                 raise ComfyError(f"{Path(s['turbo']['lora']).name} is not in ComfyUI's LoRA folders")
             turbo = (name, float(s["turbo"].get("strength", 1.0)))
         hyper = (self.hyperflow_file(), float(s["hyperflow"].get("strength", 1.0))) if s.get("hyperflow") else None
+        if turbo and self.last_hyperflow:
+            self.free()                              # HyperFlow's patch would break the turbo LoRA
         uploads: list[tuple[str, Path]] = []        # (ComfyUI name, local file); removed again even on errors
         try:
-            self._run(prompt, start_image, out_video, out_last_frame, seed, s, loras, turbo, uploads, hyper)
+            try:
+                self._run(prompt, start_image, out_video, out_last_frame, seed, s, loras, turbo, uploads, hyper)
+            except ComfyJobFailed as e:
+                # a HyperFlow-patched model left from before this process: unload once and try again
+                if not (turbo and self.last_hyperflow is None and "shapes cannot be multiplied" in str(e)):
+                    raise
+                self.log("ComfyUI still had a HyperFlow-patched model: unloading it and trying again")
+                self.free()
+                self._run(prompt, start_image, out_video, out_last_frame, seed, s, loras, turbo, uploads, hyper)
+            self.last_hyperflow = bool(hyper)
         finally:
             if self.cleanup:
                 for up, local in uploads:
