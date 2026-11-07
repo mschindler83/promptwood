@@ -129,8 +129,16 @@ class HandoverDialog(QDialog):
                                  f"({(n - 1 - k) / FPS:.2f} s) are left out; the clips after it start from this one "
                                  "and are made again.")
 
+    def done(self, r):
+        choice = self.frame()
+        self.frames = []                              # let go of the decoded frames (tens of MB)
+        self._choice = choice
+        super().done(r)
+
     def frame(self) -> int | None:
         """The chosen frame, None for the last one."""
+        if not self.frames and hasattr(self, "_choice"):
+            return self._choice
         if not self.frames or self.slider.value() >= len(self.frames) - 1:
             return None
         return int(self.slider.value())
@@ -225,7 +233,9 @@ class CompareDialog(QDialog):
         for w in (self.b_play, self.b_restart, self.slider, self.loop, self.sound):
             w.setEnabled(bool(self.players))
         if self.players:
-            self.players[0].durationChanged.connect(lambda d: self.slider.setRange(0, int(d)))
+            for p in self.players:                   # the longest clip sets the slider's range
+                p.durationChanged.connect(lambda _d: self.slider.setRange(
+                    0, max(int(q.duration()) for q in self.players)))
             self.players[0].positionChanged.connect(
                 lambda ms: None if self.slider.isSliderDown() else self.slider.setValue(int(ms)))
             QTimer.singleShot(200, self.restart)
@@ -255,10 +265,12 @@ class CompareDialog(QDialog):
 
     def _ended(self, p, status):
         from PySide6.QtMultimedia import QMediaPlayer
-        if status != QMediaPlayer.EndOfMedia or not self.loop.isChecked():
+        over = (QMediaPlayer.EndOfMedia, QMediaPlayer.InvalidMedia, QMediaPlayer.NoMedia)
+        if status not in over[:2] or not self.loop.isChecked():
             return
-        # the clips may differ in length: start all again once the longest one has ended
-        if all(q.mediaStatus() == QMediaPlayer.EndOfMedia or q is p for q in self.players):
+        # the clips may differ in length: start all again once the longest one has ended (one that cannot be
+        # played does not hold the others up)
+        if all(q.mediaStatus() in over or q is p for q in self.players):
             self.restart()
 
     def _sound(self, *_):

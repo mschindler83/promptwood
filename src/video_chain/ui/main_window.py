@@ -1870,11 +1870,18 @@ class MainWindow(QMainWindow):
             self.status.setText(f"Not an image: {Path(path).name}")
             return
         made = self.made_from_start()
+        try:                                        # another aspect ratio: another video size for every clip
+            base = T.Checker(self.project, self.tree).base()
+            size = chain.canvas_size(*chain.image_size(Path(path)), int(self.tree.options.get("resolution", 512)))
+            if base is not None and size != (base["width"], base["height"]):
+                made = [i for i, st in self.status_of.items() if st == "done"]
+        except Exception:  # noqa: BLE001
+            pass
         if confirm and made and QMessageBox.question(
                 self, "Replace the start image",
-                f"Use {Path(path).name} as the start image?\n\n{len(made)} made clip{'s start' if len(made) != 1 else ' starts'}"
-                " from the current one; they will count as CHANGED and be made again with their paths.") \
-                != QMessageBox.Yes:
+                f"Use {Path(path).name} as the start image?\n\n{len(made)} made clip{'s depend' if len(made) != 1 else ' depends'}"
+                " on the current one (it starts from it, or it sets the video size); they will count as CHANGED and "
+                "be made again with their paths.") != QMessageBox.Yes:
             return
         before = self._done_clips()
         try:
@@ -2458,12 +2465,13 @@ class MainWindow(QMainWindow):
         if self.cards and self.cards[-1].nid == new.id and isinstance(self.cards[-1], PromptCard):
             self.cards[-1].edit.setFocus()
 
-    def _busy_files(self) -> bool:
-        """A path is being joined or a video converted (they read / write clip files): no deleting meanwhile."""
+    def _busy_files(self, what: str = "delete") -> bool:
+        """A path is being joined or a video converted (they read / write clip files): no deleting (or changing
+        hand-over frames) meanwhile."""
         if self._joins:
-            self.status.setText("Wait until the path is joined, then delete.")
+            self.status.setText(f"Wait until the path is joined, then {what}.")
         elif self._converts:
-            self.status.setText("Wait until the video is converted, then delete.")
+            self.status.setText(f"Wait until the video is converted, then {what}.")
         return bool(self._joins or self._converts)
 
     def _copy_video_child(self, source: str, target: str) -> None:
@@ -2508,17 +2516,27 @@ class MainWindow(QMainWindow):
                     if not c.is_video] + [1])
         dlg = HandoverDialog(self, self.project / node.made["video"], f"Hand-over frame of clip #{nid[1:]}",
                              T.handover_index(self.tree, node), min_frame=max(1, need - 1))
-        if dlg.exec() != QDialog.Accepted:
-            return
-        self.set_handover(nid, dlg.frame())
+        try:
+            if dlg.exec() != QDialog.Accepted:
+                return
+            frame = dlg.frame()
+        finally:
+            dlg.deleteLater()                       # it holds every decoded frame
+        self.set_handover(nid, frame)
 
     def set_handover(self, nid: str, frame: int | None) -> bool:
         """The clips after a made clip start from this frame of it (None: its last frame, as usual)."""
-        if self.tree is None or self.running or nid not in self.tree.nodes or self._busy_files():
+        if self.tree is None or self.running or nid not in self.tree.nodes or \
+                self._busy_files("change the hand-over frame"):
             return False
         node = self.tree.nodes[nid]
         if node.is_video:
             return False
+        if node.made and not node.made.get("frames") and (self.project / node.made["video"]).is_file():
+            try:                                    # an older record: the real count, once
+                node.made["frames"] = chain.probe(self.project / node.made["video"])["frames"]
+            except (OSError, RuntimeError):
+                pass
         n = T.made_frames(node) or T.clip_length(self.tree, node)
         frame = None if frame is None or int(frame) >= n - 1 else max(1, int(frame))
         if frame == node.end_at:
@@ -2575,6 +2593,7 @@ class MainWindow(QMainWindow):
                             title=f"Compare {len(ids)} clips from the same point as #{nid[1:]}")
         if player:
             dlg.exec()
+            dlg.deleteLater()                       # its video players
         return dlg
 
     def keep_only(self, nid: str, others: list[str], confirm: bool = True) -> list[str]:
@@ -3243,6 +3262,7 @@ class MainWindow(QMainWindow):
         for nid, n in fresh.nodes.items():
             if nid in self.tree.nodes:
                 self.tree.nodes[nid].made = n.made
+                self.tree.nodes[nid].end_at = n.end_at   # a clip made again hands over at its last frame again
         self._tree_stamp = self._stamp()            # the generator wrote it; this window is up to date
 
     def _event(self, ev: dict):

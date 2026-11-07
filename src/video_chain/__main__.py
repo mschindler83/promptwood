@@ -112,6 +112,7 @@ def prepare_job(project: Path, targets: list[str]) -> dict:
     unknown = [t for t in targets if t not in tree.nodes]
     if unknown:
         raise JobError(f"unknown node {unknown[0]}")
+    treemod.ensure_handovers(project, tree)       # a missing hand-over frame would make its children look changed
     settings = treemod.current_settings(project, tree.options, tree)
     if settings is None:
         raise JobError("the project has no start image (and no video to take the size from)")

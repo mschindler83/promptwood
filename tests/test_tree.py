@@ -550,15 +550,20 @@ def test_hand_over_at_an_earlier_frame(project):
     joined = T.join_path(project, t, c.id)
     assert chain.probe(joined)["frames"] == 6 + 16 + 16
     assert not T.remove_stale_files(project, t) and h.is_file()   # kept: it is in use
-    # the clip made again: its old hand-over frame goes, the new version gets its own
+    # a missing hand-over frame is made again before the worker plans (its children stay done)
+    h.unlink()
+    from video_chain.__main__ import prepare_job
+    assert prepare_job(project, [c.id])["todo"] == [] and h.is_file()
+    # another frame of the same take: the earlier frame file goes
+    t.nodes[a.id].end_at = 7
+    h7 = T.ensure_handover(project, t, t.nodes[a.id])
+    assert h7.is_file() and not h.exists()
+    # the clip made again: a new take hands over at its last frame again, the old frame file goes
     t.nodes[a.id].prompt = "a2"
     T.save(project, t)
     run(project, [a.id])
     t = T.load(project)
-    assert not h.exists() and T.handover_file(project, t, t.nodes[a.id]).is_file()
-    # back to the last frame: the clips after it are made from that again
-    t.nodes[a.id].end_at = None
-    assert T.handover_file(project, t, t.nodes[a.id]) is None
+    assert not h7.exists() and t.nodes[a.id].end_at is None and T.handover_file(project, t, t.nodes[a.id]) is None
     ch = T.Checker(project, t)
     assert ch.start_frame(t.nodes[b1.id]) == project / t.nodes[a.id].made["frame"]
 

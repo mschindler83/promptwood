@@ -1057,7 +1057,7 @@ def test_project_changes_are_confirmed_and_counted(app, win, tmp_path, image, mo
     Image.new("RGB", (192, 108), (10, 10, 10)).save(other)
     before = (win.project / T.START_FILE).read_bytes()
     win.start_tile.dropped.emit(str(other))                      # dropped by accident: asked, kept
-    assert asked and "2 made clips start" in asked[0] and (win.project / T.START_FILE).read_bytes() == before
+    assert asked and "2 made clips depend" in asked[0] and (win.project / T.START_FILE).read_bytes() == before
     assert [win.state(i) for i in ids] == ["done", "done"]
     win.resolution.setCurrentIndex(win.resolution.findData(384))
     assert "2 made clips are now CHANGED" in win.status.text()

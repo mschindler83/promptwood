@@ -862,6 +862,9 @@ def handover_file(project: Path, tree: Tree, node: Node) -> Path | None:
 
 def ensure_handover(project: Path, tree: Tree, node: Node) -> Path | None:
     """Write the hand-over frame of a made clip if it is not there yet; returns it (None: the last frame counts)."""
+    if node.end_at is not None and node.made and not node.is_video and not node.made.get("frames") \
+            and node.made.get("video") and (Path(project) / node.made["video"]).is_file():
+        node.made["frames"] = chain.probe(Path(project) / node.made["video"])["frames"]   # older record: count once
     f = handover_file(project, tree, node)
     if f is not None and not f.is_file():
         tmp = f.with_name(f.stem + ".part.png")
@@ -870,6 +873,11 @@ def ensure_handover(project: Path, tree: Tree, node: Node) -> Path | None:
             tmp.replace(f)
         finally:
             tmp.unlink(missing_ok=True)
+    if node.made and node.made.get("video"):            # frames of an earlier choice in this take
+        v = Path(project) / node.made["video"]
+        for old in v.parent.glob(f"{v.stem}_f*.png") if v.parent.is_dir() else []:
+            if old != f and ".part" not in old.name:
+                _unlink(old)
     return f
 
 
@@ -1061,9 +1069,11 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
             if guide_from is not None:
                 node.made["guide_from"] = guide_from
             new_files = [new_video, new_frame]
-            h = ensure_handover(project, tree, node)   # its children start from it
-            if h is not None:
-                new_files.append(h)
+            if node.end_at is not None:
+                # a new take: the frame chosen in the old one means nothing here; it hands over at its last
+                # frame until a frame of this take is chosen
+                log(f"{nid}: made again, it hands over at its last frame again (choose a frame of the new take)")
+                node.end_at = None
         save(project, tree)
         for f in old:                              # the previous version; left for later if it is open somewhere
             if f not in new_files and not _unlink(f):
