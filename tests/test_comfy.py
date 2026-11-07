@@ -541,7 +541,7 @@ def test_qwen_loras_found_and_chained_before_lightning(server, start, tmp_path):
 def test_prompt_refiner(server):
     r = C.ComfyPromptRefiner(server.url)
     assert [m["label"] for m in r.models][0].startswith("Gemma 3 12B abliterated")     # uncensored first
-    assert r.models[0]["type"] == "ltxv" and len(r.models) == 1          # Qwen 2.5-VL cannot generate: not offered
+    assert r.models[0]["type"] == "ltxv" and not any("qwen_2.5" in m["file"] for m in r.models)   # cannot generate
     out = r.refine_prompt("a man walks", "video", None, 3, hint="more cinematic")
     assert out.startswith("REFINED a man walks")                                          # thinking, preface, quotes off
     g = server.refined
