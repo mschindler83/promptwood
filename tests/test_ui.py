@@ -1543,3 +1543,29 @@ def test_lora_strengths_from_minus_10_to_10(app, win, tmp_path, image):
     assert "slider ×-2.5" in win.badge(win.tree.nodes[ids[0]])
     assert T.Checker(win.project, win.tree).settings(ids[0])["strength"] == -2.5
     assert (win.turbo_strength.minimum(), win.turbo_strength.maximum()) == (-10.0, 10.0)
+
+
+def test_image_window_lora_rows_fit_and_can_be_removed(app, tmp_path):
+    """The left panel must fit its view in both modes: an unwrapped hint pushed the strength and the remove button
+    of a LoRA row out of sight, so a LoRA could not be removed."""
+    from PySide6.QtCore import QSettings
+
+    from video_chain.ui.image_edit import ImageEditDialog
+    lora = tmp_path / "x.safetensors"
+    lora.write_bytes(b"x")
+    q = QSettings(str(tmp_path / "fit.ini"), QSettings.IniFormat)
+    dlg = ImageEditDialog(None, tmp_path, [], None, None, lambda p: None, lambda k, p: False, q,
+                          known_loras=[(str(lora), "x")], connect_create=lambda p: None)
+    dlg.show()
+    for mode in ("edit", "create"):
+        dlg.set_mode(mode)
+        dlg.loras.set_items(dlg._known(), [{"path": str(lora), "strength": 1.0}])
+        app.processEvents()
+        view = dlg.left_scroll.viewport().width()
+        assert dlg.left_scroll.widget().width() <= view, mode
+        row, _b, _spin = dlg.loras.rows[0]
+        rm = row.findChildren(type(dlg.b_refine))[0]                  # the remove button (a tool button)
+        assert rm.mapTo(dlg.left_scroll.widget(), rm.rect().topRight()).x() <= view, mode
+        rm.click()
+        assert dlg.loras.items() == [], mode
+    dlg.reject()

@@ -308,8 +308,10 @@ class ImageEditDialog(QDialog):
         self.edit_pics = QWidget()
         epv = QVBoxLayout(self.edit_pics)
         epv.setContentsMargins(0, 0, 0, 0)
-        epv.addWidget(label("More pictures (optional): name them in the prompt, e.g. “give her the face from "
-                            "Picture 2”. The image to edit is Picture 1.", level="tertiary"))
+        more = label("More pictures (optional): name them in the prompt, e.g. “give her the face from Picture 2”. "
+                     "The image to edit is Picture 1.", level="tertiary")
+        more.setWordWrap(True)                     # unwrapped it made the panel wider than its view
+        epv.addWidget(more)
         prow = QHBoxLayout()
         self.pic2 = PictureSlot("Picture 2", self._pick)
         self.pic3 = PictureSlot("Picture 3", self._pick)
@@ -384,6 +386,7 @@ class ImageEditDialog(QDialog):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setWidget(lw)
         scroll.setFixedWidth(430)
+        self.left_scroll = scroll
         top.addWidget(scroll)
         line = QFrame()
         line.setFrameShape(QFrame.VLine)
