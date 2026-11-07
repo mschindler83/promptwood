@@ -36,6 +36,7 @@ from .graph import START, GraphView, NodeInfo
 from .image_picker import pick_image
 from .clip_dialogs import CompareDialog, HandoverDialog
 from .lora_stack import LoraStack, fill_lora_combo, lora_label, lora_path
+from .prompt_refiner import RefineDialog, replace_text
 from .image_edit import EDITS_DIR, ImageEditDialog, record_use, uses_of
 from .video_editor import VideoRangeDialog, choose_video
 from .theme import icon, repolish, theme
@@ -212,7 +213,8 @@ class ExportDialog(QDialog):
                              "with the refiner LoRA after a latent upscale), as it was made: its prompt, LoRAs and "
                              "sound. Each clip starts exactly where the refined clip before it hands over, so the "
                              "joins stay seamless. Measured on an RTX 4090: about 1.7 min (1080p) and 4-5 min (2K) "
-                             "per 3 s clip. Refined clips are kept, so the next export of the same clips is quick. "
+                             "per 3 s clip; a 10 s clip at 2K about 30 min (long clips are refined in overlapping "
+                             "time windows so they fit in the GPU memory; Sol-Attn about halves it). Refined clips are kept, so the next export of the same clips is quick. "
                              "Real videos are converted again from their file at that size.")
         f.addRow("Size", self.size)
         self.fast = QCheckBox("Faster refine with Sol-Attn (about 2× faster at 2K, very slightly different)")
@@ -319,6 +321,9 @@ class PromptCard(QFrame):
         foot = QHBoxLayout()
         self.words = label("", level="tertiary")
         foot.addWidget(self.words)
+        self.b_refine = icon_button("gen", "Refine this prompt with a language model (motion, camera, sound)")
+        self.b_refine.clicked.connect(lambda: self.action.emit("refine", self.nid))
+        foot.addWidget(self.b_refine)
         foot.addStretch(1)
         foot.addWidget(label("Seed", level="tertiary"))
         self.seed = QSpinBox()
@@ -503,7 +508,7 @@ class PromptCard(QFrame):
 
     def set_editable(self, on: bool):
         self.edit.setReadOnly(not on)
-        for w in (self.seed, self.length, self.steps, self.loras, self.guide, *self.buttons):
+        for w in (self.seed, self.length, self.steps, self.loras, self.guide, self.b_refine, *self.buttons):
             w.setEnabled(on)
         self.steps.setEnabled(on and not self.steps_locked)
         self._enable_guide()
@@ -2403,6 +2408,14 @@ class MainWindow(QMainWindow):
         if action == "revert" and node is not None and not node.is_video:
             self.revert_clip(node.id)
             return
+        if action == "refine" and node is not None and not node.is_video:
+            card = next((c for c in self.cards if c.nid == node.id and isinstance(c, PromptCard)), None)
+            if card is not None:
+                new = self.refine_text(card.edit.toPlainText(), "video")
+                if new:
+                    replace_text(card.edit, new)          # Ctrl+Z in the prompt takes it back
+                    self.status.setText(f"Clip #{node.id[1:]}: prompt refined (Ctrl+Z in the prompt undoes it).")
+            return
         if action == "handover" and node is not None and not node.is_video:
             self.choose_handover(node.id)
             return
@@ -2485,6 +2498,24 @@ class MainWindow(QMainWindow):
         self.status.setText(f"Clip #{nid[1:]}: {' and '.join(done)} back as made" +
                             (f"; it is still changed: {why}." if why else "; it is done again."))
         return done
+
+    # ---- prompt refiner
+    def refine_text(self, text: str, kind: str) -> str | None:
+        """Open the prompt refiner for a prompt ('video' / 'image' / 'edit'); the text to use, or None."""
+        if not text.strip():
+            self.status.setText("Write a prompt first; the refiner improves it.")
+            return None
+        url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL)
+        comfy_dir = os.path.expanduser(self.comfy_dir.text().strip()) or None
+
+        def connect():
+            from ..comfy import ComfyPromptRefiner
+            return ComfyPromptRefiner(url, log=lambda _m: None, comfy_dir=comfy_dir, cleanup=False)
+        dlg = RefineDialog(self, text, kind, connect, self.qs, start_comfy=self.start_comfy)
+        try:
+            return dlg.chosen() if dlg.exec() == QDialog.Accepted else None
+        finally:
+            dlg.deleteLater()
 
     # ---- AI image edit
     def edit_image(self, nid: str | None = None, from_node: bool = False, start: bool = False,
@@ -2572,7 +2603,8 @@ class MainWindow(QMainWindow):
         dlg = ImageEditDialog(self, self.project, sources, first, target, connect, use, self.qs,
                               self._picker_places(), start_comfy=self.start_comfy, on_start=before_edit,
                               known_loras=known, lora_dir=self._lora_dir(),
-                              uses=lambda meta: uses_of(self.project, self.tree, meta))
+                              uses=lambda meta: uses_of(self.project, self.tree, meta),
+                              refine=self.refine_text)
         if dialog:
             dlg.exec()
             dlg.deleteLater()

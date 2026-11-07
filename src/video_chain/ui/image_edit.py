@@ -17,11 +17,13 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QSize, Qt, Signal
 from PySide6.QtGui import QIcon, QImage, QKeySequence, QPixmap, QShortcut
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFrame, QGridLayout, QHBoxLayout,
-                               QListWidget, QListWidgetItem, QPlainTextEdit, QProgressBar, QPushButton, QSpinBox,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
+                               QFrame, QGridLayout, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem,
+                               QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSpinBox, QVBoxLayout,
+                               QWidget)
 
 from .image_picker import pick_image
+from ..imagegen import FAMILIES, size_for
 from .lora_stack import LoraStack, lora_label
 from .widgets import FrameTile, guard_wheel, icon_button, label
 
@@ -30,6 +32,11 @@ QUALITY_TEXT = {"fast": "Fast (Lightning, 4 steps)", "standard": "Standard (20 s
 PROMPT_HINT = ("Describe the change, e.g. “she smiles and looks into the camera”, “night, lit by a street lamp”, "
                "“replace the red jacket with a black leather jacket”. Say what must stay: “keep her face, pose and "
                "the background”.")
+
+
+CREATE_HINT = ("Describe the image: who or what, doing what, where; light, mood, camera and style, e.g. “a woman "
+               "in a red coat on a rainy Paris street at night, neon reflections, 35 mm photo”. With reference "
+               "pictures, say what to take from them.")
 
 
 def scale_to(src: Path, dst: Path, size: tuple[int, int]) -> None:
@@ -96,6 +103,7 @@ def uses_of(project: Path, tree, meta: dict) -> list[str]:
 
 
 class _Sig(QObject):
+    families = Signal(object, str)              # what ComfyUI has of each image family, error
     progress = Signal(int, int, int, int)       # try k, of n, step i, of steps
     result = Signal(str, object)                # png, meta
     finished = Signal(str)                      # error ('' = all done or cancelled)
@@ -152,7 +160,8 @@ class ImageEditDialog(QDialog):
     def __init__(self, parent, project: Path, sources: list[tuple[str, str]], source: str | None,
                  end_target: str | None, connect, on_use, settings=None, places=None, start_comfy=None,
                  on_start=None, known_loras: list[tuple[str, str]] | None = None, lora_dir: str = "",
-                 uses=None):
+                 uses=None, refine=None, connect_create=None, family_loras=None,
+                 start_aspect: float | None = None, mode: str = "edit"):
         super().__init__(parent)
         self.setWindowTitle("Edit an image with AI (Qwen Image Edit)")
         self.resize(1240, 820)
@@ -160,6 +169,10 @@ class ImageEditDialog(QDialog):
         self.end_target, self.qs, self.places, self.start_comfy = end_target, settings, places or [], start_comfy
         self.on_start = on_start                         # called (GUI thread) before each Generate
         self.uses = uses or (lambda _meta: [])           # uses(meta) -> where a result is used (words)
+        self.refine = refine                             # refine(text, kind) -> new text or None
+        self.connect_create = connect_create             # connect_create(progress) -> a ComfyImageCreator
+        self.start_aspect = start_aspect
+        self.families: dict = {}                         # what ComfyUI has of each family (from the creator)
         self._trash: Path | None = None                  # the result deleted last (Undo delete brings it back)
         self.source: str | None = None
         self.editor = None
@@ -170,61 +183,150 @@ class ImageEditDialog(QDialog):
         self._sig.progress.connect(self._progress)
         self._sig.result.connect(self._result)
         self._sig.finished.connect(self._finished)
+        self._sig.families.connect(self._families_found)
 
         top = QHBoxLayout(self)
         left = QVBoxLayout()
         left.setSpacing(6)
-        left.addWidget(label("1  Image to edit", type_="heading"))
+        # mode: edit an image (Qwen Image Edit) or create a new one (four model families)
+        mrow = QHBoxLayout()
+        self.m_edit = QPushButton("Edit an image")
+        self.m_create = QPushButton("Create a new image")
+        self.modes = QButtonGroup(self)
+        for k, b in enumerate((self.m_edit, self.m_create)):
+            b.setCheckable(True)
+            self.modes.addButton(b, k)
+            mrow.addWidget(b)
+        self.m_edit.setToolTip("Change an existing image by a prompt (Qwen Image Edit)")
+        self.m_create.setToolTip("Make a new image from a prompt, or from reference pictures (Krea-2, Qwen-Image, "
+                                 "FLUX, Illustrious)")
+        self.m_edit.setChecked(True)
+        left.addLayout(mrow)
+
+        # ---- edit: the image to edit
+        self.edit_box = QWidget()
+        ev = QVBoxLayout(self.edit_box)
+        ev.setContentsMargins(0, 0, 0, 0)
+        ev.addWidget(label("1  Image to edit", type_="heading"))
         self.src_tile = FrameTile(380, 214)
         self.src_tile.clear_frame("Choose the image to edit")
         self.src_tile.setCursor(Qt.PointingHandCursor)
         self.src_tile.clicked.connect(lambda _t: self._choose_source())
-        left.addWidget(self.src_tile)
-        srow = QHBoxLayout()
+        ev.addWidget(self.src_tile)
         self.src_combo = QComboBox()
         self.src_combo.setToolTip("Images of this project; or Choose file… for any image")
         for text, path in sources:
             self.src_combo.addItem(text, path)
         self.src_combo.addItem("Choose file…", None)
         self.src_combo.activated.connect(self._source_picked)
-        srow.addWidget(self.src_combo, 1)
-        left.addLayout(srow)
+        ev.addWidget(self.src_combo)
         self.src_info = label("", level="tertiary")
         self.src_info.setWordWrap(True)
-        left.addWidget(self.src_info)
+        ev.addWidget(self.src_info)
+        left.addWidget(self.edit_box)
 
-        left.addWidget(label("2  What should change?", type_="heading"))
+        # ---- create: model, references, size
+        self.create_box = QWidget()
+        cv = QVBoxLayout(self.create_box)
+        cv.setContentsMargins(0, 0, 0, 0)
+        cv.addWidget(label("1  Model", type_="heading"))
+        crow = QHBoxLayout()
+        self.family = QComboBox()
+        self.family.setToolTip("The model family; unavailable ones say what is missing")
+        self.family.addItem("looking for models in ComfyUI …", None)
+        self.family.currentIndexChanged.connect(self._family_changed)
+        self.model_file = QComboBox()
+        self.model_file.setToolTip("The model file (the recommended one first; fine-tunes of the family too)")
+        crow.addWidget(self.family, 1)
+        crow.addWidget(self.model_file, 1)
+        cv.addLayout(crow)
+        self.use_refs = QCheckBox("From reference pictures")
+        self.use_refs.toggled.connect(lambda _on: self._create_widgets())
+        cv.addWidget(self.use_refs)
+        self.ref_text = label("", level="tertiary")
+        self.ref_text.setWordWrap(True)
+        cv.addWidget(self.ref_text)
+        rrow = QHBoxLayout()
+        self.cpics = [PictureSlot(f"Picture {k}", self._pick) for k in (1, 2, 3)]
+        for slot in self.cpics:
+            rrow.addWidget(slot)
+            slot.changed.connect(self._update_buttons)
+        rrow.addStretch(1)
+        cv.addLayout(rrow)
+        srow2 = QHBoxLayout()
+        self.ref_strength = QDoubleSpinBox()
+        self.ref_strength.setRange(0.2, 1.0)
+        self.ref_strength.setSingleStep(0.05)
+        self.ref_strength.setValue(0.65)
+        self.ref_strength.setToolTip("How far the new image may move away from the picture: low keeps it close, "
+                                     "1.0 ignores it")
+        self.ref_strength_label = label("Change", level="tertiary")
+        srow2.addWidget(self.ref_strength_label)
+        srow2.addWidget(self.ref_strength)
+        srow2.addStretch(1)
+        cv.addLayout(srow2)
+        arow = QHBoxLayout()
+        self.aspect = QComboBox()
+        for text, value in (("16:9 landscape", 16 / 9), ("9:16 portrait", 9 / 16), ("1:1 square", 1.0),
+                            ("4:3", 4 / 3), ("3:4", 3 / 4), ("3:2", 3 / 2), ("2:3", 2 / 3)):
+            self.aspect.addItem(text, value)
+        if self.start_aspect:
+            self.aspect.insertItem(0, "like the start image", self.start_aspect)
+        self.aspect.setCurrentIndex(0)
+        self.aspect.currentIndexChanged.connect(lambda *_: self._create_widgets())
+        self.size_text = label("", level="tertiary")
+        arow.addWidget(label("Shape", level="tertiary"))
+        arow.addWidget(self.aspect, 1)
+        arow.addWidget(self.size_text)
+        cv.addLayout(arow)
+        left.addWidget(self.create_box)
+
+        prow0 = QHBoxLayout()
+        self.prompt_title = label("2  What should change?", type_="heading")
+        prow0.addWidget(self.prompt_title)
+        prow0.addStretch(1)
+        self.b_refine = icon_button("gen", "Refine this prompt with a language model")
+        self.b_refine.clicked.connect(self._refine_prompt)
+        self.b_refine.setVisible(refine is not None)
+        prow0.addWidget(self.b_refine)
+        left.addLayout(prow0)
         self.prompt = QPlainTextEdit()
         self.prompt.setPlaceholderText(PROMPT_HINT)
         self.prompt.setMinimumHeight(110)
         self.prompt.textChanged.connect(self._update_buttons)
         left.addWidget(self.prompt, 1)
-        left.addWidget(label("More pictures (optional): name them in the prompt, e.g. “give her the face from "
-                             "Picture 2”. The image to edit is Picture 1.", level="tertiary"))
+        self.negative = QLineEdit()
+        self.negative.setPlaceholderText("Avoid (optional negative prompt; empty: the model's usual one)")
+        left.addWidget(self.negative)
+        self.edit_pics = QWidget()
+        epv = QVBoxLayout(self.edit_pics)
+        epv.setContentsMargins(0, 0, 0, 0)
+        epv.addWidget(label("More pictures (optional): name them in the prompt, e.g. “give her the face from "
+                            "Picture 2”. The image to edit is Picture 1.", level="tertiary"))
         prow = QHBoxLayout()
         self.pic2 = PictureSlot("Picture 2", self._pick)
         self.pic3 = PictureSlot("Picture 3", self._pick)
         prow.addWidget(self.pic2)
         prow.addWidget(self.pic3)
         prow.addStretch(1)
-        left.addLayout(prow)
-        left.addWidget(label("LoRAs (optional): Qwen Image / Image Edit LoRAs from ComfyUI's LoRA folders, applied in "
-                             "this order. Text-to-image Qwen LoRAs often work for edits too, not always.",
-                             level="tertiary"))
+        epv.addLayout(prow)
+        left.addWidget(self.edit_pics)
+        self.lora_text = label("", level="tertiary")
+        self.lora_text.setWordWrap(True)
+        left.addWidget(self.lora_text)
         self.known_loras, self.lora_dir = list(known_loras or []), lora_dir
+        self.family_loras = family_loras or {}
         self.loras = LoraStack(self)
         self.loras.file_dir = lora_dir
         self.loras.picked.connect(self._lora_picked)
-        self.loras.set_items(self._known(), self._remembered_loras())
         self.loras.changed.connect(self._remember_loras)
         left.addWidget(self.loras)
 
         opts = QGridLayout()
         self.quality = QComboBox()
-        self.quality.setToolTip("Fast uses the Lightning LoRA (4 steps, a few seconds once loaded); Standard and "
-                                "Best sample longer and can follow the prompt more closely")
-        for q in ("fast", "standard", "best"):
-            self.quality.addItem(QUALITY_TEXT[q], q)
+        self.quality.setToolTip("Faster settings use the model's speed LoRA or distilled version; Best samples "
+                                "longer and can follow the prompt more closely")
+        self.quality.currentIndexChanged.connect(lambda *_: self._remember_quality())
         self.tries = QSpinBox()
         self.tries.setRange(1, 4)
         self.tries.setValue(2)
@@ -234,11 +336,15 @@ class ImageEditDialog(QDialog):
         self.keep_size.setToolTip("The model works at about 1 megapixel in its own aspect steps; this scales the "
                                   "result back to the exact size of the image it was made from, so it fits the "
                                   "chain's video size")
+        self.tags = QCheckBox("Add the usual quality tags (masterpiece, best quality …)")
+        self.tags.setChecked(True)
+        self.tags.setToolTip("Illustrious models are trained on such tags; they are put before your prompt")
         opts.addWidget(label("Quality", level="tertiary"), 0, 0)
         opts.addWidget(self.quality, 0, 1)
         opts.addWidget(label("Results", level="tertiary"), 0, 2)
         opts.addWidget(self.tries, 0, 3)
         opts.addWidget(self.keep_size, 1, 0, 1, 4)
+        opts.addWidget(self.tags, 2, 0, 1, 4)
         left.addLayout(opts)
         brow = QHBoxLayout()
         self.b_gen = QPushButton("Generate")
@@ -265,8 +371,13 @@ class ImageEditDialog(QDialog):
         left.addWidget(self.state)
         lw = QWidget()
         lw.setLayout(left)
-        lw.setFixedWidth(400)
-        top.addWidget(lw)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(lw)
+        scroll.setFixedWidth(430)
+        top.addWidget(scroll)
         line = QFrame()
         line.setFrameShape(QFrame.VLine)
         top.addWidget(line)
@@ -348,6 +459,129 @@ class ImageEditDialog(QDialog):
             self.set_source(source)
         elif sources:
             self.set_source(sources[0][1])
+        self.modes.idClicked.connect(lambda i: self.set_mode("create" if i == 1 else "edit"))
+        self.m_create.setEnabled(connect_create is not None)
+        saved = self.qs.value("imageMode", "", type=str) if self.qs is not None else ""
+        self.set_mode(mode if mode != "auto" else (saved or "edit"))
+        if connect_create is not None:
+            self._load_families()
+        self._update_buttons()
+
+    # ---- modes
+    def mode(self) -> str:
+        return "create" if self.m_create.isChecked() else "edit"
+
+    def set_mode(self, mode: str):
+        create = mode == "create" and self.connect_create is not None
+        (self.m_create if create else self.m_edit).setChecked(True)
+        if self.qs is not None:
+            self.qs.setValue("imageMode", "create" if create else "edit")
+        self.setWindowTitle("Create a new image with AI" if create else "Edit an image with AI (Qwen Image Edit)")
+        for w in (self.edit_box, self.edit_pics, self.keep_size):
+            w.setVisible(not create)
+        self.create_box.setVisible(create)
+        self.prompt_title.setText("2  Describe the image" if create else "2  What should change?")
+        self.prompt.setPlaceholderText(CREATE_HINT if create else PROMPT_HINT)
+        self.b_refine.setToolTip("Refine this prompt with a language model")
+        self.quality.blockSignals(True)
+        self.quality.clear()
+        if create:
+            fam = self.family.currentData()
+            for key, text in (FAMILIES[fam]["qualities"].items() if fam in FAMILIES else []):
+                self.quality.addItem(text, key)
+        else:
+            for q in ("fast", "standard", "best"):
+                self.quality.addItem(QUALITY_TEXT[q], q)
+        saved = self.qs.value(self._quality_key(), "", type=str) if self.qs is not None else ""
+        i = self.quality.findData(saved)
+        self.quality.setCurrentIndex(i if i >= 0 else 0)
+        self.quality.blockSignals(False)
+        self.loras.set_items(self._known(), self._remembered_loras())
+        self._create_widgets()
+        self._update_buttons()
+
+    def _quality_key(self) -> str:
+        return f"createQuality_{self.family.currentData()}" if self.mode() == "create" else "editQuality"
+
+    def _remember_quality(self):
+        if self.qs is not None and self.quality.currentData():
+            self.qs.setValue(self._quality_key(), self.quality.currentData())
+
+    def _load_families(self):
+        sig, connect = self._sig, self.connect_create
+
+        def work():
+            try:
+                sig.families.emit(connect(None).files, "")
+            except Exception as e:  # noqa: BLE001
+                try:
+                    sig.families.emit({}, str(e))
+                except RuntimeError:
+                    pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def _families_found(self, files: dict, error: str):
+        self.families = files
+        self.family.blockSignals(True)
+        self.family.clear()
+        if error:
+            self.family.addItem("ComfyUI is not reachable", None)
+            if self.mode() == "create":
+                self.state.setText(f"Cannot list the models: {error}")
+                self.b_start_comfy.setVisible("not reachable" in error and self.start_comfy is not None)
+        for key, f in FAMILIES.items():
+            info = files.get(key) or {}
+            self.family.addItem(f["label"] + ("" if "models" in info else "  (not available)"), key)
+            k = self.family.count() - 1
+            self.family.setItemData(k, info.get("missing", f["label"]), Qt.ToolTipRole)
+            if "models" not in info:
+                self.family.model().item(k).setEnabled(False)
+        saved = self.qs.value("createFamily", "", type=str) if self.qs is not None else ""
+        avail = [i for i in range(self.family.count()) if self.family.model().item(i).isEnabled()
+                 and self.family.itemData(i)]
+        i = self.family.findData(saved)
+        self.family.setCurrentIndex(i if i in avail else (avail[0] if avail else 0))
+        self.family.blockSignals(False)
+        self._family_changed()
+
+    def _family_changed(self, *_):
+        fam = self.family.currentData()
+        if self.qs is not None and fam:
+            self.qs.setValue("createFamily", fam)
+        self.model_file.clear()
+        for m in (self.families.get(fam) or {}).get("models") or []:
+            self.model_file.addItem(Path(m).stem, m)
+            self.model_file.setItemData(self.model_file.count() - 1, m, Qt.ToolTipRole)
+        if self.mode() == "create":
+            self.set_mode("create")              # qualities, LoRAs of this family
+
+    def _create_widgets(self):
+        fam = self.family.currentData()
+        f = FAMILIES.get(fam)
+        create = self.mode() == "create"
+        refs = create and self.use_refs.isChecked() and f is not None
+        n = f["refs"] if f else 0
+        for k, slot in enumerate(self.cpics):
+            slot.setVisible(refs and k < n)
+        self.ref_text.setVisible(refs)
+        self.ref_text.setText(f["ref_text"] if f else "")
+        img2img = refs and fam in ("flux1", "sdxl")
+        self.ref_strength.setVisible(img2img)
+        self.ref_strength_label.setVisible(img2img)
+        self.negative.setVisible(create and bool(f and f["negative"]))
+        self.tags.setVisible(create and fam == "sdxl")
+        if f:
+            w, h = size_for(fam, self.aspect.currentData() or 1.0)
+            self.size_text.setText(f"{w}×{h}")
+        if create:
+            self.lora_text.setText(f"LoRAs (optional): {f['label']} LoRAs from ComfyUI's LoRA folders (found by "
+                                   "their contents), applied in this order." if f else "")
+        else:
+            self.lora_text.setText("LoRAs (optional): Qwen Image / Image Edit LoRAs from ComfyUI's LoRA folders, "
+                                   "applied in this order. Text-to-image Qwen LoRAs often work for edits too, not "
+                                   "always.")
+        self.b_gen.setToolTip("Make the image (Ctrl+Enter)" if create else
+                              "Edit the image with this prompt (Ctrl+Enter)")
         self._update_buttons()
 
     # ---- source and pictures
@@ -413,18 +647,31 @@ class ImageEditDialog(QDialog):
             when = time.strftime("%Y-%m-%d %H:%M", time.localtime(Path(png).stat().st_mtime))
             used = " · ".join(f"{lora_label(lo['path'])} ×{lo['strength']:g}" for lo in meta.get("loras") or [])
             where = self.uses(meta)
+            how = (f"{FAMILIES.get(meta.get('family'), {}).get('label', '')} "
+                   f"{FAMILIES.get(meta.get('family'), {}).get('qualities', {}).get(meta.get('quality'), '')}"
+                   if meta.get("mode") == "create" else QUALITY_TEXT.get(meta.get("quality"), ""))
             self.res_info.setText(("ORIGINAL · " if show != png else "") +
                                   (f"IN USE: {', '.join(where)} · " if where else "") +
-                                  f"“{meta.get('prompt', '')}” · {QUALITY_TEXT.get(meta.get('quality'), '')} · "
+                                  f"“{meta.get('prompt', '')}” · {how} · "
                                   + (f"{used} · " if used else "") + f"seed {meta.get('seed', '?')} · {when}")
         self._update_buttons()
 
     def _update_buttons(self):
         has = self.selected() is not None
         idle = not self._busy
-        self.b_gen.setEnabled(idle and bool(self.source) and bool(self.prompt.toPlainText().strip()))
-        self.b_gen.setToolTip("Edit the image with this prompt (Ctrl+Enter)" if self.b_gen.isEnabled() else
-                              "Choose the image to edit and write what should change" if idle else "Working …")
+        text = bool(self.prompt.toPlainText().strip())
+        if self.mode() == "create":
+            fam = self.family.currentData()
+            refs_ok = not self.use_refs.isChecked() or any(s.path for s in self.cpics[:FAMILIES.get(fam, {}).get("refs", 0)])
+            ok = idle and text and fam in FAMILIES and "models" in (self.families.get(fam) or {}) and refs_ok
+            why = ("Choose an available model" if fam not in FAMILIES or "models" not in (self.families.get(fam) or {})
+                   else "Add a reference picture" if not refs_ok else "Describe the image")
+        else:
+            ok = idle and bool(self.source) and text
+            why = "Choose the image to edit and write what should change"
+        self.b_gen.setEnabled(ok)
+        if not ok:
+            self.b_gen.setToolTip(why if idle else "Working …")
         self.b_cancel.setEnabled(not idle)
         for b in (self.b_use_start, self.b_use_ref, self.b_further, self.b_again, self.b_before):
             b.setEnabled(has)
@@ -437,6 +684,8 @@ class ImageEditDialog(QDialog):
 
     # ---- generating
     def generate(self):
+        if self.mode() == "create":
+            return self.generate_new()
         if self._busy or not self.source or not self.prompt.toPlainText().strip():
             return
         self._busy, self._cancel = True, False
@@ -481,6 +730,61 @@ class ImageEditDialog(QDialog):
                         scale_to(out, out, size)
                     meta.update({"prompt": prompt, "seed": seed, "source": source, "source_copy": str(kept),
                                  "refs": refs, "size": list(size) if size else None})
+                    out.with_suffix(".json").write_text(json.dumps(meta, indent=2, ensure_ascii=False),
+                                                        encoding="utf-8")
+                    sig.result.emit(str(out), meta)
+                sig.finished.emit("")
+            except Exception as e:  # noqa: BLE001
+                try:
+                    sig.finished.emit("cancelled" if self._cancel else str(e))
+                except RuntimeError:
+                    pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def generate_new(self):
+        """Create mode: new images from the prompt (and reference pictures) with the chosen model family."""
+        if self._busy or not self.b_gen.isEnabled():
+            return
+        self._busy, self._cancel = True, False
+        fam, model = self.family.currentData(), self.model_file.currentData()
+        prompt = " ".join(self.prompt.toPlainText().split())
+        negative = " ".join(self.negative.text().split()) if self.negative.isVisible() else ""
+        quality, n = self.quality.currentData(), self.tries.value()
+        refs = [s.path for s in self.cpics[:FAMILIES[fam]["refs"]] if s.path] if self.use_refs.isChecked() else []
+        loras = [(it["path"], it["strength"]) for it in self.loras.items()]
+        w, h = size_for(fam, self.aspect.currentData() or 1.0)
+        strength, tags = self.ref_strength.value(), self.tags.isChecked()
+        edits = self.project / EDITS_DIR
+        sig, connect = self._sig, self.connect_create
+        if self.on_start is not None:
+            self.on_start()
+        self.bar.setValue(0)
+        self.bar.show()
+        self.b_start_comfy.hide()
+        self.state.setText(f"Connecting to ComfyUI … (the first image loads {FAMILIES[fam]['label']}, which takes a "
+                           "while)")
+        self._update_buttons()
+
+        def work():
+            try:
+                edits.mkdir(parents=True, exist_ok=True)
+                cur = {"k": 1}
+                self.editor = connect(lambda i, st: sig.progress.emit(cur["k"], n, i, st))
+                kept = None
+                if refs:                              # the first picture is shown as the "original"
+                    kept = edits / "sources" / f"source_{time.strftime('%Y%m%d-%H%M%S')}{Path(refs[0]).suffix.lower() or '.png'}"
+                    kept.parent.mkdir(exist_ok=True)
+                    kept.write_bytes(Path(refs[0]).read_bytes())
+                for k in range(1, n + 1):
+                    if self._cancel:
+                        break
+                    cur["k"] = k
+                    seed = random.randint(1, 2**31 - 1)
+                    out = edits / f"new_{time.strftime('%Y%m%d-%H%M%S')}_{seed}.png"
+                    meta = self.editor.create(fam, model, prompt, out, seed, quality, w, h, negative, loras,
+                                              [Path(r) for r in refs], strength, tags)
+                    meta.update({"prompt": prompt, "seed": seed, "refs": refs,
+                                 "source_copy": str(kept) if kept else None})
                     out.with_suffix(".json").write_text(json.dumps(meta, indent=2, ensure_ascii=False),
                                                         encoding="utf-8")
                     sig.result.emit(str(out), meta)
@@ -587,6 +891,17 @@ class ImageEditDialog(QDialog):
             if str(f) not in needed and f.stat().st_mtime < time.time() - 5:
                 f.unlink(missing_ok=True)
 
+    def prompt_kind(self) -> str:
+        return "image" if self.mode() == "create" else "edit"
+
+    def _refine_prompt(self):
+        if self.refine is None:
+            return
+        new = self.refine(self.prompt.toPlainText(), self.prompt_kind())
+        if new:
+            from .prompt_refiner import replace_text
+            replace_text(self.prompt, new)
+
     def _add_reference(self):
         """The selected result as one more face reference; the dialog stays open."""
         sel = self.selected()
@@ -616,9 +931,17 @@ class ImageEditDialog(QDialog):
             self._remember_loras()
 
     # ---- LoRAs
+    def _lora_key(self) -> str:
+        return f"createLoras_{self.family.currentData()}" if self.mode() == "create" else "editLoras"
+
     def _known(self) -> list[tuple[str, str]]:
-        """The Qwen LoRAs ComfyUI has, then LoRA files chosen here earlier (from other folders)."""
-        out = list(self.known_loras)
+        """The LoRAs ComfyUI has for this mode (edit: Qwen; create: the chosen family), then LoRA files chosen here
+        earlier (from other folders)."""
+        if self.mode() == "create":
+            fam = self.family.currentData()
+            out = list(self.family_loras.get("qwen" if fam == "qwen" else fam, []))
+        else:
+            out = list(self.known_loras)
         listed = {p for p, _ in out}
         for p in self._recent_files():
             if p not in listed and Path(p).is_file():
@@ -633,14 +956,14 @@ class ImageEditDialog(QDialog):
 
     def _remembered_loras(self) -> list[dict]:
         try:
-            items = json.loads(self.qs.value("editLoras", "[]", type=str)) if self.qs is not None else []
+            items = json.loads(self.qs.value(self._lora_key(), "[]", type=str)) if self.qs is not None else []
         except ValueError:
             items = []
         return [it for it in items if isinstance(it, dict) and it.get("path") and Path(it["path"]).is_file()]
 
     def _remember_loras(self):
         if self.qs is not None:
-            self.qs.setValue("editLoras", json.dumps(self.loras.items()))
+            self.qs.setValue(self._lora_key(), json.dumps(self.loras.items()))
 
     def _lora_picked(self, path: str):
         """A file from another folder chosen in the picker: offered again next time."""

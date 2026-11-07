@@ -18,7 +18,8 @@ KNOWN = {"UNETLoader", "CLIPLoader", "VAELoader", "LoadImage", "MiniMaxH3ImageTo
          "FluxKontextMultiReferenceLatentMethod", "VAEEncode", "KSampler", "ApplyHyperFlowH3",
          # 2K refine
          "VAEEncodeAudio", "LTXVConcatAVLatent", "LatentUpscaleModelLoader", "MiniMaxH3LatentUpscaleWithModel",
-         "ManualSigmas", "VAEDecodeTiled", "BlockSparseAttention"}
+         "ManualSigmas", "VAEDecodeTiled", "BlockSparseAttention", "TextGenerate", "PreviewAny"}
+LLM_FILES = ["gemma-3-12b-abliterated-text-encoder.safetensors", "qwen_2.5_vl_7b_fp8_scaled.safetensors"]
 REFINER = "minimax-h3-refiner/minimax_h3_open_regenerate_2k_refiner_rank_384_bf16.safetensors"
 UPSCALER = "minimax_h3_latent_upscaler_3d_conv_v1_bf16.safetensors"
 HYPERFLOW = "custom_node_hyperflow_8step_v1.0_comfyui_pruned.safetensors"
@@ -53,13 +54,15 @@ class FakeComfy:
         from video_chain import comfy as C
         q = self.qwen
         files = {"UNETLoader": ("unet_name", [C.UNET, C.UNET_REF] + ([QWEN_UNET] if q else [])),
-                 "CLIPLoader": ("clip_name", [C.TEXT_ENCODER] + ([QWEN_CLIP] if q else [])),
+                 "CLIPLoader": ("clip_name", [C.TEXT_ENCODER] + ([QWEN_CLIP] if q else []) + LLM_FILES),
                  "VAELoader": ("vae_name", [C.VIDEO_VAE, C.AUDIO_VAE] + ([QWEN_VAE] if q else [])),
                  "LoraLoaderModelOnly": ("lora_name", self.loras + ([QWEN_LIGHTNING] if q else [])
                                          + ([REFINER] if self.refine else [])),
                  "LatentUpscaleModelLoader": ("model_name", [UPSCALER] if self.refine else [])}
         if node in C.REFINE_NODES + ("BlockSparseAttention",) and node != "LatentUpscaleModelLoader":
             return {node: {"input": {"required": {}}}} if self.refine else {}
+        if node == "TextGenerate":
+            return {node: {"input": {"required": {}}}}
         if node == "ApplyHyperFlowH3":
             return {node: {"input": {"required": {"hyperflow_file": [[HYPERFLOW, "custom_node_hyperflow_8step_v1.0_comfyui.safetensors"]]}}}} \
                 if self.hyperflow else {}
@@ -83,6 +86,10 @@ class FakeComfy:
             for v in n["inputs"].values():
                 if isinstance(v, list) and len(v) == 2 and isinstance(v[1], int):
                     assert v[0] in wf, f"{nid} links to missing node {v[0]}"
+        if "gen" in wf and wf["gen"]["class_type"] == "TextGenerate":     # the prompt refiner: a fake answer
+            g = wf["gen"]["inputs"]
+            self.refined = g
+            return {"show": {"text": [f"<think>planning</think>Here is the refined prompt: \"REFINED {g['prompt'][:40]}\""]}}
         if "refine_save" in wf:                      # 2K refine: the draft at the target size, its frames and sound
             draft = self.root / "input" / wf["draft"]["inputs"]["file"]
             assert draft.is_file(), "draft not uploaded"

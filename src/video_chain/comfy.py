@@ -869,6 +869,28 @@ class ComfyImageEditor(ComfyGenerator):
 REFINE_SIGMAS = "0.909, 0.857, 0.667, 0"   # the release's 3 Euler steps, re-noised from 0.909, no CFG
 SOL_TAU = 1.3                               # Sol-Attn threshold (ComfyUI's default); measured at 2K on an RTX 4090:
                                             # 2.2x faster refine, PSNR 33 dB against dense attention
+# The refine pass at 2K runs out of memory on a 24 GB GPU for long clips (measured on an RTX 4090: 10 s = 880k tokens
+# fails in the model's forward pass). Longer clips are refined in MiniMax H3 context windows (ComfyUI core): windows
+# of at most this many tokens, overlapping by CONTEXT_OVERLAP frames and blended.
+WINDOW_TOKENS = 530_000                    # a 124-frame window at 2528x1440 (37 latent frames = 526k)
+CONTEXT_OVERLAP = 39
+
+
+def latent_frames(frames: int) -> int:
+    """H3's latent length for a frame count (ComfyUI's video_latent_t: 5 latents per 17 frames, plus 2)."""
+    return 2 if frames <= 5 else ((int(frames) - 5) // 17) * 5 + 2
+
+
+def context_window(frames: int, width: int, height: int) -> int | None:
+    """The context window (frames, 17n+5) for refining a clip of this size, or None when it fits in one pass."""
+    per = (int(width) // 16) * (int(height) // 16)
+    if latent_frames(frames) * per <= WINDOW_TOKENS:
+        return None
+    chunks = (WINDOW_TOKENS // per - 2) // 5           # 17-frame chunks whose latent fits
+    length = max(56, chunks * 17 + 5)                   # at least 56 frames (overlap 39 + 17)
+    return length if length < frames else None
+
+
 REFINE_NODES = ("LatentUpscaleModelLoader", "MiniMaxH3LatentUpscaleWithModel", "LTXVConcatAVLatent", "VAEEncodeAudio",
                 "ManualSigmas", "VAEDecodeTiled", "LoadVideo", "GetVideoComponents")
 
@@ -924,6 +946,12 @@ def build_refine_workflow(*, prompt: str, draft: str, seed: int, width: int, hei
         wf[f"lora{k}"] = {"class_type": "LoraLoaderModelOnly",
                           "inputs": {"model": model, "lora_name": name, "strength_model": float(strength)}}
         model = [f"lora{k}", 0]
+    window = context_window(frames, width, height)
+    if window:                                  # a long clip: refined in overlapping windows (memory)
+        wf["windows"] = {"class_type": "MiniMaxH3ContextWindows",
+                         "inputs": {"model": model, "context_length": int(window), "context_overlap": CONTEXT_OVERLAP,
+                                    "fuse_method": "pyramid", "freenoise": True, "split_conds_to_windows": False}}
+        model = ["windows", 0]
     if sparse:
         wf["sparse"] = {"class_type": "BlockSparseAttention",
                         "inputs": {"model": model, "selection": "sol-attn", "selection.tau": float(sparse),
@@ -1038,3 +1066,117 @@ def _refine(self, draft: Path, prompt: str, out: Path, seed: int, size: tuple[in
 
 
 ComfyGenerator.refine = _refine
+
+
+# ----------------------------------------------------------------------------- prompt refiner (an LLM in ComfyUI)
+
+# Language models ComfyUI can run with its TextGenerate node, loaded as text encoders: (file name contains, loader
+# type, label, uncensored). Most preferred first.
+REFINER_MODELS = (
+    ("gemma-3-12b-abliterated", "ltxv", "Gemma 3 12B abliterated (uncensored)", True),
+    ("gemma_3_12b_it_fp8", "ltxv", "Gemma 3 12B", False),
+    ("gemma_3_12b_it", "ltxv", "Gemma 3 12B", False),
+    ("qwen_2.5_vl_7b", "qwen_image", "Qwen 2.5-VL 7B", False),
+    ("qwen3vl_32b", "minimax", "Qwen3-VL 32B (MiniMax H3's text encoder)", False),
+    ("qwen-3-vl-4b", "krea2", "Qwen3-VL 4B", False),
+    ("qwen3vl_4b", "krea2", "Qwen3-VL 4B", False),
+)
+_SAFETY = ("Every person you describe is an adult. Never write sexual or suggestive content involving minors; if the "
+           "input asks for that, return the input unchanged.")
+REFINE_INSTRUCTIONS = {
+    "video": ("You improve prompts for an image-to-video model (MiniMax H3) that continues a video from a given start "
+              "frame and also makes the sound. Rewrite the user's prompt into one clear paragraph in present tense "
+              "that describes what happens: the action and motion of each subject, the camera movement and framing, "
+              "and the sound (ambient sounds, music, and any spoken words in quotes). Do not describe at length how "
+              "things look at the start, the start frame already shows that. Keep every subject, action and detail "
+              "the user gave, add nothing they did not imply, and keep tokens like <Picture 1> exactly as they are. "
+              "At most 120 words. Answer with the prompt only, no preface, no quotes around it, no markdown."),
+    "image": ("You improve prompts for text-to-image models. Expand the user's prompt into one cohesive paragraph: the "
+              "subject(s) with their attributes and actions, the setting, lighting, composition and framing, the "
+              "medium and style. Keep every subject, colour, action and spatial relation the user gave and the medium "
+              "they asked for; add only details that serve their intent; if their prompt is already detailed, only "
+              "polish it. If they want visible text, give the exact words in quotes. Keep tokens like <Picture 1> "
+              "exactly. Answer with the prompt only, no preface, no markdown."),
+    "edit": ("You improve instructions for an image editing model. Rewrite the user's request as one clear, direct "
+             "edit instruction: what exactly to change and how, and what must stay the same (identity, pose, "
+             "composition, background) unless they want it changed. Keep tokens like <Picture 1> exactly as they are. "
+             "Answer with the instruction only, no preface, no markdown."),
+}
+
+
+def pick_refiner_models(clip_names: list[str]) -> list[dict]:
+    """The language models ComfyUI lists that the refiner can use, most preferred (uncensored) first:
+    [{"file", "type", "label", "uncensored"}]."""
+    out, seen = [], set()
+    for key, kind, text, free in REFINER_MODELS:
+        for name in clip_names:
+            if key in name.lower() and name not in seen:
+                seen.add(name)
+                out.append({"file": name, "type": kind, "label": text, "uncensored": free})
+    return out
+
+
+def clean_refined(text: str) -> str:
+    """The model's answer without thinking blocks, prefaces, wrapping quotes or markdown."""
+    text = re.sub(r"<think>.*?</think>", "", text or "", flags=re.S | re.I).strip()
+    text = re.sub(r"^(here(?:'s| is)[^:\n]*:|refined prompt:|prompt:)\s*", "", text, flags=re.I).strip()
+    text = re.sub(r"^\*\*|\*\*$", "", text).strip()
+    pairs = {'"': '"', "'": "'", "“": "”", "„": "“", "‘": "’", "«": "»"}
+    if len(text) > 1 and pairs.get(text[0]) == text[-1]:
+        text = text[1:-1].strip()
+    return " ".join(text.split())
+
+
+def build_refine_prompt_workflow(*, prompt: str, kind: str, model: dict, seed: int, hint: str = "",
+                                 temperature: float = 0.7) -> dict:
+    """CLIPLoader (the LLM) -> TextGenerate with the instruction for this kind of prompt -> PreviewAny (text out)."""
+    system = REFINE_INSTRUCTIONS[kind] + " " + _SAFETY
+    user = prompt.strip() + (f"\n\nWhat the user wants changed in the prompt: {hint.strip()}" if hint.strip() else "")
+    return {
+        "llm": {"class_type": "CLIPLoader", "inputs": {"clip_name": model["file"], "type": model["type"],
+                                                       "device": "default"}},
+        "gen": {"class_type": "TextGenerate",
+                "inputs": {"clip": ["llm", 0], "prompt": user, "max_length": 512, "sampling_mode": "on",
+                           "sampling_mode.temperature": float(temperature), "sampling_mode.top_k": 64,
+                           "sampling_mode.top_p": 0.95, "sampling_mode.min_p": 0.05,
+                           "sampling_mode.repetition_penalty": 1.05, "sampling_mode.seed": int(seed),
+                           "thinking": False, "use_default_template": True, "system_prompt": system}},
+        "show": {"class_type": "PreviewAny", "inputs": {"source": ["gen", 0]}},
+    }
+
+
+class ComfyPromptRefiner(ComfyGenerator):
+    """Refines a prompt with a language model in ComfyUI (TextGenerate)."""
+
+    def _check_models(self):
+        if not self._object_info("TextGenerate"):
+            raise ComfyError("this ComfyUI has no TextGenerate node (update ComfyUI)")
+        req = self._object_info("CLIPLoader").get("input", {}).get("required", {})
+        self.models = pick_refiner_models(_combo_options(req.get("clip_name")))
+        if not self.models:
+            raise ComfyError("ComfyUI lists no language model the prompt refiner can use (e.g. a Gemma 3 12B or "
+                             "Qwen 2.5-VL 7B text encoder)")
+
+    def refine_prompt(self, prompt: str, kind: str, model_file: str | None = None, seed: int = 0,
+                      hint: str = "") -> str:
+        model = next((m for m in self.models if m["file"] == model_file), self.models[0])
+        wf = build_refine_prompt_workflow(prompt=prompt, kind=kind, model=model, seed=seed, hint=hint)
+        res = self._json("POST", "/prompt", {"prompt": wf, "client_id": self.client_id})
+        if res.get("node_errors"):
+            raise ComfyError(f"ComfyUI rejected the workflow: {json.dumps(res['node_errors'])[:600]}")
+        self.current = res["prompt_id"]
+        try:
+            entry = self._wait(self.current, self._connect_ws())
+        except ComfyJobFailed:
+            raise
+        except Exception:
+            self.interrupt()
+            raise
+        finally:
+            self.current = None
+        out = (entry.get("outputs") or {}).get("show") or {}
+        text = (out.get("text") or [""])[0]
+        text = clean_refined(text if isinstance(text, str) else str(text))
+        if not text:
+            raise ComfyError("the language model gave no answer")
+        return text

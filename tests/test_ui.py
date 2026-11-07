@@ -1434,3 +1434,29 @@ def test_lora_picker_search_and_full_names(app, tmp_path):
     stack.pick = lambda parent, kn, current, used, file_dir: known[1][0]                  # click the row: swap
     stack.rows[0][1].click()
     assert stack.items() == [{"path": known[1][0], "strength": 0.5}]
+
+
+def test_prompt_refiner_on_the_card(app, win, tmp_path, image, monkeypatch):
+    from video_chain.ui import main_window as M
+    ids = new_project(win, tmp_path, image, ("a man walks",))
+    seen = {}
+
+    class FakeDialog:
+        def __init__(self, parent, text, kind, connect, settings=None, start_comfy=None):
+            seen.update(text=text, kind=kind)
+
+        def exec(self):
+            return M.QDialog.Accepted
+
+        def chosen(self):
+            return "A man walks slowly towards the camera; footsteps on gravel."
+
+        def deleteLater(self):
+            pass
+    monkeypatch.setattr(M, "RefineDialog", FakeDialog)
+    card = win.cards[0]
+    card.b_refine.click()
+    assert seen == {"text": "a man walks", "kind": "video"}
+    assert win.tree.nodes[ids[0]].prompt == "A man walks slowly towards the camera; footsteps on gravel."
+    card.edit.undo()                                              # one Ctrl+Z takes the refined text back
+    assert card.edit.toPlainText() == "a man walks"

@@ -536,3 +536,32 @@ def test_qwen_loras_found_and_chained_before_lightning(server, start, tmp_path):
     assert meta["loras"] == [{"path": "/any/MiniMax H3/glow.safetensors", "strength": 0.6}]
     with pytest.raises(C.ComfyError, match="not in ComfyUI's LoRA folders"):
         ed.edit(start, "x", tmp_path / "e.png", 1, "fast", [], [("/any/unknown.safetensors", 1.0)])
+
+
+def test_prompt_refiner(server):
+    r = C.ComfyPromptRefiner(server.url)
+    assert [m["label"] for m in r.models][0].startswith("Gemma 3 12B abliterated")     # uncensored first
+    assert r.models[0]["type"] == "ltxv" and r.models[1]["type"] == "qwen_image"
+    out = r.refine_prompt("a man walks", "video", None, 3, hint="more cinematic")
+    assert out.startswith("REFINED a man walks")                                          # thinking, preface, quotes off
+    g = server.refined
+    assert "image-to-video" in g["system_prompt"] and "minors" in g["system_prompt"]
+    assert "more cinematic" in g["prompt"] and g["sampling_mode.seed"] == 3
+    r.refine_prompt("a cat", "image", r.models[1]["file"])
+    assert server.prompts[-1]["llm"]["inputs"]["clip_name"] == r.models[1]["file"]
+    assert C.clean_refined("**“A calm sea.”**") == "A calm sea."
+
+
+def test_long_clips_are_refined_in_context_windows():
+    """Measured on an RTX 4090: a 10 s clip at 2K (1M tokens) runs out of memory in one pass; refined in H3
+    context windows of 124 frames it works (no visible seams). Short clips stay in one pass."""
+    assert C.latent_frames(73) == 22 and C.latent_frames(124) == 37 and C.latent_frames(243) == 72
+    assert C.context_window(73, 2528, 1440) is None and C.context_window(124, 2528, 1440) is None
+    assert C.context_window(243, 2528, 1440) == 124 and C.context_window(243, 1888, 1088) == 209
+    common = dict(prompt="x", draft="d.mp4", seed=1, loras=[], refiner="r.safetensors", upscaler="u.safetensors",
+                  prefix="p")
+    wf = C.build_refine_workflow(width=2528, height=1440, frames=243, **common)
+    win = wf["windows"]["inputs"]
+    assert wf["windows"]["class_type"] == "MiniMaxH3ContextWindows" and win["context_length"] == 124
+    assert win["context_overlap"] == 39 and wf["guider"]["inputs"]["model"] == ["windows", 0]
+    assert "windows" not in C.build_refine_workflow(width=2528, height=1440, frames=73, **common)
