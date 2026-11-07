@@ -461,3 +461,38 @@ def test_records_never_point_outside_the_project(project, tmp_path):
     assert T.clip_files(project, t.nodes[a.id]) == []
     t.remove(a.id, project)
     assert victim.read_text() == "keep me"
+
+
+def test_undo_changes_of_a_made_clip(project, tmp_path):
+    t, a, b1, b2, c = build(project)
+    end = tmp_path / "end.png"
+    Image.new("RGB", (40, 30), (255, 255, 0)).save(end)
+    made_end = T.set_end_image(project, t, a.id, end)
+    T.save(project, t)
+    run(project, [c.id])
+    t = T.load(project)
+    a = t.nodes[a.id]
+    assert T.changed_inputs(t, a.id) == []
+    a.prompt, a.seed, a.overrides = "a typo", a.seed + 1, {"frames": 25}
+    T.set_end_image(project, t, a.id, end)                    # another copy: the made one is kept for undo
+    assert (project / made_end).is_file()
+    ch = T.Checker(project, t)
+    assert ch.status(a.id) == "changed" and ch.why(a.id) == "its prompt and seed and settings and end image changed"
+    assert ch.why(c.id) == f"clip #{b1.id[1:]} before it changes"
+    newer = a.end_image
+    assert T.revert(project, t, a.id) == ["prompt", "seed", "settings", "end image"]
+    assert (a.prompt, a.overrides, a.end_image) == ("a", {}, made_end) and not (project / newer).exists()
+    ch = T.Checker(project, t)
+    assert [ch.status(n) for n in (a.id, b1.id, c.id)] == ["done"] * 3 and ch.why(a.id) == ""
+    # a project setting is not undone here: the clip stays changed and says why
+    t.options["steps"] = 9
+    a.prompt = "x"
+    T.revert(project, t, a.id)
+    assert T.Checker(project, t).why(a.id) == "its settings changed (the project's or its own)"
+    # after making it again with another end image, the old copy goes
+    t.options["steps"] = 28
+    T.clear_end_image(project, t, a.id)
+    assert (project / made_end).is_file()                    # still the made one
+    T.save(project, t)
+    run(project, [a.id])
+    assert not (project / made_end).exists()

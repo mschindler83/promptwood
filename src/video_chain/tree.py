@@ -153,8 +153,9 @@ class Tree:
             if project is not None:
                 for f in list(node_files(project, g)) + clip_files(project, node):
                     _unlink(f)
-                if node.end_image and _in_ends(project, node.end_image):
-                    _unlink(Path(project) / node.end_image)
+                for rel in {node.end_image, (node.made or {}).get("end_image")} - {None}:
+                    if _in_ends(project, rel):
+                        _unlink(Path(project) / rel)
                 for ext in (".mp4", ".json"):
                     _unlink(Path(project) / "paths" / f"{g}{ext}")
         if self.selected in gone:
@@ -365,10 +366,49 @@ def set_end_image(project: Path, tree: Tree, nid: str, image: Path) -> str:
 
 
 def clear_end_image(project: Path, tree: Tree, nid: str) -> None:
+    """Remove a clip's end image. The copy its current clip was made with stays until the clip is made again
+    (Undo changes can go back to it)."""
     node = tree.nodes[nid]
-    if node.end_image and _in_ends(project, node.end_image):
+    if node.end_image and node.end_image != (node.made or {}).get("end_image") and _in_ends(project, node.end_image):
         _unlink(Path(project) / node.end_image)
     node.end_image = None
+
+
+def changed_inputs(tree: Tree, nid: str) -> list[str]:
+    """What was edited on a made generated clip since it was made: prompt, seed, settings (its own),
+    end image. Only what the record can restore (older records keep no own settings / end image)."""
+    node = tree.nodes.get(nid)
+    m = node.made if node is not None else None
+    if node is None or node.is_video or not m:
+        return []
+    out = []
+    if m.get("prompt") != node.prompt:
+        out.append("prompt")
+    if m.get("seed") != node.seed:
+        out.append("seed")
+    if "overrides" in m and m["overrides"] != (node.overrides or {}):
+        out.append("settings")
+    if "end_image" in m and m["end_image"] != node.end_image:
+        out.append("end image")
+    return out
+
+
+def revert(project: Path, tree: Tree, nid: str) -> list[str]:
+    """Undo the edits of a made generated clip: back to the prompt, seed, own settings and end image it was
+    made with. Returns what was restored."""
+    done = changed_inputs(tree, nid)
+    node = tree.nodes[nid]
+    m = node.made
+    if "prompt" in done:
+        node.prompt = m["prompt"]
+    if "seed" in done:
+        node.seed = int(m["seed"])
+    if "settings" in done:
+        node.overrides = copy.deepcopy(m["overrides"])
+    if "end image" in done:
+        clear_end_image(project, tree, nid)       # the newer image goes (unless it is the made one)
+        node.end_image = m["end_image"]
+    return done
 
 
 def copy_end_image(project: Path, tree: Tree, src: str, dst: str) -> None:
@@ -539,6 +579,34 @@ class Checker:
             st = "done"
         self._status[nid] = st
         return st
+
+
+    def why(self, nid: str) -> str:
+        """Why a clip counts as changed, in words ('' if it does not)."""
+        if self.status(nid) != "changed":
+            return ""
+        node = self.tree.nodes[nid]
+        m = node.made
+        if node.is_video:
+            return "its range, file or the video size changed"
+        edited = changed_inputs(self.tree, nid)
+        if edited:
+            return f"its {' and '.join(edited)} changed"
+        s = m.get("settings")
+        if isinstance(s, dict) and "backend" not in s:
+            return "it was made with the old generator"
+        if _old_record(s) != self.settings(nid):
+            return "its settings changed (the project's or its own)"
+        if node.parent is not None and self.status(node.parent) != "done":
+            p = self.tree.nodes[node.parent]
+            return f"{'video' if p.is_video else 'clip'} #{p.id[1:]} before it changes"
+        if m.get("start_sha1") != self.sha(self.start_frame(node)):
+            return "the frame it starts from changed"
+        if m.get("end_key") != self.end_key(node):
+            return "its end (the video after it or its end image) changed"
+        if m.get("guide_from") != self.guide_from(node):
+            return "the clip its motion guide comes from changed"
+        return "something it depends on changed"
 
 
 def _old_record(s: dict | None) -> dict | None:
@@ -852,9 +920,13 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
                 for f in (new_video, new_frame):
                     _unlink(f)
                 raise
+            old_end = (node.made or {}).get("end_image")
             node.made = {"prompt": node.prompt, "seed": node.seed, "settings": settings,
+                         "overrides": copy.deepcopy(node.overrides or {}), "end_image": node.end_image,
                          "start_sha1": start_sha, "video": f"nodes/{new_video.name}",
                          "frame": f"nodes/{new_frame.name}"}
+            if old_end and old_end != node.end_image and _in_ends(project, old_end):
+                old.append(project / old_end)          # the end image of the previous version
             if end_key is not None:
                 node.made["end_key"] = end_key
             if guide_from is not None:

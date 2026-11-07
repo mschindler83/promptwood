@@ -426,8 +426,15 @@ class PromptCard(QFrame):
         self.length.currentIndexChanged.connect(self._ov_changed)
         self.steps.valueChanged.connect(self._ov_changed)
 
+        strow = QHBoxLayout()
         self.step = label("", level="tertiary")
-        v.addWidget(self.step)
+        self.step.setWordWrap(True)
+        self.b_revert = QPushButton("Undo changes")
+        self.b_revert.clicked.connect(lambda: self.action.emit("revert", self.nid))
+        self.b_revert.hide()
+        strow.addWidget(self.step, 1)
+        strow.addWidget(self.b_revert, 0, Qt.AlignTop)
+        v.addLayout(strow)
         self.bar = QProgressBar()
         self.bar.setRange(0, 100)
         self.bar.hide()
@@ -530,6 +537,15 @@ class PromptCard(QFrame):
         self.steps.setEnabled(on and not self.steps_locked)
         self._enable_strength()
         self._enable_end()
+        self.b_revert.setEnabled(on)
+
+    def set_revert(self, edited: list[str]):
+        """Offer Undo changes when the prompt / seed / settings / end image differ from the made clip."""
+        self.b_revert.setVisible(bool(edited))
+        self.b_revert.setEnabled(not self.edit.isReadOnly())
+        if edited:
+            self.b_revert.setToolTip(f"Back to the {' and '.join(edited)} this clip was made with, so it counts as "
+                                     "done again and is not made again")
 
     def _enable_end(self):
         on = not self.edit.isReadOnly()
@@ -779,6 +795,7 @@ class MainWindow(QMainWindow):
         self.project: Path | None = None
         self.tree: T.Tree | None = None
         self.status_of: dict[str, str] = {}
+        self.why_of: dict[str, str] = {}             # why a changed clip is changed, in words
         self.live: dict[str, str] = {}          # states during a run (generating / failed / stopped)
         self.progress_of: dict[str, float] = {}
         self.cards: list[PromptCard | VideoCard] = []
@@ -1781,8 +1798,10 @@ class MainWindow(QMainWindow):
         checker = T.Checker(self.project, self.tree)
         try:
             self.status_of = {nid: checker.status(nid) for nid in self.tree.nodes}
+            self.why_of = {nid: checker.why(nid) for nid, st in self.status_of.items() if st == "changed"}
         except Exception as e:  # noqa: BLE001  (e.g. an unreadable start image)
             self.status_of = {nid: "new" for nid in self.tree.nodes}
+            self.why_of = {}
             self.status.setText(f"Could not check the clips: {e}")
         sel = self.selected_id()
         on_path = {n.id for n in self.selected_path()}
@@ -1894,7 +1913,9 @@ class MainWindow(QMainWindow):
                 step = ("will be converted again" if st == "changed" else
                         "" if Path(n.source["file"]).is_file() or st == "done" else "the video file is missing")
             else:
-                step = "will be made again" if st == "changed" else ""
+                why = self.why_of.get(n.id) if st == "changed" else ""
+                step = f"Will be made again: {why}." if why else ("will be made again" if st == "changed" else "")
+                card.set_revert(T.changed_inputs(self.tree, n.id) if st == "changed" else [])
                 end = self.project / n.end_image if n.end_image else None
                 if vc is not None:
                     card.set_end(end, vc.id, self._pixmap(self.project / vc.made["first"]) if vc.made else None)
@@ -2165,6 +2186,9 @@ class MainWindow(QMainWindow):
         if action == "end_clear" and node is not None and not node.is_video:
             self.set_end_image(node.id, None)
             return
+        if action == "revert" and node is not None and not node.is_video:
+            self.revert_clip(node.id)
+            return
         if action == "continue":
             new = self.tree.add(node.id if node else None, "")
         elif action == "variants" and node is not None:
@@ -2212,6 +2236,21 @@ class MainWindow(QMainWindow):
             T.copy_end_image(self.project, self.tree, source, target)
         except (OSError, RuntimeError, ValueError) as e:
             self.status.setText(f"Could not copy the end image: {e}")
+
+    def revert_clip(self, nid: str) -> list[str]:
+        """Undo the edits of a made clip (prompt, seed, own settings, end image) so it counts as done again."""
+        if self.tree is None or self.running or nid not in self.tree.nodes:
+            return []
+        done = T.revert(self.project, self.tree, nid)
+        if not done:
+            return []
+        self._pix.clear()
+        self._write_tree()
+        self.refresh(rebuild_path=True)
+        why = self.why_of.get(nid)
+        self.status.setText(f"Clip #{nid[1:]}: {' and '.join(done)} back as made" +
+                            (f"; it is still changed: {why}." if why else "; it is done again."))
+        return done
 
     # ---- end images
     def choose_end_image(self, nid: str) -> None:
@@ -2475,6 +2514,8 @@ class MainWindow(QMainWindow):
                 acts[end] = "end_image"
                 if node.end_image:
                     acts[m.addAction("Clear end image")] = "end_clear"
+                if T.changed_inputs(self.tree, nid):
+                    acts[m.addAction("Undo changes (back to the made clip)")] = "revert"
             m.addSeparator()
             play = m.addAction("Play this clip")
             play.setEnabled(bool(self.tree.nodes[nid].made))

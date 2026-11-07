@@ -919,6 +919,23 @@ def test_end_image_on_the_card(app, win, tmp_path, image):
     assert win.cards[0].end_text.text() == "free"
 
 
+def test_undo_changes_on_the_card(app, win, tmp_path, image):
+    ids = new_project(win, tmp_path, image, ("walks in", "sits down"))
+    run_and_wait(app, win, win.generate_path)
+    wait(app, lambda: not win._joins, timeout=30)
+    type_prompt(win, ids[0], "walks in slowly")
+    flush(app, win)
+    card = win.cards[0]
+    assert win.state(ids[0]) == "changed" and win.state(ids[1]) == "changed"
+    assert card.b_revert.isVisibleTo(card) and "prompt changed" in card.step.text()
+    assert not win.cards[1].b_revert.isVisibleTo(win.cards[1])      # only changed because of the clip before
+    card.b_revert.click()
+    flush(app, win)
+    assert win.cards[0].edit.toPlainText() == "walks in"
+    assert [win.state(i) for i in ids] == ["done", "done"] and "done again" in win.status.text()
+    assert T.load(tmp_path / "proj").nodes[ids[0]].prompt == "walks in"
+
+
 def test_motion_guide_choice_on_the_card(app, win, tmp_path, image):
     ids = new_project(win, tmp_path, image, ("x", "y"))
     card = win.cards[1]

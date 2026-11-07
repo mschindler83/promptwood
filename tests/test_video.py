@@ -142,10 +142,10 @@ def test_own_end_image(project, tmp_path, source):
     assert T.path_cuts(t, t.path_to(b.id)) == [(0, 0), (1, 0)]              # nothing cut at the end image
     ch = T.Checker(project, t)
     assert (ch.status(a.id), ch.status(b.id)) == ("done", "done")
-    # another image: the clip (and what follows) is made again; the old copy is gone
+    # another image: the clip (and what follows) is made again; the made copy stays for Undo changes
     Image.new("RGB", (40, 30), (0, 0, 255)).save(yellow)
     T.set_end_image(project, t, a.id, yellow)
-    assert not (project / rel).exists()
+    assert (project / rel).exists()
     ch = T.Checker(project, t)
     assert (ch.status(a.id), ch.status(b.id)) == ("changed", "changed")
     # a missing image is found before anything is made
