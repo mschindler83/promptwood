@@ -1528,3 +1528,18 @@ def test_create_a_new_image_in_the_window(app, tmp_path, image, monkeypatch):
         w.close()
     finally:
         server.close()
+
+
+def test_lora_strengths_from_minus_10_to_10(app, win, tmp_path, image):
+    lora = tmp_path / "slider.safetensors"
+    lora.write_bytes(b"x")
+    ids = new_project(win, tmp_path, image, ("a",))
+    win.add_node_lora(ids[0], str(lora))
+    spin = win.cards[0].loras.rows[0][2]
+    assert (spin.minimum(), spin.maximum()) == (-10.0, 10.0)
+    spin.setValue(-2.5)                                          # a slider LoRA the other way round
+    flush(app, win)
+    assert win.tree.nodes[ids[0]].overrides["loras"][0]["strength"] == -2.5
+    assert "slider ×-2.5" in win.badge(win.tree.nodes[ids[0]])
+    assert T.Checker(win.project, win.tree).settings(ids[0])["strength"] == -2.5
+    assert (win.turbo_strength.minimum(), win.turbo_strength.maximum()) == (-10.0, 10.0)

@@ -1065,7 +1065,7 @@ class MainWindow(QMainWindow):
         self.turbo_steps.setSuffix(" steps")
         self.turbo_steps.setToolTip("4 is the minimum, 6-8 look clearly better; above 8 it gets over-sharp")
         self.turbo_strength = QDoubleSpinBox()
-        self.turbo_strength.setRange(0.5, 1.5)
+        self.turbo_strength.setRange(-10.0, 10.0)
         self.turbo_strength.setSingleStep(0.05)
         self.turbo_strength.setValue(1.0)
         self.turbo_strength.setToolTip("Keep 1.0; smear/ghosting -> a bit higher (1.05-1.2), over-sharp grain -> "

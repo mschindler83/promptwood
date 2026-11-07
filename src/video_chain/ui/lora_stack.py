@@ -13,6 +13,9 @@ from .. import tree as T
 from .widgets import guard_wheel, icon_button, label
 
 
+LORA_MIN, LORA_MAX = -10.0, 10.0       # strengths (ComfyUI allows -100..100 for LoRAs, -10..10 for the turbo LoRA)
+
+
 def lora_path(p: str) -> str:
     """How a chosen LoRA file is stored: absolute, links kept as they are (a link in ComfyUI's LoRA folder keeps
     its own name)."""
@@ -248,11 +251,12 @@ class LoraStack(QWidget):
         self._set_button(button, path)
         button.clicked.connect(lambda: self._choose_again(button))
         spin = QDoubleSpinBox(w)
-        spin.setRange(0.0, 2.0)
+        spin.setRange(LORA_MIN, LORA_MAX)              # some LoRAs need negative strengths (e.g. sliders)
         spin.setSingleStep(0.05)
         spin.setDecimals(2)
         spin.setValue(strength)
-        spin.setToolTip("Strength of this LoRA")
+        spin.setToolTip(f"Strength of this LoRA ({LORA_MIN:g} … {LORA_MAX:g}; negative values reverse its effect, "
+                        "e.g. for slider LoRAs)")
         rm = icon_button("x", "Remove this LoRA", w)
         h.addWidget(button, 1)
         h.addWidget(spin)
