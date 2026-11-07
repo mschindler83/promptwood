@@ -37,6 +37,14 @@ def settings(tmp_path, name="s.ini"):
     return q
 
 
+@pytest.fixture(autouse=True)
+def silent_player(monkeypatch):
+    """No test plays anything: the test clips have a 440 Hz tone, and offscreen only hides the picture, not the
+    sound (windows made without the win fixture played their joined paths aloud)."""
+    from video_chain.ui import main_window
+    monkeypatch.setattr(main_window.Preview, "open", lambda self, path, title, autoplay=True: None)
+
+
 @pytest.fixture
 def image(tmp_path):
     p = tmp_path / "start.jpg"
