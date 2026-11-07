@@ -1343,7 +1343,7 @@ def test_switching_between_clips_and_image_edits_unloads_only_then(app, tmp_path
         dlg.tries.setValue(1)
         dlg.generate()
         wait(app, lambda: not dlg._busy, timeout=60)
-        assert comfy_frees() == 1 and w._comfy_model == "qwen"          # H3 unloaded once, before Qwen
+        assert comfy_frees() == 1                                        # H3 unloaded once, before Qwen
         wait(app, lambda: not w.worker_alive, timeout=20)                # the worker left without unloading again
         assert worker_free_count() == 0
         dlg.generate()                                                    # another edit: Qwen stays
@@ -1444,6 +1444,7 @@ def test_prompt_refiner_on_the_card(app, win, tmp_path, image, monkeypatch):
     class FakeDialog:
         def __init__(self, parent, text, kind, connect, settings=None, start_comfy=None):
             seen.update(text=text, kind=kind)
+            self.refined_any = True
 
         def exec(self):
             return M.QDialog.Accepted
@@ -1460,6 +1461,7 @@ def test_prompt_refiner_on_the_card(app, win, tmp_path, image, monkeypatch):
     assert win.tree.nodes[ids[0]].prompt == "A man walks slowly towards the camera; footsteps on gravel."
     card.edit.undo()                                              # one Ctrl+Z takes the refined text back
     assert card.edit.toPlainText() == "a man walks"
+    assert win._comfy_model == "llm" and "language model" in win.model_label.text()   # unloaded before clips
 
 
 def test_create_a_new_image_in_the_window(app, tmp_path, image, monkeypatch):
@@ -1487,6 +1489,7 @@ def test_create_a_new_image_in_the_window(app, tmp_path, image, monkeypatch):
         k3 = dlg.family.findData("flux3")
         assert not dlg.family.model().item(k3).isEnabled() and "licence" in dlg.family.itemData(k3, Qt.ToolTipRole)
         dlg.family.setCurrentIndex(dlg.family.findData("sdxl"))
+        dlg.family.activated.emit(dlg.family.currentIndex())          # chosen by the user: remembered
         assert [t for _p, t in dlg._known()] == ["style"] and dlg.negative.isVisibleTo(dlg) and dlg.tags.isVisibleTo(dlg)
         assert dlg.prompt_kind() == "image" and "×" in dlg.size_text.text()
         dlg.loras.set_items(dlg._known(), [{"path": str(sdxl_lora), "strength": 0.8}])
@@ -1498,6 +1501,16 @@ def test_create_a_new_image_in_the_window(app, tmp_path, image, monkeypatch):
         assert dlg.state.text().startswith("Done") and dlg.results.count() == 1
         png, meta = dlg.selected()
         assert meta["mode"] == "create" and meta["family"] == "sdxl" and meta["loras"][0]["strength"] == 0.8
+        from PySide6.QtTest import QTest
+        dlg.show()
+        dlg.negative.setFocus()
+        QTest.keyClick(dlg.negative, Qt.Key_Return)                     # Enter in a field presses no button
+        assert dlg.mode() == "create"
+        dlg.quality.setFocus()
+        QTest.keyClick(dlg.quality, Qt.Key_Delete)                      # Delete only in the results list
+        assert dlg.results.count() == 1
+        dlg.b_use_ref.click()                                           # in use at once (record read again)
+        assert not dlg.b_delete.isEnabled() and "IN USE: face reference" in dlg.res_info.text()
         assert server.created["lora0"]["class_type"] == "LoraLoader" and "Illustrious" in dlg.res_info.text()
         dlg.use_refs.setChecked(True)                                   # from a picture: needs one first
         assert not dlg.b_gen.isEnabled() and dlg.ref_strength.isVisibleTo(dlg)

@@ -524,6 +524,8 @@ class ComfyGenerator:
         hyper = (self.hyperflow_file(), float(s["hyperflow"].get("strength", 1.0))) if s.get("hyperflow") else None
         if turbo and self.last_hyperflow:
             self.free()                              # HyperFlow's patch would break the turbo LoRA
+        if hyper:
+            self.last_hyperflow = True               # patched from now on, even if this clip fails
         uploads: list[tuple[str, Path]] = []        # (ComfyUI name, local file); removed again even on errors
         try:
             try:
@@ -535,7 +537,8 @@ class ComfyGenerator:
                 self.log("ComfyUI still had a HyperFlow-patched model: unloading it and trying again")
                 self.free()
                 self._run(prompt, start_image, out_video, out_last_frame, seed, s, loras, turbo, uploads, hyper)
-            self.last_hyperflow = bool(hyper)
+            if not hyper:
+                self.last_hyperflow = False          # a clip without HyperFlow ran: the model is unpatched
         finally:
             if self.cleanup:
                 for up, local in uploads:
@@ -877,8 +880,12 @@ CONTEXT_OVERLAP = 39
 
 
 def latent_frames(frames: int) -> int:
-    """H3's latent length for a frame count (ComfyUI's video_latent_t: 5 latents per 17 frames, plus 2)."""
-    return 2 if frames <= 5 else ((int(frames) - 5) // 17) * 5 + 2
+    """H3's latent length for a frame count (ComfyUI's video_latent_t: 5 latents per 17 frames, plus 2; frame counts
+    off the 17n+5 grid are rounded up first, as ComfyUI does)."""
+    frames = int(frames)
+    while frames > 5 and frames % 17 != 5:
+        frames += 1
+    return 2 if frames <= 5 else ((frames - 5) // 17) * 5 + 2
 
 
 def context_window(frames: int, width: int, height: int) -> int | None:
@@ -892,7 +899,8 @@ def context_window(frames: int, width: int, height: int) -> int | None:
 
 
 REFINE_NODES = ("LatentUpscaleModelLoader", "MiniMaxH3LatentUpscaleWithModel", "LTXVConcatAVLatent", "VAEEncodeAudio",
-                "ManualSigmas", "VAEDecodeTiled", "LoadVideo", "GetVideoComponents")
+                "ManualSigmas", "VAEDecodeTiled", "LoadVideo", "GetVideoComponents", "MiniMaxH3ContextWindows",
+                "MiniMaxH3ImageToVideo", "CreateVideo", "SaveVideo", "VAEEncode")
 
 
 def pick_refine_files(loras: list[str], upscalers: list[str]) -> dict:
@@ -999,6 +1007,10 @@ def _refine(self, draft: Path, prompt: str, out: Path, seed: int, size: tuple[in
         if not self._object_info(node):
             raise ComfyError(f"this ComfyUI has no {node} node (update ComfyUI: the H3 2K nodes are in its "
                              "master since 2026-10-28)")
+    if self.last_hyperflow is not False:
+        # a HyperFlow-patched H3 model (or one this process does not know about) must not refine: load it fresh
+        self.free()
+        self.last_hyperflow = False
     if sparse and not self._object_info("BlockSparseAttention"):
         raise ComfyError("this ComfyUI has no BlockSparseAttention node (Sol-Attn; update ComfyUI)")
     req = self._object_info("LatentUpscaleModelLoader").get("input", {}).get("required", {})
@@ -1125,8 +1137,9 @@ def clean_refined(text: str) -> str:
     text = re.sub(r"^(here(?:'s| is)[^:\n]*:|refined prompt:|prompt:)\s*", "", text, flags=re.I).strip()
     text = re.sub(r"^\*\*|\*\*$", "", text).strip()
     pairs = {'"': '"', "'": "'", "“": "”", "„": "“", "‘": "’", "«": "»"}
-    if len(text) > 1 and pairs.get(text[0]) == text[-1]:
-        text = text[1:-1].strip()
+    inner = text[1:-1]
+    if len(text) > 1 and pairs.get(text[0]) == text[-1] and text[0] not in inner and text[-1] not in inner:
+        text = inner.strip()                       # only quotes around the whole answer, not spoken lines
     return " ".join(text.split())
 
 
@@ -1160,8 +1173,8 @@ class ComfyPromptRefiner(ComfyGenerator):
         req = self._object_info("CLIPLoader").get("input", {}).get("required", {})
         self.models = pick_refiner_models(_combo_options(req.get("clip_name")))
         if not self.models:
-            raise ComfyError("ComfyUI lists no language model the prompt refiner can use (e.g. a Gemma 3 12B or "
-                             "Qwen 2.5-VL 7B text encoder)")
+            raise ComfyError("ComfyUI lists no language model the prompt refiner can use (e.g. the Qwen3-VL 4B or a "
+                             "Gemma 3 12B text encoder)")
 
     def refine_prompt(self, prompt: str, kind: str, model_file: str | None = None, seed: int = 0,
                       hint: str = "") -> str:
@@ -1171,8 +1184,9 @@ class ComfyPromptRefiner(ComfyGenerator):
         if res.get("node_errors"):
             raise ComfyError(f"ComfyUI rejected the workflow: {json.dumps(res['node_errors'])[:600]}")
         self.current = res["prompt_id"]
+        ws = self._connect_ws()
         try:
-            entry = self._wait(self.current, self._connect_ws())
+            entry = self._wait(self.current, ws)
         except ComfyJobFailed:
             raise
         except Exception:
@@ -1180,6 +1194,11 @@ class ComfyPromptRefiner(ComfyGenerator):
             raise
         finally:
             self.current = None
+            if ws is not None:
+                try:
+                    ws.close()
+                except Exception:  # noqa: BLE001
+                    pass
         out = (entry.get("outputs") or {}).get("show") or {}
         text = (out.get("text") or [""])[0]
         text = clean_refined(text if isinstance(text, str) else str(text))

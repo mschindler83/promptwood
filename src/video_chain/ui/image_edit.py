@@ -15,7 +15,7 @@ import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSize, Qt, Signal
+from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QIcon, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
                                QFrame, QGridLayout, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem,
@@ -161,7 +161,7 @@ class ImageEditDialog(QDialog):
                  end_target: str | None, connect, on_use, settings=None, places=None, start_comfy=None,
                  on_start=None, known_loras: list[tuple[str, str]] | None = None, lora_dir: str = "",
                  uses=None, refine=None, connect_create=None, family_loras=None,
-                 start_aspect: float | None = None, mode: str = "edit"):
+                 start_aspect: float | None = None, mode: str = "edit", check_lora=None):
         super().__init__(parent)
         self.setWindowTitle("Edit an image with AI (Qwen Image Edit)")
         self.resize(1240, 820)
@@ -172,8 +172,13 @@ class ImageEditDialog(QDialog):
         self.refine = refine                             # refine(text, kind) -> new text or None
         self.connect_create = connect_create             # connect_create(progress) -> a ComfyImageCreator
         self.start_aspect = start_aspect
+        self.check_lora = check_lora                     # check_lora(path) -> False if ComfyUI cannot load it
         self.families: dict = {}                         # what ComfyUI has of each family (from the creator)
+        self._families_error = ""
+        self._retry_families = 0                         # retries left while ComfyUI starts
         self._trash: Path | None = None                  # the result deleted last (Undo delete brings it back)
+        self._icons: dict[tuple, QIcon] = {}             # thumbnails of the results by (path, date)
+        self.closed = False
         self.source: str | None = None
         self.editor = None
         self._busy = False
@@ -235,6 +240,8 @@ class ImageEditDialog(QDialog):
         self.family.setToolTip("The model family; unavailable ones say what is missing")
         self.family.addItem("looking for models in ComfyUI …", None)
         self.family.currentIndexChanged.connect(self._family_changed)
+        self.family.activated.connect(lambda _i: self.qs is not None and self.family.currentData() and
+                                      self.qs.setValue("createFamily", self.family.currentData()))
         self.model_file = QComboBox()
         self.model_file.setToolTip("The model file (the recommended one first; fine-tunes of the family too)")
         crow.addWidget(self.family, 1)
@@ -448,8 +455,12 @@ class ImageEditDialog(QDialog):
         top.addLayout(right, 1)
 
         QShortcut(QKeySequence("Ctrl+Return"), self, activated=self.generate)
-        QShortcut(QKeySequence("Delete"), self.results, activated=self.delete_selected)
-        self._b = QShortcut(QKeySequence("B"), self.results, activated=self.b_before.toggle)
+        for key, fn in (("Delete", self.delete_selected), ("B", self.b_before.toggle)):
+            sc = QShortcut(QKeySequence(key), self.results, activated=fn)
+            sc.setContext(Qt.WidgetWithChildrenShortcut)     # only while the results list has the focus
+        for b in self.findChildren(QPushButton):              # Enter in a field must not press a button
+            b.setAutoDefault(False)
+            b.setDefault(False)
         guard_wheel(self)
         self._load_results()
         if source:
@@ -498,6 +509,9 @@ class ImageEditDialog(QDialog):
         self.quality.blockSignals(False)
         self.loras.set_items(self._known(), self._remembered_loras())
         self._create_widgets()
+        if create and self._families_error:
+            self.state.setText(f"Cannot list the models: {self._families_error}")
+            self.b_start_comfy.setVisible("not reachable" in self._families_error and self.start_comfy is not None)
         self._update_buttons()
 
     def _quality_key(self) -> str:
@@ -522,6 +536,13 @@ class ImageEditDialog(QDialog):
 
     def _families_found(self, files: dict, error: str):
         self.families = files
+        self._families_error = error
+        if error and self._retry_families > 0:           # ComfyUI is starting: ask again in a few seconds
+            self._retry_families -= 1
+            QTimer.singleShot(5000, self._load_families)
+        elif not error and self._retry_families >= 0 and getattr(self, "_was_down", False):
+            self.state.setText("ComfyUI is running: the models are listed.")
+        self._was_down = bool(error)
         self.family.blockSignals(True)
         self.family.clear()
         if error:
@@ -546,8 +567,6 @@ class ImageEditDialog(QDialog):
 
     def _family_changed(self, *_):
         fam = self.family.currentData()
-        if self.qs is not None and fam:
-            self.qs.setValue("createFamily", fam)
         self.model_file.clear()
         for m in (self.families.get(fam) or {}).get("models") or []:
             self.model_file.addItem(Path(m).stem, m)
@@ -574,8 +593,9 @@ class ImageEditDialog(QDialog):
             w, h = size_for(fam, self.aspect.currentData() or 1.0)
             self.size_text.setText(f"{w}×{h}")
         if create:
+            found = len(self.family_loras.get(fam, [])) if f else 0
             self.lora_text.setText(f"LoRAs (optional): {f['label']} LoRAs from ComfyUI's LoRA folders (found by "
-                                   "their contents), applied in this order." if f else "")
+                                   f"their contents; {found} found), applied in this order." if f else "")
         else:
             self.lora_text.setText("LoRAs (optional): Qwen Image / Image Edit LoRAs from ComfyUI's LoRA folders, "
                                    "applied in this order. Text-to-image Qwen LoRAs often work for edits too, not "
@@ -618,8 +638,14 @@ class ImageEditDialog(QDialog):
         self.results.blockSignals(True)
         self.results.clear()
         for png, meta in project_edits(self.project):
-            it = QListWidgetItem(QIcon(QPixmap.fromImage(QImage(str(png)).scaled(
-                300, 200, Qt.KeepAspectRatio, Qt.SmoothTransformation))), "")
+            try:
+                key = (str(png), png.stat().st_mtime_ns)
+            except OSError:
+                continue
+            if key not in self._icons:                 # each result is decoded once, not on every update
+                self._icons[key] = QIcon(QPixmap.fromImage(QImage(str(png)).scaled(
+                    300, 200, Qt.KeepAspectRatio, Qt.SmoothTransformation)))
+            it = QListWidgetItem(self._icons[key], "")
             it.setData(Qt.UserRole, (str(png), meta))
             it.setToolTip(meta.get("prompt", png.name))
             self.results.addItem(it)
@@ -631,8 +657,16 @@ class ImageEditDialog(QDialog):
         self._show_selected()
 
     def selected(self) -> tuple[str, dict] | None:
+        """The selected result and its record, read again (a use is recorded while the window is open)."""
         it = self.results.currentItem()
-        return it.data(Qt.UserRole) if it is not None else None
+        if it is None:
+            return None
+        png, meta = it.data(Qt.UserRole)
+        try:
+            meta = json.loads(Path(png).with_suffix(".json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+        return png, meta
 
     def _show_selected(self):
         sel = self.selected()
@@ -700,8 +734,8 @@ class ImageEditDialog(QDialog):
             size = (img.width() // 2 * 2, img.height() // 2 * 2)
         edits = self.project / EDITS_DIR
         sig, connect = self._sig, self.connect_editor
-        if self.on_start is not None:
-            self.on_start()
+        if not self._run_on_start():
+            return
         self.bar.setValue(0)
         self.bar.show()
         self.b_start_comfy.hide()
@@ -758,8 +792,8 @@ class ImageEditDialog(QDialog):
         strength, tags = self.ref_strength.value(), self.tags.isChecked()
         edits = self.project / EDITS_DIR
         sig, connect = self._sig, self.connect_create
-        if self.on_start is not None:
-            self.on_start()
+        if not self._run_on_start():
+            return
         self.bar.setValue(0)
         self.bar.show()
         self.b_start_comfy.hide()
@@ -785,7 +819,7 @@ class ImageEditDialog(QDialog):
                     out = edits / f"new_{time.strftime('%Y%m%d-%H%M%S')}_{seed}.png"
                     meta = self.editor.create(fam, model, prompt, out, seed, quality, w, h, negative, loras,
                                               [Path(r) for r in refs], strength, tags)
-                    meta.update({"prompt": prompt, "seed": seed, "refs": refs,
+                    meta.update({"prompt": prompt, "seed": seed, "refs": refs, "tags": tags,
                                  "source_copy": str(kept) if kept else None})
                     out.with_suffix(".json").write_text(json.dumps(meta, indent=2, ensure_ascii=False),
                                                         encoding="utf-8")
@@ -797,6 +831,17 @@ class ImageEditDialog(QDialog):
                 except RuntimeError:
                     pass
         threading.Thread(target=work, daemon=True).start()
+
+    def _run_on_start(self) -> bool:
+        try:
+            if self.on_start is not None:
+                self.on_start()
+            return True
+        except Exception as e:  # noqa: BLE001
+            self._busy = False
+            self.state.setText(f"Could not start: {e}")
+            self._update_buttons()
+            return False
 
     def cancel(self):
         if not self._busy:
@@ -834,8 +879,12 @@ class ImageEditDialog(QDialog):
 
     def _start_comfy(self):
         if self.start_comfy and self.start_comfy():
-            self.state.setText("Starting ComfyUI … press Generate again in a minute.")
+            self.state.setText("Starting ComfyUI … the models are listed as soon as it answers; then press "
+                               "Generate.")
             self.b_start_comfy.hide()
+            if self.connect_create is not None:
+                self._retry_families = 36              # up to 3 minutes
+                QTimer.singleShot(5000, self._load_families)
 
     # ---- using a result
     def _use(self, kind: str):
@@ -879,7 +928,7 @@ class ImageEditDialog(QDialog):
         self._load_results(select=str(back))
         self.state.setText(f"{back.name} is back.")
 
-    def _empty_trash(self):
+    def _empty_trash(self, keep_sources: bool = False):
         """Delete for good what was deleted before, and originals no result needs any more."""
         trash = self.project / EDITS_DIR / ".deleted"
         if trash.is_dir():
@@ -887,6 +936,8 @@ class ImageEditDialog(QDialog):
                 f.unlink(missing_ok=True)
             trash.rmdir()
         self._trash = None
+        if keep_sources:
+            return
         needed = {m.get("source_copy") for _p, m in project_edits(self.project)}
         for f in (self.project / EDITS_DIR / "sources").glob("*") if (self.project / EDITS_DIR / "sources").is_dir() \
                 else []:
@@ -913,10 +964,13 @@ class ImageEditDialog(QDialog):
         self.state.setText(msg if isinstance(msg, str) and msg else
                            "Added as a face reference." if msg else "Could not add it as a face reference "
                                                                    "(see the status bar).")
+        self._show_selected()                      # now in use: shown, and it cannot be deleted
 
     def _edit_further(self):
         sel = self.selected()
         if sel is not None:
+            if self.mode() != "edit":
+                self.set_mode("edit")
             if self.src_combo.findData(sel[0]) < 0:
                 self.src_combo.insertItem(self.src_combo.count() - 1, f"Result: {sel[1].get('prompt', '')[:40]}",
                                           sel[0])
@@ -926,11 +980,32 @@ class ImageEditDialog(QDialog):
             self.prompt.setFocus()
 
     def _prompt_again(self):
+        """Back to what the selected result was made with: prompt and LoRAs; for a new image also its model,
+        quality, negative prompt and tags."""
         sel = self.selected()
-        if sel is not None:
-            self.prompt.setPlainText(sel[1].get("prompt", ""))
-            self.loras.set_items(self._known(), sel[1].get("loras") or [])
-            self._remember_loras()
+        if sel is None:
+            return
+        meta = sel[1]
+        if meta.get("mode") == "create" and self.connect_create is not None:
+            if self.mode() != "create":
+                self.set_mode("create")
+            i = self.family.findData(meta.get("family"))
+            if i >= 0 and self.family.model().item(i).isEnabled():
+                self.family.setCurrentIndex(i)
+            j = self.model_file.findData(meta.get("model"))
+            if j >= 0:
+                self.model_file.setCurrentIndex(j)
+            q = self.quality.findData(meta.get("quality"))
+            if q >= 0:
+                self.quality.setCurrentIndex(q)
+            self.negative.setText(meta.get("negative") or "")
+            if "tags" in meta:
+                self.tags.setChecked(bool(meta["tags"]))
+        elif meta.get("mode") != "create" and self.mode() != "edit":
+            self.set_mode("edit")
+        self.prompt.setPlainText(meta.get("prompt", ""))
+        self.loras.set_items(self._known(), meta.get("loras") or [])
+        self._remember_loras()
 
     # ---- LoRAs
     def _lora_key(self) -> str:
@@ -950,9 +1025,12 @@ class ImageEditDialog(QDialog):
                 out.append((p, lora_label(p)))
         return out
 
+    def _recent_key(self) -> str:
+        return self._lora_key().replace("Loras", "LoraFiles")       # per mode / family
+
     def _recent_files(self) -> list[str]:
         try:
-            return [p for p in json.loads(self.qs.value("editLoraFiles", "[]", type=str)) if isinstance(p, str)]
+            return [p for p in json.loads(self.qs.value(self._recent_key(), "[]", type=str)) if isinstance(p, str)]
         except (ValueError, AttributeError):
             return []
 
@@ -968,21 +1046,29 @@ class ImageEditDialog(QDialog):
             self.qs.setValue(self._lora_key(), json.dumps(self.loras.items()))
 
     def _lora_picked(self, path: str):
-        """A file from another folder chosen in the picker: offered again next time."""
-        if path not in {p for p, _ in self.known_loras} and self.qs is not None:
-            self.qs.setValue("editLoraFiles", json.dumps([path] + [r for r in self._recent_files() if r != path][:11]))
+        """A file from another folder chosen in the picker: offered again next time (in this mode / family); a
+        warning if ComfyUI cannot load it."""
+        listed = {p for p, _ in (self.family_loras.get(self.family.currentData(), []) if self.mode() == "create"
+                                 else self.known_loras)}
+        if path not in listed and self.qs is not None:
+            self.qs.setValue(self._recent_key(), json.dumps([path] + [r for r in self._recent_files() if r != path][:11]))
+        if self.check_lora is not None and self.check_lora(path) is False:
+            self.state.setText(f"{Path(path).name} is not in ComfyUI's LoRA folders, so ComfyUI cannot load it: "
+                               "copy or link it there (then Rescan LoRAs in the main window).")
 
     def add_lora_file(self, path: str, strength: float = 1.0):
         """A LoRA file from any folder at the end of the list (ComfyUI must find it in its LoRA folders)."""
         import os
         p = os.path.abspath(path)
         if self.qs is not None:
-            self.qs.setValue("editLoraFiles", json.dumps([p] + [r for r in self._recent_files() if r != p][:11]))
+            self.qs.setValue(self._recent_key(), json.dumps([p] + [r for r in self._recent_files() if r != p][:11]))
         self.loras.set_items(self._known(), self.loras.items() + [{"path": p, "strength": float(strength)}])
         self._remember_loras()
 
     def done(self, r):
-        if self._busy:
+        busy = self._busy
+        if busy:
             self.cancel()
-        self._empty_trash()
+        self._empty_trash(keep_sources=busy)       # a running job may still write its result with its source
+        self.closed = True
         super().done(r)

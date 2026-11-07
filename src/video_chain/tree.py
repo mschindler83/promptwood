@@ -295,7 +295,7 @@ def remove_stale_files(project: Path, tree: "Tree") -> list[Path]:
     used = {Path(project) / n.made[k] for n in tree.nodes.values() if n.made for k in ("video", "frame", "first")
             if n.made.get(k)}
     used |= {h for n in tree.nodes.values() if (h := handover_file(project, tree, n)) is not None}
-    used |= {f for n in tree.nodes.values() if n.made for size in REFINED
+    used |= {f for n in tree.nodes.values() if n.made and n.made.get("video") for size in REFINED
              for f in (refined_file(project, n, size), refined_file(project, n, size).with_suffix(".json"))}
     stuck = []
     for f in d.iterdir():
@@ -1194,6 +1194,12 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
                 emit({"e": "node", "id": node.id, "state": "reused"})
                 continue
             emit({"e": "node", "id": node.id, "state": "generating", "k": k, "n": len(order)})
+            target.with_suffix(".json").unlink(missing_ok=True)   # a copy made now must not keep older pins
+            s = node.made.get("settings") or {}
+            if node.is_video and not all(k_ in (node.made.get("key") or {}) for k_ in ("width", "height")) or \
+                    not node.is_video and not all(k_ in s for k_ in ("width", "height")):
+                raise ValueError(f"{'video' if node.is_video else 'clip'} #{node.id[1:]} has no recorded size; "
+                                 "make it again, then export")
             if node.is_video:
                 src = node.source
                 if not Path(src["file"]).is_file():

@@ -192,6 +192,7 @@ class LoraStack(QWidget):
         self.b_add.setToolTip("Add a LoRA: search by name, or take a file from another folder; several are applied "
                               "in this order")
         self.b_add.clicked.connect(self.add_from_picker)
+        self.b_add.setAutoDefault(False)               # Enter in a text field of the window must not open it
         brow.addWidget(self.none)
         brow.addWidget(self.b_add)
         brow.addStretch(1)
@@ -239,6 +240,7 @@ class LoraStack(QWidget):
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(4)
         button = QPushButton(w)
+        button.setAutoDefault(False)                   # Enter in a text field must not open the picker
         button.setStyleSheet("text-align: left; padding-left: 6px;")
         button.setMinimumWidth(60)
         from PySide6.QtWidgets import QSizePolicy

@@ -82,8 +82,8 @@ def pick_files(unets: list[str], ckpts: list[str], clips: list[str], vaes: list[
     f3 = [u for u in unets if "flux3_image_klein" in _low(u)]
     f3te = first(clips, "qwen3vl_4b_int8", "qwen3vl_4b_fp8", "qwen3vl_4b")
     f3vae = first(vaes, "flux2_vae", "flux2-vae")
-    out["flux3"] = ({"base": next((u for u in sorted(f3) if "base" in u), None),
-                     "distilled": next((u for u in sorted(f3) if "base" not in u), None), "models": sorted(f3),
+    out["flux3"] = ({"base": next((u for u in sorted(f3) if "base" in u.lower()), None),
+                     "distilled": next((u for u in sorted(f3) if "base" not in u.lower()), None), "models": sorted(f3),
                      "clip": f3te, "vae": f3vae} if f3 and f3te and f3vae else
                     {"missing": "FLUX.3 Image Klein: accept its licence on huggingface.co/black-forest-labs/"
                                 "flux-3-image-klein, then download it (flux3-image-klein-*-int8-convrot, "
@@ -196,9 +196,12 @@ def build_create_workflow(*, family: str, files: dict, model: str, prompt: str, 
                                    "sampler_name": "euler", "scheduler": "simple", "positive": ["pos", 0],
                                    "negative": ["neg", 0], "latent_image": ["latent", 0], "denoise": 1.0}}
     elif family == "flux3":
-        base = quality == "best"
-        unet = files["base"] if base and files.get("base") else files.get("distilled") or model
-        steps, cfg = (50, 3.5) if base and files.get("base") else (16, 1.0)
+        # the chosen file decides: a base model samples like the template's base (50 steps, cfg 3.5), a distilled one
+        # like the distilled template (16 steps, cfg 1); 'best' / 'fast' pick the other kind if no file was chosen
+        unet = model if model in (files.get("models") or []) else \
+            (files.get("base") if quality == "best" else files.get("distilled")) or (files.get("models") or [model])[0]
+        base = "base" in unet.lower()
+        steps, cfg = (50, 3.5) if base else (16, 1.0)
         wf["unet"] = {"class_type": "UNETLoader", "inputs": {"unet_name": unet, "weight_dtype": "default"}}
         wf["clip"] = {"class_type": "CLIPLoader", "inputs": {"clip_name": files["clip"], "type": "flux3",
                                                              "device": "default"}}
@@ -307,7 +310,10 @@ def lora_family(keys) -> str | None:
         return "flux1"
     if _SDXL.search(joined):
         return "sdxl"
-    if re.search(r"(^|[._])layers[._]\d+[._](attention|feed_forward|adaLN)", joined, re.M):
+    # Krea-2 (checked on the official krea2_style_reference LoRA): blocks.N.attn.wq/wk/wv/wo/gate + mlp.gate/down;
+    # Wan has blocks.N.self_attn.q, Z-Image / Lumina layers.N.attention: not Krea-2
+    if re.search(r"blocks[._]\d+[._]attn[._](wq|wk|wv|wo)([._]|$)", joined, re.M) and \
+            re.search(r"blocks[._]\d+[._]mlp[._](gate|down)", joined):
         return "krea2"
     return None
 
@@ -376,7 +382,11 @@ class ComfyImageCreator(ComfyGenerator):
                 for up, local in uploads:
                     self._remove(self.input_dir, {"filename": Path(up).name, "subfolder": str(Path(up).parent)},
                                  Path(local), same_size=False)
-        return {"mode": "create", "family": family, "model": model, "quality": quality, "width": width,
+        used = (wf.get("unet") or {}).get("inputs", {}).get("unet_name") or \
+            (wf.get("ckpt") or {}).get("inputs", {}).get("ckpt_name") or model
+        smp = wf["sample"]["inputs"] if wf["sample"]["class_type"] == "KSampler" else {}
+        return {"mode": "create", "family": family, "model": used, "chosen_model": model,
+                "steps": smp.get("steps", 8), "cfg": smp.get("cfg", 1.0), "quality": quality, "width": width,
                 "height": height, "negative": negative, "ref_strength": ref_strength if refs else None,
                 "loras": [{"path": str(p), "strength": float(s)} for p, s in loras]}
 
@@ -398,7 +408,12 @@ def lora_file_family(path: str) -> str | None:
             with open(path, "rb") as f:
                 n = int.from_bytes(f.read(8), "little")
                 if 0 < n < 100 * 2**20:
-                    fam = lora_family(k for k in json.loads(f.read(n)) if k != "__metadata__")
+                    head = json.loads(f.read(n))
+                    fam = lora_family(k for k in head if k != "__metadata__")
+                    if fam == "krea2":                 # Krea-2's width is 6144 (another model with such names: not)
+                        k = next((k for k in head if re.search(r"attn[._]wq[._]lora_(A|down)", k)), None)
+                        if k is not None and (head[k].get("shape") or [0, 0])[-1] != 6144:
+                            fam = None
         except (OSError, ValueError):
             fam = None
         _FAMILY_CACHE[key] = fam

@@ -2279,7 +2279,7 @@ class MainWindow(QMainWindow):
                 for fam, items in find_image_loras(roots).items():
                     found += [(p, n, fam) for p, n in items]
             except Exception:  # noqa: BLE001
-                found = []
+                return                           # keep the lists found before (a folder may be offline)
             bridge.loras.emit(found, report)
         threading.Thread(target=work, daemon=True).start()
 
@@ -2531,6 +2531,12 @@ class MainWindow(QMainWindow):
         try:
             return dlg.chosen() if dlg.exec() == QDialog.Accepted else None
         finally:
+            if dlg.refined_any and not self.running and self._comfy_model not in ("qwen",):
+                # a language model is in ComfyUI now: unloaded before the next clips, idle time as usual
+                self._comfy_model = "llm"
+                if self.keep_loaded.isChecked():
+                    self._qwen_timer.start(self.idle_minutes.value() * 60_000)
+                self._update_model_label()
             dlg.deleteLater()
 
     # ---- AI image edit
@@ -2543,6 +2549,9 @@ class MainWindow(QMainWindow):
             return None
         if self.running:
             self.status.setText("Wait until generating has finished.")
+            return None
+        if self._waiting_comfy is not None:
+            self.status.setText("Clips are generated as soon as ComfyUI runs; wait for them (or Stop) first.")
             return None
         node = self.tree.nodes.get(nid) if nid else None
         sources: list[tuple[str, str]] = []
@@ -2575,11 +2584,12 @@ class MainWindow(QMainWindow):
         comfy_dir = os.path.expanduser(self.comfy_dir.text().strip()) or None
         cleanup = self.comfy_cleanup.isChecked()
 
-        switch = {"free": False}
+        switch = {"free": False, "loaded": False}
 
         def before_edit():                          # GUI thread, before each Generate
             self._qwen_timer.stop()
-            switch["free"] = self._comfy_model in ("h3", "h3-hyperflow")   # the clip model is loaded: unload it
+            # the clip model is loaded: unload it (once: after the first image of this window it is gone)
+            switch["free"] = not switch["loaded"] and self._comfy_model in ("h3", "h3-hyperflow")
             if self.worker_alive and not self.running:
                 self._quit_worker(free=False)               # its model goes now; it is started again for clips
 
@@ -2589,7 +2599,7 @@ class MainWindow(QMainWindow):
             if switch["free"]:
                 ed.free()
                 switch["free"] = False
-            self._comfy_model = "qwen"
+            switch["loaded"] = True
             return ed
 
         def connect_create(progress):               # worker thread: the image creator (any image family)
@@ -2599,7 +2609,7 @@ class MainWindow(QMainWindow):
                 ed.free()
                 switch["free"] = False
             if progress is not None:                # (None: only listing the models)
-                self._comfy_model = "qwen"          # an image model is loaded (unloaded before the next clips)
+                switch["loaded"] = True             # an image model is loaded (unloaded before the next clips)
             return ed
 
         def use(kind: str, png: str):
@@ -2641,7 +2651,8 @@ class MainWindow(QMainWindow):
                               known_loras=known, lora_dir=self._lora_dir(),
                               uses=lambda meta: uses_of(self.project, self.tree, meta),
                               refine=self.refine_text, connect_create=connect_create, family_loras=family_loras,
-                              start_aspect=aspect, mode=mode)
+                              start_aspect=aspect, mode=mode, check_lora=self.in_comfy_loras)
+        self._edit_switch = switch
         if dialog:
             dlg.exec()
             dlg.deleteLater()
@@ -2649,8 +2660,11 @@ class MainWindow(QMainWindow):
         return dlg
 
     def edits_closed(self):
-        """The edit dialog is closed: Qwen stays loaded for the idle time ('Keep the model loaded'), else it is
-        unloaded now."""
+        """The edit dialog is closed: the image model stays loaded for the idle time ('Keep the model loaded'), else
+        it is unloaded now."""
+        sw = getattr(self, "_edit_switch", None) or {}
+        if sw.get("loaded"):                      # an image job connected (also when it finished after closing)
+            self._comfy_model = "qwen"
         if self._comfy_model != "qwen" or self.running:
             return
         if self.keep_loaded.isChecked():
@@ -3361,7 +3375,7 @@ class MainWindow(QMainWindow):
         self._job["sent"] = True
         self._worker_idle = False
         cmd = {"cmd": "run", "tree": str(self.project), "targets": self._job["targets"],
-               "free_first": self._comfy_model == "qwen"}          # an image edit model is loaded: unload it
+               "free_first": self._comfy_model in ("qwen", "llm")}          # an image edit model is loaded: unload it
         if self._comfy_model in ("h3", "h3-hyperflow"):             # earlier workers: was HyperFlow last?
             cmd["last_hyperflow"] = self._comfy_model == "h3-hyperflow"
         if self._job.get("refine"):                                # export refined: re-render the path's clips
@@ -3386,7 +3400,7 @@ class MainWindow(QMainWindow):
         if self.worker_alive and not self.running:
             self.status.setText("Unloading the model …")
             self._quit_worker()
-        elif self._comfy_model == "qwen" and not self.running:
+        elif self._comfy_model in ("qwen", "llm") and not self.running:
             self.status.setText("Unloading the image model …")
             self._free_comfy()
 
@@ -3407,7 +3421,7 @@ class MainWindow(QMainWindow):
         self._update_model_label()
 
     def _qwen_idle(self):
-        if self._comfy_model == "qwen" and not self.running:
+        if self._comfy_model in ("qwen", "llm") and not self.running:
             self._free_comfy()
             self.status.setText("The image model was unloaded after the idle time.")
 
@@ -3713,9 +3727,10 @@ class MainWindow(QMainWindow):
         return True
 
     def _update_model_label(self):
-        if not self.worker_alive and self._comfy_model == "qwen":
+        if not self.worker_alive and self._comfy_model in ("qwen", "llm"):
             left = self._qwen_timer.remainingTime() if self._qwen_timer.isActive() else -1
-            text, sev = ("Model: image model loaded in ComfyUI" +
+            text, sev = (("Model: language model (prompt refiner) loaded in ComfyUI" if self._comfy_model == "llm"
+                          else "Model: image model loaded in ComfyUI") +
                          (f" · unloads in {max(1, round(left / 60000))} min" if left >= 0 else "")), ""
         elif not self.worker_alive:
             text, sev = "Model: not loaded", ""
@@ -3732,7 +3747,7 @@ class MainWindow(QMainWindow):
         self.model_label.setProperty("severity", sev)
         repolish(self.model_label)
         self.b_unload.setVisible((self.worker_alive and not self.running and self._worker_idle) or
-                                 (not self.worker_alive and self._comfy_model == "qwen"))
+                                 (not self.worker_alive and self._comfy_model in ("qwen", "llm")))
 
     def changeEvent(self, e):
         """Back in this window (e.g. after training a LoRA): look for new LoRAs, at most every 30 s."""
@@ -3759,7 +3774,7 @@ class MainWindow(QMainWindow):
                         p.kill()
                         p.waitForFinished(3000)
             self._job = None
-        if self._comfy_model == "qwen":              # nor the image edit model
+        if self._comfy_model in ("qwen", "llm"):              # nor the image edit model
             try:
                 url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL).rstrip("/")
                 urllib.request.urlopen(urllib.request.Request(

@@ -6,7 +6,7 @@ from __future__ import annotations
 import random
 import threading
 
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut, QTextCursor
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLineEdit, QPlainTextEdit,
                                QPushButton, QVBoxLayout)
@@ -45,6 +45,7 @@ class RefineDialog(QDialog):
         self.resize(900, 560)
         self.kind, self.connect, self.qs, self.start_comfy = kind, connect, settings, start_comfy
         self.refiner = None
+        self.refined_any = False                  # a refine ran (its model is loaded in ComfyUI now)
         self._busy = False
         self._chosen: str | None = None
         self._sig = _Sig()
@@ -122,6 +123,10 @@ class RefineDialog(QDialog):
         threading.Thread(target=work, daemon=True).start()
 
     def _models(self, models: list, error: str):
+        if error and getattr(self, "_retries", 0) > 0:        # ComfyUI is starting: ask again
+            self._retries -= 1
+            QTimer.singleShot(5000, self._load_models)
+            return
         if error:
             down = "not reachable" in error
             self.state.setText(("ComfyUI is not running. " if down else "") + f"Cannot refine: {error}")
@@ -138,10 +143,9 @@ class RefineDialog(QDialog):
         self.model.blockSignals(False)
         self.model.setEnabled(True)
         self.b_refine.setEnabled(True)
-        self.state.setText("Choose a model and press Refine. The first refine loads the model, which takes a "
-                           "moment.")
-        if self.original.toPlainText().strip():
-            self.refine()
+        self.state.setText("Choose a model and press Refine (Ctrl+Enter). The first refine loads the model, which "
+                           "takes a moment.")
+        self.b_refine.setFocus()
 
     def _remember(self, *_):
         if self.qs is not None and self.model.currentData():
@@ -150,7 +154,9 @@ class RefineDialog(QDialog):
     def _start_comfy(self):
         if self.start_comfy and self.start_comfy():
             self.b_start.hide()
-            self.state.setText("Starting ComfyUI … close and open this window again in a minute.")
+            self.state.setText("Starting ComfyUI … the models are listed as soon as it answers.")
+            self._retries = 36                     # up to 3 minutes
+            QTimer.singleShot(5000, self._load_models)
 
     # ---- refining
     def refine(self):
@@ -180,6 +186,7 @@ class RefineDialog(QDialog):
         if error:
             self.state.setText(f"Could not refine: {error}")
         else:
+            self.refined_any = True
             self.out.setPlainText(text)
             same = " ".join(text.lower().strip(" .").split()) == \
                 " ".join(self.original.toPlainText().lower().strip(" .").split())

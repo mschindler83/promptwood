@@ -229,6 +229,8 @@ def serve(a, emit, make_generator: Callable[[dict], object], stdin=None) -> int:
             started = time.monotonic()
             if cmd.get("free_first") and hasattr(gen, "free"):
                 gen.free()
+            if "last_hyperflow" in cmd and getattr(gen, "last_hyperflow", False) is None:
+                gen.last_hyperflow = cmd["last_hyperflow"]
             try:
                 treemod.refine_path(gen, Path(cmd["tree"]), cmd["target"], cmd["size"], Path(cmd["out"]),
                                     fast_attention=bool(cmd.get("fast_attention")),

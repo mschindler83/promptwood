@@ -590,7 +590,9 @@ def test_image_families_from_comfyui_lists():
     assert G.size_for("qwen", 16 / 9) == (1776, 992) and G.size_for("sdxl", 1.0) == (1024, 1024)
     assert G.lora_family(["lora_unet_double_blocks_0_img_attn_proj.alpha"]) == "flux1"
     assert G.lora_family(["lora_te2_text_model_encoder_layers_0_mlp_fc1.alpha"]) == "sdxl"
-    assert G.lora_family(["diffusion_model.layers.0.adaLN_modulation.0.lora_A.weight"]) == "krea2"
+    assert G.lora_family(["diffusion_model.blocks.0.attn.wq.lora_A.weight",
+                          "diffusion_model.blocks.0.mlp.gate.lora_A.weight"]) == "krea2"
+    assert G.lora_family(["diffusion_model.layers.0.adaLN_modulation.0.lora_A.weight"]) is None   # Z-Image
     assert G.lora_family(["diffusion_model.blocks.0.self_attn.q.lora_A.weight"]) is None          # e.g. Wan
 
 
