@@ -214,6 +214,13 @@ class ExportDialog(QDialog):
                              "per 3 s clip. Refined clips are kept, so the next export of the same clips is quick. "
                              "Real videos are converted again from their file at that size.")
         f.addRow("Size", self.size)
+        self.fast = QCheckBox("Faster refine with Sol-Attn (about 2× faster at 2K, very slightly different)")
+        self.fast.setToolTip("Block-sparse attention in the refine pass. Measured on an RTX 4090 at 2K: 120 s instead "
+                             "of 267 s per 3 s clip, PSNR 33 dB against exact attention (side by side practically the "
+                             "same; skin texture very slightly smoother). Off: exact attention")
+        self.fast.setEnabled(False)
+        self.size.currentIndexChanged.connect(lambda *_: self.fast.setEnabled(self.size.currentData() != "made"))
+        f.addRow("", self.fast)
         note = label("Refined export needs ComfyUI with the H3 2K nodes, the latent upscaler and the refiner LoRA. "
                      "Generating and the preview stay at the normal size.", level="tertiary")
         note.setWordWrap(True)
@@ -3182,12 +3189,12 @@ class MainWindow(QMainWindow):
         try:
             if dlg.exec() != QDialog.Accepted:
                 return
-            out, size = dlg.target(), dlg.size.currentData()
+            out, size, fast = dlg.target(), dlg.size.currentData(), dlg.fast.isChecked()
         finally:
             dlg.deleteLater()
-        self.export(out, size)
+        self.export(out, size, fast)
 
-    def export(self, out: Path, size: str = "made") -> None:
+    def export(self, out: Path, size: str = "made", fast_attention: bool = False) -> None:
         """Export the selected path to out: as made (joined here), or refined at '1080p' / '2k' (a generator job)."""
         path = self.selected_path()
         if not path:
@@ -3195,7 +3202,7 @@ class MainWindow(QMainWindow):
         if size == "made":
             self.join_selected("export", out)
             return
-        self._start([path[-1].id], refine={"size": size, "out": str(out)})
+        self._start([path[-1].id], refine={"size": size, "out": str(out), "fast_attention": bool(fast_attention)})
 
     # ------------------------------------------------------------------ GPU
     def _poll_gpu(self):

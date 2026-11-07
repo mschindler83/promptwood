@@ -647,3 +647,14 @@ def test_export_a_path_refined(project, tmp_path):
     assert not old.exists()
     with pytest.raises(ValueError, match="not made yet"):
         T.refine_path(gen, project, c.id, "2k", tmp_path / "x.mp4", log=lambda _m: None)
+
+
+def test_refined_export_with_fast_attention_makes_its_own_copies(project, tmp_path):
+    t, a, b1, b2, c = build(project)
+    gen = run(project, [b1.id])
+    T.refine_path(gen, project, b1.id, "2k", tmp_path / "exact.mp4", log=lambda _m: None)
+    assert [r["sparse"] for r in gen.refines] == [None, None]
+    T.refine_path(gen, project, b1.id, "2k", tmp_path / "fast.mp4", log=lambda _m: None, fast_attention=True)
+    assert [r["sparse"] for r in gen.refines[2:]] == [1.3, 1.3]                 # made again with Sol-Attn
+    T.refine_path(gen, project, b1.id, "2k", tmp_path / "fast2.mp4", log=lambda _m: None, fast_attention=True)
+    assert len(gen.refines) == 4                                                # and then reused

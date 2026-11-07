@@ -1143,13 +1143,15 @@ def _refine_record(target: Path) -> dict:
 
 def refine_path(generator, project: Path, nid: str, size: str, out: Path,
                 events: Callable[[dict], None] | None = None, log: Callable[[str], None] = print,
-                pin: bool = True) -> Path:
+                pin: bool = True, fast_attention: bool = False) -> Path:
     """Export the path start -> nid at a higher size ('1080p' / '2k'): every generated clip is re-rendered by
     generator.refine (Open-H3-Regenerate-2K) as it was made (its prompt, style text, LoRAs, seed), every real video
     is converted again from its file at that size. Refined copies are kept (nodes/<clip>_<size>.mp4) and reused.
     pin: a refined clip starts exactly at the frame the refined clip before it hands over at (the first one at the
     start image) and ends at the refined first frame of a real video after it, so the joins stay seamless at the
     higher size; a kept copy is reused only while those frames are the same (its .json records them).
+    fast_attention: Sol-Attn block-sparse attention for the refine (about 2x faster at 2K, not exact); the
+    attention a copy was made with is recorded too, so the other choice makes new copies.
     Then the path is joined (the same frames left out as at the normal size) into out."""
     from .comfy import refine_size
     if size not in REFINED:
@@ -1186,6 +1188,8 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
                     last = tmp / f"{node.id}_last.png"
                     chain.frame_at(refined_file(project, vc, size), 0, last)
             pins = {"first": chain.file_signature(first), "last": chain.file_signature(last)}
+            if fast_attention:
+                pins["attention"] = "sol-attn"
             if target.is_file() and (node.is_video or _refine_record(target) == pins):
                 emit({"e": "node", "id": node.id, "state": "reused"})
                 continue
@@ -1206,8 +1210,10 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
                 loras = ([(s["lora"], s.get("strength", 1.0))] if s.get("lora") else []) + \
                     [(e["lora"], e.get("strength", 1.0)) for e in s.get("extra_loras") or []]
                 log(f"[{k}/{len(order)}] {node.id}: refining at {w}x{h}")
+                from .comfy import SOL_TAU
                 generator.refine(project / node.made["video"], prompt, target, node.seed, (w, h),
-                                 made_frames(node) or _clip_frames(project, node), loras, first, last)
+                                 made_frames(node) or _clip_frames(project, node), loras, first, last,
+                                 sparse=SOL_TAU if fast_attention else None)
                 target.with_suffix(".json").write_text(json.dumps(pins), encoding="utf-8")
             made_now.append(node.id)
             emit({"e": "node", "id": node.id, "state": "done"})

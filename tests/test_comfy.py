@@ -494,3 +494,15 @@ def test_models_unloaded_only_from_hyperflow_to_turbo(server, start, tmp_path):
     server.fail_next = "mat1 and mat2 shapes cannot be multiplied (2x8 and 2688x16)"
     fresh.generate("x", start, tmp_path / "w.mp4", tmp_path / "w.png", 1, settings(turbo=turbo))
     assert frees() == 2 and (tmp_path / "w.mp4").is_file()
+
+
+def test_refine_with_sol_attn(server, start, tmp_path):
+    gen = C.ComfyGenerator(server.url)
+    draft = tmp_path / "d.mp4"
+    gen.generate("x", start, draft, tmp_path / "d.png", 1, settings())
+    gen.refine(draft, "x", tmp_path / "r.mp4", 5, (1888, 1088), 39, [], sparse=C.SOL_TAU)
+    wf = server.prompts[-1]
+    sp = wf["sparse"]["inputs"]
+    assert wf["sparse"]["class_type"] == "BlockSparseAttention" and sp["selection"] == "sol-attn"
+    assert sp["selection.tau"] == 1.3 and wf["guider"]["inputs"]["model"] == ["sparse", 0]
+    assert sp["model"] == ["lora0", 0]                                          # after the refiner LoRA

@@ -18,7 +18,7 @@ KNOWN = {"UNETLoader", "CLIPLoader", "VAELoader", "LoadImage", "MiniMaxH3ImageTo
          "FluxKontextMultiReferenceLatentMethod", "VAEEncode", "KSampler", "ApplyHyperFlowH3",
          # 2K refine
          "VAEEncodeAudio", "LTXVConcatAVLatent", "LatentUpscaleModelLoader", "MiniMaxH3LatentUpscaleWithModel",
-         "ManualSigmas", "VAEDecodeTiled"}
+         "ManualSigmas", "VAEDecodeTiled", "BlockSparseAttention"}
 REFINER = "minimax-h3-refiner/minimax_h3_open_regenerate_2k_refiner_rank_384_bf16.safetensors"
 UPSCALER = "minimax_h3_latent_upscaler_3d_conv_v1_bf16.safetensors"
 HYPERFLOW = "custom_node_hyperflow_8step_v1.0_comfyui_pruned.safetensors"
@@ -58,7 +58,7 @@ class FakeComfy:
                  "LoraLoaderModelOnly": ("lora_name", self.loras + ([QWEN_LIGHTNING] if q else [])
                                          + ([REFINER] if self.refine else [])),
                  "LatentUpscaleModelLoader": ("model_name", [UPSCALER] if self.refine else [])}
-        if node in C.REFINE_NODES and node != "LatentUpscaleModelLoader":
+        if node in C.REFINE_NODES + ("BlockSparseAttention",) and node != "LatentUpscaleModelLoader":
             return {node: {"input": {"required": {}}}} if self.refine else {}
         if node == "ApplyHyperFlowH3":
             return {node: {"input": {"required": {"hyperflow_file": [[HYPERFLOW, "custom_node_hyperflow_8step_v1.0_comfyui.safetensors"]]}}}} \
