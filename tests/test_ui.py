@@ -1326,3 +1326,27 @@ def test_switching_between_clips_and_image_edits_unloads_only_then(app, tmp_path
         w.close()
     finally:
         server.close()
+
+
+def test_export_refined_and_hyperflow_speed(app, win, tmp_path, image):
+    from video_chain.ui.main_window import ExportDialog
+    ids = new_project(win, tmp_path, image, ("a", "b"))
+    win.speed.setCurrentIndex(win.speed.findData("hyperflow"))           # HyperFlow: 8 steps for every clip
+    assert win.tree.options["hyperflow"]["on"] and not win.steps.isEnabled()
+    assert T.Checker(win.project, win.tree).settings(ids[0])["steps"] == 8
+    run_and_wait(app, win, win.generate_path)
+    wait(app, lambda: not win._joins, timeout=30)
+    dlg = ExportDialog(None, str(tmp_path / "x.mp4"), (672, 384), {"2k": False, "1080p": True})
+    texts = [dlg.size.itemText(i) for i in range(dlg.size.count())]
+    assert texts[0].startswith("As made (672×384)") and "1888×1088 · already refined" in texts[1] \
+        and "2528×1440" in texts[2]
+    dlg.reject()
+    out = tmp_path / "export-2k.mp4"
+    win.export(out, "2k")
+    assert win.running
+    wait(app, lambda: not win.running, timeout=120)
+    info = chain.probe(out)
+    base = T.Checker(win.project, win.tree).base()
+    from video_chain.comfy import refine_size
+    assert (info["width"], info["height"]) == refine_size(base["width"], base["height"], "2k")
+    assert win.status.text().startswith(f"Exported {out.name} (2k, refined; 2 clips refined now")

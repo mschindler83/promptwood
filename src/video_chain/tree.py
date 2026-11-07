@@ -58,6 +58,8 @@ DEFAULT_OPTIONS = {"model": "Comfy-Org/MiniMax-H3", "frames": 73, "steps": 28,
                    "resolution": 512, "audio": True, "keep_repeated": False, "seed": 42,
                    # turbo: a step-distilled LoRA + its sampler, few steps for every clip (ComfyUI only)
                    "turbo": {"on": False, "lora": None, "steps": 6, "strength": 1.0},
+                   # HyperFlow: Video Rebirth's 8-step LoRA with its own sigma grid (ComfyUI-HyperFlow-H3 nodes)
+                   "hyperflow": {"on": False, "strength": 1.0},
                    # identity: reference images (copies in refs/) every clip sees, so the face stays the same
                    "identity": {"mode": "off", "images": [], "size": "match", "hint": True},
                    # style text put before / after every prompt (e.g. look, camera, a LoRA's trigger word)
@@ -242,7 +244,8 @@ class Tree:
         return t
 
 
-_CLIP_NAME = re.compile(r"^n\d+(_[0-9a-f]{8})?(_first|_f\d+)?\.(mp4|png)$")   # also the fixed names of older versions
+REFINED = ("1080p", "2k")          # refined copies of a clip version for export: nodes/<id>_<tag>_<size>.mp4
+_CLIP_NAME = re.compile(r"^n\d+(_[0-9a-f]{8})?(_first|_f\d+|_1080p|_2k)?\.(mp4|png)$")   # also the fixed names of older versions
 
 
 def _unlink(f: Path) -> bool:
@@ -265,10 +268,11 @@ def clip_files(project: Path, node: "Node") -> list[Path]:
             f = Path(project) / node.made[k]
             if area in f.resolve().parents:           # a damaged/hand-edited record never reaches elsewhere
                 out.append(f)
-    if node.made.get("video"):                    # hand-over frames of this version
+    if node.made.get("video"):                    # hand-over frames and refined copies of this version
         v = Path(project) / node.made["video"]
         if area in v.resolve().parents and v.parent.is_dir():
             out += sorted(v.parent.glob(f"{v.stem}_f*.png"))
+            out += [r for size in REFINED if (r := refined_file(project, node, size)).is_file()]
     return out
 
 
@@ -289,6 +293,7 @@ def remove_stale_files(project: Path, tree: "Tree") -> list[Path]:
     used = {Path(project) / n.made[k] for n in tree.nodes.values() if n.made for k in ("video", "frame", "first")
             if n.made.get(k)}
     used |= {h for n in tree.nodes.values() if (h := handover_file(project, tree, n)) is not None}
+    used |= {refined_file(project, n, size) for n in tree.nodes.values() if n.made for size in REFINED}
     stuck = []
     for f in d.iterdir():
         if f.is_file() and (_CLIP_NAME.match(f.name) or ".new." in f.name or ".part." in f.name) and f not in used:
@@ -668,10 +673,14 @@ def current_settings(project: Path, options: dict, tree: "Tree | None" = None) -
             refs.append({"file": rel, "sha1": sha})
     turbo = options.get("turbo") or {}
     turbo_on = bool(turbo.get("on") and turbo.get("lora"))
+    hyper = options.get("hyperflow") or {}
+    hyper_on = bool(hyper.get("on")) and not turbo_on
     style = options.get("style") or {}
     return chain.settings_dict(model=options.get("model", DEFAULT_OPTIONS["model"]), lora=None,
                                strength=1.0, frames=options.get("frames", 73),
-                               steps=int(turbo.get("steps", 6)) if turbo_on else options.get("steps", 28),
+                               steps=(int(turbo.get("steps", 6)) if turbo_on else chain.HYPERFLOW_STEPS if hyper_on
+                                      else options.get("steps", 28)),
+                               hyperflow=float(hyper.get("strength", 1.0)) if hyper_on else None,
                                width=w, height=h, audio=options.get("audio", True),
                                turbo=(turbo["lora"], turbo.get("strength", 1.0)) if turbo_on else None,
                                backend="comfyui", refs=refs,
@@ -719,8 +728,10 @@ def node_settings(base: dict, options: dict, node: Node) -> dict:
     return chain.settings_dict(model=base["model"], lora=lora, extra_loras=stack[1:],
                                strength=strength,
                                frames=ov.get("frames", options.get("frames", 73)),
-                               # turbo: its steps for every clip (a clip's own steps would break it)
-                               steps=base["steps"] if base.get("turbo") else ov.get("steps", options.get("steps", 28)),
+                               # turbo / HyperFlow: their steps for every clip (a clip's own steps would break it)
+                               steps=(base["steps"] if base.get("turbo") or base.get("hyperflow")
+                                      else ov.get("steps", options.get("steps", 28))),
+                               hyperflow=(base["hyperflow"]["strength"] if base.get("hyperflow") else None),
                                width=base["width"], height=base["height"], audio=base["audio"],
                                turbo=(base["turbo"]["lora"], base["turbo"]["strength"]) if base.get("turbo") else None,
                                backend="comfyui", refs=base.get("refs"),
@@ -1112,6 +1123,68 @@ def path_cuts(tree: Tree, path: list[Node], keep_repeated: bool = False,
             elif not a.is_video and tree.video_child(a.id) is b:
                 cuts[k - 1][1] = max(1, _guide_of(a, planned))
     return [(s, e) for s, e in cuts]
+
+
+def refined_file(project: Path, node: Node, size: str) -> Path:
+    """The refined copy of a node's current clip at an export size (named after its clip version)."""
+    v = Path(node.made["video"])
+    return Path(project) / v.parent / f"{v.stem}_{size}.mp4"
+
+
+def refine_path(generator, project: Path, nid: str, size: str, out: Path,
+                events: Callable[[dict], None] | None = None, log: Callable[[str], None] = print) -> Path:
+    """Export the path start -> nid at a higher size ('1080p' / '2k'): every generated clip is re-rendered by
+    generator.refine (Open-H3-Regenerate-2K) as it was made (its prompt, style text, LoRAs, seed), every real video
+    is converted again from its file at that size; refined copies are kept (nodes/<clip>_<size>.mp4) and reused.
+    Then the path is joined (the same frames left out as at the normal size) into out."""
+    from .comfy import refine_size
+    if size not in REFINED:
+        raise ValueError(f"unknown size {size!r}")
+    project = Path(project)
+    emit = events or (lambda _e: None)
+    tree = load(project)
+    checker = Checker(project, tree)
+    path = tree.path_to(nid)
+    missing = [n.id for n in path if checker.status(n.id) != "done"]
+    if missing:
+        raise ValueError(f"not made yet: {', '.join(missing)}")
+    todo = [n.id for n in path if not refined_file(project, n, size).is_file()]
+    for n in path:
+        if n.id not in todo:
+            emit({"e": "node", "id": n.id, "state": "reused"})
+    emit({"e": "plan", "make": todo})
+    for k, nid_ in enumerate(todo, start=1):
+        node = tree.nodes[nid_]
+        target = refined_file(project, node, size)
+        emit({"e": "node", "id": nid_, "state": "generating", "k": k, "n": len(todo)})
+        s = node.made.get("settings") or {}
+        if node.is_video:
+            src = node.source
+            if not Path(src["file"]).is_file():
+                raise FileNotFoundError(f"video file not found: {src['file']}")
+            key = node.made.get("key") or {}
+            w, h = refine_size(int(key["width"]), int(key["height"]), size)
+            log(f"[{k}/{len(todo)}] {nid_}: converting {Path(src['file']).name} at {w}x{h}")
+            chain.convert_range(Path(src["file"]), target, src["start"], src["end"], w, h)
+        else:
+            w, h = refine_size(int(s["width"]), int(s["height"]), size)
+            prompt = " ".join(x for x in (s.get("prompt_prefix", ""), node.made.get("prompt", node.prompt),
+                                          s.get("prompt_suffix", "")) if x)
+            loras = ([(s["lora"], s.get("strength", 1.0))] if s.get("lora") else []) + \
+                [(e["lora"], e.get("strength", 1.0)) for e in s.get("extra_loras") or []]
+            log(f"[{k}/{len(todo)}] {nid_}: refining at {w}x{h}")
+            generator.refine(project / node.made["video"], prompt, target, node.seed, (w, h),
+                             made_frames(node) or _clip_frames(project, node), loras)
+        emit({"e": "node", "id": nid_, "state": "done"})
+    videos = [refined_file(project, n, size) for n in path]
+    cuts = path_cuts(tree, path, bool(tree.options.get("keep_repeated")))
+    out = Path(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    emit({"e": "joining"})
+    chain.concat(videos, out, cuts=cuts)
+    emit({"e": "exported", "file": str(out)})
+    emit({"e": "done", "made": todo})
+    return out
 
 
 def join_path(project: Path, tree: Tree, nid: str, out: Path | None = None) -> Path:

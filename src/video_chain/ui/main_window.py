@@ -179,6 +179,60 @@ class VariantsDialog(QDialog):
         f.addRow(buttons)
 
 
+class ExportDialog(QDialog):
+    """Where to save a path, and at which size: as made (quick: the clips are joined), or re-rendered at 1080p /
+    2K by Open-H3-Regenerate-2K in ComfyUI (every clip once; the refined clips are kept for the next export)."""
+
+    def __init__(self, parent, default: str, made_size: tuple[int, int] | None, refined: dict[str, bool]):
+        super().__init__(parent)
+        self.setWindowTitle("Export path")
+        self.setMinimumWidth(620)
+        f = QFormLayout(self)
+        row = QHBoxLayout()
+        self.file = QLineEdit(default)
+        b = icon_button("fopen", "Choose where to save the video")
+        b.clicked.connect(self._choose)
+        row.addWidget(self.file, 1)
+        row.addWidget(b)
+        f.addRow("File", row)
+        self.size = QComboBox()
+        w, h = made_size or (0, 0)
+        self.size.addItem(f"As made ({w}×{h}) — quick" if made_size else "As made — quick", "made")
+        for key, text in (("1080p", "1080p, refined (Open-H3-Regenerate-2K)"),
+                          ("2k", "2K, refined (Open-H3-Regenerate-2K)")):
+            if made_size:
+                from ..comfy import refine_size
+                rw, rh = refine_size(w, h, key)
+                text += f" — {rw}×{rh}"
+            if refined.get(key):
+                text += " · already refined, quick"
+            self.size.addItem(text, key)
+        self.size.setToolTip("Refined: every clip of the path is re-rendered at the higher size in ComfyUI (3 steps "
+                             "with the refiner LoRA after a latent upscale), as it was made: its prompt, LoRAs and "
+                             "sound. It takes minutes per clip; refined clips are kept, so the next export of the "
+                             "same clips is quick. Real videos are converted again from their file at that size.")
+        f.addRow("Size", self.size)
+        note = label("Refined export needs ComfyUI with the H3 2K nodes, the latent upscaler and the refiner LoRA. "
+                     "Generating and the preview stay at the normal size.", level="tertiary")
+        note.setWordWrap(True)
+        f.addRow("", note)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Export")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        f.addRow(buttons)
+        guard_wheel(self)
+
+    def _choose(self):
+        f, _ = QFileDialog.getSaveFileName(self, "Export path", self.file.text(), "Video (*.mp4)")
+        if f:
+            self.file.setText(f)
+
+    def target(self) -> Path:
+        f = self.file.text().strip()
+        return Path(os.path.expanduser(f if f.endswith(".mp4") else f + ".mp4"))
+
+
 class _Bridge(QObject):
     joined = Signal(object, object, str, str, str)  # path or None, error or None, purpose, status prefix, project
     comfy = Signal(bool)                       # ComfyUI reachable
@@ -518,7 +572,7 @@ class PromptCard(QFrame):
             self.steps.setToolTip(f"Sampling steps of this clip (lowest value = the project's: {project_steps})")
             self.steps.setEnabled(not self.edit.isReadOnly() and not self.steps_locked)
             if self.steps_locked:
-                self.steps.setToolTip("Turbo mode: every clip uses the turbo steps (Clips → Speed)")
+                self.steps.setToolTip("Turbo / HyperFlow: every clip uses their own steps (Clips → Speed)")
         finally:
             for w in widgets:
                 w.blockSignals(False)
@@ -1097,7 +1151,10 @@ class MainWindow(QMainWindow):
         self.speed = QComboBox()
         self.speed.addItem("Normal", "normal")
         self.speed.addItem("Turbo (turbo LoRA, 4-8 steps)", "turbo")
-        self.speed.setToolTip("Turbo: a step-distilled LoRA with its own sampler renders every clip in 4-8 steps "
+        self.speed.addItem("HyperFlow (8 steps)", "hyperflow")
+        self.speed.setToolTip("HyperFlow: Video Rebirth's 8-step LoRA (about 3× faster than Normal, similar "
+                              "quality; needs the ComfyUI-HyperFlow-H3 nodes and its pruned weights). "
+                              "Turbo: a step-distilled LoRA with its own sampler renders every clip in 4-8 steps "
                               "instead of ~20 (needs the ComfyUI-MiniMax-H3-Turbo nodes)")
         c.addRow("Speed", self.speed)
         self.turbo_lora = QComboBox()
@@ -1631,7 +1688,8 @@ class MainWindow(QMainWindow):
             self.ref_size.setCurrentIndex(max(0, self.ref_size.findData(ident.get("size", "match"))))
             self.ref_hint.setChecked(bool(ident.get("hint", True)))
             turbo = o.get("turbo") or {}
-            self.speed.setCurrentIndex(1 if turbo.get("on") else 0)
+            self.speed.setCurrentIndex(self.speed.findData(
+                "turbo" if turbo.get("on") else "hyperflow" if (o.get("hyperflow") or {}).get("on") else "normal"))
             self.turbo_steps.setValue(int(turbo.get("steps", 6)))
             self.turbo_strength.setValue(float(turbo.get("strength", 1.0)))
             self._fill_turbo(turbo.get("lora"))
@@ -1650,7 +1708,9 @@ class MainWindow(QMainWindow):
             "frames": self.frames.currentData(), "resolution": self.resolution.currentData(),
             "steps": self.steps.value(), "audio": self.audio.isChecked(), "keep_repeated": self.keep_rep.isChecked(),
             "turbo": {"on": self.speed.currentData() == "turbo", "lora": self.turbo_lora.currentData(),
-                      "steps": self.turbo_steps.value(), "strength": round(self.turbo_strength.value(), 2)}})
+                      "steps": self.turbo_steps.value(), "strength": round(self.turbo_strength.value(), 2)},
+            "hyperflow": {**(self.tree.options.get("hyperflow") or {"strength": 1.0}),
+                          "on": self.speed.currentData() == "hyperflow"}})
         self._update_size_info()
         self._show_references()
         self._turbo_widgets()
@@ -2274,18 +2334,20 @@ class MainWindow(QMainWindow):
 
     def _turbo_widgets(self):
         on = self.speed.currentData() == "turbo"
+        hyper = self.speed.currentData() == "hyperflow"
         idle = not self.running
         for w in (self.turbo_lora, self.turbo_steps, self.turbo_strength):
             w.setEnabled(on and idle)
         self._clips_form.setRowVisible(self.turbo_lora, on)      # the turbo settings only matter in turbo mode
         self._clips_form.setRowVisible(self._turbo_row, on)
-        self.steps.setEnabled(idle and not on)
+        locked = on or hyper                                      # their own steps for every clip
+        self.steps.setEnabled(idle and not locked)
         self.steps.setToolTip("Turbo mode: every clip uses the turbo steps" if on else
-                              STEPS_TIP)
+                              "HyperFlow: every clip uses its 8 trained steps" if hyper else STEPS_TIP)
         for card in self.cards:
             if isinstance(card, PromptCard):
-                card.steps_locked = on
-                card.steps.setEnabled(idle and not on and not card.edit.isReadOnly())
+                card.steps_locked = locked
+                card.steps.setEnabled(idle and not locked and not card.edit.isReadOnly())
 
     def _warm_lora_hashes(self):
         """Hash the LoRAs this project uses in the background, so the clip states need not wait for it."""
@@ -3110,9 +3172,27 @@ class MainWindow(QMainWindow):
         if not path:
             return
         default = str(self.project / f"{self.project.name}-{path[-1].id}.mp4")
-        f, _ = QFileDialog.getSaveFileName(self, "Export path", default, "Video (*.mp4)")
-        if f:
-            self.join_selected("export", Path(f if f.endswith(".mp4") else f + ".mp4"))
+        base = T.Checker(self.project, self.tree).base()
+        refined = {size: all(n.made and T.refined_file(self.project, n, size).is_file() for n in path)
+                   for size in T.REFINED}
+        dlg = ExportDialog(self, default, (base["width"], base["height"]) if base else None, refined)
+        try:
+            if dlg.exec() != QDialog.Accepted:
+                return
+            out, size = dlg.target(), dlg.size.currentData()
+        finally:
+            dlg.deleteLater()
+        self.export(out, size)
+
+    def export(self, out: Path, size: str = "made") -> None:
+        """Export the selected path to out: as made (joined here), or refined at '1080p' / '2k' (a generator job)."""
+        path = self.selected_path()
+        if not path:
+            return
+        if size == "made":
+            self.join_selected("export", out)
+            return
+        self._start([path[-1].id], refine={"size": size, "out": str(out)})
 
     # ------------------------------------------------------------------ GPU
     def _poll_gpu(self):
@@ -3176,7 +3256,7 @@ class MainWindow(QMainWindow):
         return ((self.comfy_url.text().strip() or DEFAULT_COMFY_URL), self.comfy_dir.text().strip(),
                 self.comfy_cleanup.isChecked())
 
-    def _start(self, targets: list[str]):
+    def _start(self, targets: list[str], refine: dict | None = None):
         if self.running or self.tree is None:
             return
         self._style_changed()                      # a style edit not finished with Enter / leaving the field
@@ -3208,6 +3288,9 @@ class MainWindow(QMainWindow):
                 problems.append("choose a start image (or begin with a real video)")
             else:
                 todo = T.plan(self.tree, checker, targets)
+                if refine and todo:
+                    problems.append(f"generate the path first ({len(todo)} clip{'s are' if len(todo) != 1 else ' is'} "
+                                    "new or changed)")
                 gone = [n for n in todo if self.tree.nodes[n].is_video
                         and not Path(self.tree.nodes[n].source["file"]).is_file()]
                 if gone:
@@ -3230,14 +3313,15 @@ class MainWindow(QMainWindow):
             if empty and len(targets) > 1:
                 self.select(empty[0].id)
             return
-        if self.comfy_up is False and not self.worker_alive and self._autostart(targets):
+        if self.comfy_up is False and not self.worker_alive and self._autostart(targets, refine):
             return
         self._waiting_comfy = None
         self._save_timer.stop()
         if not self._write_tree():
             return
         self.save_settings()
-        self._job = {"targets": targets, "sent": False}
+        self._job = {"targets": targets, "sent": False, "refine": refine}
+        self._exported = None
         self._error, self._stopping, self._phase = "", False, "starting"
         self._targets, self._plan = targets, []
         self.live, self.progress_of = {}, {}
@@ -3298,6 +3382,8 @@ class MainWindow(QMainWindow):
         self._worker_idle = False
         cmd = {"cmd": "run", "tree": str(self.project), "targets": self._job["targets"],
                "free_first": self._comfy_model == "qwen"}          # an image edit model is loaded: unload it
+        if self._job.get("refine"):                                # export refined: re-render the path's clips
+            cmd.update({"cmd": "refine", "target": self._job["targets"][0], **self._job["refine"]})
         self._qwen_timer.stop()
         self._comfy_model = "h3"
         self.proc.write((json.dumps(cmd) + "\n").encode())
@@ -3478,12 +3564,17 @@ class MainWindow(QMainWindow):
                     card.set_progress(ev["i"], ev["n"])
         elif e == "done":
             self._phase = "done"
+        elif e == "exported":
+            self._exported = ev.get("file")
+        elif e == "joining":
+            self.status.setText("Joining the refined clips …")
         elif e == "error":
             self._error = ev.get("msg", "error")
 
     def _job_finished(self, code: int = 0):
         """End of a job: the worker reported idle again (code 0), or the worker ended (its exit code)."""
         ok = self._phase == "done" and code == 0 and not self._error
+        refine = (self._job or {}).get("refine")         # an export at a refined size
         for nid in [n for n, s in self.live.items() if s == "generating"]:
             self.live[nid] = "stopped" if self._stopping else "failed"
         if ok:
@@ -3495,7 +3586,14 @@ class MainWindow(QMainWindow):
             c.set_editable(True)
         self.progress.setRange(0, 1000)
         self.refresh()
-        if ok:
+        if ok and refine:
+            self.progress.setValue(1000)
+            out = Path(getattr(self, "_exported", None) or refine["out"])
+            n = len(self._plan)
+            self.status.setText(f"Exported {out.name} ({refine['size']}, refined"
+                                + (f"; {n} clip{'s' if n != 1 else ''} refined now" if n else
+                                   "; every clip was refined already") + ").")
+        elif ok:
             self.progress.setValue(1000)
             made = len(self._plan)
             msg = f"Done: {made} clip{'s' if made != 1 else ''} made." if made else "Everything was already made."
@@ -3569,7 +3667,7 @@ class MainWindow(QMainWindow):
             bridge.comfy.emit(ok)
         threading.Thread(target=check, daemon=True).start()
 
-    def _autostart(self, targets: list[str]) -> bool:
+    def _autostart(self, targets: list[str], refine: dict | None = None) -> bool:
         """ComfyUI is down: start it (if allowed) and generate targets once it answers. False: not started."""
         if not self.comfy_autostart.isChecked():
             return False
@@ -3577,6 +3675,7 @@ class MainWindow(QMainWindow):
             if not self.start_comfy():
                 return False
         self._waiting_comfy = list(targets)
+        self._waiting_refine = refine                 # an export waits too, not a plain generate
         self.status.setText("Starting ComfyUI … generating begins as soon as it runs (Stop cancels that).")
         self._update_buttons()
         return True
@@ -3591,7 +3690,8 @@ class MainWindow(QMainWindow):
             if up:
                 targets, self._waiting_comfy = self._waiting_comfy, None
                 if self.tree is not None and all(t in self.tree.nodes for t in targets):
-                    QTimer.singleShot(0, lambda: self._start(targets))
+                    refine = getattr(self, "_waiting_refine", None)
+                    QTimer.singleShot(0, lambda: self._start(targets, refine))
             elif not (self._comfy_starting and time.monotonic() - self._comfy_starting < 180):
                 self._waiting_comfy = None
                 self.status.setText("ComfyUI did not start within 3 minutes; see its own log.")

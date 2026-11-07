@@ -18,6 +18,14 @@ class FakeGenerator:
         self.progress, self.step_delay, self.steps = progress, step_delay, steps
         self.calls = []
 
+    def refine(self, draft, prompt, out, seed, size, frames, loras):
+        """Fake 2K refine: the draft scaled to size (frames and sound kept)."""
+        self.refines = getattr(self, "refines", [])
+        self.refines.append({"draft": Path(draft).name, "prompt": prompt, "size": tuple(size), "frames": frames,
+                             "loras": loras})
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(draft), "-vf", f"scale={size[0]}:{size[1]}",
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(out)], check=True)
+
     def generate(self, prompt, start_image, out_video, out_last_frame, seed, settings=None):
         k = len(self.calls)
         if self.progress is not None:

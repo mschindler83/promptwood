@@ -598,3 +598,50 @@ def test_style_text_around_every_prompt(project):
     t.options["style"] = {"prefix": "", "suffix": ""}               # back: a and b1 (made with it) change
     T.save(project, t)
     assert statuses(project)["a"] == "changed" and "prompt_prefix" not in T.Checker(project, t).settings(c.id)
+
+
+def test_hyperflow_speed(project):
+    t, a, b1, b2, c = build(project)
+    run(project, [c.id])
+    t = T.load(project)
+    t.options["hyperflow"] = {"on": True, "strength": 1.0}
+    t.nodes[b1.id].overrides = {"steps": 40}                      # a clip's own steps do not apply
+    T.save(project, t)
+    ch = T.Checker(project, t)
+    s = ch.settings(b1.id)
+    assert s["steps"] == 8 and s["hyperflow"] == {"strength": 1.0} and ch.settings(a.id)["steps"] == 8
+    assert statuses(project) == {"a": "changed", "b1": "changed", "c": "changed", "b2": "new"}   # another sampler
+    t.options["hyperflow"]["on"] = False
+    t.nodes[b1.id].overrides = {}
+    T.save(project, t)
+    assert statuses(project) == {"a": "done", "b1": "done", "c": "done", "b2": "new"}
+
+
+def test_export_a_path_refined(project, tmp_path):
+    t, a, b1, b2, c = build(project)
+    t.options["style"] = {"prefix": "cinematic,", "suffix": ""}
+    T.save(project, t)
+    gen = run(project, [b1.id])
+    t = T.load(project)
+    t.nodes[a.id].end_at = 10                                      # a hands over at frame 10
+    T.ensure_handover(project, t, t.nodes[a.id])
+    T.save(project, t)
+    run(project, [b1.id], gen)
+    out = tmp_path / "out2k.mp4"
+    T.refine_path(gen, project, b1.id, "2k", out, log=lambda _m: None)
+    assert [r["prompt"] for r in gen.refines] == ["cinematic, a", "cinematic, b1"]
+    t = T.load(project)
+    w, h = gen.refines[0]["size"]
+    info = chain.probe(out)
+    assert (info["width"], info["height"]) == (w, h) and info["frames"] == 11 + 16   # the same cuts as made size
+    assert all(T.refined_file(project, t.nodes[i], "2k").is_file() for i in (a.id, b1.id))
+    T.refine_path(gen, project, b1.id, "2k", tmp_path / "again.mp4", log=lambda _m: None)
+    assert len(gen.refines) == 2                                   # refined copies reused
+    assert not T.remove_stale_files(project, t) and T.refined_file(project, t.nodes[a.id], "2k").is_file()
+    old = T.refined_file(project, t.nodes[b1.id], "2k")
+    t.nodes[b1.id].prompt = "b1 again"
+    T.save(project, t)
+    run(project, [b1.id], gen)                                     # a new take: its old refined copy goes
+    assert not old.exists()
+    with pytest.raises(ValueError, match="not made yet"):
+        T.refine_path(gen, project, c.id, "2k", tmp_path / "x.mp4", log=lambda _m: None)

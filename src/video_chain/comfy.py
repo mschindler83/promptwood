@@ -196,7 +196,7 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
                    loras: list[tuple[str, float]], audio: bool, prefix: str, refs: list[str] = (),
                    ref_size: str = "match", ref_key=lambda i: f"ref_images.ref_image_{i}",
                    turbo: tuple[str, float] | None = None, end_image: str | None = None,
-                   guides: list[dict] = ()) -> dict:
+                   guides: list[dict] = (), hyperflow: tuple[str, float] | None = None) -> dict:
     """The API-format workflow for one clip (image = the uploaded start image, as LoadImage names it; None: a
     clip without a start frame).
 
@@ -209,7 +209,11 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
     where the previous one ended and sees the same original face.
 
     With turbo (ComfyUI name of the turbo LoRA, strength): ComfyUI-MiniMax-H3-Turbo's loader (it handles the
-    pruned model's adaln layers) right after the model, the other LoRAs after it, and its own sampler."""
+    pruned model's adaln layers) right after the model, the other LoRAs after it, and its own sampler.
+
+    With hyperflow (its weights file in models/hyperflow, strength): ComfyUI-HyperFlow-H3's ApplyHyperFlowH3 right
+    after the model (curve refit on: the exact correction for the pruned int8 H3 files), the other LoRAs after it,
+    Euler on the 8-step sigma grid it returns (no scheduler)."""
     wf: dict = {
         "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": UNET_REF if refs else UNET,
                                                          "weight_dtype": "default"}},
@@ -271,6 +275,12 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
         wf[f"guide{k}"] = {"class_type": "MiniMaxH3AddGuide", "inputs": gin}
         positive = [f"guide{k}", 0]
     model = ["unet", 0]
+    if hyperflow:
+        wf["hyperflow"] = {"class_type": "ApplyHyperFlowH3",
+                           "inputs": {"model": model, "hyperflow_file": hyperflow[0], "strength": float(hyperflow[1]),
+                                      "lora_mode": "bypass", "variant": "auto", "download_if_missing": False,
+                                      "verbose": False, "experimental_curve_refit": True}}
+        model = ["hyperflow", 0]
     if turbo:
         wf["turbo"] = {"class_type": "MiniMaxH3TurboLoRA",
                        "inputs": {"model": model, "lora_name": turbo[0], "strength": float(turbo[1]),
@@ -280,12 +290,17 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
         wf[f"lora{k}"] = {"class_type": "LoraLoaderModelOnly",
                           "inputs": {"model": model, "lora_name": name, "strength_model": float(strength)}}
         model = [f"lora{k}", 0]
-    wf["sigmas"] = {"class_type": "BasicScheduler", "inputs": {"model": model, "scheduler": SCHEDULER,
-                                                                "steps": int(steps), "denoise": 1.0}}
+    if hyperflow:
+        wf["sampler"] = {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}}
+        sigmas = ["hyperflow", 1]
+    else:
+        wf["sigmas"] = {"class_type": "BasicScheduler", "inputs": {"model": model, "scheduler": SCHEDULER,
+                                                                    "steps": int(steps), "denoise": 1.0}}
+        sigmas = ["sigmas", 0]
     wf["guider"] = {"class_type": "BasicGuider", "inputs": {"model": model, "conditioning": positive}}
     wf["sample"] = {"class_type": "SamplerCustomAdvanced",
                     "inputs": {"noise": ["noise", 0], "guider": ["guider", 0], "sampler": ["sampler", 0],
-                               "sigmas": ["sigmas", 0], "latent_image": latent}}
+                               "sigmas": sigmas, "latent_image": latent}}
     video_inputs: dict = {"images": ["decode", 0], "fps": 24.0}
     if audio:
         wf["decode_audio"] = {"class_type": "VAEDecodeAudio", "inputs": {"samples": ["sample", 0],
@@ -379,6 +394,19 @@ class ComfyGenerator:
             if not self._object_info(node):
                 raise ComfyError(f"this ComfyUI has no {node} node (update ComfyUI)")
 
+    def hyperflow_file(self) -> str:
+        """The HyperFlow weights ComfyUI lists for ApplyHyperFlowH3: the pruned build for the pruned H3 files."""
+        info = self._object_info("ApplyHyperFlowH3")
+        if not info:
+            raise ComfyError("this ComfyUI has no ApplyHyperFlowH3 node (install ComfyUI-HyperFlow-H3)")
+        names = _combo_options(info.get("input", {}).get("required", {}).get("hyperflow_file"))
+        names = [n for n in names if n.endswith(".safetensors")]
+        pruned = [n for n in names if "pruned" in n.lower()]
+        if not pruned:                           # this app uses the pruned H3 files only
+            raise ComfyError("ComfyUI lists no pruned HyperFlow weights in models/hyperflow "
+                             "(custom_node_hyperflow_8step_v1.0_comfyui_pruned.safetensors)")
+        return sorted(pruned)[0]
+
     def check_turbo(self):
         for node in ("MiniMaxH3TurboLoRA", "MiniMaxH3TurboSampler"):
             if not self._object_info(node):
@@ -452,16 +480,18 @@ class ComfyGenerator:
             if name is None:
                 raise ComfyError(f"{Path(s['turbo']['lora']).name} is not in ComfyUI's LoRA folders")
             turbo = (name, float(s["turbo"].get("strength", 1.0)))
+        hyper = (self.hyperflow_file(), float(s["hyperflow"].get("strength", 1.0))) if s.get("hyperflow") else None
         uploads: list[tuple[str, Path]] = []        # (ComfyUI name, local file); removed again even on errors
         try:
-            self._run(prompt, start_image, out_video, out_last_frame, seed, s, loras, turbo, uploads)
+            self._run(prompt, start_image, out_video, out_last_frame, seed, s, loras, turbo, uploads, hyper)
         finally:
             if self.cleanup:
                 for up, local in uploads:
                     self._remove(self.input_dir, {"filename": Path(up).name, "subfolder": str(Path(up).parent)},
                                  Path(local), same_size=False)
 
-    def _run(self, prompt, start_image, out_video, out_last_frame, seed, s, loras, turbo, uploads) -> None:
+    def _run(self, prompt, start_image, out_video, out_last_frame, seed, s, loras, turbo, uploads,
+             hyper=None) -> None:
         image = self.upload(Path(start_image)) if start_image is not None else None
         if image:
             uploads.append((image, start_image))
@@ -489,7 +519,7 @@ class ComfyGenerator:
                             height=s.get("height", 512), frames=s.get("frames", 73), steps=s.get("steps", 20),
                             loras=loras, audio=bool(s.get("audio", True)), prefix=prefix, refs=refs,
                             ref_size=s.get("ref_size", "match"), ref_key=self.ref_key() if refs else None,
-                            turbo=turbo, end_image=end_image, guides=guides)
+                            turbo=turbo, end_image=end_image, guides=guides, hyperflow=hyper)
         ws = self._connect_ws()
         try:
             res = self._json("POST", "/prompt", {"prompt": wf, "client_id": self.client_id})
@@ -765,3 +795,152 @@ class ComfyImageEditor(ComfyGenerator):
                                  Path(local), same_size=False)
         return {"quality": quality, "steps": steps, "cfg": cfg, "model": self.files["unet"],
                 "lightning": light[0] if light else None}
+
+
+# ----------------------------------------------------------------------------- 2K refine (Open-H3-Regenerate-2K)
+
+REFINE_SIGMAS = "0.909, 0.857, 0.667, 0"   # the release's 3 Euler steps, re-noised from 0.909, no CFG
+REFINE_NODES = ("LatentUpscaleModelLoader", "MiniMaxH3LatentUpscaleWithModel", "LTXVConcatAVLatent", "VAEEncodeAudio",
+                "ManualSigmas", "VAEDecodeTiled", "LoadVideo", "GetVideoComponents")
+
+
+def pick_refine_files(loras: list[str], upscalers: list[str]) -> dict:
+    """The Open-H3-Regenerate-2K refiner LoRA (highest rank) and the H3 latent upscaler (bf16 preferred)."""
+    ref = [lo for lo in loras if "regenerate_2k" in lo.lower() or "regenerate-2k" in lo.lower()]
+    rank = lambda n: int(m.group(1)) if (m := re.search(r"rank_?(\d+)", n.lower())) else 0   # noqa: E731
+    ups = [u for u in upscalers if "minimax_h3" in u.lower() or "h3_latent" in u.lower()]
+    ups.sort(key=lambda u: ("bf16" not in u.lower(), u))
+    return {"refiner": max(ref, key=rank) if ref else None, "upscaler": ups[0] if ups else None}
+
+
+def build_refine_workflow(*, prompt: str, draft: str, seed: int, width: int, height: int, frames: int,
+                          loras: list[tuple[str, float]], refiner: str, upscaler: str, prefix: str) -> dict:
+    """Re-render a finished clip (the uploaded draft video, with sound) at width x height: its video and sound are
+    encoded into H3's AV latent, the video upscaled with the latent upscaler, then refined in 3 steps with the
+    refiner LoRA (and the clip's own LoRAs, as it was made); the clip's own sound is kept."""
+    wf: dict = {
+        "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": UNET, "weight_dtype": "default"}},
+        "clip": {"class_type": "CLIPLoader", "inputs": {"clip_name": TEXT_ENCODER, "type": "minimax",
+                                                         "device": "default"}},
+        "vae": {"class_type": "VAELoader", "inputs": {"vae_name": VIDEO_VAE}},
+        "audio_vae": {"class_type": "VAELoader", "inputs": {"vae_name": AUDIO_VAE}},
+        "draft": {"class_type": "LoadVideo", "inputs": {"file": draft}},
+        "parts": {"class_type": "GetVideoComponents", "inputs": {"video": ["draft", 0]}},
+        "venc": {"class_type": "VAEEncode", "inputs": {"pixels": ["parts", 0], "vae": ["vae", 0]}},
+        "aenc": {"class_type": "VAEEncodeAudio", "inputs": {"audio": ["parts", 1], "vae": ["audio_vae", 0]}},
+        "av": {"class_type": "LTXVConcatAVLatent", "inputs": {"video_latent": ["venc", 0], "audio_latent": ["aenc", 0]}},
+        "upmodel": {"class_type": "LatentUpscaleModelLoader", "inputs": {"model_name": upscaler}},
+        "up": {"class_type": "MiniMaxH3LatentUpscaleWithModel",
+               "inputs": {"model": ["upmodel", 0], "samples": ["av", 0], "width": int(width), "height": int(height)}},
+        "cond": {"class_type": "MiniMaxH3ImageToVideo",
+                 "inputs": {"clip": ["clip", 0], "vae": ["vae", 0], "prompt": prompt, "width": int(width),
+                            "height": int(height), "length": int(frames)}},
+        "noise": {"class_type": "RandomNoise", "inputs": {"noise_seed": int(seed)}},
+        "sampler": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
+        "sigmas": {"class_type": "ManualSigmas", "inputs": {"sigmas": REFINE_SIGMAS}},
+    }
+    model = ["unet", 0]
+    for k, (name, strength) in enumerate(list(loras) + [(refiner, 1.0)]):
+        wf[f"lora{k}"] = {"class_type": "LoraLoaderModelOnly",
+                          "inputs": {"model": model, "lora_name": name, "strength_model": float(strength)}}
+        model = [f"lora{k}", 0]
+    wf["guider"] = {"class_type": "BasicGuider", "inputs": {"model": model, "conditioning": ["cond", 0]}}
+    wf["sample"] = {"class_type": "SamplerCustomAdvanced",
+                    "inputs": {"noise": ["noise", 0], "guider": ["guider", 0], "sampler": ["sampler", 0],
+                               "sigmas": ["sigmas", 0], "latent_image": ["up", 0]}}
+    wf["decode"] = {"class_type": "VAEDecodeTiled",
+                    "inputs": {"samples": ["sample", 0], "vae": ["vae", 0], "tile_size": 512, "overlap": 64,
+                               "temporal_size": 64, "temporal_overlap": 8}}
+    wf["video"] = {"class_type": "CreateVideo", "inputs": {"images": ["decode", 0], "fps": 24.0,
+                                                          "audio": ["parts", 1]}}
+    wf["refine_save"] = {"class_type": "SaveVideo", "inputs": {"video": ["video", 0], "filename_prefix": prefix,
+                                                              "format": "mp4"}}
+    return wf
+
+
+def refine_size(width: int, height: int, target: str) -> tuple[int, int]:
+    """The refined size for a clip of width x height: '1080p' (~1920x1080 pixels) or '2k' (~2560x1440), the
+    clip's aspect ratio, multiples of 32."""
+    from .chain import canvas_size
+    return canvas_size(width, height, {"1080p": 1440, "2k": 1920}[target])
+
+
+def _with_audio(video: Path, out: Path) -> Path:
+    """The clip with a sound track (silence if it has none): the refine encodes its sound into the AV latent."""
+    import subprocess
+    from .chain import probe
+    if probe(video)["audio"]:
+        return video
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(video), "-f", "lavfi", "-i",
+                    "anullsrc=r=48000:cl=stereo", "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac",
+                    "-shortest", str(out)], check=True, capture_output=True)
+    return out
+
+
+def _refine(self, draft: Path, prompt: str, out: Path, seed: int, size: tuple[int, int], frames: int,
+            loras: list[tuple[str, float]]) -> None:
+    """ComfyGenerator.refine: re-render one finished clip at size (see build_refine_workflow)."""
+    for node in REFINE_NODES:
+        if not self._object_info(node):
+            raise ComfyError(f"this ComfyUI has no {node} node (update ComfyUI: the H3 2K nodes are in its "
+                             "master since 2026-10-28)")
+    req = self._object_info("LatentUpscaleModelLoader").get("input", {}).get("required", {})
+    files = pick_refine_files(self.lora_names(refresh=True), _combo_options(req.get("model_name")))
+    if not files["refiner"]:
+        raise ComfyError("ComfyUI lists no Open-H3-Regenerate-2K refiner LoRA "
+                         "(minimax_h3_open_regenerate_2k_refiner_rank_384_bf16.safetensors in a LoRA folder)")
+    if not files["upscaler"]:
+        raise ComfyError("ComfyUI lists no H3 latent upscaler (minimax_h3_latent_upscaler_3d_conv_v1_bf16"
+                         ".safetensors in models/latent_upscale_models)")
+    names = []
+    for path, strength in loras:
+        name = self.name_for(path)
+        if name is None:
+            raise ComfyError(f"{Path(path).name} is not in ComfyUI's LoRA folders")
+        names.append((name, float(strength)))
+    import tempfile
+    uploads: list[tuple[str, Path]] = []
+    with tempfile.TemporaryDirectory(prefix="video-chain-refine-") as tmp:
+        src = _with_audio(Path(draft), Path(tmp) / "draft.mp4")
+        try:
+            name = self.upload(src)
+            uploads.append((name, src))
+            prefix = f"{SUBFOLDER}/refine_{uuid.uuid4().hex[:12]}"
+            wf = build_refine_workflow(prompt=prompt, draft=name, seed=seed, width=size[0], height=size[1],
+                                       frames=frames, loras=names, refiner=files["refiner"],
+                                       upscaler=files["upscaler"], prefix=prefix)
+            ws = self._connect_ws()
+            try:
+                res = self._json("POST", "/prompt", {"prompt": wf, "client_id": self.client_id})
+                if res.get("node_errors"):
+                    raise ComfyError(f"ComfyUI rejected the workflow: {json.dumps(res['node_errors'])[:600]}")
+                self.current = res["prompt_id"]
+                entry = self._wait(self.current, ws)
+            except ComfyJobFailed:
+                raise
+            except Exception:
+                self.interrupt()
+                raise
+            finally:
+                if ws is not None:
+                    try:
+                        ws.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                self.current = None
+            video = self._first_file((entry.get("outputs") or {}).get("refine_save"))
+            if video is None:
+                raise ComfyError("ComfyUI finished without the refined clip")
+            part = Path(out).with_name(Path(out).stem + ".part.mp4")
+            part.write_bytes(self._download(video))
+            part.replace(out)
+            if self.cleanup:
+                self._remove(self.output_dir, video, Path(out))
+        finally:
+            if self.cleanup:
+                for up, local in uploads:
+                    self._remove(self.input_dir, {"filename": Path(up).name, "subfolder": str(Path(up).parent)},
+                                 Path(local), same_size=False)
+
+
+ComfyGenerator.refine = _refine

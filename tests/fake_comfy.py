@@ -15,7 +15,14 @@ KNOWN = {"UNETLoader", "CLIPLoader", "VAELoader", "LoadImage", "MiniMaxH3ImageTo
          "LoadVideo", "GetVideoComponents",
          # Qwen Image Edit
          "FluxKontextImageScale", "ModelSamplingAuraFlow", "CFGNorm", "TextEncodeQwenImageEditPlus",
-         "FluxKontextMultiReferenceLatentMethod", "VAEEncode", "KSampler"}
+         "FluxKontextMultiReferenceLatentMethod", "VAEEncode", "KSampler", "ApplyHyperFlowH3",
+         # 2K refine
+         "VAEEncodeAudio", "LTXVConcatAVLatent", "LatentUpscaleModelLoader", "MiniMaxH3LatentUpscaleWithModel",
+         "ManualSigmas", "VAEDecodeTiled"}
+REFINER = "minimax-h3-refiner/minimax_h3_open_regenerate_2k_refiner_rank_384_bf16.safetensors"
+UPSCALER = "minimax_h3_latent_upscaler_3d_conv_v1_bf16.safetensors"
+HYPERFLOW = "custom_node_hyperflow_8step_v1.0_comfyui_pruned.safetensors"
+C_REFINE_SIGMAS = "0.909, 0.857, 0.667, 0"
 QWEN_UNET, QWEN_CLIP, QWEN_VAE = ("qwen-image/qwen_image_edit_2511_fp8mixed.safetensors",
                                   "qwen_2.5_vl_7b_fp8_scaled.safetensors", "qwen_image_vae.safetensors")
 QWEN_LIGHTNING = "qwen-image-edit/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
@@ -30,6 +37,8 @@ class FakeComfy:
         self.loras, self.fail_with, self.models_missing = list(loras), fail_with, models_missing
         self.turbo_nodes = True
         self.qwen = True                           # the Qwen Image Edit files and nodes are there
+        self.hyperflow = True                      # ComfyUI-HyperFlow-H3 with its weights
+        self.refine = True                         # the H3 2K nodes, the latent upscaler and the refiner LoRA
         self.prompts, self.calls, self.history = [], [], {}
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
@@ -45,7 +54,14 @@ class FakeComfy:
         files = {"UNETLoader": ("unet_name", [C.UNET, C.UNET_REF] + ([QWEN_UNET] if q else [])),
                  "CLIPLoader": ("clip_name", [C.TEXT_ENCODER] + ([QWEN_CLIP] if q else [])),
                  "VAELoader": ("vae_name", [C.VIDEO_VAE, C.AUDIO_VAE] + ([QWEN_VAE] if q else [])),
-                 "LoraLoaderModelOnly": ("lora_name", self.loras + ([QWEN_LIGHTNING] if q else []))}
+                 "LoraLoaderModelOnly": ("lora_name", self.loras + ([QWEN_LIGHTNING] if q else [])
+                                         + ([REFINER] if self.refine else [])),
+                 "LatentUpscaleModelLoader": ("model_name", [UPSCALER] if self.refine else [])}
+        if node in C.REFINE_NODES and node != "LatentUpscaleModelLoader":
+            return {node: {"input": {"required": {}}}} if self.refine else {}
+        if node == "ApplyHyperFlowH3":
+            return {node: {"input": {"required": {"hyperflow_file": [[HYPERFLOW, "custom_node_hyperflow_8step_v1.0_comfyui.safetensors"]]}}}} \
+                if self.hyperflow else {}
         if node in C.QWEN_NODES:
             return {node: {"input": {"required": {}}}} if q else {}
         if node in ("MiniMaxH3ImageToVideo", "MiniMaxH3TurboSampler", "MiniMaxH3TurboLoRA", "MiniMaxH3AddGuide",
@@ -66,6 +82,19 @@ class FakeComfy:
             for v in n["inputs"].values():
                 if isinstance(v, list) and len(v) == 2 and isinstance(v[1], int):
                     assert v[0] in wf, f"{nid} links to missing node {v[0]}"
+        if "refine_save" in wf:                      # 2K refine: the draft at the target size, its frames and sound
+            draft = self.root / "input" / wf["draft"]["inputs"]["file"]
+            assert draft.is_file(), "draft not uploaded"
+            assert wf["sigmas"]["inputs"]["sigmas"] == C_REFINE_SIGMAS
+            up = wf["up"]["inputs"]
+            prefix = wf["refine_save"]["inputs"]["filename_prefix"]
+            out = self.root / "output" / (prefix + "_00001_.mp4")
+            out.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(draft), "-vf",
+                            f"scale={up['width']}:{up['height']}", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                            "-c:a", "aac", str(out)], check=True)
+            return {"refine_save": {"images": [{"filename": out.name, "subfolder": str(Path(prefix).parent),
+                                                "type": "output"}]}}
         if "edit_save" in wf:                        # Qwen Image Edit: a 1024x576 picture
             for nid, node in wf.items():
                 if node["class_type"] == "LoadImage":

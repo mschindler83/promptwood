@@ -422,3 +422,48 @@ def test_qwen_image_edit(server, start, tmp_path):
     server.qwen = False
     with pytest.raises(C.ComfyError, match="Qwen Image Edit model"):
         C.ComfyImageEditor(server.url)
+
+
+def test_hyperflow_workflow(server, start, tmp_path):
+    """HyperFlow: ApplyHyperFlowH3 (pruned weights, curve refit) right after the model, the clip's LoRAs after it,
+    Euler on the sigma grid the node returns instead of a scheduler."""
+    gen = C.ComfyGenerator(server.url)
+    lora = "/data/my_models/loras/MiniMax H3/glow.safetensors"
+    gen.generate("x", start, tmp_path / "v.mp4", tmp_path / "v.png", 3,
+                 settings(lora=lora, strength=0.8, steps=8, hyperflow={"strength": 1.0}))
+    wf = server.prompts[-1]
+    hf = wf["hyperflow"]["inputs"]
+    assert wf["hyperflow"]["class_type"] == "ApplyHyperFlowH3" and hf["model"] == ["unet", 0]
+    assert hf["hyperflow_file"].endswith("_pruned.safetensors") and hf["experimental_curve_refit"] is True
+    assert hf["download_if_missing"] is False and wf["lora0"]["inputs"]["model"] == ["hyperflow", 0]
+    assert wf["sample"]["inputs"]["sigmas"] == ["hyperflow", 1] and "sigmas" not in wf
+    assert wf["sampler"]["inputs"]["sampler_name"] == "euler"
+    server.hyperflow = False
+    with pytest.raises(C.ComfyError, match="no ApplyHyperFlowH3 node"):
+        gen.generate("x", start, tmp_path / "w.mp4", tmp_path / "w.png", 3, settings(hyperflow={"strength": 1.0}))
+
+
+def test_refine_a_clip_at_2k(server, start, tmp_path):
+    """Open-H3-Regenerate-2K: the finished clip (video + sound) encoded to H3's AV latent, upscaled with the latent
+    upscaler, 3 refine steps with the clip's LoRAs + the refiner LoRA, the clip's own sound kept."""
+    gen = C.ComfyGenerator(server.url)
+    draft, frame = tmp_path / "d.mp4", tmp_path / "d.png"
+    gen.generate("x", start, draft, frame, 1, settings())
+    lora = "/data/my_models/loras/MiniMax H3/glow.safetensors"
+    size = C.refine_size(672, 384, "2k")
+    assert size == (2528, 1440) and C.refine_size(672, 384, "1080p") == (1888, 1088)
+    out = tmp_path / "r.mp4"
+    gen.refine(draft, "smoke", out, 5, size, 39, [(lora, 0.7)])
+    info = chain.probe(out)
+    assert (info["width"], info["height"], info["frames"], info["audio"]) == (2528, 1440, 39, True)
+    wf = server.prompts[-1]
+    assert wf["lora0"]["inputs"]["lora_name"] == "MiniMax H3/glow.safetensors"
+    assert wf["lora1"]["inputs"]["lora_name"].endswith("regenerate_2k_refiner_rank_384_bf16.safetensors")
+    assert wf["guider"]["inputs"]["model"] == ["lora1", 0] and wf["sample"]["inputs"]["latent_image"] == ["up", 0]
+    assert wf["video"]["inputs"]["audio"] == ["parts", 1] and wf["cond"]["inputs"]["length"] == 39
+    assert C.pick_refine_files(["a/x_regenerate_2k_refiner_rank_16_bf16.safetensors",
+                                "a/x_regenerate_2k_refiner_rank_384_bf16.safetensors"], ["u_fp16", "minimax_h3_u_bf16"]) \
+        == {"refiner": "a/x_regenerate_2k_refiner_rank_384_bf16.safetensors", "upscaler": "minimax_h3_u_bf16"}
+    server.refine = False
+    with pytest.raises(C.ComfyError, match="update ComfyUI"):
+        gen.refine(draft, "smoke", out, 5, size, 39, [])

@@ -225,6 +225,22 @@ def serve(a, emit, make_generator: Callable[[dict], object], stdin=None) -> int:
                 gen.free()
             emit({"e": "bye", "reason": "quit"})
             return 0
+        if cmd.get("cmd") == "refine":               # export a path at a higher size (2K refine)
+            started = time.monotonic()
+            if cmd.get("free_first") and hasattr(gen, "free"):
+                gen.free()
+            try:
+                treemod.refine_path(gen, Path(cmd["tree"]), cmd["target"], cmd["size"], Path(cmd["out"]),
+                                    events=lambda ev: (ev.get("e") == "node" and ev.get("state") == "generating"
+                                                       and current.update(id=ev["id"], k=ev.get("k", 0)),
+                                                       emit(ev)))
+            except (JobError, ValueError, FileNotFoundError, KeyError) as e:
+                emit({"e": "error", "msg": str(e)})
+            except Exception as e:  # noqa: BLE001
+                traceback.print_exc()
+                emit({"e": "error", "msg": f"{type(e).__name__}: {e}"})
+            emit({"e": "idle", "timeout": idle, "took": round(time.monotonic() - started, 1)})
+            continue
         if cmd.get("cmd") != "run":
             emit({"e": "error", "msg": f"unknown command {cmd.get('cmd')!r}"})
             continue
