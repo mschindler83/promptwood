@@ -60,6 +60,8 @@ DEFAULT_OPTIONS = {"model": "Comfy-Org/MiniMax-H3", "frames": 73, "steps": 28,
                    "turbo": {"on": False, "lora": None, "steps": 6, "strength": 1.0},
                    # HyperFlow: Video Rebirth's 8-step LoRA with its own sigma grid (ComfyUI-HyperFlow-H3 nodes)
                    "hyperflow": {"on": False, "strength": 1.0},
+                   # Pika H3 Flex: Pika's post-trained H3 as a LoRA, 6 steps (ComfyUI template recipe)
+                   "pika": {"on": False, "strength": 1.0},
                    # identity: reference images (copies in refs/) every clip sees, so the face stays the same
                    "identity": {"mode": "off", "images": [], "size": "match", "hint": True},
                    # style text put before / after every prompt (e.g. look, camera, a LoRA's trigger word)
@@ -678,12 +680,15 @@ def current_settings(project: Path, options: dict, tree: "Tree | None" = None) -
     turbo_on = bool(turbo.get("on") and turbo.get("lora"))
     hyper = options.get("hyperflow") or {}
     hyper_on = bool(hyper.get("on")) and not turbo_on
+    pika = options.get("pika") or {}
+    pika_on = bool(pika.get("on")) and not turbo_on and not hyper_on
     style = options.get("style") or {}
     return chain.settings_dict(model=options.get("model", DEFAULT_OPTIONS["model"]), lora=None,
                                strength=1.0, frames=options.get("frames", 73),
                                steps=(int(turbo.get("steps", 6)) if turbo_on else chain.HYPERFLOW_STEPS if hyper_on
-                                      else options.get("steps", 28)),
+                                      else chain.PIKA_STEPS if pika_on else options.get("steps", 28)),
                                hyperflow=float(hyper.get("strength", 1.0)) if hyper_on else None,
+                               pika=float(pika.get("strength", 1.0)) if pika_on else None,
                                width=w, height=h, audio=options.get("audio", True),
                                turbo=(turbo["lora"], turbo.get("strength", 1.0)) if turbo_on else None,
                                backend="comfyui", refs=refs,
@@ -732,9 +737,10 @@ def node_settings(base: dict, options: dict, node: Node) -> dict:
                                strength=strength,
                                frames=ov.get("frames", options.get("frames", 73)),
                                # turbo / HyperFlow: their steps for every clip (a clip's own steps would break it)
-                               steps=(base["steps"] if base.get("turbo") or base.get("hyperflow")
+                               steps=(base["steps"] if base.get("turbo") or base.get("hyperflow") or base.get("pika")
                                       else ov.get("steps", options.get("steps", 28))),
                                hyperflow=(base["hyperflow"]["strength"] if base.get("hyperflow") else None),
+                               pika=(base["pika"]["strength"] if base.get("pika") else None),
                                width=base["width"], height=base["height"], audio=base["audio"],
                                turbo=(base["turbo"]["lora"], base["turbo"]["strength"]) if base.get("turbo") else None,
                                backend="comfyui", refs=base.get("refs"),

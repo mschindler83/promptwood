@@ -33,6 +33,7 @@ TEXT_ENCODER = "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
 VIDEO_VAE = "minimax_h3_video_vae_fp16.safetensors"
 AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors"
 SAMPLER = "res_multistep"
+PIKA_SIGMAS = "1.0, 0.972973, 0.923077, 0.8, 0.571429, 0.333333, 0.0"   # ComfyUI's Pika H3 Flex templates
 SCHEDULER = "simple"
 SUBFOLDER = "video-chain"
 
@@ -197,8 +198,8 @@ def find_qwen_loras(roots: list[Path]) -> list[tuple[str, str]]:
 
 def find_h3_loras(roots: list[Path]) -> list[tuple[str, str]]:
     """All H3 LoRAs in these folders (links followed) as (path, name relative to its folder), sorted by name.
-    Turbo LoRAs are included; is_turbo_lora tells them apart."""
-    return _find_loras(roots, is_h3_lora)
+    Turbo LoRAs are included; is_turbo_lora tells them apart. Pika H3 Flex is left out: its speed mode applies it."""
+    return [(p, n) for p, n in _find_loras(roots, is_h3_lora) if "pika_h3_flex" not in n.lower()]
 
 
 def _find_loras(roots: list[Path], test) -> list[tuple[str, str]]:
@@ -233,7 +234,8 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
                    loras: list[tuple[str, float]], audio: bool, prefix: str, refs: list[str] = (),
                    ref_size: str = "match", ref_key=lambda i: f"ref_images.ref_image_{i}",
                    turbo: tuple[str, float] | None = None, end_image: str | None = None,
-                   guides: list[dict] = (), hyperflow: tuple[str, float] | None = None) -> dict:
+                   guides: list[dict] = (), hyperflow: tuple[str, float] | None = None,
+                   pika: tuple[str, float] | None = None) -> dict:
     """The API-format workflow for one clip (image = the uploaded start image, as LoadImage names it; None: a
     clip without a start frame).
 
@@ -250,7 +252,10 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
 
     With hyperflow (its weights file in models/hyperflow, strength): ComfyUI-HyperFlow-H3's ApplyHyperFlowH3 right
     after the model (curve refit on: the exact correction for the pruned int8 H3 files), the other LoRAs after it,
-    Euler on the 8-step sigma grid it returns (no scheduler)."""
+    Euler on the 8-step sigma grid it returns (no scheduler).
+
+    With pika (ComfyUI name of the Pika H3 Flex LoRA for this model, strength): that LoRA right after the model,
+    the other LoRAs after it, the lcm sampler on ManualSigmas PIKA_SIGMAS (ComfyUI's Pika H3 Flex templates)."""
     wf: dict = {
         "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": UNET_REF if refs else UNET,
                                                          "weight_dtype": "default"}},
@@ -312,6 +317,10 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
         wf[f"guide{k}"] = {"class_type": "MiniMaxH3AddGuide", "inputs": gin}
         positive = [f"guide{k}", 0]
     model = ["unet", 0]
+    if pika:
+        wf["pika"] = {"class_type": "LoraLoaderModelOnly",
+                      "inputs": {"model": model, "lora_name": pika[0], "strength_model": float(pika[1])}}
+        model = ["pika", 0]
     if hyperflow:
         wf["hyperflow"] = {"class_type": "ApplyHyperFlowH3",
                            "inputs": {"model": model, "hyperflow_file": hyperflow[0], "strength": float(hyperflow[1]),
@@ -327,7 +336,11 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
         wf[f"lora{k}"] = {"class_type": "LoraLoaderModelOnly",
                           "inputs": {"model": model, "lora_name": name, "strength_model": float(strength)}}
         model = [f"lora{k}", 0]
-    if hyperflow:
+    if pika:
+        wf["sampler"] = {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "lcm"}}
+        wf["sigmas"] = {"class_type": "ManualSigmas", "inputs": {"sigmas": PIKA_SIGMAS}}
+        sigmas = ["sigmas", 0]
+    elif hyperflow:
         wf["sampler"] = {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}}
         sigmas = ["hyperflow", 1]
     else:
@@ -448,6 +461,15 @@ class ComfyGenerator:
                              "(custom_node_hyperflow_8step_v1.0_comfyui_pruned.safetensors)")
         return sorted(pruned)[0]
 
+    def pika_lora(self, refs: bool) -> str:
+        """ComfyUI's name of the Pika H3 Flex LoRA for the fl2va model (ref2va with face references)."""
+        kind = "ref2va" if refs else "fl2va"
+        names = [n for n in self.lora_names(refresh=True) if "pika_h3_flex" in n.lower() and kind in n.lower()]
+        if not names:
+            raise ComfyError(f"ComfyUI lists no Pika H3 Flex LoRA for {kind} (pika_h3_flex_{kind}_v1_bf16"
+                             ".safetensors in a LoRA folder)")
+        return sorted(names, key=len)[0]
+
     def check_turbo(self):
         for node in ("MiniMaxH3TurboLoRA", "MiniMaxH3TurboSampler"):
             if not self._object_info(node):
@@ -522,6 +544,8 @@ class ComfyGenerator:
                 raise ComfyError(f"{Path(s['turbo']['lora']).name} is not in ComfyUI's LoRA folders")
             turbo = (name, float(s["turbo"].get("strength", 1.0)))
         hyper = (self.hyperflow_file(), float(s["hyperflow"].get("strength", 1.0))) if s.get("hyperflow") else None
+        pika = (self.pika_lora(bool(s.get("ref_paths"))), float(s["pika"].get("strength", 1.0))) \
+            if s.get("pika") else None
         if turbo and self.last_hyperflow:
             self.free()                              # HyperFlow's patch would break the turbo LoRA
         if hyper:
@@ -529,14 +553,14 @@ class ComfyGenerator:
         uploads: list[tuple[str, Path]] = []        # (ComfyUI name, local file); removed again even on errors
         try:
             try:
-                self._run(prompt, start_image, out_video, out_last_frame, seed, s, loras, turbo, uploads, hyper)
+                self._run(prompt, start_image, out_video, out_last_frame, seed, s, loras, turbo, uploads, hyper, pika)
             except ComfyJobFailed as e:
                 # a HyperFlow-patched model left from before this process: unload once and try again
                 if not (turbo and self.last_hyperflow is None and "shapes cannot be multiplied" in str(e)):
                     raise
                 self.log("ComfyUI still had a HyperFlow-patched model: unloading it and trying again")
                 self.free()
-                self._run(prompt, start_image, out_video, out_last_frame, seed, s, loras, turbo, uploads, hyper)
+                self._run(prompt, start_image, out_video, out_last_frame, seed, s, loras, turbo, uploads, hyper, pika)
             if not hyper:
                 self.last_hyperflow = False          # a clip without HyperFlow ran: the model is unpatched
         finally:
@@ -546,7 +570,7 @@ class ComfyGenerator:
                                  Path(local), same_size=False)
 
     def _run(self, prompt, start_image, out_video, out_last_frame, seed, s, loras, turbo, uploads,
-             hyper=None) -> None:
+             hyper=None, pika=None) -> None:
         image = self.upload(Path(start_image)) if start_image is not None else None
         if image:
             uploads.append((image, start_image))
@@ -574,7 +598,7 @@ class ComfyGenerator:
                             height=s.get("height", 512), frames=s.get("frames", 73), steps=s.get("steps", 20),
                             loras=loras, audio=bool(s.get("audio", True)), prefix=prefix, refs=refs,
                             ref_size=s.get("ref_size", "match"), ref_key=self.ref_key() if refs else None,
-                            turbo=turbo, end_image=end_image, guides=guides, hyperflow=hyper)
+                            turbo=turbo, end_image=end_image, guides=guides, hyperflow=hyper, pika=pika)
         ws = self._connect_ws()
         try:
             res = self._json("POST", "/prompt", {"prompt": wf, "client_id": self.client_id})

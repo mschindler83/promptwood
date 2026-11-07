@@ -630,3 +630,20 @@ def test_create_images_in_every_family(server, start, tmp_path):
     assert server.created["pos"]["class_type"] == "FluxGuidance" and server.created["clip"]["inputs"]["type"] == "flux"
     with pytest.raises(C.ComfyError, match="not available"):
         cr.create("flux3", None, "x", out, 5, "fast", 1024, 1024)
+
+
+def test_pika_h3_flex_workflow(server, start, tmp_path):
+    """Pika H3 Flex as ComfyUI's templates: its LoRA right after the model (fl2va / ref2va to match), the clip's own
+    LoRAs after it, lcm on the template's 6 sigmas, no scheduler."""
+    gen = C.ComfyGenerator(server.url)
+    lora = "/data/my_models/loras/MiniMax H3/glow.safetensors"
+    gen.generate("x", start, tmp_path / "v.mp4", tmp_path / "v.png", 3,
+                 settings(lora=lora, strength=-0.5, steps=6, pika={"strength": 1.0}))
+    wf = server.prompts[-1]
+    assert wf["pika"]["inputs"]["lora_name"].endswith("pika_h3_flex_fl2va_v1_bf16.safetensors")
+    assert wf["pika"]["inputs"]["model"] == ["unet", 0] and wf["lora0"]["inputs"]["model"] == ["pika", 0]
+    assert wf["lora0"]["inputs"]["strength_model"] == -0.5
+    assert wf["sampler"]["inputs"]["sampler_name"] == "lcm" and wf["sigmas"]["class_type"] == "ManualSigmas"
+    assert wf["sigmas"]["inputs"]["sigmas"] == C.PIKA_SIGMAS and len(C.PIKA_SIGMAS.split(",")) == 7
+    assert gen.pika_lora(True).endswith("pika_h3_flex_ref2va_v1_bf16.safetensors")
+    assert not [n for _p, n in C.find_h3_loras([tmp_path])]                     # never offered as a normal LoRA

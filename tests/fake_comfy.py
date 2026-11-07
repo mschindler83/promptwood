@@ -29,7 +29,8 @@ IMAGE_CKPTS = ["illustrij_v20.safetensors"]
 IMAGE_CLIPS = ["qwen3vl_4b_fp8_scaled.safetensors", "t5xxl_fp8_e4m3fn_scaled.safetensors", "clip_l.safetensors"]
 IMAGE_VAES = ["FLUX1/ae.safetensors"]
 IMAGE_LORAS = ["qwen-image/Qwen-Image-2512-Lightning-4steps-V1.0-bf16.safetensors",
-               "qwen-image/Qwen-Image-2512-Lightning-8steps-V1.0-bf16.safetensors", "krea2/krea2_style_reference.safetensors"]
+               "qwen-image/Qwen-Image-2512-Lightning-8steps-V1.0-bf16.safetensors", "krea2/krea2_style_reference.safetensors",
+               "pika-h3-flex/pika_h3_flex_fl2va_v1_bf16.safetensors", "pika-h3-flex/pika_h3_flex_ref2va_v1_bf16.safetensors"]
 LLM_FILES = ["gemma-3-12b-abliterated-text-encoder.safetensors", "qwen_2.5_vl_7b_fp8_scaled.safetensors"]
 REFINER = "minimax-h3-refiner/minimax_h3_open_regenerate_2k_refiner_rank_384_bf16.safetensors"
 UPSCALER = "minimax_h3_latent_upscaler_3d_conv_v1_bf16.safetensors"

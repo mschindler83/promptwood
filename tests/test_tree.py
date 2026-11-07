@@ -658,3 +658,13 @@ def test_refined_export_with_fast_attention_makes_its_own_copies(project, tmp_pa
     assert [r["sparse"] for r in gen.refines[2:]] == [1.3, 1.3]                 # made again with Sol-Attn
     T.refine_path(gen, project, b1.id, "2k", tmp_path / "fast2.mp4", log=lambda _m: None, fast_attention=True)
     assert len(gen.refines) == 4                                                # and then reused
+
+
+def test_pika_speed(project):
+    t, a, b1, b2, c = build(project)
+    t.options["pika"] = {"on": True, "strength": 1.0}
+    t.nodes[b1.id].overrides = {"steps": 40}
+    ch = T.Checker(project, t)
+    assert ch.settings(b1.id)["steps"] == 6 and ch.settings(b1.id)["pika"] == {"strength": 1.0}
+    t.options["hyperflow"] = {"on": True, "strength": 1.0}                 # one speed mode at a time
+    assert "pika" not in T.Checker(project, t).settings(a.id) and T.Checker(project, t).settings(a.id)["steps"] == 8

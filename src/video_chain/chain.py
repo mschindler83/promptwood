@@ -25,6 +25,7 @@ from typing import Callable, Protocol
 
 FPS = 24
 HYPERFLOW_STEPS = 8      # HyperFlow's trained sigma grid
+PIKA_STEPS = 6           # Pika H3 Flex (its template's 6-step sigmas)
 DIVISIBILITY = 32
 MAX_RATIO = 2.5          # H3 custom sizes go from 2:5 to 5:2
 
@@ -322,7 +323,8 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
                   height: int, audio: bool, backend: str = "comfyui", refs: list | None = None,
                   ref_size: str = "match", ref_hint: bool = True, extra_loras: list | None = None,
                   turbo: tuple[str, float] | None = None, guide: int = 0,
-                  style: tuple[str, str] | None = None, hyperflow: float | None = None) -> dict:
+                  style: tuple[str, str] | None = None, hyperflow: float | None = None,
+                  pika: float | None = None) -> dict:
     """What a clip depends on besides prompt, seed and start image; a clip is reused only if this is unchanged.
     The LoRA counts by content (lora_sha1), so a LoRA retrained into the same file makes its clips change.
     extra_loras: further LoRAs stacked after the first ([(path, strength)]), only present when there are any, so
@@ -336,6 +338,8 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
          "audio": bool(audio), "backend": backend}
     if hyperflow is not None:                   # HyperFlow at this strength; its own 8-step sigma grid
         s["hyperflow"] = {"strength": float(hyperflow)}
+    if pika is not None:                        # Pika H3 Flex LoRA at this strength; lcm on its 6 sigmas
+        s["pika"] = {"strength": float(pika)}
     if turbo:                                   # (turbo LoRA, strength); steps are already the turbo steps
         s["turbo"] = {"lora": turbo[0], "sha1": file_signature(turbo[0]), "strength": float(turbo[1])}
     if extra_loras:

@@ -1048,9 +1048,12 @@ class MainWindow(QMainWindow):
         self.speed.addItem("Normal", "normal")
         self.speed.addItem("Turbo (turbo LoRA, 4-8 steps)", "turbo")
         self.speed.addItem("HyperFlow (8 steps)", "hyperflow")
+        self.speed.addItem("Pika H3 Flex (6 steps)", "pika")
         self.speed.setToolTip("HyperFlow: Video Rebirth's 8-step LoRA, about 2× faster than Normal (measured on an "
                               "RTX 4090: 19 s instead of 42 s for a 3 s clip at 672×384; needs the "
                               "ComfyUI-HyperFlow-H3 nodes and its pruned weights). "
+                              "Pika H3 Flex: Pika's post-trained H3 as a LoRA, 6 steps (lcm), reported close to "
+                              "the full model; your own LoRAs can be added. "
                               "Turbo: a step-distilled LoRA with its own sampler renders every clip in 4-8 steps "
                               "instead of ~20 (needs the ComfyUI-MiniMax-H3-Turbo nodes)")
         c.addRow("Speed", self.speed)
@@ -1588,7 +1591,8 @@ class MainWindow(QMainWindow):
             self.ref_hint.setChecked(bool(ident.get("hint", True)))
             turbo = o.get("turbo") or {}
             self.speed.setCurrentIndex(self.speed.findData(
-                "turbo" if turbo.get("on") else "hyperflow" if (o.get("hyperflow") or {}).get("on") else "normal"))
+                "turbo" if turbo.get("on") else "hyperflow" if (o.get("hyperflow") or {}).get("on")
+                else "pika" if (o.get("pika") or {}).get("on") else "normal"))
             self.turbo_steps.setValue(int(turbo.get("steps", 6)))
             self.turbo_strength.setValue(float(turbo.get("strength", 1.0)))
             self._fill_turbo(turbo.get("lora"))
@@ -1609,7 +1613,8 @@ class MainWindow(QMainWindow):
             "turbo": {"on": self.speed.currentData() == "turbo", "lora": self.turbo_lora.currentData(),
                       "steps": self.turbo_steps.value(), "strength": round(self.turbo_strength.value(), 2)},
             "hyperflow": {**(self.tree.options.get("hyperflow") or {"strength": 1.0}),
-                          "on": self.speed.currentData() == "hyperflow"}})
+                          "on": self.speed.currentData() == "hyperflow"},
+            "pika": {**(self.tree.options.get("pika") or {"strength": 1.0}), "on": self.speed.currentData() == "pika"}})
         self._update_size_info()
         self._show_references()
         self._turbo_widgets()
@@ -2235,7 +2240,7 @@ class MainWindow(QMainWindow):
 
     def _turbo_widgets(self):
         on = self.speed.currentData() == "turbo"
-        hyper = self.speed.currentData() == "hyperflow"
+        hyper = self.speed.currentData() in ("hyperflow", "pika")
         idle = not self.running
         for w in (self.turbo_lora, self.turbo_steps, self.turbo_strength):
             w.setEnabled(on and idle)
@@ -2244,7 +2249,7 @@ class MainWindow(QMainWindow):
         locked = on or hyper                                      # their own steps for every clip
         self.steps.setEnabled(idle and not locked)
         self.steps.setToolTip("Turbo mode: every clip uses the turbo steps" if on else
-                              "HyperFlow: every clip uses its 8 trained steps" if hyper else STEPS_TIP)
+                              "HyperFlow / Pika H3 Flex: every clip uses their own steps" if hyper else STEPS_TIP)
         for card in self.cards:
             if isinstance(card, PromptCard):
                 card.steps_locked = locked
