@@ -208,24 +208,26 @@ def test_node_overrides(project, tmp_path):
     lora_b.write_bytes(b"x")
     t, a, b1, b2, c = build(project)
     t = T.load(project)
-    t.options["lora"] = str(lora_a)
-    t.nodes[b1.id].overrides = {"lora": str(lora_b), "strength": 0.7, "frames": 124, "steps": 20}
-    t.nodes[b2.id].overrides = {"lora": T.NO_LORA}
+    t.nodes[a.id].overrides = {"loras": [{"path": str(lora_a), "strength": 1.0}]}
+    t.nodes[b1.id].overrides = {"loras": [{"path": str(lora_b), "strength": 0.7}, {"path": str(lora_a),
+                                                                                    "strength": 0.4}],
+                                "frames": 124, "steps": 20}
     T.save(project, t)
     t = T.load(project)
     ch = T.Checker(project, t)
     sa, sb1, sb2, sc = (ch.settings(n.id) for n in (a, b1, b2, c))
     assert (sa["lora"], sa["strength"], sa["frames"], sa["steps"]) == (str(lora_a), 1.0, 73, 28)
     assert (sb1["lora"], sb1["strength"], sb1["frames"], sb1["steps"]) == (str(lora_b), 0.7, 124, 20)
-    assert sb2["lora"] is None and sb2["strength"] == 1.0
-    assert sc["lora"] == str(lora_a)                                   # overrides are not inherited
+    assert sb1["extra_loras"][0]["lora"] == str(lora_a) and sb1["extra_loras"][0]["strength"] == 0.4
+    assert sb2["lora"] is None and sb2["strength"] == 1.0                # no LoRA by default
+    assert sc["lora"] is None                                           # LoRAs are not inherited
     assert T.loras_needed(t, ch, [a.id, b1.id, b2.id, c.id]) == [str(lora_a), str(lora_b)]
     gen = run(project, [c.id, b2.id])
     used = {x["prompt"]: x["settings"] for x in gen.calls}
     assert used["b1"]["lora"] == str(lora_b) and used["b1"]["frames"] == 124 and used["b2"]["lora"] is None
-    # changing one node's override changes it and what follows, nothing else
+    # changing one clip's LoRA strength changes it and what follows, nothing else
     t = T.load(project)
-    t.nodes[b1.id].overrides["strength"] = 0.9
+    t.nodes[b1.id].overrides["loras"][1]["strength"] = 0.9
     T.save(project, t)
     assert statuses(project) == {"a": "done", "b1": "changed", "c": "changed", "b2": "done"}
 
@@ -233,7 +235,7 @@ def test_node_overrides(project, tmp_path):
 def test_missing_lora_file_is_refused(project, tmp_path):
     t = T.load(project)
     n = t.add(None, "x")
-    n.overrides = {"lora": str(tmp_path / "gone.safetensors")}
+    n.overrides = {"loras": [{"path": str(tmp_path / "gone.safetensors"), "strength": 1.0}]}
     T.save(project, t)
     with pytest.raises(FileNotFoundError, match="LoRA not found"):
         run(project, [n.id])
@@ -244,7 +246,7 @@ def test_retrained_lora_in_the_same_file_changes_its_clips(project, tmp_path):
     lora.write_bytes(b"weights v1")
     t, a, b1, b2, c = build(project)
     t = T.load(project)
-    t.nodes[b1.id].overrides = {"lora": str(lora)}
+    t.nodes[b1.id].overrides = {"loras": [{"path": str(lora), "strength": 1.0}]}
     T.save(project, t)
     run(project, [c.id, b2.id])
     assert set(statuses(project).values()) == {"done"}
@@ -334,7 +336,9 @@ def test_identity_references(project, tmp_path):
     assert T.Tree().options["identity"] is not T.Tree().options["identity"]     # defaults are not shared
 
 
-def test_stacked_loras(project, tmp_path):
+def test_old_project_loras_become_each_clips_own(project, tmp_path):
+    """Older trees had a project LoRA (+ extra LoRAs) and per-clip overrides; on load every clip gets the stack it
+    was made with, so its clips stay done."""
     files = {}
     for n in ("a", "b", "c", "d"):
         files[n] = tmp_path / f"{n}.safetensors"
@@ -357,6 +361,13 @@ def test_stacked_loras(project, tmp_path):
     gen = run(project, [c.id, b2.id])
     assert {x["prompt"]: len(x["settings"].get("extra_loras", [])) for x in gen.calls} == {"a": 1, "b1": 2,
                                                                                             "c": 1, "b2": 0}
+    t = T.load(project)
+    assert "lora" not in t.options and "extra_loras" not in t.options
+    assert t.nodes[b1.id].overrides["loras"] == [{"path": str(files["a"]), "strength": 0.9},
+                                                 {"path": str(files["b"]), "strength": 0.5},
+                                                 {"path": str(files["c"]), "strength": 0.3}]
+    T.save(project, t)                                                         # the new form: still done
+    assert set(statuses(project).values()) == {"done"}
     files["c"].write_bytes(b"retrained")                                       # an extra LoRA counts by content
     assert statuses(project) == {"a": "done", "b1": "changed", "c": "changed", "b2": "done"}
 

@@ -19,7 +19,8 @@ Project folder:
   paths/<id>.mp4       a joined path (start -> node), made on demand
   ends/<id>_<tag>.png  a generated clip's own end image
 
-Every node can override the project's LoRA (another one or none), LoRA strength, clip length and steps
+Every generated clip has its own LoRA stack (Node.overrides["loras"]: [{"path", "strength"}], applied in order;
+none by default) and can override the project's clip length and steps
 (Node.overrides); the video size and sound stay per project, so the clips of a path fit together.
 
 A node counts as done when its clip exists and was made from exactly its current prompt, seed, settings and start
@@ -43,13 +44,13 @@ from . import chain
 
 TREE_FILE = "tree.json"
 START_FILE = "start.png"
-NO_LORA = "none"                   # override value: this node without any LoRA
-OVERRIDE_KEYS = ("lora", "strength", "frames", "steps", "extra_loras", "guide")
+NO_LORA = "none"                   # old override value: this node without any LoRA
+OVERRIDE_KEYS = ("loras", "frames", "steps", "guide")
+_OLD_LORA_KEYS = ("lora", "strength", "extra_loras")
 AI, VIDEO = "ai", "video"
 GUIDE_CHOICES = (5, 22, 39)        # motion guide lengths on H3's 17n+5 grid
-DEFAULT_OPTIONS = {"model": "Comfy-Org/MiniMax-H3", "lora": None, "strength": 1.0, "frames": 73, "steps": 28,
+DEFAULT_OPTIONS = {"model": "Comfy-Org/MiniMax-H3", "frames": 73, "steps": 28,
                    "resolution": 512, "audio": True, "keep_repeated": False, "seed": 42,
-                   "extra_loras": [],            # further LoRAs stacked after "lora": [{"path", "strength"}]
                    # turbo: a step-distilled LoRA + its sampler, few steps for every clip (ComfyUI only)
                    "turbo": {"on": False, "lora": None, "steps": 6, "strength": 1.0},
                    # identity: reference images (copies in refs/) every clip sees, so the face stays the same
@@ -66,7 +67,7 @@ class Node:
     prompt: str = ""
     seed: int = 42
     made: dict | None = None       # what the current files were made from (prompt, seed, settings, start_sha1, files)
-    overrides: dict = field(default_factory=dict)   # lora (path or NO_LORA), strength, frames, steps, guide
+    overrides: dict = field(default_factory=dict)   # loras [{"path", "strength"}], frames, steps, guide
     kind: str = AI                 # AI: generated clip; VIDEO: a range of a real video file
     source: dict | None = None     # VIDEO: {"file": absolute path, "start": s, "end": s}
     end_image: str | None = None   # AI: its own end image (ends/..., project-relative); a video after it wins
@@ -187,6 +188,7 @@ class Tree:
             raise ValueError("not a tree file")
         stored = copy.deepcopy(d.get("options") or {})
         stored.pop("backend", None)                       # ComfyUI is the only generator now
+        project_loras = {k: stored.pop(k) for k in _OLD_LORA_KEYS if k in stored}   # older: project LoRAs
         t = cls(options={**copy.deepcopy(DEFAULT_OPTIONS), **stored},
                 image=d.get("image"),
                 selected=d.get("selected"), next_num=int(d.get("next_num") or 1))
@@ -195,8 +197,15 @@ class Tree:
                 raise ValueError("a node without id")
             if nd["id"] in t.nodes:
                 raise ValueError(f"node {nd['id']} appears twice")
-            ov = {k: v for k, v in (nd.get("overrides") or {}).items() if k in OVERRIDE_KEYS and v is not None}
             kind = nd.get("kind") or AI
+            raw = dict(nd.get("overrides") or {})
+            if kind == AI:
+                raw = migrate_loras(project_loras, raw)
+                made = nd.get("made")
+                if isinstance(made, dict) and isinstance(made.get("overrides"), dict):   # what Undo goes back to
+                    made["overrides"] = {k: v for k, v in migrate_loras(project_loras, made["overrides"]).items()
+                                         if k in OVERRIDE_KEYS and v is not None}
+            ov = {k: v for k, v in raw.items() if k in OVERRIDE_KEYS and v is not None}
             src = nd.get("source")
             if kind not in (AI, VIDEO):
                 raise ValueError(f"node {nd['id']} has an unknown kind {kind!r}")
@@ -296,8 +305,10 @@ def load(project: Path) -> Tree:
             if key in s:
                 t.options[key] = s[key]
         parent = None
+        project_loras = {k: t.options.pop(k) for k in _OLD_LORA_KEYS if k in t.options}
         for c in old.get("clips", []):
             n = t.add(parent, c.get("prompt", ""), c.get("seed", 42))
+            n.overrides = migrate_loras(project_loras, {})
             video, frame = project / c.get("video", ""), project / c.get("last_frame", "")
             if video.is_file() and frame.is_file():
                 n.made = {"prompt": n.prompt, "seed": n.seed, "settings": s, "start_sha1": c.get("start_sha1"),
@@ -635,8 +646,8 @@ def current_settings(project: Path, options: dict, tree: "Tree | None" = None) -
             refs.append({"file": rel, "sha1": sha})
     turbo = options.get("turbo") or {}
     turbo_on = bool(turbo.get("on") and turbo.get("lora"))
-    return chain.settings_dict(model=options.get("model", DEFAULT_OPTIONS["model"]), lora=options.get("lora"),
-                               strength=options.get("strength", 1.0), frames=options.get("frames", 73),
+    return chain.settings_dict(model=options.get("model", DEFAULT_OPTIONS["model"]), lora=None,
+                               strength=1.0, frames=options.get("frames", 73),
                                steps=int(turbo.get("steps", 6)) if turbo_on else options.get("steps", 28),
                                width=w, height=h, audio=options.get("audio", True),
                                turbo=(turbo["lora"], turbo.get("strength", 1.0)) if turbo_on else None,
@@ -648,20 +659,41 @@ def _extras(items) -> list[tuple[str, float]]:
     return [(e["path"], float(e.get("strength", 1.0))) for e in (items or []) if e.get("path")]
 
 
-def node_settings(base: dict, options: dict, node: Node) -> dict:
-    """The settings one node is made with: the project's, with the node's overrides applied.
-
-    LoRAs: the first one is the node's own (or none), else the project's; a node on the project default also
-    gets the project's extra LoRAs; the node's own extra LoRAs come on top, in order."""
-    ov = node.overrides or {}
+def migrate_loras(project: dict, ov: dict) -> dict:
+    """Older trees had a project LoRA (+ strength, extra LoRAs) that clips used unless they had their own; now
+    every clip has its own stack. The stack is what the clip was made with, so its clips stay done."""
+    if not any(k in ov for k in _OLD_LORA_KEYS) and not project.get("lora") and not project.get("extra_loras"):
+        return {k: v for k, v in ov.items() if k not in _OLD_LORA_KEYS}
+    if "loras" in ov:
+        return {k: v for k, v in ov.items() if k not in _OLD_LORA_KEYS}
     if "lora" in ov:
-        lora = None if ov["lora"] == NO_LORA else ov["lora"]
+        first = None if ov["lora"] == NO_LORA else ov["lora"]
         extras = _extras(ov.get("extra_loras"))
     else:
-        lora = options.get("lora")
-        extras = _extras(options.get("extra_loras")) + _extras(ov.get("extra_loras"))
-    return chain.settings_dict(model=base["model"], lora=lora, extra_loras=extras,
-                               strength=ov.get("strength", options.get("strength", 1.0)),
+        first = project.get("lora")
+        extras = _extras(project.get("extra_loras")) + _extras(ov.get("extra_loras"))
+    strength = float(ov.get("strength", project.get("strength", 1.0)))
+    stack = ([{"path": first, "strength": strength}] if first else []) + \
+        [{"path": p, "strength": st} for p, st in extras]
+    out = {k: v for k, v in ov.items() if k not in _OLD_LORA_KEYS}
+    if stack:
+        out["loras"] = stack
+    return out
+
+
+def node_loras(node: Node) -> list[tuple[str, float]]:
+    """A clip's LoRA stack as (path, strength), in order."""
+    return _extras((node.overrides or {}).get("loras"))
+
+
+def node_settings(base: dict, options: dict, node: Node) -> dict:
+    """The settings one node is made with: the project's, with the node's own LoRA stack and overrides.
+    The first LoRA of the stack is recorded as "lora", the others as "extra_loras" (as before)."""
+    ov = node.overrides or {}
+    stack = node_loras(node)
+    lora, strength = stack[0] if stack else (None, 1.0)
+    return chain.settings_dict(model=base["model"], lora=lora, extra_loras=stack[1:],
+                               strength=strength,
                                frames=ov.get("frames", options.get("frames", 73)),
                                # turbo: its steps for every clip (a clip's own steps would break it)
                                steps=base["steps"] if base.get("turbo") else ov.get("steps", options.get("steps", 28)),

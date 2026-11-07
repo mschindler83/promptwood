@@ -254,19 +254,24 @@ def test_step_progress_and_export(app, win, tmp_path, image, monkeypatch):
 def test_clip_settings_per_node(app, win, tmp_path, image):
     lora = tmp_path / "nose.safetensors"
     lora.write_bytes(b"x")
+    other = tmp_path / "smile.safetensors"
+    other.write_bytes(b"y")
     ids = new_project(win, tmp_path, image, ("a", "b", "c"))
     card = next(c for c in win.cards if c.nid == ids[1])
-    assert card.lora.currentIndex() == 0 and card.strength.text() == "default"
-    win.set_node_lora(ids[1], str(lora))
+    assert card.loras.items() == [] and card.loras.none.isVisibleTo(card)         # no LoRA by default
+    win.add_node_lora(ids[1], str(lora))
+    win.add_node_lora(ids[1], str(other))
     card = next(c for c in win.cards if c.nid == ids[1])
-    assert card.lora.currentData() == str(lora.resolve())
-    card.strength.setValue(0.8)
+    assert [r[1].currentData() for r in card.loras.rows] == [str(lora.resolve()), str(other.resolve())]
+    card.loras.rows[0][2].setValue(0.8)                                          # each LoRA its own strength
+    card.loras.rows[1][2].setValue(0.4)
     card.length.setCurrentIndex(card.length.findData(124))
     card.steps.setValue(20)
     flush(app, win)
-    assert win.tree.nodes[ids[1]].overrides == {"lora": str(lora.resolve()), "strength": 0.8, "frames": 124,
-                                                "steps": 20}
-    assert win.badge(win.tree.nodes[ids[1]]) == "nose · ×0.8 · 5.2 s · 20 steps"
+    assert win.tree.nodes[ids[1]].overrides == {"loras": [{"path": str(lora.resolve()), "strength": 0.8},
+                                                          {"path": str(other.resolve()), "strength": 0.4}],
+                                                "frames": 124, "steps": 20}
+    assert win.badge(win.tree.nodes[ids[1]]) == "nose ×0.8 · smile ×0.4 · 5.2 s · 20 steps"
     assert win.graph.items_by_id[ids[1]].info.badge.startswith("glow")
     assert win.graph.items_by_id[ids[0]].info.badge == ""
     # time spans follow the clip's own length: clip 2 is 124 frames (minus the repeated one)
@@ -274,26 +279,25 @@ def test_clip_settings_per_node(app, win, tmp_path, image):
     run_and_wait(app, win, win.generate_path)
     made = T.load(tmp_path / "proj").nodes[ids[1]].made["settings"]
     assert made["lora"] == str(lora.resolve()) and made["strength"] == 0.8 and made["frames"] == 124
-    # no LoRA on clip 3: strength is not used there
-    card3 = next(c for c in win.cards if c.nid == ids[2])
-    card3.lora.setCurrentIndex(card3.lora.findData(T.NO_LORA))
-    flush(app, win)
-    assert win.tree.nodes[ids[2]].overrides == {"lora": T.NO_LORA} and not card3.strength.isEnabled()
-    assert [win.state(i) for i in ids] == ["done", "done", "done"]     # the project has no LoRA: same clip
-    win.set_node_lora(ids[2], str(lora))                                # its own LoRA: made again
+    assert made["extra_loras"][0]["strength"] == 0.4
+    assert [win.state(i) for i in ids] == ["done", "done", "done"]
+    win.add_node_lora(ids[2], str(lora))                                # a LoRA on clip 3: made again
     flush(app, win)
     assert [win.state(i) for i in ids] == ["done", "done", "changed"]
     card3 = next(c for c in win.cards if c.nid == ids[2])
-    card3.lora.setCurrentIndex(0)                                       # back to the project default
+    card3.loras._remove(card3.loras.rows[0])                            # removed again: done again
     flush(app, win)
     assert win.tree.nodes[ids[2]].overrides == {} and win.state(ids[2]) == "done"
-    # the project LoRA list now offers the chosen file on every card
-    assert str(lora.resolve()) in [card3.lora.itemData(i) for i in range(card3.lora.count())]
+    # the chosen files are offered on every card
+    card3 = next(c for c in win.cards if c.nid == ids[2])
+    card3.loras.b_add.click()
+    combo = card3.loras.rows[0][1]
+    assert str(lora.resolve()) in [combo.itemData(i) for i in range(combo.count())]
 
 
 def test_missing_node_lora_stops_the_start(app, win, tmp_path, image):
     ids = new_project(win, tmp_path, image, ("a",))
-    win.tree.nodes[ids[0]].overrides = {"lora": str(tmp_path / "gone.safetensors")}
+    win.tree.nodes[ids[0]].overrides = {"loras": [{"path": str(tmp_path / "gone.safetensors"), "strength": 1}]}
     win.generate_path()
     assert not win.running and "LoRA file does not exist (gone.safetensors)" in win.status.text()
 
@@ -396,7 +400,7 @@ def test_one_worker_until_comfyui_settings_change(app, win, tmp_path, image, mon
     ids = new_project(win, tmp_path, image, ("a",))
     run_and_wait(app, win, win.generate_path)
     win.audio.setChecked(False)
-    win.set_node_lora(ids[0], str(lora))
+    win.add_node_lora(ids[0], str(lora))
     flush(app, win)
     wait(app, lambda: not win._joins, timeout=30)
     run_and_wait(app, win, win.generate_path)
@@ -460,7 +464,7 @@ def test_lora_missing_in_comfyui(app, win, tmp_path, image, monkeypatch):
     lora = tmp_path / "own_lora.safetensors"
     lora.write_bytes(b"x")
     ids = new_project(win, tmp_path, image, ("a",))
-    win.set_node_lora(ids[0], str(lora))
+    win.add_node_lora(ids[0], str(lora))
     flush(app, win)
     run_and_wait(app, win, win.generate_path)
     assert "own_lora.safetensors is not in ComfyUI's LoRA folders" in win.status.text()
@@ -500,18 +504,13 @@ def test_lora_lists_offer_the_h3_loras(app, tmp_path, image, monkeypatch):
     wait(app, lambda: w.h3_loras, timeout=10)
     assert [n for _p, n in w.h3_loras] == ["MiniMax H3/smoke.safetensors"]          # the Wan LoRA is left out
     card = w.cards[0]
-    items = [card.lora.itemText(i) for i in range(card.lora.count())]
-    assert items == ["project default (none)", "no LoRA", "smoke"]
-    project = [w.lora.itemText(i) for i in range(w.lora.count())]
-    assert project == ["none (base model)", "smoke"]
-    w.lora.setCurrentIndex(1)                                                        # project LoRA from the list
+    card.loras.b_add.click()
+    combo = card.loras.rows[0][1]
+    assert [combo.itemText(i) for i in range(combo.count())] == ["choose a LoRA …", "smoke"]
+    combo.setCurrentIndex(1)
     flush(app, w)
-    assert w.tree.options["lora"] == str(comfy / "models" / "loras" / "MiniMax H3" / "smoke.safetensors")
-    assert w.cards[0].lora.itemText(0) == "project default (smoke)"
-    card = w.cards[0]
-    card.lora.setCurrentIndex(card.lora.findText("no LoRA"))
-    flush(app, w)
-    assert w.tree.nodes[ids[0]].overrides == {"lora": T.NO_LORA}
+    smoke = str(comfy / "models" / "loras" / "MiniMax H3" / "smoke.safetensors")
+    assert w.tree.nodes[ids[0]].overrides == {"loras": [{"path": smoke, "strength": 1.0}]}
     w.close()
 
 
@@ -558,30 +557,28 @@ def test_stacked_loras_in_the_window(app, tmp_path, image, monkeypatch):
     ids = new_project(w, tmp_path, image, ("a", "b"))
     wait(app, lambda: len(w.h3_loras) == 3, timeout=10)
     path = {Path(p).stem: p for p, _n in w.h3_loras}
-    # project: nose + motion stacked
-    w.lora.setCurrentIndex(w.lora.findData(path["glow"]))
-    w.extra_loras._add_row(path["motion"], 0.5)
-    w.extra_loras.changed.emit()
-    flush(app, w)
-    assert w.tree.options["extra_loras"] == [{"path": path["motion"], "strength": 0.5}]
-    # clip 2: style on top of the project's LoRAs
+    # clip 2: nose, motion and style stacked on the card, each with its strength
     card = next(c for c in w.cards if c.nid == ids[1])
-    card.extras._add_row(path["style"], 0.3)
-    card.extras.changed.emit()
+    for name, st in (("glow", 1.0), ("motion", 0.5), ("style", 0.3)):
+        card.loras._add_row(path[name], st)
+    card.loras.changed.emit()
     flush(app, w)
-    assert w.tree.nodes[ids[1]].overrides["extra_loras"] == [{"path": path["style"], "strength": 0.3}]
-    assert w.badge(w.tree.nodes[ids[1]]) == "+ style ×0.3"
+    assert w.tree.nodes[ids[1]].overrides["loras"] == [{"path": path["glow"], "strength": 1.0},
+                                                       {"path": path["motion"], "strength": 0.5},
+                                                       {"path": path["style"], "strength": 0.3}]
+    assert w.badge(w.tree.nodes[ids[1]]) == "nose ×1 · motion ×0.5 · style ×0.3"
     ch = T.Checker(w.project, w.tree)
     s2 = ch.settings(ids[1])
     assert s2["lora"] == path["glow"] and [e["lora"] for e in s2["extra_loras"]] == [path["motion"], path["style"]]
+    assert ch.settings(ids[0])["lora"] is None                                      # clip 1: none
     run_and_wait(app, w, w.generate_path)
     made = T.load(w.project).nodes[ids[1]].made["settings"]
     assert [e["strength"] for e in made["extra_loras"]] == [0.5, 0.3]
-    # removing the row takes the LoRA off again
+    # removing a row takes the LoRA off again
     card = next(c for c in w.cards if c.nid == ids[1])
-    card.extras._remove(card.extras.rows[0])
+    card.loras._remove(card.loras.rows[2])
     flush(app, w)
-    assert "extra_loras" not in w.tree.nodes[ids[1]].overrides and w.state(ids[1]) == "changed"
+    assert len(w.tree.nodes[ids[1]].overrides["loras"]) == 2 and w.state(ids[1]) == "changed"
     w.close()
 
 
@@ -630,7 +627,10 @@ def test_turbo_in_the_window(app, tmp_path, image, monkeypatch):
     ids = new_project(w, tmp_path, image, ("a",))
     wait(app, lambda: w.turbo_loras, timeout=10)
     assert [Path(p).name for p, _n in w.h3_loras] == ["nose.safetensors"]          # turbo kept out of the lists
-    assert [w.lora.itemText(i) for i in range(w.lora.count())] == ["none (base model)", "glow"]
+    w.cards[0].loras.b_add.click()
+    combo = w.cards[0].loras.rows[0][1]
+    assert [combo.itemText(i) for i in range(combo.count())] == ["choose a LoRA …", "glow"]
+    w.cards[0].loras._remove(w.cards[0].loras.rows[0])
     assert w.turbo_lora.currentText() == "minimax_h3_turbo_v4_step600_ema"         # the recommended one
     run_and_wait(app, w, w.generate_path)
     w.speed.setCurrentIndex(w.speed.findData("turbo"))
@@ -718,12 +718,12 @@ def test_create_variants(app, win, tmp_path, image):
     lora = tmp_path / "x.safetensors"
     lora.write_bytes(b"x")
     ids = new_project(win, tmp_path, image, ("a", "b"))
-    win.tree.nodes[ids[1]].overrides = {"lora": str(lora), "strength": 0.7, "frames": 90}
+    win.tree.nodes[ids[1]].overrides = {"loras": [{"path": str(lora), "strength": 0.7}], "frames": 90}
     new = win.create_variants(ids[1], 3, generate=True)
     assert len(new) == 3 and win.running
     nodes = [win.tree.nodes[n] for n in new]
     assert all(n.parent == ids[0] and n.prompt == "b" for n in nodes)
-    assert all(n.overrides == {"lora": str(lora), "strength": 0.7, "frames": 90} for n in nodes)
+    assert all(n.overrides == {"loras": [{"path": str(lora), "strength": 0.7}], "frames": 90} for n in nodes)
     seeds = {n.seed for n in nodes} | {win.tree.nodes[ids[1]].seed}
     assert len(seeds) == 4                                                    # every variant its own seed
     wait(app, lambda: not win.running)
