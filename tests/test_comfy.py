@@ -541,14 +541,15 @@ def test_qwen_loras_found_and_chained_before_lightning(server, start, tmp_path):
 def test_prompt_refiner(server):
     r = C.ComfyPromptRefiner(server.url)
     assert [m["label"] for m in r.models][0].startswith("Gemma 3 12B abliterated")     # uncensored first
-    assert r.models[0]["type"] == "ltxv" and r.models[1]["type"] == "qwen_image"
+    assert r.models[0]["type"] == "ltxv" and len(r.models) == 1          # Qwen 2.5-VL cannot generate: not offered
     out = r.refine_prompt("a man walks", "video", None, 3, hint="more cinematic")
     assert out.startswith("REFINED a man walks")                                          # thinking, preface, quotes off
     g = server.refined
     assert "image-to-video" in g["system_prompt"] and "minors" in g["system_prompt"]
     assert "more cinematic" in g["prompt"] and g["sampling_mode.seed"] == 3
-    r.refine_prompt("a cat", "image", r.models[1]["file"])
-    assert server.prompts[-1]["llm"]["inputs"]["clip_name"] == r.models[1]["file"]
+    r.refine_prompt("the man from <Picture 1> waves", "image", r.models[0]["file"])
+    assert server.prompts[-1]["llm"]["inputs"]["clip_name"] == r.models[0]["file"]
+    assert "<Picture 1>" in server.refined["system_prompt"] and "<Picture" not in C.REFINE_INSTRUCTIONS["image"]
     assert C.clean_refined("**“A calm sea.”**") == "A calm sea."
 
 

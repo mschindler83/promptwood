@@ -181,7 +181,11 @@ class RefineDialog(QDialog):
             self.state.setText(f"Could not refine: {error}")
         else:
             self.out.setPlainText(text)
-            self.state.setText(f"{len(text.split())} words. Edit it if you like, Refine for another try, or "
+            same = " ".join(text.lower().strip(" .").split()) == \
+                " ".join(self.original.toPlainText().lower().strip(" .").split())
+            self.state.setText("The model gave the prompt back unchanged. Refine for another try, or choose "
+                               "another model (Qwen3-VL 4B refined most reliably in tests)." if same else
+                               f"{len(text.split())} words. Edit it if you like, Refine for another try, or "
                                "Use this.")
         self.buttons.button(QDialogButtonBox.Ok).setEnabled(bool(self.out.toPlainText().strip()))
 

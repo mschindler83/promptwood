@@ -1072,14 +1072,15 @@ ComfyGenerator.refine = _refine
 
 # Language models ComfyUI can run with its TextGenerate node, loaded as text encoders: (file name contains, loader
 # type, label, uncensored). Most preferred first.
+# Measured on an RTX 4090 (ComfyUI 0.44): Qwen 2.5-VL 7B cannot generate in ComfyUI (no stop tokens) and the nvfp4
+# Qwen3-VL 32B gives garbage on a 4090 (no fp4 hardware), so they are not offered. One file per model.
 REFINER_MODELS = (
     ("gemma-3-12b-abliterated", "ltxv", "Gemma 3 12B abliterated (uncensored)", True),
-    ("gemma_3_12b_it_fp8", "ltxv", "Gemma 3 12B", False),
-    ("gemma_3_12b_it", "ltxv", "Gemma 3 12B", False),
-    ("qwen_2.5_vl_7b", "qwen_image", "Qwen 2.5-VL 7B", False),
-    ("qwen3vl_32b", "minimax", "Qwen3-VL 32B (MiniMax H3's text encoder)", False),
+    ("qwen3vl_4b_fp8", "krea2", "Qwen3-VL 4B", False),
     ("qwen-3-vl-4b", "krea2", "Qwen3-VL 4B", False),
     ("qwen3vl_4b", "krea2", "Qwen3-VL 4B", False),
+    ("gemma_3_12b_it_fp8_scaled", "ltxv", "Gemma 3 12B", False),
+    ("gemma_3_12b_it_fp8", "ltxv", "Gemma 3 12B", False),
 )
 _SAFETY = ("Every person you describe is an adult. Never write sexual or suggestive content involving minors; if the "
            "input asks for that, return the input unchanged.")
@@ -1089,17 +1090,18 @@ REFINE_INSTRUCTIONS = {
               "that describes what happens: the action and motion of each subject, the camera movement and framing, "
               "and the sound (ambient sounds, music, and any spoken words in quotes). Do not describe at length how "
               "things look at the start, the start frame already shows that. Keep every subject, action and detail "
-              "the user gave, add nothing they did not imply, and keep tokens like <Picture 1> exactly as they are. "
+              "the user gave. Do not add new people, animals, objects or events, and do not change what happens; "
+              "only make it clearer and more concrete. "
               "At most 120 words. Answer with the prompt only, no preface, no quotes around it, no markdown."),
     "image": ("You improve prompts for text-to-image models. Expand the user's prompt into one cohesive paragraph: the "
               "subject(s) with their attributes and actions, the setting, lighting, composition and framing, the "
               "medium and style. Keep every subject, colour, action and spatial relation the user gave and the medium "
-              "they asked for; add only details that serve their intent; if their prompt is already detailed, only "
-              "polish it. If they want visible text, give the exact words in quotes. Keep tokens like <Picture 1> "
-              "exactly. Answer with the prompt only, no preface, no markdown."),
+              "they asked for; do not add new people, animals or objects; add only visual details that serve their "
+              "intent; if their prompt is already detailed, only polish it. If they want visible text, give the "
+              "exact words in quotes. Answer with the prompt only, no preface, no markdown."),
     "edit": ("You improve instructions for an image editing model. Rewrite the user's request as one clear, direct "
              "edit instruction: what exactly to change and how, and what must stay the same (identity, pose, "
-             "composition, background) unless they want it changed. Keep tokens like <Picture 1> exactly as they are. "
+             "composition, background) unless they want it changed. Do not add changes they did not ask for. "
              "Answer with the instruction only, no preface, no markdown."),
 }
 
@@ -1107,11 +1109,12 @@ REFINE_INSTRUCTIONS = {
 def pick_refiner_models(clip_names: list[str]) -> list[dict]:
     """The language models ComfyUI lists that the refiner can use, most preferred (uncensored) first:
     [{"file", "type", "label", "uncensored"}]."""
-    out, seen = [], set()
+    out, seen, labels = [], set(), set()
     for key, kind, text, free in REFINER_MODELS:
-        for name in clip_names:
-            if key in name.lower() and name not in seen:
+        for name in sorted(clip_names, key=len):
+            if key in name.lower() and name not in seen and text not in labels:
                 seen.add(name)
+                labels.add(text)
                 out.append({"file": name, "type": kind, "label": text, "uncensored": free})
     return out
 
@@ -1128,9 +1131,12 @@ def clean_refined(text: str) -> str:
 
 
 def build_refine_prompt_workflow(*, prompt: str, kind: str, model: dict, seed: int, hint: str = "",
-                                 temperature: float = 0.7) -> dict:
+                                 temperature: float = 0.5) -> dict:
     """CLIPLoader (the LLM) -> TextGenerate with the instruction for this kind of prompt -> PreviewAny (text out)."""
     system = REFINE_INSTRUCTIONS[kind] + " " + _SAFETY
+    tokens = re.findall(r"<[^<>]{1,40}>", prompt)          # <Picture 1>, <ref_image_0> …: only then mentioned
+    if tokens:
+        system += f" Keep these tokens exactly as they are, where they are: {', '.join(dict.fromkeys(tokens))}."
     user = prompt.strip() + (f"\n\nWhat the user wants changed in the prompt: {hint.strip()}" if hint.strip() else "")
     return {
         "llm": {"class_type": "CLIPLoader", "inputs": {"clip_name": model["file"], "type": model["type"],
