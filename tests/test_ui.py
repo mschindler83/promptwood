@@ -1960,3 +1960,24 @@ def test_inspector_and_timeline(app, win, tmp_path, image):
     win.node_action("continue", ids[2])                    # a new clip: in focus at once, to write its prompt
     assert win.focus == win.selected_id() not in ids and win.card_stack.currentWidget().nid == win.focus
     assert win.timeline._blocks[-1].nid == win.focus and win.inspector.tabText(0) == "Clip"
+
+
+def test_layout_presets_and_saved_layout(app, win):
+    """View presets size the panels; the layout is saved with the settings and restored; an unknown one is reset."""
+    from video_chain.ui.main_window import LAYOUT_VERSION
+    win.resize(1600, 900)
+    win.apply_layout("watch")
+    assert not win.act_left.isChecked() and win.left_tabs.isHidden()
+    win.apply_layout("write")
+    assert win.act_left.isChecked() and not win.left_tabs.isHidden()
+    sizes = win.split.sizes()
+    assert sizes[2] > sizes[0]                       # a wide inspector for writing
+    win.save_settings()
+    d = json.loads(win.qs.value("layout", type=str))
+    assert d["v"] == LAYOUT_VERSION and d["left"] is True and len(d["split"]) == 3
+    win.apply_layout("watch")
+    win._restore_layout()
+    assert win.act_left.isChecked() and win.split.sizes()[2] > win.split.sizes()[0]
+    win.qs.setValue("layout", "not json")
+    win._restore_layout()                            # falls back to the default layout
+    assert win.act_left.isChecked()

@@ -270,6 +270,11 @@ STEPS_TIP = "Sampling steps per clip: more is slower and rarely better; 20-30 is
 STEPS_DEFAULT = 3
 
 
+LAYOUT_VERSION = 1
+# preset: shares of the width (left panel, viewer, inspector) and of the centre's height for the viewer
+LAYOUTS = {"edit": (0.20, 0.58, 0.22, 0.62), "write": (0.17, 0.45, 0.38, 0.55), "watch": (0.0, 0.76, 0.24, 0.70)}
+
+
 class _CurrentStack(QStackedWidget):
     """A stack whose size is that of the page shown (not of its largest hidden page)."""
 
@@ -1632,6 +1637,7 @@ class MainWindow(QMainWindow):
         self.idle_minutes.setValue(q.value("idleMinutes", 15, type=int))
         if g := q.value("geometry"):
             self.restoreGeometry(g)
+        self._restore_layout()
         self._fill_recent()
         proj = q.value("project", "", type=str)
         if proj and Path(proj).is_dir():
@@ -1651,6 +1657,8 @@ class MainWindow(QMainWindow):
         if self.tree is not None:
             q.setValue("lastOptions", json.dumps(self.tree.options))
         q.setValue("geometry", self.saveGeometry())
+        q.setValue("layout", json.dumps({"v": LAYOUT_VERSION, "split": self.split.sizes(),
+                                         "center": self.center.sizes(), "left": self.act_left.isChecked()}))
         q.sync()
 
     # ------------------------------------------------------------------ project
@@ -1679,8 +1687,42 @@ class MainWindow(QMainWindow):
             a = v.addAction(f"{name} (left)", lambda _=False, k=k: self.left_tabs.setCurrentIndex(k))
             a.setShortcut(QKeySequence(f"Alt+{k + 1}"))
         v.addAction("Log", lambda: self.tabs.setCurrentWidget(self.log)).setShortcut(QKeySequence("Alt+L"))
+        v.addSeparator()
+        self.act_left = v.addAction("Left panel (clips, cast, sounds)")
+        self.act_left.setCheckable(True)
+        self.act_left.setChecked(True)
+        self.act_left.setShortcut(QKeySequence("Ctrl+Alt+B"))
+        self.act_left.toggled.connect(lambda on: self.left_tabs.setVisible(on))   # (built later, in _build)
+        for name, key, tip in (("edit", "Ctrl+Alt+1", "Layout: Edit (big viewer)"),
+                               ("write", "Ctrl+Alt+2", "Layout: Write (wide prompt)"),
+                               ("watch", "Ctrl+Alt+3", "Layout: Watch (viewer and timeline only)")):
+            v.addAction(tip, lambda _=False, n=name: self.apply_layout(n)).setShortcut(QKeySequence(key))
+        v.addAction("Reset layout", lambda: self.apply_layout("edit"))
         st = self.menuBar().addMenu("&Settings")
         st.addAction("ComfyUI and preferences…", self.show_prefs).setShortcut(QKeySequence("Ctrl+,"))
+
+    def apply_layout(self, name: str):
+        """A layout preset, as shares of the window: 'edit' (the default: a big viewer), 'write' (a wide inspector
+        for the prompt), 'watch' (no left panel, a narrow inspector)."""
+        left, mid, right, view = LAYOUTS.get(name, LAYOUTS["edit"])
+        self.act_left.setChecked(left > 0)              # (shows / hides the left panel)
+        w = max(self.split.width(), 1200)
+        self.split.setSizes([int(w * left), int(w * mid), int(w * right)])
+        h = max(self.center.height(), 600)
+        self.center.setSizes([int(h * view), int(h * (1 - view))])
+
+    def _restore_layout(self):
+        """The layout of the last session; the default one if there is none (or it was saved by an older one)."""
+        try:
+            d = json.loads(self.qs.value("layout", "", type=str) or "{}")
+        except (TypeError, ValueError):
+            d = {}
+        if d.get("v") != LAYOUT_VERSION or len(d.get("split") or []) != 3 or len(d.get("center") or []) != 2:
+            self.apply_layout("edit")
+            return
+        self.act_left.setChecked(bool(d.get("left", True)))
+        self.split.setSizes([max(0, int(x)) for x in d["split"]])
+        self.center.setSizes([max(0, int(x)) for x in d["center"]])
 
     def show_prefs(self):
         """ComfyUI's address, launcher, folder and the model / trigger word settings (not modal: the status bar
