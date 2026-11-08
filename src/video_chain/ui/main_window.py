@@ -961,16 +961,31 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(split)
         self.split = split
 
-        ls = QScrollArea()
-        ls.setWidgetResizable(True)
-        ls.setFrameShape(QFrame.NoFrame)
-        left = QWidget()
-        lv = QVBoxLayout(left)
-        lv.setContentsMargins(0, 0, 0, 0)
-        lv.setSpacing(0)
+        # panels (an editor's layout): left tabs (clips graph, cast, sounds), the viewer in the middle with the
+        # film / path / log below, the project's settings on the right; ComfyUI's settings in Preferences
+        def panel():
+            w = QWidget()
+            v = QVBoxLayout(w)
+            v.setContentsMargins(0, 0, 0, 0)
+            v.setSpacing(0)
+            return w, v
+
+        def scrolled(w):
+            sa = QScrollArea()
+            sa.setWidgetResizable(True)
+            sa.setFrameShape(QFrame.NoFrame)
+            sa.setWidget(w)
+            return sa
+        left = QWidget()                                    # (parent of the section bars below)
+        proj_w, proj_v = panel()
+        cast_w, cast_v = panel()
+        sound_w, sound_v = panel()
+        self.prefs = QDialog(self)
+        self.prefs.setWindowTitle("Preferences")
+        prefs_v = QVBoxLayout(self.prefs)
 
         bar, _ = section_bar("Project", left)
-        lv.addWidget(bar)
+        proj_v.addWidget(bar)
         pw = QWidget()
         pf = QFormLayout(pw)
         pf.setContentsMargins(10, 6, 10, 8)
@@ -1001,10 +1016,10 @@ class MainWindow(QMainWindow):
             brow.addWidget(b)
         brow.addStretch(1)
         pf.addRow("", brow)
-        lv.addWidget(pw)
+        proj_v.addWidget(pw)
 
         bar, _ = section_bar("Start image", left)
-        lv.addWidget(bar)
+        proj_v.addWidget(bar)
         sw = QWidget()
         sv = QVBoxLayout(sw)
         sv.setContentsMargins(10, 8, 10, 8)
@@ -1027,10 +1042,10 @@ class MainWindow(QMainWindow):
         airow.addWidget(self.b_ai_create)
         airow.addStretch(1)
         sv.addLayout(airow)
-        lv.addWidget(sw)
+        proj_v.addWidget(sw)
 
         bar, _ = section_bar("Cast", left)
-        lv.addWidget(bar)
+        cast_v.addWidget(bar)
         iw = QWidget()
         iv = QVBoxLayout(iw)
         iv.setContentsMargins(10, 6, 10, 8)
@@ -1142,14 +1157,14 @@ class MainWindow(QMainWindow):
         self.ident_info = label("", level="tertiary")
         self.ident_info.setWordWrap(True)
         iv.addWidget(self.ident_info)
-        lv.addWidget(iw)
+        cast_v.addWidget(iw)
         self.ref_size.currentIndexChanged.connect(self._identity_changed)
         self.ref_hint.toggled.connect(self._identity_changed)
         self.dialogue_lang.activated.connect(self._identity_changed)          # a finished choice, not each key
         self.dialogue_lang.lineEdit().editingFinished.connect(self._identity_changed)
 
         bar, _ = section_bar("Sound reference", left)
-        lv.addWidget(bar)
+        sound_v.addWidget(bar)
         aw = QWidget()
         av = QVBoxLayout(aw)
         av.setContentsMargins(10, 6, 10, 8)
@@ -1183,10 +1198,10 @@ class MainWindow(QMainWindow):
         self.sound_info = label("", level="tertiary")
         self.sound_info.setWordWrap(True)
         av.addWidget(self.sound_info)
-        lv.addWidget(aw)
+        sound_v.addWidget(aw)
 
-        bar, _ = section_bar("Clips", left)
-        lv.addWidget(bar)
+        bar, _ = section_bar("Clip settings (the project's defaults)", left)
+        proj_v.addWidget(bar)
         cw = QWidget()
         c = QFormLayout(cw)
         c.setContentsMargins(10, 6, 10, 8)
@@ -1271,10 +1286,10 @@ class MainWindow(QMainWindow):
                                       "Clips record them, so new words make those clips again")
         self.lora_triggers.toggled.connect(self._lora_triggers_changed)
         c.addRow("", self.lora_triggers)
-        lv.addWidget(cw)
+        proj_v.addWidget(cw)
 
         bar, _ = section_bar("ComfyUI", left)
-        lv.addWidget(bar)
+        prefs_v.addWidget(bar)
         aw = QWidget()
         a = QFormLayout(aw)
         a.setContentsMargins(10, 6, 10, 8)
@@ -1336,23 +1351,34 @@ class MainWindow(QMainWindow):
         krow.addStretch(1)
         a.addRow("", krow)
         self.keep_loaded.toggled.connect(self.idle_minutes.setEnabled)
-        lv.addWidget(aw)
-        lv.addStretch(1)
-        ls.setWidget(left)
-        ls.setMinimumWidth(350)
-        split.addWidget(ls)
+        prefs_v.addWidget(aw)
+        pb = QDialogButtonBox(QDialogButtonBox.Close)
+        pb.rejected.connect(self.prefs.reject)
+        prefs_v.addWidget(pb)
+        for v in (proj_v, cast_v, sound_v):
+            v.addStretch(1)
+        self.left_tabs = QTabWidget()
+        self.left_tabs.setDocumentMode(True)
+        cast_scroll, sound_scroll, proj_scroll = scrolled(cast_w), scrolled(sound_w), scrolled(proj_w)
+        self.inspector = QTabWidget()
+        self.inspector.setDocumentMode(True)
+        self.inspector.addTab(proj_scroll, "Project")
+        self.inspector.setMinimumWidth(380)
+        self._panels = (proj_w, cast_w, sound_w)
 
-        # middle: the film's scenes, the graph over the path
-        mid = QSplitter(Qt.Vertical)
-        mid.setChildrenCollapsible(False)
+        # the clips graph (left tab), the film strip (under the viewer)
         gw = QWidget()
         gv = QVBoxLayout(gw)
         gv.setContentsMargins(0, 0, 0, 0)
         gv.setSpacing(0)
-        fbar, fbh = section_bar("Film", gw)
+        film_w = QWidget()
+        film_v = QVBoxLayout(film_w)
+        film_v.setContentsMargins(0, 0, 0, 0)
+        film_v.setSpacing(0)
+        fbar, fbh = section_bar("Film", film_w)
         self.film_info = label("", level="tertiary")
         fbh.addWidget(self.film_info)
-        gv.addWidget(fbar)
+        film_v.addWidget(fbar)
         self.storyboard = Storyboard()
         self.storyboard.sceneChosen.connect(self.switch_scene)
         self.storyboard.addWanted.connect(self.add_scene)
@@ -1376,7 +1402,7 @@ class MainWindow(QMainWindow):
         self.b_film_cast.clicked.connect(self.show_film_cast)
         for b in (self.b_film_cast, self.b_film_gen, self.b_film_play, self.b_film_export):
             fbh.addWidget(b)
-        gv.addWidget(self.storyboard)
+        film_v.addWidget(self.storyboard)
         self.film = None
         bar, bh = section_bar("Clips", gw)
         self.tree_info = label("", level="tertiary")
@@ -1403,7 +1429,10 @@ class MainWindow(QMainWindow):
         self.graph.activated.connect(self._activate)
         self.graph.contextMenu.connect(self._context)
         gv.addWidget(self.graph, 1)
-        mid.addWidget(gw)
+        self.left_tabs.addTab(gw, "Clips")
+        self.left_tabs.addTab(cast_scroll, "Cast")
+        self.left_tabs.addTab(sound_scroll, "Sounds")
+        self.left_tabs.setMinimumWidth(340)
 
         pw2 = QWidget()
         pv = QVBoxLayout(pw2)
@@ -1429,12 +1458,8 @@ class MainWindow(QMainWindow):
         self.path_box.addStretch(1)
         self.path_area.setWidget(holder)
         pv.addWidget(self.path_area, 1)
-        mid.addWidget(pw2)
-        mid.setSizes([460, 420])
-        split.addWidget(mid)
 
-        # right: preview + log
-        self.tabs = QTabWidget()
+        # the viewer (the biggest area), under it the film and the selected path / the log
         rp = QWidget()
         rv = QVBoxLayout(rp)
         rv.setContentsMargins(0, 0, 0, 0)
@@ -1452,15 +1477,33 @@ class MainWindow(QMainWindow):
         prow.addWidget(self.b_export)
         prow.addStretch(1)
         rv.addLayout(prow)
-        self.tabs.addTab(rp, "Preview")
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setProperty("type", "mono")
         self.log.setMaximumBlockCount(5000)
+        self.tabs = QTabWidget()                            # under the viewer: the selected path, the log
+        self.tabs.setDocumentMode(True)
+        self.tabs.addTab(pw2, "Selected path")
         self.tabs.addTab(self.log, "Log")
-        split.addWidget(self.tabs)
+        bottom = QWidget()
+        bv = QVBoxLayout(bottom)
+        bv.setContentsMargins(0, 0, 0, 0)
+        bv.setSpacing(0)
+        bv.addWidget(film_w)
+        bv.addWidget(self.tabs, 1)
+        center = QSplitter(Qt.Vertical)
+        center.setChildrenCollapsible(False)
+        center.addWidget(rp)
+        center.addWidget(bottom)
+        center.setStretchFactor(0, 3)
+        center.setStretchFactor(1, 2)
+        self.center = center
+        split.addWidget(self.left_tabs)
+        split.addWidget(center)
+        split.addWidget(self.inspector)
         split.setStretchFactor(1, 1)
-        split.setSizes([360, 760, 440])
+        split.setSizes([400, 1300, 420])
+        self.viewer = rp
 
         sb = self.statusBar()
         self.b_gen = QPushButton("Generate path")
@@ -1488,7 +1531,10 @@ class MainWindow(QMainWindow):
         self.b_unload.clicked.connect(self.unload)
         self.b_unload.hide()
         self.comfy_label = label("", role="statusText")
+        self.b_prefs = icon_button("gear", "ComfyUI and preferences (Ctrl+,)")
+        self.b_prefs.clicked.connect(self.show_prefs)
         sb.addPermanentWidget(self.comfy_label)
+        sb.addPermanentWidget(self.b_prefs)
         sb.addPermanentWidget(self.model_label)
         sb.addPermanentWidget(self.b_unload)
         sb.addPermanentWidget(self.gpu)
@@ -1509,7 +1555,8 @@ class MainWindow(QMainWindow):
                          ("Ctrl+D", lambda: self.node_action("variant", self.selected_id())),
                          ("Ctrl+Return", self.generate_path), ("Ctrl+Shift+Return", self.generate_all)):
             QShortcut(QKeySequence(keys), self, activated=fn)
-        guard_wheel(left)
+        for w in self._panels:
+            guard_wheel(w)
         QShortcut(QKeySequence("Delete"), self.graph,
                   activated=lambda: self.node_action("delete", self.selected_id()))
         QShortcut(QKeySequence("F"), self.graph, activated=self.graph.fit)
@@ -1570,6 +1617,21 @@ class MainWindow(QMainWindow):
                                          lambda: self.edit_image(start=True, mode="create"))
         m.addSeparator()
         m.addAction("Quit", self.close).setShortcut(QKeySequence("Ctrl+Q"))
+        v = self.menuBar().addMenu("&View")
+        for k, name in enumerate(("Clips", "Cast", "Sounds")):
+            a = v.addAction(f"{name} (left)", lambda k=k: self.left_tabs.setCurrentIndex(k))
+            a.setShortcut(QKeySequence(f"Alt+{k + 1}"))
+        v.addAction("Log", lambda: self.tabs.setCurrentWidget(self.log)).setShortcut(QKeySequence("Alt+L"))
+        st = self.menuBar().addMenu("&Settings")
+        st.addAction("ComfyUI and preferences…", self.show_prefs).setShortcut(QKeySequence("Ctrl+,"))
+
+    def show_prefs(self):
+        """ComfyUI's address, launcher, folder and the model / trigger word settings (not modal: the status bar
+        and the window stay usable)."""
+        self.prefs.resize(max(self.prefs.width(), 620), self.prefs.sizeHint().height())
+        self.prefs.show()
+        self.prefs.raise_()
+        self.prefs.activateWindow()
 
     # ---- recent projects
     def recent_projects(self) -> list[str]:
@@ -1643,7 +1705,6 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001
             secs = 0.0
         if purpose == "play":
-            self.tabs.setCurrentIndex(0)
             self.preview.open(Path(path), f"Film · {len(self.film.scenes) if self.film else 1} scenes · "
                                           f"{fmt_time(secs)}")
             self.status.setText(f"Film joined: {fmt_time(secs)}.")
@@ -4402,7 +4463,6 @@ class MainWindow(QMainWindow):
             return
         n = self.tree.nodes[nid]
         if n.made and (self.project / n.made["video"]).is_file():
-            self.tabs.setCurrentIndex(0)
             what = Path(n.source["file"]).name if n.is_video else n.prompt[:60]
             self.preview.open(self.project / n.made["video"],
                               f"{'Video' if n.is_video else 'Clip'} #{nid[1:]} · {what}")
@@ -4440,7 +4500,6 @@ class MainWindow(QMainWindow):
             return
         path, secs = path
         if purpose == "play":
-            self.tabs.setCurrentIndex(0)
             self.preview.open(path, f"Path to clip #{Path(path).stem[1:]} · {fmt_time(secs)}")
             self.status.setText(f"{pre}Path joined: {fmt_time(secs)}.")
         else:
@@ -4961,7 +5020,7 @@ class MainWindow(QMainWindow):
                         self._film_queue = film_rest
                 else:
                     self.status.setText(f"ComfyUI is not running at {self.comfy_url.text().strip()}. "
-                                        "Start it (ComfyUI → Start ComfyUI) and generate again.")
+                                        "Start it (Settings → ComfyUI → Start ComfyUI) and generate again.")
                 self._update_comfy_label()
         self._update_model_label()
         self._update_buttons()
