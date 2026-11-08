@@ -81,3 +81,36 @@ def test_scene_summary(project):
     assert s["new"] == 1 and s["clips"] == 1 and s["thumb"].name == T.START_FILE and s["secs"] > 0
     T.run_tree(FakeGenerator(frames=17), project, [t.selected], log=lambda _m: None)
     assert F.summary(f, "s1")["done"] == 1
+
+
+
+def test_scene_endings_and_the_joined_film(project, tmp_path):
+    t1 = T.load(project)
+    assert any("has no clip yet" in m for m in F.film_problems(F.Film.load(project)))   # nothing chosen yet
+    t1.selected = next(iter(t1.nodes))
+    T.save(project, t1)
+    f = F.Film.load(project)
+    img = tmp_path / "tall.png"
+    Image.new("RGB", (108, 192), (200, 50, 50)).save(img)                # another shape: fitted into the film
+    s2 = f.add_scene("Two", start_image=img)
+    d2 = f.path(s2.id)
+    t2 = T.load(d2)
+    a = t2.add(None, "two a")
+    b = t2.add(a.id, "two b")
+    t2.selected = a.id
+    T.save(d2, t2)
+    assert f.take_of(s2.id, t2) == a.id                               # no ending set: the selected clip
+    f.set_take(s2.id, b.id)
+    assert F.Film.load(project).take_of(s2.id, t2) == b.id and F.summary(f, s2.id)["fixed"]
+    assert any("not made yet" in m for m in F.film_problems(f))
+    with pytest.raises(ValueError, match="not made yet"):
+        F.join_film(f, tmp_path / "film.mp4")
+    T.run_tree(FakeGenerator(frames=17, size=None), project, [t1.selected], log=lambda _m: None)
+    T.run_tree(FakeGenerator(frames=17, size=None), d2, [b.id], log=lambda _m: None)
+    assert F.film_problems(f) == []
+    out = F.join_film(f, tmp_path / "film.mp4")
+    from video_chain import chain
+    info, one = chain.probe(out), chain.probe(T.join_path(project, T.load(project), t1.selected))
+    two = chain.probe(T.join_path(d2, T.load(d2), b.id))
+    assert info["frames"] == one["frames"] + two["frames"]            # hard cuts: nothing left out
+    assert (info["width"], info["height"]) == (one["width"], one["height"])   # the first scene's frame

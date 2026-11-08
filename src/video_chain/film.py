@@ -28,6 +28,7 @@ class Scene:
     id: str
     title: str
     dir: str                    # relative to the film folder ("." for the first scene)
+    take: str | None = None     # the clip the scene ends at in the film (None: its selected clip)
 
 
 def root_of(folder: Path) -> Path:
@@ -56,7 +57,9 @@ class Film:
                 for s in d.get("scenes") or []:
                     sid, sdir = str(s.get("id") or ""), str(s.get("dir") or "")
                     if re.fullmatch(r"s\d+", sid) and (sdir == "." or re.fullmatch(rf"{SCENES_DIR}/s\d+", sdir)):
-                        scenes.append(Scene(sid, str(s.get("title") or sid), sdir))
+                        take = s.get("take") if isinstance(s.get("take"), str) and re.fullmatch(r"n\d+", s["take"]) \
+                            else None
+                        scenes.append(Scene(sid, str(s.get("title") or sid), sdir, take))
                 current = d.get("current")
             except (OSError, ValueError, AttributeError) as e:
                 raise ValueError(f"{f} is damaged ({e})") from e
@@ -120,6 +123,18 @@ class Film:
         self.scene(sid).title = title
         self.save()
 
+    def set_take(self, sid: str, nid: str | None) -> None:
+        """The clip a scene ends at in the film (None: its selected clip)."""
+        self.scene(sid).take = nid
+        self.save()
+
+    def take_of(self, sid: str, tree: "T.Tree") -> str | None:
+        """The clip the film plays a scene up to: its chosen ending, else its selected clip (None: nothing)."""
+        t = self.scene(sid).take
+        if t in tree.nodes:
+            return t
+        return tree.selected if tree.selected in tree.nodes else None
+
     def move(self, sid: str, index: int) -> None:
         s = self.scene(sid)
         self.scenes.remove(s)
@@ -182,8 +197,11 @@ def summary(film: Film, sid: str, tree: "T.Tree | None" = None, status_of: dict 
     except (OSError, ValueError):
         return out
     start = d / T.START_FILE
-    path = t.path_to(t.selected) if t.selected in t.nodes else []
+    take = film.take_of(sid, t)
+    path = t.path_to(take) if take else []
     out["clips"] = len(t.nodes)
+    out["take"] = take
+    out["fixed"] = film.scene(sid).take == take and take is not None
     try:
         ch = None if status_of is not None else T.Checker(d, t)
         for n in path:
@@ -200,4 +218,45 @@ def summary(film: Film, sid: str, tree: "T.Tree | None" = None, status_of: dict 
         m = path[0].made
         f = d / (m.get("first") or m.get("frame") or "")
         out["thumb"] = f if f.is_file() else None
+    return out
+
+
+def film_problems(film: Film) -> list[str]:
+    """Why the film cannot be played / exported yet (a scene without clips, clips not made)."""
+    out = []
+    for k, sc in enumerate(film.scenes, start=1):
+        d = film.path(sc.id)
+        try:
+            t = T.load(d)
+        except (OSError, ValueError) as e:
+            out.append(f"scene {k} ({sc.title}) cannot be read: {e}")
+            continue
+        take = film.take_of(sc.id, t)
+        if take is None:
+            out.append(f"scene {k} ({sc.title}) has no clip yet")
+            continue
+        ch = T.Checker(d, t)
+        todo = [n.id for n in t.path_to(take) if ch.status(n.id) != "done"]
+        if todo:
+            out.append(f"scene {k} ({sc.title}): {len(todo)} clip{'s' if len(todo) != 1 else ''} not made yet "
+                       f"(#{todo[0][1:]}{' …' if len(todo) > 1 else ''})")
+    return out
+
+
+def join_film(film: Film, out: Path) -> Path:
+    """The film as one video: every scene's path up to its ending, joined with hard cuts. Scenes of another size
+    than the first one are fitted into its frame (black bars)."""
+    problems = film_problems(film)
+    if problems:
+        raise ValueError(problems[0])
+    parts = []
+    for sc in film.scenes:
+        d = film.path(sc.id)
+        t = T.load(d)
+        parts.append(T.join_path(d, t, film.take_of(sc.id, t)))
+    from . import chain
+    first = chain.probe(parts[0])
+    out = Path(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    chain.concat(parts, out, cuts=[(0, 0)] * len(parts), size=(first["width"], first["height"]))
     return out

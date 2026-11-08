@@ -20,10 +20,11 @@ def state_text(s: dict) -> str:
     length = f"{int(secs // 60)}:{int(round(secs % 60)):02d}"
     if not n:
         return "no clip chosen" if s.get("clips") else "empty"
+    end = f" · ends at #{s['take'][1:]}" if s.get("fixed") and s.get("take") else ""
     if s.get("done", 0) == n:
-        return f"{length} · done"
+        return f"{length} · done{end}"
     parts = [f"{s[k]} {k}" for k in ("changed", "new") if s.get(k)]
-    return f"{length} · " + ", ".join(parts)
+    return f"{length} · " + ", ".join(parts) + end
 
 
 class Storyboard(QWidget):

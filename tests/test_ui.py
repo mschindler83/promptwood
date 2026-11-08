@@ -1900,3 +1900,24 @@ def test_scenes_in_the_window(app, win, tmp_path, image, monkeypatch):
     win.storyboard.sceneChosen.emit("s2")
     win.delete_scene("s2")                                  # the open scene: the window moves to another first
     assert win.project == root and win.storyboard.list.count() == 1 and not (root / "scenes" / "s2").exists()
+
+
+def test_generate_and_play_the_film(app, win, tmp_path, image, monkeypatch):
+    ids = new_project(win, tmp_path, image, ("kitchen a", "kitchen b"))
+    root = win.project
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("Street", True))
+    win.add_scene()
+    win.set_image(str(image))
+    first = next(iter(win.tree.nodes))
+    type_prompt(win, first, "street a")
+    flush(app, win)
+    win.storyboard.sceneChosen.emit("s1")
+    win.node_action("take", ids[0])                         # scene 1 ends at its first clip in the film
+    assert win.film.scene("s1").take == ids[0] and "ends at #" in win.storyboard.list.item(0).text()
+    win.generate_film()
+    wait(app, lambda: win._film_queue is None and not win.running, timeout=120)
+    assert win.status.text().startswith("The film is made"), win.status.text()
+    assert win.state(ids[1]) != "done"                      # after scene 1's ending: not part of the film
+    win.join_film("play")
+    wait(app, lambda: win.status.text().startswith("Film joined"), timeout=60)
+    assert win.played and win.played[-1] == root / "paths" / "film.mp4"

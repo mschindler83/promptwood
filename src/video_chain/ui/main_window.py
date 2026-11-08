@@ -252,6 +252,7 @@ class ExportDialog(QDialog):
 
 class _Bridge(QObject):
     joined = Signal(object, object, str, str, str)  # path or None, error or None, purpose, status prefix, project
+    film = Signal(object, object, str)               # the joined film or None, error or None, 'play' / 'export'
     comfy = Signal(bool)                       # ComfyUI reachable
     loras = Signal(list, bool)                 # H3 LoRAs found in ComfyUI's LoRA folders, report them
     triggers = Signal(dict)                    # the trigger word scan finished (its counts)
@@ -912,6 +913,8 @@ class MainWindow(QMainWindow):
         self._kill_timer = QTimer(self, singleShot=True, interval=8000, timeout=self._kill)
         self.bridge = _Bridge()
         self.bridge.joined.connect(self._joined)
+        self.bridge.film.connect(self._film_joined)
+        self._film_queue: list[str] | None = None    # Generate film: the scenes still to make
         self.bridge.comfy.connect(self._comfy_state)
         self.bridge.loras.connect(self._loras_found)
         self.bridge.triggers.connect(self._triggers_found)
@@ -1354,6 +1357,17 @@ class MainWindow(QMainWindow):
         self.storyboard.renameWanted.connect(self.rename_scene)
         self.storyboard.deleteWanted.connect(self.delete_scene)
         self.storyboard.moved.connect(self._scenes_moved)
+        self.b_film_gen = QPushButton("Generate film")
+        self.b_film_gen.setToolTip("Make every scene's missing clips, scene after scene (up to each scene's ending)")
+        self.b_film_gen.clicked.connect(self.generate_film)
+        self.b_film_play = QPushButton("▶ Play film")
+        self.b_film_play.setToolTip("Join all scenes in their order (hard cuts) and play the film")
+        self.b_film_play.clicked.connect(lambda: self.join_film("play"))
+        self.b_film_export = QPushButton("Export film…")
+        self.b_film_export.setToolTip("Save the whole film as one video")
+        self.b_film_export.clicked.connect(self.export_film)
+        for b in (self.b_film_gen, self.b_film_play, self.b_film_export):
+            fbh.addWidget(b)
         gv.addWidget(self.storyboard)
         self.film = None
         bar, bh = section_bar("Clips", gw)
@@ -1582,6 +1596,98 @@ class MainWindow(QMainWindow):
         name = self.film.root.name if self.film else self.project.name
         many = self.film is not None and len(self.film.scenes) > 1
         self.setWindowTitle(f"{name} › {scene.title} — Promptwood" if many and scene else f"{name} — Promptwood")
+
+    # ---- the whole film: play, export, generate
+    def join_film(self, purpose: str = "play", out: Path | None = None):
+        if self.film is None or self.running:
+            return
+        if not self._save_tree():
+            return
+        film, bridge = F.Film.load(self.film.root), self.bridge
+        target = Path(out) if out else self.film.root / "paths" / "film.mp4"
+        self.status.setText("Checking and joining the film …")
+
+        def work():
+            try:
+                bridge.film.emit(F.join_film(film, target), None, purpose)
+            except Exception as e:  # noqa: BLE001
+                bridge.film.emit(None, str(e), purpose)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _film_joined(self, path, error, purpose):
+        if error:
+            self.status.setText(f"The film cannot be joined yet: {error}.")
+            return
+        try:
+            secs = chain.probe(Path(path))["frames"] / 24
+        except Exception:  # noqa: BLE001
+            secs = 0.0
+        if purpose == "play":
+            self.tabs.setCurrentIndex(0)
+            self.preview.open(Path(path), f"Film · {len(self.film.scenes) if self.film else 1} scenes · "
+                                          f"{fmt_time(secs)}")
+            self.status.setText(f"Film joined: {fmt_time(secs)}.")
+        else:
+            self.status.setText(f"Exported the film: {Path(path).name} ({fmt_time(secs)}).")
+
+    def export_film(self):
+        if self.film is None or self.running:
+            return
+        start = str(self.film.root / f"{self.film.root.name}-film.mp4")
+        f, _ = QFileDialog.getSaveFileName(self, "Export the film", start, "Video (*.mp4)")
+        if f:
+            self.join_film("export", Path(f if f.lower().endswith(".mp4") else f + ".mp4"))
+
+    def generate_film(self):
+        """Make every scene's missing clips (up to each scene's ending), one scene after the other."""
+        if self.film is None or self.running:
+            return
+        if not self._save_tree():
+            return
+        todo, empty = [], []
+        for sc in self.film.scenes:
+            d = self.film.path(sc.id)
+            try:
+                t = T.load(d)
+            except (OSError, ValueError) as e:
+                self.status.setText(f"Scene “{sc.title}” cannot be read: {e}")
+                return
+            take = self.film.take_of(sc.id, t)
+            if take is None:
+                empty.append(sc.title)
+                continue
+            ch = T.Checker(d, t)
+            if any(ch.status(n.id) != "done" for n in t.path_to(take)):
+                todo.append(sc.id)
+        if empty:
+            self.status.setText(f"Scene “{empty[0]}” has no clip yet: write its first clip, or remove the scene.")
+            return
+        if not todo:
+            self.status.setText("Every scene is made: ▶ Play film.")
+            return
+        self._film_queue = todo
+        self._film_total = len(todo)
+        self._film_next()
+
+    def _film_next(self):
+        if not self._film_queue:
+            self._film_queue = None
+            self.status.setText("The film is made: ▶ Play film.")
+            self._show_storyboard()
+            return
+        sid = self._film_queue.pop(0)
+        done = self._film_total - len(self._film_queue)
+        self.switch_scene(sid)
+        if self.film is None or self.film.path(sid) != self.project:
+            self._film_queue = None                # could not open the scene (the status says why)
+            return
+        take = self.film.take_of(sid, self.tree)
+        self._start([take])
+        if self._job is None and self._waiting_comfy is None:
+            self._film_queue = None                # not started (the status says why)
+        else:
+            self.status.setText(f"Generating the film: scene {done} of {self._film_total} "
+                                f"(“{self.film.scene(sid).title}”) … " + self.status.text())
 
     # ---- the film's scenes (film.py)
     def _show_storyboard(self):
@@ -3118,7 +3224,8 @@ class MainWindow(QMainWindow):
                   self.comfy_url, self.ref_size, self.ref_hint, self.b_ref_add, self.b_ref_start,
                   self.b_ref_del, self.b_ref_crop, self.b_char_new, self.b_char_rename, self.b_char_del, self.char_desc,
                   self.char_lead, self.b_voice_file, self.b_voice_del, self.dialogue_lang, self.speed, self.style_prefix,
-                  self.style_suffix, self.lora_triggers, self.b_ai_edit, self.b_ai_create, self.storyboard):
+                  self.style_suffix, self.lora_triggers, self.b_ai_edit, self.b_ai_create, self.storyboard,
+                  self.b_film_gen, self.b_film_play, self.b_film_export):
             w.setEnabled(idle)
         self._turbo_widgets()                      # after the loop: turbo locks the steps fields again
         self._update_ref_start_button()            # after the loop too: they depend on the selection
@@ -3355,6 +3462,14 @@ class MainWindow(QMainWindow):
 
     def node_action(self, action: str, nid: str | None):
         if self.tree is None or self.running:
+            return
+        if action in ("take", "take_clear") and self.film is not None:
+            cur = self.film.scene_of(self.project)
+            if cur is not None:
+                self.film.set_take(cur.id, nid if action == "take" else None)
+                self._show_storyboard()
+                self.status.setText(f"The film plays “{cur.title}” up to clip #{nid[1:]}." if action == "take"
+                                    else f"The film plays “{cur.title}” up to its selected clip.")
             return
         node = self.tree.nodes.get(nid) if nid and nid != START else None
         if action in ("variant", "variants") and node is not None and node.is_video:
@@ -4041,6 +4156,12 @@ class MainWindow(QMainWindow):
             ref_last = m.addAction("Add last frame as face reference")
             ref_last.setEnabled(bool(node is not None and node.made))
             gen = m.addAction("Generate the path to here")
+            if self.film is not None:
+                cur = self.film.scene_of(self.project)
+                if cur is not None and cur.take == nid:
+                    acts[m.addAction("Clear the scene's ending (the film plays its selected path)")] = "take_clear"
+                else:
+                    acts[m.addAction("End the scene here (the film plays up to this clip)")] = "take"
             m.addSeparator()
             keep_here = m.addAction("Keep this branch, delete the other branches here")
             keep_here.setEnabled(bool(self.tree.siblings(nid)))
@@ -4574,7 +4695,7 @@ class MainWindow(QMainWindow):
             msg = f"Done: {made} clip{'s' if made != 1 else ''} made." if made else "Everything was already made."
             self.status.setText(msg)
             path = self.selected_path()
-            if len(self._targets) == 1 and path and path[-1].id == self._targets[0]:
+            if len(self._targets) == 1 and path and path[-1].id == self._targets[0] and self._film_queue is None:
                 self.join_selected("play", prefix=msg)
         elif self._stopping:
             self.progress.setValue(0)
@@ -4587,6 +4708,11 @@ class MainWindow(QMainWindow):
         if self.worker_alive and not self.keep_loaded.isChecked():
             self._quit_worker()
         self._save_timer.start()                   # what was chosen during the run (selection …) is saved now
+        if self._film_queue is not None:
+            if ok and not refine:
+                QTimer.singleShot(0, self._film_next)
+            else:
+                self._film_queue = None            # stopped or failed: the film stops there
         self._update_buttons()
         self._update_model_label()
 

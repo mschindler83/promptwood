@@ -273,10 +273,11 @@ def cut_frames(video: Path, out: Path, first: int, count: int, fps: int = FPS) -
 
 
 def concat(videos: list[Path], out: Path, drop_first: bool = True, fps: int = FPS,
-           cuts: list[tuple[int, int]] | None = None) -> None:
+           cuts: list[tuple[int, int]] | None = None, size: tuple[int, int] | None = None) -> None:
     """Join clips into one video. With drop_first, clips 2..n lose their first frame (and its 1/24 s of sound),
     which repeats the last frame of the clip before. cuts instead gives (frames cut at the start, frames cut at
-    the end) per clip. Clips without sound get silence, so sound stays in sync."""
+    the end) per clip. Clips without sound get silence, so sound stays in sync. size: fit every clip into this
+    frame (aspect kept, black bars), for parts of different sizes (a film's scenes)."""
     if not videos:
         raise ValueError("nothing to join")
     infos = [probe(v) for v in videos]
@@ -293,7 +294,9 @@ def concat(videos: list[Path], out: Path, drop_first: bool = True, fps: int = FP
         if info["frames"] - skip - cut_end < 1:              # never cut a clip away completely
             skip, cut_end = 0, 0
         stop = info["frames"] - cut_end
-        filters.append(f"[{k}:v]trim=start_frame={skip}:end_frame={stop},setpts=PTS-STARTPTS,fps={fps}[v{k}]")
+        fit = (f",scale={size[0]}:{size[1]}:force_original_aspect_ratio=decrease:flags=lanczos,"
+               f"pad={size[0]}:{size[1]}:(ow-iw)/2:(oh-ih)/2,setsar=1") if size else ""
+        filters.append(f"[{k}:v]trim=start_frame={skip}:end_frame={stop},setpts=PTS-STARTPTS,fps={fps}{fit}[v{k}]")
         labels.append(f"[v{k}]")
         if any_audio:
             start, end = skip / fps, stop / fps
