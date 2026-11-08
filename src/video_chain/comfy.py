@@ -236,7 +236,7 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
                    turbo: tuple[str, float] | None = None, end_image: str | None = None,
                    guides: list[dict] = (), hyperflow: tuple[str, float] | None = None,
                    pika: tuple[str, float] | None = None, audio_refs: list[str] = (),
-                   audio_key=lambda i: f"ref_audios.ref_audio_{i}") -> dict:
+                   audio_key=lambda i: f"ref_audios.ref_audio_{i}", start_pin: int = 1) -> dict:
     """The API-format workflow for one clip (image = the uploaded start image, as LoadImage names it; None: a
     clip without a start frame).
 
@@ -246,7 +246,9 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
 
     With refs (uploaded reference images): the ref2va model; MiniMaxH3ReferenceToVideo gets the references
     (<Picture 1> ... in the prompt) and MiniMaxH3AddGuide anchors the start image at frame 0, so the clip starts
-    where the previous one ended and sees the same original face.
+    where the previous one ended and sees the same original face. start_pin > 1: the start image is anchored as a
+    still of that many frames (RepeatImageBatch): one frame alone does not hold the start in the reference model when
+    the prompt's story does not fit it, a short still does (as a motion guide does).
 
     With audio_refs (uploaded sound files, <Audio 1> ... in the prompt): the ref2va model too (also without
     reference images); MiniMaxH3ReferenceToVideo gets them with the audio VAE, the prompt says what each one is for
@@ -299,9 +301,12 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
         wf["refcond"] = {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": inputs}
         latent, positive = ["refcond", 1], ["refcond", 0]
         if use_start:
+            pin = max(1, min(int(start_pin), int(frames) - 1))
+            if pin > 1:
+                wf["start_still"] = {"class_type": "RepeatImageBatch", "inputs": {"image": ["start", 0], "amount": pin}}
             wf["cond"] = {"class_type": "MiniMaxH3AddGuide",
                           "inputs": {"positive": positive, "vae": ["vae", 0], "latent": latent,
-                                     "image": ["start", 0], "frame_idx": 0}}
+                                     "image": ["start_still" if pin > 1 else "start", 0], "frame_idx": 0}}
             positive = ["cond", 0]
         if use_end:
             wf["end_guide"] = {"class_type": "MiniMaxH3AddGuide",
@@ -638,7 +643,8 @@ class ComfyGenerator:
                             loras=loras, audio=bool(s.get("audio", True)), prefix=prefix, refs=refs,
                             ref_size=s.get("ref_size", "match"), ref_key=self.ref_key() if refs else None,
                             turbo=turbo, end_image=end_image, guides=guides, hyperflow=hyper, pika=pika,
-                            audio_refs=sounds, **({"audio_key": self.audio_key()} if sounds else {}))
+                            audio_refs=sounds, **({"audio_key": self.audio_key()} if sounds else {}),
+                            start_pin=int(s.get("start_pin") or 1) if refs else 1)
         ws = self._connect_ws()
         try:
             res = self._json("POST", "/prompt", {"prompt": wf, "client_id": self.client_id})

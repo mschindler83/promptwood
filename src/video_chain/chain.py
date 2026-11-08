@@ -345,6 +345,10 @@ def _load_previous(out_dir: Path) -> dict[int, dict]:
         return {}
 
 
+START_PIN = 5        # frames the start image is held for in a clip with faces (the reference model cuts away from
+                     # a start frame anchored on one frame only when the story does not fit it)
+
+
 def settings_dict(*, model: str, lora: str | None, strength: float, frames: int, steps: int, width: int,
                   height: int, audio: bool, backend: str = "comfyui", refs: list | None = None,
                   ref_size: str = "match", ref_hint: bool = True, extra_loras: list | None = None,
@@ -356,7 +360,7 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
     extra_loras: further LoRAs stacked after the first ([(path, strength)]), only present when there are any, so
     a single-LoRA setting is recorded exactly as before.
     refs: the face pictures this clip is made with ([{"file": path in the project, "sha1": ...}]), only present
-    when it uses any. cast: with @mentions, the characters the model prompt describes ([{"name", "desc"}]).
+    when it uses any; such a clip holds its start image for START_PIN frames (start_pin). cast: with @mentions, the characters the model prompt describes ([{"name", "desc"}]).
     style: the project's text before / after every prompt (only present when there is any)."""
     s = {"model": model, "lora": lora or None, "lora_sha1": file_signature(lora) if lora else None,
          "strength": float(strength) if lora else 1.0,
@@ -374,7 +378,7 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
         s["audio_refs"] = [{"file": a["file"], "sha1": a["sha1"]} for a in audio_refs]
     if refs:
         s.update({"refs": [{"file": r["file"], "sha1": r["sha1"]} for r in refs], "ref_size": ref_size,
-                  "ref_hint": bool(ref_hint)})
+                  "ref_hint": bool(ref_hint), "start_pin": START_PIN})
         if cast:
             s["cast"] = [{"name": c["name"], "desc": c.get("desc", "")} for c in cast]
     if guide:                                   # motion guide: frames of the neighbouring clips anchored

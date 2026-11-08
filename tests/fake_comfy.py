@@ -12,7 +12,7 @@ KNOWN = {"UNETLoader", "CLIPLoader", "VAELoader", "LoadImage", "MiniMaxH3ImageTo
          "KSamplerSelect", "BasicScheduler", "BasicGuider", "SamplerCustomAdvanced", "VAEDecode", "VAEDecodeAudio",
          "ImageFromBatch", "SaveImage", "CreateVideo", "SaveVideo", "LoraLoaderModelOnly",
          "MiniMaxH3ReferenceToVideo", "MiniMaxH3AddGuide", "MiniMaxH3TurboLoRA", "MiniMaxH3TurboSampler",
-         "LoadVideo", "GetVideoComponents", "LoadAudio",
+         "LoadVideo", "GetVideoComponents", "LoadAudio", "RepeatImageBatch",
          # Qwen Image Edit
          "FluxKontextImageScale", "ModelSamplingAuraFlow", "CFGNorm", "TextEncodeQwenImageEditPlus",
          "FluxKontextMultiReferenceLatentMethod", "VAEEncode", "KSampler", "ApplyHyperFlowH3",
@@ -148,7 +148,10 @@ class FakeComfy:
             cond = wf["refcond"]["inputs"]
             assert wf["unet"]["inputs"]["unet_name"].startswith("minimax_h3_ref2va")
             if "start" in wf:
-                assert wf["cond"]["class_type"] == "MiniMaxH3AddGuide" and wf["cond"]["inputs"]["image"] == ["start", 0]
+                assert wf["cond"]["class_type"] == "MiniMaxH3AddGuide"
+                still = wf.get("start_still")      # faces: the start image held as a short still
+                assert wf["cond"]["inputs"]["image"] == (["start_still", 0] if still else ["start", 0])
+                assert still is None or still["inputs"]["image"] == ["start", 0]
             for k, v in cond.items():
                 if k.startswith("ref_images."):
                     assert (self.root / "input" / wf[v[0]]["inputs"]["image"]).is_file(), "reference not uploaded"

@@ -330,6 +330,7 @@ def test_identity_references(project, tmp_path):
     gen = run(project, [c.id])
     s = gen.calls[0]["settings"]
     assert s["refs"][0]["file"] == rel and s["ref_paths"] == [str(project / rel)] and "cast" not in s
+    assert s["start_pin"] == chain.START_PIN == 5
     assert gen.calls[0]["prompt"] == "a"                                       # the generator adds its sentence
     t = T.load(project)
     assert "ref_paths" not in t.nodes[a.id].made["settings"]                    # the record keeps names + hashes

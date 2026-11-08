@@ -261,6 +261,11 @@ def test_reference_workflow():
     assert guide["class_type"] == "MiniMaxH3AddGuide" and guide["inputs"]["frame_idx"] == 0
     assert guide["inputs"]["image"] == ["start", 0] and guide["inputs"]["latent"] == ["refcond", 1]
     assert wf["guider"]["inputs"]["conditioning"] == ["cond", 0] and wf["sample"]["inputs"]["latent_image"] == ["refcond", 1]
+    wf = C.build_workflow(prompt="She exhales.", image="video-chain/s.png", seed=1, width=512, height=512,
+                          frames=39, steps=20, loras=[], audio=True, prefix="p", refs=["video-chain/r1.png"],
+                          start_pin=5)
+    assert wf["start_still"]["inputs"] == {"image": ["start", 0], "amount": 5}
+    assert wf["cond"]["inputs"]["image"] == ["start_still", 0] and wf["cond"]["inputs"]["frame_idx"] == 0
     assert C.with_ref_hint("She exhales.") == "She exhales. " + C.REF_HINT
     assert C.with_ref_hint("The woman from <Picture 1> exhales.") == "The woman from <Picture 1> exhales."
 
