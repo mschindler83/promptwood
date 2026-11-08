@@ -1923,3 +1923,19 @@ def test_generate_and_play_the_film(app, win, tmp_path, image, monkeypatch):
     win.join_film("play")
     wait(app, lambda: win.status.text().startswith("Film joined"), timeout=60)
     assert win.played and win.played[-1] == root / "paths" / "film.mp4"
+
+
+def test_scene_duplicate_notes_and_film_cast(app, win, tmp_path, image, monkeypatch):
+    new_project(win, tmp_path, image, ("a clip",))
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("Two", True))
+    win.add_scene()
+    win.storyboard.duplicateWanted.emit("s1")
+    assert win.storyboard.list.count() == 3 and "(copy)" in win.storyboard.list.item(1).text()
+    monkeypatch.setattr(QInputDialog, "getMultiLineText", lambda *a, **k: ("She opens the door.", True))
+    win.storyboard.notesWanted.emit("s1")
+    assert win.film.scene("s1").notes == "She opens the door."
+    assert win.storyboard.list.item(0).toolTip().startswith("She opens the door.")
+    win._dialogs_modeless = True
+    win.show_film_cast()
+    assert win._film_cast_dialog.windowTitle() == "Cast in the film"
+    win._film_cast_dialog.deleteLater()

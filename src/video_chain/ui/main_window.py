@@ -1358,6 +1358,8 @@ class MainWindow(QMainWindow):
         self.storyboard.deleteWanted.connect(self.delete_scene)
         self.storyboard.moved.connect(self._scenes_moved)
         self.storyboard.joinWanted.connect(self.set_scene_join)
+        self.storyboard.duplicateWanted.connect(self.duplicate_scene)
+        self.storyboard.notesWanted.connect(self.scene_notes)
         self.b_film_gen = QPushButton("Generate film")
         self.b_film_gen.setToolTip("Make every scene's missing clips, scene after scene (up to each scene's ending)")
         self.b_film_gen.clicked.connect(self.generate_film)
@@ -1367,7 +1369,10 @@ class MainWindow(QMainWindow):
         self.b_film_export = QPushButton("Export film…")
         self.b_film_export.setToolTip("Save the whole film as one video")
         self.b_film_export.clicked.connect(self.export_film)
-        for b in (self.b_film_gen, self.b_film_play, self.b_film_export):
+        self.b_film_cast = QPushButton("Cast…")
+        self.b_film_cast.setToolTip("Who appears in which scene (along the clips the film plays)")
+        self.b_film_cast.clicked.connect(self.show_film_cast)
+        for b in (self.b_film_cast, self.b_film_gen, self.b_film_play, self.b_film_export):
             fbh.addWidget(b)
         gv.addWidget(self.storyboard)
         self.film = None
@@ -1819,6 +1824,66 @@ class MainWindow(QMainWindow):
             return
         self._show_storyboard()
         self.status.setText(f"Scene “{sc.title}” deleted.")
+
+    def duplicate_scene(self, sid: str):
+        if self.film is None or self.running or self._joins or self._converts or self._copying:
+            return
+        if not self._save_tree():
+            return
+        try:
+            scene = self.film.duplicate(sid)
+        except (OSError, ValueError) as e:
+            self.status.setText(f"Could not duplicate the scene: {e}")
+            return
+        self._show_storyboard()
+        self.status.setText(f"“{scene.title}” added after the original: change it freely, the original stays.")
+
+    def scene_notes(self, sid: str):
+        if self.film is None:
+            return
+        text, ok = QInputDialog.getMultiLineText(self, "Scene notes", f"Notes for “{self.film.scene(sid).title}” "
+                                                 "(e.g. what happens, a line of script):", self.film.scene(sid).notes)
+        if not ok:
+            return
+        try:
+            self.film.set_notes(sid, text)
+        except OSError as e:
+            self.status.setText(f"Could not save the notes: {e}")
+            return
+        self._show_storyboard()
+
+    def show_film_cast(self):
+        """A table: the film's characters by scene (face ●, voice ♪), along the clips the film plays."""
+        if self.film is None:
+            return
+        self._save_tree()
+        from PySide6.QtWidgets import QTableWidget, QTableWidgetItem
+        names, rows = F.cast_by_scene(self.film)
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Cast in the film")
+        v = QVBoxLayout(dlg)
+        if not names:
+            v.addWidget(label("The film has no characters yet (Cast in the left panel).", level="secondary"))
+        table = QTableWidget(len(names), len(rows))
+        table.setHorizontalHeaderLabels([f"{k}  {title}" for k, (title, _m) in enumerate(rows, start=1)])
+        table.setVerticalHeaderLabels([f"@{n}" for n in names])
+        table.setEditTriggers(QTableWidget.NoEditTriggers)
+        sym = {"face": "●", "voice": "♪", "face+voice": "●♪"}
+        for c, (_title, marks) in enumerate(rows):
+            for r, n in enumerate(names):
+                item = QTableWidgetItem(sym.get(marks.get(n, ""), ""))
+                item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(r, c, item)
+        table.resizeColumnsToContents()
+        v.addWidget(table)
+        v.addWidget(label("● face   ♪ speaks with its voice", level="tertiary"))
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dlg.reject)
+        v.addWidget(buttons)
+        dlg.resize(min(900, 160 + 120 * len(rows)), min(600, 140 + 30 * len(names)))
+        self._film_cast_dialog = dlg               # (tests look at it)
+        if not getattr(self, "_dialogs_modeless", False):
+            dlg.exec()
 
     def set_scene_join(self, sid: str, join: str):
         """How a scene follows the one before: a cut, a crossfade, or continuing from its last frame."""
@@ -3286,7 +3351,7 @@ class MainWindow(QMainWindow):
                   self.b_ref_del, self.b_ref_crop, self.b_char_new, self.b_char_rename, self.b_char_del, self.char_desc,
                   self.char_lead, self.b_voice_file, self.b_voice_del, self.dialogue_lang, self.speed, self.style_prefix,
                   self.style_suffix, self.lora_triggers, self.b_ai_edit, self.b_ai_create, self.storyboard,
-                  self.b_film_gen, self.b_film_play, self.b_film_export):
+                  self.b_film_gen, self.b_film_play, self.b_film_export, self.b_film_cast):
             w.setEnabled(idle)
         busy = bool(self._copying or self._joins or self._converts)
         self.storyboard.setEnabled(idle and not busy)  # a scene switch would pull the files from under them

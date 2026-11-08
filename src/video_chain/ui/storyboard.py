@@ -38,6 +38,8 @@ class Storyboard(QWidget):
     """sceneChosen(id), addWanted(), renameWanted(id), deleteWanted(id), moved(ids in their new order)."""
     sceneChosen = Signal(str)
     joinWanted = Signal(str, str)                 # scene id, "cut" / "fade" / "continue"
+    duplicateWanted = Signal(str)
+    notesWanted = Signal(str)
     addWanted = Signal()
     renameWanted = Signal(str)
     deleteWanted = Signal(str)
@@ -96,8 +98,10 @@ class Storyboard(QWidget):
                 item = QListWidgetItem(QIcon(pm) if not pm.isNull() else QIcon(), card_text(k, title, s))
                 item.setData(Qt.UserRole, sid)
                 item.setData(Qt.UserRole + 1, s.get("join"))
-                item.setToolTip(f"Scene {k}: {title}. {s.get('clips', 0)} clips; its selected path is what the "
-                                "film plays. Click to work on it, drag to move it")
+                item.setToolTip((f"{s['notes']}\n\n" if s.get("notes") else "") +
+                                f"Scene {k}: {title}. {s.get('clips', 0)} clips; the film plays it up to "
+                                + (f"clip #{s['take'][1:]}" if s.get("fixed") else "its selected clip") +
+                                ". Click to work on it, drag to move it, right-click for more")
                 item.setFlags(item.flags() | Qt.ItemIsDragEnabled)
                 self.list.addItem(item)
                 if sid == current:
@@ -134,6 +138,8 @@ class Storyboard(QWidget):
         sid = item.data(Qt.UserRole)
         menu = QMenu(self)
         a_rename = menu.addAction("Rename…")
+        a_notes = menu.addAction("Notes…")
+        a_dup = menu.addAction("Duplicate (a copy with its clips)")
         joins = {}
         if self.list.row(item) > 0:
             sub = menu.addMenu("Join with the scene before")
@@ -149,6 +155,10 @@ class Storyboard(QWidget):
         chosen = menu.exec(self.list.mapToGlobal(pos))
         if chosen is a_rename:
             self.renameWanted.emit(sid)
+        elif chosen is a_notes:
+            self.notesWanted.emit(sid)
+        elif chosen is a_dup:
+            self.duplicateWanted.emit(sid)
         elif chosen is a_delete:
             self.deleteWanted.emit(sid)
         elif chosen in joins:

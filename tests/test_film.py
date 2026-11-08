@@ -184,3 +184,23 @@ def test_crossfade_and_continuing_scenes(project, tmp_path):
     info = chain.probe(out)
     fade = min(F.FADE_SECS, one / 24 / 2, two / 24 / 2)
     assert abs(info["frames"] - (one + two - fade * 24)) <= 1 and info["audio"]   # they overlap by the fade
+
+
+def test_duplicate_notes_and_cast_by_scene(project, tmp_path):
+    f = F.Film.load(project)
+    t = T.load(project)
+    T.add_character(project, t, "Anna", tmp_path / "start.jpg")
+    first = next(iter(t.nodes))
+    t.nodes[first].prompt = "@Anna smiles"
+    t.selected = first
+    T.save(project, t)
+    s2 = f.add_scene("Two")
+    copy = f.duplicate("s1")                                      # the film folder's own scene, copied
+    d = f.path(copy.id)
+    assert [s.id for s in f.scenes] == ["s1", copy.id, s2.id] and copy.title == "Scene 1 (copy)"
+    assert (d / T.REFS_DIR).is_symlink() and not (d / "scenes").exists() and not (d / F.FILM_FILE).exists()
+    assert [n.prompt for n in T.load(d).nodes.values()] == ["@Anna smiles"]
+    f.set_notes(s2.id, "  Anna walks home.  ")
+    assert F.Film.load(project).scene(s2.id).notes == "Anna walks home."
+    names, rows = F.cast_by_scene(F.Film.load(project))
+    assert names == ["Anna"] and rows[0] == ("Scene 1", {"Anna": "face"}) and rows[2] == ("Two", {})

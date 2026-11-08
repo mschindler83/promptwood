@@ -33,6 +33,7 @@ class Scene:
     take: str | None = None     # the clip the scene ends at in the film (None: its selected clip)
     join: str = "cut"           # how it follows the scene before (JOINS)
     from_sha: str | None = None  # "continue": the end frame its start image was taken from
+    notes: str = ""             # the user's notes (a line of script, what happens)
 
 
 def root_of(folder: Path) -> Path:
@@ -79,7 +80,8 @@ class Film:
                         else None
                     join = e.get("join") if e.get("join") in JOINS else "cut"
                     frm = e.get("from_sha") if isinstance(e.get("from_sha"), str) else None
-                    scenes.append(Scene(sid, str(e.get("title") or sid), sdir, take, join, frm))
+                    notes = str(e.get("notes") or "")
+                    scenes.append(Scene(sid, str(e.get("title") or sid), sdir, take, join, frm, notes))
                 current = d.get("current")
                 shared = d.get("shared") if isinstance(d.get("shared"), dict) else None
             except (OSError, ValueError, AttributeError, TypeError) as e:
@@ -175,6 +177,42 @@ class Film:
         """The clip a scene ends at in the film (None: its selected clip)."""
         self.scene(sid).take = nid
         self.save()
+
+    def set_notes(self, sid: str, notes: str) -> None:
+        self.scene(sid).notes = (notes or "").strip()
+        self.save()
+
+    def duplicate(self, sid: str) -> Scene:
+        """A copy of a scene with its clips (to try a variant), right after it."""
+        src = self.scene(sid)
+        nid = _next_id(self.scenes, self.root)
+        rel = f"{SCENES_DIR}/{nid}"
+        d = self.root / rel
+        skip = {T.REFS_DIR, SCENES_DIR, FILM_FILE, "paths"}
+        ignore = shutil.ignore_patterns("*.part", "*.part.*", "video-chain-*")
+
+        def ign(folder, names):
+            out = set(ignore(folder, names))
+            if Path(folder).resolve() == self.path(sid):
+                out |= {n for n in names if n in skip}
+            return out
+        try:
+            shutil.copytree(self.path(sid), d, ignore=ign)
+            refs = self.root / T.REFS_DIR
+            refs.mkdir(exist_ok=True)
+            os.symlink(os.path.relpath(refs, d), d / T.REFS_DIR, target_is_directory=True)
+            T.save(d, T.load(d))
+        except BaseException:
+            link = d / T.REFS_DIR
+            if link.is_symlink():
+                link.unlink()
+            shutil.rmtree(d, ignore_errors=True)
+            raise
+        scene = Scene(nid, f"{src.title} (copy)", rel, src.take, src.join, src.from_sha, src.notes)
+        k = next(i for i, s in enumerate(self.scenes) if s.id == sid)
+        self.scenes.insert(k + 1, scene)
+        self.save()
+        return scene
 
     def set_join(self, sid: str, join: str) -> None:
         if join not in JOINS:
@@ -317,6 +355,7 @@ def summary(film: Film, sid: str, tree: "T.Tree | None" = None, status_of: dict 
     out["take"] = take
     out["fixed"] = film.scene(sid).take == take and take is not None
     out["join"] = film.scene(sid).join if film.scenes[0].id != sid else None
+    out["notes"] = film.scene(sid).notes
     try:
         ch = None if status_of is not None else T.Checker(d, t)
         for n in path:
@@ -383,3 +422,33 @@ def join_film(film: Film, out: Path) -> Path:
     size = (first["width"] // 2 * 2, first["height"] // 2 * 2)     # even (the video codec needs it)
     chain.join_parts(parts, out, size, [s.join for s in film.scenes], fade=FADE_SECS)
     return out
+
+
+def cast_by_scene(film: Film) -> tuple[list[str], list[tuple[str, dict[str, str]]]]:
+    """Who appears in which scene (along the path the film plays): (character names, [(scene title,
+    {name: mark})]); mark: "face", "voice" or "face+voice"."""
+    names: list[str] = []
+    rows = []
+    for sc in film.scenes:
+        d = film.path(sc.id)
+        try:
+            t = T.load(d)
+        except (OSError, ValueError):
+            rows.append((sc.title, {}))
+            continue
+        for c in T.cast_of(t):
+            if c["name"] not in names:
+                names.append(c["name"])
+        take = film.take_of(sc.id, t)
+        marks: dict[str, set] = {}
+        for n in t.path_to(take) if take else []:
+            if n.is_video:
+                continue
+            use = T.clip_cast(t.options, n.prompt)
+            for c in use["characters"]:
+                if c["images"]:
+                    marks.setdefault(c["name"], set()).add("face")
+                if c.get("voice") and c["voice"]["file"] in (use.get("voices") or []):
+                    marks.setdefault(c["name"], set()).add("voice")
+        rows.append((sc.title, {k: "+".join(sorted(v)) for k, v in marks.items()}))
+    return names, rows
