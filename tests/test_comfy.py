@@ -741,6 +741,20 @@ def test_create_images_in_every_family(server, start, tmp_path):
     cr.create("moss", None, "her on a beach", out, 5, "standard", 1024, 1024, refs=[start])
     wf = server.created
     assert "edit_lora" in wf and wf["latent"]["inputs"]["width"] == 1024
+    # Chroma1-HD (image_chroma_text_to_image): 26 steps, beta, cfg 3.5, shift 1; Fast: the Flash build, heun, cfg 1
+    assert cr.files["chroma"]["models"] == ["Chroma1-HD.safetensors"]
+    meta = cr.create("chroma", None, "a lighthouse", out, 5, "best", 1024, 1024)
+    wf = server.created
+    s = wf["sample"]["inputs"]
+    assert (s["steps"], s["cfg"], s["sampler_name"], s["scheduler"]) == (26, 3.5, "euler", "beta")
+    assert wf["unet"]["inputs"]["unet_name"] == "Chroma1-HD.safetensors" and wf["shift"]["inputs"]["shift"] == 1.0
+    assert wf["clip0"]["inputs"]["type"] == "chroma" and wf["clip"]["class_type"] == "T5TokenizerOptions"
+    assert wf["neg"]["inputs"]["text"] == G.CHROMA_NEGATIVE and wf["vae"]["inputs"]["vae_name"].endswith("ae.safetensors")
+    meta = cr.create("chroma", None, "a lighthouse", out, 5, "fast", 1024, 1024, refs=[start], ref_strength=0.7)
+    wf = server.created
+    s = wf["sample"]["inputs"]
+    assert wf["unet"]["inputs"]["unet_name"] == "Chroma1-HD-Flash.safetensors" and meta["steps"] == 12
+    assert (s["cfg"], s["sampler_name"], s["denoise"]) == (1.0, "heun", 0.7) and wf["latent"]["class_type"] == "VAEEncode"
     server.qwen21 = server.moss = False
     cr = G.ComfyImageCreator(server.url)
     assert "missing" in cr.files["qwen21"] and "missing" in cr.files["moss"]

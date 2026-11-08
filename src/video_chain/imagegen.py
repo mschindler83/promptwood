@@ -10,6 +10,8 @@ follows ComfyUI's own template for that model (settings from the template; LoRAs
                                   (image_moss_image_edit) at the chosen size
   flux3       FLUX.3 Image Klein  image_flux3_klein_t2i / _distilled_t2i; references: ReferenceMultiLatent
   flux1       FLUX.1 dev          Text to Image (Flux.1 Dev) (your FLUX.1 LoRAs); references: image to image
+  chroma      Chroma1-HD          image_chroma_text_to_image (26 steps, beta, cfg 3.5); Fast: Chroma1-HD-Flash
+                                  (community settings: heun, beta, 12 steps, cfg 1); references: image to image
   sdxl        Illustrious (SDXL)  image_sdxl_simple with Illustrious settings; references: image to image
 
 Which model files a family uses is found in ComfyUI's lists (pick_files); a family whose files are missing is
@@ -28,6 +30,10 @@ QWEN_NEGATIVE = ("低分辨率，低画质，肢体畸形，手指畸形，画�
 SDXL_NEGATIVE = ("lowres, worst quality, low quality, bad anatomy, bad hands, extra digits, fewer digits, jpeg artifacts, "
                  "blurry, watermark, signature, text")
 SDXL_QUALITY = "masterpiece, best quality, amazing quality, absurdres"
+CHROMA_NEGATIVE = ("This low quality greyscale unfinished sketch is inaccurate and flawed. The image is very blurred and "
+                   "lacks detail with excessive chromatic aberrations and artifacts. The image is overly saturated "
+                   "with excessive bloom. It has a toony aesthetic with bold outlines and flat colors.")
+CHROMA_FLASH_STEPS = 12
 
 FAMILIES = {
     "krea2": {"label": "Krea-2 Turbo", "pixels": 1024 * 1024, "multiple": 16, "negative": False,
@@ -52,6 +58,9 @@ FAMILIES = {
     "flux1": {"label": "FLUX.1 dev", "pixels": 1024 * 1024, "multiple": 16, "negative": False,
               "qualities": {"standard": "20 steps"}, "refs": 1,
               "ref_text": "Image to image: the new image starts from the picture (strength below)"},
+    "chroma": {"label": "Chroma1-HD", "pixels": 1024 * 1024, "multiple": 16, "negative": True,
+               "qualities": {"best": "Best (HD, 26 steps)", "fast": "Fast (Flash, 12 steps)"}, "refs": 1,
+               "ref_text": "Image to image: the new image starts from the picture (strength below)"},
     "sdxl": {"label": "Illustrious (SDXL)", "pixels": 1024 * 1024, "multiple": 64, "negative": True,
              "qualities": {"fast": "Fast (Euler a, 20 steps)", "best": "Best (DPM++ 2M Karras, 30 steps)"},
              "refs": 1, "ref_text": "Image to image: the new image starts from the picture (strength below)"},
@@ -123,6 +132,13 @@ def pick_files(unets: list[str], ckpts: list[str], clips: list[str], vaes: list[
     ae = next((v for v in sorted(vaes, key=len) if Path(v).name == "ae.safetensors"), None)
     out["flux1"] = ({"models": f1, "t5": t5, "clip_l": cl, "vae": ae} if f1 and t5 and cl and ae else
                     {"missing": "FLUX.1 dev with t5xxl, clip_l and ae.safetensors"})
+    # Chroma1-HD (and its Flash build for Fast); T5-XXL and FLUX.1's VAE
+    ch = [u for u in unets if "chroma" in _low(u) and "radiance" not in _low(u)]
+    flash = sorted([u for u in ch if "flash" in _low(u)], key=lambda u: ("fp8" not in _low(u), u))
+    hd = sorted([u for u in ch if "flash" not in _low(u)], key=lambda u: ("hd" not in _low(u), "fp8" not in _low(u), u))
+    out["chroma"] = ({"models": hd or flash, "hd": hd[0] if hd else None, "flash": flash[0] if flash else None,
+                      "t5": t5, "vae": ae} if ch and t5 and ae else
+                     {"missing": "Chroma1-HD (Chroma1-HD*.safetensors) with t5xxl and ae.safetensors"})
     # Illustrious / SDXL checkpoints
     sd = [c for c in ckpts if any(k in _low(c) for k in ("illustr", "noob", "sdxl", "pony"))]
     out["sdxl"] = {"models": sorted(sd)} if sd else {"missing": "an Illustrious (SDXL) checkpoint"}
@@ -282,6 +298,34 @@ def build_create_workflow(*, family: str, files: dict, model: str, prompt: str, 
                         "inputs": {"model": m, "seed": seed, "steps": 20, "cfg": 1.0, "sampler_name": "euler",
                                    "scheduler": "simple", "positive": ["pos", 0], "negative": ["neg", 0],
                                    "latent_image": ["latent", 0], "denoise": denoise}}
+    elif family == "chroma":                       # ComfyUI's image_chroma_text_to_image
+        flash = quality == "fast" and bool(files.get("flash")) and model in (files.get("hd"), None, files.get("flash"))
+        unet = files["flash"] if flash else (model or files.get("hd") or files["flash"])
+        flash = flash or unet == files.get("flash")
+        wf["unet"] = {"class_type": "UNETLoader", "inputs": {"unet_name": unet, "weight_dtype": "default"}}
+        wf["clip0"] = {"class_type": "CLIPLoader", "inputs": {"clip_name": files["t5"], "type": "chroma",
+                                                              "device": "default"}}
+        wf["clip"] = {"class_type": "T5TokenizerOptions", "inputs": {"clip": ["clip0", 0], "min_padding": 0,
+                                                                     "min_length": 0}}
+        wf["vae"] = {"class_type": "VAELoader", "inputs": {"vae_name": files["vae"]}}
+        m = _lora_chain(wf, ["unet", 0], loras)
+        wf["shift"] = {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": m, "shift": 1.0}}
+        wf["pos"] = {"class_type": "CLIPTextEncode", "inputs": {"clip": ["clip", 0], "text": prompt}}
+        wf["neg"] = {"class_type": "CLIPTextEncode", "inputs": {"clip": ["clip", 0], "text": negative or CHROMA_NEGATIVE}}
+        denoise = 1.0
+        if refs:
+            wf["ref0"] = {"class_type": "LoadImage", "inputs": {"image": refs[0]}}
+            wf["refscale"] = {"class_type": "ImageScale", "inputs": {"image": ["ref0", 0], "upscale_method": "lanczos",
+                                                                     "width": w, "height": h, "crop": "center"}}
+            wf["latent"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["refscale", 0], "vae": ["vae", 0]}}
+            denoise = float(ref_strength)
+        else:
+            wf["latent"] = {"class_type": "EmptySD3LatentImage", "inputs": {"width": w, "height": h, "batch_size": 1}}
+        steps, cfg, sampler = (CHROMA_FLASH_STEPS, 1.0, "heun") if flash else (26, 3.5, "euler")
+        wf["sample"] = {"class_type": "KSampler",
+                        "inputs": {"model": ["shift", 0], "seed": seed, "steps": steps, "cfg": cfg,
+                                   "sampler_name": sampler, "scheduler": "beta", "positive": ["pos", 0],
+                                   "negative": ["neg", 0], "latent_image": ["latent", 0], "denoise": denoise}}
     elif family == "sdxl":
         wf["ckpt"] = {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": model}}
         m, c = ["ckpt", 0], ["ckpt", 1]

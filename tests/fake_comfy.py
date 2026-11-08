@@ -26,8 +26,9 @@ KNOWN = {"UNETLoader", "CLIPLoader", "VAELoader", "LoadImage", "MiniMaxH3ImageTo
          # Qwen-Image 2.1
          "TextEncodeQwenImage21", "QwenImage21Cache",
          # MOSS-Image
-         "TextEncodeMOSSImageEdit", "SkipLayerGuidanceDiTSimple", "ImageScaleToTotalPixels", "GetImageSize"}
-IMAGE_UNETS = ["krea2/krea2_turbo_fp8_scaled.safetensors", "qwen-image/qwen_image_2512_fp8_e4m3fn.safetensors",
+         "T5TokenizerOptions", "TextEncodeMOSSImageEdit", "SkipLayerGuidanceDiTSimple", "ImageScaleToTotalPixels", "GetImageSize"}
+IMAGE_UNETS = ["Chroma1-HD.safetensors", "Chroma1-HD-Flash.safetensors",
+               "krea2/krea2_turbo_fp8_scaled.safetensors", "qwen-image/qwen_image_2512_fp8_e4m3fn.safetensors",
                "FLUX1/flux1-dev-fp8.safetensors"]
 IMAGE_CKPTS = ["illustrij_v20.safetensors"]
 IMAGE_CLIPS = ["qwen3vl_4b_fp8_scaled.safetensors", "t5xxl_fp8_e4m3fn_scaled.safetensors", "clip_l.safetensors"]

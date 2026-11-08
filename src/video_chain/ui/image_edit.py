@@ -31,6 +31,7 @@ from .widgets import FrameTile, guard_wheel, icon_button, label
 
 EDITS_DIR = "edits"
 MOSS_EDIT_QUALITIES = {"standard": "Standard (30 steps)"}
+LORA_FAMILY = {"chroma": "flux1"}         # Chroma LoRAs have FLUX.1's layer names (and FLUX.1 LoRAs often work)
 QUALITY_TEXT = {"fast": "Fast (Lightning, 4 steps)", "standard": "Standard (20 steps)", "best": "Best (40 steps, slow)"}
 PROMPT_HINT = ("Describe the change, e.g. “she smiles and looks into the camera”, “night, lit by a street lamp”, "
                "“replace the red jacket with a black leather jacket”. Say what must stay: “keep her face, pose and "
@@ -634,7 +635,7 @@ class ImageEditDialog(QDialog):
             slot.setVisible(refs and k < n)
         self.ref_text.setVisible(refs)
         self.ref_text.setText(f["ref_text"] if f else "")
-        img2img = refs and fam in ("flux1", "sdxl")
+        img2img = refs and fam in ("flux1", "sdxl", "chroma")
         self.ref_strength.setVisible(img2img)
         self.ref_strength_label.setVisible(img2img)
         self.negative.setVisible(create and bool(f and f["negative"]))
@@ -643,9 +644,13 @@ class ImageEditDialog(QDialog):
             w, h = size_for(fam, self.aspect.currentData() or 1.0)
             self.size_text.setText(f"{w}×{h}")
         if create:
-            found = len(self.family_loras.get(fam, [])) if f else 0
-            self.lora_text.setText(f"LoRAs (optional): {f['label']} LoRAs from ComfyUI's LoRA folders (found by "
-                                   f"their contents; {found} found), applied in this order." if f else "")
+            found = len(self.family_loras.get(LORA_FAMILY.get(fam, fam), [])) if f else 0
+            self.lora_text.setText(
+                f"LoRAs (optional): Chroma and FLUX.1 LoRAs (the same layer names, so they are listed together; "
+                f"FLUX.1 LoRAs often work on Chroma, not always; {found} found), applied in this order."
+                if fam == "chroma" else
+                f"LoRAs (optional): {f['label']} LoRAs from ComfyUI's LoRA folders (found by their contents; "
+                f"{found} found), applied in this order." if f else "")
         else:
             self.lora_text.setText(
                 f"LoRAs (optional): Qwen-Image 2.1 LoRAs from ComfyUI's LoRA folders (found by their contents; "
@@ -1102,7 +1107,7 @@ class ImageEditDialog(QDialog):
         earlier (from other folders)."""
         if self.mode() == "create":
             fam = self.family.currentData()
-            out = list(self.family_loras.get("qwen" if fam == "qwen" else fam, []))
+            out = list(self.family_loras.get(LORA_FAMILY.get(fam, fam), []))
         elif self.edit_model.currentData() in ("qwen21", "moss"):
             out = list(self.family_loras.get(self.edit_model.currentData(), []))   # their own (found by contents)
         else:
@@ -1136,7 +1141,8 @@ class ImageEditDialog(QDialog):
     def _lora_picked(self, path: str):
         """A file from another folder chosen in the picker: offered again next time (in this mode / family); a
         warning if ComfyUI cannot load it."""
-        listed = {p for p, _ in (self.family_loras.get(self.family.currentData(), []) if self.mode() == "create"
+        fam = self.family.currentData()
+        listed = {p for p, _ in (self.family_loras.get(LORA_FAMILY.get(fam, fam), []) if self.mode() == "create"
                                  else self.known_loras)}
         if path not in listed and self.qs is not None:
             self.qs.setValue(self._recent_key(), json.dumps([path] + [r for r in self._recent_files() if r != path][:11]))
