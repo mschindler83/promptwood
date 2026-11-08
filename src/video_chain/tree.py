@@ -76,7 +76,9 @@ DEFAULT_OPTIONS = {"model": "Comfy-Org/MiniMax-H3", "frames": 73, "steps": 28,
                    # a soundtrack to copy, a beat); only the clips that name one are made with them
                    "audio_refs": [],
                    # style text put before / after every prompt (e.g. look, camera, a LoRA's trigger word)
-                   "style": {"prefix": "", "suffix": ""}}
+                   "style": {"prefix": "", "suffix": ""},
+                   # the trigger words of a clip's LoRAs (triggers.py: from the files and CivitAI) before its prompt
+                   "lora_triggers": True}
 REFS_DIR = "refs"
 ENDS_DIR = "ends"
 MAX_CAST_PICTURES = 9              # MiniMax H3 ref2va takes up to 9 reference images
@@ -1425,6 +1427,21 @@ def node_loras(node: Node) -> list[tuple[str, float]]:
     return _extras((node.overrides or {}).get("loras"))
 
 
+def lora_trigger_words(paths: list[str]) -> list[str]:
+    """The trigger words of a LoRA stack (the app's trigger database; nothing if it cannot be read)."""
+    try:
+        from . import triggers
+        return triggers.stack_words(paths)
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def model_prompt(options: dict, node: Node, settings: dict | None) -> str:
+    """What the model gets for a generated clip: the cast's prompt (clip_cast) with its LoRAs' trigger words."""
+    from .triggers import with_triggers
+    return with_triggers(clip_cast(options, node.prompt)["prompt"], list((settings or {}).get("lora_triggers") or []))
+
+
 def node_settings(base: dict, options: dict, node: Node, audio_pool: list[dict] | None = None,
                   picture_sha: Callable[[str], str | None] | None = None) -> dict:
     """The settings one node is made with: the project's, with the node's own LoRA stack and overrides.
@@ -1457,7 +1474,9 @@ def node_settings(base: dict, options: dict, node: Node, audio_pool: list[dict] 
                                ref_size=ident.get("size", "match"), ref_hint=ident.get("hint", True),
                                guide=int(ov.get("guide") or 0),
                                style=(base.get("prompt_prefix", ""), base.get("prompt_suffix", "")),
-                               audio_refs=sounds or None, voice_language=use.get("language"))
+                               audio_refs=sounds or None, voice_language=use.get("language"),
+                               lora_triggers=(lora_trigger_words([p for p, _s in stack])
+                                              if stack and options.get("lora_triggers", True) else None))
 
 
 def loras_needed(tree: Tree, checker: "Checker", nids: list[str]) -> list[str]:
@@ -1784,7 +1803,7 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
                         call["guides"] = guides
                     if end_image is not None:
                         call["end_image"] = str(end_image)
-                    generator.generate(clip_cast(tree.options, node.prompt)["prompt"], start, new_video, new_frame,
+                    generator.generate(model_prompt(tree.options, node, settings), start, new_video, new_frame,
                                        node.seed, settings=call)
                 if not new_video.exists() or not new_frame.exists():
                     raise RuntimeError(f"the generator did not write the clip of {nid}")
@@ -1935,6 +1954,8 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
                 w, h = refine_size(int(s["width"]), int(s["height"]), size)
                 prompt = " ".join(x for x in (s.get("prompt_prefix", ""), node.made.get("prompt", node.prompt),
                                               s.get("prompt_suffix", "")) if x)
+                from .triggers import with_triggers
+                prompt = with_triggers(prompt, list(s.get("lora_triggers") or []))   # as the clip was made
                 loras = ([(s["lora"], s.get("strength", 1.0))] if s.get("lora") else []) + \
                     [(e["lora"], e.get("strength", 1.0)) for e in s.get("extra_loras") or []]
                 log(f"[{k}/{len(order)}] {node.id}: refining at {w}x{h}")

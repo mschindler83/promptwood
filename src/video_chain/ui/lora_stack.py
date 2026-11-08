@@ -235,13 +235,73 @@ class LoraStack(QWidget):
         button.setProperty("path", path)
         missing = "" if Path(path).is_file() else " (missing)"
         button.setText(Path(path).stem + missing)
-        button.setToolTip(f"{path}{missing}\nClick to choose another LoRA")
+        button.setToolTip(f"{path}{missing}\nClick to choose another LoRA; right-click for its trigger words")
+        trig = getattr(button.parentWidget(), "trigger_label", None)
+        if trig is not None:
+            self._show_trigger(trig, path)
+
+    @staticmethod
+    def _show_trigger(lab, path: str):
+        """The LoRA's trigger words under its row (triggers.py), with where they come from."""
+        try:
+            from .. import triggers
+            info = triggers.db().info(path) if Path(path).is_file() else None
+        except Exception:  # noqa: BLE001
+            info = None
+        if info is None:
+            text, tip = "trigger words: not looked up yet", "Looked up in the background (file, then CivitAI)"
+        elif not info["words"]:
+            text = "trigger words: none" + (" (CivitAI lists none)" if info["source"] == "civitai" else
+                                            " (set by you)" if info["source"] == "user" else "")
+            tip = info.get("url") or "Neither the file nor CivitAI names any"
+        else:
+            src = {"user": "set by you", "file": "from the file", "civitai": "from CivitAI",
+                   "tags": "guessed from its training tags"}[info["source"]]
+            text = f"trigger words: {', '.join(info['words'])}  ({src})"
+            tip = (f"{info.get('model') or ''}  {info.get('url') or ''}".strip() or src)
+        lab.setText(text)
+        lab.setToolTip(tip + "\nRight-click the LoRA to change them")
+
+    def refresh_triggers(self):
+        for w, b, _s in self.rows:
+            if getattr(w, "trigger_label", None) is not None:
+                self._show_trigger(w.trigger_label, b.property("path"))
+
+    def _trigger_menu(self, button: QPushButton, pos):
+        from PySide6.QtWidgets import QInputDialog, QMenu
+        from .. import triggers
+        path = button.property("path")
+        if not path or not Path(path).is_file():
+            return
+        menu = QMenu(self)
+        a_edit = menu.addAction("Change the trigger words…")
+        a_reset = menu.addAction("Use the found trigger words again")
+        chosen = menu.exec(button.mapToGlobal(pos))
+        if chosen is a_edit:
+            words, ok = QInputDialog.getText(self, "Trigger words", f"Trigger words of {Path(path).stem} "
+                                             "(comma-separated; empty: none):", text=", ".join(triggers.db().words(path)))
+            if not ok:
+                return
+            triggers.db().set_user(path, [w for w in words.split(",") if w.strip()])
+        elif chosen is a_reset:
+            triggers.db().set_user(path, None)
+        else:
+            return
+        self.refresh_triggers()
+        self.changed.emit()
 
     def _add_row(self, path: str, strength: float):
         w = QWidget(self)
-        h = QHBoxLayout(w)
+        outer = QVBoxLayout(w)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        h = QHBoxLayout()
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(4)
+        outer.addLayout(h)
+        w.trigger_label = label("", level="tertiary")
+        w.trigger_label.setWordWrap(True)
+        outer.addWidget(w.trigger_label)
         button = QPushButton(w)
         button.setAutoDefault(False)                   # Enter in a text field must not open the picker
         button.setStyleSheet("text-align: left; padding-left: 6px;")
@@ -250,6 +310,8 @@ class LoraStack(QWidget):
         button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)        # long names shorten, the row stays
         self._set_button(button, path)
         button.clicked.connect(lambda: self._choose_again(button))
+        button.setContextMenuPolicy(Qt.CustomContextMenu)
+        button.customContextMenuRequested.connect(lambda pos: self._trigger_menu(button, pos))
         spin = QDoubleSpinBox(w)
         spin.setRange(LORA_MIN, LORA_MAX)              # some LoRAs need negative strengths (e.g. sliders)
         spin.setSingleStep(0.05)

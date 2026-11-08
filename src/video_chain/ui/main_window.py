@@ -252,6 +252,7 @@ class _Bridge(QObject):
     joined = Signal(object, object, str, str, str)  # path or None, error or None, purpose, status prefix, project
     comfy = Signal(bool)                       # ComfyUI reachable
     loras = Signal(list, bool)                 # H3 LoRAs found in ComfyUI's LoRA folders, report them
+    triggers = Signal(dict)                    # the trigger word scan finished (its counts)
     copied = Signal(str, str)                  # Save as: target folder, error ('' = done)
     converted = Signal(str, object, str, str, str)  # video node id, record or None, error, token, project
 
@@ -868,6 +869,8 @@ class MainWindow(QMainWindow):
         self.bridge.joined.connect(self._joined)
         self.bridge.comfy.connect(self._comfy_state)
         self.bridge.loras.connect(self._loras_found)
+        self.bridge.triggers.connect(self._triggers_found)
+        self._trigger_scan = None
         self.bridge.copied.connect(self._copied)
         self.bridge.converted.connect(self._converted)
         self.h3_loras: list[tuple[str, str]] = []
@@ -1211,6 +1214,13 @@ class MainWindow(QMainWindow):
         c.addRow("Style after", self.style_suffix)
         for w in (self.style_prefix, self.style_suffix):
             w.editingFinished.connect(self._style_changed)
+        self.lora_triggers = QCheckBox("Put the LoRAs' trigger words before the prompt")
+        self.lora_triggers.setChecked(True)
+        self.lora_triggers.setToolTip("A clip with LoRAs gets their trigger words in front of its prompt (from the "
+                                      "LoRA files and CivitAI; shown under each LoRA, right-click to change them). "
+                                      "Clips record them, so new words make those clips again")
+        self.lora_triggers.toggled.connect(self._lora_triggers_changed)
+        c.addRow("", self.lora_triggers)
         lv.addWidget(cw)
 
         bar, _ = section_bar("ComfyUI", left)
@@ -1252,6 +1262,14 @@ class MainWindow(QMainWindow):
         self.comfy_autostart.setToolTip("If ComfyUI is not running when you generate, start it with the command "
                                         "above and begin as soon as it answers")
         a.addRow("", self.comfy_autostart)
+        self.triggers_online = QCheckBox("Look up LoRA trigger words on CivitAI")
+        self.triggers_online.setChecked(True)
+        self.triggers_online.setToolTip("In the background, after each LoRA scan: LoRAs whose files do not name their "
+                                        "trigger words are looked up on CivitAI by their file hash (this tells "
+                                        "CivitAI which LoRA files you have, nothing else). Found words are kept in "
+                                        "~/.local/share/video-chain/lora_triggers.json")
+        self.triggers_online.toggled.connect(lambda on: on and self._scan_triggers())
+        a.addRow("", self.triggers_online)
         krow = QHBoxLayout()
         self.keep_loaded = QCheckBox("Keep the model loaded for")
         self.keep_loaded.setChecked(True)
@@ -1427,6 +1445,7 @@ class MainWindow(QMainWindow):
         self.comfy_dir.setText(q.value("comfyDir", DEFAULT_COMFY_DIR, type=str))
         self.comfy_cleanup.setChecked(q.value("comfyCleanup", True, type=bool))
         self.comfy_autostart.setChecked(q.value("comfyAutoStart", True, type=bool))
+        self.triggers_online.setChecked(q.value("loraTriggersOnline", True, type=bool))
         self.idle_minutes.setValue(q.value("idleMinutes", 15, type=int))
         if g := q.value("geometry"):
             self.restoreGeometry(g)
@@ -1443,6 +1462,7 @@ class MainWindow(QMainWindow):
         q.setValue("comfyDir", self.comfy_dir.text().strip())
         q.setValue("comfyCleanup", self.comfy_cleanup.isChecked())
         q.setValue("comfyAutoStart", self.comfy_autostart.isChecked())
+        q.setValue("loraTriggersOnline", self.triggers_online.isChecked())
         q.setValue("idleMinutes", self.idle_minutes.value())
         q.setValue("project", str(self.project) if self.project else "")
         if self.tree is not None:
@@ -1716,6 +1736,7 @@ class MainWindow(QMainWindow):
             style = o.get("style") or {}
             self.style_prefix.setText(style.get("prefix") or "")
             self.style_suffix.setText(style.get("suffix") or "")
+            self.lora_triggers.setChecked(bool(o.get("lora_triggers", True)))
         finally:
             self._loading = False
 
@@ -1753,6 +1774,57 @@ class MainWindow(QMainWindow):
         self._update_cards()
         if not self._report_remade(before, "Style text changed"):
             self.status.setText("Style text changed.")
+
+    def _lora_triggers_changed(self, on: bool):
+        if self._loading or self.tree is None or self.running:
+            return
+        before = self._done_clips()
+        self.tree.options["lora_triggers"] = bool(on)
+        self._changed()
+        self._update_cards()
+        if not self._report_remade(before, "Trigger words " + ("on" if on else "off")):
+            self.status.setText("LoRA trigger words are " + ("put before the prompts." if on else "not used."))
+
+    # ---- LoRA trigger words (triggers.py), looked up in the background
+    def _trigger_paths(self) -> list[str]:
+        paths = [p for p, _n in self.h3_loras + self.qwen_loras]
+        for items in self.image_loras.values():
+            paths += [p for p, _n in items]
+        return list(dict.fromkeys(paths))
+
+    def _scan_triggers(self):
+        """Read the trigger words of LoRAs not known yet (their files; CivitAI if allowed), in the background."""
+        if getattr(self, "_trigger_scan", None) is not None or not self._trigger_paths():
+            return
+        paths, online, bridge = self._trigger_paths(), self.triggers_online.isChecked(), self.bridge
+        self._trigger_scan = threading.Event()
+        stop = self._trigger_scan
+
+        def work():
+            counts = {}
+            try:
+                from .. import triggers
+                counts = triggers.db().scan(paths, online=online, stop=stop.is_set)
+            except Exception:  # noqa: BLE001
+                counts = {}
+            try:
+                bridge.triggers.emit(counts)
+            except RuntimeError:
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def _triggers_found(self, counts: dict):
+        self._trigger_scan = None
+        for card in self.cards:
+            if isinstance(card, PromptCard):
+                card.loras.refresh_triggers()
+        if self.tree is not None:
+            self.refresh()                         # clips record their LoRAs' words
+        if counts.get("looked"):
+            self.status.setText(f"LoRA trigger words: looked up {counts['looked']} LoRA"
+                                f"{'s' if counts['looked'] != 1 else ''} on CivitAI, {counts.get('found', 0)} with "
+                                "trigger words" + (f", {counts['failed']} could not be asked (offline?)"
+                                                   if counts.get("failed") else "") + ".")
 
     # ---- the cast (characters with face pictures, @Name in prompts)
     def _identity_changed(self, *_):
@@ -2710,8 +2782,10 @@ class MainWindow(QMainWindow):
                 card.words.setText(card.words.text().split(" + ")[0] +
                                    (" + style" if T.full_prompt(self.tree.options, "x") != "x" else ""))
                 use = T.clip_cast(self.tree.options, n.prompt)
-                card.edit.setToolTip("Sent to the model: " + use["prompt"] if use["prompt"] != n.prompt.strip()
-                                     else "")
+                words = T.lora_trigger_words([p for p, _s in T.node_loras(n)]) \
+                    if self.tree.options.get("lora_triggers", True) and T.node_loras(n) else []
+                sent = T.model_prompt(self.tree.options, n, {"lora_triggers": words})
+                card.edit.setToolTip("Sent to the model: " + sent if sent != n.prompt.strip() else "")
                 card.set_faces(self._faces_text(use))
                 card.set_summary(" · ".join(self._own_parts(n)))
                 end = self.project / n.end_image if n.end_image else None
@@ -2770,7 +2844,8 @@ class MainWindow(QMainWindow):
                   self.audio, self.keep_rep, self.b_project,
                   self.comfy_url, self.ref_size, self.ref_hint, self.b_ref_add, self.b_ref_start,
                   self.b_ref_del, self.b_ref_crop, self.b_char_new, self.b_char_rename, self.b_char_del, self.char_desc,
-                  self.char_lead, self.b_voice_file, self.b_voice_del, self.dialogue_lang, self.speed, self.style_prefix, self.style_suffix, self.b_ai_edit, self.b_ai_create):
+                  self.char_lead, self.b_voice_file, self.b_voice_del, self.dialogue_lang, self.speed, self.style_prefix,
+                  self.style_suffix, self.lora_triggers, self.b_ai_edit, self.b_ai_create):
             w.setEnabled(idle)
         self._turbo_widgets()                      # after the loop: turbo locks the steps fields again
         self._update_ref_start_button()            # after the loop too: they depend on the selection
@@ -2892,6 +2967,7 @@ class MainWindow(QMainWindow):
         self.qwen_loras = [(p, n) for p, n, kind in found if kind == "qwen"]     # for the image edit window
         self.image_loras = {fam: [(p, n) for p, n, kind in found if kind == fam]
                             for fam in ("flux1", "sdxl", "krea2", "qwen21", "moss")}
+        self._scan_triggers()
         if report:
             self.status.setText(f"{len(self.h3_loras)} LoRA{'s' if len(self.h3_loras) != 1 else ''} and "
                                 f"{len(self.turbo_loras)} turbo LoRA{'s' if len(self.turbo_loras) != 1 else ''} in "
@@ -3257,7 +3333,8 @@ class MainWindow(QMainWindow):
                               known_loras=known, lora_dir=self._lora_dir(),
                               uses=lambda meta: uses_of(self.project, self.tree, meta),
                               refine=self.refine_text, connect_create=connect_create, family_loras=family_loras,
-                              start_aspect=aspect, mode=mode, check_lora=self.in_comfy_loras)
+                              start_aspect=aspect, mode=mode, check_lora=self.in_comfy_loras,
+                              use_triggers=bool(self.tree.options.get("lora_triggers", True)))
         self._edit_switch = switch
         if dialog:
             dlg.exec()
@@ -4367,6 +4444,8 @@ class MainWindow(QMainWindow):
             self.scan_loras()
 
     def closeEvent(self, e):
+        if getattr(self, "_trigger_scan", None) is not None:
+            self._trigger_scan.set()                  # the trigger word lookup stops at the next file
         if self.running:
             if QMessageBox.question(self, "Promptwood", "Clips are being generated. Stop and quit?") \
                     != QMessageBox.Yes:

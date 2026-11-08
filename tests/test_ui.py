@@ -35,6 +35,8 @@ def settings(tmp_path, name="s.ini"):
         q.setValue("thumbCacheDir", str(tmp_path / "thumb-cache"))
     if q.value("comfyAutoStart") is None:            # never start the real ComfyUI from a test
         q.setValue("comfyAutoStart", False)
+    if q.value("loraTriggersOnline") is None:        # never ask CivitAI from a test
+        q.setValue("loraTriggersOnline", False)
     return q
 
 
@@ -1785,6 +1787,50 @@ def test_qwen_image_21_in_the_image_window(app, tmp_path, image, monkeypatch):
         k = dlg.edit_model.findData("qwen21")
         assert not dlg.edit_model.model().item(k).isEnabled() and dlg.edit_model.currentData() == "2511"
         assert "not available" in dlg.edit_model.itemText(k)
+        dlg.done(0)
+        w.close()
+    finally:
+        server.close()
+
+
+def test_lora_trigger_words_in_the_image_window(app, tmp_path, image, monkeypatch):
+    import numpy as np
+    from safetensors.numpy import save_file
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from fake_comfy import FakeComfy
+
+    from video_chain import triggers as TR
+    from video_chain.ui.main_window import MainWindow
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    server = FakeComfy(tmp_path / "comfy")
+    try:
+        q = settings(tmp_path, "trig.ini")
+        q.setValue("comfyUrl", server.url)
+        w = MainWindow(q, command=FAKE)
+        new_project(w, tmp_path, image, ("a",))
+        lora = tmp_path / "loras" / "MiniMax H3" / "nose.safetensors"           # ComfyUI (fake) lists this name
+        lora.parent.mkdir(parents=True)
+        save_file({"a.lora_A.weight": np.zeros((2, 2), np.float16)}, str(lora),
+                  metadata={"modelspec.trigger_phrase": "glowx"})
+        dlg = w.edit_image(start=True, dialog=False)
+        dlg.add_lora_file(str(lora), 1.0)
+        row = dlg.loras.rows[0][0]
+        assert row.trigger_label.text() == "trigger words: not looked up yet"
+        TR.db().scan([str(lora)], online=False)
+        dlg.loras.refresh_triggers()
+        assert row.trigger_label.text() == "trigger words: glowx  (from the file)"
+        dlg.prompt.setPlainText("she smiles")
+        dlg.tries.setValue(1)
+        dlg.generate()
+        wait(app, lambda: not dlg._busy, timeout=60)
+        meta = dlg.selected()[1]
+        assert server.prompts[-1]["pos"]["inputs"]["prompt"] == "glowx, she smiles"
+        assert meta["prompt"] == "she smiles" and meta["trigger_words"] == ["glowx"]
+        assert "“she smiles” + glowx" in dlg.res_info.text()
+        dlg.done(0)
+        w.lora_triggers.setChecked(False)                                       # the project's choice
+        dlg = w.edit_image(start=True, dialog=False)
+        assert dlg._trigger_words() == []
         dlg.done(0)
         w.close()
     finally:

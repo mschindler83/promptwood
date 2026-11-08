@@ -357,7 +357,7 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
                   turbo: tuple[str, float] | None = None, guide: int = 0,
                   style: tuple[str, str] | None = None, hyperflow: float | None = None,
                   pika: float | None = None, audio_refs: list | None = None, cast: list | None = None,
-                  voice_language: str | None = None) -> dict:
+                  voice_language: str | None = None, lora_triggers: list | None = None) -> dict:
     """What a clip depends on besides prompt, seed and start image; a clip is reused only if this is unchanged.
     The LoRA counts by content (lora_sha1), so a LoRA retrained into the same file makes its clips change.
     extra_loras: further LoRAs stacked after the first ([(path, strength)]), only present when there are any, so
@@ -389,6 +389,8 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
     if voice_language:
         s["voice_language"] = voice_language
         s["start_pin"] = START_PIN
+    if lora_triggers:                           # the LoRAs' trigger words put before the prompt
+        s["lora_triggers"] = [str(w) for w in lora_triggers]
     if guide:                                   # motion guide: frames of the neighbouring clips anchored
         s["guide"] = int(guide)
     prefix, suffix = ((style[0] or "").strip(), (style[1] or "").strip()) if style else ("", "")

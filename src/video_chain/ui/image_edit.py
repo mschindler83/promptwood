@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDia
 
 from .image_picker import pick_image
 from ..comfy import EDIT_MODELS
+from ..triggers import stack_words, with_triggers
 from ..imagegen import FAMILIES, size_for
 from .lora_stack import LoraStack, lora_label
 from .widgets import FrameTile, guard_wheel, icon_button, label
@@ -162,7 +163,8 @@ class ImageEditDialog(QDialog):
                  end_target: str | None, connect, on_use, settings=None, places=None, start_comfy=None,
                  on_start=None, known_loras: list[tuple[str, str]] | None = None, lora_dir: str = "",
                  uses=None, refine=None, connect_create=None, family_loras=None,
-                 start_aspect: float | None = None, mode: str = "edit", check_lora=None):
+                 start_aspect: float | None = None, mode: str = "edit", check_lora=None,
+                 use_triggers: bool = True):
         super().__init__(parent)
         self.setWindowTitle("Edit an image with AI")
         self.resize(1240, 820)
@@ -174,6 +176,7 @@ class ImageEditDialog(QDialog):
         self.connect_create = connect_create             # connect_create(progress) -> a ComfyImageCreator
         self.start_aspect = start_aspect
         self.check_lora = check_lora                     # check_lora(path) -> False if ComfyUI cannot load it
+        self.use_triggers = use_triggers                 # the LoRAs' trigger words before the prompt (project)
         self.families: dict = {}                         # what ComfyUI has of each family (from the creator)
         self._families_error = ""
         self._retry_families = 0                         # retries left while ComfyUI starts
@@ -741,9 +744,11 @@ class ImageEditDialog(QDialog):
                    if meta.get("edit_model") == "qwen21" else
                    f"{EDIT_MODELS['moss']} {MOSS_EDIT_QUALITIES['standard']}" if meta.get("edit_model") == "moss"
                    else QUALITY_TEXT.get(meta.get("quality"), ""))
+            trig = meta.get("trigger_words") or []
             self.res_info.setText(("ORIGINAL · " if show != png else "") +
                                   (f"IN USE: {', '.join(where)} · " if where else "") +
-                                  f"“{meta.get('prompt', '')}” · {how} · "
+                                  f"“{meta.get('prompt', '')}”" + (f" + {', '.join(trig)}" if trig else "") +
+                                  f" · {how} · "
                                   + (f"{used} · " if used else "") + f"seed {meta.get('seed', '?')} · {when}")
         self._update_buttons()
 
@@ -783,6 +788,8 @@ class ImageEditDialog(QDialog):
         prompt = " ".join(self.prompt.toPlainText().split())
         source, quality, n = self.source, self.quality.currentData(), self.tries.value()
         model = self.edit_model.currentData()
+        words = self._trigger_words()
+        sent = with_triggers(prompt, words)
         refs = [p for p in (self.pic2.path, self.pic3.path) if p]
         loras = [(it["path"], it["strength"]) for it in self.loras.items()]
         self._remember_loras()
@@ -820,11 +827,12 @@ class ImageEditDialog(QDialog):
                     seed = random.randint(1, 2**31 - 1)
                     stem = f"edit_{time.strftime('%Y%m%d-%H%M%S')}_{seed}"
                     out = edits / f"{stem}.png"
-                    meta = self.editor.edit(Path(source), prompt, out, seed, quality, [Path(r) for r in refs], loras,
+                    meta = self.editor.edit(Path(source), sent, out, seed, quality, [Path(r) for r in refs], loras,
                                             model=model)
                     if size is not None:
                         scale_to(out, out, size)
-                    meta.update({"prompt": prompt, "seed": seed, "source": source, "source_copy": str(kept),
+                    meta.update({"prompt": prompt, "trigger_words": words, "seed": seed, "source": source,
+                                 "source_copy": str(kept),
                                  "refs": refs, "size": list(size) if size else None})
                     out.with_suffix(".json").write_text(json.dumps(meta, indent=2, ensure_ascii=False),
                                                         encoding="utf-8")
@@ -846,6 +854,8 @@ class ImageEditDialog(QDialog):
         prompt = " ".join(self.prompt.toPlainText().split())
         negative = " ".join(self.negative.text().split()) if self.negative.isVisible() else ""
         quality, n = self.quality.currentData(), self.tries.value()
+        words = self._trigger_words()
+        sent = with_triggers(prompt, words)
         refs = [s.path for s in self.cpics[:FAMILIES[fam]["refs"]] if s.path] if self.use_refs.isChecked() else []
         loras = [(it["path"], it["strength"]) for it in self.loras.items()]
         self._remember_loras()                    # what it was made with is offered next time
@@ -878,9 +888,9 @@ class ImageEditDialog(QDialog):
                     cur["k"] = k
                     seed = random.randint(1, 2**31 - 1)
                     out = edits / f"new_{time.strftime('%Y%m%d-%H%M%S')}_{seed}.png"
-                    meta = self.editor.create(fam, model, prompt, out, seed, quality, w, h, negative, loras,
+                    meta = self.editor.create(fam, model, sent, out, seed, quality, w, h, negative, loras,
                                               [Path(r) for r in refs], strength, tags)
-                    meta.update({"prompt": prompt, "seed": seed, "refs": refs, "tags": tags,
+                    meta.update({"prompt": prompt, "trigger_words": words, "seed": seed, "refs": refs, "tags": tags,
                                  "source_copy": str(kept) if kept else None})
                     out.with_suffix(".json").write_text(json.dumps(meta, indent=2, ensure_ascii=False),
                                                         encoding="utf-8")
@@ -1076,6 +1086,12 @@ class ImageEditDialog(QDialog):
         self._remember_loras()
 
     # ---- LoRAs
+    def _trigger_words(self) -> list[str]:
+        """The trigger words of the chosen LoRAs (put before the prompt when the project wants them)."""
+        if not self.use_triggers:
+            return []
+        return stack_words([it["path"] for it in self.loras.items()])
+
     def _lora_key(self) -> str:
         if self.mode() == "create":
             return f"createLoras_{self.family.currentData()}"

@@ -967,3 +967,33 @@ def test_cast_review_fixes(project, tmp_path):
     finally:
         T.chain.to_png = real
     assert sorted(f.name for f in (project / "refs").iterdir()) == ["ref1.png"]    # no stray full picture
+
+
+def test_lora_trigger_words_in_clips(project, tmp_path):
+    """A clip's LoRAs' trigger words go before its prompt and are recorded (new words: the clip is made again)."""
+    import numpy as np
+    from safetensors.numpy import save_file
+
+    from video_chain import triggers as TR
+    lo = tmp_path / "loras" / "braces.safetensors"
+    lo.parent.mkdir()
+    save_file({"a.lora_A.weight": np.zeros((2, 2), np.float16)}, str(lo), metadata={"modelspec.trigger_word": "braces"})
+    plain = tmp_path / "loras" / "plain.safetensors"
+    save_file({"a.lora_A.weight": np.zeros((2, 2), np.float16)}, str(plain))
+    t = T.load(project)
+    a = t.add(None, "a woman smiles")
+    a.overrides = {"loras": [{"path": str(lo), "strength": 0.8}, {"path": str(plain), "strength": 1.0}]}
+    b = t.add(None, "no lora")
+    T.save(project, t)
+    TR.db().scan([str(lo), str(plain)], online=False)
+    gen = run(project, [a.id, b.id])
+    call = next(c for c in gen.calls if "smiles" in c["prompt"])
+    assert call["prompt"] == "braces, a woman smiles" and call["settings"]["lora_triggers"] == ["braces"]
+    assert "lora_triggers" not in next(c for c in gen.calls if "no lora" in c["prompt"])["settings"]
+    assert set(statuses(project).values()) == {"done"}
+    TR.db().set_user(str(plain), ["plainword"])                                # new words: made again
+    assert statuses(project)["a woman smiles"] == "changed"
+    t = T.load(project)
+    t.options["lora_triggers"] = False                                         # off: the prompt as written
+    T.save(project, t)
+    assert "lora_triggers" not in T.Checker(project, T.load(project)).settings(a.id)
