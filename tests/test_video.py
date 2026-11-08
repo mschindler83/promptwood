@@ -261,3 +261,55 @@ def test_only_videos_need_no_model(project, source):
     assert job["todo"] == [v.id] and job["ai_todo"] == []
     cli.run_job(job, None, lambda _e: None, {"id": None, "k": 0})
     assert T.Checker(project, T.load(project)).status(v.id) == "done"
+
+
+def _main_hz(path: Path) -> float:
+    import numpy as np
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-vn", "-ac", "1", "-ar", "16000", "-f", "f32le",
+                          "-"], capture_output=True, check=True).stdout
+    x = np.frombuffer(raw, np.float32)
+    spec = np.abs(np.fft.rfft(x * np.hanning(len(x))))
+    return float(np.argmax(spec) * 16000 / len(x))
+
+
+def test_continue_the_real_videos_sound(project, tmp_path):
+    """'Continue the real video's sound': the clip's sound is the file's sound right after the range (and after the
+    clips before it), handed to the model as its soundtrack and put into the clip exactly."""
+    src = tmp_path / "talk.mp4"                     # 700 Hz until 1 s (the range), 1200 Hz after (what comes next)
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=red:s=320x180:r=30:d=5", "-f", "lavfi",
+                    "-i", "aevalsrc=0.5*sin(2*PI*if(lt(t\\,1)\\,700\\,1200)*t):d=5", "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(src)], check=True)
+    t = T.load(project)
+    t.options["frames"] = 17
+    v = t.add_video(None, str(src), 0.0, 1.0)
+    a = t.add(v.id, "she keeps talking")
+    b = t.add(a.id, "and talking")
+    a.overrides = {"source_sound": True}
+    b.overrides = {"source_sound": True, "guide": 5}
+    other = t.add(None, "no video before")
+    T.save(project, t)
+    assert T.source_sound_span(t, a) == {"file": str(src), "start": round(1.0 - 1 / 24, 3), "secs": round(17 / 24, 3),
+                                         "video": v.id}
+    # b: after a's 17 frames (its first repeats the video's last one), its own first 5 frames repeat a's end
+    assert T.source_sound_span(t, b)["start"] == round(1.0 + 16 / 24 - 5 / 24, 3)
+    assert T.source_sound_span(t, other) is None
+    gen = FakeGenerator(frames=17, size=None)
+    T.run_tree(gen, project, [a.id], log=lambda _m: None)
+    call = next(c for c in gen.calls if c["prompt"].startswith("she keeps"))
+    assert call["settings"]["audio_paths"][-1].endswith("source_sound.wav")
+    assert call["prompt"].endswith(T.SOURCE_SOUND_TEXT.format(k=1))
+    t = T.load(project)
+    rec = t.nodes[a.id].made["settings"]["source_sound"]
+    assert rec["start"] == round(1.0 - 1 / 24, 3) and rec["file_key"] is not None
+    clip = project / t.nodes[a.id].made["video"]
+    assert abs(_main_hz(clip) - 1200) < 30                     # the recorded sound, not the generator's
+    ch = T.Checker(project, t)
+    assert ch.status(a.id) == "done"
+    t.nodes[v.id].source["end"] = 1.5                         # another range: the clip's sound moves with it
+    assert T.Checker(project, t).status(a.id) == "changed"
+    t.nodes[v.id].source["end"] = 1.0
+    t.nodes[b.id].overrides["frames"] = 24 * 15                # longer than the file has sound for
+    assert any("ends at 0:05.0" in m for m in T.source_sound_problems(t, [b.id]))
+    t.nodes[other.id].overrides = {"source_sound": True}
+    assert T.source_sound_problems(t, [other.id]) == [f"clip #{other.id[1:]} continues a real video's sound, but "
+                                                      "there is no real video before it"]

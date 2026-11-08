@@ -53,7 +53,7 @@ from . import chain
 TREE_FILE = "tree.json"
 START_FILE = "start.png"
 NO_LORA = "none"                   # old override value: this node without any LoRA
-OVERRIDE_KEYS = ("loras", "frames", "steps", "guide")
+OVERRIDE_KEYS = ("loras", "frames", "steps", "guide", "source_sound")
 _OLD_LORA_KEYS = ("lora", "strength", "extra_loras")
 AI, VIDEO = "ai", "video"
 GUIDE_CHOICES = (5, 22, 39)        # motion guide lengths on H3's 17n+5 grid
@@ -1268,8 +1268,11 @@ class Checker:
 
     def settings(self, nid: str) -> dict | None:
         base = self.base()
-        return None if base is None else node_settings(base, self.tree.options, self.tree.nodes[nid],
-                                                       self.audio_pool(), self.picture_sha)
+        node = self.tree.nodes[nid]
+        span = source_sound_span(self.tree, node) \
+            if not node.is_video and (node.overrides or {}).get("source_sound") else None
+        return None if base is None else node_settings(base, self.tree.options, node, self.audio_pool(),
+                                                       self.picture_sha, source_sound=span)
 
     def start_frame(self, node: Node) -> Path | None:
         """The frame a generated clip starts from: the parent's last frame, the start image, or None (a first
@@ -1427,6 +1430,74 @@ def node_loras(node: Node) -> list[tuple[str, float]]:
     return _extras((node.overrides or {}).get("loras"))
 
 
+SOURCE_SOUND_TEXT = ("<Audio {k}> is the complete original audio track of the target video, reused 1:1: every word, "
+                     "voice and sound comes from <Audio {k}>, and the speaking person's lips move in sync with it.")
+
+
+def source_video(tree: Tree, node: Node) -> Node | None:
+    """The real video a generated clip continues (the nearest one before it on its path), or None."""
+    path = tree.path_to(node.id)
+    return next((n for n in reversed(path[:-1]) if n.is_video), None)
+
+
+def source_sound_span(tree: Tree, node: Node) -> dict | None:
+    """Where in its real video's file a clip's sound continues ("Continue the video's sound"): the part right after
+    what the path has shown so far. {"file", "start", "secs", "video"} (seconds in the file), or None without a real
+    video before the clip. A generated clip's first frame (or its carry-over frames) repeats the end of the clip
+    before, so its sound starts that much earlier; a clip that hands over early counts up to that frame."""
+    path = tree.path_to(node.id)
+    vi = max((i for i, n in enumerate(path[:-1]) if n.is_video), default=None)
+    if vi is None:
+        return None
+    v = path[vi]
+    src = v.source or {}
+    hv = handover_index(tree, v)
+    t = float(src["start"]) + (hv + 1) / chain.FPS if hv is not None else float(src["end"])
+    for p in path[vi + 1:-1]:
+        n = made_frames(p) or clip_length(tree, p)
+        h = handover_index(tree, p, n)
+        t += ((h + 1 if h is not None else n) - max(1, _guide_of(p, planned=True))) / chain.FPS
+    start = t - max(1, _guide_of(node, planned=True)) / chain.FPS
+    return {"file": str(src["file"]), "start": round(max(0.0, start), 3),
+            "secs": round(clip_length(tree, node) / chain.FPS, 3), "video": v.id}
+
+
+def source_sound_problems(tree: Tree, todo: list[str]) -> list[str]:
+    """Why clips that continue their real video's sound cannot be made (one message per problem)."""
+    out = []
+    for nid in todo:
+        node = tree.nodes[nid]
+        if node.is_video or not (node.overrides or {}).get("source_sound"):
+            continue
+        span = source_sound_span(tree, node)
+        if span is None:
+            out.append(f"clip #{nid[1:]} continues a real video's sound, but there is no real video before it")
+            continue
+        if not Path(span["file"]).is_file():
+            out.append(f"the video file of clip #{nid[1:]}'s sound is missing ({Path(span['file']).name})")
+            continue
+        have = chain.audio_seconds(Path(span["file"]))
+        need = span["start"] + span["secs"]
+        if have is None:
+            out.append(f"{Path(span['file']).name} has no sound, so clip #{nid[1:]} cannot continue it")
+        elif have < need - 0.05:
+            out.append(f"clip #{nid[1:]} needs the sound of {Path(span['file']).name} up to "
+                       f"{int(need // 60)}:{need % 60:04.1f}, but it ends at {int(have // 60)}:{have % 60:04.1f}; "
+                       "make the clip shorter")
+        n_sounds = audio_mentioned(full_prompt(tree.options, node.prompt))
+        voices = clip_cast(tree.options, node.prompt).get("voices") or []
+        secs = sum(float(a.get("secs") or 0) for a in audio_refs(tree)[:n_sounds]) + span["secs"] + \
+            sum(float(c["voice"].get("secs") or 0) for c in cast_of(tree) if c.get("voice")
+                and c["voice"]["file"] in voices)
+        if n_sounds + len(voices) + 1 > MAX_AUDIO_REFS:
+            out.append(f"clip #{nid[1:]} has too many sounds with the video's sound (the model takes "
+                       f"{MAX_AUDIO_REFS}); remove a sound or voice from its prompt")
+        elif secs > AUDIO_REF_TOTAL + 0.05:
+            out.append(f"clip #{nid[1:]} needs {secs:.1f} s of sound with the video's sound (the model takes "
+                       f"{AUDIO_REF_TOTAL:.0f} s); make it shorter or leave out its other sounds")
+    return out
+
+
 def lora_trigger_words(paths: list[str]) -> list[str]:
     """The trigger words of a LoRA stack (the app's trigger database; nothing if it cannot be read)."""
     try:
@@ -1437,13 +1508,19 @@ def lora_trigger_words(paths: list[str]) -> list[str]:
 
 
 def model_prompt(options: dict, node: Node, settings: dict | None) -> str:
-    """What the model gets for a generated clip: the cast's prompt (clip_cast) with its LoRAs' trigger words."""
+    """What the model gets for a generated clip: the cast's prompt (clip_cast) with its LoRAs' trigger words, and
+    with "Continue the video's sound" the sentence that makes the last sound reference its soundtrack."""
     from .triggers import with_triggers
-    return with_triggers(clip_cast(options, node.prompt)["prompt"], list((settings or {}).get("lora_triggers") or []))
+    text = with_triggers(clip_cast(options, node.prompt)["prompt"], list((settings or {}).get("lora_triggers") or []))
+    if (settings or {}).get("source_sound"):
+        k = len((settings or {}).get("audio_refs") or []) + 1
+        text = f"{text.rstrip()} {SOURCE_SOUND_TEXT.format(k=k)}"
+    return text
 
 
 def node_settings(base: dict, options: dict, node: Node, audio_pool: list[dict] | None = None,
-                  picture_sha: Callable[[str], str | None] | None = None) -> dict:
+                  picture_sha: Callable[[str], str | None] | None = None,
+                  source_sound: dict | None = None) -> dict:
     """The settings one node is made with: the project's, with the node's own LoRA stack and overrides.
     The first LoRA of the stack is recorded as "lora", the others as "extra_loras" (as before).
     audio_pool: the project's sound references ({"file", "sha1"}); the clip records those up to the highest
@@ -1476,7 +1553,8 @@ def node_settings(base: dict, options: dict, node: Node, audio_pool: list[dict] 
                                style=(base.get("prompt_prefix", ""), base.get("prompt_suffix", "")),
                                audio_refs=sounds or None, voice_language=use.get("language"),
                                lora_triggers=(lora_trigger_words([p for p, _s in stack])
-                                              if stack and options.get("lora_triggers", True) else None))
+                                              if stack and options.get("lora_triggers", True) else None),
+                               source_sound=source_sound)
 
 
 def loras_needed(tree: Tree, checker: "Checker", nids: list[str]) -> list[str]:
@@ -1803,8 +1881,16 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
                         call["guides"] = guides
                     if end_image is not None:
                         call["end_image"] = str(end_image)
+                    sound = None
+                    if settings.get("source_sound"):   # the real video's sound after its range: the soundtrack
+                        sound = Path(tmp) / "source_sound.wav"
+                        ss = settings["source_sound"]
+                        chain.to_wav(Path(ss["file"]), sound, ss["start"], ss["secs"])
+                        call["audio_paths"] = list(call.get("audio_paths") or []) + [str(sound)]
                     generator.generate(model_prompt(tree.options, node, settings), start, new_video, new_frame,
                                        node.seed, settings=call)
+                    if sound is not None and new_video.exists():
+                        chain.replace_audio(new_video, sound)    # exactly the recorded speech, not a remake
                 if not new_video.exists() or not new_frame.exists():
                     raise RuntimeError(f"the generator did not write the clip of {nid}")
                 made_n = chain.probe(new_video)["frames"]      # the real count (hand-over frames, joins)
@@ -1963,6 +2049,11 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
                 generator.refine(project / node.made["video"], prompt, target, node.seed, (w, h),
                                  made_frames(node) or _clip_frames(project, node), loras, first, last,
                                  sparse=SOL_TAU if fast_attention else None)
+                if s.get("source_sound") and Path(s["source_sound"]["file"]).is_file():
+                    wav = tmp / f"{node.id}_sound.wav"     # the recorded sound, as in the clip
+                    chain.to_wav(Path(s["source_sound"]["file"]), wav, s["source_sound"]["start"],
+                                 s["source_sound"]["secs"])
+                    chain.replace_audio(target, wav)
                 target.with_suffix(".json").write_text(json.dumps(pins), encoding="utf-8")
             made_now.append(node.id)
             emit({"e": "node", "id": node.id, "state": "done"})

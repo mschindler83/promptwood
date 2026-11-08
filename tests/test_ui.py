@@ -1835,3 +1835,29 @@ def test_lora_trigger_words_in_the_image_window(app, tmp_path, image, monkeypatc
         w.close()
     finally:
         server.close()
+
+
+def test_continue_the_real_videos_sound_on_the_card(app, win, tmp_path):
+    """The card's 'Sound' row appears only after a real video; switching it on also carries the picture over."""
+    from video_chain.ui.main_window import PromptCard
+    src = make_real_video(tmp_path / "real.mp4", secs=8.0)
+    win.open_project(tmp_path / "proj")
+    first = win.cards[0]
+    assert isinstance(first, PromptCard) and not first.sound_box.isVisibleTo(first)   # no real video before it
+    v = win.add_video(first.nid, str(src), 0.0, 1.5)
+    wait(app, lambda: not win._converts)
+    win.node_action("continue", v)
+    a = win.selected_id()
+    card = next(c for c in win.cards if c.nid == a)
+    assert card.sound_box.isVisibleTo(card) and not card.src_sound.isChecked() and not card.guide.currentData()
+    card.src_sound.setChecked(True)
+    flush(app, win)
+    ov = win.tree.nodes[a].overrides
+    assert ov["source_sound"] is True and ov["guide"] == max(T.GUIDE_CHOICES)          # the picture continues too
+    card = next(c for c in win.cards if c.nid == a)
+    assert card.src_sound_info.text().startswith("Uses 0:") and "real.mp4" in card.src_sound_info.text()
+    assert "video's sound" in card.settings_toggle.text()
+    assert T.SOURCE_SOUND_TEXT.format(k=1) in card.edit.toolTip()
+    card.src_sound.setChecked(False)                                                   # optional: off again
+    flush(app, win)
+    assert "source_sound" not in win.tree.nodes[a].overrides

@@ -230,6 +230,19 @@ def frame_at(video: Path, index: int, png: Path) -> None:
         raise RuntimeError(f"{Path(video).name} has no frame {index}")
 
 
+def replace_audio(video: Path, wav: Path) -> None:
+    """Put this sound into a clip instead of its own (the picture is copied, not re-encoded); the sound is cut or
+    padded with silence to the clip's length. Written under a temporary name first."""
+    video = Path(video)
+    tmp = video.with_name(video.stem + ".part" + video.suffix)
+    try:
+        _run(["ffmpeg", "-v", "error", "-y", "-i", str(video), "-i", str(wav), "-map", "0:v:0", "-map", "1:a:0",
+              "-c:v", "copy", "-af", "apad", "-c:a", "aac", "-b:a", "256k", "-shortest", str(tmp)])
+        tmp.replace(video)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def cut_frames(video: Path, out: Path, first: int, count: int, fps: int = FPS) -> bool:
     """Frames first .. first+count-1 of a chain clip (and their sound) as a clip of their own, nearly lossless.
     Returns whether it has sound."""
@@ -357,7 +370,8 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
                   turbo: tuple[str, float] | None = None, guide: int = 0,
                   style: tuple[str, str] | None = None, hyperflow: float | None = None,
                   pika: float | None = None, audio_refs: list | None = None, cast: list | None = None,
-                  voice_language: str | None = None, lora_triggers: list | None = None) -> dict:
+                  voice_language: str | None = None, lora_triggers: list | None = None,
+                  source_sound: dict | None = None) -> dict:
     """What a clip depends on besides prompt, seed and start image; a clip is reused only if this is unchanged.
     The LoRA counts by content (lora_sha1), so a LoRA retrained into the same file makes its clips change.
     extra_loras: further LoRAs stacked after the first ([(path, strength)]), only present when there are any, so
@@ -389,6 +403,15 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
     if voice_language:
         s["voice_language"] = voice_language
         s["start_pin"] = START_PIN
+    if source_sound:                            # the sound of the real video after its range, as the soundtrack
+        src = Path(source_sound["file"])
+        try:
+            st = src.stat()
+            key = [st.st_size, st.st_mtime_ns]
+        except OSError:
+            key = None
+        s["source_sound"] = {"file": str(src), "start": float(source_sound["start"]),
+                             "secs": float(source_sound["secs"]), "file_key": key}
     if lora_triggers:                           # the LoRAs' trigger words put before the prompt
         s["lora_triggers"] = [str(w) for w in lora_triggers]
     if guide:                                   # motion guide: frames of the neighbouring clips anchored

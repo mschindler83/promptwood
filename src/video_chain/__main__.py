@@ -128,7 +128,8 @@ def prepare_job(project: Path, targets: list[str]) -> dict:
     problem = treemod.guide_problem(tree, checker, todo)
     if problem:
         raise JobError(problem)
-    sounds = treemod.audio_problems(project, tree, todo) + treemod.cast_problems(project, tree, todo)
+    sounds = treemod.audio_problems(project, tree, todo) + treemod.cast_problems(project, tree, todo) + \
+        treemod.source_sound_problems(tree, todo)
     if sounds:
         raise JobError(sounds[0])
     no_end = treemod.missing_end_images(project, tree, todo)

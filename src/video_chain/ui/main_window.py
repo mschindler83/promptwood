@@ -382,6 +382,21 @@ class PromptCard(QFrame):
             self.guide.addItem(text, n)
         self.guide.setToolTip(GUIDE_TIP)
         link.addRow("Carry-over", self.guide)
+        self.sound_box = QWidget()
+        sb = QVBoxLayout(self.sound_box)
+        sb.setContentsMargins(0, 0, 0, 0)
+        sb.setSpacing(2)
+        self.src_sound = QCheckBox("Continue the real video's sound")
+        self.src_sound.setToolTip("The clip gets the real video's own sound from right after its range (what was "
+                                  "said next), exactly as recorded; the picture is made to match it (lips in sync). "
+                                  "Off: the model makes the sound itself")
+        self.src_sound_info = label("", level="tertiary")
+        self.src_sound_info.setWordWrap(True)
+        sb.addWidget(self.src_sound)
+        sb.addWidget(self.src_sound_info)
+        link.addRow("Sound", self.sound_box)
+        self._link = link
+        link.setRowVisible(self.sound_box, False)          # only for clips after a real video
         erow = QHBoxLayout()
         erow.setSpacing(6)
         self.end_thumb = QLabel()
@@ -420,6 +435,7 @@ class PromptCard(QFrame):
         v.addLayout(link)
         self._show_settings(PromptCard.settings_open)
         self.guide.currentIndexChanged.connect(self._ov_changed)
+        self.src_sound.toggled.connect(self._sound_toggled)
         self.loras.changed.connect(self._ov_changed)
         self.length.currentIndexChanged.connect(self._ov_changed)
         self.steps.valueChanged.connect(self._ov_changed)
@@ -446,7 +462,7 @@ class PromptCard(QFrame):
 
     def set_choices(self, project_frames: int, project_steps: int, known: list[tuple[str, str]]):
         """Fill the setting widgets (without emitting changes). known: (path, label) of the LoRAs to offer."""
-        widgets = (self.loras, self.length, self.steps, self.guide)
+        widgets = (self.loras, self.length, self.steps, self.guide, self.src_sound)
         for w in widgets:
             w.blockSignals(True)
         try:
@@ -462,6 +478,7 @@ class PromptCard(QFrame):
                 self.guide.addItem(f"{self.ov['guide']} frames", self.ov["guide"])
                 g = self.guide.count() - 1
             self.guide.setCurrentIndex(g)
+            self.src_sound.setChecked(bool(self.ov.get("source_sound")))
             self._enable_guide()
             self.steps.setToolTip(f"Sampling steps of this clip (lowest value = the project's: {project_steps})")
             self.steps.setEnabled(not self.edit.isReadOnly() and not self.steps_locked)
@@ -483,6 +500,8 @@ class PromptCard(QFrame):
             ov["steps"] = self.steps.value()
         if self.guide.currentData():
             ov["guide"] = self.guide.currentData()
+        if self.src_sound.isChecked():
+            ov["source_sound"] = True
         self.ov = ov
         self.overridesChanged.emit(self.nid, ov)
 
@@ -517,7 +536,8 @@ class PromptCard(QFrame):
 
     def set_editable(self, on: bool):
         self.edit.setReadOnly(not on)
-        for w in (self.seed, self.length, self.steps, self.loras, self.guide, self.b_refine, *self.buttons):
+        for w in (self.seed, self.length, self.steps, self.loras, self.guide, self.src_sound, self.b_refine,
+                  *self.buttons):
             w.setEnabled(on)
         self.steps.setEnabled(on and not self.steps_locked)
         self._enable_guide()
@@ -577,6 +597,25 @@ class PromptCard(QFrame):
         has nothing to carry over."""
         self._guide_useful = bool(useful)
         self._enable_guide()
+
+    def _sound_toggled(self, on: bool):
+        """With the video's sound the picture should continue too: no carry-over yet -> the longest one."""
+        if on and not self.guide.currentData():
+            k = self.guide.findData(max(T.GUIDE_CHOICES))
+            if k >= 0:
+                self.guide.blockSignals(True)
+                self.guide.setCurrentIndex(k)
+                self.guide.blockSignals(False)
+                self._enable_guide()
+        self._ov_changed()
+
+    def set_source_sound(self, available: bool, info: str):
+        """The 'Sound' row: shown for a clip after a real video (or when it is set); info: which part of the file."""
+        on = self.src_sound.isChecked()
+        self._link.setRowVisible(self.sound_box, available or on)
+        self.src_sound.setEnabled(not self.edit.isReadOnly() and (available or on))
+        self.src_sound_info.setText(info if on else "")
+        self.src_sound_info.setVisible(on and bool(info))
 
     def _enable_guide(self):
         on = not self.edit.isReadOnly()
@@ -2671,6 +2710,20 @@ class MainWindow(QMainWindow):
             return f"Faces: all {len(use['images'])} pictures of the cast, in cast order (<Picture N> written)"
         return "Faces: none (the prompt mentions nobody and there is no lead)"
 
+    def _source_sound_text(self, n: T.Node) -> tuple[bool, str]:
+        """For the clip card's 'Sound' row: (a real video comes before this clip, which part of its file the clip's
+        sound is)."""
+        video = T.source_video(self.tree, n)
+        if video is None:
+            return False, "There is no real video before this clip any more: switch this off."
+        span = T.source_sound_span(self.tree, n)
+
+        def t(x: float) -> str:
+            return f"{int(x // 60)}:{x % 60:04.1f}"
+        return True, (f"Uses {t(span['start'])}–{t(span['start'] + span['secs'])} of "
+                      f"{Path(span['file']).name} (video #{video.id[1:]}): the sound right after its range, exactly as "
+                      "recorded. Write in the prompt what happens; the words come from the video.")
+
     def _own_parts(self, n: T.Node) -> list[str]:
         """A clip's own LoRA / strength / length / steps in a few words."""
         ov, parts = n.overrides or {}, []
@@ -2680,6 +2733,8 @@ class MainWindow(QMainWindow):
             parts.append(f"{ov['frames'] / 24:.1f} s")
         if "steps" in ov:
             parts.append(f"{ov['steps']} steps")
+        if ov.get("source_sound"):
+            parts.append("video's sound")
         return parts
 
     def _rebuild_path(self):
@@ -2784,9 +2839,13 @@ class MainWindow(QMainWindow):
                 use = T.clip_cast(self.tree.options, n.prompt)
                 words = T.lora_trigger_words([p for p, _s in T.node_loras(n)]) \
                     if self.tree.options.get("lora_triggers", True) and T.node_loras(n) else []
-                sent = T.model_prompt(self.tree.options, n, {"lora_triggers": words})
+                sounds = [None] * (T.audio_mentioned(T.full_prompt(self.tree.options, n.prompt))
+                                   + len(use.get("voices") or []))
+                sent = T.model_prompt(self.tree.options, n, {"lora_triggers": words, "audio_refs": sounds,
+                                                             "source_sound": (n.overrides or {}).get("source_sound")})
                 card.edit.setToolTip("Sent to the model: " + sent if sent != n.prompt.strip() else "")
                 card.set_faces(self._faces_text(use))
+                card.set_source_sound(*self._source_sound_text(n))
                 card.set_summary(" · ".join(self._own_parts(n)))
                 end = self.project / n.end_image if n.end_image else None
                 if vc is not None:
@@ -3977,6 +4036,9 @@ class MainWindow(QMainWindow):
                 sounds = T.audio_problems(self.project, self.tree, todo)
                 if sounds:
                     problems.append(sounds[0] + " (Sound reference)")
+                cont = T.source_sound_problems(self.tree, todo)
+                if cont:
+                    problems.append(cont[0] + " (the clip's “Video's sound” setting)")
                 faces = T.cast_problems(self.project, self.tree, todo)
                 if faces:
                     problems.append(faces[0] + " (Cast)")
