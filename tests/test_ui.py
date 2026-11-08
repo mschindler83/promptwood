@@ -880,7 +880,17 @@ def test_variants_with_stepped_lora_strengths(app, win, tmp_path, image):
     dlg.same_seed.setChecked(True)
     assert dlg.strength_steps() == [-0.1, 0.15] and dlg.keep_seed()
     assert "#1: ×0.6, ×9.95" in dlg.preview.text() and "#3: ×0.4, ×10" in dlg.preview.text()   # capped at 10
+    assert dlg.ok.isEnabled()
+    dlg.steps[0].setValue(0.0)                                  # only b moves, and it is capped: #3 = #2
+    assert "#3 repeats" in dlg.preview.text() and not dlg.ok.isEnabled()
+    dlg.same_seed.setChecked(False)                             # other seeds: allowed (only a warning)
+    assert dlg.ok.isEnabled()
+    dlg.advanced.setChecked(False)
+    assert dlg.ok.isEnabled() and dlg.preview.text() == ""
     dlg.done(0)
+    empty = VariantsDialog(win, win.tree.add(None, "no loras"))
+    assert not empty.advanced.isEnabled()
+    empty.done(0)
     new = win.create_variants(ids[0], 3, generate=False, strength_steps=[-0.1, 0.15], keep_seed=True)
     got = [[e["strength"] for e in win.tree.nodes[n].overrides["loras"]] for n in new]
     assert got == [[0.6, 9.95], [0.5, 10.0], [0.4, 10.0]]
@@ -2082,6 +2092,15 @@ def test_audio_tracks_in_the_window(app, win, tmp_path, image):
     first = next(c for c in win.cards if c.nid == ids[0])
     assert first.sound_over.isChecked() and "laid over" in first.settings_toggle.text()
     assert "<Audio" not in first.edit.toolTip()
+    assert "Laid over" in first.src_sound_info.text()
+    first.set_editable(False)                                                 # (during a run)
+    assert not first.sound_over.isEnabled()
+    first.set_editable(True)
+    first.src_sound.setCurrentIndex(0)                                        # no sound: the box goes off too
+    assert not first.sound_over.isChecked()
+    first.src_sound.setCurrentIndex(first.src_sound.findData(f"track:{tid}"))
+    flush(app, win)
+    assert "sound_over" not in win.tree.nodes[ids[0]].overrides
     second = next(c for c in win.cards if c.nid == ids[1])
     second.src_sound.setCurrentIndex(second.src_sound.findData(f"track:{tid}"))
     flush(app, win)

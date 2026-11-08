@@ -162,11 +162,25 @@ class NewProjectDialog(QDialog):
 
 
 def variant_strengths(loras: list[dict], steps: list[float], k: int) -> list[dict]:
-    """The LoRA stack of variant k (1, 2, ...): each strength moved by k times its step (within the LoRA range)."""
+    """The LoRA stack of variant k (1, 2, ...): each strength moved by k times its step (within the LoRA range).
+    steps go with the entries that have a path, in order; other entries are kept as they are."""
     out = copy.deepcopy(loras)
-    for e, step in zip(out, steps):
+    for e, step in zip([e for e in out if e.get("path")], steps):
         if step:
             e["strength"] = round(min(LORA_MAX, max(LORA_MIN, float(e.get("strength", 1.0)) + k * step)), 4)
+    return out
+
+
+def repeated_variants(loras: list[dict], steps: list[float], count: int) -> list[int]:
+    """Variants (1..count) whose stepped strengths equal the clip's own or an earlier variant's (the range limit
+    reached): with the same seed they would be the same clip."""
+    seen = [[float(e.get("strength", 1.0)) for e in loras if e.get("path")]]
+    out = []
+    for k in range(1, count + 1):
+        st = [float(e.get("strength", 1.0)) for e in variant_strengths(loras, steps, k) if e.get("path")]
+        if st in seen:
+            out.append(k)
+        seen.append(st)
     return out
 
 
@@ -177,7 +191,8 @@ class VariantsDialog(QDialog):
     def __init__(self, parent, node):
         super().__init__(parent)
         self.setWindowTitle("Create variants")
-        self.loras = [e for e in ((node.overrides or {}).get("loras") or []) if e.get("path")]
+        self.stack = list((node.overrides or {}).get("loras") or [])
+        self.loras = [e for e in self.stack if e.get("path")]
         f = QFormLayout(self)
         text = node.prompt if len(node.prompt) < 90 else node.prompt[:87] + "…"
         info = label(f"Clip #{node.id[1:]}: “{text}”\nEach variant is a new branch from the same point with the same "
@@ -219,11 +234,15 @@ class VariantsDialog(QDialog):
         self.same_seed.setToolTip("Off: every variant gets a new seed too. On: the same seed as the clip, so the "
                                   "variants differ only by their LoRA strengths")
         self.same_seed.setEnabled(bool(self.loras))
+        self.same_seed.toggled.connect(self._preview)
         av.addRow("", self.same_seed)
         self.preview = label("", level="tertiary")
         self.preview.setWordWrap(True)
         av.addRow(self.preview)
         f.addRow(self.advanced)
+        self.advanced.setEnabled(bool(self.loras))
+        if not self.loras:
+            self.advanced.setToolTip("This clip has no LoRAs of its own (add them in its settings first)")
         self.advanced.toggled.connect(self._preview)
         self.count.valueChanged.connect(self._preview)
         self._preview()
@@ -232,6 +251,8 @@ class VariantsDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         f.addRow(buttons)
+        self.ok = buttons.button(QDialogButtonBox.Ok)
+        self._preview()
 
     def strength_steps(self) -> list[float]:
         """The step per variant of each LoRA (all 0 when the advanced settings are off)."""
@@ -245,12 +266,23 @@ class VariantsDialog(QDialog):
         steps = self.strength_steps()
         if not self.advanced.isChecked() or not any(steps):
             self.preview.setText("")
+            if hasattr(self, "ok"):
+                self.ok.setEnabled(True)
             return
         rows = []
         for k in range(1, self.count.value() + 1):
             st = variant_strengths(self.loras, steps, k)
             rows.append(f"#{k}: " + ", ".join(f"×{float(e.get('strength', 1.0)):g}" for e, s in zip(st, steps) if s))
-        self.preview.setText("Strengths: " + " · ".join(rows))
+        text = "Strengths: " + " · ".join(rows)
+        same = repeated_variants(self.loras, steps, self.count.value())
+        if same:
+            text += (f"\nVariant{'s' if len(same) > 1 else ''} {', '.join(f'#{k}' for k in same)} "
+                     f"repeat{'s' if len(same) == 1 else ''} strengths already there (the range ends at "
+                     f"{LORA_MIN:g}…{LORA_MAX:g})" + (": with the same seed that is the same clip again." if
+                                                       self.same_seed.isChecked() else "."))
+        self.preview.setText(text)
+        if hasattr(self, "ok"):
+            self.ok.setEnabled(not (same and self.same_seed.isChecked()))
 
 
 class ExportDialog(QDialog):
@@ -647,8 +679,8 @@ class PromptCard(QFrame):
 
     def set_editable(self, on: bool):
         self.edit.setReadOnly(not on)
-        for w in (self.seed, self.length, self.steps, self.loras, self.guide, self.src_sound, self.b_refine,
-                  *self.buttons):
+        for w in (self.seed, self.length, self.steps, self.loras, self.guide, self.src_sound, self.sound_over,
+                  self.b_refine, *self.buttons):
             w.setEnabled(on)
         self.steps.setEnabled(on and not self.steps_locked)
         self._enable_guide()
@@ -712,6 +744,10 @@ class PromptCard(QFrame):
     def _sound_toggled(self, *_):
         """With the video's sound the picture should continue too: no carry-over yet -> the longest one that fits
         (the clip before must be that long, and this clip longer)."""
+        if not self.src_sound.currentData() and self.sound_over.isChecked():
+            self.sound_over.blockSignals(True)         # (no sound: nothing to lay over; off when one is chosen again)
+            self.sound_over.setChecked(False)
+            self.sound_over.blockSignals(False)
         if self.src_sound.currentData() is True and not self.sound_over.isChecked() \
                 and not self.guide.currentData() and self._max_guide:
             k = self.guide.findData(self._max_guide)
@@ -4042,7 +4078,13 @@ class MainWindow(QMainWindow):
                 card.edit.setToolTip("Sent to the model: " + sent if sent != n.prompt.strip() else "")
                 card.set_faces(self._faces_text(use))
                 card.set_tracks([(tr["id"], tr["name"]) for tr in T.tracks(self.tree)])
-                card.set_source_sound(*self._source_sound_text(n))
+                avail, info, max_guide, rep_ok = self._source_sound_text(n)
+                if info and (n.overrides or {}).get("sound_over") and (n.overrides or {}).get("source_sound"):
+                    info = (info.replace(" exactly as it is.", " exactly as it is,").replace(" exactly as recorded.",
+                                                                                            " exactly as recorded,")
+                            + " Laid over: the clip is made without it (full motion, no lip sync) and gets it "
+                              "afterwards; it may be shorter than 2 s.")
+                card.set_source_sound(avail, info, max_guide, rep_ok)
                 card.set_summary(" · ".join(self._own_parts(n)))
                 end = self.project / n.end_image if n.end_image else None
                 if vc is not None:
@@ -5001,12 +5043,13 @@ class MainWindow(QMainWindow):
         if node.is_video:
             return []
         steps = list(strength_steps or [])
-        loras = [e for e in ((node.overrides or {}).get("loras") or []) if e.get("path")]
+        stack = list((node.overrides or {}).get("loras") or [])
+        loras = [e for e in stack if e.get("path")]
         for k in range(1, max(1, int(count)) + 1):
             new = self.tree.add(node.parent, node.prompt, node.seed if keep_seed else self._new_seed())
             new.overrides = copy.deepcopy(node.overrides)
             if any(steps) and loras:
-                new.overrides["loras"] = variant_strengths(loras, steps, k)
+                new.overrides["loras"] = variant_strengths(stack, steps, k)   # (every entry kept)
             self._copy_video_child(nid, new.id)
             ids.append(new.id)
         self._write_tree()
