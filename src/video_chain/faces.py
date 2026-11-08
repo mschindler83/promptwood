@@ -88,6 +88,19 @@ def detect(path: Path, model: Path) -> list[tuple[float, float, float, float, fl
                           f"scale={sw}:{sh}:flags=bilinear", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"],
                          capture_output=True, check=True).stdout
     img = np.frombuffer(raw, np.uint8)[: sw * sh * 3].reshape(sh, sw, 3)
+    return detect_rgb(img, w, h, model)
+
+
+def fit_size(w: int, h: int) -> tuple[int, int]:
+    """The size a picture is scaled to for the detector (its long side 640)."""
+    scale = SIZE / max(w, h)
+    return max(1, round(w * scale)), max(1, round(h * scale))
+
+
+def detect_rgb(img, w: int, h: int, model: Path) -> list[tuple[float, float, float, float, float]]:
+    """detect() for a picture already scaled to fit_size(w, h) (an RGB uint8 array): faces in w x h pixels."""
+    import numpy as np
+    sh, sw = img.shape[:2]
     canvas = np.zeros((SIZE, SIZE, 3), np.float32)
     canvas[:sh, :sw] = img
     blob = ((canvas - 127.5) / 128.0).transpose(2, 0, 1)[None].astype(np.float32)

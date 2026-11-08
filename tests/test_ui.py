@@ -2204,3 +2204,56 @@ def test_paint_a_mask_and_inpaint(app, tmp_path, image, monkeypatch):
         w.close()
     finally:
         server.close()
+
+
+def test_replace_a_person_in_a_real_video(app, tmp_path, image, monkeypatch):
+    """Replace a person: the head found and shown, the new person's picture, Generate (ComfyUI), Use this: the video
+    plays the new clip (converted again); its menu goes back to the original."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from fake_comfy import FakeComfy
+    from video_chain import swap
+    from video_chain.ui.main_window import MainWindow
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    server = FakeComfy(tmp_path / "comfy")
+    try:
+        q = settings(tmp_path, "swap.ini")
+        q.setValue("comfyUrl", server.url)
+        w = MainWindow(q, command=FAKE)
+        src = make_real_video(tmp_path / "real.mp4", secs=2.0)
+        w.open_project(tmp_path / "proj")
+        v = w.add_video(None, str(src), 0.0, 1.5)
+        wait(app, lambda: not w._converts)
+        assert w.state(v) == "done"
+        node = w.tree.nodes[v]
+        n = swap.probe(w.project / node.made["video"])[2]
+
+        def heads(video, model, scale=1.0, progress=None, cancelled=lambda: False):
+            tr = [(100, 40, 140, 90)] * n
+            return {"boxes": swap.head_boxes(tr, *swap.probe(video)[:2], scale), "found": n, "frames": n,
+                    "size": swap.probe(video)[:2], "fps": 24.0, "track": tr}
+        monkeypatch.setattr(swap, "find_heads", heads)
+        monkeypatch.setattr(w, "face_detector", lambda: tmp_path / "det.onnx")
+        dlg = w.replace_person(v, dialog=False)
+        wait(app, lambda: dlg.heads is not None, timeout=20)
+        assert f"found in {n} of {n} frames" in dlg.found_text.text() and not dlg.b_gen.isEnabled()
+        dlg.head_size.setValue(1.3)                                    # larger head: the boxes grow
+        assert dlg.boxes[0][2] - dlg.boxes[0][0] > 40 * 1.3
+        dlg.set_reference(str(image))
+        assert dlg.b_gen.isEnabled()
+        dlg.generate()
+        wait(app, lambda: not dlg._busy, timeout=60)
+        assert dlg.result is not None, dlg.state.text()
+        out, meta, frames = dlg.result
+        assert frames == n and out.is_file() and swap.probe(out)[2] == n and dlg.b_use.isEnabled()
+        assert server.animated["ref"]["inputs"]["image"]
+        dlg.done(0)
+        assert w.use_replacement(v, out, meta, frames)
+        node = w.tree.nodes[v]
+        assert swap.replaced(node)["original"]["file"] == str(src) and node.source["file"] == str(out.resolve())
+        wait(app, lambda: not w._converts)
+        assert w.state(v) == "done", w.status.text()                  # converted again
+        assert w.undo_replacement(v) and w.tree.nodes[v].source["file"] == str(src)
+        wait(app, lambda: not w._converts)
+        w.close()
+    finally:
+        server.close()

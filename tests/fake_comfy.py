@@ -28,6 +28,9 @@ KNOWN = {"UNETLoader", "CLIPLoader", "VAELoader", "LoadImage", "MiniMaxH3ImageTo
          # Qwen-Image 2.1 inpaint
          "ModelPatchLoader", "VideoChainQwen21FunInpaint", "ImageToMask", "MaskToImage", "ImageBlur", "GrowMask",
          "ImageCompositeMasked",
+         # Wan 2.2 Animate (replace a person)
+         "WanAnimateToVideo", "TrimVideoLatent", "DWPreprocessor", "BlockifyMask", "DrawMaskOnImage",
+         "CLIPVisionEncode", "CLIPVisionLoader", "ModelSamplingSD3", "ImageBatch", "ImageScale",
          # MOSS-Image
          "T5TokenizerOptions", "TextEncodeMOSSImageEdit", "SkipLayerGuidanceDiTSimple", "ImageScaleToTotalPixels", "GetImageSize"}
 IMAGE_UNETS = ["Chroma1-HD.safetensors", "Chroma1-HD-Flash.safetensors",
@@ -67,6 +70,7 @@ class FakeComfy:
         self.qwen21 = True                         # Qwen-Image 2.1: its files and nodes
         self.moss = True                           # MOSS-Image: its files, edit LoRA and nodes
         self.inpaint21 = True                      # the Qwen-Image 2.1 Fun ControlNet and Promptwood's node
+        self.animate = True                        # Wan 2.2 Animate's files, LoRAs and nodes (controlnet_aux too)
         self.hyperflow = True                      # ComfyUI-HyperFlow-H3 with its weights
         self.refine = True                         # the H3 2K nodes, the latent upscaler and the refiner LoRA
         self.audio_refs = True                     # MiniMaxH3ReferenceToVideo takes reference sounds
@@ -97,6 +101,26 @@ class FakeComfy:
                  "ModelPatchLoader": ("name", ["qwen_image_inpaint_diffsynth_controlnet.safetensors"]
                                       + (["Qwen-Image-2.1-Fun-Controlnet-Union.safetensors"] if self.inpaint21
                                          else []))}
+        an = self.animate
+        if node == "UNETLoader" and an:
+            files["UNETLoader"] = ("unet_name", files["UNETLoader"][1] + ["Wan2_2-Animate-14B_fp8_e4m3fn_scaled_KJ.safetensors"])
+        if node == "CLIPLoader" and an:
+            files["CLIPLoader"] = ("clip_name", files["CLIPLoader"][1] + ["umt5_xxl_fp8_e4m3fn_scaled.safetensors"])
+        if node == "VAELoader" and an:
+            files["VAELoader"] = ("vae_name", files["VAELoader"][1] + ["wan_2.1_vae.safetensors"])
+        if node == "LoraLoaderModelOnly" and an:
+            files["LoraLoaderModelOnly"] = ("lora_name", files["LoraLoaderModelOnly"][1] + [
+                "wan2-2-Lightning/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors",
+                "WanAnimate_relight_lora_fp16.safetensors"])
+        if node == "CLIPVisionLoader":
+            return {node: {"input": {"required": {"clip_name": ["COMBO", {"options": ["clip_vision_h.safetensors"]
+                                                                          if an else []}]}}}}
+        if node in ("WanAnimateToVideo", "TrimVideoLatent", "DWPreprocessor", "BlockifyMask", "DrawMaskOnImage",
+                    "CLIPVisionEncode", "ModelSamplingSD3", "ImageBatch", "ImageScale", "ImageFromBatch",
+                    "CreateVideo", "SaveVideo", "GrowMask", "ImageToMask", "MaskToImage", "ImageBlur",
+                    "ImageCompositeMasked"):
+            return {node: {"input": {"required": {}}}} if an or node not in ("WanAnimateToVideo", "DWPreprocessor") \
+                else {}
         if node == "VideoChainQwen21FunInpaint":
             return {node: {"input": {"required": {}}}} if self.inpaint21 else {}
         if node in C.REFINE_NODES + ("BlockSparseAttention",) and node != "LatentUpscaleModelLoader":
@@ -150,6 +174,19 @@ class FakeComfy:
             g = wf["gen"]["inputs"]
             self.refined = g
             return {"show": {"text": [f"<think>planning</think>Here is the refined prompt: \"REFINED {g['prompt'][:40]}\""]}}
+        if "anim0" in wf and wf.get("save", {}).get("class_type") == "SaveVideo":   # Wan Animate: the clip again
+            self.animated = wf
+            src = self.root / "input" / wf["src"]["inputs"]["file"]
+            mask = self.root / "input" / wf["mask_vid"]["inputs"]["file"]
+            assert src.is_file() and mask.is_file(), "clip or mask not uploaded"
+            n = wf["made"]["inputs"]["length"]
+            prefix = wf["save"]["inputs"]["filename_prefix"]
+            out = self.root / "output" / (prefix + "_00001_.mp4")
+            out.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(src), "-vf", "hue=h=90", "-frames:v", str(n),
+                            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(out)], check=True)
+            return {"save": {"images": [{"filename": out.name, "subfolder": str(Path(prefix).parent),
+                                         "type": "output"}]}}
         if "refine_save" in wf:                      # 2K refine: the draft at the target size, its frames and sound
             draft = self.root / "input" / wf["draft"]["inputs"]["file"]
             assert draft.is_file(), "draft not uploaded"

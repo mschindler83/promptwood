@@ -31,12 +31,14 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
 
 from .. import chain
 from .. import film as F
+from .. import swap
 from .. import tree as T
 from ..comfy import REF_HINT
 from .graph import START, GraphView, NodeInfo
 from .image_picker import pick_image
 from .clip_dialogs import CompareDialog, HandoverDialog
 from .lora_stack import LORA_MAX, LORA_MIN, LoraStack, fill_lora_combo, lora_label, lora_path
+from .swap_dialog import SwapDialog
 from .mentions import MentionHelper
 from .cast_strip import CastStrip
 from .timeline import Block, Timeline
@@ -4427,6 +4429,12 @@ class MainWindow(QMainWindow):
         if action == "video":
             self._ask_video(node.id if node else None)
             return
+        if action == "swap" and node is not None and node.is_video:
+            self.replace_person(node.id)
+            return
+        if action == "swap_undo" and node is not None and node.is_video:
+            self.undo_replacement(node.id)
+            return
         if action == "edit" and node is not None and node.is_video:
             self.edit_video(node.id)
             return
@@ -4990,7 +4998,8 @@ class MainWindow(QMainWindow):
             self.refresh()
             return
         key = made.get("key") or {}
-        if {k: key.get(k) for k in ("file", "start", "end")} != node.source:     # changed meanwhile
+        if {k: key.get(k) for k in ("file", "start", "end")} != {k: (node.source or {}).get(k)
+                                                               for k in ("file", "start", "end")}:   # changed meanwhile
             discard()
             self.refresh()
             return
@@ -5083,6 +5092,9 @@ class MainWindow(QMainWindow):
         if nid != START:
             if node is not None and node.is_video:
                 acts[m.addAction("Edit range…")] = "edit"
+                acts[m.addAction("Replace a person…")] = "swap"
+                if swap.replaced(node):
+                    acts[m.addAction("Back to the original video (undo the replacement)")] = "swap_undo"
             acts[m.addAction("Branch (another continuation)")] = "branch"
             if node is not None and not node.is_video:
                 acts[m.addAction("Variant (same prompt, other seed)")] = "variant"
@@ -5150,6 +5162,83 @@ class MainWindow(QMainWindow):
 
     def _exec_menu(self, menu: QMenu, pos):
         return menu.exec(pos)
+
+    # ---- replace a person in a real video (Wan 2.2 Animate)
+    def replace_person(self, nid: str, dialog: bool = True):
+        """The swap window for a video node (its converted clip). dialog=False: returned without exec (tests)."""
+        node = self.tree.nodes.get(nid) if self.tree else None
+        if node is None or not node.is_video or self.running:
+            return None
+        try:
+            done = T.Checker(self.project, self.tree).status(nid) == "done"
+        except Exception:  # noqa: BLE001
+            done = False
+        if not done or not node.made or not (self.project / node.made["video"]).is_file():
+            self.status.setText(f"Video #{nid[1:]} is not converted yet: generate its path (or wait for the "
+                                "conversion), then replace the person.")
+            return None
+        pictures = []
+        for c in T.cast_of(self.tree):
+            for k, rel in enumerate(c["images"], start=1):
+                if (self.project / rel).is_file():
+                    pictures.append((f"Face of @{c['name']}" + (f" ({k})" if len(c["images"]) > 1 else ""),
+                                     str(self.project / rel)))
+        url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL)
+        comfy_dir = os.path.expanduser(self.comfy_dir.text().strip()) or None
+        cleanup = self.comfy_cleanup.isChecked()
+        switch = {"free": False}
+
+        def before():                               # GUI thread: the clip model makes room
+            self._qwen_timer.stop()
+            switch["free"] = self._comfy_model in ("h3", "h3-hyperflow")
+            if self.worker_alive and not self.running:
+                self._quit_worker(free=False)
+
+        def connect(progress):                      # worker thread
+            from ..animate import ComfyAnimator
+            an = ComfyAnimator(url, log=lambda _m: None, progress=progress, comfy_dir=comfy_dir, cleanup=cleanup)
+            if an.missing:
+                raise RuntimeError(an.missing)
+            if switch["free"]:
+                an.free()
+                switch["free"] = False
+            return an
+
+        dlg = SwapDialog(self, self.project, nid, self.project / node.made["video"], self.face_detector(), pictures,
+                         connect, self.qs, on_start=before, play=lambda p, t: self.preview.open(Path(p), t))
+        if not dialog:
+            return dlg
+        if dlg.exec() == QDialog.Accepted and dlg.result is not None:
+            self.use_replacement(nid, *dlg.result)
+        return None
+
+    def use_replacement(self, nid: str, file: Path, meta: dict, frames: int) -> bool:
+        """The video node plays the clip with the replaced person (converted again; the clips after it change)."""
+        node = self.tree.nodes.get(nid) if self.tree else None
+        if node is None or not node.is_video or self.running:
+            return False
+        before = self._done_clips() - {nid}
+        swap.apply(node, file, frames, {k: v for k, v in meta.items() if k in (
+            "reference", "head_size", "size", "gen_size", "seed", "prompt", "model", "made")})
+        self._write_tree()
+        self.refresh(rebuild_path=True)
+        self.convert_video(nid)
+        if not self._report_remade(before, f"Video #{nid[1:]}: person replaced"):
+            self.status.setText(f"Video #{nid[1:]} plays the clip with the replaced person now (its menu goes back "
+                                "to the original).")
+        return True
+
+    def undo_replacement(self, nid: str) -> bool:
+        node = self.tree.nodes.get(nid) if self.tree else None
+        if node is None or self.running or not swap.restore(node):
+            return False
+        before = self._done_clips() - {nid}
+        self._write_tree()
+        self.refresh(rebuild_path=True)
+        self.convert_video(nid)
+        if not self._report_remade(before, f"Video #{nid[1:]}: back to the original"):
+            self.status.setText(f"Video #{nid[1:]} plays the original video again.")
+        return True
 
     def _play_node(self, nid: str):
         if self.tree is None or nid not in self.tree.nodes:
