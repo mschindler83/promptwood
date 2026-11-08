@@ -842,6 +842,9 @@ def test_qwen21_inpaint_with_a_painted_mask(server, start, tmp_path):
     assert ip["mask"] == ["imask", 0] and ip["model"] == ["unet", 0] and "cache" not in wf   # (no prefix cache)
     assert wf["guider"]["inputs"]["model"] == ["inpaint", 0]
     assert wf["ipatch"]["inputs"]["name"] == ed.inpaint_patch and wf["imask"]["inputs"]["channel"] == "red"
+    # the edit's picture: the source with the masked part grey (the model cannot copy what was there)
+    assert wf["text"]["inputs"]["images.image_1"] == ["ihole", 0] and wf["ihole"]["inputs"]["mask"] == ["imask", 0]
+    assert wf["ihole"]["inputs"]["destination"] == ["pic0", 0] and wf["igrey"]["inputs"]["color"] == 0x808080
     comp = wf["icompose"]["inputs"]
     assert comp["destination"] == ["pic0", 0] and comp["source"] == ["decode", 0] and comp["resize_source"] is True
     assert comp["mask"] == ["isoft", 0] and meta["inpaint"]["feather"] == C.inpaint_feather(192, 108) == 4

@@ -796,7 +796,9 @@ class ImageEditDialog(QDialog):
         why = self._mask_problem()
         a = mask_area(self.mask) if on else 0.0
         self.mask_info.setText(why or (f"Only the red part ({f'{a * 100:.0f} %' if a >= 0.01 else 'under 1 %'}) is "
-                                       "drawn anew; the rest stays exactly as it is." if on else ""))
+                                       "drawn anew; the rest stays exactly as it is. Say what it should show, e.g. “She tilts her head back "
+                                       "and looks up at the ceiling” (a short “She is looking up” only moves the "
+                                       "eyes)." if on else ""))
 
     # ---- results
     def _load_results(self, select: str | None = None):

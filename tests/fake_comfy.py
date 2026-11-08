@@ -27,7 +27,7 @@ KNOWN = {"UNETLoader", "CLIPLoader", "VAELoader", "LoadImage", "MiniMaxH3ImageTo
          "TextEncodeQwenImage21", "QwenImage21Cache",
          # Qwen-Image 2.1 inpaint
          "ModelPatchLoader", "VideoChainQwen21FunInpaint", "ImageToMask", "MaskToImage", "ImageBlur", "GrowMask",
-         "ImageCompositeMasked",
+         "ImageCompositeMasked", "EmptyImage",
          # Wan 2.2 Animate (replace a person)
          "WanAnimateToVideo", "TrimVideoLatent", "DWPreprocessor", "BlockifyMask", "DrawMaskOnImage",
          "CLIPVisionEncode", "CLIPVisionLoader", "ModelSamplingSD3", "ImageBatch", "ImageScale",
