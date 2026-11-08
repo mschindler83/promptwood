@@ -40,40 +40,71 @@ def root_of(folder: Path) -> Path:
 
 
 class Film:
-    def __init__(self, root: Path, scenes: list[Scene], current: str | None = None):
+    def __init__(self, root: Path, scenes: list[Scene], current: str | None = None, shared: dict | None = None):
         self.root = Path(root)
         self.scenes = scenes
         self.current = current if any(s.id == current for s in scenes) else scenes[0].id
+        self.shared_state = shared             # the shared settings as last passed on (film.json)
+        self.problem = ""                      # film.json could not be read fully: not written back
 
     # ---- loading and saving
     @staticmethod
     def load(root: Path) -> "Film":
         root = root_of(root)
         f = root / FILM_FILE
-        scenes, current = [], None
+        scenes, current, shared, problem = [], None, None, ""
         if f.is_file():
             try:
                 d = json.loads(f.read_text(encoding="utf-8"))
-                for s in d.get("scenes") or []:
-                    sid, sdir = str(s.get("id") or ""), str(s.get("dir") or "")
-                    if re.fullmatch(r"s\d+", sid) and (sdir == "." or re.fullmatch(rf"{SCENES_DIR}/s\d+", sdir)):
-                        take = s.get("take") if isinstance(s.get("take"), str) and re.fullmatch(r"n\d+", s["take"]) \
-                            else None
-                        scenes.append(Scene(sid, str(s.get("title") or sid), sdir, take))
+                entries = d.get("scenes") or []
+                if not isinstance(entries, list):
+                    raise ValueError("no list of scenes")
+                for e in entries:
+                    if not isinstance(e, dict):
+                        problem = "an entry that is not a scene"
+                        continue
+                    sid, sdir = str(e.get("id") or ""), str(e.get("dir") or "")
+                    ok = re.fullmatch(r"s\d+", sid) and (sdir == "." or sdir == f"{SCENES_DIR}/{sid}")
+                    if not ok or any(x.id == sid or x.dir == sdir for x in scenes):
+                        problem = f"a doubtful scene entry ({sid or '?'} in {sdir or '?'})"
+                        continue
+                    if sdir != "." and not (root / sdir / T.TREE_FILE).is_file():
+                        problem = f"the folder of scene {sid} is missing"
+                        continue
+                    take = e.get("take") if isinstance(e.get("take"), str) and re.fullmatch(r"n\d+", e["take"]) \
+                        else None
+                    scenes.append(Scene(sid, str(e.get("title") or sid), sdir, take))
                 current = d.get("current")
-            except (OSError, ValueError, AttributeError) as e:
-                raise ValueError(f"{f} is damaged ({e})") from e
+                shared = d.get("shared") if isinstance(d.get("shared"), dict) else None
+            except (OSError, ValueError, AttributeError, TypeError) as e:
+                scenes, problem = [], f"film.json cannot be read ({e})"
+        for d in sorted((root / SCENES_DIR).glob("s*")) if (root / SCENES_DIR).is_dir() else []:
+            if re.fullmatch(r"s\d+", d.name) and (d / T.TREE_FILE).is_file() and \
+                    not any(x.dir == f"{SCENES_DIR}/{d.name}" for x in scenes) and not any(x.id == d.name for x in scenes):
+                scenes.append(Scene(d.name, d.name, f"{SCENES_DIR}/{d.name}"))     # a scene folder not listed
         if not any(s.dir == "." for s in scenes):             # the film folder is always a scene
-            scenes.insert(0, Scene("s1" if not any(s.id == "s1" for s in scenes) else _next_id(scenes),
+            scenes.insert(0, Scene("s1" if not any(s.id == "s1" for s in scenes) else _next_id(scenes, root),
                                    "Scene 1", "."))
-        return Film(root, scenes, current)
+        film = Film(root, scenes, current, shared)
+        film.problem = problem
+        return film
+
+    def reorder(self, ids: list[str]) -> None:
+        """The scenes in this order (ids not given keep their place at the end)."""
+        by = {s.id: s for s in self.scenes}
+        new = [by[i] for i in ids if i in by]
+        self.scenes = new + [s for s in self.scenes if s not in new]
+        self.save()
 
     def save(self) -> None:
         """Write film.json (only once there is more than one scene, or it exists already)."""
         f = self.root / FILM_FILE
+        if self.problem:
+            raise OSError(f"film.json is not written ({self.problem}); fix or remove it")
         if len(self.scenes) < 2 and not f.exists():
             return
-        data = {"version": 1, "scenes": [asdict(s) for s in self.scenes], "current": self.current}
+        data = {"version": 1, "scenes": [asdict(s) for s in self.scenes], "current": self.current,
+                "shared": self.shared_state}
         tmp = f.with_suffix(".part")
         with open(tmp, "w", encoding="utf-8") as fh:
             fh.write(json.dumps(data, indent=2, ensure_ascii=False))
@@ -96,20 +127,31 @@ class Film:
                   like: str | None = None) -> Scene:
         """A new scene (after the scene `after`, else at the end): its own folder, the film's shared settings and
         refs, the other settings like the scene `like` (e.g. its LoRAs and speed), an optional start image."""
-        sid = _next_id(self.scenes)
+        sid = _next_id(self.scenes, self.root)
         rel = f"{SCENES_DIR}/{sid}"
         d = self.root / rel
         d.mkdir(parents=True, exist_ok=False)
-        refs = self.root / T.REFS_DIR
-        refs.mkdir(exist_ok=True)
-        os.symlink(os.path.relpath(refs, d), d / T.REFS_DIR, target_is_directory=True)
-        base = T.load(self.path(like)) if like else T.load(self.root)
-        t = T.Tree()
-        t.options.update({k: v for k, v in base.options.items() if k in T.DEFAULT_OPTIONS})
-        t.options["style"] = {"prefix": "", "suffix": ""}           # a scene's look is its own
-        if start_image is not None:
-            T.set_start_image(d, Path(start_image), t)
-        T.save(d, t)
+        try:
+            refs = self.root / T.REFS_DIR
+            refs.mkdir(exist_ok=True)
+            try:
+                os.symlink(os.path.relpath(refs, d), d / T.REFS_DIR, target_is_directory=True)
+            except OSError as e:
+                raise OSError(f"the scene's link to the film's refs/ cannot be made here ({e}); scenes need a "
+                              "file system with links") from e
+            base = T.load(self.path(like)) if like else T.load(self.root)
+            t = T.Tree()
+            t.options.update({k: v for k, v in base.options.items() if k in T.DEFAULT_OPTIONS})
+            t.options["style"] = {"prefix": "", "suffix": ""}           # a scene's look is its own
+            if start_image is not None:
+                T.set_start_image(d, Path(start_image), t)
+            T.save(d, t)
+        except BaseException:
+            link = d / T.REFS_DIR
+            if link.is_symlink():
+                link.unlink()
+            shutil.rmtree(d, ignore_errors=True)                       # no half scene blocking the next add
+            raise
         scene = Scene(sid, (title or "").strip() or f"Scene {len(self.scenes) + 1}", rel)
         k = next((i + 1 for i, s in enumerate(self.scenes) if s.id == after), len(self.scenes))
         self.scenes.insert(k, scene)
@@ -151,39 +193,55 @@ class Film:
         d = self.path(sid)
         if (self.root / SCENES_DIR).resolve() not in d.parents:
             raise ValueError("this scene's folder is not inside the film")
-        link = d / T.REFS_DIR
-        if link.is_symlink():
-            link.unlink()                          # the shared refs are never deleted with a scene
-        shutil.rmtree(d)
-        self.scenes.remove(s)
+        self.scenes.remove(s)                      # out of the film first: a failed delete leaves no broken entry
         if self.current == sid:
             self.current = self.scenes[0].id
         self.save()
+        link = d / T.REFS_DIR
+        if link.is_symlink():
+            link.unlink()                          # the shared refs are never deleted with a scene
+        shutil.rmtree(d, ignore_errors=True)
 
     # ---- shared settings
     def shared(self, options: dict) -> dict:
         return {k: options.get(k) for k in SHARED_OPTIONS if k in options}
 
     def sync_shared(self, from_dir: Path, options: dict) -> list[str]:
-        """Write the shared settings of one scene into the others; returns the ids of the scenes changed."""
-        want = self.shared(options)
-        changed = []
+        """Write the shared settings of one scene into the others (and film.json); returns the ids of the scenes
+        changed. A scene that cannot be written is skipped (raised at the end, the others are done); a scene whose
+        tree.json changes meanwhile (another window, a run) is not overwritten."""
+        want = json.loads(json.dumps(self.shared(options)))
+        changed, failed = [], []
         src = Path(from_dir).resolve()
         for s in self.scenes:
             d = self.path(s.id)
             if d == src or not (d / T.TREE_FILE).is_file():
                 continue
-            t = T.load(d)
-            if all(t.options.get(k) == v for k, v in want.items()):
-                continue
-            t.options.update(json.loads(json.dumps(want)))
-            T.save(d, t)
-            changed.append(s.id)
+            try:
+                before = (d / T.TREE_FILE).stat().st_mtime_ns
+                t = T.load(d)
+                if all(t.options.get(k) == v for k, v in want.items()):
+                    continue
+                t.options.update(want)
+                if (d / T.TREE_FILE).stat().st_mtime_ns != before:
+                    raise OSError("it was changed meanwhile")
+                T.save(d, t)
+                changed.append(s.id)
+            except (OSError, ValueError) as e:
+                failed.append(f"{s.title}: {e}")
+        if len(self.scenes) > 1 and not self.problem:
+            self.shared_state = want
+            self.save()
+        if failed:
+            raise OSError("not passed on to " + "; ".join(failed))
         return changed
 
 
-def _next_id(scenes: list[Scene]) -> str:
+def _next_id(scenes: list[Scene], root: Path | None = None) -> str:
+    """A scene id used neither by the film nor by a folder in scenes/ (e.g. one left by a failed add)."""
     n = max((int(s.id[1:]) for s in scenes if re.fullmatch(r"s\d+", s.id)), default=0) + 1
+    while root is not None and (Path(root) / SCENES_DIR / f"s{n}").exists():
+        n += 1
     return f"s{n}"
 
 
@@ -253,10 +311,14 @@ def join_film(film: Film, out: Path) -> Path:
     for sc in film.scenes:
         d = film.path(sc.id)
         t = T.load(d)
-        parts.append(T.join_path(d, t, film.take_of(sc.id, t)))
+        take = film.take_of(sc.id, t)
+        if take is None:
+            raise ValueError(f"scene {sc.title} has no clip yet")
+        parts.append(T.join_path(d, t, take))
     from . import chain
     first = chain.probe(parts[0])
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    chain.concat(parts, out, cuts=[(0, 0)] * len(parts), size=(first["width"], first["height"]))
+    size = (first["width"] // 2 * 2, first["height"] // 2 * 2)     # even (the video codec needs it)
+    chain.concat(parts, out, cuts=[(0, 0)] * len(parts), size=size)
     return out

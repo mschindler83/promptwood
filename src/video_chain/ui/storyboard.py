@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtWidgets import QAbstractItemView, QHBoxLayout, QListWidget, QListWidgetItem, QMenu, QPushButton, QWidget
 
@@ -56,8 +56,9 @@ class Storyboard(QWidget):
                              "drag to reorder, right-click to rename or delete")
         self.list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.list.customContextMenuRequested.connect(self._menu)
-        self.list.currentItemChanged.connect(self._chosen)
-        self.list.model().rowsMoved.connect(lambda *_: self.moved.emit(self.order()))
+        self.list.itemClicked.connect(self._chosen)            # a click (not a press: dragging must work)
+        self.list.itemActivated.connect(self._chosen)          # Enter
+        self.list.model().rowsMoved.connect(lambda *_: QTimer.singleShot(0, self._emit_moved))
         h.addWidget(self.list, 1)
         side = QWidget()
         sv = QHBoxLayout(side)
@@ -110,7 +111,12 @@ class Storyboard(QWidget):
 
     def _chosen(self, item, _prev=None):
         if not self._loading and item is not None:
-            self.sceneChosen.emit(item.data(Qt.UserRole))
+            sid = item.data(Qt.UserRole)
+            QTimer.singleShot(0, lambda: self.sceneChosen.emit(sid))   # after the click is handled
+
+    def _emit_moved(self):
+        """After a drop (not inside it): the list is rebuilt by the handler."""
+        self.moved.emit(self.order())
 
     def _menu(self, pos):
         item = self.list.itemAt(pos)

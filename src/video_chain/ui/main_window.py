@@ -1601,20 +1601,31 @@ class MainWindow(QMainWindow):
     def join_film(self, purpose: str = "play", out: Path | None = None):
         if self.film is None or self.running:
             return
+        if self._joins:
+            self.status.setText("A join is still running; wait for it.")
+            return
         if not self._save_tree():
             return
         film, bridge = F.Film.load(self.film.root), self.bridge
         target = Path(out) if out else self.film.root / "paths" / "film.mp4"
+        root = str(self.film.root)
         self.status.setText("Checking and joining the film …")
+        self._joins += 1                           # (a run waits for it, a second join is refused)
+        self._update_buttons()
 
         def work():
             try:
-                bridge.film.emit(F.join_film(film, target), None, purpose)
+                bridge.film.emit((F.join_film(film, target), root), None, purpose)
             except Exception as e:  # noqa: BLE001
-                bridge.film.emit(None, str(e), purpose)
+                bridge.film.emit((None, root), str(e), purpose)
         threading.Thread(target=work, daemon=True).start()
 
-    def _film_joined(self, path, error, purpose):
+    def _film_joined(self, result, error, purpose):
+        self._joins = max(0, self._joins - 1)
+        self._update_buttons()
+        path, root = result
+        if self.film is None or str(self.film.root) != root:
+            return                                 # another film was opened meanwhile
         if error:
             self.status.setText(f"The film cannot be joined yet: {error}.")
             return
@@ -1712,6 +1723,13 @@ class MainWindow(QMainWindow):
         if self.film is None or self.project is None or self.tree is None:
             return
         cur = self.film.scene_of(self.project)
+        if cur is not None and cur.take and cur.take not in self.tree.nodes:
+            try:
+                self.film.set_take(cur.id, None)
+                self.status.setText(f"The clip “{cur.title}” ended at is gone: the film plays its selected path "
+                                    "now (right-click a clip → End the scene here).")
+            except OSError:
+                pass
         if cur is not None:
             self.storyboard.update_card(cur.id, cur.title, F.summary(self.film, cur.id, self.tree, self.status_of))
 
@@ -1737,18 +1755,7 @@ class MainWindow(QMainWindow):
             return
         if self.film.path(sid) == self.project:
             return
-        before = self.film.current
-        self.film.current = sid                    # (the film folder itself opens the current scene)
-        try:
-            self.film.save()
-        except OSError:
-            pass
-        if not self.open_project(self.film.path(sid)):
-            self.film.current = before
-            try:
-                self.film.save()
-            except OSError:
-                pass
+        if not self.open_project(self.film.root, scene=sid):
             self._show_storyboard()                # back to the scene still open
 
     def add_scene(self):
@@ -1766,7 +1773,7 @@ class MainWindow(QMainWindow):
         except (OSError, ValueError) as e:
             self.status.setText(f"Could not add the scene: {e}")
             return
-        if self.open_project(self.film.path(scene.id)):
+        if self.open_project(self.film.root, scene=scene.id):
             self.status.setText(f"Scene “{scene.title}” added: choose its start image (Start image), or begin "
                                 "with a real video. The cast and sounds are the film's.")
 
@@ -1785,6 +1792,9 @@ class MainWindow(QMainWindow):
 
     def delete_scene(self, sid: str):
         if self.film is None or self.running:
+            return
+        if self._joins or self._converts or self._copying:
+            self.status.setText("Wait until the joins, conversions and copies have finished.")
             return
         sc = self.film.scene(sid)
         if sc.dir == ".":
@@ -1813,9 +1823,8 @@ class MainWindow(QMainWindow):
         if self.film is None:
             return
         try:
-            for k, sid in enumerate(order):
-                self.film.move(sid, k)
-        except (OSError, ValueError, StopIteration) as e:
+            self.film.reorder(order)
+        except (OSError, ValueError) as e:
             self.status.setText(f"Could not move the scene: {e}")
         self._show_storyboard()
 
@@ -1902,6 +1911,8 @@ class MainWindow(QMainWindow):
         source, bridge = (self.film.root if self.film else self.project), self.bridge
         scene_rel = os.path.relpath(self.project, source)       # the scene to continue in, inside the copy
         self._copy_scene = scene_rel
+        cur = self.film.scene_of(self.project) if self.film else None
+        self._copy_scene_id = cur.id if cur else None
         existed = target.exists()
         self.status.setText(f"Copying the project to {target} …")
         self.act_save_as.setEnabled(False)
@@ -1910,10 +1921,19 @@ class MainWindow(QMainWindow):
 
         def work():
             try:
-                shutil.copytree(source, target, dirs_exist_ok=True, symlinks=True,     # (scenes' links to refs/)
-                                ignore=shutil.ignore_patterns("*.part", "*.part.*", "video-chain-*"))
+                skip = shutil.ignore_patterns("*.part", "*.part.*", "video-chain-*")
+
+                def ignore(d, names):
+                    out = set(skip(d, names))
+                    if Path(d).parent.name == F.SCENES_DIR and T.REFS_DIR in names:
+                        out.add(T.REFS_DIR)           # a scene's link to the film's refs/: made again below
+                    return out
+                shutil.copytree(source, target, dirs_exist_ok=True, ignore=ignore)
                 for sc in F.Film.load(target).scenes:  # the copy remembers where its start images came from
                     d = (target / sc.dir).resolve()
+                    if sc.dir != "." and not (d / T.REFS_DIR).exists():
+                        (target / T.REFS_DIR).mkdir(exist_ok=True)
+                        os.symlink(os.path.relpath(target / T.REFS_DIR, d), d / T.REFS_DIR, target_is_directory=True)
                     if (d / T.TREE_FILE).is_file():
                         T.save(d, T.load(d))
                 bridge.copied.emit(str(target), "")
@@ -1934,7 +1954,8 @@ class MainWindow(QMainWindow):
         if here != source:
             self.status.setText(f"Copied the project to {target}.")
             return
-        if self.open_project((Path(target) / getattr(self, "_copy_scene", ".")).resolve()):
+        if self.open_project((Path(target) / getattr(self, "_copy_scene", ".")).resolve(),
+                             scene=getattr(self, "_copy_scene_id", None)):
             self.status.setText(f"Saved as {Path(target).name}; you are working in the copy now.")
 
     def close_project(self):
@@ -1943,6 +1964,7 @@ class MainWindow(QMainWindow):
         if not self._may_leave_project():
             return
         self._waiting_comfy = self._waiting_refine = None      # a wait for ComfyUI belongs to this project
+        self._film_queue = None
         self.preview.stop()
         self.film = None
         self.storyboard.show_scenes([], None)
@@ -1965,18 +1987,23 @@ class MainWindow(QMainWindow):
         self._update_buttons()
         self.status.setText("No project open. New… or Open… under Project, or the File menu.")
 
-    def open_project(self, folder: Path, quiet: bool = False) -> bool:
+    def open_project(self, folder: Path, quiet: bool = False, scene: str | None = None) -> bool:
         if self.running:
             return False
         if self.project is not None and not self._may_leave_project():
             return False
+        if scene is None:
+            self._film_queue = None                # (Generate film opens its scenes with scene=…)
         self._waiting_comfy = self._waiting_refine = None
         folder = Path(folder).expanduser().resolve()
         try:
             folder.mkdir(parents=True, exist_ok=True)
             root = F.root_of(folder)
             film = F.Film.load(root)               # the film this folder belongs to, and which scene opens
-            if folder == root:
+            if scene is not None and any(x.id == scene for x in film.scenes):
+                film.current = scene
+                folder = film.path(scene)
+            elif folder == root:
                 folder = film.path(film.current)
             else:
                 film.current = (film.scene_of(folder) or film.scenes[0]).id
@@ -1996,6 +2023,10 @@ class MainWindow(QMainWindow):
                 pass
         self.project, self.tree = folder, tree
         self.film = film
+        synced = ""
+        if len(film.scenes) > 1 and film.shared_state and film.shared(tree.options) != film.shared_state:
+            tree.options.update(json.loads(json.dumps(film.shared_state)))   # it missed a change of the film's cast
+            synced = " Its cast and sound settings were brought up to the film's."
         self._shared_sent = json.dumps(film.shared(tree.options), sort_keys=True)
         self.project_edit.setText(str(root))
         self.project_edit.setToolTip(str(folder))
@@ -2023,7 +2054,9 @@ class MainWindow(QMainWindow):
         self._warm_lora_hashes()
         self.refresh(rebuild_path=True)
         QTimer.singleShot(0, self.graph.fit)
-        self.status.setText(f"Project {folder.name}: {len(tree.nodes)} clip{'s' if len(tree.nodes) != 1 else ''}.")
+        self.status.setText(f"Project {folder.name}: {len(tree.nodes)} clip{'s' if len(tree.nodes) != 1 else ''}."
+                            + synced + (f" Note: {film.problem}; the film's scene list is not changed until it is "
+                                        "fixed." if film.problem else ""))
         return True
 
     def _open_dir(self):
@@ -3227,6 +3260,11 @@ class MainWindow(QMainWindow):
                   self.style_suffix, self.lora_triggers, self.b_ai_edit, self.b_ai_create, self.storyboard,
                   self.b_film_gen, self.b_film_play, self.b_film_export):
             w.setEnabled(idle)
+        busy = bool(self._copying or self._joins or self._converts)
+        self.storyboard.setEnabled(idle and not busy)  # a scene switch would pull the files from under them
+        self.b_film_play.setEnabled(idle and not busy)
+        self.b_film_export.setEnabled(idle and not busy)
+        self.b_film_gen.setEnabled(idle and not busy)
         self._turbo_widgets()                      # after the loop: turbo locks the steps fields again
         self._update_ref_start_button()            # after the loop too: they depend on the selection
         self._update_cast_buttons()
@@ -3465,8 +3503,12 @@ class MainWindow(QMainWindow):
             return
         if action in ("take", "take_clear") and self.film is not None:
             cur = self.film.scene_of(self.project)
-            if cur is not None:
-                self.film.set_take(cur.id, nid if action == "take" else None)
+            if cur is not None and nid:
+                try:
+                    self.film.set_take(cur.id, nid if action == "take" else None)
+                except OSError as e:
+                    self.status.setText(f"Could not save the scene's ending: {e}")
+                    return
                 self._show_storyboard()
                 self.status.setText(f"The film plays “{cur.title}” up to clip #{nid[1:]}." if action == "take"
                                     else f"The film plays “{cur.title}” up to its selected clip.")
@@ -4516,6 +4558,7 @@ class MainWindow(QMainWindow):
     def stop(self):
         if self._waiting_comfy is not None and not self.running:   # generating once ComfyUI runs: not any more
             self._waiting_comfy = None
+            self._film_queue = None
             self.status.setText("Cancelled: nothing is generated when ComfyUI is up (ComfyUI itself keeps "
                                 "starting).")
             self._update_buttons()
@@ -4744,10 +4787,14 @@ class MainWindow(QMainWindow):
             self._start_worker()
         elif self._job is not None:
             refine = self._job.get("refine")                # an export stays an export when it waits for ComfyUI
+            film_rest = list(self._film_queue) if self._film_queue is not None else None
             self._job_finished(code if code else 1)
             if code == 4:                                   # COMFY_DOWN
                 self.comfy_up = False
-                if not self._autostart(self._targets, refine):
+                if self._autostart(self._targets, refine):
+                    if film_rest is not None:               # Generate film goes on once ComfyUI runs
+                        self._film_queue = film_rest
+                else:
                     self.status.setText(f"ComfyUI is not running at {self.comfy_url.text().strip()}. "
                                         "Start it (ComfyUI → Start ComfyUI) and generate again.")
                 self._update_comfy_label()
@@ -4797,8 +4844,11 @@ class MainWindow(QMainWindow):
                 if self.tree is not None and all(t in self.tree.nodes for t in targets):
                     refine = getattr(self, "_waiting_refine", None)
                     QTimer.singleShot(0, lambda: self._start(targets, refine))
+                else:
+                    self._film_queue = None
             elif not (self._comfy_starting and time.monotonic() - self._comfy_starting < 180):
                 self._waiting_comfy = None
+                self._film_queue = None
                 self.status.setText("ComfyUI did not start within 3 minutes; see its own log.")
             self._update_buttons()
         self._update_comfy_label()

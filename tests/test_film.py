@@ -114,3 +114,40 @@ def test_scene_endings_and_the_joined_film(project, tmp_path):
     two = chain.probe(T.join_path(d2, T.load(d2), b.id))
     assert info["frames"] == one["frames"] + two["frames"]            # hard cuts: nothing left out
     assert (info["width"], info["height"]) == (one["width"], one["height"])   # the first scene's frame
+
+
+def test_damaged_or_doubtful_film_json(project, tmp_path, monkeypatch):
+    f = F.Film.load(project)
+    s2 = f.add_scene("Two")
+    s3 = f.add_scene("Three")
+    f.reorder([s3.id, "s1", s2.id])
+    assert [s.id for s in F.Film.load(project).scenes] == [s3.id, "s1", s2.id]
+    data = json.loads((project / F.FILM_FILE).read_text())
+    data["scenes"].append({"id": "s9", "dir": f"scenes/{s2.id}", "title": "points at s2"})   # id != folder
+    data["scenes"] = [e for e in data["scenes"] if e["id"] != s3.id]                       # s3 not listed
+    (project / F.FILM_FILE).write_text(json.dumps(data))
+    g = F.Film.load(project)
+    assert "doubtful" in g.problem and {s.id for s in g.scenes} == {"s1", s2.id, s3.id}       # s3 adopted
+    with pytest.raises(OSError, match="not written"):
+        g.save()                                                       # never rewritten while doubtful
+    (project / F.FILM_FILE).write_text("{broken")
+    h = F.Film.load(project)                                           # still opens (the scenes on disk)
+    assert "cannot be read" in h.problem and [s.dir for s in h.scenes][0] == "."
+    monkeypatch.setattr(F.os, "symlink", lambda *a, **k: (_ for _ in ()).throw(OSError("no links")))
+    (project / F.FILM_FILE).unlink()
+    k = F.Film.load(project)
+    with pytest.raises(OSError, match="links"):
+        k.add_scene("No links here")
+    assert not any(p.name not in (s2.id, s3.id) for p in (project / "scenes").iterdir())   # no half scene left
+
+
+def test_shared_settings_go_on_after_a_bad_scene(project, tmp_path):
+    f = F.Film.load(project)
+    s2, s3 = f.add_scene("Two"), f.add_scene("Three")
+    (f.path(s2.id) / T.TREE_FILE).write_text("{broken")
+    t = T.load(project)
+    t.options["resolution"] = 768
+    with pytest.raises(OSError, match="Two"):
+        f.sync_shared(project, t.options)
+    assert T.load(f.path(s3.id)).options["resolution"] == 768           # the others still got it
+    assert F.Film.load(project).shared_state["resolution"] == 768
