@@ -1586,6 +1586,7 @@ class MainWindow(QMainWindow):
         self.inspector = QTabWidget()
         self.inspector.setDocumentMode(True)
         self.inspector.addTab(proj_scroll, "Project")
+        self.proj_scroll = proj_scroll
         self.inspector.setMinimumWidth(380)
         self._panels = (proj_w, cast_w, sound_w)
 
@@ -3981,6 +3982,13 @@ class MainWindow(QMainWindow):
         self.select(nid)
         if nid != START:
             self.focus_clip(nid)
+        else:
+            self.show_start_image_settings()
+
+    def show_start_image_settings(self):
+        """The Project tab of the inspector, scrolled to the start image (a click on the Start node)."""
+        self.inspector.setCurrentWidget(self.proj_scroll)
+        QTimer.singleShot(0, lambda: self.proj_scroll.ensureWidgetVisible(self.start_tile, 0, 40))
 
     def _show_card_of(self, nid: str):
         self.focus_clip(nid)

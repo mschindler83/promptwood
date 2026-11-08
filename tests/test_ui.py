@@ -2124,3 +2124,14 @@ def test_audio_tracks_in_the_window(app, win, tmp_path, image):
     assert win.track_list.count() == 0
     first = next(c for c in win.cards if c.nid == ids[0])
     assert first.src_sound.currentText() == "Audio track: (removed)" and "was removed" in first.src_sound_info.text()
+
+
+def test_start_node_opens_the_project_tab(app, win, tmp_path, image):
+    """A click on the Start node shows the start image settings (the inspector's Project tab)."""
+    from video_chain.ui.graph import START
+    ids = new_project(win, tmp_path, image, ("one",))
+    assert win.inspector.currentIndex() == 0
+    win._graph_clicked(START)
+    assert win.inspector.currentWidget() is win.proj_scroll
+    win._graph_clicked(ids[0])                               # a clip: back to the Clip tab
+    assert win.inspector.currentIndex() == 0
