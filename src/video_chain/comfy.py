@@ -644,7 +644,7 @@ class ComfyGenerator:
                             ref_size=s.get("ref_size", "match"), ref_key=self.ref_key() if refs else None,
                             turbo=turbo, end_image=end_image, guides=guides, hyperflow=hyper, pika=pika,
                             audio_refs=sounds, **({"audio_key": self.audio_key()} if sounds else {}),
-                            start_pin=int(s.get("start_pin") or 1) if refs else 1)
+                            start_pin=int(s.get("start_pin") or 1))
         ws = self._connect_ws()
         try:
             res = self._json("POST", "/prompt", {"prompt": wf, "client_id": self.client_id})

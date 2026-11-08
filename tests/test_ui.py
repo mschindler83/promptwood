@@ -573,6 +573,23 @@ def test_identity_references_in_the_window(app, win, tmp_path, image, monkeypatc
     monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("Tom", True))
     win._rename_character()
     assert win.tree.nodes[ids[1]].prompt == "@Tom waves" and T.character(win.tree, "Ben") is None
+    # a voice for Tom: used where Tom says a line
+    import subprocess
+    speech = tmp_path / "tom.wav"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=200:duration=9",
+                    str(speech)], check=True)
+    assert not win.b_voice_play.isEnabled() and win.char_voice.text() == "Voice: none"
+    assert win.set_character_voice(str(speech))
+    assert win.status.text().startswith("Voice of @Tom set (7.5 s, the first 7.5 s)")
+    assert win.char_voice.text() == "Voice: tom.wav (7.5 s)" and "· voice" in win.cast_list.currentItem().text()
+    type_prompt(win, ids[1], '@Tom waves and says "Hello there."')
+    flush(app, win)
+    card = next(c for c in win.cards if c.nid == ids[1])
+    assert card.faces.text() == "Faces: @Tom · Voices: @Tom" and "<d>[English] Hello there.</d>" in card.edit.toolTip()
+    win.dialogue_lang.setCurrentText("German")
+    assert win.tree.options["identity"]["language"] == "German"
+    win._remove_voice()
+    assert win.char_voice.text() == "Voice: none" and not (tmp_path / "proj" / "refs" / "voice1.wav").exists()
     # removing the lead's face: clips that mention nobody are made without a face
     win.cast_list.setCurrentRow(0)
     win.refs.setCurrentRow(0)

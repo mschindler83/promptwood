@@ -1012,6 +1012,25 @@ class MainWindow(QMainWindow):
         self.char_lead = QCheckBox("Lead: clips that mention nobody get this face")
         self.char_lead.toggled.connect(self._character_lead_changed)
         iv.addWidget(self.char_lead)
+        vrow = QHBoxLayout()
+        self.char_voice = label("Voice: none", level="tertiary")
+        self.char_voice.setToolTip("A character with a voice speaks its lines with it: write the line in quotes in "
+                                   "the sentence of its @Name, e.g. @Anna looks up and says \"Good morning.\" "
+                                   "Use a voice only with the speaker's consent.")
+        self.b_voice_file = QPushButton("Voice…")
+        self.b_voice_file.setToolTip("Set the voice from an audio or video file: one speaker, little music or echo "
+                                     f"(the first {T.VOICE_MAX_SECS:g} s are used)")
+        self.b_voice_file.clicked.connect(self._voice_from_file)
+        self.b_voice_clip = QPushButton("From clip")
+        self.b_voice_clip.clicked.connect(self._voice_from_selected)
+        self.b_voice_play = icon_button("play", "Listen to the voice")
+        self.b_voice_play.clicked.connect(self._play_voice)
+        self.b_voice_del = icon_button("x", "Remove the voice")
+        self.b_voice_del.clicked.connect(self._remove_voice)
+        vrow.addWidget(self.char_voice, 1)
+        for b in (self.b_voice_file, self.b_voice_clip, self.b_voice_play, self.b_voice_del):
+            vrow.addWidget(b)
+        iv.addLayout(vrow)
         self.refs = QListWidget()
         self.refs.setViewMode(QListWidget.IconMode)
         self.refs.setIconSize(QSize(64, 64))
@@ -1044,6 +1063,13 @@ class MainWindow(QMainWindow):
         self.ref_size.addItem("match (fast)", "match")
         self.ref_size.addItem("max 2048 px (best likeness, slower)", "max")
         irow.addRow("Size", self.ref_size)
+        self.dialogue_lang = QComboBox()
+        self.dialogue_lang.setEditable(True)
+        self.dialogue_lang.addItems(["English", "German", "French", "Spanish", "Italian", "Portuguese", "Japanese",
+                                     "Chinese", "Korean"])
+        self.dialogue_lang.setToolTip("The language of the spoken lines (\"...\" in a prompt); the model gets each "
+                                      "line as <d>[Language] ...</d> when a character speaks with its voice")
+        irow.addRow("Speech", self.dialogue_lang)
         iv.addLayout(irow)
         self.ref_hint = QCheckBox("Tie each person to their face in the prompt")
         self.ref_hint.setChecked(True)
@@ -1057,6 +1083,7 @@ class MainWindow(QMainWindow):
         lv.addWidget(iw)
         self.ref_size.currentIndexChanged.connect(self._identity_changed)
         self.ref_hint.toggled.connect(self._identity_changed)
+        self.dialogue_lang.currentTextChanged.connect(self._identity_changed)
 
         bar, _ = section_bar("Sound reference", left)
         lv.addWidget(bar)
@@ -1663,6 +1690,7 @@ class MainWindow(QMainWindow):
             ident = o.get("identity") or {}
             self.ref_size.setCurrentIndex(max(0, self.ref_size.findData(ident.get("size", "match"))))
             self.ref_hint.setChecked(bool(ident.get("hint", True)))
+            self.dialogue_lang.setCurrentText(ident.get("language") or "English")
             turbo = o.get("turbo") or {}
             self.speed.setCurrentIndex(self.speed.findData(
                 "turbo" if turbo.get("on") else "hyperflow" if (o.get("hyperflow") or {}).get("on")
@@ -1718,7 +1746,8 @@ class MainWindow(QMainWindow):
             return
         before = self._done_clips()
         ident = dict(self.tree.options.get("identity") or {})
-        ident.update({"size": self.ref_size.currentData(), "hint": self.ref_hint.isChecked()})
+        ident.update({"size": self.ref_size.currentData(), "hint": self.ref_hint.isChecked(),
+                      "language": self.dialogue_lang.currentText().strip() or "English"})
         self.tree.options["identity"] = ident
         self._show_references()
         self._changed()
@@ -1805,7 +1834,8 @@ class MainWindow(QMainWindow):
         if c is None or not self._cast_edit_ok():
             return
         users = self._mentioning(c["name"])
-        text = f"Remove @{c['name']} and its {len(c['images'])} face picture{'s' if len(c['images']) != 1 else ''}?"
+        text = (f"Remove @{c['name']} and its {len(c['images'])} face picture{'s' if len(c['images']) != 1 else ''}"
+                + (" and its voice?" if c.get("voice") else "?"))
         if users:
             text += (f" {len(users)} clip{'s mention' if len(users) != 1 else ' mentions'} @{c['name']}; "
                      "they cannot be made until their prompts are changed.")
@@ -1963,7 +1993,7 @@ class MainWindow(QMainWindow):
             pm = self._pixmap(self.project / c["images"][0]) if self.project and c["images"] else None
             n = len(c["images"])
             text = (f"@{c['name']}   {n} face{'s' if n != 1 else ''}" if n else f"@{c['name']}   no face yet") + \
-                ("   · lead" if c.get("lead") else "")
+                ("   · voice" if c.get("voice") else "") + ("   · lead" if c.get("lead") else "")
             item = QListWidgetItem(QIcon(pm) if pm else QIcon(), text)
             item.setData(Qt.UserRole, c["name"])
             item.setToolTip((c.get("desc") or "") + (f" ({len(self._mentioning(c['name']))} clips mention it)"))
@@ -1988,7 +2018,8 @@ class MainWindow(QMainWindow):
                     "offers the names): the clip is made with exactly those faces. "
                     + (f"Clips that mention nobody get @{lead['name']}'s face. " if lead and lead["images"] else
                        "Clips that mention nobody get no face. ")
-                    + "LoRAs can act weaker in clips with faces.")
+                    + "A character with a voice speaks its lines in quotes with it (\"...\" in the sentence of "
+                    "its @Name). LoRAs can act weaker in clips with faces.")
         self.ident_info.setText(text)
 
     def _show_character(self):
@@ -1999,6 +2030,12 @@ class MainWindow(QMainWindow):
             self.char_lead.setChecked(bool(c and c.get("lead")))
         finally:
             self._loading = was
+        v = (c or {}).get("voice")
+        self.char_voice.setText(f"Voice: {v.get('name') or Path(v['file']).name} ({float(v.get('secs') or 0):.1f} s)"
+                                if v else "Voice: none")
+        self.b_voice_play.setEnabled(bool(v))
+        self.b_voice_del.setEnabled(bool(v) and not self.running)
+        self.b_voice_file.setEnabled(c is not None and not self.running)
         self.refs.clear()
         for k, rel in enumerate(c["images"] if c else [], start=1):
             pm = self._pixmap(self.project / rel) if self.project else None
@@ -2007,6 +2044,67 @@ class MainWindow(QMainWindow):
             item.setToolTip(rel)
             self.refs.addItem(item)
         self._update_ref_start_button()
+
+    # ---- a character's voice
+    def _voice_from_file(self):
+        c = self._selected_character()
+        if c is None or not self._cast_edit_ok():
+            return
+        start = self.qs.value("soundDir", "", type=str) or str(Path.home())
+        f, _ = QFileDialog.getOpenFileName(
+            self, f"Voice of @{c['name']} (one speaker, 2-{T.VOICE_MAX_SECS:g} s are used)", start,
+            "Sound or video (*.wav *.mp3 *.flac *.ogg *.m4a *.aac *.opus *.mp4 *.mov *.mkv *.webm);;All files (*)")
+        if f:
+            self.qs.setValue("soundDir", str(Path(f).parent))
+            self.set_character_voice(f)
+
+    def _voice_from_selected(self):
+        nid = self.tree.selected if self.tree else None
+        node = self.tree.nodes.get(nid) if nid else None
+        if node is None or not (node.made or {}).get("video"):
+            self.status.setText("Select a made clip or a converted video first.")
+            return
+        what = f"{'video' if node.is_video else 'clip'} #{nid[1:]}"
+        self.set_character_voice(str(self.project / node.made["video"]), label=f"sound of {what}")
+
+    def set_character_voice(self, path: str, label: str | None = None) -> bool:
+        """The voice of the selected character, from an audio or video file."""
+        c = self._selected_character()
+        if c is None or not self._cast_edit_ok():
+            return False
+        before = self._done_clips()
+        try:
+            entry = T.set_voice(self.project, self.tree, c["name"], Path(path), label=label)
+        except (ValueError, OSError, RuntimeError) as e:
+            self.status.setText(f"Could not set the voice: {e}")
+            return False
+        self._show_references(select=c["name"])
+        self._write_tree()
+        self._changed()
+        msg = (f"Voice of @{c['name']} set ({entry['secs']:.1f} s"
+               + (f", the first {T.VOICE_MAX_SECS:g} s" if entry.get("cut") else "")
+               + f"). Clips use it where @{c['name']} says a line in quotes.")
+        self.status.setText(msg)
+        if self._report_remade(before, f"Voice of @{c['name']} set"):
+            self.status.setText(msg + " " + self.status.text())
+        return True
+
+    def _remove_voice(self):
+        c = self._selected_character()
+        if c is None or not c.get("voice") or not self._cast_edit_ok():
+            return
+        before = self._done_clips()
+        T.remove_voice(self.project, self.tree, c["name"])
+        self._show_references(select=c["name"])
+        self._write_tree()
+        self._changed()
+        if not self._report_remade(before, f"Voice of @{c['name']} removed"):
+            self.status.setText(f"Voice of @{c['name']} removed.")
+
+    def _play_voice(self):
+        c = self._selected_character()
+        if c is not None and c.get("voice") and self.project is not None:
+            self.preview.open(self.project / c["voice"]["file"], f"Voice of @{c['name']}")
 
     # ---- sound references (<Audio 1> ...)
     def _sound_users(self, upto: int = 1) -> list[str]:
@@ -2255,6 +2353,11 @@ class MainWindow(QMainWindow):
         else:
             tip = "Select a converted video or a made clip"
         self.b_ref_clip.setToolTip(tip + ". For any frame of a video: Edit range… → Add as face reference")
+        has_sound = node is not None and bool((node.made or {}).get("video"))
+        self.b_voice_clip.setEnabled(has_sound and self._selected_character() is not None and not self.running)
+        self.b_voice_clip.setToolTip(
+            f"Set the voice from the sound of {'video' if node.is_video else 'clip'} #{nid[1:]} (its first "
+            f"{T.VOICE_MAX_SECS:g} s)" if has_sound else "Select a made clip or a converted video with the voice")
 
     def _show_start_image(self):
         self._update_ref_start_button()
@@ -2376,6 +2479,11 @@ class MainWindow(QMainWindow):
         """Which faces a clip is made with, for its card ('' without a cast)."""
         if not T.cast_of(self.tree):
             return ""
+        if use["mode"] == "voices":
+            faces = [f"@{c['name']}" for c in use["characters"] if c["images"]]
+            voices = [f"@{c['name']}" for c in use["characters"]
+                      if c.get("voice") and c["voice"]["file"] in use["voices"]]
+            return (("Faces: " + ", ".join(faces) + " · ") if faces else "") + "Voices: " + ", ".join(voices)
         if use["mode"] == "mention":
             return "Faces: " + ", ".join(f"@{c['name']}" for c in use["characters"])
         if use["mode"] == "lead":
@@ -2547,7 +2655,7 @@ class MainWindow(QMainWindow):
                   self.audio, self.keep_rep, self.b_project,
                   self.comfy_url, self.ref_size, self.ref_hint, self.b_ref_add, self.b_ref_start,
                   self.b_ref_del, self.b_char_new, self.b_char_rename, self.b_char_del, self.char_desc,
-                  self.char_lead, self.speed, self.style_prefix, self.style_suffix, self.b_ai_edit, self.b_ai_create):
+                  self.char_lead, self.b_voice_file, self.b_voice_del, self.dialogue_lang, self.speed, self.style_prefix, self.style_suffix, self.b_ai_edit, self.b_ai_create):
             w.setEnabled(idle)
         self._turbo_widgets()                      # after the loop: turbo locks the steps fields again
         self._update_ref_start_button()            # after the loop too: they depend on the selection

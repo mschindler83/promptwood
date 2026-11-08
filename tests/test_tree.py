@@ -356,7 +356,7 @@ def test_old_face_list_becomes_the_lead_and_clips_stay_done(project, tmp_path):
         (project / T.TREE_FILE).write_text(json.dumps(raw))
         t = T.load(project)
         assert T.cast_of(t) == [{"name": "Person1", "images": images, "desc": "", "lead": mode == "reference"}]
-        assert t.options["identity"] == {"size": "match", "hint": True}
+        assert t.options["identity"] == {"size": "match", "hint": True, "language": "English"}
         assert set(statuses(project).values()) == want                        # off: the clips had no faces
 
 
@@ -383,7 +383,7 @@ def test_cast_mentions(project, tmp_path):
     assert "Ben (the person in <Picture 1>)" in T.clip_cast(t.options, ben.prompt)["prompt"]
     assert T.clip_cast(t.options, nobody.prompt) == {"mode": "lead", "characters": [T.character(t, "Anna")],
                                                      "images": ["refs/ref1.png", "refs/ref2.png"],
-                                                     "prompt": "An empty kitchen.", "record": None}
+                                                     "voices": [], "prompt": "An empty kitchen.", "record": None}
     gen = run(project, [both.id, ben.id, nobody.id])
     by = {c["prompt"][:4]: c for c in gen.calls}
     assert by["Ben "]["settings"]["ref_paths"] == [str(project / "refs/ref3.png")]
@@ -418,7 +418,7 @@ def test_cast_problems(project, tmp_path):
                      f"clip #{b.id[1:]} writes <Image 2>; the model only knows <Picture 2> (or mention the "
                      "character as @Name)",
                      f"clip #{c.id[1:]} names <Picture 3>, but the cast has only 1 face picture",
-                     f"@Nobody (clip #{d.id[1:]}) has no face picture yet"]
+                     f"@Nobody (clip #{d.id[1:]}) has no face picture or voice yet"]
     (project / "refs/ref1.png").unlink()
     assert T.cast_problems(project, t, [e.id]) == [f"a face picture of clip #{e.id[1:]} is missing in refs/"]
     with pytest.raises(ValueError, match="@Bem"):
@@ -807,3 +807,79 @@ def test_pika_speed(project):
     assert ch.settings(b1.id)["steps"] == 6 and ch.settings(b1.id)["pika"] == {"strength": 1.0}
     t.options["hyperflow"] = {"on": True, "strength": 1.0}                 # one speed mode at a time
     assert "pika" not in T.Checker(project, t).settings(a.id) and T.Checker(project, t).settings(a.id)["steps"] == 8
+
+
+def test_dialogue_speakers():
+    o = {"cast": [{"name": "Anna", "images": [], "lead": True}, {"name": "Ben", "images": []}]}
+    text = '@Anna looks at @Ben and says: "Morning." @Ben smiles. "Hi," says @Ben. „Kaffee?“ @Anna nods. «Oui»'
+    got = [(d["line"], d["speaker"]["name"] if d["speaker"] else None) for d in T.dialogue(o, text)]
+    # first @Name of the sentence; else the one after the line in its sentence; else the last one before it
+    assert got == [("Morning.", "Anna"), ("Hi,", "Ben"), ("Kaffee?", "Anna"), ("Oui", "Anna")]
+    assert [d["speaker"] for d in T.dialogue(o, 'She says "hi".')] == [None]
+    assert T.dialogue(o, 'She says "hi".', default=T.character(o, "Anna"))[0]["speaker"]["name"] == "Anna"
+    assert T.dialogue(o, "<d>[German] Hallo</d> says @Ben")[0]["line"] == "Hallo"
+
+
+def test_cast_voices(project, tmp_path):
+    """A character's voice: used (MiniMax's structured format, after the sounds the prompt names) only in clips
+    where it says a line; such clips record the voice and the speech language, and hold their start image."""
+    t = T.load(project)
+    T.add_character(project, t, "Anna", face(tmp_path / "a.jpg", (200, 150, 130)), desc="woman, 30s")
+    T.add_character(project, t, "Ben", face(tmp_path / "b.jpg", (90, 70, 60)))
+    v = T.set_voice(project, t, "Anna", sound(tmp_path / "anna.mp4", 10, video=True))
+    assert v["file"] == "refs/voice1.wav" and v["cut"] and abs(v["secs"] - T.VOICE_MAX_SECS) < 0.1
+    with pytest.raises(ValueError, match="at least 2 s"):
+        T.set_voice(project, t, "Ben", sound(tmp_path / "short.wav", 1))
+    talk = t.add(None, '@Ben walks in. @Anna looks up and says "Good morning."')
+    quiet = t.add(None, "@Anna drinks her coffee.")
+    lead = t.add(None, 'She smiles. "Hello."')                     # nobody mentioned: the lead (Anna) speaks
+    T.save(project, t)
+    use = T.clip_cast(t.options, talk.prompt)
+    assert use["mode"] == "voices" and use["voices"] == ["refs/voice1.wav"] and use["language"] == "English"
+    assert use["images"] == ["refs/ref2.png", "refs/ref1.png"]                 # Ben is mentioned first
+    p = use["prompt"]
+    assert p.startswith("subject_definitions:\n<Subject 1> is Ben, the person in <Picture 1>.\n<Subject 2> is "
+                        "Anna (woman, 30s), the person in <Picture 2>.\n<Audio 1> is the voice-timbre reference "
+                        "for <Subject 2> (S1)")
+    assert ("[Shot 1] <Subject 1> walks in. <Subject 2> (S1) looks up and says, using the voice timbre referenced "
+            "from <Audio 1>, <d>[English] Good morning.</d>") in p
+    assert "@" not in p and "non_diegetic_music:\nN/A" in p
+    assert T.clip_cast(t.options, quiet.prompt)["mode"] == "mention"           # no line: no voice
+    lu = T.clip_cast(t.options, lead.prompt)
+    assert lu["mode"] == "voices" and lu["images"] == ["refs/ref1.png"] and "<Subject 1> (S1) says, using" in lu["prompt"]
+    gen = run(project, [talk.id, quiet.id, lead.id])
+    call = next(c["settings"] for c in gen.calls if c["prompt"].startswith("subject_definitions") and "Ben" in c["prompt"])
+    assert call["audio_paths"] == [str(project / "refs/voice1.wav")] and call["voice_language"] == "English"
+    assert call["start_pin"] == 5 and call["cast"] == [{"name": "Ben", "desc": ""}, {"name": "Anna", "desc": "woman, 30s"}]
+    q = next(c["settings"] for c in gen.calls if c["prompt"].startswith("Anna"))
+    assert "audio_refs" not in q and "voice_language" not in q
+    assert set(statuses(project).values()) == {"done"}
+    t = T.load(project)
+    t.options["identity"]["language"] = "German"                               # the voiced clips only
+    T.save(project, t)
+    st = statuses(project)
+    assert st[talk.prompt] == st[lead.prompt] == "changed" and st[quiet.prompt] == "done"
+    t.options["identity"]["language"] = "English"
+    T.set_voice(project, t, "Anna", sound(tmp_path / "other.wav", 4))         # a new voice: those clips again
+    assert not (project / "refs/voice1.wav").exists() and T.character(t, "Anna")["voice"]["file"] == "refs/voice2.wav"
+    T.save(project, t)
+    st = statuses(project)
+    assert st[talk.prompt] == "changed" and st[quiet.prompt] == "done"
+    # the sounds a clip needs: the <Audio N> it names first, then the voices; at most 3 and 15 s
+    T.add_audio_reference(project, sound(tmp_path / "s1.wav", 6), t)
+    T.add_audio_reference(project, sound(tmp_path / "s2.wav", 6), t)
+    T.set_voice(project, t, "Ben", sound(tmp_path / "ben.wav", 6))
+    both = t.add(None, '<Audio 2> is the soundtrack. @Anna says "Hi." @Ben says "Hey."')
+    use = T.clip_cast(t.options, both.prompt)
+    assert use["voices"] == ["refs/voice2.wav", "refs/voice1.wav"] and "<Audio 3> is the voice-timbre" in use["prompt"]
+    assert "<Audio 4> is the voice-timbre reference for <Subject 2> (S2)" in use["prompt"]
+    assert T.cast_problems(project, t, [both.id]) == [f"clip #{both.id[1:]} needs 2 voices and 2 sounds; the model "
+                                                      "takes at most 3 sounds"]
+    t.nodes[both.id].prompt = '<Audio 1> is the soundtrack. @Anna says "Hi." @Ben says "Hey."'
+    assert T.cast_problems(project, t, [both.id]) == [f"clip #{both.id[1:]} needs 2 voices and 1 sound of 16.0 s "
+                                                      "together; the model takes at most 15 s (shorten a voice: set "
+                                                      "it again from a shorter part)"]
+    T.remove_voice(project, t, "Ben")
+    assert not (project / "refs/voice1.wav").exists() and T.cast_problems(project, t, [both.id]) == []
+    T.remove_character(project, t, "Anna")
+    assert not (project / "refs/voice2.wav").exists()

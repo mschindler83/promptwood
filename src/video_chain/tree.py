@@ -67,11 +67,11 @@ DEFAULT_OPTIONS = {"model": "Comfy-Org/MiniMax-H3", "frames": 73, "steps": 28,
                    "pika": {"on": False, "strength": 1.0},
                    # the cast: characters with face pictures (copies in refs/); a prompt mentions them as @Name and
                    # the clip is made with exactly their pictures. A clip that mentions nobody gets the lead's.
-                   # [{"name", "images": [rel], "desc", "lead": bool}]
+                   # [{"name", "images": [rel], "desc", "lead": bool, "voice": {"file", "name", "secs"} (optional)}]
                    "cast": [],
                    # how the face pictures are used: their size for the model, and the sentence tying a person to
-                   # their picture
-                   "identity": {"size": "match", "hint": True},
+                   # their picture, the language of spoken lines (dialogue tags for voices)
+                   "identity": {"size": "match", "hint": True, "language": "English"},
                    # sound references (WAV copies in refs/): <Audio 1> ... in a clip's prompt uses them (a voice,
                    # a soundtrack to copy, a beat); only the clips that name one are made with them
                    "audio_refs": [],
@@ -87,6 +87,11 @@ AUDIO_TAG = re.compile(r"<Audio\s*(\d+)>", re.IGNORECASE)
 MENTION = re.compile(r"(?<![\w@])@(\w[\w-]*)")        # @Anna in a prompt
 NAME_OK = re.compile(r"^[^\W\d_][\w-]*$")              # a character name: a letter first, no spaces
 PICTURE_TAG = re.compile(r"<Picture\s*\d+>", re.IGNORECASE)
+# a spoken line: "...", “...”, „...“, «...» or MiniMax's own <d>[Language] ...</d>
+DIALOGUE = re.compile(r'<d>\s*(?:\[[^\]\n]*\]\s*)?(.*?)</d>|"([^"\n]+)"|“([^”\n]+)”|„([^“”\n]+)[“”]|«([^»\n]+)»',
+                      re.DOTALL)
+SAID_BY = re.compile(r"[ \t]*,?[ \t]*([A-Za-z]+)[ \t]+@(\w[\w-]*)")    # "...", says @Anna
+VOICE_MAX_SECS = 7.5               # a character's voice is cut to this (two voices fit the 15 s a clip may have)
 WRONG_TAG = re.compile(r"<(Image|Img|Face|Person|Photo|Pic|Ref|Reference)\s*(\d+)>", re.IGNORECASE)
 
 
@@ -387,8 +392,13 @@ def _migrate_cast(options: dict, has_cast: bool) -> None:
     cast = []
     for c in options.get("cast") or []:
         if isinstance(c, dict) and isinstance(c.get("name"), str) and c["name"]:
-            cast.append({"name": c["name"], "images": [r for r in c.get("images") or [] if isinstance(r, str)],
-                         "desc": str(c.get("desc") or ""), "lead": bool(c.get("lead"))})
+            entry = {"name": c["name"], "images": [r for r in c.get("images") or [] if isinstance(r, str)],
+                     "desc": str(c.get("desc") or ""), "lead": bool(c.get("lead"))}
+            v = c.get("voice")
+            if isinstance(v, dict) and isinstance(v.get("file"), str) and v["file"]:
+                entry["voice"] = {"file": v["file"], "name": str(v.get("name") or ""),
+                                  "secs": float(v.get("secs") or 0)}
+            cast.append(entry)
     options["cast"] = cast
 
 
@@ -504,6 +514,61 @@ def remove_character(project: Path, tree: Tree, name: str) -> None:
     _set_cast(tree, [x for x in cast_of(tree) if x is not c])
     for rel in c["images"]:
         _drop_file(project, rel, tree)
+    if c.get("voice"):
+        _drop_voice_file(project, c["voice"]["file"], tree)
+
+
+def voices_in_use(tree_or_options) -> list[str]:
+    return [c["voice"]["file"] for c in cast_of(tree_or_options) if c.get("voice")]
+
+
+def _drop_voice_file(project: Path, rel: str, tree: Tree) -> None:
+    if rel in voices_in_use(tree) or rel in {a["file"] for a in audio_refs(tree)}:
+        return
+    target = (Path(project) / rel).resolve()
+    if (Path(project) / REFS_DIR).resolve() in target.parents:
+        target.unlink(missing_ok=True)
+
+
+def set_voice(project: Path, tree: Tree, name: str, source: Path, start: float = 0.0,
+              label: str | None = None) -> dict:
+    """Copy the sound of an audio or video file into refs/ as the voice of a character (from start, at most
+    VOICE_MAX_SECS); it replaces the character's old voice. Returns the entry, with "cut": the source was longer.
+    A clip uses the voice when the character says a line in it ("..." after @Name)."""
+    c = character(tree, name)
+    if c is None:
+        raise ValueError(f"no character called {name}")
+    length = chain.audio_seconds(Path(source))
+    if length is None:
+        raise ValueError(f"{Path(source).name} has no sound")
+    have = length - float(start)
+    if have < AUDIO_REF_MIN:
+        raise ValueError(f"a voice needs at least {AUDIO_REF_MIN:.0f} s of speech ({Path(source).name} has "
+                         f"{max(have, 0):.1f} s)")
+    secs = min(have, VOICE_MAX_SECS)
+    d = Path(project) / REFS_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    used = set(voices_in_use(tree))
+    k = 1
+    while (d / f"voice{k}.wav").exists() or f"{REFS_DIR}/voice{k}.wav" in used:
+        k += 1
+    rel = f"{REFS_DIR}/voice{k}.wav"
+    chain.to_wav(Path(source), Path(project) / rel, start, secs if have > secs else None)
+    real = chain.audio_seconds(Path(project) / rel) or secs
+    entry = {"file": rel, "name": label or Path(source).name, "secs": round(real, 2)}
+    old = (c.get("voice") or {}).get("file")
+    _set_cast(tree, [{**x, "voice": entry} if x is c else x for x in cast_of(tree)])
+    if old:
+        _drop_voice_file(project, old, tree)
+    return {**entry, "cut": have > secs + 0.01}
+
+
+def remove_voice(project: Path, tree: Tree, name: str) -> None:
+    c = character(tree, name)
+    if c is None or not c.get("voice"):
+        return
+    _set_cast(tree, [{k: v for k, v in x.items() if k != "voice"} if x is c else x for x in cast_of(tree)])
+    _drop_voice_file(project, c["voice"]["file"], tree)
 
 
 def update_character(tree: Tree, name: str, *, desc: str | None = None, lead: bool | None = None) -> None:
@@ -563,10 +628,146 @@ def mentions(options: dict, text: str) -> tuple[list[dict], list[str]]:
     return found, unknown
 
 
+def dialogue(options: dict, text: str, default: dict | None = None) -> list[dict]:
+    """The spoken lines of a prompt, [{"start", "end", "line", "speaker": character or None}]. A line belongs to the
+    first @Name of its sentence (@Anna looks at @Ben and says "Hi." -> Anna), else to the first @Name after it in
+    the sentence ("Hi," says @Anna.), else to the last one before it, else to default."""
+    text = text or ""
+    spans = [(m.start(), m.end(), next(g for g in m.groups() if g is not None).strip())
+             for m in DIALOGUE.finditer(text)]
+    masked = list(text)
+    for a, b, line in spans:
+        masked[a:b] = "x" * (b - a)                 # sentence ends inside a quote do not count ...
+        if line[-1:] in (".", "!", "?"):
+            masked[b - 1] = "."                     # ... but a line that ends one ends its sentence
+    masked = "".join(masked)
+    marks = [(m.start(), character(options, m.group(1))) for m in MENTION.finditer(text)]
+    marks = [(pos, c) for pos, c in marks if c is not None]
+    out = []
+    for a, b, line in spans:
+        if not line:
+            continue
+        cut = max(masked.rfind(e, 0, a) for e in (". ", "! ", "? ", "\n"))
+        after = [masked.find(e, b) for e in (". ", "! ", "? ", "\n")]
+        stop = min([x for x in after if x >= 0] or [len(text)])
+        who = next((c for pos, c in marks if cut < pos < a), None) \
+            or next((c for pos, c in marks if b <= pos <= stop), None) \
+            or next((c for pos, c in reversed(marks) if pos < a), None) or default
+        out.append({"start": a, "end": b, "line": line, "speaker": who})
+    return out
+
+
+def _picture_tags(found: list[dict]) -> tuple[dict, list[str]]:
+    """<Picture> tags per character (numbered in order of their first mention) and the pictures in that order."""
+    tags, images = {}, []
+    for c in found:
+        if c["images"]:
+            first = len(images) + 1
+            images += c["images"]
+            tags[c["name"]] = " and ".join(f"<Picture {k}>" for k in range(first, len(images) + 1))
+    return tags, images
+
+
+def _voiced_prompt(options: dict, text: str, found: list[dict], lines: list[dict], n_sounds: int,
+                   implicit: bool) -> tuple[str, list[str], list[str]]:
+    """MiniMax's structured reference format (the only one a voice took effect with in the tests): subjects,
+    <Audio N> as the voice-timbre reference of a speaker (S1, S2 ... in speaking order), each line as
+    <d>[Language] ...</d>. The voices come after the n_sounds sounds the prompt names itself.
+    Returns (prompt, pictures, voice files)."""
+    lang = ((options.get("identity") or {}).get("language") or "English").strip() or "English"
+    hint = (options.get("identity") or {}).get("hint", True)
+    tags, images = _picture_tags(found)
+    subj = {c["name"]: k for k, c in enumerate(found, start=1)}
+    order: list[str] = []
+    for d in lines:
+        sp = d["speaker"]
+        if sp is not None and sp["name"] in subj and sp["name"] not in order:
+            order.append(sp["name"])
+    sid = {n: k for k, n in enumerate(order, start=1)}
+    voiced = [n for n in order if character(options, n).get("voice")]
+    audio_no = {n: n_sounds + k for k, n in enumerate(voiced, start=1)}
+
+    def token(name: str) -> str:
+        return f"<Subject {subj[name]}>" + (f" (S{sid[name]})" if name in sid else "")
+
+    def names(t: str) -> str:
+        def one(m):
+            c = character(options, m.group(1))
+            if c is None:
+                return m.group(0)
+            return token(c["name"]) if c["name"] in subj else c["name"]
+        return MENTION.sub(one, t)
+
+    body, pos, said = "", 0, set()
+    for d in lines:
+        body += names(text[pos:d["start"]])
+        sp = d["speaker"]
+        end = d["end"]
+        line = d["line"].rstrip(",;: ") or d["line"]
+        say = f"<d>[{lang}] {line}</d>"
+        # "Hi," says @Anna.  ->  <Subject 1> (S1) says, ... <d>Hi</d>.
+        tail = SAID_BY.match(text, end)
+        verb = "says"
+        if sp is not None and tail and (character(options, tail.group(2)) or {}).get("name") == sp["name"]:
+            verb, end = tail.group(1), tail.end()
+        elif tail:
+            tail = None
+        head = body.rstrip().rstrip(":,").rstrip()
+        in_sentence = bool(head) and not tail and (head[-1].isalnum() or head[-1] in ")>")
+        if sp is not None and sp["name"] in subj:
+            voice = ""
+            if sp["name"] in audio_no and sp["name"] not in said:
+                said.add(sp["name"])
+                voice = f"using the voice timbre referenced from <Audio {audio_no[sp['name']]}>, "
+            if in_sentence:                         # "... and says" (the speaker leads the sentence)
+                body = f"{head}, {voice}{say}"
+            else:                                   # a line on its own: say who speaks
+                body = f"{head} {token(sp['name'])} {verb}, {voice}{say}".lstrip()
+        else:
+            body += say
+        pos = end
+    body += names(text[pos:])
+
+    defs = []
+    for c in found:
+        desc = f" ({c['desc'].rstrip('.')})" if c.get("desc") else ""
+        defs.append(f"<Subject {subj[c['name']]}> is {c['name']}{desc}"
+                    + (f", the person in {tags[c['name']]}." if c["name"] in tags else "."))
+    defs += [f"<Audio {k}> is a sound reference, used as the description says." for k in range(1, n_sounds + 1)]
+    defs += [f"<Audio {audio_no[n]}> is the voice-timbre reference for {token(n)}, the voice of one speaker."
+             for n in voiced]
+    who = [f"<Subject {subj[c['name']]}>" for c in found]
+    shows = who[0] if len(who) == 1 else ", ".join(who[:-1]) + " and " + who[-1]
+    summary = (f"[reference generation + audio reference] The target video shows {shows}. "
+               + " ".join(f"{token(n)} speaks with the voice timbre of <Audio {audio_no[n]}>." for n in voiced))
+    keep = [f"<Subject {subj[c['name']]}> (appears in [Shot 1]): fully_preserved - {c['name']}'s face and "
+            "identity are retained." for c in found if c["name"] in tags]
+    keep += [f"<Audio {audio_no[n]}>: reference - its vocal timbre guides the dialogue delivery of {token(n)} "
+             "without copying the original signal or spoken words." for n in voiced]
+    detail = ""
+    if hint and images:
+        detail += "The pictures only show who the people are; the scene, pose and framing come from the video.\n"
+    if implicit and order:
+        detail += f"{token(order[0])} is the one who speaks.\n"
+    detail += f"[Shot 1] {body.strip()}"
+    prompt = "\n\n".join([
+        "subject_definitions:\n" + "\n".join(defs),
+        "summary:\n" + summary.strip(),
+        "retention_analysis:\n" + "\n".join(keep),
+        "detailed_description:\n" + detail,
+        "overall_soundscape:\nThe natural sound of the scene; the spoken lines are clear.",
+        "non_diegetic_music:\n" + ("N/A" if not n_sounds else "As the sound references above say.")])
+    return prompt, images, [character(options, n)["voice"]["file"] for n in voiced]
+
+
 def clip_cast(options: dict, prompt: str) -> dict:
     """How a clip uses the cast. The prompt is the clip's own (the style text is put around it here).
-    {"mode": "mention" | "tags" | "lead" | None, "characters": [...], "images": [rel], "prompt": what the model
-    gets, "record": [{"name", "desc"}] (mention mode: what the model prompt says about them)}.
+    {"mode": "voices" | "mention" | "tags" | "lead" | None, "characters": [...], "images": [rel], "voices": [rel],
+    "language": the dialogue language (voices only), "prompt": what the model gets, "record": [{"name", "desc"}]
+    (voices / mention: what the model prompt says about them)}.
+    voices:  a character with a voice says a line ("..." in the sentence of its @Name; with nobody mentioned, the
+             lead's lines): MiniMax's structured format (see _voiced_prompt); the voices come after the sounds the
+             prompt names as <Audio N>.
     mention: the characters named as @Name, numbered in order of their first mention; each @Name becomes its name
              (the first time with its <Picture> tags), and a sentence ties each to their face.
     tags:    the prompt writes <Picture N> itself: every face picture of the cast, in cast order.
@@ -574,13 +775,20 @@ def clip_cast(options: dict, prompt: str) -> dict:
     None:    no face pictures (no cast, or no lead)."""
     text = full_prompt(options, prompt)
     found, _ = mentions(options, text)
+    lead = lead_of(options)
+    implicit = not found and lead is not None and bool(lead.get("voice")) and not PICTURE_TAG.search(text)
+    lines = dialogue(options, text, default=lead if implicit else None)
+    talking = [c for c in ([lead] if implicit else found)
+               if (c["images"] or c.get("voice"))]
+    if any(d["speaker"] is not None and d["speaker"].get("voice")
+           and any(d["speaker"]["name"] == c["name"] for c in talking) for d in lines):
+        out, images, voices = _voiced_prompt(options, text, talking, lines, audio_mentioned(text), implicit)
+        lang = ((options.get("identity") or {}).get("language") or "English").strip() or "English"
+        return {"mode": "voices", "characters": talking, "images": images, "voices": voices, "language": lang,
+                "prompt": out, "record": [{"name": c["name"], "desc": c.get("desc", "")} for c in talking]}
     found = [c for c in found if c["images"]]
     if found:
-        tags, images = {}, []
-        for c in found:
-            first = len(images) + 1
-            images += c["images"]
-            tags[c["name"]] = " and ".join(f"<Picture {k}>" for k in range(first, len(images) + 1))
+        tags, images = _picture_tags(found)
         seen: set[str] = set()
 
         def name(m):
@@ -598,17 +806,16 @@ def clip_cast(options: dict, prompt: str) -> dict:
             extra.append("The pictures only show who the people are; the scene, pose and framing come from the "
                          "video.")
             out = f"{out.rstrip()} {' '.join(extra)}"
-        return {"mode": "mention", "characters": found, "images": images, "prompt": out,
+        return {"mode": "mention", "characters": found, "images": images, "voices": [], "prompt": out,
                 "record": [{"name": c["name"], "desc": c.get("desc", "")} for c in found]}
     plain = MENTION.sub(lambda m: (character(options, m.group(1)) or {"name": m.group(0)})["name"], text)
     if PICTURE_TAG.search(text) and all_pictures(options):
-        return {"mode": "tags", "characters": cast_of(options), "images": all_pictures(options), "prompt": plain,
-                "record": None}
-    lead = lead_of(options)
+        return {"mode": "tags", "characters": cast_of(options), "images": all_pictures(options), "voices": [],
+                "prompt": plain, "record": None}
     if lead and lead["images"] and not mentions(options, text)[0]:
-        return {"mode": "lead", "characters": [lead], "images": list(lead["images"]), "prompt": plain,
-                "record": None}
-    return {"mode": None, "characters": [], "images": [], "prompt": plain, "record": None}
+        return {"mode": "lead", "characters": [lead], "images": list(lead["images"]), "voices": [],
+                "prompt": plain, "record": None}
+    return {"mode": None, "characters": [], "images": [], "voices": [], "prompt": plain, "record": None}
 
 
 def cast_problems(project: Path, tree: Tree, todo: list[str]) -> list[str]:
@@ -626,8 +833,8 @@ def cast_problems(project: Path, tree: Tree, todo: list[str]) -> list[str]:
             out.append(f"clip #{nid[1:]} mentions @{word}, but there is no such character"
                        + (f" — did you mean @{close}?" if close else " (add it in the Cast)"))
         for c in found:
-            if not c["images"]:
-                out.append(f"@{c['name']} (clip #{nid[1:]}) has no face picture yet")
+            if not c["images"] and not c.get("voice"):
+                out.append(f"@{c['name']} (clip #{nid[1:]}) has no face picture or voice yet")
         for m in WRONG_TAG.finditer(text):
             out.append(f"clip #{nid[1:]} writes <{m.group(1)} {m.group(2)}>; the model only knows <Picture "
                        f"{m.group(2)}> (or mention the character as @Name)")
@@ -643,6 +850,22 @@ def cast_problems(project: Path, tree: Tree, todo: list[str]) -> list[str]:
                        f"{MAX_CAST_PICTURES}")
         if any(not (Path(project) / r).is_file() for r in use["images"]):
             out.append(f"a face picture of clip #{nid[1:]} is missing in refs/")
+        if use["voices"]:
+            if any(not (Path(project) / r).is_file() for r in use["voices"]):
+                out.append(f"a voice of clip #{nid[1:]} is missing in refs/")
+            n_sounds = audio_mentioned(text)
+            secs = {a["file"]: float(a.get("secs") or 0) for a in audio_refs(tree)[:n_sounds]}
+            secs.update({c["voice"]["file"]: float(c["voice"].get("secs") or 0) for c in cast_of(tree)
+                         if c.get("voice")})
+            n = n_sounds + len(use["voices"])
+            total = sum(secs.get(r, 0) for r in [a["file"] for a in audio_refs(tree)[:n_sounds]] + use["voices"])
+            what = (f"{len(use['voices'])} voice{'s' if len(use['voices']) != 1 else ''}"
+                    + (f" and {n_sounds} sound{'s' if n_sounds != 1 else ''}" if n_sounds else ""))
+            if n > MAX_AUDIO_REFS:
+                out.append(f"clip #{nid[1:]} needs {what}; the model takes at most {MAX_AUDIO_REFS} sounds")
+            elif total > AUDIO_REF_TOTAL + 0.05:
+                out.append(f"clip #{nid[1:]} needs {what} of {total:.1f} s together; the model takes at most "
+                           f"{AUDIO_REF_TOTAL:.0f} s (shorten a voice: set it again from a shorter part)")
     return list(dict.fromkeys(out))
 
 
@@ -1079,14 +1302,16 @@ def node_settings(base: dict, options: dict, node: Node, audio_pool: list[dict] 
     """The settings one node is made with: the project's, with the node's own LoRA stack and overrides.
     The first LoRA of the stack is recorded as "lora", the others as "extra_loras" (as before).
     audio_pool: the project's sound references ({"file", "sha1"}); the clip records those up to the highest
-    <Audio N> its prompt names (none: nothing recorded, as before).
+    <Audio N> its prompt names (none: nothing recorded, as before), then the voices of the characters who speak.
     picture_sha: the content hash of a face picture (project-relative name); the clip records the pictures it is
     made with (see clip_cast), and with @mentions what the model prompt says about the characters."""
     ov = node.overrides or {}
     n_audio = 0 if node.is_video else audio_mentioned(full_prompt(options, node.prompt))
-    use = clip_cast(options, node.prompt) if not node.is_video else {"images": [], "record": None}
+    use = clip_cast(options, node.prompt) if not node.is_video else {"images": [], "record": None, "voices": []}
     sha = picture_sha or (lambda rel: None)
     refs = [{"file": r, "sha1": sha(r)} for r in use["images"]]
+    sounds = (audio_pool or [])[:n_audio] if n_audio else []
+    sounds = sounds + [{"file": r, "sha1": sha(r)} for r in use.get("voices", [])]
     ident = options.get("identity") or {}
     stack = node_loras(node)
     lora, strength = stack[0] if stack else (None, 1.0)
@@ -1104,7 +1329,7 @@ def node_settings(base: dict, options: dict, node: Node, audio_pool: list[dict] 
                                ref_size=ident.get("size", "match"), ref_hint=ident.get("hint", True),
                                guide=int(ov.get("guide") or 0),
                                style=(base.get("prompt_prefix", ""), base.get("prompt_suffix", "")),
-                               audio_refs=(audio_pool or [])[:n_audio] if n_audio else None)
+                               audio_refs=sounds or None, voice_language=use.get("language"))
 
 
 def loras_needed(tree: Tree, checker: "Checker", nids: list[str]) -> list[str]:
