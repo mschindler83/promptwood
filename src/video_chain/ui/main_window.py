@@ -849,6 +849,7 @@ class MainWindow(QMainWindow):
         self._phase = ""
         self._error = ""
         self._plan: list[str] = []
+        self._made_now: set[str] = set()
         self._targets: list[str] = []
         self._loading = False
         self._tree_stamp: tuple | None = None   # tree.json as this window last read or wrote it
@@ -3924,6 +3925,7 @@ class MainWindow(QMainWindow):
         self._exported = None
         self._error, self._stopping, self._phase = "", False, "starting"
         self._targets, self._plan = targets, []
+        self._made_now: set[str] = set()           # the clips really made (an export reuses kept refined copies)
         self.live, self.progress_of = {}, {}
         self.log.clear()
         self.preview.stop()
@@ -4137,6 +4139,7 @@ class MainWindow(QMainWindow):
         elif e == "node":
             nid, st = ev["id"], ev["state"]
             if st == "generating":
+                self._made_now.add(nid)
                 self.live[nid] = "generating"
                 self.progress_of[nid] = 0.0
                 k = self._plan.index(nid) + 1 if nid in self._plan else 1
@@ -4193,7 +4196,7 @@ class MainWindow(QMainWindow):
         if ok and refine:
             self.progress.setValue(1000)
             out = Path(getattr(self, "_exported", None) or refine["out"])
-            n = len(self._plan)
+            n = len(self._made_now)                # the export lists every clip, but reuses kept copies
             self.status.setText(f"Exported {out.name} ({refine['size']}, refined"
                                 + (f"; {n} clip{'s' if n != 1 else ''} refined now" if n else
                                    "; every clip was refined already") + ").")

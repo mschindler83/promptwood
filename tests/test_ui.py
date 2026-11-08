@@ -1514,6 +1514,10 @@ def test_export_refined_and_hyperflow_speed(app, win, tmp_path, image):
     from video_chain.comfy import refine_size
     assert (info["width"], info["height"]) == refine_size(base["width"], base["height"], "2k")
     assert win.status.text().startswith(f"Exported {out.name} (2k, refined; 2 clips refined now")
+    win.export(out, "2k")                                                    # again: the kept copies are reused
+    wait(app, lambda: not win.running, timeout=120)
+    assert win.status.text() == f"Exported {out.name} (2k, refined; every clip was refined already)."
+    assert {win.state(n) for n in ids} == {"done"}
 
 
 def test_pika_speed_saved_and_steps_locked(app, win, tmp_path, image):
