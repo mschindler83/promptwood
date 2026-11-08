@@ -1727,3 +1727,56 @@ def test_face_crop_dialog(app, tmp_path):
     dlg.b_whole.click()
     assert dlg.crop() is None
     dlg.deleteLater()
+
+
+def test_qwen_image_21_in_the_image_window(app, tmp_path, image, monkeypatch):
+    """Qwen-Image 2.1 next to Qwen-Image-Edit 2511 for edits (the model can be chosen), and in Create's list."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from fake_comfy import FakeComfy
+
+    from video_chain.ui.main_window import MainWindow
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    server = FakeComfy(tmp_path / "comfy")
+    try:
+        q = settings(tmp_path, "q21.ini")
+        q.setValue("comfyUrl", server.url)
+        w = MainWindow(q, command=FAKE)
+        new_project(w, tmp_path, image, ("a",))
+        dlg = w.edit_image(start=True, dialog=False)
+        wait(app, lambda: dlg.families, timeout=20)
+        models = [dlg.edit_model.itemText(i) for i in range(dlg.edit_model.count())]
+        assert models == ["Qwen-Image-Edit 2511", "Qwen-Image 2.1"] and dlg.edit_model.currentData() == "2511"
+        assert [dlg.quality.itemData(i) for i in range(dlg.quality.count())] == ["fast", "standard", "best"]
+        dlg.edit_model.setCurrentIndex(1)
+        assert [dlg.quality.itemText(i) for i in range(dlg.quality.count())] == ["Fast (Turbo, 8 steps)",
+                                                                                 "Best (25 steps)"]
+        assert q.value("editModel") == "qwen21" and "Qwen-Image 2.1" in dlg.lora_text.text()
+        dlg.prompt.setPlainText("she smiles")
+        dlg.tries.setValue(1)
+        dlg.generate()
+        wait(app, lambda: not dlg._busy, timeout=60)
+        png, meta = dlg.selected()
+        assert meta["edit_model"] == "qwen21" and meta["steps"] == 8 and "Qwen-Image 2.1 Fast" in dlg.res_info.text()
+        assert server.edited["text"]["class_type"] == "TextEncodeQwenImage21"
+        dlg.edit_model.setCurrentIndex(0)
+        dlg._prompt_again()                                         # back to the model the result was made with
+        assert dlg.edit_model.currentData() == "qwen21" and dlg.quality.currentData() == "fast"
+        # Create: Qwen-Image 2.1 in the model list
+        dlg.set_mode("create")
+        k = dlg.family.findData("qwen21")
+        assert dlg.family.itemText(k) == "Qwen-Image 2.1" and dlg.family.model().item(k).isEnabled()
+        dlg.family.setCurrentIndex(k)
+        assert dlg.model_file.count() == 1 and "Fast (Turbo, 8 steps)" in [dlg.quality.itemText(i)
+                                                                         for i in range(dlg.quality.count())]
+        dlg.done(0)
+        # without the 2.1 files: offered, but not available, with what is missing
+        server.qwen21 = False
+        dlg = w.edit_image(start=True, dialog=False)
+        wait(app, lambda: dlg.families, timeout=20)
+        k = dlg.edit_model.findData("qwen21")
+        assert not dlg.edit_model.model().item(k).isEnabled() and dlg.edit_model.currentData() == "2511"
+        assert "not available" in dlg.edit_model.itemText(k)
+        dlg.done(0)
+        w.close()
+    finally:
+        server.close()

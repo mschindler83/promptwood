@@ -4,6 +4,8 @@ follows ComfyUI's own template for that model (settings from the template; LoRAs
   krea2       Krea-2 Turbo        Text to Image (Krea-2 Turbo); references: Image Style Reference (Krea-2 Turbo)
   qwen        Qwen-Image 2512     Text to Image (Qwen-Image 2512) (+ its Lightning LoRAs); references:
                                   Qwen-Image-Edit 2511 composing a new picture from them (empty latent)
+  qwen21      Qwen-Image 2.1      image_qwen_image_2_1_t2i / _turbo_t2i; references: the same model's picture
+                                  inputs (image_qwen_image_2_1_image_edit) at the chosen size
   flux3       FLUX.3 Image Klein  image_flux3_klein_t2i / _distilled_t2i; references: ReferenceMultiLatent
   flux1       FLUX.1 dev          Text to Image (Flux.1 Dev) (your FLUX.1 LoRAs); references: image to image
   sdxl        Illustrious (SDXL)  image_sdxl_simple with Illustrious settings; references: image to image
@@ -17,7 +19,8 @@ import re
 import uuid
 from pathlib import Path
 
-from .comfy import SUBFOLDER, ComfyError, ComfyGenerator, ComfyJobFailed, _combo_options
+from .comfy import (SUBFOLDER, ComfyError, ComfyGenerator, ComfyJobFailed, _combo_options, build_qwen21_workflow,
+                    pick_qwen21_files)
 
 QWEN_NEGATIVE = ("低分辨率，低画质，肢体畸形，手指畸形，画面过饱和，蜡像感，人脸无细节，过度光滑，画面具有AI感。构图混乱。文字模糊，扭曲")
 SDXL_NEGATIVE = ("lowres, worst quality, low quality, bad anatomy, bad hands, extra digits, fewer digits, jpeg artifacts, "
@@ -33,6 +36,10 @@ FAMILIES = {
                            "best": "Best (50 steps, slow)"}, "refs": 3,
              "ref_text": "The new image is composed from the pictures (Qwen-Image-Edit 2511); name them as "
                          "Picture 1, Picture 2 … in the prompt"},
+    "qwen21": {"label": "Qwen-Image 2.1", "pixels": 1024 * 1024, "multiple": 32, "negative": False,
+               "qualities": {"fast": "Fast (Turbo, 8 steps)", "best": "Best (25 steps)"}, "refs": 3,
+               "ref_text": "The new image is made from the pictures (up to 3): say in the prompt what to take from "
+                           "each, e.g. “the woman from the first picture wearing the jacket from the second”"},
     "flux3": {"label": "FLUX.3 Image Klein", "pixels": 1024 * 1024, "multiple": 16, "negative": True,
               "qualities": {"fast": "Fast (distilled, 16 steps)", "best": "Best (base, 50 steps)"}, "refs": 3,
               "ref_text": "Name the pictures in the prompt as <ref_image_0>, <ref_image_1> …"},
@@ -81,6 +88,12 @@ def pick_files(unets: list[str], ckpts: list[str], clips: list[str], vaes: list[
                     "lightning8": next((lo for lo in light if "8steps" in lo), None), "edit": edit,
                     "edit_lightning": edit_light[0] if edit_light else None}
                    if qwen and qte and vae else {"missing": "Qwen-Image 2512 (qwen_image_2512_fp8) and qwen_2.5_vl_7b"})
+    # Qwen-Image 2.1 (generation and editing in one model; the Turbo build for Fast)
+    q21 = pick_qwen21_files(unets, clips, vaes)
+    out["qwen21"] = ({**q21, "models": [m for m in q21["models"] if m != q21.get("turbo")] or q21["models"]}
+                     if q21 else {"missing": "Qwen-Image 2.1 (qwen_image_2.1_*_int8_convrot from "
+                                             "huggingface.co/Comfy-Org/Qwen-Image-2.1, with qwen3vl_8b and "
+                                             "qwen_image_2.1_vae)"})
     # FLUX.3 Image Klein
     f3 = [u for u in unets if "flux3_image_klein" in _low(u)]
     f3te = first(clips, "qwen3vl_4b_int8", "qwen3vl_4b_fp8", "qwen3vl_4b")
@@ -201,6 +214,10 @@ def build_create_workflow(*, family: str, files: dict, model: str, prompt: str, 
                         "inputs": {"model": sampler_model, "seed": seed, "steps": steps, "cfg": cfg,
                                    "sampler_name": "euler", "scheduler": "simple", "positive": ["pos", 0],
                                    "negative": ["neg", 0], "latent_image": ["latent", 0], "denoise": 1.0}}
+    elif family == "qwen21":                       # ComfyUI's Qwen-Image 2.1 templates (see comfy.py)
+        return build_qwen21_workflow(files=files, prompt=prompt, seed=seed, quality=quality, prefix=prefix,
+                                     save_as="create_save", images=list(refs[:3]), size=(w, h), negative=negative,
+                                     loras=loras, model=model)
     elif family == "flux3":
         # the chosen file decides: a base model samples like the template's base (50 steps, cfg 3.5), a distilled one
         # like the distilled template (16 steps, cfg 1); 'best' / 'fast' pick the other kind if no file was chosen
@@ -333,6 +350,11 @@ class ComfyImageCreator(ComfyGenerator):
         self.files = pick_files(combo("UNETLoader", "unet_name"), combo("CheckpointLoaderSimple", "ckpt_name"),
                                 combo("CLIPLoader", "clip_name"), combo("VAELoader", "vae_name"),
                                 combo("LoraLoaderModelOnly", "lora_name"))
+        if "models" in self.files.get("qwen21", {}):
+            from .comfy import QWEN21_NODES
+            lacking = next((n for n in QWEN21_NODES if not self._object_info(n)), None)
+            if lacking:
+                self.files["qwen21"] = {"missing": f"this ComfyUI has no {lacking} node (update ComfyUI)"}
 
     def create(self, family: str, model: str | None, prompt: str, out_png: Path, seed: int, quality: str,
                width: int, height: int, negative: str = "", loras: list[tuple[str, float]] = (),

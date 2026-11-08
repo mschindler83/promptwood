@@ -861,38 +861,138 @@ def build_edit_workflow(*, prompt: str, image: str, refs: list[str] = (), seed: 
     return wf
 
 
+# Qwen-Image 2.1: one model for generation and editing (ComfyUI's templates image_qwen_image_2_1_image_edit / _t2i
+# and their Turbo versions): the base samples 25 steps at cfg 1, Turbo its 8 fixed sigmas at cfg 1
+QWEN21_NODES = ("TextEncodeQwenImage21", "QwenImage21Cache", "ManualSigmas", "CFGGuider", "SamplerCustomAdvanced")
+QWEN21_SIGMAS = "1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0"
+QWEN21_STEPS = 25
+QWEN21_RESOLUTION = 1024           # pictures are seen at about 1024 x 1024 (multiples of 32, aspect kept)
+
+
+def pick_qwen21_files(unets: list[str], clips: list[str], vaes: list[str]) -> dict | None:
+    """Qwen-Image 2.1's files ComfyUI lists: {"base", "turbo", "models", "clip", "vae"}, or None without a model,
+    its text encoder (Qwen3-VL 8B) or its VAE."""
+    def low(n):
+        return n.lower().replace("-", "_")
+    q = [u for u in unets if "qwen_image_2.1" in low(u) or "qwen_image_21" in low(u)]
+    base = sorted([u for u in q if "turbo" not in low(u)], key=lambda u: ("int8" not in u, u))
+    turbo = sorted([u for u in q if "turbo" in low(u)], key=lambda u: ("int8" not in u, u))
+    clip = sorted([c for c in clips if "qwen3vl_8b" in low(c)], key=lambda c: ("int8" not in c, c))
+    vae = sorted([v for v in vaes if "qwen_image_2.1_vae" in low(v) or "qwen_image_21_vae" in low(v)])
+    if not (base or turbo) or not clip or not vae:
+        return None
+    return {"base": base[0] if base else None, "turbo": turbo[0] if turbo else None, "models": base + turbo,
+            "clip": clip[0], "vae": vae[0]}
+
+
+def build_qwen21_workflow(*, files: dict, prompt: str, seed: int, quality: str, prefix: str, save_as: str,
+                          images: list[str] = (), size: tuple[int, int] | None = None, negative: str = "",
+                          loras: list[tuple[str, float]] = (), model: str | None = None) -> dict:
+    """One Qwen-Image 2.1 picture. images: uploaded pictures (image_1 ... in the text encoder: an edit's source
+    first); size: the new picture's (width, height); None: the size of images[0] as the model sees it (an edit).
+    quality 'fast': the Turbo model (8 steps), else the base (25 steps); model: a chosen file (a fine-tune) instead.
+    save_as: the SaveImage node's id."""
+    turbo = quality == "fast" and bool(files.get("turbo"))
+    unet = model if model and model not in (files.get("base"), files.get("turbo")) else \
+        (files["turbo"] if turbo else files.get("base") or files["turbo"])
+    turbo = turbo or (unet == files.get("turbo"))
+    wf: dict = {
+        "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": unet, "weight_dtype": "default"}},
+        "clip": {"class_type": "CLIPLoader", "inputs": {"clip_name": files["clip"], "type": "qwen_image",
+                                                         "device": "default"}},
+        "vae": {"class_type": "VAELoader", "inputs": {"vae_name": files["vae"]}},
+    }
+    m = ["unet", 0]
+    for k, (name, strength) in enumerate(loras):
+        wf[f"lora{k}"] = {"class_type": "LoraLoaderModelOnly",
+                          "inputs": {"model": m, "lora_name": name, "strength_model": float(strength)}}
+        m = [f"lora{k}", 0]
+    wf["cache"] = {"class_type": "QwenImage21Cache", "inputs": {"model": m, "device": "auto", "dtype": "default"}}
+    te = {"clip": ["clip", 0], "prompt": prompt, "negative_prompt": negative or "", "resolution": QWEN21_RESOLUTION}
+    if images:
+        te["vae"] = ["vae", 0]
+        for k, name in enumerate(images[:10]):
+            wf[f"pic{k}"] = {"class_type": "LoadImage", "inputs": {"image": name}}
+            te[f"images.image_{k + 1}"] = [f"pic{k}", 0]
+    wf["text"] = {"class_type": "TextEncodeQwenImage21", "inputs": te}
+    if size is not None or not images:
+        w, h = size or (1024, 1024)
+        wf["latent"] = {"class_type": "EmptyLatentImage", "inputs": {"width": int(w), "height": int(h),
+                                                                     "batch_size": 1}}
+        latent = ["latent", 0]
+    else:
+        latent = ["text", 2]                       # the source's size, as the model sees it
+    if turbo:
+        wf["noise"] = {"class_type": "RandomNoise", "inputs": {"noise_seed": int(seed)}}
+        wf["sampler"] = {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}}
+        wf["sigmas"] = {"class_type": "ManualSigmas", "inputs": {"sigmas": QWEN21_SIGMAS}}
+        wf["guider"] = {"class_type": "CFGGuider", "inputs": {"model": ["cache", 0], "positive": ["text", 0],
+                                                              "negative": ["text", 1], "cfg": 1.0}}
+        wf["sample"] = {"class_type": "SamplerCustomAdvanced",
+                        "inputs": {"noise": ["noise", 0], "guider": ["guider", 0], "sampler": ["sampler", 0],
+                                   "sigmas": ["sigmas", 0], "latent_image": latent}}
+    else:
+        wf["sample"] = {"class_type": "KSampler",
+                        "inputs": {"model": ["cache", 0], "seed": int(seed), "steps": QWEN21_STEPS, "cfg": 1.0,
+                                   "sampler_name": "euler", "scheduler": "simple", "positive": ["text", 0],
+                                   "negative": ["text", 1], "latent_image": latent, "denoise": 1.0}}
+    wf["decode"] = {"class_type": "VAEDecode", "inputs": {"samples": ["sample", 0], "vae": ["vae", 0]}}
+    wf[save_as] = {"class_type": "SaveImage", "inputs": {"images": ["decode", 0], "filename_prefix": prefix}}
+    return wf
+
+
+EDIT_MODELS = {"2511": "Qwen-Image-Edit 2511", "qwen21": "Qwen-Image 2.1"}
+EDIT21_QUALITIES = ("fast", "best")   # Turbo (8 steps) / base (25 steps)
+
+
 class ComfyImageEditor(ComfyGenerator):
-    """Edits an image by a prompt with Qwen Image Edit in ComfyUI (same connection, upload and cleanup as the
-    clip generator)."""
+    """Edits an image by a prompt in ComfyUI (same connection, upload and cleanup as the clip generator), with
+    Qwen-Image-Edit 2511 or Qwen-Image 2.1 (EDIT_MODELS)."""
 
     def _check_models(self):
         def combo(node, field):
             return _combo_options(self._object_info(node).get("input", {}).get("required", {}).get(field))
-        self.files = pick_qwen_files(combo("UNETLoader", "unet_name"), combo("CLIPLoader", "clip_name"),
-                                     combo("VAELoader", "vae_name"), combo("LoraLoaderModelOnly", "lora_name"))
+        unets, clips, vaes = combo("UNETLoader", "unet_name"), combo("CLIPLoader", "clip_name"), \
+            combo("VAELoader", "vae_name")
+        self.files = pick_qwen_files(unets, clips, vaes, combo("LoraLoaderModelOnly", "lora_name"))
+        q21 = pick_qwen21_files(unets, clips, vaes)
+        self.files21 = q21 if q21 and all(self._object_info(n) for n in QWEN21_NODES) else None
         missing = [what for what, key in (("the Qwen Image Edit model (e.g. qwen_image_edit_2511_*.safetensors in "
                                            "models/diffusion_models)", "unet"),
                                           ("its text encoder qwen_2.5_vl_7b*.safetensors", "clip"),
                                           ("its VAE qwen_image_vae.safetensors", "vae")) if not self.files[key]]
-        if missing:
-            raise ComfyError("ComfyUI does not list " + "; ".join(missing))
-        for node in QWEN_NODES:
-            if not self._object_info(node):
-                raise ComfyError(f"this ComfyUI has no {node} node (update ComfyUI)")
+        self.missing_2511 = "ComfyUI does not list " + "; ".join(missing) if missing else ""
+        if not self.missing_2511:
+            for node in QWEN_NODES:
+                if not self._object_info(node):
+                    self.missing_2511 = f"this ComfyUI has no {node} node (update ComfyUI)"
+                    break
+        if self.missing_2511 and self.files21 is None:
+            raise ComfyError(self.missing_2511)
 
-    def qualities(self) -> list[str]:
+    def models(self) -> list[str]:
+        """The edit models this ComfyUI has (keys of EDIT_MODELS)."""
+        return [m for m, ok in (("2511", not self.missing_2511), ("qwen21", self.files21 is not None)) if ok]
+
+    def qualities(self, model: str = "2511") -> list[str]:
+        if model == "qwen21":
+            return list(EDIT21_QUALITIES) if self.files21 and self.files21.get("turbo") else ["best"]
         return (["fast"] if self.files.get("lightning") else []) + ["standard", "best"]
 
     def edit(self, image: Path, prompt: str, out_png: Path, seed: int, quality: str = "fast",
-             refs: list[Path] = (), loras: list[tuple[str, float]] = ()) -> dict:
+             refs: list[Path] = (), loras: list[tuple[str, float]] = (), model: str = "2511") -> dict:
         """Edit image by prompt; the result goes to out_png. loras: (file, strength) in ComfyUI's LoRA folders.
-        Returns what it was made with."""
+        model: a key of EDIT_MODELS. Returns what it was made with."""
         names = []
         for path, strength in loras:
             name = self.name_for(path)
             if name is None:
                 raise ComfyError(f"{Path(path).name} is not in ComfyUI's LoRA folders")
             names.append((name, float(strength)))
+        if model == "qwen21":
+            return self._edit21(image, prompt, out_png, seed, quality, refs, loras, names)
+        if self.missing_2511:
+            raise ComfyError(self.missing_2511)
         light = self.files.get("lightning") if quality == "fast" else None
         if quality == "fast" and not light:
             quality = "standard"
@@ -939,8 +1039,62 @@ class ComfyImageEditor(ComfyGenerator):
                 for up, local in uploads:
                     self._remove(self.input_dir, {"filename": Path(up).name, "subfolder": str(Path(up).parent)},
                                  Path(local), same_size=False)
-        return {"quality": quality, "steps": steps, "cfg": cfg, "model": self.files["unet"],
+        return {"quality": quality, "steps": steps, "cfg": cfg, "model": self.files["unet"], "edit_model": "2511",
                 "lightning": light[0] if light else None,
+                "loras": [{"path": str(p), "strength": float(st)} for p, st in loras]}
+
+    def _run_saving(self, wf: dict, node: str, out_png: Path, uploads: list[tuple[str, Path]]) -> None:
+        """Queue a workflow, wait, download what its SaveImage node `node` wrote to out_png; clean up after."""
+        try:
+            ws = self._connect_ws()
+            try:
+                res = self._json("POST", "/prompt", {"prompt": wf, "client_id": self.client_id})
+                if res.get("node_errors"):
+                    raise ComfyError(f"ComfyUI rejected the workflow: {json.dumps(res['node_errors'])[:600]}")
+                self.current = res["prompt_id"]
+                entry = self._wait(self.current, ws)
+            except ComfyJobFailed:
+                raise
+            except Exception:
+                self.interrupt()
+                raise
+            finally:
+                if ws is not None:
+                    try:
+                        ws.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                self.current = None
+            out = self._first_file((entry.get("outputs") or {}).get(node))
+            if out is None:
+                raise ComfyError("ComfyUI finished without the edited image")
+            Path(out_png).write_bytes(self._download(out))
+            if self.cleanup:
+                self._remove(self.output_dir, out, Path(out_png))
+        finally:
+            if self.cleanup:
+                for up, local in uploads:
+                    self._remove(self.input_dir, {"filename": Path(up).name, "subfolder": str(Path(up).parent)},
+                                 Path(local), same_size=False)
+
+    def _edit21(self, image, prompt, out_png, seed, quality, refs, loras, names) -> dict:
+        if self.files21 is None:
+            raise ComfyError("Qwen-Image 2.1 is not available (qwen_image_2.1_*.safetensors, qwen3vl_8b and "
+                             "qwen_image_2.1_vae in ComfyUI's models, and a ComfyUI with its nodes)")
+        if quality not in self.qualities("qwen21"):
+            quality = self.qualities("qwen21")[-1]
+        uploads: list[tuple[str, Path]] = []
+        pics = []
+        for p in [image, *list(refs)[:2]]:
+            uploads.append((self.upload(Path(p)), Path(p)))
+            pics.append(uploads[-1][0])
+        wf = build_qwen21_workflow(files=self.files21, prompt=prompt, seed=seed, quality=quality,
+                                   prefix=f"{SUBFOLDER}/edit_{uuid.uuid4().hex[:12]}", save_as="edit_save",
+                                   images=pics, loras=names)
+        self._run_saving(wf, "edit_save", out_png, uploads)
+        turbo = wf["sample"]["class_type"] == "SamplerCustomAdvanced"
+        return {"quality": quality, "steps": 8 if turbo else QWEN21_STEPS, "cfg": 1.0, "edit_model": "qwen21",
+                "model": wf["unet"]["inputs"]["unet_name"], "lightning": None,
                 "loras": [{"path": str(p), "strength": float(st)} for p, st in loras]}
 
 

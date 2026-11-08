@@ -447,7 +447,28 @@ def test_qwen_image_edit(server, start, tmp_path):
     wf = server.prompts[-1]
     assert "lightning" not in wf and wf["sample"]["inputs"]["steps"] == 40 and wf["sample"]["inputs"]["cfg"] == 4.0
     assert C.pick_qwen_files(["x.safetensors"], [], [], [])["unet"] is None
-    server.qwen = False
+    assert meta["edit_model"] == "2511" and ed.models() == ["2511", "qwen21"]
+    # Qwen-Image 2.1 (ComfyUI's image_qwen_image_2_1_image_edit): the source as image_1, its own latent size
+    meta = ed.edit(start, "she smiles", out, 9, "fast", [face], model="qwen21")
+    wf = server.edited
+    assert meta["edit_model"] == "qwen21" and meta["steps"] == 8 and ed.qualities("qwen21") == ["fast", "best"]
+    assert wf["unet"]["inputs"]["unet_name"].endswith("qwen_image_2.1_turbo_int8_convrot.safetensors")
+    te = wf["text"]["inputs"]
+    assert wf["text"]["class_type"] == "TextEncodeQwenImage21" and te["images.image_1"] == ["pic0", 0]
+    assert te["images.image_2"] == ["pic1", 0] and te["vae"] == ["vae", 0] and te["resolution"] == 1024
+    assert wf["sample"]["inputs"]["latent_image"] == ["text", 2] and "latent" not in wf
+    assert wf["sigmas"]["inputs"]["sigmas"] == C.QWEN21_SIGMAS and wf["guider"]["inputs"]["cfg"] == 1.0
+    assert wf["cache"]["inputs"]["model"] == ["unet", 0] and wf["clip"]["inputs"]["type"] == "qwen_image"
+    meta = ed.edit(start, "night", out, 9, "best", model="qwen21")
+    wf = server.edited
+    assert meta["steps"] == 25 and wf["sample"]["class_type"] == "KSampler" and wf["sample"]["inputs"]["cfg"] == 1.0
+    assert wf["unet"]["inputs"]["unet_name"].endswith("qwen_image_2.1_int8_convrot.safetensors")
+    server.qwen = False                                    # only 2.1 left: editing still works with it
+    ed = C.ComfyImageEditor(server.url)
+    assert ed.models() == ["qwen21"]
+    with pytest.raises(C.ComfyError, match="Qwen Image Edit model"):
+        ed.edit(start, "x", out, 1, "fast")
+    server.qwen21 = False
     with pytest.raises(C.ComfyError, match="Qwen Image Edit model"):
         C.ComfyImageEditor(server.url)
 
@@ -632,6 +653,16 @@ def test_image_families_from_comfyui_lists():
                           "diffusion_model.blocks.0.mlp.gate.lora_A.weight"]) == "krea2"
     assert G.lora_family(["diffusion_model.layers.0.adaLN_modulation.0.lora_A.weight"]) is None   # Z-Image
     assert G.lora_family(["diffusion_model.blocks.0.self_attn.q.lora_A.weight"]) is None          # e.g. Wan
+    assert "Qwen-Image 2.1" in files["qwen21"]["missing"]
+    q21 = C.pick_qwen21_files(["qwen-image/qwen_image_2.1_turbo_int8_convrot.safetensors",
+                               "qwen-image/qwen_image_2.1_bf16.safetensors",
+                               "qwen-image/qwen_image_2.1_int8_convrot.safetensors"],
+                              ["qwen3vl_8b_bf16.safetensors", "qwen3vl_8b_int8_convrot.safetensors"],
+                              ["qwen_image_2.1_vae_bf16.safetensors"])
+    assert q21["base"].endswith("2.1_int8_convrot.safetensors") and q21["turbo"].endswith("turbo_int8_convrot.safetensors")
+    assert q21["clip"] == "qwen3vl_8b_int8_convrot.safetensors" and q21["vae"] == "qwen_image_2.1_vae_bf16.safetensors"
+    assert C.pick_qwen21_files(["qwen-image/qwen_image_2.1_bf16.safetensors"], [], []) is None   # no encoder
+    assert G.size_for("qwen21", 16 / 9) == (1376, 768)
 
 
 def test_create_images_in_every_family(server, start, tmp_path):
@@ -668,6 +699,20 @@ def test_create_images_in_every_family(server, start, tmp_path):
     assert server.created["pos"]["class_type"] == "FluxGuidance" and server.created["clip"]["inputs"]["type"] == "flux"
     with pytest.raises(C.ComfyError, match="not available"):
         cr.create("flux3", None, "x", out, 5, "fast", 1024, 1024)
+    # Qwen-Image 2.1 (ComfyUI's image_qwen_image_2_1_t2i / turbo_t2i): Turbo 8 fixed steps, base 25, cfg 1
+    assert cr.files["qwen21"]["models"] == ["qwen-image/qwen_image_2.1_int8_convrot.safetensors"]   # Turbo: Fast
+    meta = cr.create("qwen21", None, "a lighthouse at dusk", out, 5, "fast", 1376, 768)
+    wf = server.created
+    assert wf["unet"]["inputs"]["unet_name"].endswith("turbo_int8_convrot.safetensors") and meta["steps"] == 8
+    assert wf["latent"]["inputs"]["width"] == 1376 and Image.open(out).size == (1376, 768)
+    assert "vae" not in wf["text"]["inputs"] and wf["text"]["inputs"]["prompt"] == "a lighthouse at dusk"
+    meta = cr.create("qwen21", None, "the woman from the first picture on a beach", out, 5, "best", 1024, 1024,
+                     refs=[start])
+    wf = server.created
+    assert meta["steps"] == 25 and wf["text"]["inputs"]["images.image_1"] == ["pic0", 0]
+    assert wf["sample"]["inputs"]["latent_image"] == ["latent", 0]          # the chosen size, not the picture's
+    server.qwen21 = False
+    assert "missing" in G.ComfyImageCreator(server.url).files["qwen21"]
 
 
 def test_pika_h3_flex_workflow(server, start, tmp_path):

@@ -22,7 +22,9 @@ KNOWN = {"UNETLoader", "CLIPLoader", "VAELoader", "LoadImage", "MiniMaxH3ImageTo
          # image creation
          "CLIPTextEncode", "ConditioningZeroOut", "EmptyLatentImage", "EmptySD3LatentImage", "CFGGuider",
          "ModelSamplingFlux", "DualCLIPLoader", "FluxGuidance", "CheckpointLoaderSimple", "LoraLoader", "ImageScale",
-         "EmptyFlux2LatentImage", "ReferenceMultiLatent", "BatchImagesNode", "MiniMaxH3ContextWindows"}
+         "EmptyFlux2LatentImage", "ReferenceMultiLatent", "BatchImagesNode", "MiniMaxH3ContextWindows",
+         # Qwen-Image 2.1
+         "TextEncodeQwenImage21", "QwenImage21Cache"}
 IMAGE_UNETS = ["krea2/krea2_turbo_fp8_scaled.safetensors", "qwen-image/qwen_image_2512_fp8_e4m3fn.safetensors",
                "FLUX1/flux1-dev-fp8.safetensors"]
 IMAGE_CKPTS = ["illustrij_v20.safetensors"]
@@ -39,6 +41,9 @@ C_REFINE_SIGMAS = "0.909, 0.857, 0.667, 0"
 QWEN_UNET, QWEN_CLIP, QWEN_VAE = ("qwen-image/qwen_image_edit_2511_fp8mixed.safetensors",
                                   "qwen_2.5_vl_7b_fp8_scaled.safetensors", "qwen_image_vae.safetensors")
 QWEN_LIGHTNING = "qwen-image-edit/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
+QWEN21_UNETS = ["qwen-image/qwen_image_2.1_int8_convrot.safetensors",
+                "qwen-image/qwen_image_2.1_turbo_int8_convrot.safetensors"]
+QWEN21_CLIP, QWEN21_VAE = "qwen3vl_8b_int8_convrot.safetensors", "qwen_image_2.1_vae_bf16.safetensors"
 
 
 class FakeComfy:
@@ -50,6 +55,7 @@ class FakeComfy:
         self.loras, self.fail_with, self.models_missing = list(loras), fail_with, models_missing
         self.turbo_nodes = True
         self.qwen = True                           # the Qwen Image Edit files and nodes are there
+        self.qwen21 = True                         # Qwen-Image 2.1: its files and nodes
         self.hyperflow = True                      # ComfyUI-HyperFlow-H3 with its weights
         self.refine = True                         # the H3 2K nodes, the latent upscaler and the refiner LoRA
         self.audio_refs = True                     # MiniMaxH3ReferenceToVideo takes reference sounds
@@ -65,10 +71,13 @@ class FakeComfy:
 
     def object_info(self, node):
         from video_chain import comfy as C
-        q = self.qwen
-        files = {"UNETLoader": ("unet_name", [C.UNET, C.UNET_REF] + ([QWEN_UNET] if q else []) + IMAGE_UNETS),
-                 "CLIPLoader": ("clip_name", [C.TEXT_ENCODER] + ([QWEN_CLIP] if q else []) + LLM_FILES + IMAGE_CLIPS),
-                 "VAELoader": ("vae_name", [C.VIDEO_VAE, C.AUDIO_VAE] + ([QWEN_VAE] if q else []) + IMAGE_VAES),
+        q, q21 = self.qwen, self.qwen21
+        files = {"UNETLoader": ("unet_name", [C.UNET, C.UNET_REF] + ([QWEN_UNET] if q else []) + IMAGE_UNETS
+                                + (QWEN21_UNETS if q21 else [])),
+                 "CLIPLoader": ("clip_name", [C.TEXT_ENCODER] + ([QWEN_CLIP] if q else []) + LLM_FILES + IMAGE_CLIPS
+                                + ([QWEN21_CLIP] if q21 else [])),
+                 "VAELoader": ("vae_name", [C.VIDEO_VAE, C.AUDIO_VAE] + ([QWEN_VAE] if q else []) + IMAGE_VAES
+                               + ([QWEN21_VAE] if q21 else [])),
                  "CheckpointLoaderSimple": ("ckpt_name", IMAGE_CKPTS),
                  "LoraLoaderModelOnly": ("lora_name", self.loras + ([QWEN_LIGHTNING] if q else [])
                                          + ([REFINER] if self.refine else []) + IMAGE_LORAS),
@@ -80,6 +89,8 @@ class FakeComfy:
         if node == "ApplyHyperFlowH3":
             return {node: {"input": {"required": {"hyperflow_file": [[HYPERFLOW, "custom_node_hyperflow_8step_v1.0_comfyui.safetensors"]]}}}} \
                 if self.hyperflow else {}
+        if node in C.QWEN21_NODES:
+            return {node: {"input": {"required": {}}}} if q21 else {}
         if node in C.QWEN_NODES:
             return {node: {"input": {"required": {}}}} if q else {}
         if node in ("MiniMaxH3ImageToVideo", "MiniMaxH3TurboSampler", "MiniMaxH3TurboLoRA", "MiniMaxH3AddGuide",
@@ -134,6 +145,7 @@ class FakeComfy:
             return {"refine_save": {"images": [{"filename": out.name, "subfolder": str(Path(prefix).parent),
                                                 "type": "output"}]}}
         if "edit_save" in wf:                        # Qwen Image Edit: a 1024x576 picture
+            self.edited = wf
             for nid, node in wf.items():
                 if node["class_type"] == "LoadImage":
                     assert (self.root / "input" / node["inputs"]["image"]).is_file(), f"{nid} not uploaded"

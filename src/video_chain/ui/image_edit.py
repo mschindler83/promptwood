@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDia
                                QWidget)
 
 from .image_picker import pick_image
+from ..comfy import EDIT_MODELS
 from ..imagegen import FAMILIES, size_for
 from .lora_stack import LoraStack, lora_label
 from .widgets import FrameTile, guard_wheel, icon_button, label
@@ -162,7 +163,7 @@ class ImageEditDialog(QDialog):
                  uses=None, refine=None, connect_create=None, family_loras=None,
                  start_aspect: float | None = None, mode: str = "edit", check_lora=None):
         super().__init__(parent)
-        self.setWindowTitle("Edit an image with AI (Qwen Image Edit)")
+        self.setWindowTitle("Edit an image with AI")
         self.resize(1240, 820)
         self.project, self.connect_editor, self.on_use = Path(project), connect, on_use
         self.end_target, self.qs, self.places, self.start_comfy = end_target, settings, places or [], start_comfy
@@ -227,6 +228,18 @@ class ImageEditDialog(QDialog):
         self.src_info = label("", level="tertiary")
         self.src_info.setWordWrap(True)
         ev.addWidget(self.src_info)
+        erow = QHBoxLayout()
+        self.edit_model = QComboBox()
+        for key, text in EDIT_MODELS.items():
+            self.edit_model.addItem(text, key)
+        self.edit_model.setToolTip("Qwen-Image-Edit 2511: the proven edit model. Qwen-Image 2.1 (2026): newer and "
+                                   "smaller, one model for creating and editing; research licence (non-commercial)")
+        saved = settings.value("editModel", "", type=str) if settings is not None else ""
+        self.edit_model.setCurrentIndex(max(0, self.edit_model.findData(saved)))
+        self.edit_model.currentIndexChanged.connect(self._edit_model_changed)
+        erow.addWidget(label("Model", level="tertiary"))
+        erow.addWidget(self.edit_model, 1)
+        ev.addLayout(erow)
         left.addWidget(self.edit_box)
 
         # ---- create: model, references, size
@@ -489,7 +502,7 @@ class ImageEditDialog(QDialog):
         (self.m_create if create else self.m_edit).setChecked(True)
         if self.qs is not None:
             self.qs.setValue("imageMode", "create" if create else "edit")
-        self.setWindowTitle("Create a new image with AI" if create else "Edit an image with AI (Qwen Image Edit)")
+        self.setWindowTitle("Create a new image with AI" if create else "Edit an image with AI")
         for w in (self.edit_box, self.edit_pics, self.keep_size):
             w.setVisible(not create)
         self.create_box.setVisible(create)
@@ -501,6 +514,9 @@ class ImageEditDialog(QDialog):
         if create:
             fam = self.family.currentData()
             for key, text in (FAMILIES[fam]["qualities"].items() if fam in FAMILIES else []):
+                self.quality.addItem(text, key)
+        elif self.edit_model.currentData() == "qwen21":
+            for key, text in FAMILIES["qwen21"]["qualities"].items():
                 self.quality.addItem(text, key)
         else:
             for q in ("fast", "standard", "best"):
@@ -517,7 +533,28 @@ class ImageEditDialog(QDialog):
         self._update_buttons()
 
     def _quality_key(self) -> str:
-        return f"createQuality_{self.family.currentData()}" if self.mode() == "create" else "editQuality"
+        if self.mode() == "create":
+            return f"createQuality_{self.family.currentData()}"
+        return "editQuality" if self.edit_model.currentData() == "2511" else f"editQuality_{self.edit_model.currentData()}"
+
+    def _edit_model_changed(self, *_):
+        if self.qs is not None:
+            self.qs.setValue("editModel", self.edit_model.currentData())
+        if self.mode() == "edit":
+            self.set_mode("edit")                # its qualities and LoRAs
+
+    def _show_edit_models(self):
+        """Qwen-Image 2.1 can be chosen only when ComfyUI has it (known from the model list of Create)."""
+        info = self.families.get("qwen21") or {}
+        k = self.edit_model.findData("qwen21")
+        if not self.families:
+            return                                 # not listed yet: both stay offered
+        ok = "models" in info
+        self.edit_model.model().item(k).setEnabled(ok)
+        self.edit_model.setItemText(k, EDIT_MODELS["qwen21"] + ("" if ok else "  (not available)"))
+        self.edit_model.setItemData(k, EDIT_MODELS["qwen21"] if ok else info.get("missing", ""), Qt.ToolTipRole)
+        if not ok and self.edit_model.currentData() == "qwen21":
+            self.edit_model.setCurrentIndex(self.edit_model.findData("2511"))
 
     def _remember_quality(self):
         if self.qs is not None and self.quality.currentData():
@@ -565,6 +602,7 @@ class ImageEditDialog(QDialog):
         i = self.family.findData(saved)
         self.family.setCurrentIndex(i if i in avail else (avail[0] if avail else 0))
         self.family.blockSignals(False)
+        self._show_edit_models()
         self._family_changed()
 
     def _family_changed(self, *_):
@@ -599,9 +637,11 @@ class ImageEditDialog(QDialog):
             self.lora_text.setText(f"LoRAs (optional): {f['label']} LoRAs from ComfyUI's LoRA folders (found by "
                                    f"their contents; {found} found), applied in this order." if f else "")
         else:
-            self.lora_text.setText("LoRAs (optional): Qwen Image / Image Edit LoRAs from ComfyUI's LoRA folders, "
-                                   "applied in this order. Text-to-image Qwen LoRAs often work for edits too, not "
-                                   "always.")
+            self.lora_text.setText(
+                "LoRAs (optional): LoRA files made for Qwen-Image 2.1 (Qwen-Image 2512 and Image Edit LoRAs do not "
+                "fit it), applied in this order." if self.edit_model.currentData() == "qwen21" else
+                "LoRAs (optional): Qwen Image / Image Edit LoRAs from ComfyUI's LoRA folders, applied in this order. "
+                "Text-to-image Qwen LoRAs often work for edits too, not always.")
         self.b_gen.setToolTip("Make the image (Ctrl+Enter)" if create else
                               "Edit the image with this prompt (Ctrl+Enter)")
         self._update_buttons()
@@ -685,7 +725,9 @@ class ImageEditDialog(QDialog):
             where = self.uses(meta)
             how = (f"{FAMILIES.get(meta.get('family'), {}).get('label', '')} "
                    f"{FAMILIES.get(meta.get('family'), {}).get('qualities', {}).get(meta.get('quality'), '')}"
-                   if meta.get("mode") == "create" else QUALITY_TEXT.get(meta.get("quality"), ""))
+                   if meta.get("mode") == "create" else
+                   f"{EDIT_MODELS['qwen21']} {FAMILIES['qwen21']['qualities'].get(meta.get('quality'), '')}"
+                   if meta.get("edit_model") == "qwen21" else QUALITY_TEXT.get(meta.get("quality"), ""))
             self.res_info.setText(("ORIGINAL · " if show != png else "") +
                                   (f"IN USE: {', '.join(where)} · " if where else "") +
                                   f"“{meta.get('prompt', '')}” · {how} · "
@@ -727,6 +769,7 @@ class ImageEditDialog(QDialog):
         self._busy, self._cancel = True, False
         prompt = " ".join(self.prompt.toPlainText().split())
         source, quality, n = self.source, self.quality.currentData(), self.tries.value()
+        model = self.edit_model.currentData()
         refs = [p for p in (self.pic2.path, self.pic3.path) if p]
         loras = [(it["path"], it["strength"]) for it in self.loras.items()]
         self._remember_loras()
@@ -750,7 +793,9 @@ class ImageEditDialog(QDialog):
                 edits.mkdir(parents=True, exist_ok=True)
                 cur = {"k": 1}
                 self.editor = connect(lambda i, s: sig.progress.emit(cur["k"], n, i, s))
-                if quality == "fast" and "fast" not in self.editor.qualities():
+                if model not in self.editor.models():
+                    raise RuntimeError(f"{EDIT_MODELS[model]} is not available in ComfyUI")
+                if quality == "fast" and "fast" not in self.editor.qualities(model):
                     sig.progress.emit(0, n, 0, 0)
                 kept = edits / "sources" / f"source_{time.strftime('%Y%m%d-%H%M%S')}{Path(source).suffix.lower() or '.png'}"
                 kept.parent.mkdir(exist_ok=True)
@@ -762,7 +807,8 @@ class ImageEditDialog(QDialog):
                     seed = random.randint(1, 2**31 - 1)
                     stem = f"edit_{time.strftime('%Y%m%d-%H%M%S')}_{seed}"
                     out = edits / f"{stem}.png"
-                    meta = self.editor.edit(Path(source), prompt, out, seed, quality, [Path(r) for r in refs], loras)
+                    meta = self.editor.edit(Path(source), prompt, out, seed, quality, [Path(r) for r in refs], loras,
+                                            model=model)
                     if size is not None:
                         scale_to(out, out, size)
                     meta.update({"prompt": prompt, "seed": seed, "source": source, "source_copy": str(kept),
@@ -1003,15 +1049,24 @@ class ImageEditDialog(QDialog):
             self.negative.setText(meta.get("negative") or "")
             if "tags" in meta:
                 self.tags.setChecked(bool(meta["tags"]))
-        elif meta.get("mode") != "create" and self.mode() != "edit":
-            self.set_mode("edit")
+        elif meta.get("mode") != "create":
+            if self.mode() != "edit":
+                self.set_mode("edit")
+            i = self.edit_model.findData(meta.get("edit_model") or "2511")
+            if i >= 0 and self.edit_model.model().item(i).isEnabled():
+                self.edit_model.setCurrentIndex(i)
+            q = self.quality.findData(meta.get("quality"))
+            if q >= 0:
+                self.quality.setCurrentIndex(q)
         self.prompt.setPlainText(meta.get("prompt", ""))
         self.loras.set_items(self._known(), meta.get("loras") or [])
         self._remember_loras()
 
     # ---- LoRAs
     def _lora_key(self) -> str:
-        return f"createLoras_{self.family.currentData()}" if self.mode() == "create" else "editLoras"
+        if self.mode() == "create":
+            return f"createLoras_{self.family.currentData()}"
+        return "editLoras" if self.edit_model.currentData() == "2511" else f"editLoras_{self.edit_model.currentData()}"
 
     def _known(self) -> list[tuple[str, str]]:
         """The LoRAs ComfyUI has for this mode (edit: Qwen; create: the chosen family), then LoRA files chosen here
@@ -1019,6 +1074,8 @@ class ImageEditDialog(QDialog):
         if self.mode() == "create":
             fam = self.family.currentData()
             out = list(self.family_loras.get("qwen" if fam == "qwen" else fam, []))
+        elif self.edit_model.currentData() == "qwen21":
+            out = []                               # Qwen-Image 2512 / Edit LoRAs do not fit 2.1
         else:
             out = list(self.known_loras)
         listed = {p for p, _ in out}
