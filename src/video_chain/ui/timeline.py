@@ -78,8 +78,9 @@ class _Lane(QWidget):
             px += w
         total = sum(b.secs for b in self.blocks)
         gap = (px - 8.0) / max(total, 0.001)            # pixels per second on average
-        label_step = next((st for st in (1, 2, 5, 10, 15, 30, 60, 120, 300, 600) if st * gap >= 44), 1200)
         tick_step = next((st for st in (1, 2, 5, 10, 30, 60, 300) if st * gap >= 6), 600)
+        label_step = next((st for st in (1, 2, 5, 10, 20, 30, 60, 120, 300, 600, 1200, 1800, 3600)
+                           if st % tick_step == 0 and st * gap >= 44), 3600)   # labels fall on ticks
         sec, i, acc = 0, 0, 0.0
         while pos and sec <= total + 0.01:
             while i < len(pos) - 1 and acc + pos[i][2].secs < sec:

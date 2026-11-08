@@ -1615,7 +1615,7 @@ class MainWindow(QMainWindow):
         for w in (*self._panels, self.prefs):
             guard_wheel(w)
         QShortcut(QKeySequence("Delete"), self.graph,
-                  activated=lambda: self.node_action("delete", self.selected_id()))
+                  activated=lambda: self.node_action("delete", self.target_id()))
         QShortcut(QKeySequence("F"), self.graph, activated=self.graph.fit)
         self._update_buttons()
 
@@ -3439,6 +3439,7 @@ class MainWindow(QMainWindow):
             self.focus_info.setText("")
         self.timeline.set_focus(self.focus)
         self.graph.set_focus(self.focus)
+        self._update_buttons()                     # (the actions follow the clip in focus)
 
     def focus_clip(self, nid: str):
         """Show a clip of the path in the inspector (the path stays as it is)."""
@@ -3584,8 +3585,8 @@ class MainWindow(QMainWindow):
 
     def _update_buttons(self):
         has = self.tree is not None
-        sel = self.selected_id() if has else None
-        is_clip = bool(has and sel and sel != START)
+        sel = self.target_id() if has else None     # the actions work on the clip in the inspector
+        is_clip = bool(has and sel and sel != START and sel in self.tree.nodes)
         idle = not self.running
         self.b_continue.setEnabled(has and idle)
         self.b_add_video.setEnabled(has and idle)
@@ -3602,10 +3603,18 @@ class MainWindow(QMainWindow):
         self.b_gen.setEnabled(free and bool(path))
         self.b_gen_all.setEnabled(free and has and bool(self.tree.nodes))
         self.b_delete.setEnabled(is_clip and free)
+        num = f" #{sel[1:]}" if is_clip else ""
+        self.b_branch.setToolTip(f"Branch: another continuation from the same point as clip{num} (Ctrl+B)")
+        self.b_variant.setToolTip(f"Variant of clip{num}: same prompt, other seed (Ctrl+D)")
+        self.b_delete.setToolTip(f"Delete clip{num} (the one in the inspector) and everything after it (Del)")
         self.b_play_path.setEnabled(all_done and idle)
         self.b_export.setEnabled(all_done and idle)
         fn = self.tree.nodes.get(self.focus) if has and self.focus else None
         self.b_play_clip.setEnabled(bool(fn and fn.made))
+        self.b_play_clip.setToolTip(f"Play clip #{fn.id[1:]}, the one in the inspector" if fn and fn.made else
+                                    "The clip in the inspector is not made yet" if fn else
+                                    "Show a clip in the inspector first")
+        self.b_play_film.setToolTip("Join the scenes of the film and play it (all scenes must be made)")
         self.b_play_film.setEnabled(self.film is not None and idle and not (self._copying or self._joins
                                                                           or self._converts))
         todo = sum(1 for n in path if self.state(n.id) != "done")
