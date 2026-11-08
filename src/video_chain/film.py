@@ -20,7 +20,7 @@ from . import tree as T
 
 FILM_FILE = "film.json"
 SCENES_DIR = "scenes"
-SHARED_OPTIONS = ("cast", "identity", "audio_refs", "resolution", "audio")
+SHARED_OPTIONS = ("cast", "identity", "audio_refs", "tracks", "resolution", "audio")
 JOINS = {"cut": "Cut", "fade": "Crossfade", "continue": "Continue"}   # how a scene follows the one before
 FADE_SECS = 0.5
 

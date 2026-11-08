@@ -644,6 +644,30 @@ class PromptCard(QFrame):
                 self._enable_guide()
         self._ov_changed()
 
+    def set_tracks(self, tracks: list[tuple[str, str]]):
+        """The project's audio tracks as choices of the Sound dropdown: (id, name)."""
+        want = [(f"Audio track: {name}", T.TRACK_PREFIX + tid) for tid, name in tracks]
+        have = [(self.src_sound.itemText(k), self.src_sound.itemData(k)) for k in range(len(SOUND_MODES),
+                                                                                       self.src_sound.count())]
+        cur = (getattr(self, "ov", None) or {}).get("source_sound") or None     # (the clip's own setting)
+        if isinstance(cur, str) and cur.startswith(T.TRACK_PREFIX) and cur not in [d for _t, d in want]:
+            want.append(("Audio track: (removed)", cur))   # kept, so the setting shows and can be taken back
+        if want == have:
+            if self.src_sound.currentData() != cur and self.src_sound.findData(cur) >= 0:
+                self.src_sound.blockSignals(True)
+                self.src_sound.setCurrentIndex(self.src_sound.findData(cur))
+                self.src_sound.blockSignals(False)
+            return
+        self.src_sound.blockSignals(True)
+        try:
+            while self.src_sound.count() > len(SOUND_MODES):
+                self.src_sound.removeItem(len(SOUND_MODES))
+            for text, data in want:
+                self.src_sound.addItem(text, data)
+            self.src_sound.setCurrentIndex(max(0, self.src_sound.findData(cur)))
+        finally:
+            self.src_sound.blockSignals(False)
+
     def set_source_sound(self, available: bool, info: str, max_guide: int = 0, repeat: bool = False):
         """The 'Sound' row: shown for a clip after another clip (or when it is set). available: a real video comes
         before it (its sound can be continued); repeat: there is a clip before it (its sound can be repeated); info:
@@ -654,10 +678,12 @@ class PromptCard(QFrame):
         model = self.src_sound.model()
         for k in range(self.src_sound.count()):        # a choice in use stays choosable (to be taken back)
             d = self.src_sound.itemData(k)
-            ok = d is None or d == cur or (available if d is True else repeat)
+            track = isinstance(d, str) and d.startswith(T.TRACK_PREFIX)
+            ok = d is None or d == cur or track or (available if d is True else repeat)
             model.item(k).setEnabled(ok)
-        self._link.setRowVisible(self.sound_box, available or repeat or bool(cur))
-        self.src_sound.setEnabled(not self.edit.isReadOnly() and (available or repeat or bool(cur)))
+        some = available or repeat or bool(cur) or self.src_sound.count() > len(SOUND_MODES)
+        self._link.setRowVisible(self.sound_box, some)
+        self.src_sound.setEnabled(not self.edit.isReadOnly() and some)
         self.src_sound_info.setText(info if cur else "")
         self.src_sound_info.setVisible(bool(cur) and bool(info))
 
@@ -1198,6 +1224,47 @@ class MainWindow(QMainWindow):
         self.ref_hint.toggled.connect(self._identity_changed)
         self.dialogue_lang.activated.connect(self._identity_changed)          # a finished choice, not each key
         self.dialogue_lang.lineEdit().editingFinished.connect(self._identity_changed)
+
+        bar, _ = section_bar("Audio tracks", left)
+        sound_v.addWidget(bar)
+        tw = QWidget()
+        tv = QVBoxLayout(tw)
+        tv.setContentsMargins(10, 6, 10, 8)
+        tv.setSpacing(6)
+        self.track_list = QListWidget()
+        self.track_list.setFixedHeight(96)
+        self.track_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.track_list.setToolTip("Sound the clips play as their soundtrack (a clip's Sound: “Audio track: …”). "
+                                   "Double-click to cut it again")
+        self.track_list.itemDoubleClicked.connect(lambda _i: self._recut_track())
+        self.track_list.currentRowChanged.connect(lambda _r: self._update_track_buttons())
+        tv.addWidget(self.track_list)
+        trow = QHBoxLayout()
+        self.b_track_add = QPushButton("Import…")
+        self.b_track_add.setToolTip("Import the sound of an MP3, WAV, OGG, FLAC … or a video file and cut it to the "
+                                    "part you need")
+        self.b_track_add.clicked.connect(lambda: self.import_track())
+        self.b_track_clip = QPushButton("From selected clip…")
+        self.b_track_clip.clicked.connect(self._track_from_selected)
+        self.b_track_cut = QPushButton("Cut…")
+        self.b_track_cut.setToolTip("Change the part of the file the track plays (or its name); the clips playing it "
+                                    "count as changed")
+        self.b_track_cut.clicked.connect(self._recut_track)
+        self.b_track_play = icon_button("play", "Listen to the selected audio track")
+        self.b_track_play.clicked.connect(self._play_track)
+        self.b_track_del = QPushButton("Remove")
+        self.b_track_del.setToolTip("Remove the selected audio track")
+        self.b_track_del.clicked.connect(self._remove_track)
+        for w in (self.b_track_add, self.b_track_clip):
+            trow.addWidget(w)
+        trow.addStretch(1)
+        for w in (self.b_track_cut, self.b_track_play, self.b_track_del):
+            trow.addWidget(w)
+        tv.addLayout(trow)
+        self.track_info = label("", level="tertiary")
+        self.track_info.setWordWrap(True)
+        tv.addWidget(self.track_info)
+        sound_v.addWidget(tw)
 
         bar, _ = section_bar("Sound reference", left)
         sound_v.addWidget(bar)
@@ -2410,6 +2477,7 @@ class MainWindow(QMainWindow):
         self._show_start_image()
         self._show_references()
         self._show_sounds()
+        self._show_tracks()
         if not tree.nodes:
             tree.selected = tree.add(None, "").id
         if tree.selected is None:
@@ -3094,6 +3162,150 @@ class MainWindow(QMainWindow):
         if 0 <= row < len(refs) and self.project is not None:
             self.preview.open(self.project / refs[row]["file"], f"<Audio {row + 1}>: {refs[row].get('name', '')}")
 
+    # ---- audio tracks (imported sound the clips play, carried on from clip to clip)
+    def _track_dialog(self, file: str = "", start=None, end=None, name: str = "", title: str = "Audio track"):
+        from .audio_editor import AudioRangeDialog
+        return AudioRangeDialog(self, file=file, start=start, end=end, name=name, settings=self.qs, title=title,
+                                player=os.environ.get("QT_QPA_PLATFORM") != "offscreen")
+
+    def import_track(self, file: str = "", name: str = "") -> str | None:
+        """Choose a sound file, cut it, add it as an audio track. Returns its id."""
+        if self.project is None or self.tree is None or self.running:
+            return None
+        dlg = self._track_dialog(file, name=name, title="Import an audio track")
+        if not file:
+            dlg._choose()
+            if not dlg.file:
+                dlg.deleteLater()
+                return None
+        if dlg.exec() != QDialog.Accepted or not dlg.file:
+            return None
+        return self.add_track(dlg.file, dlg.start, dlg.end, dlg.name.text().strip())
+
+    def add_track(self, file: str, start: float, end: float | None, name: str = "") -> str | None:
+        if self.project is None or self.tree is None or self.running:
+            return None
+        try:
+            entry = T.add_track(self.project, self.tree, Path(file), start, end, name or None)
+        except (ValueError, OSError, RuntimeError) as e:
+            self.status.setText(f"Could not import the sound: {e}")
+            return None
+        self._show_tracks(select=entry["id"])
+        self._write_tree()
+        self._changed()
+        self.status.setText(f"Audio track “{entry['name']}” added ({entry['secs']:.1f} s). Choose it in a clip's "
+                            "Sound setting; the clips after it that play it too carry it on.")
+        return entry["id"]
+
+    def _track_from_selected(self):
+        node = self.tree.nodes.get(self.target_id()) if self.tree else None
+        if node is None or not (node.made or {}).get("video"):
+            self.status.setText("Select a made clip or a converted video first.")
+            return
+        what = f"{'video' if node.is_video else 'clip'} #{node.id[1:]}"
+        self.import_track(str(self.project / node.made["video"]), name=f"sound of {what}")
+
+    def _selected_track(self) -> dict | None:
+        item = self.track_list.currentItem()
+        return T.track_of(self.tree, item.data(Qt.UserRole)) if item is not None and self.tree else None
+
+    def _recut_track(self):
+        tr = self._selected_track()
+        if tr is None or self.project is None or self.running:
+            return
+        src = tr.get("source") or ""
+        if src and Path(src).is_file():
+            dlg = self._track_dialog(src, tr.get("start"), tr.get("end"), tr["name"], title="Cut the audio track")
+        else:                                           # the original is gone: cut the track's own sound
+            dlg = self._track_dialog(str(self.project / tr["file"]), 0.0, float(tr["secs"]), tr["name"],
+                                     title="Cut the audio track")
+        if dlg.exec() != QDialog.Accepted or not dlg.file:
+            return
+        self.recut_track(tr["id"], dlg.file, dlg.start, dlg.end, dlg.name.text().strip())
+
+    def recut_track(self, tid: str, file: str, start: float, end: float | None, name: str = "") -> bool:
+        before = self._done_clips()
+        tr = T.track_of(self.tree, tid)
+        if tr is None:
+            return False
+        same = (str(file) == tr.get("source") and abs(float(start) - float(tr.get("start") or 0)) < 1e-3
+                and end is not None and abs(float(end) - float(tr.get("end") or 0)) < 1e-3)
+        if same:                                       # only the name: the sound and the clips stay as they are
+            tr["name"] = name or tr["name"]
+        else:
+            try:
+                T.recut_track(self.project, self.tree, tid, Path(file), start, end, name or None)
+            except (ValueError, OSError, RuntimeError) as e:
+                self.status.setText(f"Could not cut the audio track: {e}")
+                return False
+        self._show_tracks(select=tid)
+        self._write_tree()
+        self._changed()
+        self.status.setText(f"Audio track “{T.track_of(self.tree, tid)['name']}” "
+                            + ("renamed." if same else "cut again."))
+        self._report_remade(before, "Audio track cut again")
+        return True
+
+    def _remove_track(self):
+        tr = self._selected_track()
+        if tr is None or self.project is None or self.running:
+            return
+        users = T.track_users(self.tree, tr["id"])
+        if users and QMessageBox.question(
+                self, "Remove audio track",
+                f"Remove “{tr['name']}”? {len(users)} clip{'s play' if len(users) != 1 else ' plays'} it (in this "
+                "scene); set another sound for them before they are made again.") != QMessageBox.Yes:
+            return
+        T.remove_track(self.project, self.tree, tr["id"])
+        self._show_tracks()
+        self._write_tree()
+        self._changed()
+
+    def _play_track(self):
+        tr = self._selected_track()
+        if tr is not None and self.project is not None:
+            self.preview.open(self.project / tr["file"], f"Audio track: {tr['name']}")
+
+    def _show_tracks(self, select: str | None = None):
+        cur = select or (self.track_list.currentItem().data(Qt.UserRole) if self.track_list.currentItem() else None)
+        self.track_list.blockSignals(True)
+        self.track_list.clear()
+        trs = T.tracks(self.tree) if self.tree else []
+        for tr in trs:
+            users = len(T.track_users(self.tree, tr["id"]))
+            item = QListWidgetItem(f"{tr['name']}   {float(tr['secs']):.1f} s"
+                                   + (f"   · {users} clip{'s' if users != 1 else ''}" if users else ""))
+            item.setData(Qt.UserRole, tr["id"])
+            item.setToolTip(f"{tr.get('source') or tr['file']}\n{float(tr.get('start') or 0):.2f}–"
+                            f"{float(tr.get('end') or 0):.2f} s of the file")
+            self.track_list.addItem(item)
+            if tr["id"] == cur:
+                self.track_list.setCurrentItem(item)
+        if trs and self.track_list.currentRow() < 0:
+            self.track_list.setCurrentRow(0)
+        self.track_list.blockSignals(False)
+        self.track_info.setText(
+            "Music, speech or a background for the film: import a sound file (or the sound of a video) and cut it. "
+            "A clip whose Sound is “Audio track: …” plays it exactly; the clips after it that play the same track "
+            "carry it on where the one before stopped (the picture is made to match, lips in sync)."
+            if not trs else
+            "A clip plays a track via its Sound setting; the clips after it with the same track carry it on. "
+            "Shared by all scenes of the film.")
+        self._update_track_buttons()
+
+    def _update_track_buttons(self):
+        idle = self.project is not None and self.tree is not None and not self.running
+        sel = self._selected_track() is not None if self.tree else False
+        self.b_track_add.setEnabled(idle)
+        node = self.tree.nodes.get(self.target_id()) if self.tree else None
+        has = node is not None and bool((node.made or {}).get("video"))
+        self.b_track_clip.setEnabled(idle and has)
+        self.b_track_clip.setToolTip(f"Import the sound of {'video' if node.is_video else 'clip'} #{node.id[1:]} "
+                                     "and cut it" if has else "Select a made clip or a converted video")
+        for b in (self.b_track_cut, self.b_track_del):
+            b.setEnabled(idle and sel)
+        self.b_track_play.setEnabled(sel)
+
     def _show_sounds(self, select: int | None = None):
         self.sounds.clear()
         refs = T.audio_refs(self.tree) if self.tree else []
@@ -3262,6 +3474,7 @@ class MainWindow(QMainWindow):
     def _update_ref_start_button(self):
         """Enable the 'Add: Start image / Selected clip' buttons and say exactly which frame they take."""
         self._update_sound_buttons()
+        self._update_track_buttons()
         start = self._start_image_there()
         self.b_ref_start.setEnabled(start and not self.running)
         self.b_ref_start.setToolTip("Add the start image as a face reference" if start else
@@ -3376,6 +3589,7 @@ class MainWindow(QMainWindow):
                                   self.progress_of.get(n.id, 0.0), n.id in on_path, n.id == sel,
                                   self.badge(n), n.kind))
         self.graph.show_nodes(infos)
+        self._show_tracks()                        # (how many clips play each track)
         if rebuild_path or [c.nid for c in self.cards] != [n.id for n in self.selected_path()]:
             self._rebuild_path()
         else:
@@ -3435,6 +3649,22 @@ class MainWindow(QMainWindow):
             return f"{int(x // 60)}:{x % 60:04.1f}"
         video = T.source_video(self.tree, n)
         repeat = n.parent is not None
+        tid = T.track_id(n)
+        if tid is not None:
+            span = T.track_sound_span(self.tree, n)
+            tr = T.track_of(self.tree, tid)
+            if span is None or tr is None:
+                return video is not None, "This audio track was removed: choose another sound.", 0, repeat
+            end = span["start"] + span["secs"] - span["pad"]
+            how = (f"carries it on from clip #{span['from'][1:]}" if span["from"] else "from its beginning")
+            past = (f"; the track ends at {t(float(tr['secs']))}, silence after it" if end > float(tr["secs"]) + 0.05
+                    else "")
+            if span["start"] >= float(tr["secs"]) - 0.05:
+                return video is not None, (f"“{tr['name']}” has ended before this clip ({t(float(tr['secs']))}): "
+                                           "choose another sound or cut the track longer."), 0, repeat
+            return video is not None, (f"Plays {t(span['start'])}–{t(min(end, float(tr['secs'])))} of “{tr['name']}”"
+                                       f" ({how}{past}), exactly as it is. Write in the prompt what happens; the "
+                                       "sound comes from the track."), 0, repeat
         if (n.overrides or {}).get("source_sound") == "previous":
             span = T.previous_sound_span(self.tree, n)
             if span is None:
@@ -3473,6 +3703,9 @@ class MainWindow(QMainWindow):
             parts.append(f"{ov['steps']} steps")
         if ov.get("source_sound") == "previous":
             parts.append("repeats the sound before")
+        elif T.track_id(n) is not None:
+            tr = T.track_of(self.tree, T.track_id(n)) if self.tree else None
+            parts.append(f"track “{tr['name'][:16]}”" if tr else "removed track")
         elif ov.get("source_sound"):
             parts.append("video's sound")
         return parts
@@ -3669,6 +3902,7 @@ class MainWindow(QMainWindow):
                                                              "source_sound": cont})
                 card.edit.setToolTip("Sent to the model: " + sent if sent != n.prompt.strip() else "")
                 card.set_faces(self._faces_text(use))
+                card.set_tracks([(tr["id"], tr["name"]) for tr in T.tracks(self.tree)])
                 card.set_source_sound(*self._source_sound_text(n))
                 card.set_summary(" · ".join(self._own_parts(n)))
                 end = self.project / n.end_image if n.end_image else None

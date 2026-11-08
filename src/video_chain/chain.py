@@ -139,10 +139,11 @@ def audio_seconds(path: Path) -> float | None:
 
 
 def to_wav(source: Path, wav: Path, start: float = 0.0, seconds: float | None = None, loop: float | None = None,
-           offset: float = 0.0) -> None:
+           offset: float = 0.0, pad: float = 0.0) -> None:
     """The sound of an audio or video file as 48 kHz stereo WAV (a part of it with start / seconds); written under
     a temporary name first. loop: only `loop` seconds from start are taken and repeated over and over, the WAV
-    begins `offset` seconds into that loop."""
+    begins `offset` seconds into that loop. pad: seconds of silence first; with pad (or without loop) a sound that
+    ends before `seconds` is filled up with silence."""
     wav = Path(wav)
     tmp = wav.with_name(wav.stem + ".part.wav")
     cmd = ["ffmpeg", "-v", "error", "-y", "-ss", f"{float(start):.3f}"]
@@ -153,6 +154,10 @@ def to_wav(source: Path, wav: Path, start: float = 0.0, seconds: float | None = 
         cmd += ["-af", "aloop=loop=-1:size=2147483647"]
         if offset > 0:
             cmd += ["-ss", f"{float(offset):.3f}"]
+    elif pad > 0 and seconds is not None:
+        cmd += ["-af", f"adelay={round(float(pad) * 1000)}:all=1,apad"]
+    elif pad > 0:
+        cmd += ["-af", f"adelay={round(float(pad) * 1000)}:all=1"]
     if seconds is not None:
         cmd += ["-t", f"{float(seconds):.3f}"]
     try:
@@ -499,6 +504,9 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
         if source_sound.get("mode") == "previous":     # the clip before's sound, repeated (loop / offset)
             s["source_sound"].update({"mode": "previous", "loop": float(source_sound["loop"]),
                                       "offset": float(source_sound.get("offset") or 0.0)})
+        elif source_sound.get("mode") == "track":      # an audio track of the project, carried on along the path
+            s["source_sound"].update({"mode": "track", "track": str(source_sound["track"]),
+                                      "pad": float(source_sound.get("pad") or 0.0)})
     if lora_triggers:                           # the LoRAs' trigger words put before the prompt
         s["lora_triggers"] = [str(w) for w in lora_triggers]
     if guide:                                   # motion guide: frames of the neighbouring clips anchored

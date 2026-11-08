@@ -2017,3 +2017,51 @@ def test_layout_presets_and_saved_layout(app, win):
     win._show_left_tab(1)                            # a tab chosen from the menu shows the panel
     assert win.act_left.isChecked() and win.left_tabs.currentIndex() == 1
     win.hide()
+
+
+def test_audio_tracks_in_the_window(app, win, tmp_path, image):
+    """Import and cut an audio track; a clip plays it, the next one carries it on; renamed / removed."""
+    import subprocess
+    from PySide6.QtWidgets import QDialogButtonBox
+    from video_chain.ui.audio_editor import AudioRangeDialog
+    src = tmp_path / "song.wav"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=f=500:d=12", str(src)], check=True)
+    dlg = AudioRangeDialog(None, file=str(src), start=2.0, end=3.0, player=False)
+    assert abs(dlg.duration - 12.0) < 0.1 and dlg.start == 2.0 and dlg.name.text() == "song"
+    assert not dlg.buttons.button(QDialogButtonBox.Ok).isEnabled()                  # under 2 s
+    dlg.set_range(2.0, 9.0)
+    assert dlg.buttons.button(QDialogButtonBox.Ok).isEnabled()
+    wait(app, lambda: bool(dlg.bar.peaks))                                    # the waveform, made in the background
+    dlg.done(0)
+    ids = new_project(win, tmp_path, image, ("one", "two"))
+    tid = win.add_track(str(src), 2.0, 9.0, "Song")
+    assert tid == "t1" and win.track_list.count() == 1 and "Song" in win.track_list.item(0).text()
+    flush(app, win)
+    first = next(c for c in win.cards if c.nid == ids[0])
+    k = first.src_sound.findData("track:t1")
+    assert k >= 0 and first.sound_box.isVisibleTo(first)                       # offered on every clip
+    first.src_sound.setCurrentIndex(k)
+    flush(app, win)
+    assert win.tree.nodes[ids[0]].overrides["source_sound"] == "track:t1"
+    first = next(c for c in win.cards if c.nid == ids[0])
+    assert first.src_sound.currentData() == "track:t1" and "from its beginning" in first.src_sound_info.text()
+    second = next(c for c in win.cards if c.nid == ids[1])
+    second.src_sound.setCurrentIndex(second.src_sound.findData("track:t1"))
+    flush(app, win)
+    second = next(c for c in win.cards if c.nid == ids[1])
+    assert f"carries it on from clip #{ids[0][1:]}" in second.src_sound_info.text()
+    assert T.TRACK_SOUND_TEXT.format(k=1) in second.edit.toolTip()
+    assert "1 clip" not in win.track_list.item(0).text() and "2 clips" in win.track_list.item(0).text()
+    assert win.recut_track("t1", str(src), 2.0, 9.0, "Song 2")                # only the name
+    assert T.track_of(win.tree, "t1")["name"] == "Song 2"
+    win.track_list.setCurrentRow(0)
+    monkey = QMessageBox.question
+    QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.Yes)
+    try:
+        win._remove_track()
+    finally:
+        QMessageBox.question = monkey
+    flush(app, win)
+    assert win.track_list.count() == 0
+    first = next(c for c in win.cards if c.nid == ids[0])
+    assert first.src_sound.currentText() == "Audio track: (removed)" and "was removed" in first.src_sound_info.text()

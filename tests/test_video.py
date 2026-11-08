@@ -396,3 +396,76 @@ def test_repeat_the_sound_of_a_real_video(project, tmp_path):
     wav = tmp_path / "out.wav"
     chain.to_wav(src, wav, span["start"], span["secs"], span["loop"], span["offset"])
     assert abs(chain.audio_seconds(wav) - span["secs"]) < 0.05 and abs(_main_hz(wav) - 700) < 30
+
+
+def _two_tones(path: Path) -> Path:
+    """5 s of picture; sound 700 Hz for 3 s, then 1200 Hz until 8 s (longer than the picture)."""
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                    "aevalsrc=0.5*sin(2*PI*if(lt(t\\,3)\\,700\\,1200)*t):d=8", "-c:a", "libmp3lame", str(path)],
+                   check=True)
+    return path
+
+
+def test_audio_track_carried_on_from_clip_to_clip(project, tmp_path):
+    """An imported, cut audio track: the first clip playing it starts at its beginning, the next one carries it on
+    where the first stopped (as the joined path plays them); past its end: a clear problem; cut again: changed."""
+    with_start(project, tmp_path)
+    src = _two_tones(tmp_path / "song.mp3")
+    t = T.load(project)
+    t.options["frames"] = 48
+    tr = T.add_track(project, t, src, 3.0, 8.0, "Song")             # only the 1200 Hz part
+    assert tr["id"] == "t1" and abs(tr["secs"] - 5.0) < 0.05 and tr["file"].startswith("refs/track_")
+    a = t.add(None, "she sings")
+    b = t.add(a.id, "she sings on")
+    a.overrides = {"source_sound": "track:t1"}
+    b.overrides = {"source_sound": "track:t1", "guide": 5}
+    T.save(project, t)
+    sa, sb = T.track_sound_span(t, a), T.track_sound_span(t, b)
+    assert sa["start"] == 0.0 and sa["pad"] == 0.0 and sa["from"] is None   # the first clip of a path loses nothing
+    assert sb["start"] == round((48 - 5) / 24, 3) and sb["pad"] == 0.0 and sb["from"] == a.id
+    assert T.source_sound_problems(t, [a.id, b.id], project) == []
+    gen = FakeGenerator(frames=17, size=None)
+    T.run_tree(gen, project, [a.id, b.id], log=lambda _m: None)
+    call = next(c for c in gen.calls if c["prompt"].startswith("she sings on"))
+    assert call["prompt"].endswith(T.TRACK_SOUND_TEXT.format(k=1))
+    t = T.load(project)
+    rec = t.nodes[b.id].made["settings"]["source_sound"]
+    n_a = T.made_frames(t.nodes[a.id])
+    assert rec["mode"] == "track" and rec["track"] == "t1" and rec["file"] == tr["file"]
+    assert rec["start"] == round((n_a - 5) / 24, 3)                  # after what a really played
+    clip_b = project / t.nodes[b.id].made["video"]
+    assert abs(_main_hz(clip_b) - 1200) < 30
+    assert T.Checker(project, t).status(b.id) == "done"
+    T.recut_track(project, t, "t1", src, 0.0, 3.0)                   # another part: both clips are changed
+    assert not (project / tr["file"]).exists()
+    ch = T.Checker(project, t)
+    assert ch.status(a.id) == "changed" and ch.status(b.id) == "changed"
+    d = t.add(None, "long")                                            # (not made: its planned 6 s count)
+    d.overrides = {"source_sound": "track:t1", "frames": 24 * 6}
+    e = t.add(d.id, "after the end")
+    e.overrides = {"source_sound": "track:t1"}
+    assert any("has ended before clip" in m for m in T.source_sound_problems(t, [d.id, e.id], project))
+    T.remove_track(project, t, "t1")
+    assert any("was removed" in m for m in T.source_sound_problems(t, [a.id], project))
+    with pytest.raises(ValueError, match="at least 2 s"):
+        T.add_track(project, t, src, 0.0, 1.0)
+
+
+def test_audio_track_after_a_real_video_and_padding(project, tmp_path):
+    """After a real video a clip's first frame is left out when joined: the track starts with that much silence;
+    a track that ends inside a clip is filled up with silence."""
+    src = _two_tones(tmp_path / "song.mp3")
+    vid = tmp_path / "v.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=red:s=320x180:r=30:d=2", "-c:v",
+                    "libx264", "-pix_fmt", "yuv420p", str(vid)], check=True)
+    t = T.load(project)
+    t.options["frames"] = 48
+    T.add_track(project, t, src, 0.0, 2.5, "Short")
+    v = t.add_video(None, str(vid), 0.0, 1.0)
+    a = t.add(v.id, "after the video")
+    a.overrides = {"source_sound": "track:t1", "guide": 9}
+    span = T.source_sound_span(t, a, project)
+    assert span["start"] == 0.0 and span["pad"] == round(9 / 24, 3)
+    wav = tmp_path / "out.wav"
+    chain.to_wav(T.sound_file(project, span), wav, span["start"], span["secs"], pad=span["pad"])
+    assert abs(chain.audio_seconds(wav) - span["secs"]) < 0.05      # padded and filled up to the clip's length
