@@ -365,8 +365,9 @@ def join_parts(videos: list[Path], out: Path, size: tuple[int, int], joins: list
             filters.append(f"{cv}[v{k}]xfade=transition=fade:duration={d:.6f}:offset={t - d:.6f}{nv}")
             filters.append(f"{ca}[a{k}]acrossfade=d={d:.6f}{na}")
             t += durs[k] - d
-        else:
-            filters.append(f"{cv}{ca}[v{k}][a{k}]concat=n=2:v=1:a=1{nv}{na}")
+        else:                                   # (concat output gets its frame rate again: a fade may follow)
+            filters.append(f"{cv}{ca}[v{k}][a{k}]concat=n=2:v=1:a=1[cc{k}]{na}")
+            filters.append(f"[cc{k}]fps={fps},settb=AVTB{nv}")
             t += durs[k]
         cv, ca = nv, na
     out = Path(out)

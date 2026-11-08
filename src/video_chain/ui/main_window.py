@@ -253,6 +253,7 @@ class ExportDialog(QDialog):
 class _Bridge(QObject):
     joined = Signal(object, object, str, str, str)  # path or None, error or None, purpose, status prefix, project
     film = Signal(object, object, str)               # the joined film or None, error or None, 'play' / 'export'
+    duplicated = Signal(object, object, str)         # (scene id, title) or None, error or None, film folder
     comfy = Signal(bool)                       # ComfyUI reachable
     loras = Signal(list, bool)                 # H3 LoRAs found in ComfyUI's LoRA folders, report them
     triggers = Signal(dict)                    # the trigger word scan finished (its counts)
@@ -914,6 +915,7 @@ class MainWindow(QMainWindow):
         self.bridge = _Bridge()
         self.bridge.joined.connect(self._joined)
         self.bridge.film.connect(self._film_joined)
+        self.bridge.duplicated.connect(self._scene_duplicated)
         self._film_queue: list[str] | None = None    # Generate film: the scenes still to make
         self.bridge.comfy.connect(self._comfy_state)
         self.bridge.loras.connect(self._loras_found)
@@ -1612,6 +1614,7 @@ class MainWindow(QMainWindow):
             return
         if not self._save_tree():
             return
+        self._update_continues()
         film, bridge = F.Film.load(self.film.root), self.bridge
         target = Path(out) if out else self.film.root / "paths" / "film.mp4"
         root = str(self.film.root)
@@ -1661,6 +1664,7 @@ class MainWindow(QMainWindow):
             return
         if not self._save_tree():
             return
+        self._update_continues()
         todo, empty = [], []
         for sc in self.film.scenes:
             d = self.film.path(sc.id)
@@ -1682,8 +1686,9 @@ class MainWindow(QMainWindow):
         if not todo:
             self.status.setText("Every scene is made: ▶ Play film.")
             return
-        self._film_queue = todo
-        self._film_total = len(todo)
+        ids = [sc.id for sc in self.film.scenes]          # from the first scene with work on, each one checked when
+        self._film_queue = ids[ids.index(todo[0]):]       # its turn comes (a continuing one may need it by then)
+        self._film_total = len(self._film_queue)
         self._film_next()
 
     def _film_next(self):
@@ -1692,8 +1697,24 @@ class MainWindow(QMainWindow):
             self.status.setText("The film is made: ▶ Play film.")
             self._show_storyboard()
             return
+        if self.film is not None and len(self.film.scenes) > 1:
+            try:
+                self.film.update_continues()       # the scenes after a new end start from it
+            except (OSError, ValueError):
+                pass
         sid = self._film_queue.pop(0)
         done = self._film_total - len(self._film_queue)
+        d = self.film.path(sid) if self.film else None
+        try:
+            t = T.load(d)
+            take = self.film.take_of(sid, t)
+            ch = T.Checker(d, t)
+            ready = take is not None and all(ch.status(n.id) == "done" for n in t.path_to(take))
+        except (OSError, ValueError, StopIteration):
+            ready = False
+        if ready:                                  # made already: the next one
+            QTimer.singleShot(0, self._film_next)
+            return
         self.switch_scene(sid)
         if self.film is None or self.film.path(sid) != self.project:
             self._film_queue = None                # could not open the scene (the status says why)
@@ -1825,18 +1846,58 @@ class MainWindow(QMainWindow):
         self._show_storyboard()
         self.status.setText(f"Scene “{sc.title}” deleted.")
 
+    def _update_continues(self) -> list[str]:
+        """Bring continuing scenes to the current end of the scene before them; the open scene is read again
+        when its start image changed."""
+        if self.film is None or len(self.film.scenes) < 2 or self.film.problem:
+            return []
+        try:
+            updated = self.film.update_continues()
+        except (OSError, ValueError) as e:
+            self.status.setText(f"Could not update the scenes that continue another: {e}")
+            return []
+        cur = self.film.scene_of(self.project) if self.project else None
+        if cur is not None and cur.id in updated:
+            self.open_project(self.film.root, scene=cur.id)
+        return updated
+
     def duplicate_scene(self, sid: str):
-        if self.film is None or self.running or self._joins or self._converts or self._copying:
+        if self.film is None:
+            return
+        if self.running or self._joins or self._converts or self._copying:
+            self.status.setText("Wait until generating, joins and copies have finished.")
             return
         if not self._save_tree():
             return
-        try:
-            scene = self.film.duplicate(sid)
-        except (OSError, ValueError) as e:
-            self.status.setText(f"Could not duplicate the scene: {e}")
+        root, bridge = self.film.root, self.bridge
+        self._copying = str(root)                  # (no scene switch, no other copy meanwhile)
+        self._update_buttons()
+        self.status.setText(f"Copying “{self.film.scene(sid).title}” with its clips …")
+
+        def work():
+            try:
+                sc = F.Film.load(root).duplicate(sid)
+                bridge.duplicated.emit((sc.id, sc.title), None, str(root))
+            except Exception as e:  # noqa: BLE001
+                bridge.duplicated.emit(None, str(e), str(root))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _scene_duplicated(self, result, error, root):
+        self._copying = None
+        self._update_buttons()
+        if self.film is None or str(self.film.root) != root:
             return
+        if error:
+            self.status.setText(f"Could not duplicate the scene: {error}")
+            return
+        current = self.film.current
+        try:
+            self.film = F.Film.load(self.film.root)
+            self.film.current = current
+        except (OSError, ValueError):
+            pass
         self._show_storyboard()
-        self.status.setText(f"“{scene.title}” added after the original: change it freely, the original stays.")
+        self.status.setText(f"“{result[1]}” added: change it freely, the original stays as it is.")
 
     def scene_notes(self, sid: str):
         if self.film is None:
@@ -1856,7 +1917,8 @@ class MainWindow(QMainWindow):
         """A table: the film's characters by scene (face ●, voice ♪), along the clips the film plays."""
         if self.film is None:
             return
-        self._save_tree()
+        if not self._save_tree():
+            return
         from PySide6.QtWidgets import QTableWidget, QTableWidgetItem
         names, rows = F.cast_by_scene(self.film)
         dlg = QDialog(self)
@@ -1884,6 +1946,7 @@ class MainWindow(QMainWindow):
         self._film_cast_dialog = dlg               # (tests look at it)
         if not getattr(self, "_dialogs_modeless", False):
             dlg.exec()
+            dlg.deleteLater()
 
     def set_scene_join(self, sid: str, join: str):
         """How a scene follows the one before: a cut, a crossfade, or continuing from its last frame."""
@@ -1910,11 +1973,16 @@ class MainWindow(QMainWindow):
     def _scenes_moved(self, order: list[str]):
         if self.film is None:
             return
+        reset = []
         try:
-            self.film.reorder(order)
+            reset = self.film.reorder(order)
         except (OSError, ValueError) as e:
             self.status.setText(f"Could not move the scene: {e}")
         self._show_storyboard()
+        if reset:
+            self.status.setText("Moved. " + ", ".join(f"“{self.film.scene(i).title}”" for i in reset) +
+                                " now start" + ("s" if len(reset) == 1 else "") + " with a cut: the scene before "
+                                "changed (right-click → Join with the scene before → Continue to continue it).")
 
     # ---- new / open / save / close
     def new_project(self):
@@ -3602,6 +3670,7 @@ class MainWindow(QMainWindow):
                 except OSError as e:
                     self.status.setText(f"Could not save the scene's ending: {e}")
                     return
+                self._update_continues()               # a scene continuing this one starts from the new end
                 self._show_storyboard()
                 self.status.setText(f"The film plays “{cur.title}” up to clip #{nid[1:]}." if action == "take"
                                     else f"The film plays “{cur.title}” up to its selected clip.")
@@ -4844,11 +4913,9 @@ class MainWindow(QMainWindow):
         if self.worker_alive and not self.keep_loaded.isChecked():
             self._quit_worker()
         self._save_timer.start()                   # what was chosen during the run (selection …) is saved now
-        if ok and self.film is not None and len(self.film.scenes) > 1 and not self.film.problem:
-            try:
-                self.film.update_continues()       # the next scene starts from this one's (new) end
-            except (OSError, ValueError):
-                pass
+        if ok and self.film is not None and len(self.film.scenes) > 1 and not self.film.problem \
+                and self._film_queue is None:
+            QTimer.singleShot(0, self._update_continues)   # the next scene starts from this one's (new) end
         if self._film_queue is not None:
             if ok and not refine:
                 QTimer.singleShot(0, self._film_next)

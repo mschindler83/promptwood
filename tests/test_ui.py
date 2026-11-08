@@ -1930,11 +1930,12 @@ def test_scene_duplicate_notes_and_film_cast(app, win, tmp_path, image, monkeypa
     monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("Two", True))
     win.add_scene()
     win.storyboard.duplicateWanted.emit("s1")
+    wait(app, lambda: win._copying is None, timeout=30)          # copied in the background
     assert win.storyboard.list.count() == 3 and "(copy)" in win.storyboard.list.item(1).text()
     monkeypatch.setattr(QInputDialog, "getMultiLineText", lambda *a, **k: ("She opens the door.", True))
     win.storyboard.notesWanted.emit("s1")
     assert win.film.scene("s1").notes == "She opens the door."
-    assert win.storyboard.list.item(0).toolTip().startswith("She opens the door.")
+    assert "She opens the door." in win.storyboard.list.item(0).toolTip()
     win._dialogs_modeless = True
     win.show_film_cast()
     assert win._film_cast_dialog.windowTitle() == "Cast in the film"

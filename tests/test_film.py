@@ -204,3 +204,43 @@ def test_duplicate_notes_and_cast_by_scene(project, tmp_path):
     assert F.Film.load(project).scene(s2.id).notes == "Anna walks home."
     names, rows = F.cast_by_scene(F.Film.load(project))
     assert names == ["Anna"] and rows[0] == ("Scene 1", {"Anna": "face"}) and rows[2] == ("Two", {})
+
+
+def test_continue_stays_honest_after_changes(project, tmp_path):
+    from video_chain import chain
+    t1 = T.load(project)
+    a1 = next(iter(t1.nodes))
+    b1 = t1.add(a1, "scene one goes on")
+    t1.selected = a1
+    T.save(project, t1)
+    f = F.Film.load(project)
+    s2, s3 = f.add_scene("Two"), f.add_scene("Three", start_image=tmp_path / "start.jpg")
+    for sc in (s2, s3):
+        d = f.path(sc.id)
+        t = T.load(d)
+        n = t.add(None, sc.title)
+        t.selected = n.id
+        T.save(d, t)
+    f.set_join(s2.id, "continue")
+    f.set_join(s3.id, "fade")
+    T.run_tree(FakeGenerator(frames=17, size=None), project, [b1.id], log=lambda _m: None)
+    f.update_continues()
+    for sc in (s2, s3):
+        d = f.path(sc.id)
+        T.run_tree(FakeGenerator(frames=17, size=None), d, [T.load(d).selected], log=lambda _m: None)
+    out = F.join_film(f, tmp_path / "mixed.mp4")                       # continue (a cut) then a crossfade
+    assert chain.probe(out)["frames"] > 30
+    f.set_take("s1", b1.id)                                             # scene 1 ends later now
+    assert any("whose end changed" in m for m in F.film_problems(f))    # never joined with the old start
+    assert f.reorder([s2.id, "s1", s3.id]) == [s2.id]                   # first now: its continue is a cut
+    assert F.Film.load(project).scene(s2.id).join == "cut"
+
+
+def test_duplicating_continuing_scenes(project, tmp_path):
+    f = F.Film.load(project)
+    s2, s3 = f.add_scene("Two"), f.add_scene("Three")
+    f.set_join(s2.id, "continue")
+    f.set_join(s3.id, "continue")
+    c = f.duplicate(s2.id)                           # s3 continues s2: the copy goes to the end, not in between
+    assert [s.id for s in f.scenes] == ["s1", s2.id, s3.id, c.id] and c.join == "cut" and c.title == "Two (copy)"
+    assert f.duplicate(c.id).title == "Two (copy 2)"

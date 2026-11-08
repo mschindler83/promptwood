@@ -97,12 +97,30 @@ class Film:
         film.problem = problem
         return film
 
-    def reorder(self, ids: list[str]) -> None:
-        """The scenes in this order (ids not given keep their place at the end)."""
+    def reorder(self, ids: list[str]) -> list[str]:
+        """The scenes in this order (ids not given keep their place at the end). Returns the scenes whose
+        'continue' became a cut (their scene before changed)."""
+        before = self._befores()
         by = {s.id: s for s in self.scenes}
         new = [by[i] for i in ids if i in by]
         self.scenes = new + [s for s in self.scenes if s not in new]
+        reset = self._keep_joins(before)
         self.save()
+        return reset
+
+    def _befores(self) -> dict[str, str | None]:
+        return {s.id: (self.scenes[k - 1].id if k else None) for k, s in enumerate(self.scenes)}
+
+    def _keep_joins(self, before: dict[str, str | None]) -> list[str]:
+        """A scene continued the scene before it: if that is another scene now (or none), it starts with a cut
+        (its start image is never replaced by the new neighbour's end)."""
+        reset = []
+        now = self._befores()
+        for s in self.scenes:
+            if s.join == "continue" and (now[s.id] is None or now[s.id] != before.get(s.id)):
+                s.join, s.from_sha = "cut", None
+                reset.append(s.id)
+        return reset
 
     def save(self) -> None:
         """Write film.json (only once there is more than one scene, or it exists already)."""
@@ -184,12 +202,15 @@ class Film:
 
     def duplicate(self, sid: str) -> Scene:
         """A copy of a scene with its clips (to try a variant), right after it."""
+        if self.problem:
+            raise OSError(f"film.json is not written ({self.problem}); fix or remove it first")
         src = self.scene(sid)
         nid = _next_id(self.scenes, self.root)
         rel = f"{SCENES_DIR}/{nid}"
         d = self.root / rel
         skip = {T.REFS_DIR, SCENES_DIR, FILM_FILE, "paths"}
-        ignore = shutil.ignore_patterns("*.part", "*.part.*", "video-chain-*")
+        ignore = shutil.ignore_patterns("*.part", "*.part.*", "video-chain-*",         # (refined copies can be
+                                        "*_1080p.mp4", "*_1080p.json", "*_2k.mp4", "*_2k.json")   # made again)
 
         def ign(folder, names):
             out = set(ignore(folder, names))
@@ -208,10 +229,28 @@ class Film:
                 link.unlink()
             shutil.rmtree(d, ignore_errors=True)
             raise
-        scene = Scene(nid, f"{src.title} (copy)", rel, src.take, src.join, src.from_sha, src.notes)
+        base = re.sub(r" \(copy( \d+)?\)$", "", src.title)
+        titles = {s.title for s in self.scenes}
+        title, n = f"{base} (copy)", 2
+        while title in titles:
+            title, n = f"{base} (copy {n})", n + 1
+        # a copy keeps its own start (it does not continue the original); it does not come between the original
+        # and a scene continuing it
+        join = "cut" if src.join == "continue" else src.join
+        scene = Scene(nid, title, rel, src.take, join, None if join == "cut" else src.from_sha, src.notes)
         k = next(i for i, s in enumerate(self.scenes) if s.id == sid)
-        self.scenes.insert(k + 1, scene)
-        self.save()
+        after = self.scenes[k + 1] if k + 1 < len(self.scenes) else None
+        at = len(self.scenes) if after is not None and after.join == "continue" else k + 1
+        self.scenes.insert(at, scene)
+        try:
+            self.save()
+        except BaseException:
+            self.scenes.remove(scene)
+            link = d / T.REFS_DIR
+            if link.is_symlink():
+                link.unlink()
+            shutil.rmtree(d, ignore_errors=True)
+            raise
         return scene
 
     def set_join(self, sid: str, join: str) -> None:
@@ -237,7 +276,10 @@ class Film:
         node = t.nodes.get(take) if take else None
         if node is None or not node.made:
             return None
-        f = T.handover_file(d, t, node) or (d / node.made.get("frame", ""))
+        try:
+            f = T.ensure_handover(d, t, node) or (d / node.made.get("frame", ""))
+        except (OSError, RuntimeError, ValueError):
+            f = d / node.made.get("frame", "")
         return f if f.is_file() else None
 
     def update_continues(self) -> list[str]:
@@ -271,11 +313,14 @@ class Film:
             return t
         return tree.selected if tree.selected in tree.nodes else None
 
-    def move(self, sid: str, index: int) -> None:
+    def move(self, sid: str, index: int) -> list[str]:
+        before = self._befores()
         s = self.scene(sid)
         self.scenes.remove(s)
         self.scenes.insert(max(0, min(int(index), len(self.scenes))), s)
+        reset = self._keep_joins(before)
         self.save()
+        return reset
 
     def remove(self, sid: str) -> None:
         """Delete a scene and its folder (its clips). The film folder's own scene (the first one made) stays."""
@@ -287,7 +332,9 @@ class Film:
         d = self.path(sid)
         if (self.root / SCENES_DIR).resolve() not in d.parents:
             raise ValueError("this scene's folder is not inside the film")
+        before = self._befores()
         self.scenes.remove(s)                      # out of the film first: a failed delete leaves no broken entry
+        self._keep_joins(before)
         if self.current == sid:
             self.current = self.scenes[0].id
         self.save()
@@ -379,9 +426,16 @@ def film_problems(film: Film) -> list[str]:
     """Why the film cannot be played / exported yet (a scene without clips, clips not made)."""
     out = []
     for k, sc in enumerate(film.scenes, start=1):
-        if k > 1 and sc.join == "continue" and film.end_frame(film.scenes[k - 2].id) is None:
-            out.append(f"scene {k} ({sc.title}) continues scene {k - 1}, which is not made yet")
-            continue
+        if k > 1 and sc.join == "continue":
+            end = film.end_frame(film.scenes[k - 2].id)
+            if end is None:
+                out.append(f"scene {k} ({sc.title}) continues scene {k - 1}, which is not made yet")
+                continue
+            from . import chain
+            if chain.file_signature(end) != sc.from_sha:
+                out.append(f"scene {k} ({sc.title}) continues scene {k - 1}, whose end changed: it has to be "
+                           "made again from there (Generate film)")
+                continue
         d = film.path(sc.id)
         try:
             t = T.load(d)

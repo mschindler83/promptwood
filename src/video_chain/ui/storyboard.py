@@ -2,6 +2,7 @@
 right-click to rename or delete, '+ Scene' to add one."""
 from __future__ import annotations
 
+import html
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
@@ -98,10 +99,11 @@ class Storyboard(QWidget):
                 item = QListWidgetItem(QIcon(pm) if not pm.isNull() else QIcon(), card_text(k, title, s))
                 item.setData(Qt.UserRole, sid)
                 item.setData(Qt.UserRole + 1, s.get("join"))
-                item.setToolTip((f"{s['notes']}\n\n" if s.get("notes") else "") +
+                notes = html.escape(s["notes"]).replace("\n", "<br>") if s.get("notes") else ""
+                item.setToolTip("<p>" + (f"{notes}<br><br>" if notes else "") +
                                 f"Scene {k}: {title}. {s.get('clips', 0)} clips; the film plays it up to "
                                 + (f"clip #{s['take'][1:]}" if s.get("fixed") else "its selected clip") +
-                                ". Click to work on it, drag to move it, right-click for more")
+                                ". Click to work on it, drag to move it, right-click for more</p>")
                 item.setFlags(item.flags() | Qt.ItemIsDragEnabled)
                 self.list.addItem(item)
                 if sid == current:
