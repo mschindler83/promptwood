@@ -348,10 +348,14 @@ def test_repeat_the_sound_of_the_clip_before(project, tmp_path):
     assert T.source_sound_problems(t, [b.id], project) == [f"clip #{b.id[1:]} repeats the sound of clip "
                                                            f"#{a.id[1:]}, which is not made yet"]
     assert T.source_sound_problems(t, [a.id, b.id], project) == []        # a is made first in the same run
+    t.nodes[b.id].overrides["frames"] = 24                                # independent of a: checked anyway
+    assert any("shorter than 2 s" in m for m in T.source_sound_problems(t, [a.id, b.id], project))
+    del t.nodes[b.id].overrides["frames"]
     gen = FakeGenerator(frames=17, size=None)       # clip k sounds at 300 + 100 k Hz
     T.run_tree(gen, project, [a.id, b.id], log=lambda _m: None)
     call = next(c for c in gen.calls if c["prompt"].startswith("it goes on"))
     assert call["settings"]["audio_paths"][-1].endswith("source_sound.wav")
+    assert call["prompt"].endswith(T.REPEAT_SOUND_TEXT.format(k=1))
     t = T.load(project)
     rec = t.nodes[b.id].made["settings"]["source_sound"]
     assert rec["mode"] == "previous" and rec["file"] == t.nodes[a.id].made["video"]      # relative: unique name
@@ -367,6 +371,11 @@ def test_repeat_the_sound_of_the_clip_before(project, tmp_path):
     t = T.load(project)
     assert t.nodes[a.id].made["video"] != rec["file"]
     assert T.Checker(project, t).status(b.id) == "changed"     # its sound has changed
+    silent = FakeGenerator(frames=17, size=None, audio=False)   # a made again without sound: a clear message
+    t.nodes[a.id].prompt = "silence"
+    T.save(project, t)
+    with pytest.raises(Exception, match="has no sound"):
+        T.run_tree(silent, project, [a.id, b.id], log=lambda _m: None)
 
 
 def test_repeat_the_sound_of_a_real_video(project, tmp_path):

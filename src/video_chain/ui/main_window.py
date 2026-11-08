@@ -3663,8 +3663,8 @@ class MainWindow(QMainWindow):
                     if self.tree.options.get("lora_triggers", True) and T.node_loras(n) else []
                 sounds = [None] * (T.audio_mentioned(T.full_prompt(self.tree.options, n.prompt))
                                    + len(use.get("voices") or []))
-                cont = bool((n.overrides or {}).get("source_sound")) and \
-                    T.source_sound_span(self.tree, n) is not None
+                cont = (n.overrides or {}).get("source_sound") \
+                    if T.source_sound_span(self.tree, n) is not None else None
                 sent = T.model_prompt(self.tree.options, n, {"lora_triggers": words, "audio_refs": sounds,
                                                              "source_sound": cont})
                 card.edit.setToolTip("Sent to the model: " + sent if sent != n.prompt.strip() else "")
