@@ -272,7 +272,7 @@ STEPS_DEFAULT = 3
 
 LAYOUT_VERSION = 1
 # preset: shares of the width (left panel, viewer, inspector) and of the centre's height for the viewer
-LAYOUTS = {"edit": (0.20, 0.58, 0.22, 0.62), "write": (0.17, 0.45, 0.38, 0.55), "watch": (0.0, 0.76, 0.24, 0.70)}
+LAYOUTS = {"edit": (0.20, 0.58, 0.22, 0.62), "write": (0.17, 0.51, 0.32, 0.55), "watch": (0.0, 0.84, 0.16, 0.70)}
 
 
 class _CurrentStack(QStackedWidget):
@@ -1658,7 +1658,9 @@ class MainWindow(QMainWindow):
             q.setValue("lastOptions", json.dumps(self.tree.options))
         q.setValue("geometry", self.saveGeometry())
         q.setValue("layout", json.dumps({"v": LAYOUT_VERSION, "split": self.split.sizes(),
-                                         "center": self.center.sizes(), "left": self.act_left.isChecked()}))
+                                         "center": self.center.sizes(), "left": self.act_left.isChecked(),
+                                         "left_w": (self.split.sizes()[0] if self.act_left.isChecked() else 0)
+                                         or getattr(self, "_left_w", 0)}))
         q.sync()
 
     # ------------------------------------------------------------------ project
@@ -1684,7 +1686,7 @@ class MainWindow(QMainWindow):
         m.addAction("Quit", self.close).setShortcut(QKeySequence("Ctrl+Q"))
         v = self.menuBar().addMenu("&View")
         for k, name in enumerate(("Clips", "Cast", "Sounds")):
-            a = v.addAction(f"{name} (left)", lambda _=False, k=k: self.left_tabs.setCurrentIndex(k))
+            a = v.addAction(f"{name} (left)", lambda _=False, k=k: self._show_left_tab(k))
             a.setShortcut(QKeySequence(f"Alt+{k + 1}"))
         v.addAction("Log", lambda: self.tabs.setCurrentWidget(self.log)).setShortcut(QKeySequence("Alt+L"))
         v.addSeparator()
@@ -1692,7 +1694,7 @@ class MainWindow(QMainWindow):
         self.act_left.setCheckable(True)
         self.act_left.setChecked(True)
         self.act_left.setShortcut(QKeySequence("Ctrl+Alt+B"))
-        self.act_left.toggled.connect(lambda on: self.left_tabs.setVisible(on))   # (built later, in _build)
+        self.act_left.toggled.connect(lambda on: self._show_left(on))   # (the panel is built later, in _build)
         for name, key, tip in (("edit", "Ctrl+Alt+1", "Layout: Edit (big viewer)"),
                                ("write", "Ctrl+Alt+2", "Layout: Write (wide prompt)"),
                                ("watch", "Ctrl+Alt+3", "Layout: Watch (viewer and timeline only)")):
@@ -1705,24 +1707,53 @@ class MainWindow(QMainWindow):
         """A layout preset, as shares of the window: 'edit' (the default: a big viewer), 'write' (a wide inspector
         for the prompt), 'watch' (no left panel, a narrow inspector)."""
         left, mid, right, view = LAYOUTS.get(name, LAYOUTS["edit"])
-        self.act_left.setChecked(left > 0)              # (shows / hides the left panel)
         w = max(self.split.width(), 1200)
-        self.split.setSizes([int(w * left), int(w * mid), int(w * right)])
+        if left > 0:
+            self._left_w = int(w * left)
+        self.act_left.setChecked(left > 0)              # (shows / hides the left panel)
+        self.split.setSizes([int(w * left) if left > 0 else 0, int(w * mid), int(w * right)])
         h = max(self.center.height(), 600)
         self.center.setSizes([int(h * view), int(h * (1 - view))])
 
+    def _show_left(self, on: bool):
+        """Show / hide the left panel; shown again it gets its last width back (taken from the viewer)."""
+        sizes = self.split.sizes()
+        if not on and sizes[0] > 0:
+            self._left_w = sizes[0]
+        self.left_tabs.setVisible(on)
+        if on:
+            want = max(getattr(self, "_left_w", 0), self.left_tabs.minimumWidth())
+            sizes = self.split.sizes()
+            if sizes[0] < want:
+                give = want - sizes[0]
+                self.split.setSizes([want, max(sizes[1] - give, 1), sizes[2]])
+
+    def _show_left_tab(self, k: int):
+        self.act_left.setChecked(True)                  # (a hidden panel is shown first)
+        self.left_tabs.setCurrentIndex(k)
+
     def _restore_layout(self):
-        """The layout of the last session; the default one if there is none (or it was saved by an older one)."""
+        """The layout of the last session; the default one if there is none, it was saved by an older version or
+        it is damaged."""
         try:
             d = json.loads(self.qs.value("layout", "", type=str) or "{}")
-        except (TypeError, ValueError):
-            d = {}
-        if d.get("v") != LAYOUT_VERSION or len(d.get("split") or []) != 3 or len(d.get("center") or []) != 2:
+            split, center = d["split"], d["center"]
+            ok = (d.get("v") == LAYOUT_VERSION and len(split) == 3 and len(center) == 2
+                  and all(isinstance(x, int) and x >= 0 for x in split + center)
+                  and split[1] > 0 and split[2] > 0 and all(x > 0 for x in center))
+            left_w = int(d.get("left_w") or 0)
+        except (TypeError, ValueError, KeyError, AttributeError):
+            ok = False
+        if not ok:
             self.apply_layout("edit")
             return
+        if left_w > 0:
+            self._left_w = left_w
+        elif split[0] > 0:
+            self._left_w = split[0]
+        self.split.setSizes(split)
         self.act_left.setChecked(bool(d.get("left", True)))
-        self.split.setSizes([max(0, int(x)) for x in d["split"]])
-        self.center.setSizes([max(0, int(x)) for x in d["center"]])
+        self.center.setSizes(center)
 
     def show_prefs(self):
         """ComfyUI's address, launcher, folder and the model / trigger word settings (not modal: the status bar

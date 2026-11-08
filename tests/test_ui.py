@@ -1981,3 +1981,25 @@ def test_layout_presets_and_saved_layout(app, win):
     win.qs.setValue("layout", "not json")
     win._restore_layout()                            # falls back to the default layout
     assert win.act_left.isChecked()
+    for bad in ("[]", "5", '{"v": 1, "split": ["a", 1, 1], "center": [1, 1]}',
+                '{"v": 1, "split": [0, 0, 0], "center": [1, 1]}'):
+        win.apply_layout("watch")
+        win.qs.setValue("layout", bad)
+        win._restore_layout()
+        assert win.act_left.isChecked(), bad
+    # hidden, saved, restored and shown again: the left panel gets its width back
+    win.show()
+    app.processEvents()
+    win.apply_layout("edit")
+    app.processEvents()
+    win.act_left.setChecked(False)
+    win.save_settings()
+    win._restore_layout()
+    assert not win.act_left.isChecked()
+    win.act_left.setChecked(True)
+    app.processEvents()
+    assert win.split.sizes()[0] >= win.left_tabs.minimumWidth()
+    win.act_left.setChecked(False)
+    win._show_left_tab(1)                            # a tab chosen from the menu shows the panel
+    assert win.act_left.isChecked() and win.left_tabs.currentIndex() == 1
+    win.hide()
