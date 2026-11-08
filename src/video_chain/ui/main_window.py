@@ -2411,7 +2411,7 @@ class MainWindow(QMainWindow):
             tip = f"Add {what} as a face reference"
         else:
             tip = "Select a converted video or a made clip"
-        self.b_ref_clip.setToolTip(tip + ". For any frame of a video: Edit range… → Add as face reference")
+        self.b_ref_clip.setToolTip(tip + ". For any frame of a video: Edit range… → Add as face picture…")
         has_sound = node is not None and bool((node.made or {}).get("video"))
         self.b_voice_clip.setEnabled(has_sound and self._selected_character() is not None and not self.running)
         self.b_voice_clip.setToolTip(

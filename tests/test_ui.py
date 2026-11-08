@@ -1105,7 +1105,7 @@ def test_video_range_dialog(app, tmp_path):
                            on_reference=lambda p: got.append(QImage(p).size().toTuple()) or True)
     assert dlg.b_ref.isEnabled() and dlg.reference_here()
     assert got == [(dlg.info["width"], dlg.info["height"])]  # the whole frame, not cut to the chain's size
-    assert "face reference" in dlg.summary.text()
+    assert "was added (see the Cast" in dlg.summary.text()
     assert dlg.info["fps"] == 30 and abs(dlg.end - 2.0) < 0.05 and dlg.frames() == 48
     dlg.set_range(0.5, 1.0)
     assert dlg.frames() == 12 and "12 frames" in dlg.summary.text() and "672×384" in dlg.summary.text()

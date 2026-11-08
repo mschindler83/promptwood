@@ -139,7 +139,7 @@ class VideoRangeDialog(QDialog):
         self.setWindowTitle("Real video")
         self.resize(980, 760)
         self.settings, self.canvas, self.want_player = settings, canvas, player
-        self.on_reference = on_reference              # callable(png path) -> bool: add a face reference
+        self.on_reference = on_reference              # callable(png path) -> bool: crop and add a face picture
         self.file, self.info = "", None
         self.start, self.end = 0.0, 0.0
         self.player = None
@@ -213,9 +213,10 @@ class VideoRangeDialog(QDialog):
         rrow.addWidget(self.end_spin)
         rrow.addWidget(b_set_end)
         rrow.addStretch(1)
-        self.b_ref = QPushButton("Add as face reference")
-        self.b_ref.setToolTip("Add the frame at the playhead (whole picture, full size) as a face reference: "
-                              "every generated clip sees this face")
+        self.b_ref = QPushButton("Add as face picture…")
+        self.b_ref.setToolTip("Crop a face from the frame at the playhead (the face is found for you, or set the "
+                              "square by hand) and add it to the character selected in the Cast; clips that "
+                              "mention that character get this face")
         self.b_ref.clicked.connect(self.reference_here)
         self.b_ref.setVisible(on_reference is not None)
         rrow.addWidget(self.b_ref)
@@ -329,9 +330,9 @@ class VideoRangeDialog(QDialog):
         self.b_play_sel.setEnabled(on and self.player is not None)
         self.buttons.button(QDialogButtonBox.Ok).setEnabled(on and self.frames() >= 1)
 
-    # ---- face reference
+    # ---- face picture
     def reference_here(self) -> bool:
-        """The frame at the playhead, uncropped at the source's size, handed to on_reference."""
+        """The frame at the playhead at the source's size, handed to on_reference (which opens the crop window)."""
         if self.info is None or self.on_reference is None:
             return False
         t = self.position()
@@ -346,8 +347,8 @@ class VideoRangeDialog(QDialog):
                 self.summary.setText(f"Could not read the frame at {fmt(t)}.")
                 return False
             ok = bool(self.on_reference(str(png)))
-        self.summary.setText(f"The frame at {fmt(t)} is now a face reference." if ok
-                             else "Could not add the frame as a face reference (see the status bar).")
+        self.summary.setText(f"The face from the frame at {fmt(t)} was added (see the Cast in the left panel)." if ok
+                             else f"The frame at {fmt(t)} was not added as a face picture.")
         return ok
 
     # ---- range
