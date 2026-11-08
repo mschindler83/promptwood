@@ -169,6 +169,7 @@ class RefineDialog(QDialog):
         self.b_refine.setEnabled(False)
         self.buttons.button(QDialogButtonBox.Ok).setEnabled(False)
         self.state.setText("Refining …")
+        self.refined_any = True                    # its model is being loaded in ComfyUI (unloaded before clips)
         self.state.setProperty("severity", "")
         repolish(self.state)
         text, kind, model, hint = (self.original.toPlainText(), self.kind, self.model.currentData(),

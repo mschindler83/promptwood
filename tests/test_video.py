@@ -315,3 +315,18 @@ def test_continue_the_real_videos_sound(project, tmp_path):
     t.nodes[other.id].overrides = {"source_sound": True}
     assert T.source_sound_problems(t, [other.id]) == [f"clip #{other.id[1:]} continues a real video's sound, but "
                                                       "there is no real video before it"]
+
+
+
+def test_a_videos_first_frame_survives_reopening(project, source):
+    """The cleanup of old hand-over frames (<clip>_f<n>.png) must not take a video's <clip>_first.png."""
+    t = T.load(project)
+    v = t.add_video(None, str(source), 0.0, 1.0)
+    a = t.add(v.id, "after")
+    T.save(project, t)
+    T.run_tree(FakeGenerator(frames=17, size=None), project, [a.id], log=lambda _m: None)
+    t = T.load(project)
+    first = project / t.nodes[v.id].made["first"]
+    assert first.is_file()
+    T.ensure_handovers(project, t)                      # as on opening the project / starting a run
+    assert first.is_file() and T.Checker(project, t).status(v.id) == "done"

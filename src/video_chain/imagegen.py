@@ -454,10 +454,7 @@ class ComfyImageCreator(ComfyGenerator):
                                        quality_tags=quality_tags)
             ws = self._connect_ws()
             try:
-                res = self._json("POST", "/prompt", {"prompt": wf, "client_id": self.client_id})
-                if res.get("node_errors"):
-                    raise ComfyError(f"ComfyUI rejected the workflow: {json.dumps(res['node_errors'])[:600]}")
-                self.current = res["prompt_id"]
+                self._queue(wf)
                 entry = self._wait(self.current, ws)
             except ComfyJobFailed:
                 raise

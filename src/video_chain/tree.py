@@ -158,8 +158,11 @@ class Tree:
             raise KeyError(parent)
         nid = f"n{self.next_num}"
         self.next_num += 1
-        if seed is None:
+        if seed is None:                           # never the seed of an existing clip (also after deletes)
+            used = {n.seed for n in self.nodes.values()}
             seed = int(self.options.get("seed", 42)) + len(self.nodes)
+            while seed in used:
+                seed += 1
         node = Node(nid, parent, prompt, int(seed))
         self.nodes[nid] = node
         return node
@@ -236,6 +239,11 @@ class Tree:
         for nd in d.get("nodes", []):
             if not isinstance(nd, dict) or not nd.get("id"):
                 raise ValueError("a node without id")
+            if not re.fullmatch(r"n\d+", str(nd["id"])) or nd.get("parent") is not None and \
+                    not re.fullmatch(r"n\d+", str(nd["parent"])):
+                raise ValueError(f"node {str(nd['id'])[:20]!r} has an invalid id")       # ids become file names
+            if nd.get("made") is not None and not isinstance(nd.get("made"), dict):
+                raise ValueError(f"node {nd['id']} has a damaged record")
             if nd["id"] in t.nodes:
                 raise ValueError(f"node {nd['id']} appears twice")
             kind = nd.get("kind") or AI
@@ -279,6 +287,15 @@ REFINED = ("1080p", "2k")          # refined copies of a clip version for export
 _CLIP_NAME = re.compile(r"^n\d+(_[0-9a-f]{8})?((_first|_f\d+)?\.(mp4|png)|_(1080p|2k)\.(mp4|json))$")   # also the fixed names of older versions
 
 
+def handover_frames(video: Path) -> list[Path]:
+    """The hand-over frames written for a clip version (<stem>_f<index>.png; not a video's <stem>_first.png)."""
+    video = Path(video)
+    if not video.parent.is_dir():
+        return []
+    pat = re.compile(re.escape(video.stem) + r"_f\d+\.png$")
+    return [f for f in video.parent.glob(f"{video.stem}_f*.png") if pat.match(f.name)]
+
+
 def _unlink(f: Path) -> bool:
     """Delete a file; False if that is not possible right now (e.g. open in a player on an SMB share)."""
     try:
@@ -302,7 +319,7 @@ def clip_files(project: Path, node: "Node") -> list[Path]:
     if node.made.get("video"):                    # hand-over frames and refined copies of this version
         v = Path(project) / node.made["video"]
         if area in v.resolve().parents and v.parent.is_dir():
-            out += sorted(v.parent.glob(f"{v.stem}_f*.png"))
+            out += sorted(handover_frames(v))
             out += [r for size in REFINED for r in (refined_file(project, node, size),
                                                      refined_file(project, node, size).with_suffix(".json"))
                     if r.is_file()]
@@ -348,8 +365,8 @@ def load(project: Path) -> Tree:
     if p.exists():
         try:
             return Tree.from_json(json.loads(p.read_text(encoding="utf-8")))
-        except (ValueError, KeyError, TypeError) as e:
-            raise ValueError(f"{p} is damaged ({e})") from e
+        except Exception as e:  # noqa: BLE001  (any damage: one clear message)
+            raise ValueError(f"{p} is damaged ({type(e).__name__}: {e})") from e
     old = chain.load_record(project)
     t = Tree()
     if old:
@@ -377,7 +394,10 @@ def save(project: Path, tree: Tree) -> None:
     project = Path(project)
     project.mkdir(parents=True, exist_ok=True)
     tmp = project / (TREE_FILE + ".part")
-    tmp.write_text(json.dumps(tree.to_json(), indent=2, ensure_ascii=False), encoding="utf-8")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(json.dumps(tree.to_json(), indent=2, ensure_ascii=False))
+        f.flush()
+        os.fsync(f.fileno())                       # on disk before it replaces the old file (power cut)
     tmp.replace(project / TREE_FILE)
 
 
@@ -1506,13 +1526,23 @@ def source_sound_problems(tree: Tree, todo: list[str]) -> list[str]:
     return out
 
 
-def lora_trigger_words(paths: list[str]) -> list[str]:
-    """The trigger words of a LoRA stack (the app's trigger database; nothing if it cannot be read)."""
+def lora_trigger_words(paths: list[str]) -> list[str] | None:
+    """The trigger words of a LoRA stack (the app's trigger database; None if it cannot be read)."""
     try:
         from . import triggers
         return triggers.stack_words(paths)
     except Exception:  # noqa: BLE001
-        return []
+        return None                                # unknown (e.g. the database cannot be read right now)
+
+
+def _stack_triggers(options: dict, node: Node, stack: list) -> list[str] | None:
+    """A clip's trigger words; while the database cannot be read, those it was made with (no false CHANGED)."""
+    if not stack or not options.get("lora_triggers", True):
+        return None
+    words = lora_trigger_words([p for p, _s in stack])
+    if words is None:
+        words = (((node.made or {}).get("settings")) or {}).get("lora_triggers")
+    return words
 
 
 def model_prompt(options: dict, node: Node, settings: dict | None) -> str:
@@ -1560,8 +1590,7 @@ def node_settings(base: dict, options: dict, node: Node, audio_pool: list[dict] 
                                guide=int(ov.get("guide") or 0),
                                style=(base.get("prompt_prefix", ""), base.get("prompt_suffix", "")),
                                audio_refs=sounds or None, voice_language=use.get("language"),
-                               lora_triggers=(lora_trigger_words([p for p, _s in stack])
-                                              if stack and options.get("lora_triggers", True) else None),
+                               lora_triggers=_stack_triggers(options, node, stack),
                                source_sound=source_sound)
 
 
@@ -1709,11 +1738,13 @@ def ensure_handover(project: Path, tree: Tree, node: Node) -> Path | None:
             tmp.replace(f)
         finally:
             tmp.unlink(missing_ok=True)
-    if node.made and node.made.get("video"):            # frames of an earlier choice in this take
+    if node.made and node.made.get("video") and not node.is_video:   # frames of an earlier choice in this take
         v = Path(project) / node.made["video"]
-        for old in v.parent.glob(f"{v.stem}_f*.png") if v.parent.is_dir() else []:
-            if old != f and ".part" not in old.name:
-                _unlink(old)
+        area = (Path(project) / "nodes").resolve()
+        if area in v.resolve().parents:
+            for old in handover_frames(v):
+                if old != f:
+                    _unlink(old)
     return f
 
 
@@ -1960,6 +1991,11 @@ def path_cuts(tree: Tree, path: list[Node], keep_repeated: bool = False,
                 cuts[k][0] = max(1, _guide_of(b, planned))
             elif not a.is_video and tree.video_child(a.id) is b:
                 cuts[k - 1][1] = max(1, _guide_of(a, planned))
+    for k, a in enumerate(path):                   # a short clip keeps at least one frame (carry-over + hand-over)
+        n = (clip_length(tree, a) if planned else made_frames(a)) or clip_length(tree, a)
+        if cuts[k][0] + cuts[k][1] >= n:
+            cuts[k][1] = max(0, n - 1 - cuts[k][0])
+            cuts[k][0] = min(cuts[k][0], max(0, n - 1))
     return [(s, e) for s, e in cuts]
 
 

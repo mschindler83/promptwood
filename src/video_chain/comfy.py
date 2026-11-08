@@ -540,6 +540,34 @@ class ComfyGenerator:
         except ComfyError:
             pass
 
+    def _save(self, f: dict, dest: Path) -> None:
+        """Download a result into dest, written under a temporary name first (never a truncated file)."""
+        dest = Path(dest)
+        tmp = dest.with_name(dest.stem + ".part" + dest.suffix)
+        try:
+            tmp.write_bytes(self._download(f))
+            tmp.replace(dest)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    def _drop_uploads(self, uploads: list[tuple[str, Path]]) -> None:
+        if self.cleanup:
+            for up, local in uploads:
+                self._remove(self.input_dir, {"filename": Path(up).name, "subfolder": str(Path(up).parent)},
+                             Path(local), same_size=False)
+
+    def _queue(self, wf: dict) -> str:
+        """Queue a workflow under an id chosen here, set as current before it is sent: a Stop while the request is
+        on its way (or after a lost answer) can still cancel the job ComfyUI may have accepted."""
+        pid = str(uuid.uuid4())
+        self.current = pid
+        res = self._json("POST", "/prompt", {"prompt": wf, "client_id": self.client_id, "prompt_id": pid})
+        if res.get("node_errors"):
+            self.current = None
+            raise ComfyError(f"ComfyUI rejected the workflow: {json.dumps(res['node_errors'])[:600]}")
+        self.current = res.get("prompt_id") or pid
+        return self.current
+
     def interrupt(self) -> None:
         """Stop the clip being rendered (and drop it from the queue)."""
         pid = self.current
@@ -654,10 +682,7 @@ class ComfyGenerator:
                             start_pin=int(s.get("start_pin") or 1))
         ws = self._connect_ws()
         try:
-            res = self._json("POST", "/prompt", {"prompt": wf, "client_id": self.client_id})
-            if res.get("node_errors"):
-                raise ComfyError(f"ComfyUI rejected the workflow: {json.dumps(res['node_errors'])[:600]}")
-            self.current = res["prompt_id"]
+            self._queue(wf)
             entry = self._wait(self.current, ws)
         except ComfyJobFailed:
             raise
@@ -678,8 +703,8 @@ class ComfyGenerator:
         frame = self._first_file(outputs.get("save_last"))
         if video is None or frame is None:
             raise ComfyError("ComfyUI finished without the video or the last frame")
-        Path(out_video).write_bytes(self._download(video))
-        Path(out_last_frame).write_bytes(self._download(frame))
+        self._save(video, Path(out_video))
+        self._save(frame, Path(out_last_frame))
         if self.cleanup:
             self._remove(self.output_dir, video, Path(out_video))
             self._remove(self.output_dir, frame, Path(out_last_frame))
@@ -761,8 +786,9 @@ class ComfyGenerator:
                     pass
                 except ComfyError:
                     raise
-                except Exception:  # noqa: BLE001  (timeout or a dropped socket: keep polling)
-                    pass
+                except Exception as e:  # noqa: BLE001  (a timeout: go on; a dropped socket: poll instead)
+                    if not (isinstance(e, TimeoutError) or type(e).__name__ == "WebSocketTimeoutException"):
+                        ws = None                       # (recv would fail at once forever: no busy loop)
             else:
                 time.sleep(0.5)
             if ws is None or time.monotonic() - last_poll > 5:
@@ -1129,10 +1155,7 @@ class ComfyImageEditor(ComfyGenerator):
                                      loras=names)
             ws = self._connect_ws()
             try:
-                res = self._json("POST", "/prompt", {"prompt": wf, "client_id": self.client_id})
-                if res.get("node_errors"):
-                    raise ComfyError(f"ComfyUI rejected the workflow: {json.dumps(res['node_errors'])[:600]}")
-                self.current = res["prompt_id"]
+                self._queue(wf)
                 entry = self._wait(self.current, ws)
             except ComfyJobFailed:
                 raise
@@ -1149,7 +1172,7 @@ class ComfyImageEditor(ComfyGenerator):
             out = self._first_file((entry.get("outputs") or {}).get("edit_save"))
             if out is None:
                 raise ComfyError("ComfyUI finished without the edited image")
-            Path(out_png).write_bytes(self._download(out))
+            self._save(out, Path(out_png))
             if self.cleanup:
                 self._remove(self.output_dir, out, Path(out_png))
         finally:
@@ -1166,10 +1189,7 @@ class ComfyImageEditor(ComfyGenerator):
         try:
             ws = self._connect_ws()
             try:
-                res = self._json("POST", "/prompt", {"prompt": wf, "client_id": self.client_id})
-                if res.get("node_errors"):
-                    raise ComfyError(f"ComfyUI rejected the workflow: {json.dumps(res['node_errors'])[:600]}")
-                self.current = res["prompt_id"]
+                self._queue(wf)
                 entry = self._wait(self.current, ws)
             except ComfyJobFailed:
                 raise
@@ -1186,7 +1206,7 @@ class ComfyImageEditor(ComfyGenerator):
             out = self._first_file((entry.get("outputs") or {}).get(node))
             if out is None:
                 raise ComfyError("ComfyUI finished without the edited image")
-            Path(out_png).write_bytes(self._download(out))
+            self._save(out, Path(out_png))
             if self.cleanup:
                 self._remove(self.output_dir, out, Path(out_png))
         finally:
@@ -1201,12 +1221,16 @@ class ComfyImageEditor(ComfyGenerator):
                              "moss_image_edit_lora_*, qwen3.5_9b and flux2-vae in ComfyUI's models)")
         uploads: list[tuple[str, Path]] = []
         pics = []
-        for p in [image, *list(refs)[:2]]:
-            uploads.append((self.upload(Path(p)), Path(p)))
-            pics.append(uploads[-1][0])
-        wf = build_moss_workflow(files=self.files_moss, prompt=prompt, seed=seed,
-                                 prefix=f"{SUBFOLDER}/edit_{uuid.uuid4().hex[:12]}", save_as="edit_save",
-                                 images=pics, loras=names)
+        try:
+            for p in [image, *list(refs)[:2]]:
+                uploads.append((self.upload(Path(p)), Path(p)))
+                pics.append(uploads[-1][0])
+            wf = build_moss_workflow(files=self.files_moss, prompt=prompt, seed=seed,
+                                     prefix=f"{SUBFOLDER}/edit_{uuid.uuid4().hex[:12]}", save_as="edit_save",
+                                     images=pics, loras=names)
+        except BaseException:
+            self._drop_uploads(uploads)              # (_run_saving cleans up only once it runs)
+            raise
         self._run_saving(wf, "edit_save", out_png, uploads)
         return {"quality": "standard", "steps": MOSS_EDIT_STEPS, "cfg": 4.0, "edit_model": "moss",
                 "model": wf["unet"]["inputs"]["unet_name"], "lightning": None,
@@ -1220,12 +1244,16 @@ class ComfyImageEditor(ComfyGenerator):
             quality = self.qualities("qwen21")[-1]
         uploads: list[tuple[str, Path]] = []
         pics = []
-        for p in [image, *list(refs)[:2]]:
-            uploads.append((self.upload(Path(p)), Path(p)))
-            pics.append(uploads[-1][0])
-        wf = build_qwen21_workflow(files=self.files21, prompt=prompt, seed=seed, quality=quality,
-                                   prefix=f"{SUBFOLDER}/edit_{uuid.uuid4().hex[:12]}", save_as="edit_save",
-                                   images=pics, loras=names)
+        try:
+            for p in [image, *list(refs)[:2]]:
+                uploads.append((self.upload(Path(p)), Path(p)))
+                pics.append(uploads[-1][0])
+            wf = build_qwen21_workflow(files=self.files21, prompt=prompt, seed=seed, quality=quality,
+                                       prefix=f"{SUBFOLDER}/edit_{uuid.uuid4().hex[:12]}", save_as="edit_save",
+                                       images=pics, loras=names)
+        except BaseException:
+            self._drop_uploads(uploads)
+            raise
         self._run_saving(wf, "edit_save", out_png, uploads)
         turbo = wf["sample"]["class_type"] == "SamplerCustomAdvanced"
         return {"quality": quality, "steps": 8 if turbo else QWEN21_STEPS, "cfg": 1.0, "edit_model": "qwen21",
@@ -1411,10 +1439,7 @@ def _refine(self, draft: Path, prompt: str, out: Path, seed: int, size: tuple[in
                                        upscaler=files["upscaler"], prefix=prefix, sparse=sparse, **pins)
             ws = self._connect_ws()
             try:
-                res = self._json("POST", "/prompt", {"prompt": wf, "client_id": self.client_id})
-                if res.get("node_errors"):
-                    raise ComfyError(f"ComfyUI rejected the workflow: {json.dumps(res['node_errors'])[:600]}")
-                self.current = res["prompt_id"]
+                self._queue(wf)
                 entry = self._wait(self.current, ws)
             except ComfyJobFailed:
                 raise
@@ -1568,10 +1593,7 @@ class ComfyPromptRefiner(ComfyGenerator):
                       hint: str = "", cast: list[dict] | None = None) -> str:
         model = next((m for m in self.models if m["file"] == model_file), self.models[0])
         wf = build_refine_prompt_workflow(prompt=prompt, kind=kind, model=model, seed=seed, hint=hint, cast=cast)
-        res = self._json("POST", "/prompt", {"prompt": wf, "client_id": self.client_id})
-        if res.get("node_errors"):
-            raise ComfyError(f"ComfyUI rejected the workflow: {json.dumps(res['node_errors'])[:600]}")
-        self.current = res["prompt_id"]
+        self._queue(wf)
         ws = self._connect_ws()
         try:
             entry = self._wait(self.current, ws)

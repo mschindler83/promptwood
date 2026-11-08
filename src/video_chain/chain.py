@@ -93,7 +93,11 @@ def probe(path: Path) -> dict:
     if v is None:
         raise RuntimeError(f"{path} has no video stream")
     num, _, den = (v.get("r_frame_rate") or "0/1").partition("/")
-    return {"frames": int(v.get("nb_read_frames") or 0), "fps": float(num) / float(den or 1),
+    try:
+        fps = float(num) / float(den or 1)
+    except (ValueError, ZeroDivisionError):     # "0/0" for some streams
+        fps = 0.0
+    return {"frames": int(v.get("nb_read_frames") or 0), "fps": fps,
             "width": int(v["width"]), "height": int(v["height"]),
             "audio": any(s.get("codec_type") == "audio" for s in streams)}
 
@@ -103,8 +107,11 @@ def last_frame(video: Path, png: Path) -> None:
     n = probe(video)["frames"]
     if n < 1:
         raise RuntimeError(f"{video} has no frames")
+    Path(png).unlink(missing_ok=True)              # an older PNG there must not pass as this frame
     _run(["ffmpeg", "-v", "error", "-y", "-i", str(video), "-vf", f"select=eq(n\\,{n - 1})", "-frames:v", "1",
           str(png)])
+    if not Path(png).is_file():
+        raise RuntimeError(f"could not read the last frame of {Path(video).name}")
 
 
 def to_png(image: Path, png: Path, crop: tuple[int, int, int, int] | None = None) -> None:
@@ -253,9 +260,15 @@ def cut_frames(video: Path, out: Path, first: int, count: int, fps: int = FPS) -
     if has_audio:
         cmd += ["-map", "0:a:0", "-af", f"atrim=start={first / fps:.6f}:end={(first + count) / fps:.6f},"
                                         "asetpts=PTS-STARTPTS", "-c:a", "aac", "-b:a", "256k"]
-    _run(cmd + ["-r", str(fps), str(out)])
-    if probe(out)["frames"] != count:
-        raise RuntimeError(f"could not cut {count} frames from {Path(video).name}")
+    out = Path(out)
+    tmp = out.with_name(out.stem + ".part" + out.suffix)
+    try:
+        _run(cmd + ["-r", str(fps), str(tmp)])
+        if probe(tmp)["frames"] != count:
+            raise RuntimeError(f"could not cut {count} frames from {Path(video).name}")
+        tmp.replace(out)
+    finally:
+        tmp.unlink(missing_ok=True)
     return has_audio
 
 
@@ -301,9 +314,12 @@ def concat(videos: list[Path], out: Path, drop_first: bool = True, fps: int = FP
     codec = ["-c:v", "libx264", "-crf", "16", "-preset", "slow", "-pix_fmt", "yuv420p"]
     codec += ["-c:a", "aac", "-b:a", "192k"] if any_audio else []
     tmp = out.with_name(out.stem + ".part" + out.suffix)
-    _run(["ffmpeg", "-v", "error", "-y", *args, "-filter_complex", ";".join(filters), *maps, *codec,
-          "-r", str(fps), str(tmp)])
-    tmp.replace(out)
+    try:
+        _run(["ffmpeg", "-v", "error", "-y", *args, "-filter_complex", ";".join(filters), *maps, *codec,
+              "-r", str(fps), str(tmp)])
+        tmp.replace(out)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 _SHA_CACHE: dict[tuple, str] = {}

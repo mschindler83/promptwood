@@ -236,11 +236,18 @@ def serve(a, emit, make_generator: Callable[[dict], object], stdin=None) -> int:
             emit({"e": "bye", "reason": "idle"})
             return 0
         line = lines.readline()
-        if not line:                                # the GUI is gone
+        if not line:                                # the GUI is gone: give ComfyUI's memory back too
+            if hasattr(gen, "free"):
+                try:
+                    gen.free()
+                except Exception:  # noqa: BLE001
+                    pass
             return 0
         try:
             cmd = json.loads(line)
         except ValueError:
+            cmd = None
+        if not isinstance(cmd, dict):
             emit({"e": "error", "msg": f"bad command: {line.strip()[:80]}"})
             continue
         if cmd.get("cmd") == "quit":
@@ -298,9 +305,13 @@ def _main_serve(a, emit) -> int:
 
     def on_term(_sig, _frame):                       # Stop in the GUI: cancel the clip in ComfyUI too
         gen = holder.get("gen")
-        if gen is not None and hasattr(gen, "interrupt"):
-            gen.interrupt()
-        raise SystemExit(143)
+        try:
+            if gen is not None and hasattr(gen, "interrupt"):
+                gen.interrupt()
+        except Exception:  # noqa: BLE001  (Stop must end the worker whatever ComfyUI answers)
+            pass
+        finally:
+            raise SystemExit(143)
     signal.signal(signal.SIGTERM, on_term)
 
     def make(current: dict):

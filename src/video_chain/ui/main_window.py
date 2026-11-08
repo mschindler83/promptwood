@@ -888,7 +888,7 @@ class MainWindow(QMainWindow):
         self.cards: list[PromptCard | VideoCard] = []
         self._pix: dict[tuple, QPixmap] = {}
         self.proc: QProcess | None = None
-        self._buf = self._ebuf = ""
+        self._buf, self._ebuf = b"", ""
         self._stopping = False
         self._phase = ""
         self._error = ""
@@ -1677,8 +1677,9 @@ class MainWindow(QMainWindow):
     def close_project(self):
         if self.running or self.project is None:
             return
-        self._save_timer.stop()
-        self._save_tree()
+        if not self._may_leave_project():
+            return
+        self._waiting_comfy = self._waiting_refine = None      # a wait for ComfyUI belongs to this project
         self.preview.stop()
         self.project = self.tree = None
         self.project_edit.clear()
@@ -1701,8 +1702,9 @@ class MainWindow(QMainWindow):
     def open_project(self, folder: Path, quiet: bool = False) -> bool:
         if self.running:
             return False
-        self._save_timer.stop()
-        self._save_tree()
+        if self.project is not None and not self._may_leave_project():
+            return False
+        self._waiting_comfy = self._waiting_refine = None
         folder = Path(folder).expanduser().resolve()
         try:
             folder.mkdir(parents=True, exist_ok=True)
@@ -2457,9 +2459,21 @@ class MainWindow(QMainWindow):
         self._save_timer.start()
         self._refresh_timer.start()
 
-    def _save_tree(self):
+    def _save_tree(self) -> bool:
+        """Save the open project now; False if it could not be saved (changed outside, disk error)."""
         if self.project is not None and self.tree is not None and not self.running:
-            self._write_tree()
+            return bool(self._write_tree())
+        return True
+
+    def _may_leave_project(self) -> bool:
+        """Save before the project is closed or replaced; if that fails, ask before its edits are dropped."""
+        self._save_timer.stop()
+        if self._save_tree():
+            return True
+        why = self.status.text()
+        return QMessageBox.question(
+            self, "Unsaved changes", f"The project could not be saved: {why}\n\nClose it anyway and lose the "
+            "changes since the last save?") == QMessageBox.Yes
 
     def _stamp(self) -> tuple | None:
         try:
@@ -2608,6 +2622,9 @@ class MainWindow(QMainWindow):
             return
         img = QImage(str(start))
         w, h = img.width(), img.height()
+        if img.isNull() or w < 1 or h < 1:
+            self.size_info.setText(f"The start image ({T.START_FILE}) cannot be read: choose it again.")
+            return
         vw, vh = chain.canvas_size(w, h, self.resolution.currentData())
         r = (w / h) / (vw / vh)
         note = "" if 0.97 < r < 1.03 else " (ratio outside 2:5 … 5:2, it gets stretched)"
@@ -3027,6 +3044,8 @@ class MainWindow(QMainWindow):
         status bar how many were found."""
         comfy_dir, bridge = Path(os.path.expanduser(self.comfy_dir.text().strip() or DEFAULT_COMFY_DIR)), self.bridge
         self._scanned_at = time.monotonic()
+        self._lora_scan_gen = getattr(self, "_lora_scan_gen", 0) + 1
+        gen = self._lora_scan_gen
 
         def work():
             try:
@@ -3039,6 +3058,8 @@ class MainWindow(QMainWindow):
                     found += [(p, n, fam) for p, n in items]
             except Exception:  # noqa: BLE001
                 return                           # keep the lists found before (a folder may be offline)
+            if gen != getattr(self, "_lora_scan_gen", gen):
+                return                           # a newer scan was started (e.g. another ComfyUI folder)
             bridge.loras.emit(found, report)
         threading.Thread(target=work, daemon=True).start()
 
@@ -4124,7 +4145,7 @@ class MainWindow(QMainWindow):
         self.proc.readyReadStandardError.connect(self._read_err)
         self.proc.finished.connect(self._finished)
         self.proc.errorOccurred.connect(self._proc_error)
-        self._buf = self._ebuf = ""
+        self._buf, self._ebuf = b"", ""
         self._worker_idle, self._worker_bound, self._replace_worker = False, self._worker_key(), False
         self._worker_leaving = False
         minutes = self.idle_minutes.value() if self.keep_loaded.isChecked() else 0
@@ -4162,6 +4183,7 @@ class MainWindow(QMainWindow):
         if self.proc is None:
             return
         self._quit_frees = free
+        self._worker_leaving = True                       # no new job for it (a new worker starts instead)
         if self.proc.state() == QProcess.Running:
             self.proc.write(b'{"cmd": "quit", "free": true}\n' if free else b'{"cmd": "quit"}\n')
         self._kill_timer.start()
@@ -4217,10 +4239,17 @@ class MainWindow(QMainWindow):
         p = self.proc
         if p is None:
             return
-        self._buf += bytes(p.readAllStandardOutput()).decode(errors="replace")
-        *lines, self._buf = self._buf.split("\n")
+        self._buf += bytes(p.readAllStandardOutput())     # bytes: a character split between reads stays whole
+        *lines, self._buf = self._buf.split(b"\n")
         for line in lines:
+            self._safe_line(line.decode(errors="replace"))
+
+    def _safe_line(self, line: str):
+        """One line of the worker's output; a broken event must not lose the lines after it."""
+        try:
             self._line(line)
+        except Exception as e:  # noqa: BLE001
+            self.log.appendPlainText(f"(could not handle the worker's message: {type(e).__name__}: {e})")
 
     def _read_err(self):
         p = self.proc
@@ -4289,6 +4318,8 @@ class MainWindow(QMainWindow):
         elif e == "bye":
             self._worker_idle = False
             self._worker_leaving = True
+            if self._job is not None and self._job.get("sent") and self._phase != "done":
+                self._replace_worker = True               # our job crossed its goodbye: a new worker takes it
             if self._comfy_model in ("h3", "h3-hyperflow") and (ev.get("reason") == "idle" or self._quit_frees):
                 self._comfy_model = None                       # it unloaded the clip model
             if ev.get("reason") == "idle" and not self.running:
@@ -4380,6 +4411,7 @@ class MainWindow(QMainWindow):
         self._stopping = False
         if self.worker_alive and not self.keep_loaded.isChecked():
             self._quit_worker()
+        self._save_timer.start()                   # what was chosen during the run (selection …) is saved now
         self._update_buttons()
         self._update_model_label()
 
@@ -4394,26 +4426,27 @@ class MainWindow(QMainWindow):
         self._kill_timer.stop()
         p, self.proc = self.proc, None
         if p is not None:
-            rest = bytes(p.readAllStandardOutput()).decode(errors="replace")
-            for line in (self._buf + rest).split("\n"):
-                self._line(line)
+            rest = self._buf + bytes(p.readAllStandardOutput())
+            for line in rest.split(b"\n"):
+                self._safe_line(line.decode(errors="replace"))
             err = bytes(p.readAllStandardError()).decode(errors="replace")
             for line in (self._ebuf + err).split("\n"):
                 line = line.split("\r")[-1].rstrip()
                 if line:
                     self.log.appendPlainText(line)
             p.deleteLater()
-        self._buf = self._ebuf = ""
+        self._buf, self._ebuf = b"", ""
         self._worker_idle = False
         self._model_state = ""
         if self._job is not None and self._replace_worker and not self._stopping:
             self._job["sent"] = False
             self._start_worker()
         elif self._job is not None:
+            refine = self._job.get("refine")                # an export stays an export when it waits for ComfyUI
             self._job_finished(code if code else 1)
             if code == 4:                                   # COMFY_DOWN
                 self.comfy_up = False
-                if not self._autostart(self._targets):
+                if not self._autostart(self._targets, refine):
                     self.status.setText(f"ComfyUI is not running at {self.comfy_url.text().strip()}. "
                                         "Start it (ComfyUI → Start ComfyUI) and generate again.")
                 self._update_comfy_label()
@@ -4456,7 +4489,9 @@ class MainWindow(QMainWindow):
             self._comfy_starting = 0.0
             self.status.setText("ComfyUI is running.")
         if self._waiting_comfy is not None:
-            if up:
+            if up and QApplication.activeModalWidget() is not None:
+                pass                                        # a dialog is open (it may change the project): later
+            elif up:
                 targets, self._waiting_comfy = self._waiting_comfy, None
                 if self.tree is not None and all(t in self.tree.nodes for t in targets):
                     refine = getattr(self, "_waiting_refine", None)
@@ -4533,6 +4568,9 @@ class MainWindow(QMainWindow):
                     != QMessageBox.Yes:
                 e.ignore()
                 return
+        if self.project is not None and not self.running and not self._may_leave_project():
+            e.ignore()                                # the user keeps the window to save elsewhere / reopen
+            return
         if getattr(self, "_trigger_scan", None) is not None:
             self._trigger_scan.set()                  # the trigger word lookup stops at the next file
         if self.proc is not None:                    # never leave the generator (and the model) behind

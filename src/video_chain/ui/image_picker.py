@@ -95,7 +95,8 @@ class ImagePickerDialog(QDialog):
         self._thumbs = _Thumbs()
         self._thumbs.ready.connect(self._thumb_ready)
         self._items: dict[str, QListWidgetItem] = {}
-        self._cache: dict[tuple, QImage] = {}
+        from collections import OrderedDict
+        self._cache: OrderedDict[tuple, QImage] = OrderedDict()     # the latest thumbnails (bounded)
         self.folder: Path = Path.home()
         self._chosen: str | None = None
         self._extra_places = places or []
@@ -284,6 +285,8 @@ class ImagePickerDialog(QDialog):
                 except OSError:
                     pass
         self._cache[key] = img
+        while len(self._cache) > 600:                  # a huge folder must not keep every thumbnail in memory
+            self._cache.popitem(last=False)
         self._thumbs.ready.emit(gen, path, img)
 
     def _thumb_ready(self, gen: int, path: str, img: QImage):

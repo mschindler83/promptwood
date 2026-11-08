@@ -13,6 +13,7 @@ import random
 import subprocess
 import threading
 import time
+import uuid
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal
@@ -57,6 +58,21 @@ def scale_to(src: Path, dst: Path, size: tuple[int, int]) -> None:
         tmp.unlink(missing_ok=True)
 
 
+def upright(path) -> QImage:
+    """An image as ComfyUI's LoadImage sees it: turned by its EXIF orientation (phone photos)."""
+    from PySide6.QtGui import QImageReader
+    r = QImageReader(str(path))
+    r.setAutoTransform(True)
+    return r.read()
+
+
+def _mtime(p: Path) -> float:
+    try:
+        return p.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def project_edits(project: Path) -> list[tuple[Path, dict]]:
     """The edit results kept in a project, newest first, with what they were made from."""
     d = Path(project) / EDITS_DIR
@@ -69,7 +85,7 @@ def project_edits(project: Path) -> list[tuple[Path, dict]]:
         except (OSError, ValueError):
             meta = {}
         out.append((png, meta))
-    return sorted(out, key=lambda x: x[0].stat().st_mtime, reverse=True)
+    return sorted(out, key=lambda x: _mtime(x[0]), reverse=True)
 
 
 def record_use(png: str | Path, use: dict) -> None:
@@ -493,23 +509,30 @@ class ImageEditDialog(QDialog):
             self.set_source(source)
         elif sources:
             self.set_source(sources[0][1])
-        self.modes.idClicked.connect(lambda i: self.set_mode("create" if i == 1 else "edit"))
+        self.modes.idClicked.connect(self._mode_clicked)
         self.m_create.setEnabled(connect_create is not None)
         saved = self.qs.value("imageMode", "", type=str) if self.qs is not None else ""
+        if mode != "auto" and self.qs is not None:
+            self.qs.setValue("imageMode", mode)       # opened from its Edit / Create button: the user's choice
         self.set_mode(mode if mode != "auto" else (saved or "edit"))
         if connect_create is not None:
             self._load_families()
         self._update_buttons()
 
     # ---- modes
+    def _mode_clicked(self, i: int):
+        mode = "create" if i == 1 else "edit"
+        if self.qs is not None:
+            self.qs.setValue("imageMode", mode)       # remembered only when the user chooses it
+        self.set_mode(mode)
+
     def mode(self) -> str:
         return "create" if self.m_create.isChecked() else "edit"
 
     def set_mode(self, mode: str):
         create = mode == "create" and self.connect_create is not None
         (self.m_create if create else self.m_edit).setChecked(True)
-        if self.qs is not None:
-            self.qs.setValue("imageMode", "create" if create else "edit")
+
         self.setWindowTitle("Create a new image with AI" if create else "Edit an image with AI")
         for w in (self.edit_box, self.edit_pics, self.keep_size):
             w.setVisible(not create)
@@ -557,8 +580,11 @@ class ImageEditDialog(QDialog):
     def _show_edit_models(self):
         """Qwen-Image 2.1 and MOSS-Image can be chosen only when ComfyUI has them (known from Create's model list;
         MOSS also needs its edit LoRA)."""
-        if not self.families:
-            return                                 # not listed yet: all stay offered
+        if not self.families:                      # not listed (yet, or ComfyUI is gone): all offered again
+            for i in range(self.edit_model.count()):
+                self.edit_model.model().item(i).setEnabled(True)
+                self.edit_model.setItemText(i, EDIT_MODELS[self.edit_model.itemData(i)])
+            return
         for key in ("2511", "qwen21", "moss"):
             info = self.families.get({"2511": "edit2511"}.get(key, key)) or {}
             k = self.edit_model.findData(key)
@@ -592,6 +618,8 @@ class ImageEditDialog(QDialog):
         threading.Thread(target=work, daemon=True).start()
 
     def _families_found(self, files: dict, error: str):
+        before = self.family.currentData()
+        kept = self.loras.items() if self.mode() == "create" and before not in FAMILIES else []
         self.families = files
         self._families_error = error
         if error and self._retry_families > 0:           # ComfyUI is starting: ask again in a few seconds
@@ -622,6 +650,9 @@ class ImageEditDialog(QDialog):
         self.family.blockSignals(False)
         self._show_edit_models()
         self._family_changed()
+        if kept and not self.loras.items():         # chosen before the list came: keep them
+            self.loras.set_items(self._known(), kept)
+            self._remember_loras()
 
     def _family_changed(self, *_):
         fam = self.family.currentData()
@@ -694,7 +725,7 @@ class ImageEditDialog(QDialog):
             self.set_source(path)
 
     def set_source(self, path: str):
-        img = QImage(path)
+        img = upright(path)
         if img.isNull():
             self.state.setText(f"Not an image: {Path(path).name}")
             return
@@ -751,7 +782,7 @@ class ImageEditDialog(QDialog):
             orig = meta.get("source_copy") or meta.get("source")
             show = orig if self.b_before.isChecked() and orig and Path(orig).is_file() else png
             self.view.set_image(QImage(show))
-            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(Path(png).stat().st_mtime))
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(_mtime(Path(png))))
             used = " · ".join(f"{lora_label(lo['path'])} ×{lo['strength']:g}" for lo in meta.get("loras") or [])
             where = self.uses(meta)
             how = (f"{FAMILIES.get(meta.get('family'), {}).get('label', '')} "
@@ -812,7 +843,7 @@ class ImageEditDialog(QDialog):
         self._remember_loras()
         size = None
         if self.keep_size.isChecked():
-            img = QImage(source)
+            img = upright(source)                 # the size the edit comes back at (a phone photo turned)
             size = (img.width() // 2 * 2, img.height() // 2 * 2)
         edits = self.project / EDITS_DIR
         sig, connect = self._sig, self.connect_editor
@@ -834,7 +865,8 @@ class ImageEditDialog(QDialog):
                     raise RuntimeError(f"{EDIT_MODELS[model]} is not available in ComfyUI")
                 if quality == "fast" and "fast" not in self.editor.qualities(model):
                     sig.progress.emit(0, n, 0, 0)
-                kept = edits / "sources" / f"source_{time.strftime('%Y%m%d-%H%M%S')}{Path(source).suffix.lower() or '.png'}"
+                kept = edits / "sources" / (f"source_{time.strftime('%Y%m%d-%H%M%S')}_{uuid.uuid4().hex[:6]}"
+                                            f"{Path(source).suffix.lower() or '.png'}")
                 kept.parent.mkdir(exist_ok=True)
                 kept.write_bytes(Path(source).read_bytes())         # the original stays with its results
                 for k in range(1, n + 1):
@@ -896,7 +928,8 @@ class ImageEditDialog(QDialog):
                 self.editor = connect(lambda i, st: sig.progress.emit(cur["k"], n, i, st))
                 kept = None
                 if refs:                              # the first picture is shown as the "original"
-                    kept = edits / "sources" / f"source_{time.strftime('%Y%m%d-%H%M%S')}{Path(refs[0]).suffix.lower() or '.png'}"
+                    kept = edits / "sources" / (f"source_{time.strftime('%Y%m%d-%H%M%S')}_{uuid.uuid4().hex[:6]}"
+                                                f"{Path(refs[0]).suffix.lower() or '.png'}")
                     kept.parent.mkdir(exist_ok=True)
                     kept.write_bytes(Path(refs[0]).read_bytes())
                 for k in range(1, n + 1):

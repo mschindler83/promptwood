@@ -269,8 +269,9 @@ class VideoRangeDialog(QDialog):
     def _choose(self):
         f = choose_video(self, self.settings, str(Path(self.file).parent) if self.file else None)
         if f:
-            keep, self._keep = self._keep or (None, None), None
-            self.load(f, *keep)
+            keep = self._keep or (None, None)
+            if self.load(f, *keep):
+                self._keep = None                  # (a file that cannot be read keeps the saved range)
 
     def load(self, file: str, start: float | None = None, end: float | None = None) -> bool:
         try:
@@ -403,19 +404,35 @@ class VideoRangeDialog(QDialog):
             for which, idx in (("first", 0), ("last", max(0, n - 1))):
                 if gen != self._gen:                      # the range moved on: skip the stale frame
                     return
-                try:
-                    r = subprocess.run(["ffmpeg", "-v", "error", "-ss", f"{float(start):.6f}", "-i", file,
-                                        "-map", "0:v:0", "-vf", f"fps={FPS},select=eq(n\\,{idx}){size}",
-                                        "-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "-"],
-                                       capture_output=True, timeout=120)
-                    img = QImage.fromData(r.stdout, "PNG") if r.returncode == 0 else QImage()
-                except (OSError, subprocess.SubprocessError):
-                    img = QImage()
+                img = self._decode(["ffmpeg", "-v", "error", "-ss", f"{float(start):.6f}", "-i", file,
+                                    "-map", "0:v:0", "-vf", f"fps={FPS},select=eq(n\\,{idx}){size}",
+                                    "-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "-"], gen)
+                if img is None:                           # the range moved on (or the dialog closed): stopped
+                    return
                 try:
                     sig.ready.emit(gen, which, img)
                 except RuntimeError:                      # the dialog is gone
                     return
         threading.Thread(target=work, daemon=True).start()
+
+    def _decode(self, cmd: list[str], gen: int) -> QImage | None:
+        """Run a frame decode; killed as soon as the range moves on or the dialog closes (None then)."""
+        import time
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        except OSError:
+            return QImage()
+        end = time.monotonic() + 120
+        while True:
+            try:
+                out, _ = proc.communicate(timeout=0.2)
+                break
+            except subprocess.TimeoutExpired:
+                if gen != self._gen or time.monotonic() > end:
+                    proc.kill()
+                    proc.communicate()
+                    return None if gen != self._gen else QImage()
+        return QImage.fromData(out, "PNG") if proc.returncode == 0 else QImage()
 
     def _frame_ready(self, gen: int, which: str, img: QImage):
         if gen != self._gen:
@@ -475,6 +492,7 @@ class VideoRangeDialog(QDialog):
         self.b_play.setIcon(icon("pause" if st == QMediaPlayer.PlayingState else "play"))
 
     def done(self, r):                                  # stop playback and the file handle with the dialog
+        self._gen += 1                                  # running frame decodes stop
         if self.player is not None:
             self.player.stop()
             self.player.setSource(QUrl())
