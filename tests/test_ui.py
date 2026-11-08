@@ -586,6 +586,16 @@ def test_identity_references_in_the_window(app, win, tmp_path, image, monkeypatc
     flush(app, win)
     card = next(c for c in win.cards if c.nid == ids[1])
     assert card.faces.text() == "Faces: @Tom · Voices: @Tom\nLines: @Tom: \u201cHello there.\u201d" and "<d>[English] Hello there.</d>" in card.edit.toolTip()
+    # the overview: who appears in which clip of the path
+    strip = win.cast_strip
+    rows = [strip.verticalHeaderItem(r).text() for r in range(strip.rowCount())]
+    cols = [c.nid for c in win.cards]
+    assert strip.isVisibleTo(win) and rows == ["@Person1", "@Tom"] and strip.columnCount() == len(cols)
+    assert strip.item(rows.index("@Tom"), cols.index(ids[1])).text() == "●♪"
+    assert strip.item(rows.index("@Person1"), cols.index(ids[0])).text() == "○"           # the lead, nobody named
+    assert strip.item(rows.index("@Tom"), cols.index(ids[0])).text() == ""
+    assert "speaks with its voice" in strip.item(rows.index("@Tom"), cols.index(ids[1])).toolTip()
+    strip._clicked(cols.index(ids[1]))                                                   # shows that card
     win.dialogue_lang.setCurrentText("German")
     assert win.tree.options["identity"]["language"] == "German"
     win._remove_voice()

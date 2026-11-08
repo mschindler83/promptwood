@@ -37,6 +37,7 @@ from .image_picker import pick_image
 from .clip_dialogs import CompareDialog, HandoverDialog
 from .lora_stack import LoraStack, fill_lora_combo, lora_label, lora_path
 from .mentions import MentionHelper
+from .cast_strip import CastStrip
 from .prompt_refiner import RefineDialog, replace_text
 from .image_edit import EDITS_DIR, ImageEditDialog, record_use, uses_of
 from .video_editor import VideoRangeDialog, choose_video
@@ -1306,6 +1307,10 @@ class MainWindow(QMainWindow):
         self.path_info = label("", level="tertiary")
         bh.addWidget(self.path_info)
         pv.addWidget(bar)
+        self.cast_strip = CastStrip()
+        self.cast_strip.clipClicked.connect(self._show_card_of)
+        self.cast_strip.hide()
+        pv.addWidget(self.cast_strip)
         self.path_area = QScrollArea()
         self.path_area.setWidgetResizable(True)
         self.path_area.setFrameShape(QFrame.NoFrame)
@@ -2551,6 +2556,13 @@ class MainWindow(QMainWindow):
             last = self.cards[-1]
             QTimer.singleShot(0, lambda: self.path_area.ensureWidgetVisible(last))
 
+    def _show_card_of(self, nid: str):
+        card = next((c for c in self.cards if c.nid == nid), None)
+        if card is not None:
+            self.path_area.ensureWidgetVisible(card)
+            if isinstance(card, PromptCard):
+                card.edit.setFocus()
+
     def _show_card_settings(self, on: bool):
         """Open / close the own settings on every card at once."""
         for c in self.cards:
@@ -2559,6 +2571,7 @@ class MainWindow(QMainWindow):
 
     def _update_cards(self):
         path_nodes = [self.tree.nodes[c.nid] for c in self.cards if c.nid in self.tree.nodes]
+        self.cast_strip.show_path(self.tree.options, path_nodes)
         cuts = dict(zip([n.id for n in path_nodes],
                         T.path_cuts(self.tree, path_nodes, bool(self.tree.options.get("keep_repeated")),
                                     planned=True)))
