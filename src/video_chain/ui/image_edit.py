@@ -28,6 +28,7 @@ from ..comfy import EDIT_MODELS
 from ..triggers import stack_words, with_triggers
 from ..imagegen import FAMILIES, size_for
 from .lora_stack import LoraStack, lora_label
+from .mask_painter import MaskPainterDialog, mask_area, overlay
 from .widgets import FrameTile, guard_wheel, icon_button, label
 
 EDITS_DIR = "edits"
@@ -264,6 +265,21 @@ class ImageEditDialog(QDialog):
         erow.addWidget(label("Model", level="tertiary"))
         erow.addWidget(self.edit_model, 1)
         ev.addLayout(erow)
+        mrow2 = QHBoxLayout()
+        self.b_mask = QPushButton("Paint mask…")
+        self.b_mask.setToolTip("Paint the part that should change; the rest stays exactly as it is (inpainting "
+                               "with Qwen-Image 2.1 and its Fun ControlNet)")
+        self.b_mask.clicked.connect(self.paint_mask)
+        self.b_mask_clear = QPushButton("No mask")
+        self.b_mask_clear.setToolTip("Edit the whole image again")
+        self.b_mask_clear.clicked.connect(lambda: self.set_mask(None))
+        self.mask_info = label("", level="tertiary")
+        self.mask_info.setWordWrap(True)
+        mrow2.addWidget(self.b_mask)
+        mrow2.addWidget(self.b_mask_clear)
+        mrow2.addWidget(self.mask_info, 1)
+        ev.addLayout(mrow2)
+        self.mask: QImage | None = None              # white = drawn anew, at the source's (upright) size
         left.addWidget(self.edit_box)
 
         # ---- create: model, references, size
@@ -576,6 +592,8 @@ class ImageEditDialog(QDialog):
     def _edit_model_changed(self, *_):
         if self.mode() == "edit":
             self.set_mode("edit")                # its qualities and LoRAs
+        self._show_mask()
+        self._update_buttons()
 
     def _show_edit_models(self):
         """Qwen-Image 2.1 and MOSS-Image can be chosen only when ComfyUI has them (known from Create's model list;
@@ -729,13 +747,55 @@ class ImageEditDialog(QDialog):
         if img.isNull():
             self.state.setText(f"Not an image: {Path(path).name}")
             return
+        changed = str(path) != self.source
         self.source = str(path)
-        self.src_tile.set_image(img)
+        if changed or (self.mask is not None and self.mask.size() != img.size()):
+            self.mask = None                       # a mask belongs to its image
+        self.src_tile.set_image(overlay(img, self.mask) if self.mask is not None else img)
         self.src_tile.setToolTip(str(path))
+        self._show_mask()
         i = self.src_combo.findData(str(path))
         self.src_info.setText(f"{self.src_combo.itemText(i) + ' · ' if i >= 0 else ''}{Path(path).name} · "
                               f"{img.width()}×{img.height()}")
         self._update_buttons()
+
+    # ---- mask (inpainting)
+    def paint_mask(self):
+        if not self.source:
+            return
+        img = upright(self.source)
+        dlg = MaskPainterDialog(self, img, self.mask)
+        try:
+            if dlg.exec() == QDialog.Accepted:
+                self.set_mask(dlg.mask if mask_area(dlg.mask) > 0 else None)
+        finally:
+            dlg.deleteLater()
+
+    def set_mask(self, mask: QImage | None):
+        """The painted mask for the image to edit (None: the whole image is edited)."""
+        self.mask = mask.copy() if mask is not None else None
+        if self.source:
+            img = upright(self.source)
+            self.src_tile.set_image(overlay(img, self.mask) if self.mask is not None else img)
+        self._show_mask()
+        self._update_buttons()
+
+    def _mask_problem(self) -> str:
+        """Why the painted mask cannot be used now ("" if it can, or there is none)."""
+        if self.mask is None:
+            return ""
+        if self.edit_model.currentData() != "qwen21":
+            return "A painted mask works with Qwen-Image 2.1: choose it as the model (or remove the mask)."
+        return ""
+
+    def _show_mask(self):
+        on = self.mask is not None
+        self.b_mask.setText("Change mask…" if on else "Paint mask…")
+        self.b_mask.setEnabled(bool(self.source) and not self._busy)
+        self.b_mask_clear.setVisible(on)
+        why = self._mask_problem()
+        self.mask_info.setText(why or (f"Only the red part ({mask_area(self.mask) * 100:.0f} %) is drawn anew; the "
+                                       "rest stays exactly as it is." if on else ""))
 
     # ---- results
     def _load_results(self, select: str | None = None):
@@ -811,9 +871,10 @@ class ImageEditDialog(QDialog):
             why = ("Choose an available model" if fam not in FAMILIES or "models" not in (self.families.get(fam) or {})
                    else "Add a reference picture" if not refs_ok else "Describe the image")
         else:
-            ok = idle and bool(self.source) and text
-            why = "Choose the image to edit and write what should change"
+            ok = idle and bool(self.source) and text and not self._mask_problem()
+            why = self._mask_problem() or "Choose the image to edit and write what should change"
         self.b_gen.setEnabled(ok)
+        self.b_mask.setEnabled(bool(self.source) and idle)
         if not ok:
             self.b_gen.setToolTip(why if idle else "Working …")
         self.b_cancel.setEnabled(not idle)
@@ -836,13 +897,18 @@ class ImageEditDialog(QDialog):
         prompt = " ".join(self.prompt.toPlainText().split())
         source, quality, n = self.source, self.quality.currentData(), self.tries.value()
         model = self.edit_model.currentData()
+        if self._mask_problem():
+            self._busy = False
+            self.state.setText(self._mask_problem())
+            return
+        mask = self.mask.copy() if self.mask is not None else None
         words = self._trigger_words()
         sent = with_triggers(prompt, words)
         refs = [p for p in (self.pic2.path, self.pic3.path) if p]
         loras = [(it["path"], it["strength"]) for it in self.loras.items()]
         self._remember_loras()
         size = None
-        if self.keep_size.isChecked():
+        if self.keep_size.isChecked() and mask is None:     # (an inpaint comes back at the source's own size)
             img = upright(source)                 # the size the edit comes back at (a phone photo turned)
             size = (img.width() // 2 * 2, img.height() // 2 * 2)
         edits = self.project / EDITS_DIR
@@ -869,6 +935,11 @@ class ImageEditDialog(QDialog):
                                             f"{Path(source).suffix.lower() or '.png'}")
                 kept.parent.mkdir(exist_ok=True)
                 kept.write_bytes(Path(source).read_bytes())         # the original stays with its results
+                mask_file = None
+                if mask is not None:                                 # the mask too (white = drawn anew)
+                    mask_file = kept.with_name(kept.stem.replace("source_", "mask_", 1) + ".png")
+                    if not mask.save(str(mask_file), "PNG"):
+                        raise RuntimeError("could not save the mask")
                 for k in range(1, n + 1):
                     if self._cancel:
                         break
@@ -877,11 +948,11 @@ class ImageEditDialog(QDialog):
                     stem = f"edit_{time.strftime('%Y%m%d-%H%M%S')}_{seed}"
                     out = edits / f"{stem}.png"
                     meta = self.editor.edit(Path(source), sent, out, seed, quality, [Path(r) for r in refs], loras,
-                                            model=model)
+                                            model=model, mask=mask_file)
                     if size is not None:
                         scale_to(out, out, size)
                     meta.update({"prompt": prompt, "trigger_words": words, "seed": seed, "source": source,
-                                 "source_copy": str(kept),
+                                 "source_copy": str(kept), **({"mask": str(mask_file)} if mask_file else {}),
                                  "refs": refs, "size": list(size) if size else None})
                     out.with_suffix(".json").write_text(json.dumps(meta, indent=2, ensure_ascii=False),
                                                         encoding="utf-8")
@@ -1131,6 +1202,11 @@ class ImageEditDialog(QDialog):
             q = self.quality.findData(meta.get("quality"))
             if q >= 0:
                 self.quality.setCurrentIndex(q)
+            m = meta.get("mask")                  # an inpaint of the image shown: its mask again
+            if m and Path(m).is_file() and meta.get("source") == self.source:
+                img = QImage(m).convertToFormat(QImage.Format_Grayscale8)
+                if not img.isNull() and img.size() == upright(self.source).size():
+                    self.set_mask(img)
         self.prompt.setPlainText(meta.get("prompt", ""))
         self.loras.set_items(self._known(), meta.get("loras") or [])
         self._remember_loras()

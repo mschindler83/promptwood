@@ -823,3 +823,35 @@ def test_qwen21_and_moss_loras_found_by_contents(tmp_path):
     found = G.find_image_loras([tmp_path])
     assert [n for _p, n in found["qwen21"]] == ["Qwen_2.1/head.safetensors"]
     assert [n for _p, n in found["moss"]] == ["moss/detail.safetensors"]      # the edit LoRA: applied by edits
+
+
+def test_qwen21_inpaint_with_a_painted_mask(server, start, tmp_path):
+    """A painted mask: the Qwen-Image 2.1 Fun ControlNet (Promptwood's node) draws the masked part anew, the
+    result is laid into the source along a soft edge; other models and a missing ControlNet / node say why not."""
+    mask = tmp_path / "mask.png"
+    Image.new("L", (192, 108), 0).save(mask)
+    ed = C.ComfyImageEditor(server.url)
+    assert ed.can_inpaint("qwen21") == "" and "Qwen-Image 2.1" in ed.can_inpaint("2511")
+    assert ed.inpaint_patch == "Qwen-Image-2.1-Fun-Controlnet-Union.safetensors"   # not the older Qwen-Image's
+    out = tmp_path / "e.png"
+    meta = ed.edit(start, "a red scarf", out, 9, "fast", model="qwen21", mask=mask)
+    wf = server.edited
+    assert meta["inpaint"]["patch"] == ed.inpaint_patch
+    ip = wf["inpaint"]["inputs"]
+    assert wf["inpaint"]["class_type"] == C.INPAINT21_NODE and ip["inpaint_image"] == ["pic0", 0]
+    assert ip["mask"] == ["imask", 0] and ip["model"] == ["unet", 0] and wf["cache"]["inputs"]["model"] == ["inpaint", 0]
+    assert wf["ipatch"]["inputs"]["name"] == ed.inpaint_patch and wf["imask"]["inputs"]["channel"] == "red"
+    comp = wf["icompose"]["inputs"]
+    assert comp["destination"] == ["pic0", 0] and comp["source"] == ["decode", 0] and comp["resize_source"] is True
+    assert comp["mask"] == ["isoft", 0] and wf["igrow"]["inputs"]["expand"] == C.INPAINT_FEATHER // 2
+    assert wf["edit_save"]["inputs"]["images"] == ["icompose", 0]
+    ed.edit(start, "night", out, 9, "fast", model="qwen21")                 # no mask: as before
+    assert "inpaint" not in server.edited and server.edited["edit_save"]["inputs"]["images"] == ["decode", 0]
+    with pytest.raises(C.ComfyError, match="Qwen-Image 2.1"):
+        ed.edit(start, "x", out, 1, "fast", mask=mask)                       # 2511: no mask
+    server.inpaint21 = False
+    ed = C.ComfyImageEditor(server.url)
+    assert "Fun ControlNet" in ed.can_inpaint("qwen21")
+    with pytest.raises(C.ComfyError, match="Fun ControlNet"):
+        ed.edit(start, "x", out, 1, "fast", model="qwen21", mask=mask)
+    assert C.pick_qwen21_inpaint(["qwen_image_inpaint_diffsynth_controlnet.safetensors"]) is None

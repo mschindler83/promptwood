@@ -924,12 +924,29 @@ def pick_qwen21_files(unets: list[str], clips: list[str], vaes: list[str]) -> di
             "clip": clip[0], "vae": vae[0]}
 
 
+# Inpainting with Qwen-Image 2.1 (a painted mask): the Qwen-Image 2.1 Fun ControlNet Union (alibaba-pai, in
+# models/model_patches) draws the masked part anew and sees the rest; Promptwood's node (comfy_nodes/) hands it the
+# source and the mask, since ComfyUI's QwenImageDiffsynthControlnet has no input for the image to keep. Afterwards
+# the result is laid into the source along a soft edge, so everything outside the mask stays exactly as it was.
+INPAINT21_NODE = "VideoChainQwen21FunInpaint"
+INPAINT_FEATHER = 12                        # px: the soft edge (the mask grown by half of it, then blurred)
+
+
+def pick_qwen21_inpaint(patches: list[str]) -> str | None:
+    """The Qwen-Image 2.1 Fun ControlNet among ComfyUI's model patches (not the older Qwen-Image's)."""
+    hits = [p for p in patches if is_qwen21_name(p) and "controlnet" in p.lower().replace("_", "").replace("-", "")]
+    return sorted(hits, key=lambda p: (_quantized(p), p))[0] if hits else None
+
+
 def build_qwen21_workflow(*, files: dict, prompt: str, seed: int, quality: str, prefix: str, save_as: str,
                           images: list[str] = (), size: tuple[int, int] | None = None, negative: str = "",
-                          loras: list[tuple[str, float]] = (), model: str | None = None) -> dict:
+                          loras: list[tuple[str, float]] = (), model: str | None = None,
+                          inpaint: dict | None = None) -> dict:
     """One Qwen-Image 2.1 picture. images: uploaded pictures (image_1 ... in the text encoder: an edit's source
     first); size: the new picture's (width, height); None: the size of images[0] as the model sees it (an edit).
     quality 'fast': the Turbo model (8 steps), else the base (25 steps); model: a chosen file (a fine-tune) instead.
+    inpaint: {"patch": the Fun ControlNet, "mask": an uploaded mask at the source's size (white = draw anew),
+    "strength", "feather"}: only the masked part of images[0] is drawn anew, the result laid into the source.
     save_as: the SaveImage node's id."""
     if model and model not in (files.get("base"), files.get("turbo")):
         unet = model                               # a chosen fine-tune: Turbo sampling only for a Turbo build
@@ -948,13 +965,24 @@ def build_qwen21_workflow(*, files: dict, prompt: str, seed: int, quality: str, 
         wf[f"lora{k}"] = {"class_type": "LoraLoaderModelOnly",
                           "inputs": {"model": m, "lora_name": name, "strength_model": float(strength)}}
         m = [f"lora{k}", 0]
-    wf["cache"] = {"class_type": "QwenImage21Cache", "inputs": {"model": m, "device": "auto", "dtype": "default"}}
     te = {"clip": ["clip", 0], "prompt": prompt, "negative_prompt": negative or "", "resolution": QWEN21_RESOLUTION}
     if images:
         te["vae"] = ["vae", 0]
         for k, name in enumerate(images[:10]):
             wf[f"pic{k}"] = {"class_type": "LoadImage", "inputs": {"image": name}}
             te[f"images.image_{k + 1}"] = [f"pic{k}", 0]
+    if inpaint:
+        if not images:
+            raise ValueError("inpainting needs the source picture")
+        wf["ipatch"] = {"class_type": "ModelPatchLoader", "inputs": {"name": inpaint["patch"]}}
+        wf["imask_pic"] = {"class_type": "LoadImage", "inputs": {"image": inpaint["mask"]}}
+        wf["imask"] = {"class_type": "ImageToMask", "inputs": {"image": ["imask_pic", 0], "channel": "red"}}
+        wf["inpaint"] = {"class_type": INPAINT21_NODE,
+                         "inputs": {"model": m, "model_patch": ["ipatch", 0], "vae": ["vae", 0],
+                                    "inpaint_image": ["pic0", 0], "mask": ["imask", 0],
+                                    "strength": float(inpaint.get("strength", 1.0))}}
+        m = ["inpaint", 0]
+    wf["cache"] = {"class_type": "QwenImage21Cache", "inputs": {"model": m, "device": "auto", "dtype": "default"}}
     wf["text"] = {"class_type": "TextEncodeQwenImage21", "inputs": te}
     if size is not None or not images:
         w, h = size or (1024, 1024)
@@ -978,7 +1006,24 @@ def build_qwen21_workflow(*, files: dict, prompt: str, seed: int, quality: str, 
                                    "sampler_name": "euler", "scheduler": "simple", "positive": ["text", 0],
                                    "negative": ["text", 1], "latent_image": latent, "denoise": 1.0}}
     wf["decode"] = {"class_type": "VAEDecode", "inputs": {"samples": ["sample", 0], "vae": ["vae", 0]}}
-    wf[save_as] = {"class_type": "SaveImage", "inputs": {"images": ["decode", 0], "filename_prefix": prefix}}
+    out = ["decode", 0]
+    if inpaint:                                # laid into the source: outside the (softened) mask it stays exact
+        feather = max(0, min(31, int(inpaint.get("feather", INPAINT_FEATHER))))
+        wf["igrow"] = {"class_type": "GrowMask", "inputs": {"mask": ["imask", 0], "expand": feather // 2,
+                                                            "tapered_corners": True}}
+        mask = ["igrow", 0]
+        if feather:
+            wf["isoft_pic"] = {"class_type": "MaskToImage", "inputs": {"mask": mask}}
+            wf["isoft_blur"] = {"class_type": "ImageBlur", "inputs": {"image": ["isoft_pic", 0],
+                                                                      "blur_radius": feather,
+                                                                      "sigma": max(1.0, feather / 2)}}
+            wf["isoft"] = {"class_type": "ImageToMask", "inputs": {"image": ["isoft_blur", 0], "channel": "red"}}
+            mask = ["isoft", 0]
+        wf["icompose"] = {"class_type": "ImageCompositeMasked",
+                          "inputs": {"destination": ["pic0", 0], "source": out, "x": 0, "y": 0,
+                                     "resize_source": True, "mask": mask}}
+        out = ["icompose", 0]
+    wf[save_as] = {"class_type": "SaveImage", "inputs": {"images": out, "filename_prefix": prefix}}
     return wf
 
 
@@ -1093,6 +1138,14 @@ class ComfyImageEditor(ComfyGenerator):
         self.files = pick_qwen_files(unets, clips, vaes, combo("LoraLoaderModelOnly", "lora_name"))
         q21 = pick_qwen21_files(unets, clips, vaes)
         self.files21 = q21 if q21 and all(self._object_info(n) for n in QWEN21_NODES) else None
+        patch = pick_qwen21_inpaint(combo("ModelPatchLoader", "name"))
+        self.inpaint_missing = (
+            "Qwen-Image 2.1 is not available" if self.files21 is None else
+            "the Qwen-Image 2.1 Fun ControlNet Union is not in ComfyUI's models/model_patches "
+            "(Qwen-Image-2.1-Fun-Controlnet-Union.safetensors from alibaba-pai)" if patch is None else
+            f"ComfyUI has no {INPAINT21_NODE} node: copy video-chain's comfy_nodes/video_chain_nodes into "
+            "ComfyUI/custom_nodes and restart ComfyUI" if not self._object_info(INPAINT21_NODE) else "")
+        self.inpaint_patch = None if self.inpaint_missing else patch
         moss = pick_moss_files(unets, clips, vaes, combo("LoraLoaderModelOnly", "lora_name"))
         self.files_moss = moss if moss and moss.get("edit_lora") and all(self._object_info(n) for n in MOSS_NODES) \
             else None
@@ -1121,10 +1174,20 @@ class ComfyImageEditor(ComfyGenerator):
             return list(EDIT21_QUALITIES) if self.files21 and self.files21.get("turbo") else ["best"]
         return (["fast"] if self.files.get("lightning") else []) + ["standard", "best"]
 
+    def can_inpaint(self, model: str) -> str:
+        """Why a painted mask cannot be used with this edit model ("" when it can)."""
+        if model != "qwen21":
+            return "painting a mask works with Qwen-Image 2.1"
+        return self.inpaint_missing
+
     def edit(self, image: Path, prompt: str, out_png: Path, seed: int, quality: str = "fast",
-             refs: list[Path] = (), loras: list[tuple[str, float]] = (), model: str = "2511") -> dict:
+             refs: list[Path] = (), loras: list[tuple[str, float]] = (), model: str = "2511",
+             mask: Path | None = None) -> dict:
         """Edit image by prompt; the result goes to out_png. loras: (file, strength) in ComfyUI's LoRA folders.
-        model: a key of EDIT_MODELS. Returns what it was made with."""
+        model: a key of EDIT_MODELS. mask: a picture at the image's size, white where it is drawn anew (inpaint;
+        Qwen-Image 2.1 only). Returns what it was made with."""
+        if mask is not None and self.can_inpaint(model):
+            raise ComfyError(self.can_inpaint(model))
         names = []
         for path, strength in loras:
             name = self.name_for(path)
@@ -1132,7 +1195,7 @@ class ComfyImageEditor(ComfyGenerator):
                 raise ComfyError(f"{Path(path).name} is not in ComfyUI's LoRA folders")
             names.append((name, float(strength)))
         if model == "qwen21":
-            return self._edit21(image, prompt, out_png, seed, quality, refs, loras, names)
+            return self._edit21(image, prompt, out_png, seed, quality, refs, loras, names, mask)
         if model == "moss":
             return self._edit_moss(image, prompt, out_png, seed, refs, loras, names)
         if self.missing_2511:
@@ -1236,7 +1299,7 @@ class ComfyImageEditor(ComfyGenerator):
                 "model": wf["unet"]["inputs"]["unet_name"], "lightning": None,
                 "loras": [{"path": str(p), "strength": float(st)} for p, st in loras]}
 
-    def _edit21(self, image, prompt, out_png, seed, quality, refs, loras, names) -> dict:
+    def _edit21(self, image, prompt, out_png, seed, quality, refs, loras, names, mask=None) -> dict:
         if self.files21 is None:
             raise ComfyError("Qwen-Image 2.1 is not available (qwen_image_2.1_*.safetensors, qwen3vl_8b and "
                              "qwen_image_2.1_vae in ComfyUI's models, and a ComfyUI with its nodes)")
@@ -1248,17 +1311,25 @@ class ComfyImageEditor(ComfyGenerator):
             for p in [image, *list(refs)[:2]]:
                 uploads.append((self.upload(Path(p)), Path(p)))
                 pics.append(uploads[-1][0])
+            inpaint = None
+            if mask is not None:
+                uploads.append((self.upload(Path(mask)), Path(mask)))
+                inpaint = {"patch": self.inpaint_patch, "mask": uploads[-1][0], "strength": 1.0,
+                           "feather": INPAINT_FEATHER}
             wf = build_qwen21_workflow(files=self.files21, prompt=prompt, seed=seed, quality=quality,
                                        prefix=f"{SUBFOLDER}/edit_{uuid.uuid4().hex[:12]}", save_as="edit_save",
-                                       images=pics, loras=names)
+                                       images=pics, loras=names, inpaint=inpaint)
         except BaseException:
             self._drop_uploads(uploads)
             raise
         self._run_saving(wf, "edit_save", out_png, uploads)
         turbo = wf["sample"]["class_type"] == "SamplerCustomAdvanced"
-        return {"quality": quality, "steps": 8 if turbo else QWEN21_STEPS, "cfg": 1.0, "edit_model": "qwen21",
+        meta = {"quality": quality, "steps": 8 if turbo else QWEN21_STEPS, "cfg": 1.0, "edit_model": "qwen21",
                 "model": wf["unet"]["inputs"]["unet_name"], "lightning": None,
                 "loras": [{"path": str(p), "strength": float(st)} for p, st in loras]}
+        if mask is not None:
+            meta["inpaint"] = {"patch": self.inpaint_patch, "feather": INPAINT_FEATHER}
+        return meta
 
 
 # ----------------------------------------------------------------------------- 2K refine (Open-H3-Regenerate-2K)

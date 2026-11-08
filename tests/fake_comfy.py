@@ -25,6 +25,9 @@ KNOWN = {"UNETLoader", "CLIPLoader", "VAELoader", "LoadImage", "MiniMaxH3ImageTo
          "EmptyFlux2LatentImage", "ReferenceMultiLatent", "BatchImagesNode", "MiniMaxH3ContextWindows",
          # Qwen-Image 2.1
          "TextEncodeQwenImage21", "QwenImage21Cache",
+         # Qwen-Image 2.1 inpaint
+         "ModelPatchLoader", "VideoChainQwen21FunInpaint", "ImageToMask", "MaskToImage", "ImageBlur", "GrowMask",
+         "ImageCompositeMasked",
          # MOSS-Image
          "T5TokenizerOptions", "TextEncodeMOSSImageEdit", "SkipLayerGuidanceDiTSimple", "ImageScaleToTotalPixels", "GetImageSize"}
 IMAGE_UNETS = ["Chroma1-HD.safetensors", "Chroma1-HD-Flash.safetensors",
@@ -63,6 +66,7 @@ class FakeComfy:
         self.qwen = True                           # the Qwen Image Edit files and nodes are there
         self.qwen21 = True                         # Qwen-Image 2.1: its files and nodes
         self.moss = True                           # MOSS-Image: its files, edit LoRA and nodes
+        self.inpaint21 = True                      # the Qwen-Image 2.1 Fun ControlNet and Promptwood's node
         self.hyperflow = True                      # ComfyUI-HyperFlow-H3 with its weights
         self.refine = True                         # the H3 2K nodes, the latent upscaler and the refiner LoRA
         self.audio_refs = True                     # MiniMaxH3ReferenceToVideo takes reference sounds
@@ -89,7 +93,12 @@ class FakeComfy:
                  "LoraLoaderModelOnly": ("lora_name", self.loras + ([QWEN_LIGHTNING] if q else [])
                                          + ([REFINER] if self.refine else []) + IMAGE_LORAS
                                          + ([MOSS_EDIT] if mo else [])),
-                 "LatentUpscaleModelLoader": ("model_name", [UPSCALER] if self.refine else [])}
+                 "LatentUpscaleModelLoader": ("model_name", [UPSCALER] if self.refine else []),
+                 "ModelPatchLoader": ("name", ["qwen_image_inpaint_diffsynth_controlnet.safetensors"]
+                                      + (["Qwen-Image-2.1-Fun-Controlnet-Union.safetensors"] if self.inpaint21
+                                         else []))}
+        if node == "VideoChainQwen21FunInpaint":
+            return {node: {"input": {"required": {}}}} if self.inpaint21 else {}
         if node in C.REFINE_NODES + ("BlockSparseAttention",) and node != "LatentUpscaleModelLoader":
             return {node: {"input": {"required": {}}}} if self.refine else {}
         if node == "TextGenerate":

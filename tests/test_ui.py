@@ -2135,3 +2135,64 @@ def test_start_node_opens_the_project_tab(app, win, tmp_path, image):
     assert win.inspector.currentWidget() is win.proj_scroll
     win._graph_clicked(ids[0])                               # a clip: back to the Clip tab
     assert win.inspector.currentIndex() == 0
+
+
+def test_paint_a_mask_and_inpaint(app, tmp_path, image, monkeypatch):
+    """Paint a mask in the edit window: only with Qwen-Image 2.1; the edit sends it (inpaint), the result keeps the
+    source's size, the mask is kept with it and comes back with Prompt again; a new source drops it."""
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QImage
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from fake_comfy import FakeComfy
+    from video_chain.ui.main_window import MainWindow
+    from video_chain.ui.mask_painter import MaskPainterDialog, mask_area
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    server = FakeComfy(tmp_path / "comfy")
+    try:
+        q = settings(tmp_path, "inpaint.ini")
+        q.setValue("comfyUrl", server.url)
+        w = MainWindow(q, command=FAKE)
+        new_project(w, tmp_path, image, ("a",))
+        dlg = w.edit_image(start=True, dialog=False)
+        wait(app, lambda: dlg.families, timeout=20)
+        assert dlg.source and dlg.mask is None and dlg.b_mask.isEnabled() and not dlg.b_mask_clear.isVisible()
+        from video_chain.ui.image_edit import upright
+        src = upright(dlg.source)
+        painter = MaskPainterDialog(dlg, src)
+        c = painter.canvas
+        assert c.mask.size() == src.size() and mask_area(c.mask) == 0
+        c.set_brush(20)
+        c._undo.append(c.mask.copy())
+        c._dab(QPointF(10, 10), QPointF(src.width() / 2, src.height() / 2), False)
+        painted = mask_area(c.mask)
+        assert 0 < painted < 0.5
+        c.invert()
+        assert mask_area(c.mask) > 0.5
+        c.undo()
+        assert abs(mask_area(c.mask) - painted) < 1e-9
+        dlg.set_mask(c.mask)
+        painter.done(0)
+        dlg.edit_model.setCurrentIndex(dlg.edit_model.findData("2511"))
+        dlg.prompt.setPlainText("a red scarf")
+        dlg.tries.setValue(1)
+        assert not dlg.b_gen.isEnabled() and "Qwen-Image 2.1" in dlg.mask_info.text()
+        dlg.edit_model.setCurrentIndex(dlg.edit_model.findData("qwen21"))
+        assert dlg.b_gen.isEnabled() and "drawn anew" in dlg.mask_info.text()
+        dlg.generate()
+        wait(app, lambda: not dlg._busy, timeout=60)
+        png, meta = dlg.selected()
+        assert meta["inpaint"]["patch"].startswith("Qwen-Image-2.1-Fun") and server.edited["inpaint"]
+        m = QImage(meta["mask"])
+        assert m.size() == src.size() and abs(mask_area(m) - painted) < 0.02
+        dlg.set_mask(None)
+        assert dlg.mask is None and not dlg.b_mask_clear.isVisible()
+        dlg._prompt_again()                                        # the mask of that result comes back
+        assert dlg.mask is not None and abs(mask_area(dlg.mask) - painted) < 0.02
+        other = tmp_path / "other.png"
+        QImage(64, 48, QImage.Format_RGB32).save(str(other))
+        dlg.set_source(str(other))                                 # another image: no mask
+        assert dlg.mask is None
+        dlg.done(0)
+        w.close()
+    finally:
+        server.close()
