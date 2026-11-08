@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QVBoxLayout, QWidget)
 
 from .. import chain
+from .. import film as F
 from .. import tree as T
 from ..comfy import REF_HINT
 from .graph import START, GraphView, NodeInfo
@@ -38,6 +39,8 @@ from .clip_dialogs import CompareDialog, HandoverDialog
 from .lora_stack import LoraStack, fill_lora_combo, lora_label, lora_path
 from .mentions import MentionHelper
 from .cast_strip import CastStrip
+from .timeline import Block, Timeline
+from .storyboard import Storyboard
 from .face_crop import FaceCropDialog
 from .prompt_refiner import RefineDialog, replace_text
 from .image_edit import EDITS_DIR, ImageEditDialog, record_use, uses_of
@@ -250,6 +253,8 @@ class ExportDialog(QDialog):
 
 class _Bridge(QObject):
     joined = Signal(object, object, str, str, str)  # path or None, error or None, purpose, status prefix, project
+    film = Signal(object, object, str)               # the joined film or None, error or None, 'play' / 'export'
+    duplicated = Signal(object, object, str)         # (scene id, title) or None, error or None, film folder
     comfy = Signal(bool)                       # ComfyUI reachable
     loras = Signal(list, bool)                 # H3 LoRAs found in ComfyUI's LoRA folders, report them
     triggers = Signal(dict)                    # the trigger word scan finished (its counts)
@@ -263,6 +268,23 @@ END_TIP = ("End image: a picture this clip steers its end to (any image, or a fr
            "The clip's last frame is what the model actually made; the next clip starts from that")
 STEPS_TIP = "Sampling steps per clip: more is slower and rarely better; 20-30 is typical"
 STEPS_DEFAULT = 3
+
+
+LAYOUT_VERSION = 1
+# preset: shares of the width (left panel, viewer, inspector) and of the centre's height for the viewer
+LAYOUTS = {"edit": (0.20, 0.58, 0.22, 0.62), "write": (0.17, 0.51, 0.32, 0.55), "watch": (0.0, 0.84, 0.16, 0.70)}
+
+
+class _CurrentStack(QStackedWidget):
+    """A stack whose size is that of the page shown (not of its largest hidden page)."""
+
+    def sizeHint(self):
+        w = self.currentWidget()
+        return w.sizeHint() if w is not None else super().sizeHint()
+
+    def minimumSizeHint(self):
+        w = self.currentWidget()
+        return w.minimumSizeHint() if w is not None else super().minimumSizeHint()
 
 
 class PromptCard(QFrame):
@@ -910,6 +932,9 @@ class MainWindow(QMainWindow):
         self._kill_timer = QTimer(self, singleShot=True, interval=8000, timeout=self._kill)
         self.bridge = _Bridge()
         self.bridge.joined.connect(self._joined)
+        self.bridge.film.connect(self._film_joined)
+        self.bridge.duplicated.connect(self._scene_duplicated)
+        self._film_queue: list[str] | None = None    # Generate film: the scenes still to make
         self.bridge.comfy.connect(self._comfy_state)
         self.bridge.loras.connect(self._loras_found)
         self.bridge.triggers.connect(self._triggers_found)
@@ -954,16 +979,31 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(split)
         self.split = split
 
-        ls = QScrollArea()
-        ls.setWidgetResizable(True)
-        ls.setFrameShape(QFrame.NoFrame)
-        left = QWidget()
-        lv = QVBoxLayout(left)
-        lv.setContentsMargins(0, 0, 0, 0)
-        lv.setSpacing(0)
+        # panels (an editor's layout): left tabs (clips graph, cast, sounds), the viewer in the middle with the
+        # film / path / log below, the project's settings on the right; ComfyUI's settings in Preferences
+        def panel():
+            w = QWidget()
+            v = QVBoxLayout(w)
+            v.setContentsMargins(0, 0, 0, 0)
+            v.setSpacing(0)
+            return w, v
+
+        def scrolled(w):
+            sa = QScrollArea()
+            sa.setWidgetResizable(True)
+            sa.setFrameShape(QFrame.NoFrame)
+            sa.setWidget(w)
+            return sa
+        left = QWidget()                                    # (parent of the section bars below)
+        proj_w, proj_v = panel()
+        cast_w, cast_v = panel()
+        sound_w, sound_v = panel()
+        self.prefs = QDialog(self)
+        self.prefs.setWindowTitle("Preferences")
+        prefs_v = QVBoxLayout(self.prefs)
 
         bar, _ = section_bar("Project", left)
-        lv.addWidget(bar)
+        proj_v.addWidget(bar)
         pw = QWidget()
         pf = QFormLayout(pw)
         pf.setContentsMargins(10, 6, 10, 8)
@@ -994,10 +1034,10 @@ class MainWindow(QMainWindow):
             brow.addWidget(b)
         brow.addStretch(1)
         pf.addRow("", brow)
-        lv.addWidget(pw)
+        proj_v.addWidget(pw)
 
         bar, _ = section_bar("Start image", left)
-        lv.addWidget(bar)
+        proj_v.addWidget(bar)
         sw = QWidget()
         sv = QVBoxLayout(sw)
         sv.setContentsMargins(10, 8, 10, 8)
@@ -1020,10 +1060,10 @@ class MainWindow(QMainWindow):
         airow.addWidget(self.b_ai_create)
         airow.addStretch(1)
         sv.addLayout(airow)
-        lv.addWidget(sw)
+        proj_v.addWidget(sw)
 
         bar, _ = section_bar("Cast", left)
-        lv.addWidget(bar)
+        cast_v.addWidget(bar)
         iw = QWidget()
         iv = QVBoxLayout(iw)
         iv.setContentsMargins(10, 6, 10, 8)
@@ -1135,14 +1175,14 @@ class MainWindow(QMainWindow):
         self.ident_info = label("", level="tertiary")
         self.ident_info.setWordWrap(True)
         iv.addWidget(self.ident_info)
-        lv.addWidget(iw)
+        cast_v.addWidget(iw)
         self.ref_size.currentIndexChanged.connect(self._identity_changed)
         self.ref_hint.toggled.connect(self._identity_changed)
         self.dialogue_lang.activated.connect(self._identity_changed)          # a finished choice, not each key
         self.dialogue_lang.lineEdit().editingFinished.connect(self._identity_changed)
 
         bar, _ = section_bar("Sound reference", left)
-        lv.addWidget(bar)
+        sound_v.addWidget(bar)
         aw = QWidget()
         av = QVBoxLayout(aw)
         av.setContentsMargins(10, 6, 10, 8)
@@ -1176,10 +1216,10 @@ class MainWindow(QMainWindow):
         self.sound_info = label("", level="tertiary")
         self.sound_info.setWordWrap(True)
         av.addWidget(self.sound_info)
-        lv.addWidget(aw)
+        sound_v.addWidget(aw)
 
-        bar, _ = section_bar("Clips", left)
-        lv.addWidget(bar)
+        bar, _ = section_bar("Clip settings (the project's defaults)", left)
+        proj_v.addWidget(bar)
         cw = QWidget()
         c = QFormLayout(cw)
         c.setContentsMargins(10, 6, 10, 8)
@@ -1264,10 +1304,10 @@ class MainWindow(QMainWindow):
                                       "Clips record them, so new words make those clips again")
         self.lora_triggers.toggled.connect(self._lora_triggers_changed)
         c.addRow("", self.lora_triggers)
-        lv.addWidget(cw)
+        proj_v.addWidget(cw)
 
         bar, _ = section_bar("ComfyUI", left)
-        lv.addWidget(bar)
+        prefs_v.addWidget(bar)
         aw = QWidget()
         a = QFormLayout(aw)
         a.setContentsMargins(10, 6, 10, 8)
@@ -1329,19 +1369,61 @@ class MainWindow(QMainWindow):
         krow.addStretch(1)
         a.addRow("", krow)
         self.keep_loaded.toggled.connect(self.idle_minutes.setEnabled)
-        lv.addWidget(aw)
-        lv.addStretch(1)
-        ls.setWidget(left)
-        ls.setMinimumWidth(350)
-        split.addWidget(ls)
+        prefs_v.addWidget(aw)
+        pb = QDialogButtonBox(QDialogButtonBox.Close)
+        pb.button(QDialogButtonBox.Close).setAutoDefault(False)     # Enter in a field must not close it
+        pb.button(QDialogButtonBox.Close).setDefault(False)
+        pb.rejected.connect(self.prefs.reject)
+        prefs_v.addWidget(pb)
+        for v in (proj_v, cast_v, sound_v):
+            v.addStretch(1)
+        self.left_tabs = QTabWidget()
+        self.left_tabs.setDocumentMode(True)
+        cast_scroll, sound_scroll, proj_scroll = scrolled(cast_w), scrolled(sound_w), scrolled(proj_w)
+        self.inspector = QTabWidget()
+        self.inspector.setDocumentMode(True)
+        self.inspector.addTab(proj_scroll, "Project")
+        self.inspector.setMinimumWidth(380)
+        self._panels = (proj_w, cast_w, sound_w)
 
-        # middle: graph over the path
-        mid = QSplitter(Qt.Vertical)
-        mid.setChildrenCollapsible(False)
+        # the clips graph (left tab), the film strip (under the viewer)
         gw = QWidget()
         gv = QVBoxLayout(gw)
         gv.setContentsMargins(0, 0, 0, 0)
         gv.setSpacing(0)
+        film_w = QWidget()
+        film_v = QVBoxLayout(film_w)
+        film_v.setContentsMargins(0, 0, 0, 0)
+        film_v.setSpacing(0)
+        fbar, fbh = section_bar("Film", film_w)
+        self.film_info = label("", level="tertiary")
+        fbh.addWidget(self.film_info)
+        film_v.addWidget(fbar)
+        self.storyboard = Storyboard()
+        self.storyboard.sceneChosen.connect(self.switch_scene)
+        self.storyboard.addWanted.connect(self.add_scene)
+        self.storyboard.renameWanted.connect(self.rename_scene)
+        self.storyboard.deleteWanted.connect(self.delete_scene)
+        self.storyboard.moved.connect(self._scenes_moved)
+        self.storyboard.joinWanted.connect(self.set_scene_join)
+        self.storyboard.duplicateWanted.connect(self.duplicate_scene)
+        self.storyboard.notesWanted.connect(self.scene_notes)
+        self.b_film_gen = QPushButton("Generate film")
+        self.b_film_gen.setToolTip("Make every scene's missing clips, scene after scene (up to each scene's ending)")
+        self.b_film_gen.clicked.connect(self.generate_film)
+        self.b_film_play = QPushButton("▶ Play film")
+        self.b_film_play.setToolTip("Join all scenes in their order (hard cuts) and play the film")
+        self.b_film_play.clicked.connect(lambda: self.join_film("play"))
+        self.b_film_export = QPushButton("Export film…")
+        self.b_film_export.setToolTip("Save the whole film as one video")
+        self.b_film_export.clicked.connect(self.export_film)
+        self.b_film_cast = QPushButton("Cast…")
+        self.b_film_cast.setToolTip("Who appears in which scene (along the clips the film plays)")
+        self.b_film_cast.clicked.connect(self.show_film_cast)
+        for b in (self.b_film_cast, self.b_film_gen, self.b_film_play, self.b_film_export):
+            fbh.addWidget(b)
+        film_v.addWidget(self.storyboard)
+        self.film = None
         bar, bh = section_bar("Clips", gw)
         self.tree_info = label("", level="tertiary")
         bh.addWidget(self.tree_info)
@@ -1356,18 +1438,21 @@ class MainWindow(QMainWindow):
         self.b_fit = icon_button("frame", "Fit the view (F)")
         for btn, act in ((self.b_continue, "continue"), (self.b_add_video, "video"), (self.b_branch, "branch"),
                          (self.b_variant, "variant"), (self.b_delete, "delete")):
-            btn.clicked.connect(lambda _=False, a=act: self.node_action(a, self.selected_id()))
+            btn.clicked.connect(lambda _=False, a=act: self.node_action(a, self.target_id()))
             bh.addWidget(btn)
         bh.addSpacing(6)
         self.b_fit.clicked.connect(lambda: self.graph.fit())
         bh.addWidget(self.b_fit)
         gv.addWidget(bar)
         self.graph = GraphView()
-        self.graph.selected.connect(self.select)
+        self.graph.selected.connect(self._graph_clicked)
         self.graph.activated.connect(self._activate)
         self.graph.contextMenu.connect(self._context)
         gv.addWidget(self.graph, 1)
-        mid.addWidget(gw)
+        self.left_tabs.addTab(gw, "Clips")
+        self.left_tabs.addTab(cast_scroll, "Cast")
+        self.left_tabs.addTab(sound_scroll, "Sounds")
+        self.left_tabs.setMinimumWidth(340)
 
         pw2 = QWidget()
         pv = QVBoxLayout(pw2)
@@ -1381,24 +1466,46 @@ class MainWindow(QMainWindow):
         self.cast_strip.clipClicked.connect(self._show_card_of)
         self.cast_strip.hide()
         pv.addWidget(self.cast_strip)
-        self.path_area = QScrollArea()
-        self.path_area.setWidgetResizable(True)
-        self.path_area.setFrameShape(QFrame.NoFrame)
-        holder = QWidget()
-        self.path_box = QHBoxLayout(holder)
-        self.path_box.setContentsMargins(10, 10, 10, 10)
-        self.path_box.setSpacing(10)
+        self.timeline = Timeline()
+        self.timeline.clicked.connect(self.focus_clip)
+        self.timeline.activated.connect(self._play_node)
+        self.timeline.menu.connect(lambda nid, pos: self._context(nid, pos))
+        pv.addWidget(self.timeline)
+        pv.addStretch(1)
+        # the inspector's Clip tab: the card of the clip in focus (one at a time; the path's other cards wait in
+        # the stack), with ‹ › to step along the path
+        clip_tab = QWidget()
+        ctv = QVBoxLayout(clip_tab)
+        ctv.setContentsMargins(8, 6, 8, 6)
+        nav = QHBoxLayout()
+        self.b_prev_clip = QPushButton("‹")
+        self.b_prev_clip.setToolTip("The clip before it on the path (Alt+Left)")
+        self.b_prev_clip.clicked.connect(lambda: self._step_focus(-1))
+        self.b_next_clip = QPushButton("›")
+        self.b_next_clip.setToolTip("The clip after it on the path (Alt+Right)")
+        self.b_next_clip.clicked.connect(lambda: self._step_focus(1))
+        self.focus_info = label("", level="secondary")
+        for b in (self.b_prev_clip, self.b_next_clip):
+            b.setFixedWidth(32)
+        nav.addWidget(self.b_prev_clip)
+        nav.addWidget(self.focus_info, 1)
+        nav.addWidget(self.b_next_clip)
+        ctv.addLayout(nav)
+        self.card_stack = _CurrentStack()
         self.path_hint = label("", level="tertiary")
-        self.path_box.addWidget(self.path_hint)
-        self.path_box.addStretch(1)
-        self.path_area.setWidget(holder)
-        pv.addWidget(self.path_area, 1)
-        mid.addWidget(pw2)
-        mid.setSizes([460, 420])
-        split.addWidget(mid)
+        self.path_hint.setWordWrap(True)
+        self.path_hint.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.card_stack.addWidget(self.path_hint)
+        card_scroll = QScrollArea()
+        card_scroll.setWidgetResizable(True)
+        card_scroll.setFrameShape(QFrame.NoFrame)
+        card_scroll.setWidget(self.card_stack)
+        ctv.addWidget(card_scroll, 1)
+        self.inspector.insertTab(0, clip_tab, "Clip")
+        self.inspector.setCurrentIndex(0)
+        self.focus: str | None = None
 
-        # right: preview + log
-        self.tabs = QTabWidget()
+        # the viewer (the biggest area), under it the film and the selected path / the log
         rp = QWidget()
         rv = QVBoxLayout(rp)
         rv.setContentsMargins(0, 0, 0, 0)
@@ -1406,25 +1513,52 @@ class MainWindow(QMainWindow):
         rv.addWidget(self.preview, 1)
         prow = QHBoxLayout()
         prow.setContentsMargins(8, 0, 8, 8)
-        self.b_play_path = QPushButton("Play path")
+        self.b_play_clip = QPushButton("▶ Clip")
+        self.b_play_clip.setToolTip("Play the clip shown in the inspector (Space in the timeline: double-click)")
+        self.b_play_clip.clicked.connect(lambda: self.focus and self._play_node(self.focus))
+        self.b_play_path = QPushButton("▶ Path")
         self.b_play_path.setToolTip("Join the clips of the selected path and play them")
         self.b_play_path.clicked.connect(lambda: self.join_selected("play"))
+        self.b_play_film = QPushButton("▶ Film")
+        self.b_play_film.setToolTip("Join all scenes of the film and play it")
+        self.b_play_film.clicked.connect(lambda: self.join_film("play"))
         self.b_export = QPushButton("Export path…")
         self.b_export.setToolTip("Save the selected path as one video")
         self.b_export.clicked.connect(self.export_path)
-        prow.addWidget(self.b_play_path)
+        prow.addWidget(label("Play", level="tertiary"))
+        for b in (self.b_play_clip, self.b_play_path, self.b_play_film):
+            prow.addWidget(b)
+        prow.addSpacing(12)
         prow.addWidget(self.b_export)
         prow.addStretch(1)
         rv.addLayout(prow)
-        self.tabs.addTab(rp, "Preview")
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setProperty("type", "mono")
         self.log.setMaximumBlockCount(5000)
+        self.tabs = QTabWidget()                            # under the viewer: the selected path, the log
+        self.tabs.setDocumentMode(True)
+        self.tabs.addTab(pw2, "Selected path")
         self.tabs.addTab(self.log, "Log")
-        split.addWidget(self.tabs)
+        bottom = QWidget()
+        bv = QVBoxLayout(bottom)
+        bv.setContentsMargins(0, 0, 0, 0)
+        bv.setSpacing(0)
+        bv.addWidget(film_w)
+        bv.addWidget(self.tabs, 1)
+        center = QSplitter(Qt.Vertical)
+        center.setChildrenCollapsible(False)
+        center.addWidget(rp)
+        center.addWidget(bottom)
+        center.setStretchFactor(0, 3)
+        center.setStretchFactor(1, 2)
+        self.center = center
+        split.addWidget(self.left_tabs)
+        split.addWidget(center)
+        split.addWidget(self.inspector)
         split.setStretchFactor(1, 1)
-        split.setSizes([360, 760, 440])
+        split.setSizes([400, 1300, 420])
+        self.viewer = rp
 
         sb = self.statusBar()
         self.b_gen = QPushButton("Generate path")
@@ -1443,8 +1577,14 @@ class MainWindow(QMainWindow):
         self.progress.setRange(0, 1000)
         self.status = label("Open or create a project folder.", role="statusText")
         self.gpu = label("GPU …", role="statusText")
-        for w in (self.b_gen, self.b_gen_all, self.b_stop, self.progress):
-            sb.addWidget(w)
+        tb = self.addToolBar("Run")                # making clips: at the top, like an editor's render buttons
+        tb.setObjectName("runToolbar")
+        tb.setMovable(False)
+        for w in (self.b_gen, self.b_gen_all, self.b_stop):
+            tb.addWidget(w)
+        tb.addSeparator()
+        tb.addWidget(self.progress)
+        self.run_toolbar = tb
         sb.addWidget(self.status, 1)
         self.model_label = label("Model: not loaded", role="statusText")
         self.b_unload = QPushButton("Unload")
@@ -1452,7 +1592,10 @@ class MainWindow(QMainWindow):
         self.b_unload.clicked.connect(self.unload)
         self.b_unload.hide()
         self.comfy_label = label("", role="statusText")
+        self.b_prefs = icon_button("gear", "ComfyUI and preferences (Ctrl+,)")
+        self.b_prefs.clicked.connect(self.show_prefs)
         sb.addPermanentWidget(self.comfy_label)
+        sb.addPermanentWidget(self.b_prefs)
         sb.addPermanentWidget(self.model_label)
         sb.addPermanentWidget(self.b_unload)
         sb.addPermanentWidget(self.gpu)
@@ -1467,15 +1610,17 @@ class MainWindow(QMainWindow):
                     self.turbo_lora.currentIndexChanged, self.turbo_steps.valueChanged,
                     self.turbo_strength.valueChanged):
             sig.connect(self._options_changed)
-        for keys, fn in (("Ctrl+N", lambda: self.node_action("continue", self.selected_id())),
-                         ("Ctrl+Shift+V", lambda: self.node_action("video", self.selected_id())),
-                         ("Ctrl+B", lambda: self.node_action("branch", self.selected_id())),
-                         ("Ctrl+D", lambda: self.node_action("variant", self.selected_id())),
-                         ("Ctrl+Return", self.generate_path), ("Ctrl+Shift+Return", self.generate_all)):
+        for keys, fn in (("Ctrl+N", lambda: self.node_action("continue", self.target_id())),
+                         ("Ctrl+Shift+V", lambda: self.node_action("video", self.target_id())),
+                         ("Ctrl+B", lambda: self.node_action("branch", self.target_id())),
+                         ("Ctrl+D", lambda: self.node_action("variant", self.target_id())),
+                         ("Ctrl+Return", self.generate_path), ("Ctrl+Shift+Return", self.generate_all),
+                         ("Alt+Left", lambda: self._step_focus(-1)), ("Alt+Right", lambda: self._step_focus(1))):
             QShortcut(QKeySequence(keys), self, activated=fn)
-        guard_wheel(left)
+        for w in (*self._panels, self.prefs):
+            guard_wheel(w)
         QShortcut(QKeySequence("Delete"), self.graph,
-                  activated=lambda: self.node_action("delete", self.selected_id()))
+                  activated=lambda: self.node_action("delete", self.target_id()))
         QShortcut(QKeySequence("F"), self.graph, activated=self.graph.fit)
         self._update_buttons()
 
@@ -1492,6 +1637,7 @@ class MainWindow(QMainWindow):
         self.idle_minutes.setValue(q.value("idleMinutes", 15, type=int))
         if g := q.value("geometry"):
             self.restoreGeometry(g)
+        self._restore_layout()
         self._fill_recent()
         proj = q.value("project", "", type=str)
         if proj and Path(proj).is_dir():
@@ -1511,6 +1657,10 @@ class MainWindow(QMainWindow):
         if self.tree is not None:
             q.setValue("lastOptions", json.dumps(self.tree.options))
         q.setValue("geometry", self.saveGeometry())
+        q.setValue("layout", json.dumps({"v": LAYOUT_VERSION, "split": self.split.sizes(),
+                                         "center": self.center.sizes(), "left": self.act_left.isChecked(),
+                                         "left_w": (self.split.sizes()[0] if self.act_left.isChecked() else 0)
+                                         or getattr(self, "_left_w", 0)}))
         q.sync()
 
     # ------------------------------------------------------------------ project
@@ -1534,6 +1684,84 @@ class MainWindow(QMainWindow):
                                          lambda: self.edit_image(start=True, mode="create"))
         m.addSeparator()
         m.addAction("Quit", self.close).setShortcut(QKeySequence("Ctrl+Q"))
+        v = self.menuBar().addMenu("&View")
+        for k, name in enumerate(("Clips", "Cast", "Sounds")):
+            a = v.addAction(f"{name} (left)", lambda _=False, k=k: self._show_left_tab(k))
+            a.setShortcut(QKeySequence(f"Alt+{k + 1}"))
+        v.addAction("Log", lambda: self.tabs.setCurrentWidget(self.log)).setShortcut(QKeySequence("Alt+L"))
+        v.addSeparator()
+        self.act_left = v.addAction("Left panel (clips, cast, sounds)")
+        self.act_left.setCheckable(True)
+        self.act_left.setChecked(True)
+        self.act_left.setShortcut(QKeySequence("Ctrl+Alt+B"))
+        self.act_left.toggled.connect(lambda on: self._show_left(on))   # (the panel is built later, in _build)
+        for name, key, tip in (("edit", "Ctrl+Alt+1", "Layout: Edit (big viewer)"),
+                               ("write", "Ctrl+Alt+2", "Layout: Write (wide prompt)"),
+                               ("watch", "Ctrl+Alt+3", "Layout: Watch (viewer and timeline only)")):
+            v.addAction(tip, lambda _=False, n=name: self.apply_layout(n)).setShortcut(QKeySequence(key))
+        v.addAction("Reset layout", lambda: self.apply_layout("edit"))
+        st = self.menuBar().addMenu("&Settings")
+        st.addAction("ComfyUI and preferences…", self.show_prefs).setShortcut(QKeySequence("Ctrl+,"))
+
+    def apply_layout(self, name: str):
+        """A layout preset, as shares of the window: 'edit' (the default: a big viewer), 'write' (a wide inspector
+        for the prompt), 'watch' (no left panel, a narrow inspector)."""
+        left, mid, right, view = LAYOUTS.get(name, LAYOUTS["edit"])
+        w = max(self.split.width(), 1200)
+        if left > 0:
+            self._left_w = int(w * left)
+        self.act_left.setChecked(left > 0)              # (shows / hides the left panel)
+        self.split.setSizes([int(w * left) if left > 0 else 0, int(w * mid), int(w * right)])
+        h = max(self.center.height(), 600)
+        self.center.setSizes([int(h * view), int(h * (1 - view))])
+
+    def _show_left(self, on: bool):
+        """Show / hide the left panel; shown again it gets its last width back (taken from the viewer)."""
+        sizes = self.split.sizes()
+        if not on and sizes[0] > 0:
+            self._left_w = sizes[0]
+        self.left_tabs.setVisible(on)
+        if on:
+            want = max(getattr(self, "_left_w", 0), self.left_tabs.minimumWidth())
+            sizes = self.split.sizes()
+            if sizes[0] < want:
+                give = want - sizes[0]
+                self.split.setSizes([want, max(sizes[1] - give, 1), sizes[2]])
+
+    def _show_left_tab(self, k: int):
+        self.act_left.setChecked(True)                  # (a hidden panel is shown first)
+        self.left_tabs.setCurrentIndex(k)
+
+    def _restore_layout(self):
+        """The layout of the last session; the default one if there is none, it was saved by an older version or
+        it is damaged."""
+        try:
+            d = json.loads(self.qs.value("layout", "", type=str) or "{}")
+            split, center = d["split"], d["center"]
+            ok = (d.get("v") == LAYOUT_VERSION and len(split) == 3 and len(center) == 2
+                  and all(isinstance(x, int) and x >= 0 for x in split + center)
+                  and split[1] > 0 and split[2] > 0 and all(x > 0 for x in center))
+            left_w = int(d.get("left_w") or 0)
+        except (TypeError, ValueError, KeyError, AttributeError):
+            ok = False
+        if not ok:
+            self.apply_layout("edit")
+            return
+        if left_w > 0:
+            self._left_w = left_w
+        elif split[0] > 0:
+            self._left_w = split[0]
+        self.split.setSizes(split)
+        self.act_left.setChecked(bool(d.get("left", True)))
+        self.center.setSizes(center)
+
+    def show_prefs(self):
+        """ComfyUI's address, launcher, folder and the model / trigger word settings (not modal: the status bar
+        and the window stay usable)."""
+        self.prefs.resize(max(self.prefs.width(), 620), self.prefs.sizeHint().height())
+        self.prefs.show()
+        self.prefs.raise_()
+        self.prefs.activateWindow()
 
     # ---- recent projects
     def recent_projects(self) -> list[str]:
@@ -1561,7 +1789,391 @@ class MainWindow(QMainWindow):
         self.b_recent.setEnabled(bool(self.recent_projects()))
 
     def _update_title(self):
-        self.setWindowTitle(f"{self.project.name} — Promptwood" if self.project else "Promptwood")
+        if self.project is None:
+            self.setWindowTitle("Promptwood")
+            return
+        scene = self.film.scene_of(self.project) if self.film else None
+        name = self.film.root.name if self.film else self.project.name
+        many = self.film is not None and len(self.film.scenes) > 1
+        self.setWindowTitle(f"{name} › {scene.title} — Promptwood" if many and scene else f"{name} — Promptwood")
+
+    # ---- the whole film: play, export, generate
+    def join_film(self, purpose: str = "play", out: Path | None = None):
+        if self.film is None or self.running:
+            return
+        if self._joins:
+            self.status.setText("A join is still running; wait for it.")
+            return
+        if not self._save_tree():
+            return
+        self._update_continues()
+        film, bridge = F.Film.load(self.film.root), self.bridge
+        target = Path(out) if out else self.film.root / "paths" / "film.mp4"
+        root = str(self.film.root)
+        self.status.setText("Checking and joining the film …")
+        self._joins += 1                           # (a run waits for it, a second join is refused)
+        self._update_buttons()
+
+        def work():
+            try:
+                bridge.film.emit((F.join_film(film, target), root), None, purpose)
+            except Exception as e:  # noqa: BLE001
+                bridge.film.emit((None, root), str(e), purpose)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _film_joined(self, result, error, purpose):
+        self._joins = max(0, self._joins - 1)
+        self._update_buttons()
+        path, root = result
+        if self.film is None or str(self.film.root) != root:
+            return                                 # another film was opened meanwhile
+        if error:
+            self.status.setText(f"The film cannot be joined yet: {error}.")
+            return
+        try:
+            secs = chain.probe(Path(path))["frames"] / 24
+        except Exception:  # noqa: BLE001
+            secs = 0.0
+        if purpose == "play":
+            self.preview.open(Path(path), f"Film · {len(self.film.scenes) if self.film else 1} scenes · "
+                                          f"{fmt_time(secs)}")
+            self.status.setText(f"Film joined: {fmt_time(secs)}.")
+        else:
+            self.status.setText(f"Exported the film: {Path(path).name} ({fmt_time(secs)}).")
+
+    def export_film(self):
+        if self.film is None or self.running:
+            return
+        start = str(self.film.root / f"{self.film.root.name}-film.mp4")
+        f, _ = QFileDialog.getSaveFileName(self, "Export the film", start, "Video (*.mp4)")
+        if f:
+            self.join_film("export", Path(f if f.lower().endswith(".mp4") else f + ".mp4"))
+
+    def generate_film(self):
+        """Make every scene's missing clips (up to each scene's ending), one scene after the other."""
+        if self.film is None or self.running:
+            return
+        if not self._save_tree():
+            return
+        self._update_continues()
+        todo, empty = [], []
+        for sc in self.film.scenes:
+            d = self.film.path(sc.id)
+            try:
+                t = T.load(d)
+            except (OSError, ValueError) as e:
+                self.status.setText(f"Scene “{sc.title}” cannot be read: {e}")
+                return
+            take = self.film.take_of(sc.id, t)
+            if take is None:
+                empty.append(sc.title)
+                continue
+            ch = T.Checker(d, t)
+            if any(ch.status(n.id) != "done" for n in t.path_to(take)):
+                todo.append(sc.id)
+        if empty:
+            self.status.setText(f"Scene “{empty[0]}” has no clip yet: write its first clip, or remove the scene.")
+            return
+        if not todo:
+            self.status.setText("Every scene is made: ▶ Play film.")
+            return
+        ids = [sc.id for sc in self.film.scenes]          # from the first scene with work on, each one checked when
+        self._film_queue = ids[ids.index(todo[0]):]       # its turn comes (a continuing one may need it by then)
+        self._film_total = len(self._film_queue)
+        self._film_next()
+
+    def _film_next(self):
+        if not self._film_queue:
+            self._film_queue = None
+            self.status.setText("The film is made: ▶ Play film.")
+            self._show_storyboard()
+            return
+        if self.film is not None and len(self.film.scenes) > 1:
+            try:
+                self.film.update_continues()       # the scenes after a new end start from it
+            except (OSError, ValueError):
+                pass
+        sid = self._film_queue.pop(0)
+        done = self._film_total - len(self._film_queue)
+        d = self.film.path(sid) if self.film else None
+        try:
+            t = T.load(d)
+            take = self.film.take_of(sid, t)
+            ch = T.Checker(d, t)
+            ready = take is not None and all(ch.status(n.id) == "done" for n in t.path_to(take))
+        except (OSError, ValueError, StopIteration):
+            ready = False
+        if ready:                                  # made already: the next one
+            QTimer.singleShot(0, self._film_next)
+            return
+        self.switch_scene(sid)
+        if self.film is None or self.film.path(sid) != self.project:
+            self._film_queue = None                # could not open the scene (the status says why)
+            return
+        take = self.film.take_of(sid, self.tree)
+        self._start([take])
+        if self._job is None and self._waiting_comfy is None:
+            self._film_queue = None                # not started (the status says why)
+        else:
+            self.status.setText(f"Generating the film: scene {done} of {self._film_total} "
+                                f"(“{self.film.scene(sid).title}”) … " + self.status.text())
+
+    # ---- the film's scenes (film.py)
+    def _show_storyboard(self):
+        if self.film is None:
+            self.storyboard.show_scenes([], None)
+            self.film_info.setText("")
+            return
+        scenes = []
+        for sc in self.film.scenes:
+            if self.project is not None and self.film.path(sc.id) == self.project:
+                summ = F.summary(self.film, sc.id, self.tree, self.status_of)
+            else:
+                summ = F.summary(self.film, sc.id)
+            scenes.append((sc.id, sc.title, summ))
+        self.storyboard.show_scenes(scenes, self.film.current)
+        cur = self.film.scene_of(self.project) if self.project else None
+        self.film_info.setText(f"› {cur.title}" if cur and len(self.film.scenes) > 1 else "")
+        self._update_title()
+
+    def _update_scene_card(self):
+        """The open scene's card follows the work on it (its path, states)."""
+        if self.film is None or self.project is None or self.tree is None:
+            return
+        cur = self.film.scene_of(self.project)
+        if cur is not None and cur.take and cur.take not in self.tree.nodes:
+            try:
+                self.film.set_take(cur.id, None)
+                self.status.setText(f"The clip “{cur.title}” ended at is gone: the film plays its selected path "
+                                    "now (right-click a clip → End the scene here).")
+            except OSError:
+                pass
+        if cur is not None:
+            self.storyboard.update_card(cur.id, cur.title, F.summary(self.film, cur.id, self.tree, self.status_of))
+
+    def _sync_shared(self):
+        """The cast, sounds and size settings are the film's: written into the other scenes when they change."""
+        if self.film is None or len(self.film.scenes) < 2 or self.tree is None:
+            return
+        now = json.dumps(self.film.shared(self.tree.options), sort_keys=True)
+        if now == getattr(self, "_shared_sent", None):
+            return
+        try:
+            self.film.sync_shared(self.project, self.tree.options)
+            self._shared_sent = now
+        except (OSError, ValueError) as e:
+            self.status.setText(f"Could not pass the cast / sound settings on to the other scenes: {e}")
+
+    def switch_scene(self, sid: str):
+        if self.film is None or self.project is None:
+            return
+        if self.running:
+            self.status.setText("Wait until generating has finished.")
+            self._show_storyboard()
+            return
+        if self.film.path(sid) == self.project:
+            return
+        if not self.open_project(self.film.root, scene=sid):
+            self._show_storyboard()                # back to the scene still open
+
+    def add_scene(self):
+        if self.film is None or self.project is None or self.running:
+            return
+        title, ok = QInputDialog.getText(self, "New scene", "Title of the new scene:",
+                                         text=f"Scene {len(self.film.scenes) + 1}")
+        if not ok:
+            return
+        if not self._may_leave_project():
+            return
+        cur = self.film.scene_of(self.project)
+        try:
+            scene = self.film.add_scene(title, after=cur.id if cur else None, like=cur.id if cur else None)
+        except (OSError, ValueError) as e:
+            self.status.setText(f"Could not add the scene: {e}")
+            return
+        if self.open_project(self.film.root, scene=scene.id):
+            self.status.setText(f"Scene “{scene.title}” added: choose its start image (Start image), or begin "
+                                "with a real video. The cast and sounds are the film's.")
+
+    def rename_scene(self, sid: str):
+        if self.film is None:
+            return
+        title, ok = QInputDialog.getText(self, "Rename scene", "Title:", text=self.film.scene(sid).title)
+        if not ok:
+            return
+        try:
+            self.film.rename(sid, title)
+        except (OSError, ValueError) as e:
+            self.status.setText(f"Could not rename the scene: {e}")
+            return
+        self._show_storyboard()
+
+    def delete_scene(self, sid: str):
+        if self.film is None or self.running:
+            return
+        if self._joins or self._converts or self._copying:
+            self.status.setText("Wait until the joins, conversions and copies have finished.")
+            return
+        sc = self.film.scene(sid)
+        if sc.dir == ".":
+            self.status.setText("The film folder's own scene cannot be deleted; move it if it should not be first.")
+            return
+        if len(self.film.scenes) < 2:
+            return
+        n = F.summary(self.film, sid)["clips"]
+        if QMessageBox.question(self, "Delete scene", f"Delete the scene “{sc.title}” with its {n} clip"
+                                f"{'s' if n != 1 else ''} and their files? This cannot be undone.") != QMessageBox.Yes:
+            return
+        if self.film.path(sid) == self.project:    # leave it first
+            other = next(s for s in self.film.scenes if s.id != sid)
+            self.switch_scene(other.id)
+            if self.project == self.film.path(sid):
+                return
+        try:
+            self.film.remove(sid)
+        except (OSError, ValueError) as e:
+            self.status.setText(f"Could not delete the scene: {e}")
+            return
+        self._show_storyboard()
+        self.status.setText(f"Scene “{sc.title}” deleted.")
+
+    def _update_continues(self) -> list[str]:
+        """Bring continuing scenes to the current end of the scene before them; the open scene is read again
+        when its start image changed."""
+        if self.film is None or len(self.film.scenes) < 2 or self.film.problem:
+            return []
+        try:
+            updated = self.film.update_continues()
+        except (OSError, ValueError) as e:
+            self.status.setText(f"Could not update the scenes that continue another: {e}")
+            return []
+        cur = self.film.scene_of(self.project) if self.project else None
+        if cur is not None and cur.id in updated:
+            self.open_project(self.film.root, scene=cur.id)
+        return updated
+
+    def duplicate_scene(self, sid: str):
+        if self.film is None:
+            return
+        if self.running or self._joins or self._converts or self._copying:
+            self.status.setText("Wait until generating, joins and copies have finished.")
+            return
+        if not self._save_tree():
+            return
+        root, bridge = self.film.root, self.bridge
+        self._copying = str(root)                  # (no scene switch, no other copy meanwhile)
+        self._update_buttons()
+        self.status.setText(f"Copying “{self.film.scene(sid).title}” with its clips …")
+
+        def work():
+            try:
+                sc = F.Film.load(root).duplicate(sid)
+                bridge.duplicated.emit((sc.id, sc.title), None, str(root))
+            except Exception as e:  # noqa: BLE001
+                bridge.duplicated.emit(None, str(e), str(root))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _scene_duplicated(self, result, error, root):
+        self._copying = None
+        self._update_buttons()
+        if self.film is None or str(self.film.root) != root:
+            return
+        if error:
+            self.status.setText(f"Could not duplicate the scene: {error}")
+            return
+        current = self.film.current
+        try:
+            self.film = F.Film.load(self.film.root)
+            self.film.current = current
+        except (OSError, ValueError):
+            pass
+        self._show_storyboard()
+        self.status.setText(f"“{result[1]}” added: change it freely, the original stays as it is.")
+
+    def scene_notes(self, sid: str):
+        if self.film is None:
+            return
+        text, ok = QInputDialog.getMultiLineText(self, "Scene notes", f"Notes for “{self.film.scene(sid).title}” "
+                                                 "(e.g. what happens, a line of script):", self.film.scene(sid).notes)
+        if not ok:
+            return
+        try:
+            self.film.set_notes(sid, text)
+        except OSError as e:
+            self.status.setText(f"Could not save the notes: {e}")
+            return
+        self._show_storyboard()
+
+    def show_film_cast(self):
+        """A table: the film's characters by scene (face ●, voice ♪), along the clips the film plays."""
+        if self.film is None:
+            return
+        if not self._save_tree():
+            return
+        from PySide6.QtWidgets import QTableWidget, QTableWidgetItem
+        names, rows = F.cast_by_scene(self.film)
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Cast in the film")
+        v = QVBoxLayout(dlg)
+        if not names:
+            v.addWidget(label("The film has no characters yet (the Cast tab, Alt+2).", level="secondary"))
+        table = QTableWidget(len(names), len(rows))
+        table.setHorizontalHeaderLabels([f"{k}  {title}" for k, (title, _m) in enumerate(rows, start=1)])
+        table.setVerticalHeaderLabels([f"@{n}" for n in names])
+        table.setEditTriggers(QTableWidget.NoEditTriggers)
+        sym = {"face": "●", "voice": "♪", "face+voice": "●♪"}
+        for c, (_title, marks) in enumerate(rows):
+            for r, n in enumerate(names):
+                item = QTableWidgetItem(sym.get(marks.get(n, ""), ""))
+                item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(r, c, item)
+        table.resizeColumnsToContents()
+        v.addWidget(table)
+        v.addWidget(label("● face   ♪ speaks with its voice", level="tertiary"))
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dlg.reject)
+        v.addWidget(buttons)
+        dlg.resize(min(900, 160 + 120 * len(rows)), min(600, 140 + 30 * len(names)))
+        self._film_cast_dialog = dlg               # (tests look at it)
+        if not getattr(self, "_dialogs_modeless", False):
+            dlg.exec()
+            dlg.deleteLater()
+
+    def set_scene_join(self, sid: str, join: str):
+        """How a scene follows the one before: a cut, a crossfade, or continuing from its last frame."""
+        if self.film is None or self.running:
+            return
+        if not self._save_tree():
+            return
+        try:
+            self.film.set_join(sid, join)
+            updated = self.film.update_continues() if join == "continue" else []
+        except (OSError, ValueError) as e:
+            self.status.setText(f"Could not change the join: {e}")
+            return
+        sc = self.film.scene(sid)
+        if self.film.path(sid) == self.project and sid in updated:
+            self.open_project(self.film.root, scene=sid)   # its start image changed under the open window
+        self._show_storyboard()
+        self.status.setText({"cut": f"“{sc.title}” follows with a hard cut.",
+                             "fade": f"“{sc.title}” fades in over the scene before (½ s).",
+                             "continue": f"“{sc.title}” starts from the last frame of the scene before"
+                                         + ("." if updated else " (once that one is made)."),
+                             }[join])
+
+    def _scenes_moved(self, order: list[str]):
+        if self.film is None:
+            return
+        reset = []
+        try:
+            reset = self.film.reorder(order)
+        except (OSError, ValueError) as e:
+            self.status.setText(f"Could not move the scene: {e}")
+        self._show_storyboard()
+        if reset:
+            self.status.setText("Moved. " + ", ".join(f"“{self.film.scene(i).title}”" for i in reset) +
+                                " now start" + ("s" if len(reset) == 1 else "") + " with a cut: the scene before "
+                                "changed (right-click → Join with the scene before → Continue to continue it).")
 
     # ---- new / open / save / close
     def new_project(self):
@@ -1622,12 +2234,13 @@ class MainWindow(QMainWindow):
         """Copy the whole project (clips included) to a new folder and continue there."""
         if self.project is None or self.running:
             return
+        root = self.film.root if self.film else self.project
         d = QFileDialog.getExistingDirectory(self, "Save the project as (choose the folder to put the copy in)",
-                                             str(self.project.parent))
+                                             str(root.parent))
         if not d:
             return
         from PySide6.QtWidgets import QInputDialog
-        name, ok = QInputDialog.getText(self, "Save as", "Name of the copy:", text=f"{self.project.name}-copy")
+        name, ok = QInputDialog.getText(self, "Save as", "Name of the copy:", text=f"{root.name}-copy")
         if not ok or not name.strip():
             return
         self.copy_project_to(Path(d) / name.strip())
@@ -1642,18 +2255,34 @@ class MainWindow(QMainWindow):
         self._save_timer.stop()
         if not self._write_tree():
             return
-        source, bridge = self.project, self.bridge
+        source, bridge = (self.film.root if self.film else self.project), self.bridge
+        scene_rel = os.path.relpath(self.project, source)       # the scene to continue in, inside the copy
+        self._copy_scene = scene_rel
+        cur = self.film.scene_of(self.project) if self.film else None
+        self._copy_scene_id = cur.id if cur else None
         existed = target.exists()
         self.status.setText(f"Copying the project to {target} …")
         self.act_save_as.setEnabled(False)
         self._copying = str(source)
 
+
         def work():
             try:
-                shutil.copytree(source, target, dirs_exist_ok=True,
-                                ignore=shutil.ignore_patterns("*.part", "*.part.*", "video-chain-*"))
-                tree = T.load(target)                 # the copy remembers where its start image came from
-                T.save(target, tree)
+                skip = shutil.ignore_patterns("*.part", "*.part.*", "video-chain-*")
+
+                def ignore(d, names):
+                    out = set(skip(d, names))
+                    if Path(d).parent.name == F.SCENES_DIR and T.REFS_DIR in names:
+                        out.add(T.REFS_DIR)           # a scene's link to the film's refs/: made again below
+                    return out
+                shutil.copytree(source, target, dirs_exist_ok=True, ignore=ignore)
+                for sc in F.Film.load(target).scenes:  # the copy remembers where its start images came from
+                    d = (target / sc.dir).resolve()
+                    if sc.dir != "." and not (d / T.REFS_DIR).exists():
+                        (target / T.REFS_DIR).mkdir(exist_ok=True)
+                        os.symlink(os.path.relpath(target / T.REFS_DIR, d), d / T.REFS_DIR, target_is_directory=True)
+                    if (d / T.TREE_FILE).is_file():
+                        T.save(d, T.load(d))
                 bridge.copied.emit(str(target), "")
             except Exception as e:  # noqa: BLE001
                 if not existed:                       # a half copy would block the next try
@@ -1668,10 +2297,12 @@ class MainWindow(QMainWindow):
         if error:
             self.status.setText(f"Could not copy the project: {error}")
             return
-        if self.project is None or str(self.project) != source:
+        here = str(self.film.root if self.film else self.project) if self.project is not None else None
+        if here != source:
             self.status.setText(f"Copied the project to {target}.")
             return
-        if self.open_project(Path(target)):
+        if self.open_project((Path(target) / getattr(self, "_copy_scene", ".")).resolve(),
+                             scene=getattr(self, "_copy_scene_id", None)):
             self.status.setText(f"Saved as {Path(target).name}; you are working in the copy now.")
 
     def close_project(self):
@@ -1680,12 +2311,19 @@ class MainWindow(QMainWindow):
         if not self._may_leave_project():
             return
         self._waiting_comfy = self._waiting_refine = None      # a wait for ComfyUI belongs to this project
+        self._film_queue = None
         self.preview.stop()
+        self.film = None
+        self.storyboard.show_scenes([], None)
+        self.film_info.setText("")
         self.project = self.tree = None
         self.project_edit.clear()
         self.qs.setValue("project", "")
+        self.focus = self._path_end = None
+        self.timeline.show_path([], None)
+        self.graph.set_focus(None)
         for c in self.cards:
-            self.path_box.removeWidget(c)
+            self.card_stack.removeWidget(c)
             c.setParent(None)
             c.deleteLater()
         self.cards = []
@@ -1699,15 +2337,31 @@ class MainWindow(QMainWindow):
         self._update_buttons()
         self.status.setText("No project open. New… or Open… under Project, or the File menu.")
 
-    def open_project(self, folder: Path, quiet: bool = False) -> bool:
+    def open_project(self, folder: Path, quiet: bool = False, scene: str | None = None) -> bool:
         if self.running:
             return False
         if self.project is not None and not self._may_leave_project():
             return False
+        if scene is None:
+            self._film_queue = None                # (Generate film opens its scenes with scene=…)
         self._waiting_comfy = self._waiting_refine = None
         folder = Path(folder).expanduser().resolve()
         try:
             folder.mkdir(parents=True, exist_ok=True)
+            root = F.root_of(folder)
+            film = F.Film.load(root)               # the film this folder belongs to, and which scene opens
+            if len(film.scenes) > 1 and not film.problem:
+                try:
+                    film.update_continues()        # scenes that continue the one before: its current end
+                except (OSError, ValueError):
+                    pass
+            if scene is not None and any(x.id == scene for x in film.scenes):
+                film.current = scene
+                folder = film.path(scene)
+            elif folder == root:
+                folder = film.path(film.current)
+            else:
+                film.current = (film.scene_of(folder) or film.scenes[0]).id
             tree = T.load(folder)
         except (OSError, ValueError) as e:
             msg = f"Could not open the project: {e}"
@@ -1723,7 +2377,14 @@ class MainWindow(QMainWindow):
             except ValueError:
                 pass
         self.project, self.tree = folder, tree
-        self.project_edit.setText(str(folder))
+        self.film = film
+        self.focus = self._path_end = None         # (ids like n3 exist in every scene: no focus carried over)
+        synced = ""
+        if len(film.scenes) > 1 and film.shared_state and film.shared(tree.options) != film.shared_state:
+            tree.options.update(json.loads(json.dumps(film.shared_state)))   # it missed a change of the film's cast
+            synced = " Its cast and sound settings were brought up to the film's."
+        self._shared_sent = json.dumps(film.shared(tree.options), sort_keys=True)
+        self.project_edit.setText(str(root))
         self.project_edit.setToolTip(str(folder))
         self.preview.stop()
         self.live, self.progress_of = {}, {}
@@ -1738,13 +2399,20 @@ class MainWindow(QMainWindow):
         self._tree_stamp = self._stamp()
         self._write_tree()
         T.ensure_handovers(folder, tree)          # e.g. deleted by hand: the clips after them stay done
-        self.qs.setValue("project", str(folder))
-        self._remember_project(folder)
+        self.qs.setValue("project", str(root))
+        self._remember_project(root)
+        try:
+            film.save()                            # which scene was open (only once there are several)
+        except OSError:
+            pass
+        self._show_storyboard()
         self._update_title()
         self._warm_lora_hashes()
         self.refresh(rebuild_path=True)
         QTimer.singleShot(0, self.graph.fit)
-        self.status.setText(f"Project {folder.name}: {len(tree.nodes)} clip{'s' if len(tree.nodes) != 1 else ''}.")
+        self.status.setText(f"Project {folder.name}: {len(tree.nodes)} clip{'s' if len(tree.nodes) != 1 else ''}."
+                            + synced + (f" Note: {film.problem}; the film's scene list is not changed until it is "
+                                        "fixed." if film.problem else ""))
         return True
 
     def _open_dir(self):
@@ -2498,6 +3166,7 @@ class MainWindow(QMainWindow):
             self.status.setText(f"Could not save the project: {e}")
             return False
         self._tree_stamp = self._stamp()
+        self._sync_shared()
         return True
 
     # ------------------------------------------------------------------ start image
@@ -2698,6 +3367,7 @@ class MainWindow(QMainWindow):
         videos = sum(1 for n in self.tree.nodes.values() if n.is_video)
         self.tree_info.setText(f"{len(self.tree.nodes)} clips" + (f" ({videos} real)" if videos else "") +
                                f" · {branches} branch{'es' if branches != 1 else ''} · {made} made")
+        self._update_scene_card()
         self._update_buttons()
 
     def badge(self, n: T.Node) -> str:
@@ -2777,12 +3447,11 @@ class MainWindow(QMainWindow):
 
     def _rebuild_path(self):
         for c in self.cards:
-            self.path_box.removeWidget(c)
+            self.card_stack.removeWidget(c)
             c.setParent(None)
             c.deleteLater()
         self.cards = []
         path = self.selected_path()
-        self.path_hint.setVisible(not path)
         self.path_hint.setText("The start image is selected. Select a clip to see its path, or press Continue "
                                "(Ctrl+N) to add a clip after the start image.")
         for k, n in enumerate(path):
@@ -2790,7 +3459,8 @@ class MainWindow(QMainWindow):
                 card = VideoCard(n)
                 card.action.connect(self.node_action)
                 card.play.connect(self._play_node)
-                self.path_box.insertWidget(k, card)
+                self._fit_card(card)
+                self.card_stack.addWidget(card)
                 self.cards.append(card)
                 card.set_editable(not self.running)
                 continue
@@ -2806,20 +3476,101 @@ class MainWindow(QMainWindow):
                              self.known_loras())
             card.action.connect(self.node_action)
             card.play.connect(self._play_node)
-            self.path_box.insertWidget(k, card)
+            self._fit_card(card)
+            self.card_stack.addWidget(card)
             self.cards.append(card)
             card.set_editable(not self.running)
+        ids = [c.nid for c in self.cards]
+        end = ids[-1] if ids else None
+        if self.focus not in ids or end != getattr(self, "_path_end", None):
+            self.focus = end                       # a new path (or a new clip at its end): where one goes on
+            if end is not None:
+                self.inspector.setCurrentIndex(0)
+        self._path_end = end
         self._update_cards()
-        if self.cards:
-            last = self.cards[-1]
-            QTimer.singleShot(0, lambda: self.path_area.ensureWidgetVisible(last))
+        self._show_focus()
+
+    @staticmethod
+    def _fit_card(card):
+        """A card in the inspector takes its width (it had a fixed width in a row)."""
+        card.setMinimumWidth(300)
+        card.setMaximumWidth(16777215)
+
+    def _show_focus(self):
+        card = next((c for c in self.cards if c.nid == self.focus), None)
+        self.card_stack.setCurrentWidget(card if card is not None else self.path_hint)
+        self.card_stack.updateGeometry()
+        ids = [c.nid for c in self.cards]
+        k = ids.index(self.focus) if self.focus in ids else -1
+        self.b_prev_clip.setEnabled(k > 0)
+        self.b_next_clip.setEnabled(0 <= k < len(ids) - 1)
+        if k >= 0 and self.tree is not None and self.focus in self.tree.nodes:
+            n = self.tree.nodes[self.focus]
+            what = "Video" if n.is_video else "Clip"
+            self.focus_info.setText(f"{what} #{n.id[1:]} · {k + 1} of {len(ids)} on the path")
+        else:
+            self.focus_info.setText("")
+        self.timeline.set_focus(self.focus)
+        self.graph.set_focus(self.focus)
+        self._update_buttons()                     # (the actions follow the clip in focus)
+
+    def focus_clip(self, nid: str):
+        """Show a clip of the path in the inspector (the path stays as it is)."""
+        if any(c.nid == nid for c in self.cards):
+            self.focus = nid
+            self._show_focus()
+            self.inspector.setCurrentIndex(0)
+
+    def _step_focus(self, d: int):
+        ids = [c.nid for c in self.cards]
+        if self.focus in ids:
+            k = max(0, min(len(ids) - 1, ids.index(self.focus) + d))
+            self.focus_clip(ids[k])
+
+    def target_id(self):
+        """The clip the toolbar / shortcut actions work on: the one shown in the inspector, else the selected."""
+        if self.focus and self.tree is not None and self.focus in self.tree.nodes:
+            return self.focus
+        return self.selected_id()
+
+    def _graph_clicked(self, nid):
+        """A click in the graph: a clip of the shown path is shown in the inspector; another one is selected (its
+        path is shown, it in focus)."""
+        if nid != START and any(c.nid == nid for c in self.cards):
+            self.focus_clip(nid)
+            return
+        self.select(nid)
+        if nid != START:
+            self.focus_clip(nid)
 
     def _show_card_of(self, nid: str):
+        self.focus_clip(nid)
         card = next((c for c in self.cards if c.nid == nid), None)
-        if card is not None:
-            self.path_area.ensureWidgetVisible(card)
-            if isinstance(card, PromptCard):
-                card.edit.setFocus()
+        if isinstance(card, PromptCard):
+            card.edit.setFocus()
+
+    def _update_timeline(self, path_nodes: list, cuts: dict):
+        """The path as blocks as long as its clips are in the joined video; the carry-over hatched."""
+        blocks = []
+        for n in path_nodes:
+            frames = T.clip_length(self.tree, n)
+            a, b = cuts.get(n.id, (0, 0))
+            secs = max(1, frames - a - b) / 24
+            lead = int((n.overrides or {}).get("guide") or 0) / 24 if not n.is_video and n.parent else 0.0
+            pm = self._pixmap(self._node_frame(n))
+            if pm is not None:                      # scaled once per picture (the timeline is redrawn often)
+                cache = self.__dict__.setdefault("_tl_thumbs", {})
+                key = pm.cacheKey()
+                if key not in cache:
+                    if len(cache) > 400:
+                        cache.clear()
+                    cache[key] = pm.scaledToHeight(48, Qt.SmoothTransformation)
+                pm = cache[key]
+            what = (Path(n.source["file"]).name if n.is_video else (n.prompt or "(no prompt yet)"))
+            tip = (f"{'Video' if n.is_video else 'Clip'} #{n.id[1:]} · {secs:.1f} s · {self.state(n.id)}\n"
+                   f"{what[:160]}")
+            blocks.append(Block(n.id, f"#{n.id[1:]}", secs, self.state(n.id), n.is_video, pm, lead, tip))
+        self.timeline.show_path(blocks, self.focus)
 
     def _show_card_settings(self, on: bool):
         """Open / close the own settings on every card at once."""
@@ -2833,6 +3584,7 @@ class MainWindow(QMainWindow):
         cuts = dict(zip([n.id for n in path_nodes],
                         T.path_cuts(self.tree, path_nodes, bool(self.tree.options.get("keep_repeated")),
                                     planned=True)))
+        self._update_timeline(path_nodes, cuts)
         t = 0.0
         for k, card in enumerate(self.cards):
             n = self.tree.nodes.get(card.nid)
@@ -2906,8 +3658,8 @@ class MainWindow(QMainWindow):
 
     def _update_buttons(self):
         has = self.tree is not None
-        sel = self.selected_id() if has else None
-        is_clip = bool(has and sel and sel != START)
+        sel = self.target_id() if has else None     # the actions work on the clip in the inspector
+        is_clip = bool(has and sel and sel != START and sel in self.tree.nodes)
         idle = not self.running
         self.b_continue.setEnabled(has and idle)
         self.b_add_video.setEnabled(has and idle)
@@ -2924,8 +3676,20 @@ class MainWindow(QMainWindow):
         self.b_gen.setEnabled(free and bool(path))
         self.b_gen_all.setEnabled(free and has and bool(self.tree.nodes))
         self.b_delete.setEnabled(is_clip and free)
+        num = f" #{sel[1:]}" if is_clip else ""
+        self.b_branch.setToolTip(f"Branch: another continuation from the same point as clip{num} (Ctrl+B)")
+        self.b_variant.setToolTip(f"Variant of clip{num}: same prompt, other seed (Ctrl+D)")
+        self.b_delete.setToolTip(f"Delete clip{num} (the one in the inspector) and everything after it (Del)")
         self.b_play_path.setEnabled(all_done and idle)
         self.b_export.setEnabled(all_done and idle)
+        fn = self.tree.nodes.get(self.focus) if has and self.focus else None
+        self.b_play_clip.setEnabled(bool(fn and fn.made))
+        self.b_play_clip.setToolTip(f"Play clip #{fn.id[1:]}, the one in the inspector" if fn and fn.made else
+                                    "The clip in the inspector is not made yet" if fn else
+                                    "Show a clip in the inspector first")
+        self.b_play_film.setToolTip("Join the scenes of the film and play it (all scenes must be made)")
+        self.b_play_film.setEnabled(self.film is not None and idle and not (self._copying or self._joins
+                                                                          or self._converts))
         todo = sum(1 for n in path if self.state(n.id) != "done")
         why = ("Select a clip first: its path is played" if not path else
                f"Not ready: {todo} clip{'s' if todo != 1 else ''} on this path {'are' if todo != 1 else 'is'} new or "
@@ -2943,8 +3707,14 @@ class MainWindow(QMainWindow):
                   self.comfy_url, self.ref_size, self.ref_hint, self.b_ref_add, self.b_ref_start,
                   self.b_ref_del, self.b_ref_crop, self.b_char_new, self.b_char_rename, self.b_char_del, self.char_desc,
                   self.char_lead, self.b_voice_file, self.b_voice_del, self.dialogue_lang, self.speed, self.style_prefix,
-                  self.style_suffix, self.lora_triggers, self.b_ai_edit, self.b_ai_create):
+                  self.style_suffix, self.lora_triggers, self.b_ai_edit, self.b_ai_create, self.storyboard,
+                  self.b_film_gen, self.b_film_play, self.b_film_export, self.b_film_cast):
             w.setEnabled(idle)
+        busy = bool(self._copying or self._joins or self._converts)
+        self.storyboard.setEnabled(idle and not busy)  # a scene switch would pull the files from under them
+        self.b_film_play.setEnabled(idle and not busy)
+        self.b_film_export.setEnabled(idle and not busy)
+        self.b_film_gen.setEnabled(idle and not busy)
         self._turbo_widgets()                      # after the loop: turbo locks the steps fields again
         self._update_ref_start_button()            # after the loop too: they depend on the selection
         self._update_cast_buttons()
@@ -3181,6 +3951,19 @@ class MainWindow(QMainWindow):
     def node_action(self, action: str, nid: str | None):
         if self.tree is None or self.running:
             return
+        if action in ("take", "take_clear") and self.film is not None:
+            cur = self.film.scene_of(self.project)
+            if cur is not None and nid:
+                try:
+                    self.film.set_take(cur.id, nid if action == "take" else None)
+                except OSError as e:
+                    self.status.setText(f"Could not save the scene's ending: {e}")
+                    return
+                self._update_continues()               # a scene continuing this one starts from the new end
+                self._show_storyboard()
+                self.status.setText(f"The film plays “{cur.title}” up to clip #{nid[1:]}." if action == "take"
+                                    else f"The film plays “{cur.title}” up to its selected clip.")
+            return
         node = self.tree.nodes.get(nid) if nid and nid != START else None
         if action in ("variant", "variants") and node is not None and node.is_video:
             self.status.setText("Variants are for generated clips; a real video stays as it is.")
@@ -3406,7 +4189,7 @@ class MainWindow(QMainWindow):
                     return False
                 c = self._selected_character()
                 record_use(png, {"kind": "ref", "file": c["images"][-1]})
-                return (f"Added as a face of @{c['name']} (Cast, left panel); mention it in prompts as "
+                return (f"Added as a face of @{c['name']} (the Cast tab, Alt+2); mention it in prompts as "
                         f"@{c['name']}." + (f" {self.status.text()}" if "CHANGED" in self.status.text() else ""))
             ok = self.set_image(png, confirm=True) if kind == "start" else \
                 bool(target) and self.set_end_image(target, png)
@@ -3866,6 +4649,12 @@ class MainWindow(QMainWindow):
             ref_last = m.addAction("Add last frame as face reference")
             ref_last.setEnabled(bool(node is not None and node.made))
             gen = m.addAction("Generate the path to here")
+            if self.film is not None:
+                cur = self.film.scene_of(self.project)
+                if cur is not None and cur.take == nid:
+                    acts[m.addAction("Clear the scene's ending (the film plays its selected path)")] = "take_clear"
+                else:
+                    acts[m.addAction("End the scene here (the film plays up to this clip)")] = "take"
             m.addSeparator()
             keep_here = m.addAction("Keep this branch, delete the other branches here")
             keep_here.setEnabled(bool(self.tree.siblings(nid)))
@@ -3902,7 +4691,6 @@ class MainWindow(QMainWindow):
             return
         n = self.tree.nodes[nid]
         if n.made and (self.project / n.made["video"]).is_file():
-            self.tabs.setCurrentIndex(0)
             what = Path(n.source["file"]).name if n.is_video else n.prompt[:60]
             self.preview.open(self.project / n.made["video"],
                               f"{'Video' if n.is_video else 'Clip'} #{nid[1:]} · {what}")
@@ -3940,7 +4728,6 @@ class MainWindow(QMainWindow):
             return
         path, secs = path
         if purpose == "play":
-            self.tabs.setCurrentIndex(0)
             self.preview.open(path, f"Path to clip #{Path(path).stem[1:]} · {fmt_time(secs)}")
             self.status.setText(f"{pre}Path joined: {fmt_time(secs)}.")
         else:
@@ -4220,6 +5007,7 @@ class MainWindow(QMainWindow):
     def stop(self):
         if self._waiting_comfy is not None and not self.running:   # generating once ComfyUI runs: not any more
             self._waiting_comfy = None
+            self._film_queue = None
             self.status.setText("Cancelled: nothing is generated when ComfyUI is up (ComfyUI itself keeps "
                                 "starting).")
             self._update_buttons()
@@ -4399,7 +5187,7 @@ class MainWindow(QMainWindow):
             msg = f"Done: {made} clip{'s' if made != 1 else ''} made." if made else "Everything was already made."
             self.status.setText(msg)
             path = self.selected_path()
-            if len(self._targets) == 1 and path and path[-1].id == self._targets[0]:
+            if len(self._targets) == 1 and path and path[-1].id == self._targets[0] and self._film_queue is None:
                 self.join_selected("play", prefix=msg)
         elif self._stopping:
             self.progress.setValue(0)
@@ -4412,6 +5200,14 @@ class MainWindow(QMainWindow):
         if self.worker_alive and not self.keep_loaded.isChecked():
             self._quit_worker()
         self._save_timer.start()                   # what was chosen during the run (selection …) is saved now
+        if ok and self.film is not None and len(self.film.scenes) > 1 and not self.film.problem \
+                and self._film_queue is None:
+            QTimer.singleShot(0, self._update_continues)   # the next scene starts from this one's (new) end
+        if self._film_queue is not None:
+            if ok and not refine:
+                QTimer.singleShot(0, self._film_next)
+            else:
+                self._film_queue = None            # stopped or failed: the film stops there
         self._update_buttons()
         self._update_model_label()
 
@@ -4443,12 +5239,16 @@ class MainWindow(QMainWindow):
             self._start_worker()
         elif self._job is not None:
             refine = self._job.get("refine")                # an export stays an export when it waits for ComfyUI
+            film_rest = list(self._film_queue) if self._film_queue is not None else None
             self._job_finished(code if code else 1)
             if code == 4:                                   # COMFY_DOWN
                 self.comfy_up = False
-                if not self._autostart(self._targets, refine):
+                if self._autostart(self._targets, refine):
+                    if film_rest is not None:               # Generate film goes on once ComfyUI runs
+                        self._film_queue = film_rest
+                else:
                     self.status.setText(f"ComfyUI is not running at {self.comfy_url.text().strip()}. "
-                                        "Start it (ComfyUI → Start ComfyUI) and generate again.")
+                                        "Start it (Settings → ComfyUI and preferences → Start ComfyUI) and generate again.")
                 self._update_comfy_label()
         self._update_model_label()
         self._update_buttons()
@@ -4496,8 +5296,11 @@ class MainWindow(QMainWindow):
                 if self.tree is not None and all(t in self.tree.nodes for t in targets):
                     refine = getattr(self, "_waiting_refine", None)
                     QTimer.singleShot(0, lambda: self._start(targets, refine))
+                else:
+                    self._film_queue = None
             elif not (self._comfy_starting and time.monotonic() - self._comfy_starting < 180):
                 self._waiting_comfy = None
+                self._film_queue = None
                 self.status.setText("ComfyUI did not start within 3 minutes; see its own log.")
             self._update_buttons()
         self._update_comfy_label()

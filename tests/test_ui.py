@@ -1862,3 +1862,144 @@ def test_continue_the_real_videos_sound_on_the_card(app, win, tmp_path):
     card.src_sound.setChecked(False)                                                   # optional: off again
     flush(app, win)
     assert "source_sound" not in win.tree.nodes[a].overrides
+
+
+def test_scenes_in_the_window(app, win, tmp_path, image, monkeypatch):
+    """Scenes: the storyboard shows them; a new one opens; switching keeps each scene's clips; the cast is shared."""
+    ids = new_project(win, tmp_path, image, ("kitchen clip",))
+    root = win.project
+    assert win.storyboard.list.count() == 1 and win.windowTitle().startswith(root.name + " — ")
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("Street", True))
+    win.add_scene()
+    assert win.project == (root / "scenes" / "s2").resolve() and win.storyboard.list.count() == 2
+    assert "› Street" in win.windowTitle() and win.film_info.text() == "› Street"
+    assert win.tree.nodes and all(n.prompt == "" for n in win.tree.nodes.values())    # its own (empty) clips
+    win.add_reference(str(image))                           # a face in scene 2: the film's cast
+    flush(app, win)
+    win._save_tree()
+    win.storyboard.sceneChosen.emit("s1")                   # back to scene 1 (the film folder)
+    assert win.project == root and [n.prompt for n in win.tree.nodes.values()] == ["kitchen clip"]
+    assert T.cast_of(win.tree) and (root / T.cast_of(win.tree)[0]["images"][0]).is_file()
+    assert win.qs.value("project") == str(root)
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("Night street", True))
+    win.rename_scene("s2")
+    win._scenes_moved(["s2", "s1"])
+    assert [win.storyboard.list.item(i).text().split("\n")[0] for i in range(2)] == ["1  Night street", "2  Scene 1"]
+    win.storyboard.sceneChosen.emit("s2")
+    copy = tmp_path / "film-copy"
+    win.copy_project_to(copy)                               # Save as: the whole film, the same scene open
+    wait(app, lambda: win._copying is None, timeout=30)
+    assert win.project == (copy / "scenes" / "s2").resolve() and (copy / "scenes" / "s2" / T.REFS_DIR).is_symlink()
+    assert (copy / "film.json").is_file() and win.storyboard.list.count() == 2
+    win.open_project(root)
+    win.storyboard.sceneChosen.emit("s1")
+    win.open_project(root)                                  # the film opens the scene worked on last
+    assert win.project == root
+    win.delete_scene("s1")                                  # the film folder's scene stays
+    assert "cannot be deleted" in win.status.text()
+    win.storyboard.sceneChosen.emit("s2")
+    win.delete_scene("s2")                                  # the open scene: the window moves to another first
+    assert win.project == root and win.storyboard.list.count() == 1 and not (root / "scenes" / "s2").exists()
+
+
+def test_generate_and_play_the_film(app, win, tmp_path, image, monkeypatch):
+    ids = new_project(win, tmp_path, image, ("kitchen a", "kitchen b"))
+    root = win.project
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("Street", True))
+    win.add_scene()
+    win.set_image(str(image))
+    first = next(iter(win.tree.nodes))
+    type_prompt(win, first, "street a")
+    flush(app, win)
+    win.storyboard.sceneChosen.emit("s1")
+    win.node_action("take", ids[0])                         # scene 1 ends at its first clip in the film
+    assert win.film.scene("s1").take == ids[0] and "ends at #" in win.storyboard.list.item(0).text()
+    win.storyboard.joinWanted.emit("s2", "fade")           # the street fades in over the kitchen
+    assert win.film.scene("s2").join == "fade" and "crossfade" in win.storyboard.list.item(1).text()
+    win.generate_film()
+    wait(app, lambda: win._film_queue is None and not win.running, timeout=120)
+    assert win.status.text().startswith("The film is made"), win.status.text()
+    assert win.state(ids[1]) != "done"                      # after scene 1's ending: not part of the film
+    win.join_film("play")
+    wait(app, lambda: win.status.text().startswith("Film joined"), timeout=60)
+    assert win.played and win.played[-1] == root / "paths" / "film.mp4"
+
+
+def test_scene_duplicate_notes_and_film_cast(app, win, tmp_path, image, monkeypatch):
+    new_project(win, tmp_path, image, ("a clip",))
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("Two", True))
+    win.add_scene()
+    win.storyboard.duplicateWanted.emit("s1")
+    wait(app, lambda: win._copying is None, timeout=30)          # copied in the background
+    assert win.storyboard.list.count() == 3 and "(copy)" in win.storyboard.list.item(1).text()
+    monkeypatch.setattr(QInputDialog, "getMultiLineText", lambda *a, **k: ("She opens the door.", True))
+    win.storyboard.notesWanted.emit("s1")
+    assert win.film.scene("s1").notes == "She opens the door."
+    assert "She opens the door." in win.storyboard.list.item(0).toolTip()
+    win._dialogs_modeless = True
+    win.show_film_cast()
+    assert win._film_cast_dialog.windowTitle() == "Cast in the film"
+    win._film_cast_dialog.deleteLater()
+
+
+def test_inspector_and_timeline(app, win, tmp_path, image):
+    """The editor layout: the path as a timeline; the clip in focus in the inspector; clicking a clip of the path
+    shows it without changing the path; a new clip gets the focus."""
+    ids = new_project(win, tmp_path, image, ("one", "two", "three"))
+    assert [b.nid for b in win.timeline._blocks] == ids and win.focus == ids[-1]
+    assert win.card_stack.currentWidget().nid == ids[-1] and "3 of 3" in win.focus_info.text()
+    win.timeline.clicked.emit(ids[0])                      # a block: shown, the path stays
+    assert win.card_stack.currentWidget().nid == ids[0] and [c.nid for c in win.cards] == ids
+    assert not win.b_prev_clip.isEnabled() and win.b_next_clip.isEnabled()
+    win._step_focus(1)
+    assert win.focus == ids[1]
+    win._graph_clicked(ids[2])                             # a clip of the path in the graph: focus only
+    assert win.focus == ids[2] and win.selected_id() == ids[2]
+    win._graph_clicked(ids[0])
+    assert win.focus == ids[0] and [c.nid for c in win.cards] == ids    # (the path is not cut short)
+    win.node_action("continue", ids[2])                    # a new clip: in focus at once, to write its prompt
+    assert win.focus == win.selected_id() not in ids and win.card_stack.currentWidget().nid == win.focus
+    assert win.timeline._blocks[-1].nid == win.focus and win.inspector.tabText(0) == "Clip"
+
+
+def test_layout_presets_and_saved_layout(app, win):
+    """View presets size the panels; the layout is saved with the settings and restored; an unknown one is reset."""
+    from video_chain.ui.main_window import LAYOUT_VERSION
+    win.resize(1600, 900)
+    win.apply_layout("watch")
+    assert not win.act_left.isChecked() and win.left_tabs.isHidden()
+    win.apply_layout("write")
+    assert win.act_left.isChecked() and not win.left_tabs.isHidden()
+    sizes = win.split.sizes()
+    assert sizes[2] > sizes[0]                       # a wide inspector for writing
+    win.save_settings()
+    d = json.loads(win.qs.value("layout", type=str))
+    assert d["v"] == LAYOUT_VERSION and d["left"] is True and len(d["split"]) == 3
+    win.apply_layout("watch")
+    win._restore_layout()
+    assert win.act_left.isChecked() and win.split.sizes()[2] > win.split.sizes()[0]
+    win.qs.setValue("layout", "not json")
+    win._restore_layout()                            # falls back to the default layout
+    assert win.act_left.isChecked()
+    for bad in ("[]", "5", '{"v": 1, "split": ["a", 1, 1], "center": [1, 1]}',
+                '{"v": 1, "split": [0, 0, 0], "center": [1, 1]}'):
+        win.apply_layout("watch")
+        win.qs.setValue("layout", bad)
+        win._restore_layout()
+        assert win.act_left.isChecked(), bad
+    # hidden, saved, restored and shown again: the left panel gets its width back
+    win.show()
+    app.processEvents()
+    win.apply_layout("edit")
+    app.processEvents()
+    win.act_left.setChecked(False)
+    win.save_settings()
+    win._restore_layout()
+    assert not win.act_left.isChecked()
+    win.act_left.setChecked(True)
+    app.processEvents()
+    assert win.split.sizes()[0] >= win.left_tabs.minimumWidth()
+    win.act_left.setChecked(False)
+    win._show_left_tab(1)                            # a tab chosen from the menu shows the panel
+    assert win.act_left.isChecked() and win.left_tabs.currentIndex() == 1
+    win.hide()

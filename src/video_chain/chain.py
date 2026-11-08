@@ -273,10 +273,11 @@ def cut_frames(video: Path, out: Path, first: int, count: int, fps: int = FPS) -
 
 
 def concat(videos: list[Path], out: Path, drop_first: bool = True, fps: int = FPS,
-           cuts: list[tuple[int, int]] | None = None) -> None:
+           cuts: list[tuple[int, int]] | None = None, size: tuple[int, int] | None = None) -> None:
     """Join clips into one video. With drop_first, clips 2..n lose their first frame (and its 1/24 s of sound),
     which repeats the last frame of the clip before. cuts instead gives (frames cut at the start, frames cut at
-    the end) per clip. Clips without sound get silence, so sound stays in sync."""
+    the end) per clip. Clips without sound get silence, so sound stays in sync. size: fit every clip into this
+    frame (aspect kept, black bars), for parts of different sizes (a film's scenes)."""
     if not videos:
         raise ValueError("nothing to join")
     infos = [probe(v) for v in videos]
@@ -293,7 +294,9 @@ def concat(videos: list[Path], out: Path, drop_first: bool = True, fps: int = FP
         if info["frames"] - skip - cut_end < 1:              # never cut a clip away completely
             skip, cut_end = 0, 0
         stop = info["frames"] - cut_end
-        filters.append(f"[{k}:v]trim=start_frame={skip}:end_frame={stop},setpts=PTS-STARTPTS,fps={fps}[v{k}]")
+        fit = (f",scale={size[0]}:{size[1]}:force_original_aspect_ratio=decrease:flags=lanczos,"
+               f"pad={size[0]}:{size[1]}:(ow-iw)/2:(oh-ih)/2,setsar=1") if size else ""
+        filters.append(f"[{k}:v]trim=start_frame={skip}:end_frame={stop},setpts=PTS-STARTPTS,fps={fps}{fit}[v{k}]")
         labels.append(f"[v{k}]")
         if any_audio:
             start, end = skip / fps, stop / fps
@@ -317,6 +320,62 @@ def concat(videos: list[Path], out: Path, drop_first: bool = True, fps: int = FP
     try:
         _run(["ffmpeg", "-v", "error", "-y", *args, "-filter_complex", ";".join(filters), *maps, *codec,
               "-r", str(fps), str(tmp)])
+        tmp.replace(out)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def join_parts(videos: list[Path], out: Path, size: tuple[int, int], joins: list[str], fade: float = 0.5,
+               fps: int = FPS) -> None:
+    """Join a film's parts (each scene joined already) in one frame size. joins[k]: how part k follows part k-1
+    ("cut", "fade": a crossfade of `fade` seconds, picture and sound, "continue": its first frame repeats the end of
+    the part before and is left out); joins[0] is ignored. Parts without sound get silence."""
+    if not videos:
+        raise ValueError("nothing to join")
+    if not any(j == "fade" for j in joins[1:]):
+        concat(videos, out, cuts=[(1 if k and joins[k] == "continue" else 0, 0) for k in range(len(videos))],
+               size=size, fps=fps)
+        return
+    w, h = size
+    infos = [probe(v) for v in videos]
+    args: list[str] = []
+    for v in videos:
+        args += ["-i", str(v)]
+    filters, extra, durs = [], len(videos), []
+    for k, info in enumerate(infos):
+        skip = 1 if k and joins[k] == "continue" and info["frames"] > 1 else 0
+        n = info["frames"] - skip
+        durs.append(n / fps)
+        filters.append(f"[{k}:v]trim=start_frame={skip}:end_frame={info['frames']},setpts=PTS-STARTPTS,fps={fps},"
+                       f"scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos,"
+                       f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p,settb=AVTB[v{k}]")
+        if info["audio"]:
+            src = f"[{k}:a]"
+        else:
+            args += ["-f", "lavfi", "-t", f"{n / fps + 1:.6f}", "-i", "anullsrc=r=48000:cl=stereo"]
+            src = f"[{extra}:a]"
+            extra += 1
+        filters.append(f"{src}aresample=48000,aformat=channel_layouts=stereo,apad,"
+                       f"atrim=start={skip / fps:.6f}:end={info['frames'] / fps:.6f},asetpts=PTS-STARTPTS[a{k}]")
+    cv, ca, t = "[v0]", "[a0]", durs[0]
+    for k in range(1, len(videos)):
+        nv, na = f"[cv{k}]", f"[ca{k}]"
+        if joins[k] == "fade":
+            d = max(0.04, min(fade, durs[k - 1] / 2, durs[k] / 2))
+            filters.append(f"{cv}[v{k}]xfade=transition=fade:duration={d:.6f}:offset={t - d:.6f}{nv}")
+            filters.append(f"{ca}[a{k}]acrossfade=d={d:.6f}{na}")
+            t += durs[k] - d
+        else:                                   # (concat output gets its frame rate again: a fade may follow)
+            filters.append(f"{cv}{ca}[v{k}][a{k}]concat=n=2:v=1:a=1[cc{k}]{na}")
+            filters.append(f"[cc{k}]fps={fps},settb=AVTB{nv}")
+            t += durs[k]
+        cv, ca = nv, na
+    out = Path(out)
+    tmp = out.with_name(out.stem + ".part" + out.suffix)
+    try:
+        _run(["ffmpeg", "-v", "error", "-y", *args, "-filter_complex", ";".join(filters), "-map", cv, "-map", ca,
+              "-c:v", "libx264", "-crf", "16", "-preset", "slow", "-pix_fmt", "yuv420p", "-c:a", "aac",
+              "-b:a", "192k", "-r", str(fps), str(tmp)])
         tmp.replace(out)
     finally:
         tmp.unlink(missing_ok=True)

@@ -348,7 +348,7 @@ class VideoRangeDialog(QDialog):
                 self.summary.setText(f"Could not read the frame at {fmt(t)}.")
                 return False
             ok = bool(self.on_reference(str(png)))
-        self.summary.setText(f"The face from the frame at {fmt(t)} was added (see the Cast in the left panel)." if ok
+        self.summary.setText(f"The face from the frame at {fmt(t)} was added (see the Cast tab, Alt+2)." if ok
                              else f"The frame at {fmt(t)} was not added as a face picture.")
         return ok
 

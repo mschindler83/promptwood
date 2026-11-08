@@ -55,6 +55,7 @@ class NodeItem(QGraphicsObject):
         self.setAcceptHoverEvents(True)
         self.setCursor(Qt.PointingHandCursor)
         self._hover = False
+        self.focused = False                  # shown in the inspector
         self.setToolTip(info.prompt or info.title)
 
     def boundingRect(self) -> QRectF:
@@ -80,6 +81,10 @@ class NodeItem(QGraphicsObject):
         p.setPen(pen)
         p.setBrush(t.bgRaised)
         p.drawRoundedRect(r, 8, 8)
+        if self.focused:                      # the clip in the inspector: a second, outer ring
+            p.setPen(QPen(with_alpha(t.accent, 0.8), 1.5, Qt.DashLine))
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(r.adjusted(-1.5, -1.5, 1.5, 1.5), 9, 9)
 
         thumb = QRectF(8, 8, W - 16, THUMB_H)
         p.setPen(Qt.NoPen)
@@ -189,6 +194,15 @@ class GraphView(QGraphicsView):
         self.items_by_id: dict[str, NodeItem] = {}
         self.edges: list[tuple[str, str, QGraphicsPathItem]] = []
         self._structure: tuple = ()
+        self._focus: str | None = None
+
+    def set_focus(self, nid: str | None) -> None:
+        """Mark the clip shown in the inspector."""
+        self._focus = nid
+        for k, item in self.items_by_id.items():
+            if item.focused != (k == nid):
+                item.focused = k == nid
+                item.update()
 
     # ---- content
     def show_nodes(self, infos: list[NodeInfo]) -> None:
@@ -234,6 +248,7 @@ class GraphView(QGraphicsView):
             item.contextMenu.connect(self.contextMenu)
             sc.addItem(item)
             self.items_by_id[i.id] = item
+            item.focused = i.id == self._focus
         for i in infos:
             if i.parent is not None and i.parent in pos:
                 a, b = pos[i.parent], pos[i.id]
