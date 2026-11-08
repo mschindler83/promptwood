@@ -775,3 +775,36 @@ def test_speed_files_checked_before_the_run(server, monkeypatch):
     gen.check_speed({"pika": {"strength": 1.0}})
     with pytest.raises(C.ComfyError, match="ref2va"):
         gen.check_speed({"pika": {"strength": 1.0}, "refs": [{"file": "r.png"}]})
+
+
+def test_qwen21_and_moss_loras_found_by_contents(tmp_path):
+    """Qwen-Image 2.1 LoRAs (one stream, width 4096; attention-only ones too) and MOSS-Image LoRAs (layers.N.proj,
+    width 3072) are found by their contents; Qwen 2512 LoRAs, MOSS's own edit LoRA and look-alikes of another width
+    are not."""
+    import numpy as np
+    from safetensors.numpy import save_file
+
+    from video_chain import imagegen as G
+
+    def lora(name, shapes):
+        p = tmp_path / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        save_file({k: np.zeros(s, np.float16) for k, s in shapes.items()}, str(p))
+        return p
+    q21 = lora("Qwen_2.1/head.safetensors", {"diffusion_model.transformer_blocks.0.attn.to_q.lora_A.weight": (4, 4096),
+                                             "diffusion_model.transformer_blocks.0.attn.to_q.lora_B.weight": (4096, 4)})
+    q2512 = lora("qwen/style.safetensors", {"diffusion_model.transformer_blocks.0.attn.to_q.lora_A.weight": (4, 3072),
+                                            "diffusion_model.transformer_blocks.0.attn.add_q_proj.lora_A.weight": (4, 3072),
+                                            "diffusion_model.transformer_blocks.0.img_mlp.net.0.proj.lora_A.weight": (4, 3072),
+                                            "diffusion_model.transformer_blocks.0.txt_mlp.net.0.proj.lora_A.weight": (4, 3072)})
+    narrow = lora("other/attn.safetensors", {"transformer_blocks.0.attn.to_q.lora_A.weight": (4, 3072)})
+    moss = lora("moss/detail.safetensors", {"lora_unet_layers_0_proj_ffn_down.lora_down.weight": (4, 8192),
+                                            "lora_unet_layers_0_proj_q.lora_down.weight": (4, 3072)})
+    edit = lora("moss-image/moss_image_edit_lora_rank_64_bf16.safetensors",
+                {"layers.0.proj.q.lora_A": (4, 3072)})
+    assert G.lora_file_family(str(q21)) == "qwen21" and G.lora_file_family(str(moss)) == "moss"
+    assert G.lora_file_family(str(q2512)) == "qwen" and G.lora_file_family(str(narrow)) is None
+    assert G.lora_file_family(str(edit)) == "moss"
+    found = G.find_image_loras([tmp_path])
+    assert [n for _p, n in found["qwen21"]] == ["Qwen_2.1/head.safetensors"]
+    assert [n for _p, n in found["moss"]] == ["moss/detail.safetensors"]      # the edit LoRA: applied by edits

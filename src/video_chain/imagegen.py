@@ -334,13 +334,25 @@ _SDXL = re.compile(r"(lora_te2_|text_encoder_2|input_blocks[._]4[._]1[._]transfo
 _FLUX1 = re.compile(r"(double_blocks|single_blocks|single_transformer_blocks)")
 
 
+_MOSS = re.compile(r"layers[._]\d+[._]proj[._](ffn_up_gate|ffn_down|qkv|q|k|v|o)([._]|$)", re.M)
+_QWEN21 = re.compile(r"transformer_blocks[._]\d+[._](attn[._]to_(q|k|v|out)|img_mlp)")
+WIDTH = {"krea2": 6144, "qwen21": 4096, "moss": 3072}     # the input width of a LoRA's down matrices
+
+
 def lora_family(keys) -> str | None:
-    """The model family a LoRA is for, from its tensor names: 'qwen', 'flux1', 'sdxl', 'krea2' or None."""
+    """The model family a LoRA is for, from its tensor names: 'qwen', 'qwen21', 'moss', 'flux1', 'sdxl', 'krea2'
+    or None. qwen21 / moss / krea2 are confirmed by the width of the layers (lora_file_family)."""
     keys = list(keys)
     joined = "\n".join(keys)
+    if _MOSS.search(joined):                       # MOSS-Image: layers.N.proj.q / ffn_up_gate ...
+        return "moss"
     if re.search(r"transformer_blocks[._]\d+[._]img_mlp", joined) and re.search(r"txt_mlp", joined) and \
             "single_transformer_blocks" not in joined:
         return "qwen"
+    # Qwen-Image 2.1: one stream (transformer_blocks with attn / img_mlp, no text-side layers); 2512 has txt_mlp
+    if _QWEN21.search(joined) and not re.search(r"txt_mlp|add_[qkv]_proj|to_add_out|single_transformer_blocks|"
+                                                r"ff_context|double_blocks", joined):
+        return "qwen21"
     if _FLUX1.search(joined) and ("img_mlp" in joined or "img_attn" in joined or "single_transformer_blocks" in joined
                                   or "double_blocks" in joined):
         return "flux1"
@@ -452,9 +464,10 @@ def lora_file_family(path: str) -> str | None:
                 if 0 < n < 100 * 2**20:
                     head = json.loads(f.read(n))
                     fam = lora_family(k for k in head if k != "__metadata__")
-                    if fam == "krea2":                 # Krea-2's width is 6144 (another model with such names: not)
-                        k = next((k for k in head if re.search(r"attn[._]wq[._]lora_(A|down)", k)), None)
-                        if k is not None and (head[k].get("shape") or [0, 0])[-1] != 6144:
+                    if fam in WIDTH:                   # the width tells models with such layer names apart
+                        k = next((k for k in head if re.search(r"(attn[._]wq|attn[._]to_q|proj[._]q|proj[._]qkv)"
+                                                               r"[._]lora_(A|down)", k)), None)
+                        if k is None or (head[k].get("shape") or [0, 0])[-1] != WIDTH[fam]:
                             fam = None
         except (OSError, ValueError):
             fam = None
@@ -463,11 +476,12 @@ def lora_file_family(path: str) -> str | None:
 
 
 def find_image_loras(roots: list[Path]) -> dict[str, list[tuple[str, str]]]:
-    """The image-model LoRAs in ComfyUI's LoRA folders by family ('flux1', 'sdxl', 'krea2'; Qwen ones are found by
-    comfy.find_qwen_loras), as (path, name in its folder), sorted by name. Speed and style-reference LoRAs that the
-    workflows apply themselves are left out."""
+    """The image-model LoRAs in ComfyUI's LoRA folders by family ('flux1', 'sdxl', 'krea2', 'qwen21', 'moss'; Qwen
+    2512 / Edit ones are found by comfy.find_qwen_loras), as (path, name in its folder), sorted by name. LoRAs the
+    workflows apply themselves (speed, style reference, MOSS's edit LoRA) and control LoRAs are left out."""
     import os
-    out: dict[str, list[tuple[str, str]]] = {"flux1": [], "sdxl": [], "krea2": []}
+    out: dict[str, list[tuple[str, str]]] = {"flux1": [], "sdxl": [], "krea2": [], "qwen21": [], "moss": []}
+    own = ("style_reference", "moss_image_edit", "control", "turbo", "lightning", "_steps")
     seen = set()
     for root in roots:
         for dirpath, _dirs, files in os.walk(root, followlinks=True):
@@ -478,6 +492,6 @@ def find_image_loras(roots: list[Path]) -> dict[str, list[tuple[str, str]]]:
                 seen.add(full)
                 fam = lora_file_family(full)
                 name = os.path.relpath(full, root)
-                if fam in out and "style_reference" not in name.lower():
+                if fam in out and not any(w in name.lower() for w in own):
                     out[fam].append((full, name))
     return {k: sorted(v, key=lambda x: x[1].lower()) for k, v in out.items()}

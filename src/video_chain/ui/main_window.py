@@ -2890,7 +2890,8 @@ class MainWindow(QMainWindow):
         self.h3_loras = [(p, n) for p, n, kind in found if kind == "h3"]
         self.turbo_loras = [(p, n) for p, n, kind in found if kind == "turbo"]
         self.qwen_loras = [(p, n) for p, n, kind in found if kind == "qwen"]     # for the image edit window
-        self.image_loras = {fam: [(p, n) for p, n, kind in found if kind == fam] for fam in ("flux1", "sdxl", "krea2")}
+        self.image_loras = {fam: [(p, n) for p, n, kind in found if kind == fam]
+                            for fam in ("flux1", "sdxl", "krea2", "qwen21", "moss")}
         if report:
             self.status.setText(f"{len(self.h3_loras)} LoRA{'s' if len(self.h3_loras) != 1 else ''} and "
                                 f"{len(self.turbo_loras)} turbo LoRA{'s' if len(self.turbo_loras) != 1 else ''} in "

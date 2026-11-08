@@ -645,9 +645,11 @@ class ImageEditDialog(QDialog):
                                    f"their contents; {found} found), applied in this order." if f else "")
         else:
             self.lora_text.setText(
-                "LoRAs (optional): LoRA files made for Qwen-Image 2.1 (Qwen-Image 2512 and Image Edit LoRAs do not "
-                "fit it), applied in this order." if self.edit_model.currentData() == "qwen21" else
-                "LoRAs (optional): LoRA files made for MOSS-Image, applied before its edit LoRA."
+                f"LoRAs (optional): Qwen-Image 2.1 LoRAs from ComfyUI's LoRA folders (found by their contents; "
+                f"{len(self.family_loras.get('qwen21', []))} found), applied in this order."
+                if self.edit_model.currentData() == "qwen21" else
+                f"LoRAs (optional): MOSS-Image LoRAs from ComfyUI's LoRA folders (found by their contents; "
+                f"{len(self.family_loras.get('moss', []))} found), applied before its edit LoRA."
                 if self.edit_model.currentData() == "moss" else
                 "LoRAs (optional): Qwen Image / Image Edit LoRAs from ComfyUI's LoRA folders, applied in this order. "
                 "Text-to-image Qwen LoRAs often work for edits too, not always.")
@@ -1086,7 +1088,7 @@ class ImageEditDialog(QDialog):
             fam = self.family.currentData()
             out = list(self.family_loras.get("qwen" if fam == "qwen" else fam, []))
         elif self.edit_model.currentData() in ("qwen21", "moss"):
-            out = []                               # Qwen-Image 2512 / Edit LoRAs fit neither
+            out = list(self.family_loras.get(self.edit_model.currentData(), []))   # their own (found by contents)
         else:
             out = list(self.known_loras)
         listed = {p for p, _ in out}
