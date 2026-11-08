@@ -1357,6 +1357,7 @@ class MainWindow(QMainWindow):
         self.storyboard.renameWanted.connect(self.rename_scene)
         self.storyboard.deleteWanted.connect(self.delete_scene)
         self.storyboard.moved.connect(self._scenes_moved)
+        self.storyboard.joinWanted.connect(self.set_scene_join)
         self.b_film_gen = QPushButton("Generate film")
         self.b_film_gen.setToolTip("Make every scene's missing clips, scene after scene (up to each scene's ending)")
         self.b_film_gen.clicked.connect(self.generate_film)
@@ -1819,6 +1820,28 @@ class MainWindow(QMainWindow):
         self._show_storyboard()
         self.status.setText(f"Scene “{sc.title}” deleted.")
 
+    def set_scene_join(self, sid: str, join: str):
+        """How a scene follows the one before: a cut, a crossfade, or continuing from its last frame."""
+        if self.film is None or self.running:
+            return
+        if not self._save_tree():
+            return
+        try:
+            self.film.set_join(sid, join)
+            updated = self.film.update_continues() if join == "continue" else []
+        except (OSError, ValueError) as e:
+            self.status.setText(f"Could not change the join: {e}")
+            return
+        sc = self.film.scene(sid)
+        if self.film.path(sid) == self.project and sid in updated:
+            self.open_project(self.film.root, scene=sid)   # its start image changed under the open window
+        self._show_storyboard()
+        self.status.setText({"cut": f"“{sc.title}” follows with a hard cut.",
+                             "fade": f"“{sc.title}” fades in over the scene before (½ s).",
+                             "continue": f"“{sc.title}” starts from the last frame of the scene before"
+                                         + ("." if updated else " (once that one is made)."),
+                             }[join])
+
     def _scenes_moved(self, order: list[str]):
         if self.film is None:
             return
@@ -2000,6 +2023,11 @@ class MainWindow(QMainWindow):
             folder.mkdir(parents=True, exist_ok=True)
             root = F.root_of(folder)
             film = F.Film.load(root)               # the film this folder belongs to, and which scene opens
+            if len(film.scenes) > 1 and not film.problem:
+                try:
+                    film.update_continues()        # scenes that continue the one before: its current end
+                except (OSError, ValueError):
+                    pass
             if scene is not None and any(x.id == scene for x in film.scenes):
                 film.current = scene
                 folder = film.path(scene)
@@ -4751,6 +4779,11 @@ class MainWindow(QMainWindow):
         if self.worker_alive and not self.keep_loaded.isChecked():
             self._quit_worker()
         self._save_timer.start()                   # what was chosen during the run (selection …) is saved now
+        if ok and self.film is not None and len(self.film.scenes) > 1 and not self.film.problem:
+            try:
+                self.film.update_continues()       # the next scene starts from this one's (new) end
+            except (OSError, ValueError):
+                pass
         if self._film_queue is not None:
             if ok and not refine:
                 QTimer.singleShot(0, self._film_next)

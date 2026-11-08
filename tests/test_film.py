@@ -151,3 +151,36 @@ def test_shared_settings_go_on_after_a_bad_scene(project, tmp_path):
         f.sync_shared(project, t.options)
     assert T.load(f.path(s3.id)).options["resolution"] == 768           # the others still got it
     assert F.Film.load(project).shared_state["resolution"] == 768
+
+
+
+def test_crossfade_and_continuing_scenes(project, tmp_path):
+    from video_chain import chain
+    t1 = T.load(project)
+    a1 = next(iter(t1.nodes))
+    t1.selected = a1
+    T.save(project, t1)
+    f = F.Film.load(project)
+    s2 = f.add_scene("Two")
+    d2 = f.path(s2.id)
+    t2 = T.load(d2)
+    b = t2.add(None, "two")
+    t2.selected = b.id
+    T.save(d2, t2)
+    f.set_join(s2.id, "continue")
+    assert any("continues scene 1, which is not made yet" in m for m in F.film_problems(f))
+    T.run_tree(FakeGenerator(frames=17, size=None), project, [a1], log=lambda _m: None)
+    assert f.update_continues() == [s2.id]                              # its start: scene 1's last frame
+    end = f.end_frame("s1")
+    assert end is not None and (d2 / T.START_FILE).is_file()
+    assert f.update_continues() == []                                   # nothing new: not set again
+    T.run_tree(FakeGenerator(frames=17, size=None), d2, [b.id], log=lambda _m: None)
+    one = chain.probe(T.join_path(project, T.load(project), a1))["frames"]
+    two = chain.probe(T.join_path(d2, T.load(d2), b.id))["frames"]
+    out = F.join_film(f, tmp_path / "cont.mp4")
+    assert chain.probe(out)["frames"] == one + two - 1                  # the repeated first frame left out
+    f.set_join(s2.id, "fade")
+    out = F.join_film(f, tmp_path / "fade.mp4")
+    info = chain.probe(out)
+    fade = min(F.FADE_SECS, one / 24 / 2, two / 24 / 2)
+    assert abs(info["frames"] - (one + two - fade * 24)) <= 1 and info["audio"]   # they overlap by the fade

@@ -21,6 +21,8 @@ from . import tree as T
 FILM_FILE = "film.json"
 SCENES_DIR = "scenes"
 SHARED_OPTIONS = ("cast", "identity", "audio_refs", "resolution", "audio")
+JOINS = {"cut": "Cut", "fade": "Crossfade", "continue": "Continue"}   # how a scene follows the one before
+FADE_SECS = 0.5
 
 
 @dataclass
@@ -29,6 +31,8 @@ class Scene:
     title: str
     dir: str                    # relative to the film folder ("." for the first scene)
     take: str | None = None     # the clip the scene ends at in the film (None: its selected clip)
+    join: str = "cut"           # how it follows the scene before (JOINS)
+    from_sha: str | None = None  # "continue": the end frame its start image was taken from
 
 
 def root_of(folder: Path) -> Path:
@@ -73,7 +77,9 @@ class Film:
                         continue
                     take = e.get("take") if isinstance(e.get("take"), str) and re.fullmatch(r"n\d+", e["take"]) \
                         else None
-                    scenes.append(Scene(sid, str(e.get("title") or sid), sdir, take))
+                    join = e.get("join") if e.get("join") in JOINS else "cut"
+                    frm = e.get("from_sha") if isinstance(e.get("from_sha"), str) else None
+                    scenes.append(Scene(sid, str(e.get("title") or sid), sdir, take, join, frm))
                 current = d.get("current")
                 shared = d.get("shared") if isinstance(d.get("shared"), dict) else None
             except (OSError, ValueError, AttributeError, TypeError) as e:
@@ -170,6 +176,56 @@ class Film:
         self.scene(sid).take = nid
         self.save()
 
+    def set_join(self, sid: str, join: str) -> None:
+        if join not in JOINS:
+            raise ValueError(f"unknown join {join!r}")
+        sc = self.scene(sid)
+        sc.join = join
+        sc.from_sha = None
+        self.save()
+
+    def before(self, sid: str) -> Scene | None:
+        k = next(i for i, s in enumerate(self.scenes) if s.id == sid)
+        return self.scenes[k - 1] if k else None
+
+    def end_frame(self, sid: str) -> Path | None:
+        """The last frame of a scene's ending as made (its hand-over frame if it hands over early), or None."""
+        d = self.path(sid)
+        try:
+            t = T.load(d)
+        except (OSError, ValueError):
+            return None
+        take = self.take_of(sid, t)
+        node = t.nodes.get(take) if take else None
+        if node is None or not node.made:
+            return None
+        f = T.handover_file(d, t, node) or (d / node.made.get("frame", ""))
+        return f if f.is_file() else None
+
+    def update_continues(self) -> list[str]:
+        """Scenes that continue the scene before them start from its end frame: their start image is set again when
+        that frame changed (their clips then count as changed). Returns the ids of the scenes updated."""
+        from . import chain
+        out = []
+        for k, sc in enumerate(self.scenes):
+            if k == 0 or sc.join != "continue":
+                continue
+            frame = self.end_frame(self.scenes[k - 1].id)
+            if frame is None:
+                continue
+            sha = chain.file_signature(frame)
+            d = self.path(sc.id)
+            if sha == sc.from_sha and (d / T.START_FILE).is_file():
+                continue
+            t = T.load(d)
+            T.set_start_image(d, frame, t)
+            T.save(d, t)
+            sc.from_sha = sha
+            out.append(sc.id)
+        if out:
+            self.save()
+        return out
+
     def take_of(self, sid: str, tree: "T.Tree") -> str | None:
         """The clip the film plays a scene up to: its chosen ending, else its selected clip (None: nothing)."""
         t = self.scene(sid).take
@@ -260,6 +316,7 @@ def summary(film: Film, sid: str, tree: "T.Tree | None" = None, status_of: dict 
     out["clips"] = len(t.nodes)
     out["take"] = take
     out["fixed"] = film.scene(sid).take == take and take is not None
+    out["join"] = film.scene(sid).join if film.scenes[0].id != sid else None
     try:
         ch = None if status_of is not None else T.Checker(d, t)
         for n in path:
@@ -283,6 +340,9 @@ def film_problems(film: Film) -> list[str]:
     """Why the film cannot be played / exported yet (a scene without clips, clips not made)."""
     out = []
     for k, sc in enumerate(film.scenes, start=1):
+        if k > 1 and sc.join == "continue" and film.end_frame(film.scenes[k - 2].id) is None:
+            out.append(f"scene {k} ({sc.title}) continues scene {k - 1}, which is not made yet")
+            continue
         d = film.path(sc.id)
         try:
             t = T.load(d)
@@ -302,8 +362,9 @@ def film_problems(film: Film) -> list[str]:
 
 
 def join_film(film: Film, out: Path) -> Path:
-    """The film as one video: every scene's path up to its ending, joined with hard cuts. Scenes of another size
-    than the first one are fitted into its frame (black bars)."""
+    """The film as one video: every scene's path up to its ending, joined as each scene says (cut, crossfade, or
+    continuing: its repeated first frame left out). Scenes of another size than the first are fitted into its frame
+    (black bars)."""
     problems = film_problems(film)
     if problems:
         raise ValueError(problems[0])
@@ -320,5 +381,5 @@ def join_film(film: Film, out: Path) -> Path:
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
     size = (first["width"] // 2 * 2, first["height"] // 2 * 2)     # even (the video codec needs it)
-    chain.concat(parts, out, cuts=[(0, 0)] * len(parts), size=size)
+    chain.join_parts(parts, out, size, [s.join for s in film.scenes], fade=FADE_SECS)
     return out

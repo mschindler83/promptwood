@@ -1914,6 +1914,8 @@ def test_generate_and_play_the_film(app, win, tmp_path, image, monkeypatch):
     win.storyboard.sceneChosen.emit("s1")
     win.node_action("take", ids[0])                         # scene 1 ends at its first clip in the film
     assert win.film.scene("s1").take == ids[0] and "ends at #" in win.storyboard.list.item(0).text()
+    win.storyboard.joinWanted.emit("s2", "fade")           # the street fades in over the kitchen
+    assert win.film.scene("s2").join == "fade" and "crossfade" in win.storyboard.list.item(1).text()
     win.generate_film()
     wait(app, lambda: win._film_queue is None and not win.running, timeout=120)
     assert win.status.text().startswith("The film is made"), win.status.text()

@@ -27,9 +27,17 @@ def state_text(s: dict) -> str:
     return f"{length} · " + ", ".join(parts) + end
 
 
+JOIN_MARK = {"fade": "  ⤳ crossfade", "continue": "  → continues"}
+
+
+def card_text(k: int, title: str, s: dict) -> str:
+    return f"{k}  {title}{JOIN_MARK.get(s.get('join') or '', '')}\n{state_text(s)}"
+
+
 class Storyboard(QWidget):
     """sceneChosen(id), addWanted(), renameWanted(id), deleteWanted(id), moved(ids in their new order)."""
     sceneChosen = Signal(str)
+    joinWanted = Signal(str, str)                 # scene id, "cut" / "fade" / "continue"
     addWanted = Signal()
     renameWanted = Signal(str)
     deleteWanted = Signal(str)
@@ -85,8 +93,9 @@ class Storyboard(QWidget):
                     img = QImage(str(s["thumb"]))
                     if not img.isNull():
                         pm = QPixmap.fromImage(img.scaled(THUMB, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-                item = QListWidgetItem(QIcon(pm) if not pm.isNull() else QIcon(), f"{k}  {title}\n{state_text(s)}")
+                item = QListWidgetItem(QIcon(pm) if not pm.isNull() else QIcon(), card_text(k, title, s))
                 item.setData(Qt.UserRole, sid)
+                item.setData(Qt.UserRole + 1, s.get("join"))
                 item.setToolTip(f"Scene {k}: {title}. {s.get('clips', 0)} clips; its selected path is what the "
                                 "film plays. Click to work on it, drag to move it")
                 item.setFlags(item.flags() | Qt.ItemIsDragEnabled)
@@ -104,7 +113,7 @@ class Storyboard(QWidget):
         for i in range(self.list.count()):
             item = self.list.item(i)
             if item.data(Qt.UserRole) == sid:
-                item.setText(f"{i + 1}  {title}\n{state_text(s)}")
+                item.setText(card_text(i + 1, title, s))
 
     def order(self) -> list[str]:
         return [self.list.item(i).data(Qt.UserRole) for i in range(self.list.count())]
@@ -125,12 +134,25 @@ class Storyboard(QWidget):
         sid = item.data(Qt.UserRole)
         menu = QMenu(self)
         a_rename = menu.addAction("Rename…")
+        joins = {}
+        if self.list.row(item) > 0:
+            sub = menu.addMenu("Join with the scene before")
+            cur = item.data(Qt.UserRole + 1) or "cut"
+            for key, text in (("cut", "Cut (hard cut)"), ("fade", "Crossfade (½ s, picture and sound)"),
+                              ("continue", "Continue (starts from its last frame)")):
+                a = sub.addAction(text)
+                a.setCheckable(True)
+                a.setChecked(key == cur)
+                joins[a] = key
+        menu.addSeparator()
         a_delete = menu.addAction("Delete scene…")
         chosen = menu.exec(self.list.mapToGlobal(pos))
         if chosen is a_rename:
             self.renameWanted.emit(sid)
         elif chosen is a_delete:
             self.deleteWanted.emit(sid)
+        elif chosen in joins:
+            self.joinWanted.emit(sid, joins[chosen])
 
     def setEnabled(self, on: bool):          # noqa: N802  (Qt naming): no switching while clips are made
         self.list.setEnabled(on)
