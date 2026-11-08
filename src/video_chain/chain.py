@@ -107,12 +107,14 @@ def last_frame(video: Path, png: Path) -> None:
           str(png)])
 
 
-def to_png(image: Path, png: Path) -> None:
-    """Convert to PNG; written under a temporary name first, so a failed conversion never leaves a broken file."""
+def to_png(image: Path, png: Path, crop: tuple[int, int, int, int] | None = None) -> None:
+    """Convert to PNG (crop: x, y, width, height in its pixels); written under a temporary name first, so a failed
+    conversion never leaves a broken file."""
     png = Path(png)
     tmp = png.with_name(png.stem + ".part.png")
+    vf = ["-vf", "crop={2}:{3}:{0}:{1}".format(*(int(v) for v in crop))] if crop else []
     try:
-        _run(["ffmpeg", "-v", "error", "-y", "-i", str(image), "-frames:v", "1", str(tmp)])
+        _run(["ffmpeg", "-v", "error", "-y", "-i", str(image), "-frames:v", "1", *vf, str(tmp)])
         tmp.replace(png)
     finally:
         tmp.unlink(missing_ok=True)

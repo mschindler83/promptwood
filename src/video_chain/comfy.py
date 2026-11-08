@@ -88,8 +88,13 @@ def lora_name_for(path: str, names: list[str], roots: list[Path] = ()) -> str | 
 
 def comfy_lora_roots(comfy_dir: Path) -> list[Path]:
     """ComfyUI's LoRA folders: models/loras plus the 'loras' entries of extra_model_paths.yaml."""
+    return comfy_model_roots(comfy_dir, "loras")
+
+
+def comfy_model_roots(comfy_dir: Path, kind: str) -> list[Path]:
+    """ComfyUI's folders for one kind of model: models/<kind> plus the <kind> entries of extra_model_paths.yaml."""
     comfy_dir = Path(comfy_dir).expanduser()
-    roots = [comfy_dir / "models" / "loras"]
+    roots = [comfy_dir / "models" / kind]
     cfg = comfy_dir / "extra_model_paths.yaml"
     if cfg.is_file():
         try:
@@ -98,10 +103,10 @@ def comfy_lora_roots(comfy_dir: Path) -> list[Path]:
         except Exception:  # noqa: BLE001
             data = {}
         for section in data.values():
-            if not isinstance(section, dict) or "loras" not in section:
+            if not isinstance(section, dict) or kind not in section:
                 continue
             base = Path(os.path.expanduser(str(section.get("base_path", ""))))
-            for entry in str(section["loras"]).split("\n"):
+            for entry in str(section[kind]).split("\n"):
                 entry = entry.strip()
                 if entry:
                     root = Path(os.path.expanduser(entry))

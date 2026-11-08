@@ -439,7 +439,41 @@ def _set_cast(tree: Tree, cast: list[dict]) -> None:
     tree.options["cast"] = cast
 
 
-def _copy_picture(project: Path, image: Path, tree: Tree) -> str:
+def source_of(rel: str) -> str:
+    """Where the full picture a face picture was cropped from is kept (refs/ref1.png -> refs/ref1_full.png)."""
+    return rel[:-4] + "_full.png" if rel.endswith(".png") else rel + "_full.png"
+
+
+def _write_picture(project: Path, image: Path, rel: str, crop: tuple[int, int, int] | None) -> None:
+    """The face picture rel from image, cropped to the square crop (x, y, side) if given; the full picture is kept
+    beside it (source_of) for cropping again."""
+    full = Path(project) / source_of(rel)
+    if crop:
+        if Path(image).resolve() != full.resolve():
+            chain.to_png(Path(image), full)
+        x, y, side = (int(v) for v in crop)
+        chain.to_png(full, Path(project) / rel, (x, y, side, side))
+    else:
+        chain.to_png(Path(image), Path(project) / rel)
+        full.unlink(missing_ok=True)
+
+
+def recrop_picture(project: Path, tree: Tree, rel: str, crop: tuple[int, int, int] | None) -> None:
+    """Crop a face picture again from its full picture (crop None: the whole full picture). A picture added
+    uncropped is its own full picture."""
+    if rel not in all_pictures(tree):
+        raise ValueError(f"{rel} is no face picture of the cast")
+    full = Path(project) / source_of(rel)
+    if not full.is_file():                          # added uncropped (or before cropping existed): it is the full one
+        shutil.copyfile(Path(project) / rel, full)
+    if crop:
+        x, y, side = (int(v) for v in crop)
+        chain.to_png(full, Path(project) / rel, (x, y, side, side))
+    else:
+        chain.to_png(full, Path(project) / rel)
+
+
+def _copy_picture(project: Path, image: Path, tree: Tree, crop: tuple[int, int, int] | None = None) -> str:
     if len(all_pictures(tree)) >= MAX_CAST_PICTURES:
         raise ValueError(f"at most {MAX_CAST_PICTURES} face pictures in a project")
     d = Path(project) / REFS_DIR
@@ -449,16 +483,18 @@ def _copy_picture(project: Path, image: Path, tree: Tree) -> str:
     while (d / f"ref{k}.png").exists() or f"{REFS_DIR}/ref{k}.png" in used:
         k += 1
     rel = f"{REFS_DIR}/ref{k}.png"
-    chain.to_png(Path(image), Path(project) / rel)
+    _write_picture(project, image, rel, crop)
     return rel
 
 
-def add_character(project: Path, tree: Tree, name: str, image: Path | None = None, desc: str = "") -> dict:
-    """A new character (with a first face picture). The first character of a cast is the lead."""
+def add_character(project: Path, tree: Tree, name: str, image: Path | None = None, desc: str = "",
+                  crop: tuple[int, int, int] | None = None) -> dict:
+    """A new character (with a first face picture, cropped to crop = x, y, side). The first character of a cast is
+    the lead."""
     name = check_name(tree, name)
     entry = {"name": name, "images": [], "desc": (desc or "").strip(), "lead": not cast_of(tree)}
     if image is not None:
-        entry["images"].append(_copy_picture(project, image, tree))
+        entry["images"].append(_copy_picture(project, image, tree, crop))
     _set_cast(tree, cast_of(tree) + [entry])
     return entry
 
@@ -470,32 +506,36 @@ def next_character_name(tree: Tree) -> str:
     return f"Person{k}"
 
 
-def add_picture(project: Path, tree: Tree, name: str, image: Path) -> str:
-    """Copy an image into refs/ as one more face picture of a character; returns its name in the project."""
+def add_picture(project: Path, tree: Tree, name: str, image: Path,
+                crop: tuple[int, int, int] | None = None) -> str:
+    """Copy an image into refs/ as one more face picture of a character (cropped to the square crop = x, y, side;
+    the full picture is kept for cropping again); returns its name in the project."""
     c = character(tree, name)
     if c is None:
         raise ValueError(f"no character called {name}")
     if len(c["images"]) >= MAX_PICTURES_PER_CHARACTER:
         raise ValueError(f"at most {MAX_PICTURES_PER_CHARACTER} pictures per character")
-    rel = _copy_picture(project, image, tree)
+    rel = _copy_picture(project, image, tree, crop)
     _set_cast(tree, [{**x, "images": x["images"] + [rel]} if x is c else x for x in cast_of(tree)])
     return rel
 
 
-def add_reference(project: Path, image: Path, tree: Tree, name: str | None = None) -> str:
+def add_reference(project: Path, image: Path, tree: Tree, name: str | None = None,
+                  crop: tuple[int, int, int] | None = None) -> str:
     """A face picture for a character (name), else for the lead, else for a new character PersonN."""
     target = character(tree, name) if name else (lead_of(tree) or (cast_of(tree) or [None])[0])
     if target is None:
-        return add_character(project, tree, next_character_name(tree), image)["images"][0]
-    return add_picture(project, tree, target["name"], image)
+        return add_character(project, tree, next_character_name(tree), image, crop=crop)["images"][0]
+    return add_picture(project, tree, target["name"], image, crop)
 
 
 def _drop_file(project: Path, rel: str, tree: Tree) -> None:
     if rel in all_pictures(tree):
         return                                     # another character still uses it
-    target = (Path(project) / rel).resolve()
-    if (Path(project) / REFS_DIR).resolve() in target.parents:
-        target.unlink(missing_ok=True)
+    for f in (rel, source_of(rel)):
+        target = (Path(project) / f).resolve()
+        if (Path(project) / REFS_DIR).resolve() in target.parents:
+            target.unlink(missing_ok=True)
 
 
 def remove_picture(project: Path, tree: Tree, rel: str) -> None:

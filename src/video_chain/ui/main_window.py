@@ -38,6 +38,7 @@ from .clip_dialogs import CompareDialog, HandoverDialog
 from .lora_stack import LoraStack, fill_lora_combo, lora_label, lora_path
 from .mentions import MentionHelper
 from .cast_strip import CastStrip
+from .face_crop import FaceCropDialog
 from .prompt_refiner import RefineDialog, replace_text
 from .image_edit import EDITS_DIR, ImageEditDialog, record_use, uses_of
 from .video_editor import VideoRangeDialog, choose_video
@@ -1052,10 +1053,15 @@ class MainWindow(QMainWindow):
         self.b_ref_del = QPushButton("Remove")
         self.b_ref_del.setToolTip("Remove the selected face picture")
         self.b_ref_del.clicked.connect(self._remove_reference)
+        self.b_ref_crop = QPushButton("Crop…")
+        self.b_ref_crop.setToolTip("Crop the selected face picture again (from the full picture it came from)")
+        self.b_ref_crop.clicked.connect(self._recrop_reference)
+        self.refs.itemDoubleClicked.connect(lambda _i: self._recrop_reference())
         rrow.addWidget(label("Add face:", level="tertiary"))
         for b in (self.b_ref_add, self.b_ref_start, self.b_ref_clip):
             rrow.addWidget(b)
         rrow.addStretch(1)
+        rrow.addWidget(self.b_ref_crop)
         rrow.addWidget(self.b_ref_del)
         iv.addLayout(rrow)
         irow = QFormLayout()
@@ -1942,18 +1948,43 @@ class MainWindow(QMainWindow):
             return True
         return False
 
-    def add_reference(self, path: str) -> bool:
-        """A face picture for the selected character (none selected: the lead, or a new character)."""
+    def face_detector(self) -> Path | None:
+        from .. import faces as F
+        comfy_dir = os.path.expanduser(self.comfy_dir.text().strip()) or None
+        return F.find_detector(Path(comfy_dir)) if comfy_dir else None
+
+    def crop_face(self, path: str, title: str, crop=None):
+        """The crop window: the square (x, y, side), None for the whole picture, or False (cancelled)."""
+        try:
+            dlg = FaceCropDialog(self, Path(path), self.face_detector(), title, crop)
+        except ValueError as e:
+            self.status.setText(str(e))
+            return False
+        try:
+            return dlg.crop() if dlg.exec() == QDialog.Accepted else False
+        finally:
+            dlg.deleteLater()
+
+    def add_reference(self, path: str, crop="ask") -> bool:
+        """A face picture for the selected character (none selected: the lead, or a new character). crop: "ask"
+        opens the crop window, else the square (x, y, side) or None (the whole picture)."""
         if self.project is None or self.running:
             return False
         if QImage(path).isNull():
             self.status.setText(f"Not an image: {Path(path).name}")
             return False
-        before = self._done_clips()
         target = self._selected_character()
+        if crop == "ask":
+            who = f"@{target['name']}" if target else (f"@{T.lead_of(self.tree)['name']}" if T.lead_of(self.tree)
+                                                       else "a new character")
+            crop = self.crop_face(path, f"Face picture of {who}")
+            if crop is False:
+                self.status.setText("Face not added.")
+                return False
+        before = self._done_clips()
         known = set(self._cast_names())
         try:
-            rel = T.add_reference(self.project, Path(path), self.tree, target["name"] if target else None)
+            rel = T.add_reference(self.project, Path(path), self.tree, target["name"] if target else None, crop=crop)
         except (ValueError, OSError, RuntimeError) as e:
             self.status.setText(f"Could not add the face: {e}")
             return False
@@ -1965,6 +1996,29 @@ class MainWindow(QMainWindow):
                             f"New character @{owner} with this face (rename it with Rename…).")
         self._report_remade(before, f"Face added to @{owner}")
         return True
+
+    def _recrop_reference(self):
+        item = self.refs.currentItem()
+        if item is None or not self._cast_edit_ok():
+            return
+        rel = item.data(Qt.UserRole)
+        full = self.project / T.source_of(rel)
+        crop = self.crop_face(str(full if full.is_file() else self.project / rel), "Crop the face picture again")
+        if crop is False:
+            return
+        before = self._done_clips()
+        try:
+            T.recrop_picture(self.project, self.tree, rel, crop)
+        except (ValueError, OSError, RuntimeError) as e:
+            self.status.setText(f"Could not crop: {e}")
+            return
+        self._pix.clear()
+        c = self._selected_character()
+        self._show_references(select=c["name"] if c else None)
+        self._write_tree()
+        self._changed()
+        if not self._report_remade(before, "Face picture cropped"):
+            self.status.setText("Face picture cropped.")
 
     def _remove_reference(self):
         item = self.refs.currentItem()
@@ -2676,7 +2730,7 @@ class MainWindow(QMainWindow):
         for w in (self.start_tile, self.frames, self.resolution, self.steps,
                   self.audio, self.keep_rep, self.b_project,
                   self.comfy_url, self.ref_size, self.ref_hint, self.b_ref_add, self.b_ref_start,
-                  self.b_ref_del, self.b_char_new, self.b_char_rename, self.b_char_del, self.char_desc,
+                  self.b_ref_del, self.b_ref_crop, self.b_char_new, self.b_char_rename, self.b_char_del, self.char_desc,
                   self.char_lead, self.b_voice_file, self.b_voice_del, self.dialogue_lang, self.speed, self.style_prefix, self.style_suffix, self.b_ai_edit, self.b_ai_create):
             w.setEnabled(idle)
         self._turbo_widgets()                      # after the loop: turbo locks the steps fields again

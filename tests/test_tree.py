@@ -896,3 +896,38 @@ def test_refine_problems():
     assert T.refine_problems(a, '@Ben and Anna stand there. Anna laughs: "Finally." "Finally."') == [
         "the line \u201cLook, it is snowing!\u201d is gone or changed", "the line \u201cFinally.\u201d is there 2 times",
         "@Anna is no longer mentioned"]
+
+
+def test_face_crop(project, tmp_path):
+    from video_chain import faces as F
+    t = T.load(project)
+    src = tmp_path / "wide.png"
+    Image.new("RGB", (300, 200), (90, 80, 70)).save(src)
+    rel = T.add_character(project, t, "Anna", src, crop=(50, 20, 120))["images"][0]
+    assert Image.open(project / rel).size == (120, 120) and Image.open(project / T.source_of(rel)).size == (300, 200)
+    T.recrop_picture(project, t, rel, (0, 0, 200))
+    assert Image.open(project / rel).size == (200, 200)
+    T.recrop_picture(project, t, rel, None)                                    # back to the whole picture
+    assert Image.open(project / rel).size == (300, 200)
+    plain = T.add_picture(project, t, "Anna", src)                             # uncropped: no full copy ...
+    assert not (project / T.source_of(plain)).exists()
+    T.recrop_picture(project, t, plain, (10, 10, 50))                          # ... it is its own full picture
+    assert Image.open(project / plain).size == (50, 50) and (project / T.source_of(plain)).is_file()
+    T.remove_character(project, t, "Anna")
+    assert not list((project / "refs").glob("ref*"))
+    # the square around a face: margin, the face a little above the middle, inside the picture
+    assert F.face_square((100, 50, 140, 110), 400, 300) == (75, 38, 90)
+    assert F.face_square((0, 0, 40, 60), 400, 300) == (0, 0, 90)
+    assert F.face_square((10, 10, 390, 290), 400, 300) == (50, 0, 300)
+    assert F.centre_square(300, 200) == (50, 0, 200)
+
+
+@pytest.mark.models
+def test_face_detector_finds_no_face_in_a_plain_picture(tmp_path):
+    from video_chain import faces as F
+    model = F.find_detector(Path.home() / "ComfyUI")
+    if F.available(model):
+        pytest.skip(F.available(model))
+    p = tmp_path / "grey.png"
+    Image.new("RGB", (320, 180), (128, 128, 128)).save(p)
+    assert F.detect(p, model) == []

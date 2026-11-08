@@ -46,6 +46,13 @@ def silent_player(monkeypatch):
     monkeypatch.setattr(QMediaPlayer, "play", lambda self: None)     # Preview.open itself still runs
 
 
+@pytest.fixture(autouse=True)
+def crop_accepted(monkeypatch):
+    """The face crop window is taken as it opens (its default square); no modal window waits in a test."""
+    from video_chain.ui.face_crop import FaceCropDialog
+    monkeypatch.setattr(FaceCropDialog, "exec", lambda self: FaceCropDialog.Accepted)
+
+
 @pytest.fixture
 def image(tmp_path):
     p = tmp_path / "start.jpg"
@@ -554,6 +561,16 @@ def test_identity_references_in_the_window(app, win, tmp_path, image, monkeypatc
     win.add_reference(str(other))
     assert win.status.text().startswith("Face added to @Ben")
     assert T.character(win.tree, "Ben")["images"] == ["refs/ref2.png"] and not win.char_lead.isChecked()
+    proj = tmp_path / "proj"
+    assert Image.open(proj / "refs/ref2.png").size == (80, 80)           # no face found: the middle square
+    assert Image.open(proj / "refs/ref2_full.png").size == (80, 100)     # the full picture is kept
+    monkeypatch.setattr(win, "crop_face", lambda path, title, crop=None: (10, 20, 40))
+    win.refs.setCurrentRow(0)
+    win._recrop_reference()
+    assert Image.open(proj / "refs/ref2.png").size == (40, 40) and "cropped" in win.status.text()
+    monkeypatch.setattr(win, "crop_face", lambda path, title, crop=None: False)     # cancelled: nothing added
+    assert not win.add_reference(str(other)) and len(T.character(win.tree, "Ben")["images"]) == 1
+    monkeypatch.delattr(win, "crop_face")                                     # the window's own again
     type_prompt(win, ids[1], "@Bem waves")
     flush(app, win)
     win.select(ids[1])
@@ -1689,3 +1706,17 @@ def test_image_window_lora_rows_fit_and_can_be_removed(app, tmp_path):
         rm.click()
         assert dlg.loras.items() == [], mode
     dlg.reject()
+
+
+def test_face_crop_dialog(app, tmp_path):
+    from video_chain.ui.face_crop import FaceCropDialog
+    p = tmp_path / "pic.png"
+    Image.new("RGB", (300, 200), (90, 80, 70)).save(p)
+    dlg = FaceCropDialog(None, p, None)                       # no detector: the middle square, set by hand
+    assert dlg.crop() == (50, 0, 200) and "No face detection" in dlg.info.text()
+    assert not dlg.b_face.isEnabled()
+    dlg.view.set_crop((280, -5, 100))                         # kept inside the picture
+    assert dlg.crop() == (200, 0, 100) and "100 × 100 px" in dlg.info.text() and "Small" in dlg.info.text()
+    dlg.b_whole.click()
+    assert dlg.crop() is None
+    dlg.deleteLater()
