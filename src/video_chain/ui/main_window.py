@@ -39,6 +39,7 @@ from .clip_dialogs import CompareDialog, HandoverDialog
 from .lora_stack import LoraStack, fill_lora_combo, lora_label, lora_path
 from .mentions import MentionHelper
 from .cast_strip import CastStrip
+from .timeline import Block, Timeline
 from .storyboard import Storyboard
 from .face_crop import FaceCropDialog
 from .prompt_refiner import RefineDialog, replace_text
@@ -1353,6 +1354,8 @@ class MainWindow(QMainWindow):
         self.keep_loaded.toggled.connect(self.idle_minutes.setEnabled)
         prefs_v.addWidget(aw)
         pb = QDialogButtonBox(QDialogButtonBox.Close)
+        pb.button(QDialogButtonBox.Close).setAutoDefault(False)     # Enter in a field must not close it
+        pb.button(QDialogButtonBox.Close).setDefault(False)
         pb.rejected.connect(self.prefs.reject)
         prefs_v.addWidget(pb)
         for v in (proj_v, cast_v, sound_v):
@@ -1425,7 +1428,7 @@ class MainWindow(QMainWindow):
         bh.addWidget(self.b_fit)
         gv.addWidget(bar)
         self.graph = GraphView()
-        self.graph.selected.connect(self.select)
+        self.graph.selected.connect(self._graph_clicked)
         self.graph.activated.connect(self._activate)
         self.graph.contextMenu.connect(self._context)
         gv.addWidget(self.graph, 1)
@@ -1446,18 +1449,44 @@ class MainWindow(QMainWindow):
         self.cast_strip.clipClicked.connect(self._show_card_of)
         self.cast_strip.hide()
         pv.addWidget(self.cast_strip)
-        self.path_area = QScrollArea()
-        self.path_area.setWidgetResizable(True)
-        self.path_area.setFrameShape(QFrame.NoFrame)
-        holder = QWidget()
-        self.path_box = QHBoxLayout(holder)
-        self.path_box.setContentsMargins(10, 10, 10, 10)
-        self.path_box.setSpacing(10)
+        self.timeline = Timeline()
+        self.timeline.clicked.connect(self.focus_clip)
+        self.timeline.activated.connect(self._play_node)
+        self.timeline.menu.connect(lambda nid, pos: self._context(nid, pos))
+        pv.addWidget(self.timeline)
+        pv.addStretch(1)
+        # the inspector's Clip tab: the card of the clip in focus (one at a time; the path's other cards wait in
+        # the stack), with ‹ › to step along the path
+        clip_tab = QWidget()
+        ctv = QVBoxLayout(clip_tab)
+        ctv.setContentsMargins(8, 6, 8, 6)
+        nav = QHBoxLayout()
+        self.b_prev_clip = QPushButton("‹")
+        self.b_prev_clip.setToolTip("The clip before it on the path (Alt+Left)")
+        self.b_prev_clip.clicked.connect(lambda: self._step_focus(-1))
+        self.b_next_clip = QPushButton("›")
+        self.b_next_clip.setToolTip("The clip after it on the path (Alt+Right)")
+        self.b_next_clip.clicked.connect(lambda: self._step_focus(1))
+        self.focus_info = label("", level="secondary")
+        for b in (self.b_prev_clip, self.b_next_clip):
+            b.setFixedWidth(32)
+        nav.addWidget(self.b_prev_clip)
+        nav.addWidget(self.focus_info, 1)
+        nav.addWidget(self.b_next_clip)
+        ctv.addLayout(nav)
+        self.card_stack = QStackedWidget()
         self.path_hint = label("", level="tertiary")
-        self.path_box.addWidget(self.path_hint)
-        self.path_box.addStretch(1)
-        self.path_area.setWidget(holder)
-        pv.addWidget(self.path_area, 1)
+        self.path_hint.setWordWrap(True)
+        self.path_hint.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.card_stack.addWidget(self.path_hint)
+        card_scroll = QScrollArea()
+        card_scroll.setWidgetResizable(True)
+        card_scroll.setFrameShape(QFrame.NoFrame)
+        card_scroll.setWidget(self.card_stack)
+        ctv.addWidget(card_scroll, 1)
+        self.inspector.insertTab(0, clip_tab, "Clip")
+        self.inspector.setCurrentIndex(0)
+        self.focus: str | None = None
 
         # the viewer (the biggest area), under it the film and the selected path / the log
         rp = QWidget()
@@ -1553,9 +1582,10 @@ class MainWindow(QMainWindow):
                          ("Ctrl+Shift+V", lambda: self.node_action("video", self.selected_id())),
                          ("Ctrl+B", lambda: self.node_action("branch", self.selected_id())),
                          ("Ctrl+D", lambda: self.node_action("variant", self.selected_id())),
-                         ("Ctrl+Return", self.generate_path), ("Ctrl+Shift+Return", self.generate_all)):
+                         ("Ctrl+Return", self.generate_path), ("Ctrl+Shift+Return", self.generate_all),
+                         ("Alt+Left", lambda: self._step_focus(-1)), ("Alt+Right", lambda: self._step_focus(1))):
             QShortcut(QKeySequence(keys), self, activated=fn)
-        for w in self._panels:
+        for w in (*self._panels, self.prefs):
             guard_wheel(w)
         QShortcut(QKeySequence("Delete"), self.graph,
                   activated=lambda: self.node_action("delete", self.selected_id()))
@@ -1619,7 +1649,7 @@ class MainWindow(QMainWindow):
         m.addAction("Quit", self.close).setShortcut(QKeySequence("Ctrl+Q"))
         v = self.menuBar().addMenu("&View")
         for k, name in enumerate(("Clips", "Cast", "Sounds")):
-            a = v.addAction(f"{name} (left)", lambda k=k: self.left_tabs.setCurrentIndex(k))
+            a = v.addAction(f"{name} (left)", lambda _=False, k=k: self.left_tabs.setCurrentIndex(k))
             a.setShortcut(QKeySequence(f"Alt+{k + 1}"))
         v.addAction("Log", lambda: self.tabs.setCurrentWidget(self.log)).setShortcut(QKeySequence("Alt+L"))
         st = self.menuBar().addMenu("&Settings")
@@ -1986,7 +2016,7 @@ class MainWindow(QMainWindow):
         dlg.setWindowTitle("Cast in the film")
         v = QVBoxLayout(dlg)
         if not names:
-            v.addWidget(label("The film has no characters yet (Cast in the left panel).", level="secondary"))
+            v.addWidget(label("The film has no characters yet (the Cast tab, Alt+2).", level="secondary"))
         table = QTableWidget(len(names), len(rows))
         table.setHorizontalHeaderLabels([f"{k}  {title}" for k, (title, _m) in enumerate(rows, start=1)])
         table.setVerticalHeaderLabels([f"@{n}" for n in names])
@@ -2190,7 +2220,7 @@ class MainWindow(QMainWindow):
         self.project_edit.clear()
         self.qs.setValue("project", "")
         for c in self.cards:
-            self.path_box.removeWidget(c)
+            self.card_stack.removeWidget(c)
             c.setParent(None)
             c.deleteLater()
         self.cards = []
@@ -3313,12 +3343,11 @@ class MainWindow(QMainWindow):
 
     def _rebuild_path(self):
         for c in self.cards:
-            self.path_box.removeWidget(c)
+            self.card_stack.removeWidget(c)
             c.setParent(None)
             c.deleteLater()
         self.cards = []
         path = self.selected_path()
-        self.path_hint.setVisible(not path)
         self.path_hint.setText("The start image is selected. Select a clip to see its path, or press Continue "
                                "(Ctrl+N) to add a clip after the start image.")
         for k, n in enumerate(path):
@@ -3326,7 +3355,8 @@ class MainWindow(QMainWindow):
                 card = VideoCard(n)
                 card.action.connect(self.node_action)
                 card.play.connect(self._play_node)
-                self.path_box.insertWidget(k, card)
+                self._fit_card(card)
+                self.card_stack.addWidget(card)
                 self.cards.append(card)
                 card.set_editable(not self.running)
                 continue
@@ -3342,20 +3372,84 @@ class MainWindow(QMainWindow):
                              self.known_loras())
             card.action.connect(self.node_action)
             card.play.connect(self._play_node)
-            self.path_box.insertWidget(k, card)
+            self._fit_card(card)
+            self.card_stack.addWidget(card)
             self.cards.append(card)
             card.set_editable(not self.running)
+        ids = [c.nid for c in self.cards]
+        end = ids[-1] if ids else None
+        if self.focus not in ids or end != getattr(self, "_path_end", None):
+            self.focus = end                       # a new path (or a new clip at its end): where one goes on
+        self._path_end = end
         self._update_cards()
-        if self.cards:
-            last = self.cards[-1]
-            QTimer.singleShot(0, lambda: self.path_area.ensureWidgetVisible(last))
+        self._show_focus()
+
+    @staticmethod
+    def _fit_card(card):
+        """A card in the inspector takes its width (it had a fixed width in a row)."""
+        card.setMinimumWidth(300)
+        card.setMaximumWidth(16777215)
+
+    def _show_focus(self):
+        card = next((c for c in self.cards if c.nid == self.focus), None)
+        self.card_stack.setCurrentWidget(card if card is not None else self.path_hint)
+        ids = [c.nid for c in self.cards]
+        k = ids.index(self.focus) if self.focus in ids else -1
+        self.b_prev_clip.setEnabled(k > 0)
+        self.b_next_clip.setEnabled(0 <= k < len(ids) - 1)
+        if k >= 0 and self.tree is not None and self.focus in self.tree.nodes:
+            n = self.tree.nodes[self.focus]
+            what = "Video" if n.is_video else "Clip"
+            self.focus_info.setText(f"{what} #{n.id[1:]} · {k + 1} of {len(ids)} on the path")
+        else:
+            self.focus_info.setText("")
+        self.timeline.set_focus(self.focus)
+
+    def focus_clip(self, nid: str):
+        """Show a clip of the path in the inspector (the path stays as it is)."""
+        if any(c.nid == nid for c in self.cards):
+            self.focus = nid
+            self._show_focus()
+            self.inspector.setCurrentIndex(0)
+
+    def _step_focus(self, d: int):
+        ids = [c.nid for c in self.cards]
+        if self.focus in ids:
+            k = max(0, min(len(ids) - 1, ids.index(self.focus) + d))
+            self.focus_clip(ids[k])
+
+    def _graph_clicked(self, nid):
+        """A click in the graph: a clip of the shown path is shown in the inspector; another one is selected (its
+        path is shown, it in focus)."""
+        if nid != START and any(c.nid == nid for c in self.cards):
+            self.focus_clip(nid)
+            return
+        self.select(nid)
+        if nid != START:
+            self.focus_clip(nid)
 
     def _show_card_of(self, nid: str):
+        self.focus_clip(nid)
         card = next((c for c in self.cards if c.nid == nid), None)
-        if card is not None:
-            self.path_area.ensureWidgetVisible(card)
-            if isinstance(card, PromptCard):
-                card.edit.setFocus()
+        if isinstance(card, PromptCard):
+            card.edit.setFocus()
+
+    def _update_timeline(self, path_nodes: list, cuts: dict):
+        """The path as blocks as long as its clips are in the joined video; the carry-over hatched."""
+        blocks = []
+        for n in path_nodes:
+            frames = T.clip_length(self.tree, n)
+            a, b = cuts.get(n.id, (0, 0))
+            secs = max(1, frames - a - b) / 24
+            lead = int((n.overrides or {}).get("guide") or 0) / 24 if not n.is_video and n.parent else 0.0
+            pm = self._pixmap(self._node_frame(n))
+            if pm is not None:
+                pm = pm.scaledToHeight(48, Qt.SmoothTransformation)
+            what = (Path(n.source["file"]).name if n.is_video else (n.prompt or "(no prompt yet)"))
+            tip = (f"{'Video' if n.is_video else 'Clip'} #{n.id[1:]} · {secs:.1f} s · {self.state(n.id)}\n"
+                   f"{what[:160]}")
+            blocks.append(Block(n.id, f"#{n.id[1:]}", secs, self.state(n.id), n.is_video, pm, lead, tip))
+        self.timeline.show_path(blocks, self.focus)
 
     def _show_card_settings(self, on: bool):
         """Open / close the own settings on every card at once."""
@@ -3369,6 +3463,7 @@ class MainWindow(QMainWindow):
         cuts = dict(zip([n.id for n in path_nodes],
                         T.path_cuts(self.tree, path_nodes, bool(self.tree.options.get("keep_repeated")),
                                     planned=True)))
+        self._update_timeline(path_nodes, cuts)
         t = 0.0
         for k, card in enumerate(self.cards):
             n = self.tree.nodes.get(card.nid)
@@ -3961,7 +4056,7 @@ class MainWindow(QMainWindow):
                     return False
                 c = self._selected_character()
                 record_use(png, {"kind": "ref", "file": c["images"][-1]})
-                return (f"Added as a face of @{c['name']} (Cast, left panel); mention it in prompts as "
+                return (f"Added as a face of @{c['name']} (the Cast tab, Alt+2); mention it in prompts as "
                         f"@{c['name']}." + (f" {self.status.text()}" if "CHANGED" in self.status.text() else ""))
             ok = self.set_image(png, confirm=True) if kind == "start" else \
                 bool(target) and self.set_end_image(target, png)
@@ -5020,7 +5115,7 @@ class MainWindow(QMainWindow):
                         self._film_queue = film_rest
                 else:
                     self.status.setText(f"ComfyUI is not running at {self.comfy_url.text().strip()}. "
-                                        "Start it (Settings → ComfyUI → Start ComfyUI) and generate again.")
+                                        "Start it (Settings → ComfyUI and preferences → Start ComfyUI) and generate again.")
                 self._update_comfy_label()
         self._update_model_label()
         self._update_buttons()

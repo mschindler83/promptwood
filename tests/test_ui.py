@@ -1940,3 +1940,23 @@ def test_scene_duplicate_notes_and_film_cast(app, win, tmp_path, image, monkeypa
     win.show_film_cast()
     assert win._film_cast_dialog.windowTitle() == "Cast in the film"
     win._film_cast_dialog.deleteLater()
+
+
+def test_inspector_and_timeline(app, win, tmp_path, image):
+    """The editor layout: the path as a timeline; the clip in focus in the inspector; clicking a clip of the path
+    shows it without changing the path; a new clip gets the focus."""
+    ids = new_project(win, tmp_path, image, ("one", "two", "three"))
+    assert [b.nid for b in win.timeline._blocks] == ids and win.focus == ids[-1]
+    assert win.card_stack.currentWidget().nid == ids[-1] and "3 of 3" in win.focus_info.text()
+    win.timeline.clicked.emit(ids[0])                      # a block: shown, the path stays
+    assert win.card_stack.currentWidget().nid == ids[0] and [c.nid for c in win.cards] == ids
+    assert not win.b_prev_clip.isEnabled() and win.b_next_clip.isEnabled()
+    win._step_focus(1)
+    assert win.focus == ids[1]
+    win._graph_clicked(ids[2])                             # a clip of the path in the graph: focus only
+    assert win.focus == ids[2] and win.selected_id() == ids[2]
+    win._graph_clicked(ids[0])
+    assert win.focus == ids[0] and [c.nid for c in win.cards] == ids    # (the path is not cut short)
+    win.node_action("continue", ids[2])                    # a new clip: in focus at once, to write its prompt
+    assert win.focus == win.selected_id() not in ids and win.card_stack.currentWidget().nid == win.focus
+    assert win.timeline._blocks[-1].nid == win.focus and win.inspector.tabText(0) == "Clip"

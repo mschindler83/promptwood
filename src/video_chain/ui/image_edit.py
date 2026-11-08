@@ -469,7 +469,7 @@ class ImageEditDialog(QDialog):
                                   "than one big change)")
         self.b_further.clicked.connect(self._edit_further)
         self.b_use_ref = QPushButton("Add as face reference")
-        self.b_use_ref.setToolTip("Add this result to the project's face references (left panel), e.g. a face or an "
+        self.b_use_ref.setToolTip("Add this result to the project's face pictures (the Cast tab, Alt+2), e.g. a face or an "
                                   "outfit made here; the dialog stays open, so you can add several")
         self.b_use_ref.clicked.connect(self._add_reference)
         self.b_again = QPushButton("Use its prompt and LoRAs")
