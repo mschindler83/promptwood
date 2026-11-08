@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QVBoxLayout, QWidget)
 
 from .. import chain
+from .. import film as F
 from .. import tree as T
 from ..comfy import REF_HINT
 from .graph import START, GraphView, NodeInfo
@@ -38,6 +39,7 @@ from .clip_dialogs import CompareDialog, HandoverDialog
 from .lora_stack import LoraStack, fill_lora_combo, lora_label, lora_path
 from .mentions import MentionHelper
 from .cast_strip import CastStrip
+from .storyboard import Storyboard
 from .face_crop import FaceCropDialog
 from .prompt_refiner import RefineDialog, replace_text
 from .image_edit import EDITS_DIR, ImageEditDialog, record_use, uses_of
@@ -1335,13 +1337,25 @@ class MainWindow(QMainWindow):
         ls.setMinimumWidth(350)
         split.addWidget(ls)
 
-        # middle: graph over the path
+        # middle: the film's scenes, the graph over the path
         mid = QSplitter(Qt.Vertical)
         mid.setChildrenCollapsible(False)
         gw = QWidget()
         gv = QVBoxLayout(gw)
         gv.setContentsMargins(0, 0, 0, 0)
         gv.setSpacing(0)
+        fbar, fbh = section_bar("Film", gw)
+        self.film_info = label("", level="tertiary")
+        fbh.addWidget(self.film_info)
+        gv.addWidget(fbar)
+        self.storyboard = Storyboard()
+        self.storyboard.sceneChosen.connect(self.switch_scene)
+        self.storyboard.addWanted.connect(self.add_scene)
+        self.storyboard.renameWanted.connect(self.rename_scene)
+        self.storyboard.deleteWanted.connect(self.delete_scene)
+        self.storyboard.moved.connect(self._scenes_moved)
+        gv.addWidget(self.storyboard)
+        self.film = None
         bar, bh = section_bar("Clips", gw)
         self.tree_info = label("", level="tertiary")
         bh.addWidget(self.tree_info)
@@ -1561,7 +1575,143 @@ class MainWindow(QMainWindow):
         self.b_recent.setEnabled(bool(self.recent_projects()))
 
     def _update_title(self):
-        self.setWindowTitle(f"{self.project.name} — Promptwood" if self.project else "Promptwood")
+        if self.project is None:
+            self.setWindowTitle("Promptwood")
+            return
+        scene = self.film.scene_of(self.project) if self.film else None
+        name = self.film.root.name if self.film else self.project.name
+        many = self.film is not None and len(self.film.scenes) > 1
+        self.setWindowTitle(f"{name} › {scene.title} — Promptwood" if many and scene else f"{name} — Promptwood")
+
+    # ---- the film's scenes (film.py)
+    def _show_storyboard(self):
+        if self.film is None:
+            self.storyboard.show_scenes([], None)
+            self.film_info.setText("")
+            return
+        scenes = []
+        for sc in self.film.scenes:
+            if self.project is not None and self.film.path(sc.id) == self.project:
+                summ = F.summary(self.film, sc.id, self.tree, self.status_of)
+            else:
+                summ = F.summary(self.film, sc.id)
+            scenes.append((sc.id, sc.title, summ))
+        self.storyboard.show_scenes(scenes, self.film.current)
+        cur = self.film.scene_of(self.project) if self.project else None
+        self.film_info.setText(f"› {cur.title}" if cur and len(self.film.scenes) > 1 else "")
+        self._update_title()
+
+    def _update_scene_card(self):
+        """The open scene's card follows the work on it (its path, states)."""
+        if self.film is None or self.project is None or self.tree is None:
+            return
+        cur = self.film.scene_of(self.project)
+        if cur is not None:
+            self.storyboard.update_card(cur.id, cur.title, F.summary(self.film, cur.id, self.tree, self.status_of))
+
+    def _sync_shared(self):
+        """The cast, sounds and size settings are the film's: written into the other scenes when they change."""
+        if self.film is None or len(self.film.scenes) < 2 or self.tree is None:
+            return
+        now = json.dumps(self.film.shared(self.tree.options), sort_keys=True)
+        if now == getattr(self, "_shared_sent", None):
+            return
+        try:
+            self.film.sync_shared(self.project, self.tree.options)
+            self._shared_sent = now
+        except (OSError, ValueError) as e:
+            self.status.setText(f"Could not pass the cast / sound settings on to the other scenes: {e}")
+
+    def switch_scene(self, sid: str):
+        if self.film is None or self.project is None:
+            return
+        if self.running:
+            self.status.setText("Wait until generating has finished.")
+            self._show_storyboard()
+            return
+        if self.film.path(sid) == self.project:
+            return
+        before = self.film.current
+        self.film.current = sid                    # (the film folder itself opens the current scene)
+        try:
+            self.film.save()
+        except OSError:
+            pass
+        if not self.open_project(self.film.path(sid)):
+            self.film.current = before
+            try:
+                self.film.save()
+            except OSError:
+                pass
+            self._show_storyboard()                # back to the scene still open
+
+    def add_scene(self):
+        if self.film is None or self.project is None or self.running:
+            return
+        title, ok = QInputDialog.getText(self, "New scene", "Title of the new scene:",
+                                         text=f"Scene {len(self.film.scenes) + 1}")
+        if not ok:
+            return
+        if not self._may_leave_project():
+            return
+        cur = self.film.scene_of(self.project)
+        try:
+            scene = self.film.add_scene(title, after=cur.id if cur else None, like=cur.id if cur else None)
+        except (OSError, ValueError) as e:
+            self.status.setText(f"Could not add the scene: {e}")
+            return
+        if self.open_project(self.film.path(scene.id)):
+            self.status.setText(f"Scene “{scene.title}” added: choose its start image (Start image), or begin "
+                                "with a real video. The cast and sounds are the film's.")
+
+    def rename_scene(self, sid: str):
+        if self.film is None:
+            return
+        title, ok = QInputDialog.getText(self, "Rename scene", "Title:", text=self.film.scene(sid).title)
+        if not ok:
+            return
+        try:
+            self.film.rename(sid, title)
+        except (OSError, ValueError) as e:
+            self.status.setText(f"Could not rename the scene: {e}")
+            return
+        self._show_storyboard()
+
+    def delete_scene(self, sid: str):
+        if self.film is None or self.running:
+            return
+        sc = self.film.scene(sid)
+        if sc.dir == ".":
+            self.status.setText("The film folder's own scene cannot be deleted; move it if it should not be first.")
+            return
+        if len(self.film.scenes) < 2:
+            return
+        n = F.summary(self.film, sid)["clips"]
+        if QMessageBox.question(self, "Delete scene", f"Delete the scene “{sc.title}” with its {n} clip"
+                                f"{'s' if n != 1 else ''} and their files? This cannot be undone.") != QMessageBox.Yes:
+            return
+        if self.film.path(sid) == self.project:    # leave it first
+            other = next(s for s in self.film.scenes if s.id != sid)
+            self.switch_scene(other.id)
+            if self.project == self.film.path(sid):
+                return
+        try:
+            self.film.remove(sid)
+        except (OSError, ValueError) as e:
+            self.status.setText(f"Could not delete the scene: {e}")
+            return
+        self._show_storyboard()
+        self.status.setText(f"Scene “{sc.title}” deleted.")
+
+    def _scenes_moved(self, order: list[str]):
+        if self.film is None:
+            return
+        try:
+            for k, sid in enumerate(order):
+                self.film.move(sid, k)
+        except (OSError, ValueError, StopIteration) as e:
+            self.status.setText(f"Could not move the scene: {e}")
+        self._show_storyboard()
 
     # ---- new / open / save / close
     def new_project(self):
@@ -1622,12 +1772,13 @@ class MainWindow(QMainWindow):
         """Copy the whole project (clips included) to a new folder and continue there."""
         if self.project is None or self.running:
             return
+        root = self.film.root if self.film else self.project
         d = QFileDialog.getExistingDirectory(self, "Save the project as (choose the folder to put the copy in)",
-                                             str(self.project.parent))
+                                             str(root.parent))
         if not d:
             return
         from PySide6.QtWidgets import QInputDialog
-        name, ok = QInputDialog.getText(self, "Save as", "Name of the copy:", text=f"{self.project.name}-copy")
+        name, ok = QInputDialog.getText(self, "Save as", "Name of the copy:", text=f"{root.name}-copy")
         if not ok or not name.strip():
             return
         self.copy_project_to(Path(d) / name.strip())
@@ -1642,18 +1793,23 @@ class MainWindow(QMainWindow):
         self._save_timer.stop()
         if not self._write_tree():
             return
-        source, bridge = self.project, self.bridge
+        source, bridge = (self.film.root if self.film else self.project), self.bridge
+        scene_rel = os.path.relpath(self.project, source)       # the scene to continue in, inside the copy
+        self._copy_scene = scene_rel
         existed = target.exists()
         self.status.setText(f"Copying the project to {target} …")
         self.act_save_as.setEnabled(False)
         self._copying = str(source)
 
+
         def work():
             try:
-                shutil.copytree(source, target, dirs_exist_ok=True,
+                shutil.copytree(source, target, dirs_exist_ok=True, symlinks=True,     # (scenes' links to refs/)
                                 ignore=shutil.ignore_patterns("*.part", "*.part.*", "video-chain-*"))
-                tree = T.load(target)                 # the copy remembers where its start image came from
-                T.save(target, tree)
+                for sc in F.Film.load(target).scenes:  # the copy remembers where its start images came from
+                    d = (target / sc.dir).resolve()
+                    if (d / T.TREE_FILE).is_file():
+                        T.save(d, T.load(d))
                 bridge.copied.emit(str(target), "")
             except Exception as e:  # noqa: BLE001
                 if not existed:                       # a half copy would block the next try
@@ -1668,10 +1824,11 @@ class MainWindow(QMainWindow):
         if error:
             self.status.setText(f"Could not copy the project: {error}")
             return
-        if self.project is None or str(self.project) != source:
+        here = str(self.film.root if self.film else self.project) if self.project is not None else None
+        if here != source:
             self.status.setText(f"Copied the project to {target}.")
             return
-        if self.open_project(Path(target)):
+        if self.open_project((Path(target) / getattr(self, "_copy_scene", ".")).resolve()):
             self.status.setText(f"Saved as {Path(target).name}; you are working in the copy now.")
 
     def close_project(self):
@@ -1681,6 +1838,9 @@ class MainWindow(QMainWindow):
             return
         self._waiting_comfy = self._waiting_refine = None      # a wait for ComfyUI belongs to this project
         self.preview.stop()
+        self.film = None
+        self.storyboard.show_scenes([], None)
+        self.film_info.setText("")
         self.project = self.tree = None
         self.project_edit.clear()
         self.qs.setValue("project", "")
@@ -1708,6 +1868,12 @@ class MainWindow(QMainWindow):
         folder = Path(folder).expanduser().resolve()
         try:
             folder.mkdir(parents=True, exist_ok=True)
+            root = F.root_of(folder)
+            film = F.Film.load(root)               # the film this folder belongs to, and which scene opens
+            if folder == root:
+                folder = film.path(film.current)
+            else:
+                film.current = (film.scene_of(folder) or film.scenes[0]).id
             tree = T.load(folder)
         except (OSError, ValueError) as e:
             msg = f"Could not open the project: {e}"
@@ -1723,7 +1889,9 @@ class MainWindow(QMainWindow):
             except ValueError:
                 pass
         self.project, self.tree = folder, tree
-        self.project_edit.setText(str(folder))
+        self.film = film
+        self._shared_sent = json.dumps(film.shared(tree.options), sort_keys=True)
+        self.project_edit.setText(str(root))
         self.project_edit.setToolTip(str(folder))
         self.preview.stop()
         self.live, self.progress_of = {}, {}
@@ -1738,8 +1906,13 @@ class MainWindow(QMainWindow):
         self._tree_stamp = self._stamp()
         self._write_tree()
         T.ensure_handovers(folder, tree)          # e.g. deleted by hand: the clips after them stay done
-        self.qs.setValue("project", str(folder))
-        self._remember_project(folder)
+        self.qs.setValue("project", str(root))
+        self._remember_project(root)
+        try:
+            film.save()                            # which scene was open (only once there are several)
+        except OSError:
+            pass
+        self._show_storyboard()
         self._update_title()
         self._warm_lora_hashes()
         self.refresh(rebuild_path=True)
@@ -2498,6 +2671,7 @@ class MainWindow(QMainWindow):
             self.status.setText(f"Could not save the project: {e}")
             return False
         self._tree_stamp = self._stamp()
+        self._sync_shared()
         return True
 
     # ------------------------------------------------------------------ start image
@@ -2698,6 +2872,7 @@ class MainWindow(QMainWindow):
         videos = sum(1 for n in self.tree.nodes.values() if n.is_video)
         self.tree_info.setText(f"{len(self.tree.nodes)} clips" + (f" ({videos} real)" if videos else "") +
                                f" · {branches} branch{'es' if branches != 1 else ''} · {made} made")
+        self._update_scene_card()
         self._update_buttons()
 
     def badge(self, n: T.Node) -> str:
@@ -2943,7 +3118,7 @@ class MainWindow(QMainWindow):
                   self.comfy_url, self.ref_size, self.ref_hint, self.b_ref_add, self.b_ref_start,
                   self.b_ref_del, self.b_ref_crop, self.b_char_new, self.b_char_rename, self.b_char_del, self.char_desc,
                   self.char_lead, self.b_voice_file, self.b_voice_del, self.dialogue_lang, self.speed, self.style_prefix,
-                  self.style_suffix, self.lora_triggers, self.b_ai_edit, self.b_ai_create):
+                  self.style_suffix, self.lora_triggers, self.b_ai_edit, self.b_ai_create, self.storyboard):
             w.setEnabled(idle)
         self._turbo_widgets()                      # after the loop: turbo locks the steps fields again
         self._update_ref_start_button()            # after the loop too: they depend on the selection

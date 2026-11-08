@@ -1862,3 +1862,41 @@ def test_continue_the_real_videos_sound_on_the_card(app, win, tmp_path):
     card.src_sound.setChecked(False)                                                   # optional: off again
     flush(app, win)
     assert "source_sound" not in win.tree.nodes[a].overrides
+
+
+def test_scenes_in_the_window(app, win, tmp_path, image, monkeypatch):
+    """Scenes: the storyboard shows them; a new one opens; switching keeps each scene's clips; the cast is shared."""
+    ids = new_project(win, tmp_path, image, ("kitchen clip",))
+    root = win.project
+    assert win.storyboard.list.count() == 1 and win.windowTitle().startswith(root.name + " — ")
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("Street", True))
+    win.add_scene()
+    assert win.project == (root / "scenes" / "s2").resolve() and win.storyboard.list.count() == 2
+    assert "› Street" in win.windowTitle() and win.film_info.text() == "› Street"
+    assert win.tree.nodes and all(n.prompt == "" for n in win.tree.nodes.values())    # its own (empty) clips
+    win.add_reference(str(image))                           # a face in scene 2: the film's cast
+    flush(app, win)
+    win._save_tree()
+    win.storyboard.sceneChosen.emit("s1")                   # back to scene 1 (the film folder)
+    assert win.project == root and [n.prompt for n in win.tree.nodes.values()] == ["kitchen clip"]
+    assert T.cast_of(win.tree) and (root / T.cast_of(win.tree)[0]["images"][0]).is_file()
+    assert win.qs.value("project") == str(root)
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("Night street", True))
+    win.rename_scene("s2")
+    win._scenes_moved(["s2", "s1"])
+    assert [win.storyboard.list.item(i).text().split("\n")[0] for i in range(2)] == ["1  Night street", "2  Scene 1"]
+    win.storyboard.sceneChosen.emit("s2")
+    copy = tmp_path / "film-copy"
+    win.copy_project_to(copy)                               # Save as: the whole film, the same scene open
+    wait(app, lambda: win._copying is None, timeout=30)
+    assert win.project == (copy / "scenes" / "s2").resolve() and (copy / "scenes" / "s2" / T.REFS_DIR).is_symlink()
+    assert (copy / "film.json").is_file() and win.storyboard.list.count() == 2
+    win.open_project(root)
+    win.storyboard.sceneChosen.emit("s1")
+    win.open_project(root)                                  # the film opens the scene worked on last
+    assert win.project == root
+    win.delete_scene("s1")                                  # the film folder's scene stays
+    assert "cannot be deleted" in win.status.text()
+    win.storyboard.sceneChosen.emit("s2")
+    win.delete_scene("s2")                                  # the open scene: the window moves to another first
+    assert win.project == root and win.storyboard.list.count() == 1 and not (root / "scenes" / "s2").exists()
