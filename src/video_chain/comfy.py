@@ -941,7 +941,101 @@ def build_qwen21_workflow(*, files: dict, prompt: str, seed: int, quality: str, 
     return wf
 
 
-EDIT_MODELS = {"2511": "Qwen-Image-Edit 2511", "qwen21": "Qwen-Image 2.1"}
+# MOSS-Image (OpenMOSS, 5B, Apache 2.0; ComfyUI's templates image_moss_image_t2i / _base_t2i / _edit): new images
+# with the SFT model (25 steps, cfg 2.5, er_sde; the base model with skip-layer guidance on layer 22 for the first
+# half), edits with its edit LoRA (30 steps, cfg 4, euler, skip-layer guidance throughout; the picture at ~1 MP)
+MOSS_NODES = ("TextEncodeMOSSImageEdit", "SkipLayerGuidanceDiTSimple", "EmptyFlux2LatentImage",
+              "ImageScaleToTotalPixels", "GetImageSize")
+MOSS_NEGATIVE = "nsfw, worst quality, bad anatomy, watermark, jpeg artifact"
+MOSS_STEPS, MOSS_EDIT_STEPS = 25, 30
+
+
+def pick_moss_files(unets: list[str], clips: list[str], vaes: list[str], loras: list[str]) -> dict | None:
+    """MOSS-Image's files ComfyUI lists: {"sft", "base", "models", "clip", "vae", "edit_lora"} (edit_lora None:
+    no edits), or None without a model, its text encoder (Qwen3.5 9B) or its VAE (FLUX.2's)."""
+    def low(n):
+        return n.lower().replace("-", "_")
+    m = [u for u in unets if "moss_image" in low(u)]
+    sft = sorted([u for u in m if "base" not in low(u)], key=lambda u: ("int8" not in u, u))
+    base = sorted([u for u in m if "base" in low(u)], key=lambda u: ("int8" not in u, u))
+    clip = sorted([c for c in clips if "qwen3.5_9b" in low(c) and "qwen_image" not in low(c)],
+                  key=lambda c: ("w4a8" not in c, "int8" not in c, c))
+    vae = sorted([v for v in vaes if "flux2_vae" in low(v)], key=lambda v: ("small" not in v, v))
+    edit = sorted([lo for lo in loras if "moss_image_edit" in low(lo)])
+    if not (sft or base) or not clip or not vae:
+        return None
+    return {"sft": sft[0] if sft else None, "base": base[0] if base else None, "models": sft + base,
+            "clip": clip[0], "vae": vae[0], "edit_lora": edit[0] if edit else None}
+
+
+def build_moss_workflow(*, files: dict, prompt: str, seed: int, prefix: str, save_as: str, images: list[str] = (),
+                        size: tuple[int, int] | None = None, negative: str = "", loras: list[tuple[str, float]] = (),
+                        model: str | None = None) -> dict:
+    """One MOSS-Image picture. Without images: text to image at size. With images (uploaded; an edit's source
+    first): the edit LoRA and TextEncodeMOSSImageEdit; size None: the size of the first picture scaled to ~1 MP."""
+    unet = model if model in (files.get("models") or []) else (files.get("sft") or files["base"])
+    if images:
+        unet = files.get("sft") or unet            # the edit LoRA was trained on the SFT model
+    wf: dict = {
+        "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": unet, "weight_dtype": "default"}},
+        "clip": {"class_type": "CLIPLoader", "inputs": {"clip_name": files["clip"], "type": "moss_image",
+                                                         "device": "default"}},
+        "vae": {"class_type": "VAELoader", "inputs": {"vae_name": files["vae"]}},
+    }
+    m = ["unet", 0]
+    for k, (name, strength) in enumerate(loras):
+        wf[f"lora{k}"] = {"class_type": "LoraLoaderModelOnly",
+                          "inputs": {"model": m, "lora_name": name, "strength_model": float(strength)}}
+        m = [f"lora{k}", 0]
+    neg = negative or MOSS_NEGATIVE
+    if images:
+        if not files.get("edit_lora"):
+            raise ComfyError("MOSS-Image's edit LoRA (moss_image_edit_lora_rank_64_bf16.safetensors) is missing")
+        wf["edit_lora"] = {"class_type": "LoraLoaderModelOnly",
+                           "inputs": {"model": m, "lora_name": files["edit_lora"], "strength_model": 1.0}}
+        wf["slg"] = {"class_type": "SkipLayerGuidanceDiTSimple",
+                     "inputs": {"model": ["edit_lora", 0], "double_layers": "", "single_layers": "22",
+                                "start_percent": 0.0, "end_percent": 1.0}}
+        pics = {}
+        for k, name in enumerate(images[:10]):
+            wf[f"pic{k}"] = {"class_type": "LoadImage", "inputs": {"image": name}}
+            wf[f"scale{k}"] = {"class_type": "ImageScaleToTotalPixels",
+                               "inputs": {"image": [f"pic{k}", 0], "upscale_method": "lanczos", "megapixels": 1.0,
+                                          "resolution_steps": 16}}
+            pics[f"images.image_{k}"] = [f"scale{k}", 0]
+        for nid, text in (("pos", prompt), ("neg", neg)):
+            wf[nid] = {"class_type": "TextEncodeMOSSImageEdit",
+                       "inputs": {"clip": ["clip", 0], "prompt": text, "edit_format": "Moss-Image-Edit",
+                                  "image_strength": 1.0, "vae": ["vae", 0], **pics}}
+        if size is None:
+            wf["size"] = {"class_type": "GetImageSize", "inputs": {"image": ["scale0", 0]}}
+            wf["latent"] = {"class_type": "EmptyFlux2LatentImage",
+                            "inputs": {"width": ["size", 0], "height": ["size", 1], "batch_size": 1}}
+        steps, cfg, sampler, sched, sm = MOSS_EDIT_STEPS, 4.0, "euler", "normal", ["slg", 0]
+    else:
+        wf["pos"] = {"class_type": "CLIPTextEncode", "inputs": {"clip": ["clip", 0], "text": prompt}}
+        wf["neg"] = {"class_type": "CLIPTextEncode", "inputs": {"clip": ["clip", 0], "text": neg}}
+        sm = m
+        if unet == files.get("base"):              # the base template: skip-layer guidance for the first half
+            wf["slg"] = {"class_type": "SkipLayerGuidanceDiTSimple",
+                         "inputs": {"model": m, "double_layers": "", "single_layers": "22", "start_percent": 0.0,
+                                    "end_percent": 0.5}}
+            sm = ["slg", 0]
+        steps, cfg, sampler, sched = MOSS_STEPS, 2.5, "er_sde", "simple"
+    if "latent" not in wf:
+        w, h = size or (1024, 1024)
+        wf["latent"] = {"class_type": "EmptyFlux2LatentImage", "inputs": {"width": int(w), "height": int(h),
+                                                                          "batch_size": 1}}
+    wf["sample"] = {"class_type": "KSampler",
+                    "inputs": {"model": sm, "seed": int(seed), "steps": steps, "cfg": cfg, "sampler_name": sampler,
+                               "scheduler": sched, "positive": ["pos", 0], "negative": ["neg", 0],
+                               "latent_image": ["latent", 0], "denoise": 1.0}}
+    wf["decode"] = {"class_type": "VAEDecode", "inputs": {"samples": ["sample", 0], "vae": ["vae", 0]}}
+    wf[save_as] = {"class_type": "SaveImage", "inputs": {"images": ["decode", 0], "filename_prefix": prefix}}
+    return wf
+
+
+EDIT_MODELS = {"2511": "Qwen-Image-Edit 2511", "qwen21": "Qwen-Image 2.1", "moss": "MOSS-Image Edit"}
 EDIT21_QUALITIES = ("fast", "best")   # Turbo (8 steps) / base (25 steps)
 
 
@@ -957,6 +1051,9 @@ class ComfyImageEditor(ComfyGenerator):
         self.files = pick_qwen_files(unets, clips, vaes, combo("LoraLoaderModelOnly", "lora_name"))
         q21 = pick_qwen21_files(unets, clips, vaes)
         self.files21 = q21 if q21 and all(self._object_info(n) for n in QWEN21_NODES) else None
+        moss = pick_moss_files(unets, clips, vaes, combo("LoraLoaderModelOnly", "lora_name"))
+        self.files_moss = moss if moss and moss.get("edit_lora") and all(self._object_info(n) for n in MOSS_NODES) \
+            else None
         missing = [what for what, key in (("the Qwen Image Edit model (e.g. qwen_image_edit_2511_*.safetensors in "
                                            "models/diffusion_models)", "unet"),
                                           ("its text encoder qwen_2.5_vl_7b*.safetensors", "clip"),
@@ -967,14 +1064,17 @@ class ComfyImageEditor(ComfyGenerator):
                 if not self._object_info(node):
                     self.missing_2511 = f"this ComfyUI has no {node} node (update ComfyUI)"
                     break
-        if self.missing_2511 and self.files21 is None:
+        if self.missing_2511 and self.files21 is None and self.files_moss is None:
             raise ComfyError(self.missing_2511)
 
     def models(self) -> list[str]:
         """The edit models this ComfyUI has (keys of EDIT_MODELS)."""
-        return [m for m, ok in (("2511", not self.missing_2511), ("qwen21", self.files21 is not None)) if ok]
+        return [m for m, ok in (("2511", not self.missing_2511), ("qwen21", self.files21 is not None),
+                                ("moss", self.files_moss is not None)) if ok]
 
     def qualities(self, model: str = "2511") -> list[str]:
+        if model == "moss":
+            return ["standard"]
         if model == "qwen21":
             return list(EDIT21_QUALITIES) if self.files21 and self.files21.get("turbo") else ["best"]
         return (["fast"] if self.files.get("lightning") else []) + ["standard", "best"]
@@ -991,6 +1091,8 @@ class ComfyImageEditor(ComfyGenerator):
             names.append((name, float(strength)))
         if model == "qwen21":
             return self._edit21(image, prompt, out_png, seed, quality, refs, loras, names)
+        if model == "moss":
+            return self._edit_moss(image, prompt, out_png, seed, refs, loras, names)
         if self.missing_2511:
             raise ComfyError(self.missing_2511)
         light = self.files.get("lightning") if quality == "fast" else None
@@ -1076,6 +1178,23 @@ class ComfyImageEditor(ComfyGenerator):
                 for up, local in uploads:
                     self._remove(self.input_dir, {"filename": Path(up).name, "subfolder": str(Path(up).parent)},
                                  Path(local), same_size=False)
+
+    def _edit_moss(self, image, prompt, out_png, seed, refs, loras, names) -> dict:
+        if self.files_moss is None:
+            raise ComfyError("MOSS-Image is not available for edits (moss_image_sft_*.safetensors, its edit LoRA "
+                             "moss_image_edit_lora_*, qwen3.5_9b and flux2-vae in ComfyUI's models)")
+        uploads: list[tuple[str, Path]] = []
+        pics = []
+        for p in [image, *list(refs)[:2]]:
+            uploads.append((self.upload(Path(p)), Path(p)))
+            pics.append(uploads[-1][0])
+        wf = build_moss_workflow(files=self.files_moss, prompt=prompt, seed=seed,
+                                 prefix=f"{SUBFOLDER}/edit_{uuid.uuid4().hex[:12]}", save_as="edit_save",
+                                 images=pics, loras=names)
+        self._run_saving(wf, "edit_save", out_png, uploads)
+        return {"quality": "standard", "steps": MOSS_EDIT_STEPS, "cfg": 4.0, "edit_model": "moss",
+                "model": wf["unet"]["inputs"]["unet_name"], "lightning": None,
+                "loras": [{"path": str(p), "strength": float(st)} for p, st in loras]}
 
     def _edit21(self, image, prompt, out_png, seed, quality, refs, loras, names) -> dict:
         if self.files21 is None:

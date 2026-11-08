@@ -447,7 +447,7 @@ def test_qwen_image_edit(server, start, tmp_path):
     wf = server.prompts[-1]
     assert "lightning" not in wf and wf["sample"]["inputs"]["steps"] == 40 and wf["sample"]["inputs"]["cfg"] == 4.0
     assert C.pick_qwen_files(["x.safetensors"], [], [], [])["unet"] is None
-    assert meta["edit_model"] == "2511" and ed.models() == ["2511", "qwen21"]
+    assert meta["edit_model"] == "2511" and ed.models() == ["2511", "qwen21", "moss"]
     # Qwen-Image 2.1 (ComfyUI's image_qwen_image_2_1_image_edit): the source as image_1, its own latent size
     meta = ed.edit(start, "she smiles", out, 9, "fast", [face], model="qwen21")
     wf = server.edited
@@ -463,12 +463,26 @@ def test_qwen_image_edit(server, start, tmp_path):
     wf = server.edited
     assert meta["steps"] == 25 and wf["sample"]["class_type"] == "KSampler" and wf["sample"]["inputs"]["cfg"] == 1.0
     assert wf["unet"]["inputs"]["unet_name"].endswith("qwen_image_2.1_int8_convrot.safetensors")
-    server.qwen = False                                    # only 2.1 left: editing still works with it
+    # MOSS-Image (ComfyUI's image_moss_image_edit): SFT + edit LoRA, skip-layer guidance, the source at ~1 MP
+    meta = ed.edit(start, "she smiles", out, 4, "standard", [face], model="moss")
+    wf = server.edited
+    assert meta["edit_model"] == "moss" and meta["steps"] == 30 and ed.qualities("moss") == ["standard"]
+    assert wf["unet"]["inputs"]["unet_name"].endswith("moss_image_sft_int8_convrot.safetensors")
+    assert wf["edit_lora"]["inputs"]["lora_name"].endswith("moss_image_edit_lora_rank_64_bf16.safetensors")
+    assert wf["slg"]["inputs"]["single_layers"] == "22" and wf["slg"]["inputs"]["end_percent"] == 1.0
+    p = wf["pos"]["inputs"]
+    assert wf["pos"]["class_type"] == "TextEncodeMOSSImageEdit" and p["edit_format"] == "Moss-Image-Edit"
+    assert p["images.image_0"] == ["scale0", 0] and p["images.image_1"] == ["scale1", 0]
+    assert wf["neg"]["inputs"]["prompt"] == C.MOSS_NEGATIVE and wf["clip"]["inputs"]["type"] == "moss_image"
+    assert wf["latent"]["inputs"]["width"] == ["size", 0] and wf["scale0"]["inputs"]["megapixels"] == 1.0
+    s = wf["sample"]["inputs"]
+    assert (s["steps"], s["cfg"], s["sampler_name"], s["scheduler"]) == (30, 4.0, "euler", "normal")
+    server.qwen = False                                    # only 2.1 and MOSS left: editing still works with them
     ed = C.ComfyImageEditor(server.url)
-    assert ed.models() == ["qwen21"]
+    assert ed.models() == ["qwen21", "moss"]
     with pytest.raises(C.ComfyError, match="Qwen Image Edit model"):
         ed.edit(start, "x", out, 1, "fast")
-    server.qwen21 = False
+    server.qwen21 = server.moss = False
     with pytest.raises(C.ComfyError, match="Qwen Image Edit model"):
         C.ComfyImageEditor(server.url)
 
@@ -663,6 +677,12 @@ def test_image_families_from_comfyui_lists():
     assert q21["clip"] == "qwen3vl_8b_int8_convrot.safetensors" and q21["vae"] == "qwen_image_2.1_vae_bf16.safetensors"
     assert C.pick_qwen21_files(["qwen-image/qwen_image_2.1_bf16.safetensors"], [], []) is None   # no encoder
     assert G.size_for("qwen21", 16 / 9) == (1376, 768)
+    mo = C.pick_moss_files(["moss-image/moss_image_base_bf16.safetensors", "moss-image/moss_image_sft_int8_convrot.safetensors"],
+                           ["qwen3.5_9b_qwen_image_2.1_pe_t2i.int8_convrot.safetensors", "qwen3.5_9b_w4a8_gptq.safetensors"],
+                           ["flux2-vae.safetensors", "flux2-vae_small.safetensors"], [])
+    assert mo["sft"].endswith("sft_int8_convrot.safetensors") and mo["base"].endswith("base_bf16.safetensors")
+    assert mo["clip"] == "qwen3.5_9b_w4a8_gptq.safetensors" and mo["vae"] == "flux2-vae_small.safetensors"
+    assert mo["edit_lora"] is None and "MOSS-Image" in files["moss"]["missing"]
 
 
 def test_create_images_in_every_family(server, start, tmp_path):
@@ -711,8 +731,19 @@ def test_create_images_in_every_family(server, start, tmp_path):
     wf = server.created
     assert meta["steps"] == 25 and wf["text"]["inputs"]["images.image_1"] == ["pic0", 0]
     assert wf["sample"]["inputs"]["latent_image"] == ["latent", 0]          # the chosen size, not the picture's
-    server.qwen21 = False
-    assert "missing" in G.ComfyImageCreator(server.url).files["qwen21"]
+    # MOSS-Image (image_moss_image_t2i): SFT, 25 steps, cfg 2.5, er_sde; references with its edit LoRA
+    meta = cr.create("moss", None, "a lighthouse", out, 5, "standard", 1376, 768)
+    wf = server.created
+    s = wf["sample"]["inputs"]
+    assert (s["steps"], s["cfg"], s["sampler_name"]) == (25, 2.5, "er_sde") and "slg" not in wf
+    assert wf["pos"]["class_type"] == "CLIPTextEncode" and wf["neg"]["inputs"]["text"] == C.MOSS_NEGATIVE
+    assert wf["latent"]["class_type"] == "EmptyFlux2LatentImage" and Image.open(out).size == (1376, 768)
+    cr.create("moss", None, "her on a beach", out, 5, "standard", 1024, 1024, refs=[start])
+    wf = server.created
+    assert "edit_lora" in wf and wf["latent"]["inputs"]["width"] == 1024
+    server.qwen21 = server.moss = False
+    cr = G.ComfyImageCreator(server.url)
+    assert "missing" in cr.files["qwen21"] and "missing" in cr.files["moss"]
 
 
 def test_pika_h3_flex_workflow(server, start, tmp_path):

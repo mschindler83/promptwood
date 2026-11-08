@@ -1745,7 +1745,8 @@ def test_qwen_image_21_in_the_image_window(app, tmp_path, image, monkeypatch):
         dlg = w.edit_image(start=True, dialog=False)
         wait(app, lambda: dlg.families, timeout=20)
         models = [dlg.edit_model.itemText(i) for i in range(dlg.edit_model.count())]
-        assert models == ["Qwen-Image-Edit 2511", "Qwen-Image 2.1"] and dlg.edit_model.currentData() == "2511"
+        assert models == ["Qwen-Image-Edit 2511", "Qwen-Image 2.1", "MOSS-Image Edit"]
+        assert dlg.edit_model.currentData() == "2511"
         assert [dlg.quality.itemData(i) for i in range(dlg.quality.count())] == ["fast", "standard", "best"]
         dlg.edit_model.setCurrentIndex(1)
         assert [dlg.quality.itemText(i) for i in range(dlg.quality.count())] == ["Fast (Turbo, 8 steps)",
@@ -1758,6 +1759,12 @@ def test_qwen_image_21_in_the_image_window(app, tmp_path, image, monkeypatch):
         png, meta = dlg.selected()
         assert meta["edit_model"] == "qwen21" and meta["steps"] == 8 and "Qwen-Image 2.1 Fast" in dlg.res_info.text()
         assert server.edited["text"]["class_type"] == "TextEncodeQwenImage21"
+        dlg.edit_model.setCurrentIndex(2)                           # MOSS-Image Edit
+        assert [dlg.quality.itemText(i) for i in range(dlg.quality.count())] == ["Standard (30 steps)"]
+        dlg.generate()
+        wait(app, lambda: not dlg._busy, timeout=60)
+        assert dlg.selected()[1]["edit_model"] == "moss" and "MOSS-Image Edit" in dlg.res_info.text()
+        dlg.results.setCurrentRow(dlg.results.count() - 1)          # the 2.1 result (oldest last)
         dlg.edit_model.setCurrentIndex(0)
         dlg._prompt_again()                                         # back to the model the result was made with
         assert dlg.edit_model.currentData() == "qwen21" and dlg.quality.currentData() == "fast"
@@ -1768,9 +1775,11 @@ def test_qwen_image_21_in_the_image_window(app, tmp_path, image, monkeypatch):
         dlg.family.setCurrentIndex(k)
         assert dlg.model_file.count() == 1 and "Fast (Turbo, 8 steps)" in [dlg.quality.itemText(i)
                                                                          for i in range(dlg.quality.count())]
+        k = dlg.family.findData("moss")
+        assert dlg.family.itemText(k) == "MOSS-Image" and dlg.family.model().item(k).isEnabled()
         dlg.done(0)
-        # without the 2.1 files: offered, but not available, with what is missing
-        server.qwen21 = False
+        # without the 2.1 and MOSS files: offered, but not available, with what is missing
+        server.qwen21 = server.moss = False
         dlg = w.edit_image(start=True, dialog=False)
         wait(app, lambda: dlg.families, timeout=20)
         k = dlg.edit_model.findData("qwen21")

@@ -29,6 +29,7 @@ from .lora_stack import LoraStack, lora_label
 from .widgets import FrameTile, guard_wheel, icon_button, label
 
 EDITS_DIR = "edits"
+MOSS_EDIT_QUALITIES = {"standard": "Standard (30 steps)"}
 QUALITY_TEXT = {"fast": "Fast (Lightning, 4 steps)", "standard": "Standard (20 steps)", "best": "Best (40 steps, slow)"}
 PROMPT_HINT = ("Describe the change, e.g. “she smiles and looks into the camera”, “night, lit by a street lamp”, "
                "“replace the red jacket with a black leather jacket”. Say what must stay: “keep her face, pose and "
@@ -233,7 +234,8 @@ class ImageEditDialog(QDialog):
         for key, text in EDIT_MODELS.items():
             self.edit_model.addItem(text, key)
         self.edit_model.setToolTip("Qwen-Image-Edit 2511: the proven edit model. Qwen-Image 2.1 (2026): newer and "
-                                   "smaller, one model for creating and editing; research licence (non-commercial)")
+                                   "smaller, one model for creating and editing; research licence (non-commercial). "
+                                   "MOSS-Image Edit (2026, 5B, Apache 2.0): MOSS-Image with its edit LoRA")
         saved = settings.value("editModel", "", type=str) if settings is not None else ""
         self.edit_model.setCurrentIndex(max(0, self.edit_model.findData(saved)))
         self.edit_model.currentIndexChanged.connect(self._edit_model_changed)
@@ -515,8 +517,9 @@ class ImageEditDialog(QDialog):
             fam = self.family.currentData()
             for key, text in (FAMILIES[fam]["qualities"].items() if fam in FAMILIES else []):
                 self.quality.addItem(text, key)
-        elif self.edit_model.currentData() == "qwen21":
-            for key, text in FAMILIES["qwen21"]["qualities"].items():
+        elif self.edit_model.currentData() in ("qwen21", "moss"):
+            qs = FAMILIES["qwen21"]["qualities"] if self.edit_model.currentData() == "qwen21" else MOSS_EDIT_QUALITIES
+            for key, text in qs.items():
                 self.quality.addItem(text, key)
         else:
             for q in ("fast", "standard", "best"):
@@ -544,17 +547,21 @@ class ImageEditDialog(QDialog):
             self.set_mode("edit")                # its qualities and LoRAs
 
     def _show_edit_models(self):
-        """Qwen-Image 2.1 can be chosen only when ComfyUI has it (known from the model list of Create)."""
-        info = self.families.get("qwen21") or {}
-        k = self.edit_model.findData("qwen21")
+        """Qwen-Image 2.1 and MOSS-Image can be chosen only when ComfyUI has them (known from Create's model list;
+        MOSS also needs its edit LoRA)."""
         if not self.families:
-            return                                 # not listed yet: both stay offered
-        ok = "models" in info
-        self.edit_model.model().item(k).setEnabled(ok)
-        self.edit_model.setItemText(k, EDIT_MODELS["qwen21"] + ("" if ok else "  (not available)"))
-        self.edit_model.setItemData(k, EDIT_MODELS["qwen21"] if ok else info.get("missing", ""), Qt.ToolTipRole)
-        if not ok and self.edit_model.currentData() == "qwen21":
-            self.edit_model.setCurrentIndex(self.edit_model.findData("2511"))
+            return                                 # not listed yet: all stay offered
+        for key in ("qwen21", "moss"):
+            info = self.families.get(key) or {}
+            k = self.edit_model.findData(key)
+            ok = "models" in info and (key != "moss" or bool(info.get("edit_lora")))
+            why = info.get("missing") or ("MOSS-Image's edit LoRA (moss_image_edit_lora_rank_64_bf16) is missing"
+                                          if key == "moss" else "")
+            self.edit_model.model().item(k).setEnabled(ok)
+            self.edit_model.setItemText(k, EDIT_MODELS[key] + ("" if ok else "  (not available)"))
+            self.edit_model.setItemData(k, EDIT_MODELS[key] if ok else why, Qt.ToolTipRole)
+            if not ok and self.edit_model.currentData() == key:
+                self.edit_model.setCurrentIndex(self.edit_model.findData("2511"))
 
     def _remember_quality(self):
         if self.qs is not None and self.quality.currentData():
@@ -640,6 +647,8 @@ class ImageEditDialog(QDialog):
             self.lora_text.setText(
                 "LoRAs (optional): LoRA files made for Qwen-Image 2.1 (Qwen-Image 2512 and Image Edit LoRAs do not "
                 "fit it), applied in this order." if self.edit_model.currentData() == "qwen21" else
+                "LoRAs (optional): LoRA files made for MOSS-Image, applied before its edit LoRA."
+                if self.edit_model.currentData() == "moss" else
                 "LoRAs (optional): Qwen Image / Image Edit LoRAs from ComfyUI's LoRA folders, applied in this order. "
                 "Text-to-image Qwen LoRAs often work for edits too, not always.")
         self.b_gen.setToolTip("Make the image (Ctrl+Enter)" if create else
@@ -727,7 +736,9 @@ class ImageEditDialog(QDialog):
                    f"{FAMILIES.get(meta.get('family'), {}).get('qualities', {}).get(meta.get('quality'), '')}"
                    if meta.get("mode") == "create" else
                    f"{EDIT_MODELS['qwen21']} {FAMILIES['qwen21']['qualities'].get(meta.get('quality'), '')}"
-                   if meta.get("edit_model") == "qwen21" else QUALITY_TEXT.get(meta.get("quality"), ""))
+                   if meta.get("edit_model") == "qwen21" else
+                   f"{EDIT_MODELS['moss']} {MOSS_EDIT_QUALITIES['standard']}" if meta.get("edit_model") == "moss"
+                   else QUALITY_TEXT.get(meta.get("quality"), ""))
             self.res_info.setText(("ORIGINAL · " if show != png else "") +
                                   (f"IN USE: {', '.join(where)} · " if where else "") +
                                   f"“{meta.get('prompt', '')}” · {how} · "
@@ -1074,8 +1085,8 @@ class ImageEditDialog(QDialog):
         if self.mode() == "create":
             fam = self.family.currentData()
             out = list(self.family_loras.get("qwen" if fam == "qwen" else fam, []))
-        elif self.edit_model.currentData() == "qwen21":
-            out = []                               # Qwen-Image 2512 / Edit LoRAs do not fit 2.1
+        elif self.edit_model.currentData() in ("qwen21", "moss"):
+            out = []                               # Qwen-Image 2512 / Edit LoRAs fit neither
         else:
             out = list(self.known_loras)
         listed = {p for p, _ in out}

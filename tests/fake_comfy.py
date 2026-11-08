@@ -24,7 +24,9 @@ KNOWN = {"UNETLoader", "CLIPLoader", "VAELoader", "LoadImage", "MiniMaxH3ImageTo
          "ModelSamplingFlux", "DualCLIPLoader", "FluxGuidance", "CheckpointLoaderSimple", "LoraLoader", "ImageScale",
          "EmptyFlux2LatentImage", "ReferenceMultiLatent", "BatchImagesNode", "MiniMaxH3ContextWindows",
          # Qwen-Image 2.1
-         "TextEncodeQwenImage21", "QwenImage21Cache"}
+         "TextEncodeQwenImage21", "QwenImage21Cache",
+         # MOSS-Image
+         "TextEncodeMOSSImageEdit", "SkipLayerGuidanceDiTSimple", "ImageScaleToTotalPixels", "GetImageSize"}
 IMAGE_UNETS = ["krea2/krea2_turbo_fp8_scaled.safetensors", "qwen-image/qwen_image_2512_fp8_e4m3fn.safetensors",
                "FLUX1/flux1-dev-fp8.safetensors"]
 IMAGE_CKPTS = ["illustrij_v20.safetensors"]
@@ -44,6 +46,9 @@ QWEN_LIGHTNING = "qwen-image-edit/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf1
 QWEN21_UNETS = ["qwen-image/qwen_image_2.1_int8_convrot.safetensors",
                 "qwen-image/qwen_image_2.1_turbo_int8_convrot.safetensors"]
 QWEN21_CLIP, QWEN21_VAE = "qwen3vl_8b_int8_convrot.safetensors", "qwen_image_2.1_vae_bf16.safetensors"
+MOSS_UNET, MOSS_CLIP, MOSS_VAE = ("moss-image/moss_image_sft_int8_convrot.safetensors",
+                                  "qwen3.5_9b_w4a8_gptq.safetensors", "flux2-vae_small.safetensors")
+MOSS_EDIT = "moss-image/moss_image_edit_lora_rank_64_bf16.safetensors"
 
 
 class FakeComfy:
@@ -56,6 +61,7 @@ class FakeComfy:
         self.turbo_nodes = True
         self.qwen = True                           # the Qwen Image Edit files and nodes are there
         self.qwen21 = True                         # Qwen-Image 2.1: its files and nodes
+        self.moss = True                           # MOSS-Image: its files, edit LoRA and nodes
         self.hyperflow = True                      # ComfyUI-HyperFlow-H3 with its weights
         self.refine = True                         # the H3 2K nodes, the latent upscaler and the refiner LoRA
         self.audio_refs = True                     # MiniMaxH3ReferenceToVideo takes reference sounds
@@ -71,16 +77,17 @@ class FakeComfy:
 
     def object_info(self, node):
         from video_chain import comfy as C
-        q, q21 = self.qwen, self.qwen21
+        q, q21, mo = self.qwen, self.qwen21, self.moss
         files = {"UNETLoader": ("unet_name", [C.UNET, C.UNET_REF] + ([QWEN_UNET] if q else []) + IMAGE_UNETS
-                                + (QWEN21_UNETS if q21 else [])),
+                                + (QWEN21_UNETS if q21 else []) + ([MOSS_UNET] if mo else [])),
                  "CLIPLoader": ("clip_name", [C.TEXT_ENCODER] + ([QWEN_CLIP] if q else []) + LLM_FILES + IMAGE_CLIPS
-                                + ([QWEN21_CLIP] if q21 else [])),
+                                + ([QWEN21_CLIP] if q21 else []) + ([MOSS_CLIP] if mo else [])),
                  "VAELoader": ("vae_name", [C.VIDEO_VAE, C.AUDIO_VAE] + ([QWEN_VAE] if q else []) + IMAGE_VAES
-                               + ([QWEN21_VAE] if q21 else [])),
+                               + ([QWEN21_VAE] if q21 else []) + ([MOSS_VAE] if mo else [])),
                  "CheckpointLoaderSimple": ("ckpt_name", IMAGE_CKPTS),
                  "LoraLoaderModelOnly": ("lora_name", self.loras + ([QWEN_LIGHTNING] if q else [])
-                                         + ([REFINER] if self.refine else []) + IMAGE_LORAS),
+                                         + ([REFINER] if self.refine else []) + IMAGE_LORAS
+                                         + ([MOSS_EDIT] if mo else [])),
                  "LatentUpscaleModelLoader": ("model_name", [UPSCALER] if self.refine else [])}
         if node in C.REFINE_NODES + ("BlockSparseAttention",) and node != "LatentUpscaleModelLoader":
             return {node: {"input": {"required": {}}}} if self.refine else {}
@@ -91,6 +98,8 @@ class FakeComfy:
                 if self.hyperflow else {}
         if node in C.QWEN21_NODES:
             return {node: {"input": {"required": {}}}} if q21 else {}
+        if node in C.MOSS_NODES:
+            return {node: {"input": {"required": {}}}} if mo else {}
         if node in C.QWEN_NODES:
             return {node: {"input": {"required": {}}}} if q else {}
         if node in ("MiniMaxH3ImageToVideo", "MiniMaxH3TurboSampler", "MiniMaxH3TurboLoRA", "MiniMaxH3AddGuide",
