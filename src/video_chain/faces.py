@@ -78,7 +78,8 @@ def _nms(boxes, scores, thresh=0.4):
 
 
 def detect(path: Path, model: Path) -> list[tuple[float, float, float, float, float]]:
-    """The faces in a picture, [(x1, y1, x2, y2, score)] in its pixels, largest first."""
+    """The faces in a picture, [(x1, y1, x2, y2, score)] in its pixels, largest first. The picture should be a
+    PNG (no EXIF rotation): ffprobe gives the stored size, ffmpeg would turn a rotated photo first."""
     import numpy as np
     w, h = image_size(path)
     scale = SIZE / max(w, h)
@@ -104,16 +105,18 @@ def detect(path: Path, model: Path) -> list[tuple[float, float, float, float, fl
         scores.append(sc[ok])
     if not boxes or not sum(len(s) for s in scores):
         return []
-    b, s = np.concatenate(boxes) / scale, np.concatenate(scores)
+    b, s = np.concatenate(boxes), np.concatenate(scores)
+    b = b / np.array([sw / w, sh / h, sw / w, sh / h])          # the exact factors of the scaled picture
     found = [(*map(float, b[i]), float(s[i])) for i in _nms(b, s)]
     found = [(max(0.0, x1), max(0.0, y1), min(float(w), x2), min(float(h), y2), sc) for x1, y1, x2, y2, sc in found]
+    found = [f for f in found if f[2] - f[0] >= 1 and f[3] - f[1] >= 1]   # e.g. a hit in the padding
     return sorted(found, key=lambda f: -(f[2] - f[0]) * (f[3] - f[1]))
 
 
 def face_square(face, width: int, height: int, margin: float = FACE_MARGIN) -> tuple[int, int, int]:
     """The square crop (x, y, side) around a face box, inside the picture; the face a little above the middle."""
     x1, y1, x2, y2 = face[:4]
-    side = min(int(round(max(x2 - x1, y2 - y1) * margin)), width, height)
+    side = max(1, min(int(round(max(x2 - x1, y2 - y1) * margin)), width, height))
     cx, cy = (x1 + x2) / 2, (y1 + y2) / 2 + (y2 - y1) * 0.05
     x = int(round(min(max(cx - side / 2, 0), width - side)))
     y = int(round(min(max(cy - side / 2, 0), height - side)))

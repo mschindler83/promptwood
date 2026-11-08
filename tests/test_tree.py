@@ -931,3 +931,39 @@ def test_face_detector_finds_no_face_in_a_plain_picture(tmp_path):
     p = tmp_path / "grey.png"
     Image.new("RGB", (320, 180), (128, 128, 128)).save(p)
     assert F.detect(p, model) == []
+
+
+def test_cast_review_fixes(project, tmp_path):
+    o = {"cast": [{"name": "Anna", "images": ["refs/a.png"], "desc": "woman", "voice": {"file": "refs/v.wav"}},
+                  {"name": "Ben", "images": ["refs/b.png"], "desc": "man"}], "identity": {"hint": True}}
+    # only a speech verb after a line names its speaker ("Then @Anna" is ordinary text)
+    p = T.clip_cast(o, '@Anna turns to @Ben. "Hello." Then @Anna smiles.')["prompt"]
+    assert "<d>[English] Hello.</d> Then <Subject 1> (S1) smiles." in p
+    # an @Name inside a quoted line is a spoken word: no picture, no tag, no @ read aloud
+    u = T.clip_cast(o, '@Anna says "Hi @Ben"')
+    assert u["images"] == ["refs/a.png"] and "<d>[English] Hi Ben</d>" in u["prompt"]
+    u = T.clip_cast(o, '@Ben waves "Hi @Anna"')
+    assert u["images"] == ["refs/b.png"] and '"Hi Anna"' in u["prompt"]
+    assert [d["speaker"]["name"] for d in T.dialogue(o, '@Ben waves and says "Hi @Anna"')] == ["Ben"]
+    # with the hint off the description is not in the prompt, so it is not recorded either
+    o["identity"]["hint"] = False
+    assert T.clip_cast(o, "@Ben waves")["record"] == [{"name": "Ben", "desc": ""}]
+    t = T.load(project)
+    T.add_character(project, t, "Ben", face(tmp_path / "b.jpg", (90, 70, 60)))
+    with pytest.raises(ValueError, match="no character called Bob"):
+        T.add_reference(project, face(tmp_path / "x.jpg", (1, 2, 3)), t, "Bob")
+    n = t.add(None, "@Ben stands next to <Picture 1>.")
+    assert any("writes <Picture N> and mentions @Names" in m for m in T.cast_problems(project, t, [n.id]))
+    real = T.chain.to_png
+
+    def failing_crop(image, png, crop=None):                                   # the crop step fails
+        if crop:
+            raise RuntimeError("ffmpeg failed")
+        real(image, png)
+    T.chain.to_png = failing_crop
+    try:
+        with pytest.raises(RuntimeError):
+            T.add_picture(project, t, "Ben", face(tmp_path / "y.jpg", (5, 5, 5)), crop=(0, 0, 32))
+    finally:
+        T.chain.to_png = real
+    assert sorted(f.name for f in (project / "refs").iterdir()) == ["ref1.png"]    # no stray full picture

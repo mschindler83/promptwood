@@ -169,6 +169,8 @@ class RefineDialog(QDialog):
         self.b_refine.setEnabled(False)
         self.buttons.button(QDialogButtonBox.Ok).setEnabled(False)
         self.state.setText("Refining …")
+        self.state.setProperty("severity", "")
+        repolish(self.state)
         text, kind, model, hint = (self.original.toPlainText(), self.kind, self.model.currentData(),
                                    self.hint.text())
         sig, refiner, seed, cast = self._sig, self.refiner, random.randint(0, 2**31 - 1), self.cast
@@ -189,6 +191,8 @@ class RefineDialog(QDialog):
         self.b_refine.setEnabled(True)
         if error:
             self.state.setText(f"Could not refine: {error}")
+            self.state.setProperty("severity", "")
+            repolish(self.state)
         else:
             self.refined_any = True
             self.out.setPlainText(text)

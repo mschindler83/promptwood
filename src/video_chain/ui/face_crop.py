@@ -2,12 +2,14 @@
 it, its corner (or the mouse wheel) to resize it; click another found face to crop to that one."""
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QHBoxLayout, QPushButton, QVBoxLayout, QWidget
 
+from .. import chain
 from .. import faces as F
 from .theme import theme
 from .widgets import label
@@ -25,6 +27,7 @@ class CropView(QWidget):
         self.image, self.faces, self.crop = image, faces, crop
         self.setMinimumSize(560, 400)
         self.setMouseTracking(True)
+        self._shown: QImage | None = None           # the picture scaled to the view (a big photo drags smoothly)
         self._drag: tuple[str, QPointF, tuple[int, int, int]] | None = None
 
     # picture <-> widget coordinates
@@ -57,7 +60,10 @@ class CropView(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         s, ox, oy = self._frame()
-        p.drawImage(QRectF(ox, oy, self.image.width() * s, self.image.height() * s), self.image)
+        target = QRectF(ox, oy, self.image.width() * s, self.image.height() * s)
+        if self._shown is None or self._shown.size() != target.size().toSize():
+            self._shown = self.image.scaled(target.size().toSize(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        p.drawImage(target.topLeft(), self._shown)
         x, y, side = self.crop
         box = self._to_widget(x, y, side, side)
         shade = QPainterPath()
@@ -102,15 +108,20 @@ class CropView(QWidget):
         dx, dy = (pos.x() - start.x()) / s, (pos.y() - start.y()) / s
         if kind == "move":
             self.set_crop((round(x + dx), round(y + dy), side))
-        else:
-            self.set_crop((x, y, round(side + max(dx, dy))))
+        else:                                       # the corner grows the square; its top-left stays
+            limit = min(self.image.width() - x, self.image.height() - y)
+            self.set_crop((x, y, min(round(side + max(dx, dy)), limit)))
 
     def mouseReleaseEvent(self, _e):
         self._drag = None
 
     def wheelEvent(self, e):
         x, y, side = self.crop
+        w, h = self.image.width(), self.image.height()
         new = round(side * (0.93 if e.angleDelta().y() > 0 else 1.07))
+        new = int(max(min(new, w, h), min(MIN_SIDE, w, h)))
+        if new == side:                             # at the smallest / largest size: nothing moves
+            return
         self.set_crop((round(x + (side - new) / 2), round(y + (side - new) / 2), new))
 
 
@@ -122,15 +133,24 @@ class FaceCropDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.resize(820, 640)
-        image = QImage(str(image_path))
+        # one PNG for the view, the detector and the crop: ffmpeg turns a rotated (EXIF) photo upright, as it
+        # does when the face picture is written, so the square lands where it is shown
+        self._tmp = tempfile.TemporaryDirectory(prefix="video-chain-crop-")
+        png = Path(self._tmp.name) / "picture.png"
+        try:
+            chain.to_png(Path(image_path), png)
+        except Exception:  # noqa: BLE001
+            png = Path(image_path)
+        image = QImage(str(png))
         if image.isNull():
+            self._tmp.cleanup()
             raise ValueError(f"not an image: {Path(image_path).name}")
         w, h = image.width(), image.height()
         why = F.available(model)
         self.faces: list = []
         if why is None:
             try:
-                self.faces = F.detect(Path(image_path), model)
+                self.faces = F.detect(png, model)
             except Exception as e:  # noqa: BLE001
                 why = f"the face detector failed: {e}"
         self.why = why
@@ -179,6 +199,10 @@ class FaceCropDialog(QDialog):
         if side < SMALL_SIDE:
             text += f" Small: below {SMALL_SIDE} px the face picture is soft; a bigger source works better."
         self.info.setText(text)
+
+    def done(self, r):
+        super().done(r)
+        self._tmp.cleanup()
 
     def _use_whole(self):
         self.whole = True

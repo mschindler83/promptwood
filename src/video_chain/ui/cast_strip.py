@@ -61,8 +61,9 @@ class CastStrip(QTableWidget):
 
     def show_path(self, options: dict, nodes: list) -> None:
         cast = T.cast_of(options)
-        self.setVisible(bool(cast) and bool(nodes))
-        if not self.isVisible():
+        show = bool(cast) and bool(nodes)
+        self.setVisible(show)
+        if not show:                                # (not isVisible(): False too before the window is shown)
             return
         cells = cast_cells(options, nodes)
         self._ids = [n.id for n in nodes]

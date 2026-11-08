@@ -22,8 +22,8 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QSettings, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QIcon, QImage, QKeySequence, QPixmap, QShortcut
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
-                               QFileDialog, QFormLayout, QInputDialog, QLabel,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+                               QDoubleSpinBox, QFileDialog, QFormLayout, QInputDialog, QLabel,
                                QFrame, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu,
                                QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
                                QScrollArea, QSlider, QSpinBox, QSplitter, QStackedWidget, QTabWidget, QToolButton,
@@ -1057,6 +1057,7 @@ class MainWindow(QMainWindow):
         self.b_ref_crop.setToolTip("Crop the selected face picture again (from the full picture it came from)")
         self.b_ref_crop.clicked.connect(self._recrop_reference)
         self.refs.itemDoubleClicked.connect(lambda _i: self._recrop_reference())
+        self.refs.currentRowChanged.connect(lambda _r: self._update_cast_buttons())
         rrow.addWidget(label("Add face:", level="tertiary"))
         for b in (self.b_ref_add, self.b_ref_start, self.b_ref_clip):
             rrow.addWidget(b)
@@ -1090,7 +1091,8 @@ class MainWindow(QMainWindow):
         lv.addWidget(iw)
         self.ref_size.currentIndexChanged.connect(self._identity_changed)
         self.ref_hint.toggled.connect(self._identity_changed)
-        self.dialogue_lang.currentTextChanged.connect(self._identity_changed)
+        self.dialogue_lang.activated.connect(self._identity_changed)          # a finished choice, not each key
+        self.dialogue_lang.lineEdit().editingFinished.connect(self._identity_changed)
 
         bar, _ = section_bar("Sound reference", left)
         lv.addWidget(bar)
@@ -1755,10 +1757,16 @@ class MainWindow(QMainWindow):
     def _identity_changed(self, *_):
         if self._loading or self.tree is None or self.running:
             return
-        before = self._done_clips()
         ident = dict(self.tree.options.get("identity") or {})
-        ident.update({"size": self.ref_size.currentData(), "hint": self.ref_hint.isChecked(),
-                      "language": self.dialogue_lang.currentText().strip() or "English"})
+        lang = self.dialogue_lang.currentText().strip()
+        if not lang:                                # an emptied field: back to the language in use
+            lang = ident.get("language") or "English"
+            self.dialogue_lang.setCurrentText(lang)
+        new = {"size": self.ref_size.currentData(), "hint": self.ref_hint.isChecked(), "language": lang}
+        if all(ident.get(k) == v for k, v in new.items()):
+            return
+        before = self._done_clips()
+        ident.update(new)
         self.tree.options["identity"] = ident
         self._show_references()
         self._changed()
@@ -1812,6 +1820,11 @@ class MainWindow(QMainWindow):
             return
         new, ok = QInputDialog.getText(self, "Rename character", f"New name for @{c['name']}:", text=c["name"])
         if not ok or new.strip() == c["name"]:
+            return
+        try:
+            T.check_name(self.tree, new, keep=c["name"])
+        except ValueError as e:
+            self.status.setText(f"Could not rename: {e}")
             return
         users = self._mentioning(c["name"])
         made = [n for n in users if self.tree.nodes[n].made]
@@ -1956,7 +1969,8 @@ class MainWindow(QMainWindow):
     def crop_face(self, path: str, title: str, crop=None):
         """The crop window: the square (x, y, side), None for the whole picture, or False (cancelled)."""
         try:
-            dlg = FaceCropDialog(self, Path(path), self.face_detector(), title, crop)
+            dlg = FaceCropDialog(QApplication.activeModalWidget() or self, Path(path), self.face_detector(), title,
+                                 crop)                # over the video / image window it was opened from
         except ValueError as e:
             self.status.setText(str(e))
             return False
@@ -1968,12 +1982,25 @@ class MainWindow(QMainWindow):
     def add_reference(self, path: str, crop="ask") -> bool:
         """A face picture for the selected character (none selected: the lead, or a new character). crop: "ask"
         opens the crop window, else the square (x, y, side) or None (the whole picture)."""
-        if self.project is None or self.running:
+        if self.project is None:
+            self.status.setText("Open or create a project folder first.")
+            return False
+        if self.running:
+            self.status.setText("Wait until generating has finished.")
             return False
         if QImage(path).isNull():
             self.status.setText(f"Not an image: {Path(path).name}")
             return False
         target = self._selected_character()
+        owner = target or T.lead_of(self.tree) or (T.cast_of(self.tree) or [None])[0]
+        if owner is not None and len(owner["images"]) >= T.MAX_PICTURES_PER_CHARACTER:
+            self.status.setText(f"@{owner['name']} has {T.MAX_PICTURES_PER_CHARACTER} face pictures already; remove "
+                                "one first (or select another character).")
+            return False
+        if len(T.all_pictures(self.tree)) >= T.MAX_CAST_PICTURES:
+            self.status.setText(f"The cast has {T.MAX_CAST_PICTURES} face pictures, the most the model takes; "
+                                "remove one first.")
+            return False
         if crop == "ask":
             who = f"@{target['name']}" if target else (f"@{T.lead_of(self.tree)['name']}" if T.lead_of(self.tree)
                                                        else "a new character")
@@ -2092,9 +2119,6 @@ class MainWindow(QMainWindow):
         v = (c or {}).get("voice")
         self.char_voice.setText(f"Voice: {v.get('name') or Path(v['file']).name} ({float(v.get('secs') or 0):.1f} s)"
                                 if v else "Voice: none")
-        self.b_voice_play.setEnabled(bool(v))
-        self.b_voice_del.setEnabled(bool(v) and not self.running)
-        self.b_voice_file.setEnabled(c is not None and not self.running)
         self.refs.clear()
         for k, rel in enumerate(c["images"] if c else [], start=1):
             pm = self._pixmap(self.project / rel) if self.project else None
@@ -2103,6 +2127,20 @@ class MainWindow(QMainWindow):
             item.setToolTip(rel)
             self.refs.addItem(item)
         self._update_ref_start_button()
+        self._update_cast_buttons()
+
+    def _update_cast_buttons(self):
+        """The cast buttons that need a selected character, voice or face picture (and no run)."""
+        c = self._selected_character()
+        idle = self.project is not None and not self.running
+        v = bool(c and c.get("voice"))
+        for w in (self.b_char_rename, self.b_char_del, self.char_desc, self.char_lead, self.b_voice_file):
+            w.setEnabled(idle and c is not None)
+        self.b_voice_del.setEnabled(idle and v)
+        self.b_voice_play.setEnabled(v)
+        pic = self.refs.currentItem() is not None
+        self.b_ref_crop.setEnabled(idle and pic)
+        self.b_ref_del.setEnabled(idle and pic)
 
     # ---- a character's voice
     def _voice_from_file(self):
@@ -2735,6 +2773,7 @@ class MainWindow(QMainWindow):
             w.setEnabled(idle)
         self._turbo_widgets()                      # after the loop: turbo locks the steps fields again
         self._update_ref_start_button()            # after the loop too: they depend on the selection
+        self._update_cast_buttons()
 
     def select(self, nid):
         if self.tree is None:

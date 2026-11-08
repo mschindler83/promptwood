@@ -613,7 +613,10 @@ def test_identity_references_in_the_window(app, win, tmp_path, image, monkeypatc
     assert strip.item(rows.index("@Tom"), cols.index(ids[0])).text() == ""
     assert "speaks with its voice" in strip.item(rows.index("@Tom"), cols.index(ids[1])).toolTip()
     strip._clicked(cols.index(ids[1]))                                                   # shows that card
+    win.dialogue_lang.setCurrentText("Ger")                                  # typing: nothing changes yet
+    assert win.tree.options["identity"]["language"] == "English"
     win.dialogue_lang.setCurrentText("German")
+    win.dialogue_lang.lineEdit().editingFinished.emit()
     assert win.tree.options["identity"]["language"] == "German"
     win._remove_voice()
     assert win.char_voice.text() == "Voice: none" and not (tmp_path / "proj" / "refs" / "voice1.wav").exists()

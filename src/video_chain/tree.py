@@ -90,7 +90,9 @@ PICTURE_TAG = re.compile(r"<Picture\s*\d+>", re.IGNORECASE)
 # a spoken line: "...", “...”, „...“, «...» or MiniMax's own <d>[Language] ...</d>
 DIALOGUE = re.compile(r'<d>\s*(?:\[[^\]\n]*\]\s*)?(.*?)</d>|"([^"\n]+)"|“([^”\n]+)”|„([^“”\n]+)[“”]|«([^»\n]+)»',
                       re.DOTALL)
-SAID_BY = re.compile(r"[ \t]*,?[ \t]*([A-Za-z]+)[ \t]+@(\w[\w-]*)")    # "...", says @Anna
+SAID_BY = re.compile(r"[ \t]*,?[ \t]*(says|said|asks|asked|answers|answered|replies|replied|whispers|whispered|"
+                     r"shouts|shouted|calls|called|adds|added|cries|cried|murmurs|murmured|mutters|muttered|laughs|"
+                     r"laughed|sagt|fragt|antwortet|ruft|flüstert)[ \t]+@(\w[\w-]*)", re.IGNORECASE)   # "...", says @Anna
 VOICE_MAX_SECS = 7.5               # a character's voice is cut to this (two voices fit the 15 s a clip may have)
 WRONG_TAG = re.compile(r"<(Image|Img|Face|Person|Photo|Pic|Ref|Reference)\s*(\d+)>", re.IGNORECASE)
 
@@ -449,10 +451,16 @@ def _write_picture(project: Path, image: Path, rel: str, crop: tuple[int, int, i
     beside it (source_of) for cropping again."""
     full = Path(project) / source_of(rel)
     if crop:
-        if Path(image).resolve() != full.resolve():
+        made = Path(image).resolve() != full.resolve()
+        if made:
             chain.to_png(Path(image), full)
         x, y, side = (int(v) for v in crop)
-        chain.to_png(full, Path(project) / rel, (x, y, side, side))
+        try:
+            chain.to_png(full, Path(project) / rel, (x, y, side, side))
+        except BaseException:
+            if made:
+                full.unlink(missing_ok=True)
+            raise
     else:
         chain.to_png(Path(image), Path(project) / rel)
         full.unlink(missing_ok=True)
@@ -524,6 +532,8 @@ def add_reference(project: Path, image: Path, tree: Tree, name: str | None = Non
                   crop: tuple[int, int, int] | None = None) -> str:
     """A face picture for a character (name), else for the lead, else for a new character PersonN."""
     target = character(tree, name) if name else (lead_of(tree) or (cast_of(tree) or [None])[0])
+    if name and target is None:
+        raise ValueError(f"no character called {name}")
     if target is None:
         return add_character(project, tree, next_character_name(tree), image, crop=crop)["images"][0]
     return add_picture(project, tree, target["name"], image, crop)
@@ -654,11 +664,25 @@ def rename_character(tree: Tree, old: str, new: str) -> list[str]:
     return changed
 
 
+def _in_lines(text: str):
+    """pos -> True when it lies inside a quoted line (an @Name there is a spoken word, not a mention)."""
+    spans = [(m.start(), m.end()) for m in DIALOGUE.finditer(text or "")]
+    return lambda pos: any(a < pos < b for a, b in spans)
+
+
+def _unmention(line: str) -> str:
+    """A spoken line with its @Names as plain names (nobody says the @)."""
+    return MENTION.sub(lambda m: m.group(1), line)
+
+
 def mentions(options: dict, text: str) -> tuple[list[dict], list[str]]:
     """The characters a prompt mentions as @Name, in the order they first appear, and the @words that name
-    nobody in the cast."""
+    nobody in the cast. An @Name inside a quoted line is a spoken word, not a mention."""
     found, unknown = [], []
+    inside = _in_lines(text)
     for m in MENTION.finditer(text or ""):
+        if inside(m.start()):
+            continue
         c = character(options, m.group(1))
         if c is None:
             if m.group(1) not in unknown:
@@ -698,7 +722,8 @@ def dialogue(options: dict, text: str, default: dict | None = None) -> list[dict
         if line[-1:] in (".", "!", "?"):
             masked[b - 1] = "."                     # ... but a line that ends one ends its sentence
     masked = "".join(masked)
-    marks = [(m.start(), character(options, m.group(1))) for m in MENTION.finditer(text)]
+    inside = _in_lines(text)
+    marks = [(m.start(), character(options, m.group(1))) for m in MENTION.finditer(text) if not inside(m.start())]
     marks = [(pos, c) for pos, c in marks if c is not None]
     out, prev_end = [], 0
     for a, b, line in spans:
@@ -798,7 +823,7 @@ def _voiced_prompt(options: dict, text: str, found: list[dict], lines: list[dict
         body += names(text[pos:d["start"]])
         sp = d["speaker"]
         end = d["end"]
-        line = d["line"].rstrip(",;: ") or d["line"]
+        line = _unmention(d["line"].rstrip(",;: ") or d["line"])
         say = f"<d>[{lang}] {line}</d>"
         # "Hi," says @Anna.  ->  <Subject 1> (S1) says, ... <d>Hi</d>.
         tail = SAID_BY.match(text, end)
@@ -888,12 +913,13 @@ def clip_cast(options: dict, prompt: str) -> dict:
     if found:
         tags, images = _picture_tags(found)
         seen: set[str] = set()
+        inside = _in_lines(text)
 
         def name(m):
             c = character(options, m.group(1))
             if c is None:
-                return m.group(0)
-            if not c["images"] or c["name"] in seen:
+                return m.group(1) if inside(m.start()) else m.group(0)
+            if not c["images"] or c["name"] in seen or inside(m.start()):
                 return c["name"]
             seen.add(c["name"])
             return f"{c['name']} (the person in {tags[c['name']]})"
@@ -904,8 +930,9 @@ def clip_cast(options: dict, prompt: str) -> dict:
             extra.append("The pictures only show who the people are; the scene, pose and framing come from the "
                          "video.")
             out = f"{out.rstrip()} {' '.join(extra)}"
+        hint = (options.get("identity") or {}).get("hint", True)      # the descriptions are in the prompt only then
         return {"mode": "mention", "characters": found, "images": images, "voices": [], "prompt": out,
-                "record": [{"name": c["name"], "desc": c.get("desc", "")} for c in found]}
+                "record": [{"name": c["name"], "desc": c.get("desc", "") if hint else ""} for c in found]}
     plain = MENTION.sub(lambda m: (character(options, m.group(1)) or {"name": m.group(0)})["name"], text)
     if PICTURE_TAG.search(text) and all_pictures(options):
         return {"mode": "tags", "characters": cast_of(options), "images": all_pictures(options), "voices": [],
@@ -937,6 +964,9 @@ def cast_problems(project: Path, tree: Tree, todo: list[str]) -> list[str]:
             out.append(f"clip #{nid[1:]} writes <{m.group(1)} {m.group(2)}>; the model only knows <Picture "
                        f"{m.group(2)}> (or mention the character as @Name)")
         use = clip_cast(tree.options, node.prompt)
+        if use["mode"] in ("mention", "voices") and PICTURE_TAG.search(text):
+            out.append(f"clip #{nid[1:]} writes <Picture N> and mentions @Names; with @Names the app numbers the "
+                       "pictures itself, so write the people only as @Name")
         if use["mode"] == "tags":
             top = max(int(re.sub(r"\D", "", t)) for t in PICTURE_TAG.findall(text))
             if top > len(use["images"]):

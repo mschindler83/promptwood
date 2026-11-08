@@ -102,8 +102,10 @@ def comfy_model_roots(comfy_dir: Path, kind: str) -> list[Path]:
             data = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
         except Exception:  # noqa: BLE001
             data = {}
+        if not isinstance(data, dict):
+            data = {}
         for section in data.values():
-            if not isinstance(section, dict) or kind not in section:
+            if not isinstance(section, dict) or not section.get(kind):
                 continue
             base = Path(os.path.expanduser(str(section.get("base_path", ""))))
             for entry in str(section[kind]).split("\n"):
@@ -1226,7 +1228,8 @@ def cast_instruction(cast: list[dict]) -> str:
         return ""
     people = "; ".join(f"@{c['name']}" + (f" ({c['desc'].strip().rstrip('.')})" if c.get("desc") else "")
                        + (", has a voice" if c.get("voice") else "") for c in cast)
-    return (f"The cast, written as @Name: {people}. Write a cast member always as @Name, exactly as written (not "
+    return (f"The cast, written as @Name: {people}. The descriptions are for your information; do not repeat "
+            "them in the prompt. Write a cast member always as @Name, exactly as written (not "
             "as a description or a plain name), at least once in each sentence about them. Mention a cast member only "
             "if the user's prompt or request does. Each spoken line: in double quotes, in its own sentence that "
             "starts with the speaker's @Name, never with he, she or they. Wrong: @A and @B sit down. She says "
