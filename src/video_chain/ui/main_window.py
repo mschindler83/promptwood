@@ -23,7 +23,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QSettings, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QIcon, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
-                               QDoubleSpinBox, QFileDialog, QFormLayout, QInputDialog, QLabel,
+                               QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QInputDialog, QLabel,
                                QFrame, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu,
                                QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
                                QScrollArea, QSlider, QSpinBox, QSplitter, QStackedWidget, QTabWidget, QToolButton,
@@ -36,7 +36,7 @@ from ..comfy import REF_HINT
 from .graph import START, GraphView, NodeInfo
 from .image_picker import pick_image
 from .clip_dialogs import CompareDialog, HandoverDialog
-from .lora_stack import LoraStack, fill_lora_combo, lora_label, lora_path
+from .lora_stack import LORA_MAX, LORA_MIN, LoraStack, fill_lora_combo, lora_label, lora_path
 from .mentions import MentionHelper
 from .cast_strip import CastStrip
 from .timeline import Block, Timeline
@@ -161,12 +161,23 @@ class NewProjectDialog(QDialog):
             self.image.setText(f)
 
 
+def variant_strengths(loras: list[dict], steps: list[float], k: int) -> list[dict]:
+    """The LoRA stack of variant k (1, 2, ...): each strength moved by k times its step (within the LoRA range)."""
+    out = copy.deepcopy(loras)
+    for e, step in zip(out, steps):
+        if step:
+            e["strength"] = round(min(LORA_MAX, max(LORA_MIN, float(e.get("strength", 1.0)) + k * step)), 4)
+    return out
+
+
 class VariantsDialog(QDialog):
-    """How many variants of a clip, and whether to generate them right away."""
+    """How many variants of a clip, and whether to generate them right away. Advanced: move each LoRA's strength
+    by a step per variant (a strength sweep), and keep the clip's seed so only the strengths differ."""
 
     def __init__(self, parent, node):
         super().__init__(parent)
         self.setWindowTitle("Create variants")
+        self.loras = [e for e in ((node.overrides or {}).get("loras") or []) if e.get("path")]
         f = QFormLayout(self)
         text = node.prompt if len(node.prompt) < 90 else node.prompt[:87] + "…"
         info = label(f"Clip #{node.id[1:]}: “{text}”\nEach variant is a new branch from the same point with the same "
@@ -180,11 +191,66 @@ class VariantsDialog(QDialog):
         self.generate = QCheckBox("Generate them now")
         self.generate.setChecked(True)
         f.addRow("", self.generate)
+
+        self.advanced = QGroupBox("Advanced: change the LoRA strengths per variant")
+        self.advanced.setCheckable(True)
+        self.advanced.setChecked(False)
+        self.advanced.setToolTip("Variant 1 gets each strength plus its step, variant 2 plus twice the step … "
+                                 "(a negative step lowers it), e.g. to find the strength that works best")
+        av = QFormLayout(self.advanced)
+        self.steps: list[QDoubleSpinBox] = []
+        if not self.loras:
+            av.addRow(label("This clip has no LoRAs.", level="tertiary"))
+        for e in self.loras:
+            spin = QDoubleSpinBox()
+            spin.setRange(-5.0, 5.0)
+            spin.setSingleStep(0.05)
+            spin.setDecimals(2)
+            spin.setPrefix("± ")
+            spin.setSuffix(" per variant")
+            spin.setMinimumWidth(170)
+            spin.setToolTip(f"Now {float(e.get('strength', 1.0)):g}; variant k gets {float(e.get('strength', 1.0)):g} "
+                            "+ k × this step")
+            spin.valueChanged.connect(self._preview)
+            guard_wheel(spin)
+            self.steps.append(spin)
+            av.addRow(f"{lora_label(e['path'])[:32]} (×{float(e.get('strength', 1.0)):g})", spin)
+        self.same_seed = QCheckBox("Keep the clip's seed (only the strengths differ)")
+        self.same_seed.setToolTip("Off: every variant gets a new seed too. On: the same seed as the clip, so the "
+                                  "variants differ only by their LoRA strengths")
+        self.same_seed.setEnabled(bool(self.loras))
+        av.addRow("", self.same_seed)
+        self.preview = label("", level="tertiary")
+        self.preview.setWordWrap(True)
+        av.addRow(self.preview)
+        f.addRow(self.advanced)
+        self.advanced.toggled.connect(self._preview)
+        self.count.valueChanged.connect(self._preview)
+        self._preview()
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("Create")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         f.addRow(buttons)
+
+    def strength_steps(self) -> list[float]:
+        """The step per variant of each LoRA (all 0 when the advanced settings are off)."""
+        on = self.advanced.isChecked()
+        return [s.value() if on else 0.0 for s in self.steps]
+
+    def keep_seed(self) -> bool:
+        return self.advanced.isChecked() and self.same_seed.isChecked() and any(self.strength_steps())
+
+    def _preview(self, *_):
+        steps = self.strength_steps()
+        if not self.advanced.isChecked() or not any(steps):
+            self.preview.setText("")
+            return
+        rows = []
+        for k in range(1, self.count.value() + 1):
+            st = variant_strengths(self.loras, steps, k)
+            rows.append(f"#{k}: " + ", ".join(f"×{float(e.get('strength', 1.0)):g}" for e, s in zip(st, steps) if s))
+        self.preview.setText("Strengths: " + " · ".join(rows))
 
 
 class ExportDialog(QDialog):
@@ -4351,7 +4417,8 @@ class MainWindow(QMainWindow):
         elif action == "variants" and node is not None:
             dlg = VariantsDialog(self, node)
             if dlg.exec() == QDialog.Accepted:
-                self.create_variants(node.id, dlg.count.value(), dlg.generate.isChecked())
+                self.create_variants(node.id, dlg.count.value(), dlg.generate.isChecked(),
+                                     strength_steps=dlg.strength_steps(), keep_seed=dlg.keep_seed())
             return
         elif action in ("branch", "variant") and node is not None:
             new = self.tree.add(node.parent, node.prompt if action == "variant" else "",
@@ -4922,25 +4989,32 @@ class MainWindow(QMainWindow):
                             "in the other branches.")
         return gone
 
-    def create_variants(self, nid: str, count: int, generate: bool = True) -> list[str]:
+    def create_variants(self, nid: str, count: int, generate: bool = True, strength_steps: list[float] | None = None,
+                        keep_seed: bool = False) -> list[str]:
         """count new branches next to nid: same prompt and clip settings, each its own new seed; then (optionally)
-        generate them in one run. Returns the new node ids."""
+        generate them in one run. strength_steps: per LoRA of the clip's stack, variant k gets its strength + k ×
+        step; keep_seed: the clip's seed instead of new ones. Returns the new node ids."""
         if self.tree is None or self.running or nid not in self.tree.nodes:
             return []
         node = self.tree.nodes[nid]
         ids = []
         if node.is_video:
             return []
-        for _ in range(max(1, int(count))):
-            new = self.tree.add(node.parent, node.prompt, self._new_seed())
+        steps = list(strength_steps or [])
+        loras = [e for e in ((node.overrides or {}).get("loras") or []) if e.get("path")]
+        for k in range(1, max(1, int(count)) + 1):
+            new = self.tree.add(node.parent, node.prompt, node.seed if keep_seed else self._new_seed())
             new.overrides = copy.deepcopy(node.overrides)
+            if any(steps) and loras:
+                new.overrides["loras"] = variant_strengths(loras, steps, k)
             self._copy_video_child(nid, new.id)
             ids.append(new.id)
         self._write_tree()
         self.refresh()
         self.graph.reveal(ids[-1])
-        self.status.setText(f"{len(ids)} variant{'s' if len(ids) != 1 else ''} of clip #{nid[1:]} added; once made, "
-                            "compare them side by side with the Compare button on the card.")
+        sweep = " with stepped LoRA strengths" if any(steps) and loras else ""
+        self.status.setText(f"{len(ids)} variant{'s' if len(ids) != 1 else ''} of clip #{nid[1:]} added{sweep}; once "
+                            "made, compare them side by side with the Compare button on the card.")
         if generate:
             self._start(ids)
         return ids

@@ -860,6 +860,36 @@ def test_create_variants(app, win, tmp_path, image):
     assert not win.running and all(win.state(n) == "new" for n in only)
 
 
+
+def test_variants_with_stepped_lora_strengths(app, win, tmp_path, image):
+    """Advanced variants: each LoRA's strength moves by its step per variant (within the range), optionally with
+    the clip's own seed so only the strengths differ."""
+    from video_chain.ui.main_window import VariantsDialog
+    a, b = tmp_path / "a.safetensors", tmp_path / "b.safetensors"
+    a.write_bytes(b"x")
+    b.write_bytes(b"y")
+    ids = new_project(win, tmp_path, image, ("one",))
+    node = win.tree.nodes[ids[0]]
+    node.overrides = {"loras": [{"path": str(a), "strength": 0.7}, {"path": str(b), "strength": 9.8}]}
+    dlg = VariantsDialog(win, node)
+    assert not dlg.advanced.isChecked() and dlg.strength_steps() == [0.0, 0.0] and not dlg.keep_seed()
+    dlg.advanced.setChecked(True)
+    dlg.count.setValue(3)
+    dlg.steps[0].setValue(-0.1)
+    dlg.steps[1].setValue(0.15)
+    dlg.same_seed.setChecked(True)
+    assert dlg.strength_steps() == [-0.1, 0.15] and dlg.keep_seed()
+    assert "#1: ×0.6, ×9.95" in dlg.preview.text() and "#3: ×0.4, ×10" in dlg.preview.text()   # capped at 10
+    dlg.done(0)
+    new = win.create_variants(ids[0], 3, generate=False, strength_steps=[-0.1, 0.15], keep_seed=True)
+    got = [[e["strength"] for e in win.tree.nodes[n].overrides["loras"]] for n in new]
+    assert got == [[0.6, 9.95], [0.5, 10.0], [0.4, 10.0]]
+    assert all(win.tree.nodes[n].seed == node.seed for n in new)
+    assert node.overrides["loras"][0]["strength"] == 0.7                     # the clip itself is unchanged
+    plain = win.create_variants(ids[0], 1, generate=False, strength_steps=[0.0, 0.0])
+    assert win.tree.nodes[plain[0]].overrides == node.overrides and win.tree.nodes[plain[0]].seed != node.seed
+
+
 def test_keep_this_branch(app, win, tmp_path, image):
     ids = new_project(win, tmp_path, image, ("a", "b"))                       # n1 -> n2
     variants = win.create_variants(ids[1], 2, generate=False)                 # n1 -> n2 | v1 | v2
