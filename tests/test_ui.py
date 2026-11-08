@@ -1850,8 +1850,8 @@ def test_continue_the_real_videos_sound_on_the_card(app, win, tmp_path):
     win.node_action("continue", v)
     a = win.selected_id()
     card = next(c for c in win.cards if c.nid == a)
-    assert card.sound_box.isVisibleTo(card) and not card.src_sound.isChecked() and not card.guide.currentData()
-    card.src_sound.setChecked(True)
+    assert card.sound_box.isVisibleTo(card) and card.src_sound.currentData() is None and not card.guide.currentData()
+    card.src_sound.setCurrentIndex(card.src_sound.findData(True))
     flush(app, win)
     ov = win.tree.nodes[a].overrides
     assert ov["source_sound"] is True and ov["guide"] == 22    # the longest carry-over the 36-frame video allows
@@ -1859,9 +1859,23 @@ def test_continue_the_real_videos_sound_on_the_card(app, win, tmp_path):
     assert card.src_sound_info.text().startswith("Uses 0:") and "real.mp4" in card.src_sound_info.text()
     assert "video's sound" in card.settings_toggle.text()
     assert T.SOURCE_SOUND_TEXT.format(k=1) in card.edit.toolTip()
-    card.src_sound.setChecked(False)                                                   # optional: off again
+    card.src_sound.setCurrentIndex(0)                                                   # optional: off again
     flush(app, win)
     assert "source_sound" not in win.tree.nodes[a].overrides
+    card = next(c for c in win.cards if c.nid == a)                         # or the sound of the clip before, again
+    card.src_sound.setCurrentIndex(card.src_sound.findData("previous"))
+    flush(app, win)
+    assert win.tree.nodes[a].overrides["source_sound"] == "previous"
+    card = next(c for c in win.cards if c.nid == a)
+    assert card.src_sound_info.text().startswith(f"Repeats the sound of video #{v[1:]}")
+    assert "repeats the sound before" in card.settings_toggle.text()
+    win.node_action("continue", a)                    # after a generated clip: repeat it, or go on with the video
+    b = win.selected_id()
+    card = next(c for c in win.cards if c.nid == b)
+    model = card.src_sound.model()
+    assert card.sound_box.isVisibleTo(card)
+    assert model.item(card.src_sound.findData("previous")).isEnabled()
+    assert model.item(card.src_sound.findData(True)).isEnabled()           # (the real video is still before it)
 
 
 def test_scenes_in_the_window(app, win, tmp_path, image, monkeypatch):

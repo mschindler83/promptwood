@@ -330,3 +330,60 @@ def test_a_videos_first_frame_survives_reopening(project, source):
     assert first.is_file()
     T.ensure_handovers(project, t)                      # as on opening the project / starting a run
     assert first.is_file() and T.Checker(project, t).status(v.id) == "done"
+
+
+def test_repeat_the_sound_of_the_clip_before(project, tmp_path):
+    """'Repeat the sound of the clip before': the clip before's sound as the path plays it, looped to this clip's
+    length, laid so the joined path hears it from its beginning; made in one run with the clip before."""
+    with_start(project, tmp_path)
+    t = T.load(project)
+    t.options["frames"] = 48                        # 2 s: the least sound the model takes
+    a = t.add(None, "music plays")
+    b = t.add(a.id, "it goes on")
+    b.overrides = {"source_sound": "previous"}
+    T.save(project, t)
+    span = T.previous_sound_span(t, b)
+    assert span["file"] == "" and span["video"] == a.id and span["mode"] == "previous"
+    assert T.previous_sound_span(t, a) is None
+    assert T.source_sound_problems(t, [b.id], project) == [f"clip #{b.id[1:]} repeats the sound of clip "
+                                                           f"#{a.id[1:]}, which is not made yet"]
+    assert T.source_sound_problems(t, [a.id, b.id], project) == []        # a is made first in the same run
+    gen = FakeGenerator(frames=17, size=None)       # clip k sounds at 300 + 100 k Hz
+    T.run_tree(gen, project, [a.id, b.id], log=lambda _m: None)
+    call = next(c for c in gen.calls if c["prompt"].startswith("it goes on"))
+    assert call["settings"]["audio_paths"][-1].endswith("source_sound.wav")
+    t = T.load(project)
+    rec = t.nodes[b.id].made["settings"]["source_sound"]
+    assert rec["mode"] == "previous" and rec["file"] == t.nodes[a.id].made["video"]      # relative: unique name
+    n_a = T.made_frames(t.nodes[a.id])
+    assert rec["loop"] == round(n_a / 24, 3) and rec["offset"] == round((n_a - 1) / 24, 3)
+    clip_b = project / t.nodes[b.id].made["video"]
+    assert abs(_main_hz(clip_b) - 300) < 30                    # a's sound (its own would be 400 Hz)
+    assert T.Checker(project, t).status(b.id) == "done"
+    assert abs(chain.audio_seconds(clip_b) - chain.probe(clip_b)["frames"] / 24) < 0.1   # looped to its length
+    t.nodes[a.id].prompt = "music plays louder"                 # a made again
+    T.save(project, t)
+    T.run_tree(FakeGenerator(frames=17, size=None), project, [a.id], log=lambda _m: None)
+    t = T.load(project)
+    assert t.nodes[a.id].made["video"] != rec["file"]
+    assert T.Checker(project, t).status(b.id) == "changed"     # its sound has changed
+
+
+def test_repeat_the_sound_of_a_real_video(project, tmp_path):
+    """After a real video the repeated sound is the video's range."""
+    src = tmp_path / "talk.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=red:s=320x180:r=30:d=5", "-f", "lavfi",
+                    "-i", "sine=f=700:d=5", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest",
+                    str(src)], check=True)
+    t = T.load(project)
+    t.options["frames"] = 48
+    v = t.add_video(None, str(src), 1.0, 2.0)
+    a = t.add(v.id, "again")
+    a.overrides = {"source_sound": "previous", "guide": 5}
+    span = T.source_sound_span(t, a, project)
+    loop = round(T.clip_length(t, v) / 24, 3)
+    assert span["file"] == str(src) and span["start"] == 1.0 and span["loop"] == loop
+    assert span["offset"] == round((loop - 5 / 24) % loop, 3)
+    wav = tmp_path / "out.wav"
+    chain.to_wav(src, wav, span["start"], span["secs"], span["loop"], span["offset"])
+    assert abs(chain.audio_seconds(wav) - span["secs"]) < 0.05 and abs(_main_hz(wav) - 700) < 30

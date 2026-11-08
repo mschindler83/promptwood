@@ -1289,7 +1289,7 @@ class Checker:
     def settings(self, nid: str) -> dict | None:
         base = self.base()
         node = self.tree.nodes[nid]
-        span = source_sound_span(self.tree, node) \
+        span = source_sound_span(self.tree, node, self.project) \
             if not node.is_video and (node.overrides or {}).get("source_sound") else None
         return None if base is None else node_settings(base, self.tree.options, node, self.audio_pool(),
                                                        self.picture_sha, source_sound=span)
@@ -1466,11 +1466,14 @@ def source_video(tree: Tree, node: Node) -> Node | None:
     return next((n for n in reversed(path[:-1]) if n.is_video), None)
 
 
-def source_sound_span(tree: Tree, node: Node) -> dict | None:
+def source_sound_span(tree: Tree, node: Node, project: Path | None = None) -> dict | None:
     """Where in its real video's file a clip's sound continues ("Continue the video's sound"): the part right after
     what the path has shown so far. {"file", "start", "secs", "video"} (seconds in the file), or None without a real
     video before the clip. A generated clip's first frame (or its carry-over frames) repeats the end of the clip
-    before, so its sound starts that much earlier; a clip that hands over early counts up to that frame."""
+    before, so its sound starts that much earlier; a clip that hands over early counts up to that frame.
+    With "Repeat the sound of the clip before" (source_sound == "previous") see previous_sound_span."""
+    if (node.overrides or {}).get("source_sound") == "previous":
+        return previous_sound_span(tree, node, project)
     path = tree.path_to(node.id)
     vi = max((i for i, n in enumerate(path[:-1]) if n.is_video), default=None)
     if vi is None:
@@ -1487,14 +1490,71 @@ def source_sound_span(tree: Tree, node: Node) -> dict | None:
             "secs": round(clip_length(tree, node) / chain.FPS, 3), "video": v.id}
 
 
-def source_sound_problems(tree: Tree, todo: list[str]) -> list[str]:
-    """Why clips that continue their real video's sound cannot be made (one message per problem)."""
+def previous_sound_span(tree: Tree, node: Node, project: Path | None = None) -> dict | None:
+    """'Repeat the sound of the clip before': the sound of the clip before this one as the joined path plays it
+    (without its carry-over frames and the frames after an early hand-over), repeated as often as this clip needs.
+    It is laid so that the joined path hears it from its beginning: this clip's own first frame (or carry-over
+    frames) is left out when joined, so its sound starts that much before the loop's end (offset).
+    {"file", "start", "secs", "loop", "offset", "video", "mode": "previous"}; a generated clip's file is named
+    relative to the project folder (its names are unique per version; see sound_file), "" while it is not made yet.
+    None for a first clip."""
+    path = tree.path_to(node.id)
+    if len(path) < 2:
+        return None
+    k = len(path) - 2
+    p = path[k]
+    secs = round(clip_length(tree, node) / chain.FPS, 3)
+    lead = max(1, _guide_of(node, planned=True)) / chain.FPS
+    if p.is_video:
+        file, base = str((p.source or {}).get("file") or ""), float((p.source or {}).get("start") or 0.0)
+    elif p.made:
+        file, base = str(p.made["video"]), 0.0
+    else:
+        file, base = "", 0.0
+    n = (made_frames(p) if not p.is_video else 0) or clip_length(tree, p)
+    a, b = path_cuts(tree, path)[k]
+    loop = max(1, n - a - b) / chain.FPS
+    return {"file": file, "start": round(base + a / chain.FPS, 3), "secs": secs, "loop": round(loop, 3),
+            "offset": round((loop - lead) % loop, 3), "video": p.id, "mode": "previous"}
+
+
+def sound_file(project: Path | None, sound: dict) -> Path:
+    """The file of a clip's soundtrack (source_sound span or record): a real video's own path, or a clip of the
+    project (relative)."""
+    f = Path(sound["file"])
+    return f if f.is_absolute() or project is None else Path(project) / f
+
+
+def source_sound_problems(tree: Tree, todo: list[str], project: Path | None = None) -> list[str]:
+    """Why clips that continue their real video's sound (or repeat the clip before's) cannot be made (one message
+    per problem)."""
     out = []
     for nid in todo:
         node = tree.nodes[nid]
         if node.is_video or not (node.overrides or {}).get("source_sound"):
             continue
-        span = source_sound_span(tree, node)
+        span = source_sound_span(tree, node, project)
+        if (node.overrides or {}).get("source_sound") == "previous":
+            if span is None:
+                out.append(f"clip #{nid[1:]} repeats the sound of the clip before, but it is the first clip")
+                continue
+            before = tree.nodes[span["video"]]
+            if not span["file"]:
+                if before.id not in todo:          # (made first in this run otherwise)
+                    out.append(f"clip #{nid[1:]} repeats the sound of clip #{before.id[1:]}, which is not made yet")
+                continue
+            if not sound_file(project, span).is_file():
+                out.append(f"the video file of clip #{nid[1:]}'s sound is missing ({Path(span['file']).name})")
+                continue
+            if before.id in todo:                  # it is made again first: its new sound is checked then
+                continue
+            if span["secs"] < AUDIO_REF_MIN:
+                out.append(f"clip #{nid[1:]} is shorter than {AUDIO_REF_MIN:.0f} s, the least sound the model "
+                           "takes; make it longer to repeat the sound of the clip before")
+            if chain.audio_seconds(sound_file(project, span)) is None:
+                out.append(f"clip #{before.id[1:]} has no sound, so clip #{nid[1:]} cannot repeat it")
+            out += _sound_room(tree, node, span)
+            continue
         if span is None:
             out.append(f"clip #{nid[1:]} continues a real video's sound, but there is no real video before it")
             continue
@@ -1512,18 +1572,25 @@ def source_sound_problems(tree: Tree, todo: list[str]) -> list[str]:
             out.append(f"clip #{nid[1:]} needs the sound of {Path(span['file']).name} up to "
                        f"{int(need // 60)}:{need % 60:04.1f}, but it ends at {int(have // 60)}:{have % 60:04.1f}; "
                        "make the clip shorter")
-        n_sounds = audio_mentioned(full_prompt(tree.options, node.prompt))
-        voices = clip_cast(tree.options, node.prompt).get("voices") or []
-        secs = sum(float(a.get("secs") or 0) for a in audio_refs(tree)[:n_sounds]) + span["secs"] + \
-            sum(float(c["voice"].get("secs") or 0) for c in cast_of(tree) if c.get("voice")
-                and c["voice"]["file"] in voices)
-        if n_sounds + len(voices) + 1 > MAX_AUDIO_REFS:
-            out.append(f"clip #{nid[1:]} has too many sounds with the video's sound (the model takes "
-                       f"{MAX_AUDIO_REFS}); remove a sound or voice from its prompt")
-        elif secs > AUDIO_REF_TOTAL + 0.05:
-            out.append(f"clip #{nid[1:]} needs {secs:.1f} s of sound with the video's sound (the model takes "
-                       f"{AUDIO_REF_TOTAL:.0f} s); make it shorter or leave out its other sounds")
+        out += _sound_room(tree, node, span)
     return out
+
+
+def _sound_room(tree: Tree, node: Node, span: dict) -> list[str]:
+    """The model's limits on sound references, with the clip's soundtrack as one more."""
+    nid = node.id
+    n_sounds = audio_mentioned(full_prompt(tree.options, node.prompt))
+    voices = clip_cast(tree.options, node.prompt).get("voices") or []
+    secs = sum(float(a.get("secs") or 0) for a in audio_refs(tree)[:n_sounds]) + span["secs"] + \
+        sum(float(c["voice"].get("secs") or 0) for c in cast_of(tree) if c.get("voice")
+            and c["voice"]["file"] in voices)
+    if n_sounds + len(voices) + 1 > MAX_AUDIO_REFS:
+        return [f"clip #{nid[1:]} has too many sounds with its soundtrack (the model takes "
+                f"{MAX_AUDIO_REFS}); remove a sound or voice from its prompt"]
+    if secs > AUDIO_REF_TOTAL + 0.05:
+        return [f"clip #{nid[1:]} needs {secs:.1f} s of sound with its soundtrack (the model takes "
+                f"{AUDIO_REF_TOTAL:.0f} s); make it shorter or leave out its other sounds"]
+    return []
 
 
 def lora_trigger_words(paths: list[str]) -> list[str] | None:
@@ -1876,7 +1943,7 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
     no_end = missing_end_images(project, tree, todo)
     if no_end:
         raise FileNotFoundError(f"the end image of clip #{no_end[0][1:]} is missing")
-    faces = cast_problems(project, tree, todo) + source_sound_problems(tree, todo)
+    faces = cast_problems(project, tree, todo) + source_sound_problems(tree, todo, project)
     if faces:
         raise ValueError(faces[0])
     for nid in sorted(on_paths - set(todo), key=lambda i: tree.depth(i)):
@@ -1924,7 +1991,8 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
                     if settings.get("source_sound"):   # the real video's sound after its range: the soundtrack
                         sound = Path(tmp) / "source_sound.wav"
                         ss = settings["source_sound"]
-                        chain.to_wav(Path(ss["file"]), sound, ss["start"], ss["secs"])
+                        chain.to_wav(sound_file(project, ss), sound, ss["start"], ss["secs"], ss.get("loop"),
+                                     ss.get("offset") or 0.0)
                         call["audio_paths"] = list(call.get("audio_paths") or []) + [str(sound)]
                     generator.generate(model_prompt(tree.options, node, settings), start, new_video, new_frame,
                                        node.seed, settings=call)
@@ -2093,13 +2161,14 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
                 generator.refine(project / node.made["video"], prompt, target, node.seed, (w, h),
                                  made_frames(node) or _clip_frames(project, node), loras, first, last,
                                  sparse=SOL_TAU if fast_attention else None)
-                if s.get("source_sound") and not Path(s["source_sound"]["file"]).is_file():
+                if s.get("source_sound") and not sound_file(project, s["source_sound"]).is_file():
                     log(f"[{k}/{len(order)}] {node.id}: the video file of its sound is missing "
                         f"({Path(s['source_sound']['file']).name}); the refined copy keeps the model's sound")
-                if s.get("source_sound") and Path(s["source_sound"]["file"]).is_file():
+                if s.get("source_sound") and sound_file(project, s["source_sound"]).is_file():
                     wav = tmp / f"{node.id}_sound.wav"     # the recorded sound, as in the clip
-                    chain.to_wav(Path(s["source_sound"]["file"]), wav, s["source_sound"]["start"],
-                                 s["source_sound"]["secs"])
+                    chain.to_wav(sound_file(project, s["source_sound"]), wav, s["source_sound"]["start"],
+                                 s["source_sound"]["secs"], s["source_sound"].get("loop"),
+                                 s["source_sound"].get("offset") or 0.0)
                     chain.replace_audio(target, wav)
                 target.with_suffix(".json").write_text(json.dumps(pins), encoding="utf-8")
             made_now.append(node.id)

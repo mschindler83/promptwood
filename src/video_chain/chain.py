@@ -138,12 +138,21 @@ def audio_seconds(path: Path) -> float | None:
     return float(d) if d not in (None, "N/A") else None
 
 
-def to_wav(source: Path, wav: Path, start: float = 0.0, seconds: float | None = None) -> None:
+def to_wav(source: Path, wav: Path, start: float = 0.0, seconds: float | None = None, loop: float | None = None,
+           offset: float = 0.0) -> None:
     """The sound of an audio or video file as 48 kHz stereo WAV (a part of it with start / seconds); written under
-    a temporary name first."""
+    a temporary name first. loop: only `loop` seconds from start are taken and repeated over and over, the WAV
+    begins `offset` seconds into that loop."""
     wav = Path(wav)
     tmp = wav.with_name(wav.stem + ".part.wav")
-    cmd = ["ffmpeg", "-v", "error", "-y", "-ss", f"{float(start):.3f}", "-i", str(source), "-map", "0:a:0", "-vn"]
+    cmd = ["ffmpeg", "-v", "error", "-y", "-ss", f"{float(start):.3f}"]
+    if loop:
+        cmd += ["-t", f"{float(loop):.3f}"]
+    cmd += ["-i", str(source), "-map", "0:a:0", "-vn"]
+    if loop:
+        cmd += ["-af", "aloop=loop=-1:size=2147483647"]
+        if offset > 0:
+            cmd += ["-ss", f"{float(offset):.3f}"]
     if seconds is not None:
         cmd += ["-t", f"{float(seconds):.3f}"]
     try:
@@ -479,14 +488,17 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
         s["voice_language"] = voice_language
         s["start_pin"] = START_PIN
     if source_sound:                            # the sound of the real video after its range, as the soundtrack
-        src = Path(source_sound["file"])
-        try:
-            st = src.stat()
-            key = [st.st_size, st.st_mtime_ns]
+        src = Path(source_sound["file"]) if source_sound.get("file") else None
+        try:                                    # (a clip of the project: its name is unique per version)
+            st = src.stat() if src is not None and src.is_absolute() else None
+            key = [st.st_size, st.st_mtime_ns] if st is not None else None
         except OSError:
             key = None
-        s["source_sound"] = {"file": str(src), "start": float(source_sound["start"]),
+        s["source_sound"] = {"file": str(src) if src is not None else "", "start": float(source_sound["start"]),
                              "secs": float(source_sound["secs"]), "file_key": key}
+        if source_sound.get("mode") == "previous":     # the clip before's sound, repeated (loop / offset)
+            s["source_sound"].update({"mode": "previous", "loop": float(source_sound["loop"]),
+                                      "offset": float(source_sound.get("offset") or 0.0)})
     if lora_triggers:                           # the LoRAs' trigger words put before the prompt
         s["lora_triggers"] = [str(w) for w in lora_triggers]
     if guide:                                   # motion guide: frames of the neighbouring clips anchored
