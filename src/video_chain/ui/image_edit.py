@@ -87,8 +87,7 @@ def uses_of(project: Path, tree, meta: dict) -> list[str]:
     from .. import chain
     from .. import tree as T
     out = []
-    ident = (tree.options.get("identity") or {}) if tree is not None else {}
-    refs = list(ident.get("images") or [])
+    owner = {r: c["name"] for c in (T.cast_of(tree) if tree is not None else []) for r in c["images"]}
     for u in meta.get("uses") or []:
         kind = u.get("kind")
         if kind == "start" and u.get("sha1") and chain.file_signature(Path(project) / T.START_FILE) == u["sha1"]:
@@ -97,8 +96,8 @@ def uses_of(project: Path, tree, meta: dict) -> list[str]:
             for n in tree.nodes.values():
                 if u.get("file") and u["file"] in (n.end_image, (n.made or {}).get("end_image")):
                     out.append(f"the end image of clip #{n.id[1:]}")
-        elif kind == "ref" and u.get("file") in refs:
-            out.append(f"face reference <Picture {refs.index(u['file']) + 1}>")
+        elif kind == "ref" and u.get("file") in owner:
+            out.append(f"face of @{owner[u['file']]}")
     return list(dict.fromkeys(out))
 
 

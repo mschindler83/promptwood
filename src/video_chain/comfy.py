@@ -1212,6 +1212,7 @@ def build_refine_prompt_workflow(*, prompt: str, kind: str, model: dict, seed: i
     """CLIPLoader (the LLM) -> TextGenerate with the instruction for this kind of prompt -> PreviewAny (text out)."""
     system = REFINE_INSTRUCTIONS[kind] + " " + _SAFETY
     tokens = re.findall(r"<[^<>]{1,40}>", prompt)          # <Picture 1>, <ref_image_0> …: only then mentioned
+    tokens += re.findall(r"(?<![\w@])@\w[\w-]*", prompt)    # @Anna: the cast, mentioned by name
     if tokens:
         system += f" Keep these tokens exactly as they are, where they are: {', '.join(dict.fromkeys(tokens))}."
     user = prompt.strip() + (f"\n\nWhat the user wants changed in the prompt: {hint.strip()}" if hint.strip() else "")

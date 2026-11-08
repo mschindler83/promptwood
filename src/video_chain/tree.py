@@ -13,6 +13,9 @@ A made generated clip without a video after it can hand over at an earlier frame
 clips after it start from that frame, and the frames after it are left out when a path is joined. The clip itself
 stays as made (nothing is generated again for it); only what follows it changes.
 The project's style text (options "style": prefix / suffix) is put around every prompt sent to the model.
+The cast (options "cast"): characters with face pictures in refs/. A prompt mentions them as @Name; the clip is made
+with exactly the pictures of the characters it mentions (renumbered <Picture 1> ... for the model, see clip_cast).
+A clip that mentions nobody gets the lead's pictures; one that writes <Picture N> itself gets every picture.
 
 Project folder:
   tree.json            nodes (id, parent, prompt, seed, what was made), options, the selected node
@@ -62,8 +65,13 @@ DEFAULT_OPTIONS = {"model": "Comfy-Org/MiniMax-H3", "frames": 73, "steps": 28,
                    "hyperflow": {"on": False, "strength": 1.0},
                    # Pika H3 Flex: Pika's post-trained H3 as a LoRA, 6 steps (ComfyUI template recipe)
                    "pika": {"on": False, "strength": 1.0},
-                   # identity: reference images (copies in refs/) every clip sees, so the face stays the same
-                   "identity": {"mode": "off", "images": [], "size": "match", "hint": True},
+                   # the cast: characters with face pictures (copies in refs/); a prompt mentions them as @Name and
+                   # the clip is made with exactly their pictures. A clip that mentions nobody gets the lead's.
+                   # [{"name", "images": [rel], "desc", "lead": bool}]
+                   "cast": [],
+                   # how the face pictures are used: their size for the model, and the sentence tying a person to
+                   # their picture
+                   "identity": {"size": "match", "hint": True},
                    # sound references (WAV copies in refs/): <Audio 1> ... in a clip's prompt uses them (a voice,
                    # a soundtrack to copy, a beat); only the clips that name one are made with them
                    "audio_refs": [],
@@ -71,10 +79,15 @@ DEFAULT_OPTIONS = {"model": "Comfy-Org/MiniMax-H3", "frames": 73, "steps": 28,
                    "style": {"prefix": "", "suffix": ""}}
 REFS_DIR = "refs"
 ENDS_DIR = "ends"
-MAX_REFS = 9
+MAX_CAST_PICTURES = 9              # MiniMax H3 ref2va takes up to 9 reference images
+MAX_PICTURES_PER_CHARACTER = 3
 MAX_AUDIO_REFS = 3                 # MiniMax H3 ref2va: up to 3 sounds, each 2-15 s, together at most 15 s
 AUDIO_REF_MIN, AUDIO_REF_TOTAL = 2.0, 15.0
 AUDIO_TAG = re.compile(r"<Audio\s*(\d+)>", re.IGNORECASE)
+MENTION = re.compile(r"(?<![\w@])@(\w[\w-]*)")        # @Anna in a prompt
+NAME_OK = re.compile(r"^[^\W\d_][\w-]*$")              # a character name: a letter first, no spaces
+PICTURE_TAG = re.compile(r"<Picture\s*\d+>", re.IGNORECASE)
+WRONG_TAG = re.compile(r"<(Image|Img|Face|Person|Photo|Pic|Ref|Reference)\s*(\d+)>", re.IGNORECASE)
 
 
 @dataclass
@@ -210,6 +223,7 @@ class Tree:
         t = cls(options={**copy.deepcopy(DEFAULT_OPTIONS), **stored},
                 image=d.get("image"),
                 selected=d.get("selected"), next_num=int(d.get("next_num") or 1))
+        _migrate_cast(t.options, "cast" in stored)
         for nd in d.get("nodes", []):
             if not isinstance(nd, dict) or not nd.get("id"):
                 raise ValueError("a node without id")
@@ -358,23 +372,284 @@ def save(project: Path, tree: Tree) -> None:
     tmp.replace(project / TREE_FILE)
 
 
-def add_reference(project: Path, image: Path, tree: Tree) -> str:
-    """Copy an image into refs/ as a reference for the face; returns its name in the project."""
-    ident = dict(tree.options.get("identity") or DEFAULT_OPTIONS["identity"])
-    images = list(ident.get("images") or [])
-    if len(images) >= MAX_REFS:
-        raise ValueError(f"at most {MAX_REFS} reference images")
+def _migrate_cast(options: dict, has_cast: bool) -> None:
+    """Older projects had one list of face pictures (identity "images", used by every clip while "mode" was
+    "reference"). They become one character, Person1, the lead while they were on: every clip is made with exactly
+    the same pictures as before, so made clips stay done."""
+    ident = dict(options.get("identity") or {})
+    if not has_cast:
+        images = [r for r in ident.get("images") or [] if isinstance(r, str)]
+        options["cast"] = ([{"name": "Person1", "images": images, "desc": "",
+                             "lead": ident.get("mode") == "reference"}] if images else [])
+    for k in ("images", "mode"):
+        ident.pop(k, None)
+    options["identity"] = {**DEFAULT_OPTIONS["identity"], **ident}
+    cast = []
+    for c in options.get("cast") or []:
+        if isinstance(c, dict) and isinstance(c.get("name"), str) and c["name"]:
+            cast.append({"name": c["name"], "images": [r for r in c.get("images") or [] if isinstance(r, str)],
+                         "desc": str(c.get("desc") or ""), "lead": bool(c.get("lead"))})
+    options["cast"] = cast
+
+
+def cast_of(tree_or_options) -> list[dict]:
+    """The characters ({"name", "images", "desc", "lead"}), in the order of the cast list."""
+    options = tree_or_options.options if isinstance(tree_or_options, Tree) else tree_or_options
+    return list(options.get("cast") or [])
+
+
+def character(tree_or_options, name: str) -> dict | None:
+    """The character with this name (case does not matter), or None."""
+    low = (name or "").lower()
+    return next((c for c in cast_of(tree_or_options) if c["name"].lower() == low), None)
+
+
+def lead_of(tree_or_options) -> dict | None:
+    return next((c for c in cast_of(tree_or_options) if c.get("lead")), None)
+
+
+def all_pictures(tree_or_options) -> list[str]:
+    """Every face picture of the cast, in cast order (what <Picture 1> ... number in a prompt that writes them)."""
+    return [r for c in cast_of(tree_or_options) for r in c["images"]]
+
+
+def check_name(tree: Tree, name: str, keep: str | None = None) -> str:
+    """A valid new name (stripped), or ValueError. keep: the character being renamed (its own name is fine)."""
+    name = (name or "").strip()
+    if not NAME_OK.match(name):
+        raise ValueError("a name starts with a letter and has only letters, digits, - and _ (no spaces), "
+                         "e.g. Anna or Anna_B")
+    other = character(tree, name)
+    if other is not None and (keep is None or other["name"].lower() != keep.lower()):
+        raise ValueError(f"there is already a character called {other['name']}")
+    return name
+
+
+def _set_cast(tree: Tree, cast: list[dict]) -> None:
+    tree.options["cast"] = cast
+
+
+def _copy_picture(project: Path, image: Path, tree: Tree) -> str:
+    if len(all_pictures(tree)) >= MAX_CAST_PICTURES:
+        raise ValueError(f"at most {MAX_CAST_PICTURES} face pictures in a project")
     d = Path(project) / REFS_DIR
     d.mkdir(parents=True, exist_ok=True)
+    used = set(all_pictures(tree))
     k = 1
-    while (d / f"ref{k}.png").exists() or f"{REFS_DIR}/ref{k}.png" in images:
+    while (d / f"ref{k}.png").exists() or f"{REFS_DIR}/ref{k}.png" in used:
         k += 1
     rel = f"{REFS_DIR}/ref{k}.png"
     chain.to_png(Path(image), Path(project) / rel)
-    images.append(rel)
-    ident["images"] = images
-    tree.options["identity"] = ident
     return rel
+
+
+def add_character(project: Path, tree: Tree, name: str, image: Path | None = None, desc: str = "") -> dict:
+    """A new character (with a first face picture). The first character of a cast is the lead."""
+    name = check_name(tree, name)
+    entry = {"name": name, "images": [], "desc": (desc or "").strip(), "lead": not cast_of(tree)}
+    if image is not None:
+        entry["images"].append(_copy_picture(project, image, tree))
+    _set_cast(tree, cast_of(tree) + [entry])
+    return entry
+
+
+def next_character_name(tree: Tree) -> str:
+    k = 1
+    while character(tree, f"Person{k}") is not None:
+        k += 1
+    return f"Person{k}"
+
+
+def add_picture(project: Path, tree: Tree, name: str, image: Path) -> str:
+    """Copy an image into refs/ as one more face picture of a character; returns its name in the project."""
+    c = character(tree, name)
+    if c is None:
+        raise ValueError(f"no character called {name}")
+    if len(c["images"]) >= MAX_PICTURES_PER_CHARACTER:
+        raise ValueError(f"at most {MAX_PICTURES_PER_CHARACTER} pictures per character")
+    rel = _copy_picture(project, image, tree)
+    _set_cast(tree, [{**x, "images": x["images"] + [rel]} if x is c else x for x in cast_of(tree)])
+    return rel
+
+
+def add_reference(project: Path, image: Path, tree: Tree, name: str | None = None) -> str:
+    """A face picture for a character (name), else for the lead, else for a new character PersonN."""
+    target = character(tree, name) if name else (lead_of(tree) or (cast_of(tree) or [None])[0])
+    if target is None:
+        return add_character(project, tree, next_character_name(tree), image)["images"][0]
+    return add_picture(project, tree, target["name"], image)
+
+
+def _drop_file(project: Path, rel: str, tree: Tree) -> None:
+    if rel in all_pictures(tree):
+        return                                     # another character still uses it
+    target = (Path(project) / rel).resolve()
+    if (Path(project) / REFS_DIR).resolve() in target.parents:
+        target.unlink(missing_ok=True)
+
+
+def remove_picture(project: Path, tree: Tree, rel: str) -> None:
+    _set_cast(tree, [{**c, "images": [r for r in c["images"] if r != rel]} for c in cast_of(tree)])
+    _drop_file(project, rel, tree)
+
+
+def remove_reference(project: Path, rel: str, tree: Tree) -> None:
+    remove_picture(project, tree, rel)
+
+
+def remove_character(project: Path, tree: Tree, name: str) -> None:
+    c = character(tree, name)
+    if c is None:
+        return
+    _set_cast(tree, [x for x in cast_of(tree) if x is not c])
+    for rel in c["images"]:
+        _drop_file(project, rel, tree)
+
+
+def update_character(tree: Tree, name: str, *, desc: str | None = None, lead: bool | None = None) -> None:
+    """Change a character's description, or make it the lead (lead=False: no lead)."""
+    c = character(tree, name)
+    if c is None:
+        raise ValueError(f"no character called {name}")
+    cast = []
+    for x in cast_of(tree):
+        x = dict(x)
+        if x["name"] == c["name"]:
+            if desc is not None:
+                x["desc"] = desc.strip()
+            if lead is not None:
+                x["lead"] = bool(lead)
+        elif lead:
+            x["lead"] = False                       # one lead only
+        cast.append(x)
+    _set_cast(tree, cast)
+
+
+def rename_character(tree: Tree, old: str, new: str) -> list[str]:
+    """Rename a character and every @old in the clips' prompts (and the style text). Returns the clips changed."""
+    c = character(tree, old)
+    if c is None:
+        raise ValueError(f"no character called {old}")
+    new = check_name(tree, new, keep=c["name"])
+
+    def swap(text: str) -> str:
+        return MENTION.sub(lambda m: f"@{new}" if m.group(1).lower() == c["name"].lower() else m.group(0),
+                           text or "")
+    changed = []
+    for n in tree.nodes.values():
+        if not n.is_video and swap(n.prompt) != n.prompt:
+            n.prompt = swap(n.prompt)
+            changed.append(n.id)
+    style = dict(tree.options.get("style") or {})
+    for k in ("prefix", "suffix"):
+        if style.get(k):
+            style[k] = swap(style[k])
+    tree.options["style"] = style
+    _set_cast(tree, [{**x, "name": new} if x["name"] == c["name"] else x for x in cast_of(tree)])
+    return changed
+
+
+def mentions(options: dict, text: str) -> tuple[list[dict], list[str]]:
+    """The characters a prompt mentions as @Name, in the order they first appear, and the @words that name
+    nobody in the cast."""
+    found, unknown = [], []
+    for m in MENTION.finditer(text or ""):
+        c = character(options, m.group(1))
+        if c is None:
+            if m.group(1) not in unknown:
+                unknown.append(m.group(1))
+        elif c not in found:
+            found.append(c)
+    return found, unknown
+
+
+def clip_cast(options: dict, prompt: str) -> dict:
+    """How a clip uses the cast. The prompt is the clip's own (the style text is put around it here).
+    {"mode": "mention" | "tags" | "lead" | None, "characters": [...], "images": [rel], "prompt": what the model
+    gets, "record": [{"name", "desc"}] (mention mode: what the model prompt says about them)}.
+    mention: the characters named as @Name, numbered in order of their first mention; each @Name becomes its name
+             (the first time with its <Picture> tags), and a sentence ties each to their face.
+    tags:    the prompt writes <Picture N> itself: every face picture of the cast, in cast order.
+    lead:    nobody is mentioned: the lead's pictures (the generator adds its <Picture 1> sentence).
+    None:    no face pictures (no cast, or no lead)."""
+    text = full_prompt(options, prompt)
+    found, _ = mentions(options, text)
+    found = [c for c in found if c["images"]]
+    if found:
+        tags, images = {}, []
+        for c in found:
+            first = len(images) + 1
+            images += c["images"]
+            tags[c["name"]] = " and ".join(f"<Picture {k}>" for k in range(first, len(images) + 1))
+        seen: set[str] = set()
+
+        def name(m):
+            c = character(options, m.group(1))
+            if c is None:
+                return m.group(0)
+            if not c["images"] or c["name"] in seen:
+                return c["name"]
+            seen.add(c["name"])
+            return f"{c['name']} (the person in {tags[c['name']]})"
+        out = MENTION.sub(name, text)
+        if (options.get("identity") or {}).get("hint", True):
+            extra = [f"{c['name']} has exactly the face of the person in {tags[c['name']]}." for c in found]
+            extra += [f"{c['name']}: {c['desc'].rstrip('.')}." for c in found if c.get("desc")]
+            extra.append("The pictures only show who the people are; the scene, pose and framing come from the "
+                         "video.")
+            out = f"{out.rstrip()} {' '.join(extra)}"
+        return {"mode": "mention", "characters": found, "images": images, "prompt": out,
+                "record": [{"name": c["name"], "desc": c.get("desc", "")} for c in found]}
+    plain = MENTION.sub(lambda m: (character(options, m.group(1)) or {"name": m.group(0)})["name"], text)
+    if PICTURE_TAG.search(text) and all_pictures(options):
+        return {"mode": "tags", "characters": cast_of(options), "images": all_pictures(options), "prompt": plain,
+                "record": None}
+    lead = lead_of(options)
+    if lead and lead["images"] and not mentions(options, text)[0]:
+        return {"mode": "lead", "characters": [lead], "images": list(lead["images"]), "prompt": plain,
+                "record": None}
+    return {"mode": None, "characters": [], "images": [], "prompt": plain, "record": None}
+
+
+def cast_problems(project: Path, tree: Tree, todo: list[str]) -> list[str]:
+    """Why clips to be made cannot get the faces their prompts name (one message per problem)."""
+    out = []
+    names = [c["name"] for c in cast_of(tree)]
+    for nid in todo:
+        node = tree.nodes[nid]
+        if node.is_video:
+            continue
+        text = full_prompt(tree.options, node.prompt)
+        found, unknown = mentions(tree.options, text)
+        for word in unknown:
+            close = _closest(word, names)
+            out.append(f"clip #{nid[1:]} mentions @{word}, but there is no such character"
+                       + (f" — did you mean @{close}?" if close else " (add it in the Cast)"))
+        for c in found:
+            if not c["images"]:
+                out.append(f"@{c['name']} (clip #{nid[1:]}) has no face picture yet")
+        for m in WRONG_TAG.finditer(text):
+            out.append(f"clip #{nid[1:]} writes <{m.group(1)} {m.group(2)}>; the model only knows <Picture "
+                       f"{m.group(2)}> (or mention the character as @Name)")
+        use = clip_cast(tree.options, node.prompt)
+        if use["mode"] == "tags":
+            top = max(int(re.sub(r"\D", "", t)) for t in PICTURE_TAG.findall(text))
+            if top > len(use["images"]):
+                n = len(use["images"])
+                out.append(f"clip #{nid[1:]} names <Picture {top}>, but the cast has only {n} face "
+                           f"picture{'' if n == 1 else 's'}")
+        if len(use["images"]) > MAX_CAST_PICTURES:
+            out.append(f"clip #{nid[1:]} needs {len(use['images'])} face pictures; the model takes at most "
+                       f"{MAX_CAST_PICTURES}")
+        if any(not (Path(project) / r).is_file() for r in use["images"]):
+            out.append(f"a face picture of clip #{nid[1:]} is missing in refs/")
+    return list(dict.fromkeys(out))
+
+
+def _closest(word: str, names: list[str]) -> str | None:
+    import difflib
+    hit = difflib.get_close_matches(word.lower(), [n.lower() for n in names], n=1, cutoff=0.6)
+    return next((n for n in names if hit and n.lower() == hit[0]), None)
 
 
 def audio_refs(tree: Tree) -> list[dict]:
@@ -444,15 +719,6 @@ def audio_problems(project: Path, tree: Tree, todo: list[str]) -> list[str]:
         elif any(not (Path(project) / a["file"]).is_file() for a in refs[:n]):
             out.append(f"a sound reference of clip #{nid[1:]} is missing in refs/")
     return out
-
-
-def remove_reference(project: Path, rel: str, tree: Tree) -> None:
-    ident = dict(tree.options.get("identity") or {})
-    ident["images"] = [r for r in ident.get("images") or [] if r != rel]
-    tree.options["identity"] = ident
-    target = (Path(project) / rel).resolve()
-    if (Path(project) / REFS_DIR).resolve() in target.parents:
-        target.unlink(missing_ok=True)
 
 
 def _in_ends(project: Path, rel: str) -> bool:
@@ -622,6 +888,7 @@ class Checker:
         self._status: dict[str, str] = {}
         self._settings: dict | None = None
         self._audio: list[dict] | None = None
+        self._pictures: dict[str, str | None] = {}
 
     def sha(self, path: Path | None) -> str | None:
         """SHA-1 of a frame, cached across checks by (path, size, date): a check after every edit must not read
@@ -640,10 +907,16 @@ class Checker:
                            for a in audio_refs(self.tree)]
         return self._audio
 
+    def picture_sha(self, rel: str) -> str | None:
+        """The content hash of a face picture (None: missing), cached for this round."""
+        if rel not in self._pictures:
+            self._pictures[rel] = self.sha(self.project / rel)
+        return self._pictures[rel]
+
     def settings(self, nid: str) -> dict | None:
         base = self.base()
         return None if base is None else node_settings(base, self.tree.options, self.tree.nodes[nid],
-                                                       self.audio_pool())
+                                                       self.audio_pool(), self.picture_sha)
 
     def start_frame(self, node: Node) -> Path | None:
         """The frame a generated clip starts from: the parent's last frame, the start image, or None (a first
@@ -751,15 +1024,6 @@ def current_settings(project: Path, options: dict, tree: "Tree | None" = None) -
     if dims is None:
         return None
     w, h = chain.canvas_size(*dims, int(options.get("resolution", 512)))
-    ident = options.get("identity") or {}
-    refs = None
-    if ident.get("mode") == "reference" and ident.get("images"):
-        refs = []
-        for rel in ident["images"]:
-            sha = chain.file_signature(Path(project) / rel)
-            if sha is None:
-                raise FileNotFoundError(f"reference image missing: {rel}")
-            refs.append({"file": rel, "sha1": sha})
     turbo = options.get("turbo") or {}
     turbo_on = bool(turbo.get("on") and turbo.get("lora"))
     hyper = options.get("hyperflow") or {}
@@ -775,8 +1039,7 @@ def current_settings(project: Path, options: dict, tree: "Tree | None" = None) -
                                pika=float(pika.get("strength", 1.0)) if pika_on else None,
                                width=w, height=h, audio=options.get("audio", True),
                                turbo=(turbo["lora"], turbo.get("strength", 1.0)) if turbo_on else None,
-                               backend="comfyui", refs=refs,
-                               ref_size=ident.get("size", "match"), ref_hint=ident.get("hint", True),
+                               backend="comfyui",
                                style=(style.get("prefix") or "", style.get("suffix") or ""))
 
 
@@ -811,13 +1074,20 @@ def node_loras(node: Node) -> list[tuple[str, float]]:
     return _extras((node.overrides or {}).get("loras"))
 
 
-def node_settings(base: dict, options: dict, node: Node, audio_pool: list[dict] | None = None) -> dict:
+def node_settings(base: dict, options: dict, node: Node, audio_pool: list[dict] | None = None,
+                  picture_sha: Callable[[str], str | None] | None = None) -> dict:
     """The settings one node is made with: the project's, with the node's own LoRA stack and overrides.
     The first LoRA of the stack is recorded as "lora", the others as "extra_loras" (as before).
     audio_pool: the project's sound references ({"file", "sha1"}); the clip records those up to the highest
-    <Audio N> its prompt names (none: nothing recorded, as before)."""
+    <Audio N> its prompt names (none: nothing recorded, as before).
+    picture_sha: the content hash of a face picture (project-relative name); the clip records the pictures it is
+    made with (see clip_cast), and with @mentions what the model prompt says about the characters."""
     ov = node.overrides or {}
     n_audio = 0 if node.is_video else audio_mentioned(full_prompt(options, node.prompt))
+    use = clip_cast(options, node.prompt) if not node.is_video else {"images": [], "record": None}
+    sha = picture_sha or (lambda rel: None)
+    refs = [{"file": r, "sha1": sha(r)} for r in use["images"]]
+    ident = options.get("identity") or {}
     stack = node_loras(node)
     lora, strength = stack[0] if stack else (None, 1.0)
     return chain.settings_dict(model=base["model"], lora=lora, extra_loras=stack[1:],
@@ -830,8 +1100,8 @@ def node_settings(base: dict, options: dict, node: Node, audio_pool: list[dict] 
                                pika=(base["pika"]["strength"] if base.get("pika") else None),
                                width=base["width"], height=base["height"], audio=base["audio"],
                                turbo=(base["turbo"]["lora"], base["turbo"]["strength"]) if base.get("turbo") else None,
-                               backend="comfyui", refs=base.get("refs"),
-                               ref_size=base.get("ref_size", "match"), ref_hint=base.get("ref_hint", True),
+                               backend="comfyui", refs=refs or None, cast=use["record"],
+                               ref_size=ident.get("size", "match"), ref_hint=ident.get("hint", True),
                                guide=int(ov.get("guide") or 0),
                                style=(base.get("prompt_prefix", ""), base.get("prompt_suffix", "")),
                                audio_refs=(audio_pool or [])[:n_audio] if n_audio else None)
@@ -1117,6 +1387,9 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
     no_end = missing_end_images(project, tree, todo)
     if no_end:
         raise FileNotFoundError(f"the end image of clip #{no_end[0][1:]} is missing")
+    faces = cast_problems(project, tree, todo)
+    if faces:
+        raise ValueError(faces[0])
     for nid in sorted(on_paths - set(todo), key=lambda i: tree.depth(i)):
         emit({"e": "node", "id": nid, "state": "reused"})
     emit({"e": "plan", "make": todo})
@@ -1158,7 +1431,7 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
                         call["guides"] = guides
                     if end_image is not None:
                         call["end_image"] = str(end_image)
-                    generator.generate(full_prompt(tree.options, node.prompt), start, new_video, new_frame,
+                    generator.generate(clip_cast(tree.options, node.prompt)["prompt"], start, new_video, new_frame,
                                        node.seed, settings=call)
                 if not new_video.exists() or not new_frame.exists():
                     raise RuntimeError(f"the generator did not write the clip of {nid}")

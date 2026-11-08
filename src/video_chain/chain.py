@@ -350,13 +350,13 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
                   ref_size: str = "match", ref_hint: bool = True, extra_loras: list | None = None,
                   turbo: tuple[str, float] | None = None, guide: int = 0,
                   style: tuple[str, str] | None = None, hyperflow: float | None = None,
-                  pika: float | None = None, audio_refs: list | None = None) -> dict:
+                  pika: float | None = None, audio_refs: list | None = None, cast: list | None = None) -> dict:
     """What a clip depends on besides prompt, seed and start image; a clip is reused only if this is unchanged.
     The LoRA counts by content (lora_sha1), so a LoRA retrained into the same file makes its clips change.
     extra_loras: further LoRAs stacked after the first ([(path, strength)]), only present when there are any, so
     a single-LoRA setting is recorded exactly as before.
-    refs: reference images for the face/identity ([{"file": path in the project, "sha1": ...}]), only present when
-    the identity references are on.
+    refs: the face pictures this clip is made with ([{"file": path in the project, "sha1": ...}]), only present
+    when it uses any. cast: with @mentions, the characters the model prompt describes ([{"name", "desc"}]).
     style: the project's text before / after every prompt (only present when there is any)."""
     s = {"model": model, "lora": lora or None, "lora_sha1": file_signature(lora) if lora else None,
          "strength": float(strength) if lora else 1.0,
@@ -375,6 +375,8 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
     if refs:
         s.update({"refs": [{"file": r["file"], "sha1": r["sha1"]} for r in refs], "ref_size": ref_size,
                   "ref_hint": bool(ref_hint)})
+        if cast:
+            s["cast"] = [{"name": c["name"], "desc": c.get("desc", "")} for c in cast]
     if guide:                                   # motion guide: frames of the neighbouring clips anchored
         s["guide"] = int(guide)
     prefix, suffix = ((style[0] or "").strip(), (style[1] or "").strip()) if style else ("", "")

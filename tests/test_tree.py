@@ -312,28 +312,116 @@ def test_start_image_conversion_failure_leaves_the_old_one(project, tmp_path):
     assert not list(project.glob("*.part.png"))
 
 
+def face(path, color):
+    Image.new("RGB", (64, 80), color).save(path)
+    return path
+
+
 def test_identity_references(project, tmp_path):
+    """One face picture without any @mention: the first character is the lead, every clip uses its pictures."""
     t, a, b1, b2, c = build(project)
     run(project, [c.id])
     t = T.load(project)
-    face = tmp_path / "face.jpg"
-    Image.new("RGB", (64, 80), (180, 140, 120)).save(face)
-    rel = T.add_reference(project, face, t)
+    rel = T.add_reference(project, face(tmp_path / "face.jpg", (180, 140, 120)), t)
     assert rel == "refs/ref1.png" and (project / rel).is_file()
-    t.options["identity"]["mode"] = "reference"
+    assert T.cast_of(t) == [{"name": "Person1", "images": [rel], "desc": "", "lead": True}]
     T.save(project, t)
     assert set(statuses(project).values()) == {"changed", "new"}               # references change every clip
     gen = run(project, [c.id])
     s = gen.calls[0]["settings"]
-    assert s["refs"][0]["file"] == rel and s["ref_paths"] == [str(project / rel)]
+    assert s["refs"][0]["file"] == rel and s["ref_paths"] == [str(project / rel)] and "cast" not in s
+    assert gen.calls[0]["prompt"] == "a"                                       # the generator adds its sentence
     t = T.load(project)
     assert "ref_paths" not in t.nodes[a.id].made["settings"]                    # the record keeps names + hashes
     assert statuses(project)["c"] == "done"
-    Image.new("RGB", (64, 80), (10, 10, 10)).save(project / rel)                 # another reference image
+    face(project / rel, (10, 10, 10))                                          # another reference image
     assert statuses(project)["a"] == "changed"
     T.remove_reference(project, rel, t)
-    assert not (project / rel).exists() and t.options["identity"]["images"] == []
-    assert T.Tree().options["identity"] is not T.Tree().options["identity"]     # defaults are not shared
+    assert not (project / rel).exists() and T.cast_of(t)[0]["images"] == []
+    assert T.Tree().options["cast"] is not T.Tree().options["cast"]             # defaults are not shared
+
+
+def test_old_face_list_becomes_the_lead_and_clips_stay_done(project, tmp_path):
+    t, a, b1, b2, c = build(project)
+    T.add_reference(project, face(tmp_path / "f.jpg", (180, 140, 120)), t)
+    T.add_picture(project, t, "Person1", face(tmp_path / "g.jpg", (90, 60, 50)))
+    T.save(project, t)
+    run(project, [c.id])
+    assert set(statuses(project).values()) == {"done", "new"}
+    raw = json.loads((project / T.TREE_FILE).read_text())
+    images = raw["options"].pop("cast")[0]["images"]
+    for mode, want in (("reference", {"done", "new"}), ("off", {"changed", "new"})):
+        raw["options"]["identity"] = {"mode": mode, "images": images, "size": "match", "hint": True}
+        (project / T.TREE_FILE).write_text(json.dumps(raw))
+        t = T.load(project)
+        assert T.cast_of(t) == [{"name": "Person1", "images": images, "desc": "", "lead": mode == "reference"}]
+        assert t.options["identity"] == {"size": "match", "hint": True}
+        assert set(statuses(project).values()) == want                        # off: the clips had no faces
+
+
+def test_cast_mentions(project, tmp_path):
+    t = T.load(project)
+    T.add_character(project, t, "Anna", face(tmp_path / "a1.jpg", (200, 150, 130)), desc="woman, 30s, grey sweater")
+    T.add_picture(project, t, "anna", face(tmp_path / "a2.jpg", (190, 140, 120)))
+    T.add_character(project, t, "Ben", face(tmp_path / "b.jpg", (90, 70, 60)))
+    with pytest.raises(ValueError, match="already"):
+        T.add_character(project, t, "ben")
+    with pytest.raises(ValueError, match="no spaces"):
+        T.add_character(project, t, "Anna B")
+    both = t.add(None, "@Anna sits at the table. @Ben walks in and sits opposite @anna.")
+    ben = t.add(None, "@Ben looks out of the window.")
+    nobody = t.add(None, "An empty kitchen.")
+    T.save(project, t)
+    use = T.clip_cast(t.options, both.prompt)
+    assert use["mode"] == "mention" and use["images"] == ["refs/ref1.png", "refs/ref2.png", "refs/ref3.png"]
+    assert use["prompt"].startswith("Anna (the person in <Picture 1> and <Picture 2>) sits at the table. Ben (the "
+                                    "person in <Picture 3>) walks in and sits opposite Anna. ")
+    assert "Ben has exactly the face of the person in <Picture 3>." in use["prompt"]
+    assert "Anna: woman, 30s, grey sweater." in use["prompt"]
+    assert T.clip_cast(t.options, ben.prompt)["images"] == ["refs/ref3.png"]   # renumbered: Ben is <Picture 1>
+    assert "Ben (the person in <Picture 1>)" in T.clip_cast(t.options, ben.prompt)["prompt"]
+    assert T.clip_cast(t.options, nobody.prompt) == {"mode": "lead", "characters": [T.character(t, "Anna")],
+                                                     "images": ["refs/ref1.png", "refs/ref2.png"],
+                                                     "prompt": "An empty kitchen.", "record": None}
+    gen = run(project, [both.id, ben.id, nobody.id])
+    by = {c["prompt"][:4]: c for c in gen.calls}
+    assert by["Ben "]["settings"]["ref_paths"] == [str(project / "refs/ref3.png")]
+    assert by["Ben "]["settings"]["cast"] == [{"name": "Ben", "desc": ""}]
+    assert set(statuses(project).values()) == {"done"}
+    t = T.load(project)
+    T.add_character(project, t, "Cara", face(tmp_path / "c.jpg", (30, 30, 30)))        # a new one changes nothing
+    T.update_character(t, "Ben", desc="man, 40s")                                        # Ben's clips only
+    T.save(project, t)
+    st = statuses(project)
+    assert st[both.prompt] == st[ben.prompt] == "changed" and st[nobody.prompt] == "done"
+    T.update_character(t, "Ben", lead=True)                                              # one lead only
+    assert [c["name"] for c in T.cast_of(t) if c["lead"]] == ["Ben"]
+    assert T.rename_character(t, "Ben", "Tom") == [both.id, ben.id]
+    assert t.nodes[ben.id].prompt == "@Tom looks out of the window." and T.character(t, "Ben") is None
+    T.remove_character(project, t, "Cara")
+    assert not (project / "refs/ref4.png").exists()
+
+
+def test_cast_problems(project, tmp_path):
+    t = T.load(project)
+    T.add_character(project, t, "Ben", face(tmp_path / "b.jpg", (90, 70, 60)))
+    T.add_character(project, t, "Nobody")
+    a = t.add(None, "@Bem waves.")
+    b = t.add(None, "The man from <Image 2> waves.")
+    c = t.add(None, "The man from <Picture 3> waves.")
+    d = t.add(None, "@Nobody waves.")
+    e = t.add(None, "@Ben waves.")
+    T.save(project, t)
+    probs = T.cast_problems(project, t, [a.id, b.id, c.id, d.id, e.id])
+    assert probs == [f"clip #{a.id[1:]} mentions @Bem, but there is no such character — did you mean @Ben?",
+                     f"clip #{b.id[1:]} writes <Image 2>; the model only knows <Picture 2> (or mention the "
+                     "character as @Name)",
+                     f"clip #{c.id[1:]} names <Picture 3>, but the cast has only 1 face picture",
+                     f"@Nobody (clip #{d.id[1:]}) has no face picture yet"]
+    (project / "refs/ref1.png").unlink()
+    assert T.cast_problems(project, t, [e.id]) == [f"a face picture of clip #{e.id[1:]} is missing in refs/"]
+    with pytest.raises(ValueError, match="@Bem"):
+        run(project, [a.id])
 
 
 def sound(path, secs, video=False):

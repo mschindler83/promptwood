@@ -9,7 +9,8 @@ import pytest
 
 os.environ["QT_QPA_PLATFORM"] = "offscreen"   # never open windows on the real desktop
 from PIL import Image  # noqa: E402
-from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
+from PySide6.QtGui import QTextCursor  # noqa: E402
+from PySide6.QtWidgets import QApplication, QInputDialog, QMessageBox  # noqa: E402
 
 from video_chain import chain  # noqa: E402
 from video_chain import tree as T  # noqa: E402
@@ -522,17 +523,21 @@ def test_lora_lists_offer_the_h3_loras(app, tmp_path, image, monkeypatch):
     w.close()
 
 
-def test_identity_references_in_the_window(app, win, tmp_path, image):
+def test_identity_references_in_the_window(app, win, tmp_path, image, monkeypatch):
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
     ids = new_project(win, tmp_path, image, ("a", "b"))
     run_and_wait(app, win, win.generate_path)
     face = tmp_path / "face.png"
     Image.new("RGB", (80, 100), (190, 150, 120)).save(face)
-    win.add_reference(str(face))
+    win.add_reference(str(face))                                               # no character yet: Person1, lead
     flush(app, win)
     assert "2 made clips are now CHANGED" in win.status.text()
-    assert win.ident_mode.currentData() == "reference" and win.refs.count() == 1
-    assert win.refs.item(0).text() == "<Picture 1>" and (tmp_path / "proj" / "refs" / "ref1.png").is_file()
-    assert [win.state(i) for i in ids] == ["changed", "changed"]               # every clip sees the reference now
+    assert win.cast_list.count() == 1 and win.cast_list.item(0).text().startswith("@Person1")
+    assert win.char_lead.isChecked() and win.refs.count() == 1 and win.refs.item(0).text() == "Person1 1"
+    assert (tmp_path / "proj" / "refs" / "ref1.png").is_file()
+    assert [win.state(i) for i in ids] == ["changed", "changed"]               # every clip gets the lead's face
+    card = win.cards[0]
+    assert card.faces.text() == "Faces: @Person1 (the lead; the prompt mentions nobody)"
     run_and_wait(app, win, win.generate_path)
     made = T.load(tmp_path / "proj").nodes[ids[0]].made["settings"]
     assert made["refs"][0]["file"] == "refs/ref1.png" and made["ref_size"] == "match"
@@ -540,15 +545,41 @@ def test_identity_references_in_the_window(app, win, tmp_path, image):
     flush(app, win)
     assert win.state(ids[0]) == "changed"
     wait(app, lambda: not win._joins, timeout=30)                              # the auto-play join of the run
+    # a second character, mentioned in clip 2 only
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("Ben", True))
+    win._new_character()
+    assert win._selected_character()["name"] == "Ben" and "@Ben added" in win.status.text()
+    other = tmp_path / "ben.png"
+    Image.new("RGB", (80, 100), (60, 50, 40)).save(other)
+    win.add_reference(str(other))
+    assert win.status.text().startswith("Face added to @Ben")
+    assert T.character(win.tree, "Ben")["images"] == ["refs/ref2.png"] and not win.char_lead.isChecked()
+    type_prompt(win, ids[1], "@Bem waves")
+    flush(app, win)
+    win.select(ids[1])
+    win.generate_path()
+    assert not win.running and "did you mean @Ben? (Cast)" in win.status.text()
+    type_prompt(win, ids[1], "@Ben waves")
+    flush(app, win)
+    card = next(c for c in win.cards if c.nid == ids[1])
+    assert card.faces.text() == "Faces: @Ben" and "Ben (the person in <Picture 1>)" in card.edit.toolTip()
+    # typing @B offers the names; the chosen one goes in whole
+    card.edit.setPlainText("Then @B")
+    card.edit.moveCursor(QTextCursor.End)
+    card.mentions._insert("Ben")
+    assert card.edit.toPlainText() == "Then @Ben "
+    # rename: every @mention follows
+    type_prompt(win, ids[1], "@Ben waves")
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("Tom", True))
+    win._rename_character()
+    assert win.tree.nodes[ids[1]].prompt == "@Tom waves" and T.character(win.tree, "Ben") is None
+    # removing the lead's face: clips that mention nobody are made without a face
+    win.cast_list.setCurrentRow(0)
     win.refs.setCurrentRow(0)
     win._remove_reference()
     flush(app, win)
     assert win.refs.count() == 0 and not (tmp_path / "proj" / "refs" / "ref1.png").exists()
-    win.generate_path()
-    assert not win.running and "add a reference image" in win.status.text()
-    win.ident_mode.setCurrentIndex(win.ident_mode.findData("off"))
-    flush(app, win)
-    assert [win.state(i) for i in ids] == ["changed", "changed"]               # made with refs, now without
+    assert win.cards[0].faces.text() == "Faces: none (the prompt mentions nobody and there is no lead)"
 
 
 def test_sound_references_in_the_window(app, win, tmp_path, image, monkeypatch):
@@ -809,7 +840,7 @@ def test_review_fixes_in_the_window(app, win, tmp_path, image, monkeypatch):
     win.add_reference(str(face))
     win.save_settings()
     win.create_project(tmp_path / "fresh")
-    assert win.tree.options["identity"]["images"] == [] and win.refs.count() == 0
+    assert T.cast_of(win.tree) == [] and win.refs.count() == 0 and win.cast_list.count() == 0
     # an auto-selected turbo LoRA is stored, so turbo really runs with it
     win.turbo_loras = [("/l/minimax_h3_turbo_v4_step600_ema.safetensors", "minimax_h3_turbo_v4_step600_ema.safetensors")]
     win.tree.options["turbo"] = {"on": True, "lora": None, "steps": 6, "strength": 1.0}
@@ -902,9 +933,9 @@ def test_video_first_then_generated_clip(app, win, tmp_path):
     assert win.b_ref_clip.isEnabled() and f"first frame of video #{v[1:]}" in win.b_ref_clip.toolTip()
     win.b_ref_clip.click()
     win.reference_from_node(v, "last")
-    assert win.refs.count() == 2 and win.ident_mode.currentData() == "reference"
+    assert win.refs.count() == 2 and win.char_lead.isChecked()                 # both: faces of the lead
     assert "last frame of" in win.status.text()
-    win.ident_mode.setCurrentIndex(win.ident_mode.findData("off"))
+    win.char_lead.setChecked(False)                                            # clips without a face again
     win.node_action("continue", v)
     a = win.selected_id()
     assert isinstance(win.cards[1], PromptCard)
@@ -1304,10 +1335,10 @@ def test_ai_image_edit_for_start_and_end_images(app, tmp_path, image, monkeypatc
         dlg.b_before.setChecked(True)
         assert dlg.res_info.text().startswith("ORIGINAL")
         dlg.b_use_ref.click()                                       # one more face reference, the dialog stays
-        refs = (w.tree.options.get("identity") or {}).get("images")
+        refs = T.all_pictures(w.tree)
         assert len(refs) == 1 and (w.project / refs[0]).is_file() and dlg.used is None
-        assert "<Picture 1>" in dlg.state.text() and w.refs.count() == 1
-        assert w.tree.options["identity"]["mode"] == "reference"     # adding one switches them on
+        assert "@Person1" in dlg.state.text() and w.refs.count() == 1
+        assert T.lead_of(w.tree)["name"] == "Person1"                # the first face: the lead
         dlg.b_use_end.click()                                       # the clip's end image
         assert dlg.used == ("end", png) and w.tree.nodes[ids[1]].end_image and w.state(ids[1]) == "changed"
         # from the start image section: a result as the new start image; earlier results are listed
@@ -1321,7 +1352,7 @@ def test_ai_image_edit_for_start_and_end_images(app, tmp_path, image, monkeypatc
         dlg2.results.setCurrentRow(next(i for i in range(dlg2.results.count())
                                         if dlg2.results.item(i).data(Qt.UserRole)[0] == png))
         assert not dlg2.b_delete.isEnabled() and dlg2.res_info.text().startswith(
-            f"IN USE: face reference <Picture 1>, the end image of clip #{ids[1][1:]} · ")
+            f"IN USE: face of @Person1, the end image of clip #{ids[1][1:]} · ")
         other = next(i for i in range(dlg2.results.count()) if dlg2.results.item(i).data(Qt.UserRole)[0] != png)
         dlg2.results.setCurrentRow(other)
         bad = dlg2.selected()[0]
@@ -1572,7 +1603,7 @@ def test_create_a_new_image_in_the_window(app, tmp_path, image, monkeypatch):
         QTest.keyClick(dlg.quality, Qt.Key_Delete)                      # Delete only in the results list
         assert dlg.results.count() == 1
         dlg.b_use_ref.click()                                           # in use at once (record read again)
-        assert not dlg.b_delete.isEnabled() and "IN USE: face reference" in dlg.res_info.text()
+        assert not dlg.b_delete.isEnabled() and "IN USE: face of @Person1" in dlg.res_info.text()
         assert server.created["lora0"]["class_type"] == "LoraLoader" and "Illustrious" in dlg.res_info.text()
         dlg.use_refs.setChecked(True)                                   # from a picture: needs one first
         assert not dlg.b_gen.isEnabled() and dlg.ref_strength.isVisibleTo(dlg)

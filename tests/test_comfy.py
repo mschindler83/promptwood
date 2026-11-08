@@ -573,6 +573,8 @@ def test_prompt_refiner(server):
     r.refine_prompt("the man from <Picture 1> waves", "image", r.models[0]["file"])
     assert server.prompts[-1]["llm"]["inputs"]["clip_name"] == r.models[0]["file"]
     assert "<Picture 1>" in server.refined["system_prompt"] and "<Picture" not in C.REFINE_INSTRUCTIONS["image"]
+    r.refine_prompt("@Anna waves at @Ben-2, mail me@home", "video", None)
+    assert "exactly as they are, where they are: @Anna, @Ben-2." in server.refined["system_prompt"]
     assert C.clean_refined("**“A calm sea.”**") == "A calm sea."
 
 

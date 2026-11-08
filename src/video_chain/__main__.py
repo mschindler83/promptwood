@@ -128,7 +128,7 @@ def prepare_job(project: Path, targets: list[str]) -> dict:
     problem = treemod.guide_problem(tree, checker, todo)
     if problem:
         raise JobError(problem)
-    sounds = treemod.audio_problems(project, tree, todo)
+    sounds = treemod.audio_problems(project, tree, todo) + treemod.cast_problems(project, tree, todo)
     if sounds:
         raise JobError(sounds[0])
     no_end = treemod.missing_end_images(project, tree, todo)
@@ -136,7 +136,8 @@ def prepare_job(project: Path, targets: list[str]) -> dict:
         raise JobError(f"the end image of clip #{no_end[0][1:]} is missing")
     ai_todo = [nid for nid in todo if not tree.nodes[nid].is_video]     # what needs the model
     # which H3 models the clips use: the reference one (face references or a sound) and/or the normal one
-    ref_kinds = sorted({bool(settings.get("refs") or checker.settings(nid).get("audio_refs")) for nid in ai_todo})
+    ref_kinds = sorted({bool(checker.settings(nid).get("refs") or checker.settings(nid).get("audio_refs"))
+                        for nid in ai_todo})
     return {"project": project, "targets": targets, "settings": settings, "todo": todo, "loras": loras,
             "ai_todo": ai_todo, "ref_kinds": ref_kinds}
 
