@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDoubleSpinBox, QFileDialog, 
                                QProgressBar, QPushButton, QSlider, QVBoxLayout)
 
 from .. import chain, swap
-from ..animate import DEFAULT_PROMPT, SIZES, window_count
+from ..animate import DEFAULT_PROMPT, SIZES, gen_size, window_count
 from .widgets import FrameTile, guard_wheel, label
 
 
@@ -34,12 +34,14 @@ class SwapDialog(QDialog):
     play(path, title): show a clip. .result: (path, meta, frames) of the clip to use."""
 
     def __init__(self, parent, project: Path, nid: str, clip: Path, detector: Path | None,
-                 pictures: list[tuple[str, str]], connect, settings=None, on_start=None, play=None):
+                 pictures: list[tuple[str, str]], connect, settings=None, on_start=None, play=None,
+                 source: dict | None = None):
         super().__init__(parent)
         self.setWindowTitle(f"Replace a person in video #{nid[1:]}")
         self.resize(1180, 720)
         self.project, self.nid, self.clip, self.detector = Path(project), nid, Path(clip), detector
         self.connect, self.qs, self.on_start, self.play = connect, settings, on_start, play
+        self.source = dict(source or {})          # the video's file and range (the DWPose cache is bound to it)
         self.heads: dict | None = None
         self.boxes: list[tuple] = []
         self.result: tuple[Path, dict, int] | None = None
@@ -271,6 +273,7 @@ class SwapDialog(QDialog):
         n, clip, ref = self.heads["frames"], self.clip, self.ref
         size, prompt, seed = self.size.currentData(), self.prompt.text().strip(), random.randint(1, 2**31 - 1)
         scale, sig, connect = self.head_size.value(), self._sig, self.connect
+        project, source = self.project, self.source
         self.bar.setRange(0, 0)
         self.bar.show()
         self.state.setText("Connecting to ComfyUI … (loading Wan 2.2 Animate takes a while the first time)")
@@ -285,7 +288,17 @@ class SwapDialog(QDialog):
                 if self._cancel:
                     raise InterruptedError("cancelled")
                 out = out_dir / f"{stem}.mp4"
-                meta = self.animator.replace(clip, mask, Path(ref), out, seed, n, (w, h), size, prompt, fps)
+                gen = gen_size(w, h, SIZES.get(size, 480))
+                key = swap.pose_key(clip, source, gen)
+                cached = swap.cached_pose(project, key)
+                if cached:
+                    sig.progress.emit("cached", 0, 0)
+                keep = None if cached else (out_dir / f"{stem}_pose.mkv", out_dir / f"{stem}_face.mkv")
+                meta = self.animator.replace(clip, mask, Path(ref), out, seed, n, (w, h), size, prompt, fps,
+                                             pose=cached, keep_pose=keep)
+                if keep is not None and all(p.is_file() for p in keep):
+                    swap.store_pose(project, key, *keep, {"source": source, "size": list(gen), "frames": n,
+                                                          "clip": str(clip), "made": time.strftime("%Y-%m-%d %H:%M:%S")})
                 meta.update({"reference": str(ref), "head_size": scale, "mask": str(mask), "clip": str(clip),
                              "made": time.strftime("%Y-%m-%d %H:%M:%S")})
                 got = swap.probe(out)[2]
@@ -309,6 +322,9 @@ class SwapDialog(QDialog):
                 pass
 
     def _progress(self, what: str, k: int, n: int):
+        if what == "cached":
+            self.state.setText("Using the stored pose and face motion of this clip (DWPose is skipped) …")
+            return
         if what == "find":
             self.state.setText(f"Looking for the head: frame {k} of {n}")
         else:
@@ -327,8 +343,10 @@ class SwapDialog(QDialog):
             self.result = res
             out, meta, n = res
             self.state.setText(f"Done: {n} frames, made at {meta['gen_size'][0]}×{meta['gen_size'][1]} in "
-                               f"{meta['windows']} part{'s' if meta['windows'] != 1 else ''}. Play it, then "
-                               "“Use this” to put it into the video.")
+                               f"{meta['windows']} part{'s' if meta['windows'] != 1 else ''}"
+                               + (" (the stored pose and face motion)" if meta.get("pose_cached") else
+                                  "; its pose and face motion are stored for the next try") +
+                               ". Play it, then “Use this” to put it into the video.")
             first = Path(self._tmp.name) / "result.png"
             try:
                 chain.frame_at(out, min(self.slider.value(), n - 1), first)

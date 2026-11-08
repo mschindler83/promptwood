@@ -2245,7 +2245,14 @@ def test_replace_a_person_in_a_real_video(app, tmp_path, image, monkeypatch):
         assert dlg.result is not None, dlg.state.text()
         out, meta, frames = dlg.result
         assert frames == n and out.is_file() and swap.probe(out)[2] == n and dlg.b_use.isEnabled()
-        assert server.animated["ref"]["inputs"]["image"]
+        assert server.animated["ref"]["inputs"]["image"] and "dw_pose" in server.animated
+        assert "stored for the next try" in dlg.state.text()
+        assert len(list((w.project / swap.POSE_CACHE_DIR).glob("*/info.json"))) == 1
+        dlg.generate()                                                 # again: DWPose is not run again
+        wait(app, lambda: not dlg._busy, timeout=60)
+        assert dlg.result is not None and "dw_pose" not in server.animated, dlg.state.text()
+        assert "stored pose and face motion" in dlg.state.text()
+        out, meta, frames = dlg.result
         dlg.done(0)
         assert w.use_replacement(v, out, meta, frames)
         node = w.tree.nodes[v]

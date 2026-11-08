@@ -5205,7 +5205,8 @@ class MainWindow(QMainWindow):
             return an
 
         dlg = SwapDialog(self, self.project, nid, self.project / node.made["video"], self.face_detector(), pictures,
-                         connect, self.qs, on_start=before, play=lambda p, t: self.preview.open(Path(p), t))
+                         connect, self.qs, on_start=before, play=lambda p, t: self.preview.open(Path(p), t),
+                         source=node.source)
         if not dialog:
             return dlg
         if dlg.exec() == QDialog.Accepted and dlg.result is not None:

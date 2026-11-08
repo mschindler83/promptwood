@@ -9,7 +9,7 @@ import math
 import uuid
 from pathlib import Path
 
-from .comfy import SUBFOLDER, ComfyError, ComfyGenerator, ComfyImageEditor, _combo_options
+from .comfy import SUBFOLDER, ComfyError, ComfyGenerator, ComfyJobFailed, _combo_options
 
 ANIMATE_NODES = ("WanAnimateToVideo", "TrimVideoLatent", "DWPreprocessor", "BlockifyMask", "DrawMaskOnImage",
                  "CLIPVisionEncode", "CLIPVisionLoader", "ModelSamplingSD3", "LoadVideo", "GetVideoComponents",
@@ -64,9 +64,12 @@ def pick_animate_files(unets, clips, vaes, loras, visions) -> dict:
 
 def build_animate_workflow(*, files: dict, video: str, mask: str, reference: str, frames: int,
                            src_size: tuple[int, int], gen: tuple[int, int], prompt: str, seed: int, prefix: str,
-                           fps: float = 24.0, feather: int = 12, grow: int = 10) -> dict:
+                           fps: float = 24.0, feather: int = 12, grow: int = 10, pose: tuple[str, str] | None = None,
+                           keep_pose: bool = False) -> dict:
     """video / mask / reference: uploaded names (the clip, its head mask, the new person's picture); frames: the
-    clip's frame count; src_size: its size; gen: the size the head is made at."""
+    clip's frame count; src_size: its size; gen: the size the head is made at. pose: uploaded (pose, face) videos
+    of an earlier run (DWPose is not run again); keep_pose: the DWPose videos are saved too ("pose_save",
+    "face_save"; lossless) to be stored for the next run."""
     W, H = gen
     sw, sh = src_size
     wf: dict = {
@@ -92,13 +95,13 @@ def build_animate_workflow(*, files: dict, video: str, mask: str, reference: str
         "src_parts": {"class_type": "GetVideoComponents", "inputs": {"video": ["src", 0]}},
         "small": {"class_type": "ImageScale", "inputs": {"image": ["src_parts", 0], "upscale_method": "lanczos",
                                                          "width": W, "height": H, "crop": "disabled"}},
-        "face": {"class_type": "DWPreprocessor", "inputs": {"image": ["small", 0], "detect_hand": "disable",
+        "dw_face": {"class_type": "DWPreprocessor", "inputs": {"image": ["small", 0], "detect_hand": "disable",
                                                             "detect_body": "disable", "detect_face": "enable",
                                                             "resolution": min(W, H),
                                                             "bbox_detector": "yolox_l.onnx",
                                                             "pose_estimator": "dw-ll_ucoco_384_bs5.torchscript.pt",
                                                             "scale_stick_for_xinsr_cn": "disable"}},
-        "pose": {"class_type": "DWPreprocessor", "inputs": {"image": ["small", 0], "detect_hand": "enable",
+        "dw_pose": {"class_type": "DWPreprocessor", "inputs": {"image": ["small", 0], "detect_hand": "enable",
                                                             "detect_body": "enable", "detect_face": "disable",
                                                             "resolution": min(W, H),
                                                             "bbox_detector": "yolox_l.onnx",
@@ -117,13 +120,31 @@ def build_animate_workflow(*, files: dict, video: str, mask: str, reference: str
         "background": {"class_type": "DrawMaskOnImage", "inputs": {"image": ["small", 0], "mask": ["mask_block", 0],
                                                                    "color": "0, 0, 0"}},
     }
+    if pose is not None:                       # the motion of an earlier run of this very clip (cached)
+        del wf["dw_face"], wf["dw_pose"]
+        for name, file in (("pose", pose[0]), ("face", pose[1])):
+            wf[f"{name}_vid"] = {"class_type": "LoadVideo", "inputs": {"file": file}}
+            wf[f"{name}_parts"] = {"class_type": "GetVideoComponents", "inputs": {"video": [f"{name}_vid", 0]}}
+        pose_in, face_in = ["pose_parts", 0], ["face_parts", 0]
+    else:
+        pose_in, face_in = ["dw_pose", 0], ["dw_face", 0]
+        if keep_pose:                          # lossless (H.264 at crf 0, 4:4:4): the drawings exactly as made
+            for name, src in (("pose", pose_in), ("face", face_in)):
+                wf[f"{name}_keep"] = {"class_type": "CreateVideo",
+                                      "inputs": {"images": src, "fps": float(fps), "bit_depth": 8,
+                                                 "chroma_subsampling": "444"}}
+                wf[f"{name}_save"] = {"class_type": "SaveVideo",
+                                      "inputs": {"video": [f"{name}_keep", 0],
+                                                 "filename_prefix": f"{prefix}_{name}", "format": "mkv",
+                                                 "format.codec": "h264", "format.codec.encoding": "re-encode",
+                                                 "format.codec.encoding.crf": 0.0}}
     acc = None
     for k in range(window_count(frames)):
         a = {"positive": ["pos", 0], "negative": ["neg", 0], "vae": ["vae", 0], "width": W, "height": H,
              "length": WINDOW, "batch_size": 1, "continue_motion_max_frames": OVERLAP,
              "video_frame_offset": 0 if k == 0 else [f"anim{k - 1}", 5],
-             "clip_vision_output": ["ref_vision", 0], "reference_image": ["ref", 0], "face_video": ["face", 0],
-             "pose_video": ["pose", 0], "background_video": ["background", 0], "character_mask": ["mask_block", 0]}
+             "clip_vision_output": ["ref_vision", 0], "reference_image": ["ref", 0], "face_video": face_in,
+             "pose_video": pose_in, "background_video": ["background", 0], "character_mask": ["mask_block", 0]}
         if acc is not None:
             a["continue_motion"] = acc
         wf[f"anim{k}"] = {"class_type": "WanAnimateToVideo", "inputs": a}
@@ -177,29 +198,66 @@ class ComfyAnimator(ComfyGenerator):
             f"this ComfyUI has no {lacking} node" + (f" (install {NODE_HELP[lacking]})" if lacking in NODE_HELP
                                                      else " (update ComfyUI)") if lacking else "")
 
-    _run_saving = ComfyImageEditor._run_saving
+    def _run_outputs(self, wf: dict, outs: dict[str, Path], uploads: list[tuple[str, Path]]) -> None:
+        """Queue a workflow, wait, download what its save nodes wrote ({node: local file}); clean up after."""
+        try:
+            ws = self._connect_ws()
+            try:
+                self._queue(wf)
+                entry = self._wait(self.current, ws)
+            except ComfyJobFailed:
+                raise
+            except Exception:
+                self.interrupt()
+                raise
+            finally:
+                if ws is not None:
+                    try:
+                        ws.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                self.current = None
+            for node, dest in outs.items():
+                f = self._first_file((entry.get("outputs") or {}).get(node))
+                if f is None:
+                    raise ComfyError(f"ComfyUI finished without the output of {node}")
+                self._save(f, Path(dest))
+                if self.cleanup:
+                    self._remove(self.output_dir, f, Path(dest))
+        finally:
+            if self.cleanup:
+                for up, local in uploads:
+                    self._remove(self.input_dir, {"filename": Path(up).name, "subfolder": str(Path(up).parent)},
+                                 Path(local), same_size=False)
 
     def replace(self, video: Path, mask: Path, reference: Path, out: Path, seed: int, frames: int,
-                src_size: tuple[int, int], size: str = "480p", prompt: str = "", fps: float = 24.0) -> dict:
+                src_size: tuple[int, int], size: str = "480p", prompt: str = "", fps: float = 24.0,
+                pose: tuple[Path, Path] | None = None, keep_pose: tuple[Path, Path] | None = None) -> dict:
         """Draw the person of `reference` into the head mask of `video`; the result (the clip's size, frames and
-        sound) goes to out. Returns what it was made with."""
+        sound) goes to out. pose: (pose, face) videos stored from an earlier run of this clip at this size (DWPose
+        is skipped); keep_pose: where this run's DWPose videos go (to be stored). Returns what it was made with."""
         if self.missing:
             raise ComfyError(self.missing)
         gen = gen_size(*src_size, SIZES.get(size, 480))
         uploads: list[tuple[str, Path]] = []
         try:
             names = []
-            for p in (video, mask, reference):
+            for p in (video, mask, reference) + (tuple(pose) if pose else ()):
                 uploads.append((self.upload(Path(p)), Path(p)))
                 names.append(uploads[-1][0])
             feather = max(4, min(20, round(min(src_size) / 90)))
             wf = build_animate_workflow(files=self.files, video=names[0], mask=names[1], reference=names[2],
                                         frames=frames, src_size=src_size, gen=gen, prompt=prompt, seed=seed,
                                         prefix=f"{SUBFOLDER}/swap_{uuid.uuid4().hex[:12]}", fps=fps,
-                                        feather=feather)
+                                        feather=feather, pose=(names[3], names[4]) if pose else None,
+                                        keep_pose=keep_pose is not None and not pose)
         except BaseException:
             self._drop_uploads(uploads)
             raise
-        self._run_saving(wf, "save", Path(out), uploads)
+        outs = {"save": Path(out)}
+        if keep_pose is not None and not pose:
+            outs.update({"pose_save": Path(keep_pose[0]), "face_save": Path(keep_pose[1])})
+        self._run_outputs(wf, outs, uploads)
         return {"model": self.files["unet"], "size": size, "gen_size": list(gen), "windows": window_count(frames),
+                "pose_cached": bool(pose),
                 "steps": STEPS, "seed": int(seed), "prompt": prompt or DEFAULT_PROMPT, "feather": feather}

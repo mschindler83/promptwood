@@ -104,11 +104,59 @@ def test_animate_workflow_in_comfy(tmp_path):
         assert wf["video"]["inputs"]["audio"] == ["src_parts", 1]
         assert wf["shift"]["inputs"]["shift"] == 8.0 and wf["sample0"]["inputs"]["steps"] == 6
         assert wf["lora_speed"]["inputs"]["lora_name"].endswith("rank64_bf16.safetensors")
-        assert wf["face"]["inputs"]["detect_face"] == "enable" and wf["pose"]["inputs"]["detect_body"] == "enable"
+        assert wf["dw_face"]["inputs"]["detect_face"] == "enable" and wf["dw_pose"]["inputs"]["detect_body"] == "enable"
         server.animate = False
         an = A.ComfyAnimator(server.url)
         assert "Wan 2.2 Animate model" in an.missing
         with pytest.raises(Exception, match="Animate"):
             an.replace(v, m, ref, out, 7, 160, (320, 180))
+    finally:
+        server.close()
+
+
+def test_pose_cache_key_and_store(tmp_path):
+    """The DWPose cache is bound to the exact video file, range, converted clip and size."""
+    c = clip(tmp_path / "c.mp4", 10)
+    src = {"file": "/v/real.mp4", "start": 1.0, "end": 2.5}
+    k = swap.pose_key(c, src, (832, 480))
+    assert k == swap.pose_key(c, dict(src), (832, 480))
+    assert k != swap.pose_key(c, {**src, "end": 2.6}, (832, 480))           # another range
+    assert k != swap.pose_key(c, {**src, "file": "/v/other.mp4"}, (832, 480))
+    assert k != swap.pose_key(c, src, (1280, 720))                          # another size
+    c2 = clip(tmp_path / "c2.mp4", 11)
+    assert k != swap.pose_key(c2, src, (832, 480))                          # another converted clip
+    project = tmp_path / "p"
+    assert swap.cached_pose(project, k) is None
+    pose, face = tmp_path / "pose.mkv", tmp_path / "face.mkv"
+    pose.write_bytes(b"p")
+    face.write_bytes(b"f")
+    stored = swap.store_pose(project, k, pose, face, {"source": src})
+    assert swap.cached_pose(project, k) == stored and stored[0].read_bytes() == b"p" and not pose.exists()
+
+
+def test_animate_workflow_keeps_and_reuses_the_pose(tmp_path):
+    """First run: DWPose runs and its videos are kept (lossless); with them: DWPose is not run again."""
+    v = clip(tmp_path / "v.mp4", 30)
+    m = tmp_path / "m.mp4"
+    swap.write_mask([(100, 40, 160, 120)] * 30, 320, 180, m)
+    ref = tmp_path / "ref.png"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=red:s=64x64", "-frames:v", "1",
+                    str(ref)], check=True)
+    server = FakeComfy(tmp_path / "comfy")
+    try:
+        an = A.ComfyAnimator(server.url)
+        keep = (tmp_path / "pose.mkv", tmp_path / "face.mkv")
+        meta = an.replace(v, m, ref, tmp_path / "o1.mp4", 1, 30, (320, 180), keep_pose=keep)
+        wf = server.animated
+        assert "dw_pose" in wf and "dw_face" in wf and not meta["pose_cached"]
+        assert wf["pose_save"]["inputs"]["format.codec.encoding.crf"] == 0.0
+        assert wf["pose_keep"]["inputs"]["chroma_subsampling"] == "444"
+        assert all(p.is_file() for p in keep)
+        meta = an.replace(v, m, ref, tmp_path / "o2.mp4", 1, 30, (320, 180), pose=keep)
+        wf = server.animated
+        assert meta["pose_cached"] and "dw_pose" not in wf and "pose_save" not in wf
+        assert wf["anim0"]["inputs"]["pose_video"] == ["pose_parts", 0]
+        assert wf["anim0"]["inputs"]["face_video"] == ["face_parts", 0]
+        assert swap.probe(tmp_path / "o2.mp4")[2] == 30
     finally:
         server.close()

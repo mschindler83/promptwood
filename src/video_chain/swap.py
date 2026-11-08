@@ -178,3 +178,35 @@ def restore(node) -> bool:
         return False
     node.source = dict(r["original"])
     return True
+
+
+# ---- DWPose cache: the pose and face motion of a clip, bound to its exact video, range and size
+POSE_CACHE_DIR = f"{SWAPS_DIR}/pose_cache"
+POSE_VERSION = 1                            # bumped when the DWPose settings of the workflow change
+
+
+def pose_key(clip: Path, source: dict, gen: tuple[int, int]) -> str:
+    """The cache key of a clip's DWPose videos: its source file and range, the converted clip's content and the
+    size the head is made at (any change: another key)."""
+    import hashlib
+    from . import chain
+    data = {"v": POSE_VERSION, "file": str((source or {}).get("file")), "start": (source or {}).get("start"),
+            "end": (source or {}).get("end"), "clip": chain.file_signature(Path(clip)), "size": list(gen)}
+    return hashlib.sha1(json.dumps(data, sort_keys=True).encode()).hexdigest()[:20]
+
+
+def cached_pose(project: Path, key: str) -> tuple[Path, Path] | None:
+    """The stored (pose, face) videos for key, or None."""
+    d = Path(project) / POSE_CACHE_DIR / key
+    pose, face = d / "pose.mkv", d / "face.mkv"
+    return (pose, face) if pose.is_file() and face.is_file() and (d / "info.json").is_file() else None
+
+
+def store_pose(project: Path, key: str, pose: Path, face: Path, info: dict) -> tuple[Path, Path]:
+    """Keep a run's DWPose videos for key (moved in; info.json last, so a half-written entry is never used)."""
+    d = Path(project) / POSE_CACHE_DIR / key
+    d.mkdir(parents=True, exist_ok=True)
+    Path(pose).replace(d / "pose.mkv")
+    Path(face).replace(d / "face.mkv")
+    (d / "info.json").write_text(json.dumps(info, indent=2), encoding="utf-8")
+    return d / "pose.mkv", d / "face.mkv"

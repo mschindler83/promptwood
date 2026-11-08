@@ -185,8 +185,20 @@ class FakeComfy:
             out.parent.mkdir(parents=True, exist_ok=True)
             subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(src), "-vf", "hue=h=90", "-frames:v", str(n),
                             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(out)], check=True)
-            return {"save": {"images": [{"filename": out.name, "subfolder": str(Path(prefix).parent),
-                                         "type": "output"}]}}
+            res = {"save": {"images": [{"filename": out.name, "subfolder": str(Path(prefix).parent),
+                                        "type": "output"}]}}
+            for name in ("pose", "face"):            # the DWPose videos kept for the cache
+                if f"{name}_vid" in wf:
+                    assert (self.root / "input" / wf[f"{name}_vid"]["inputs"]["file"]).is_file()
+                if f"{name}_save" in wf:
+                    sv = wf[f"{name}_save"]["inputs"]
+                    assert sv["format"] == "mkv" and sv["format.codec.encoding.crf"] == 0.0
+                    f = self.root / "output" / (sv["filename_prefix"] + "_00001_.mkv")
+                    subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(src), "-frames:v", str(n), "-c:v",
+                                    "libx264", "-qp", "0", str(f)], check=True)
+                    res[f"{name}_save"] = {"images": [{"filename": f.name, "subfolder": str(Path(prefix).parent),
+                                                       "type": "output"}]}
+            return res
         if "refine_save" in wf:                      # 2K refine: the draft at the target size, its frames and sound
             draft = self.root / "input" / wf["draft"]["inputs"]["file"]
             assert draft.is_file(), "draft not uploaded"
