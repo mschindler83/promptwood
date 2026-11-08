@@ -580,6 +580,14 @@ def test_prompt_refiner(server):
     assert "<Picture 1>" in server.refined["system_prompt"] and "<Picture" not in C.REFINE_INSTRUCTIONS["image"]
     r.refine_prompt("@Anna waves at @Ben-2, mail me@home", "video", None)
     assert "exactly as they are, where they are: @Anna, @Ben-2." in server.refined["system_prompt"]
+    assert "The cast" not in server.refined["system_prompt"]
+    r.refine_prompt("@Anna waves", "video", None, cast=[{"name": "Anna", "desc": "woman, 30s.", "voice": True},
+                                                        {"name": "Ben", "desc": "", "voice": False}])
+    system = server.refined["system_prompt"]
+    assert "The cast, written as @Name: @Anna (woman, 30s), has a voice; @Ben." in system
+    assert "in its own sentence that starts with the speaker's @Name, never with he, she or they" in system
+    r.refine_prompt("a red car", "image", None, cast=[{"name": "Anna", "desc": "", "voice": False}])
+    assert "The cast" not in server.refined["system_prompt"]                  # images: no cast rules
     assert C.clean_refined("**“A calm sea.”**") == "A calm sea."
 
 

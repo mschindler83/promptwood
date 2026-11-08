@@ -2476,9 +2476,18 @@ class MainWindow(QMainWindow):
         return " · ".join(parts)
 
     def _faces_text(self, use: dict) -> str:
-        """Which faces a clip is made with, for its card ('' without a cast)."""
+        """Which faces (and voices) a clip is made with, for its card ('' without a cast); with spoken lines, who
+        says each one (as the app reads it: the voice it gets)."""
         if not T.cast_of(self.tree):
             return ""
+        text = self._cast_line(use)
+        if use["mode"] == "voices":
+            said = [(f"@{d['name']}" if d["name"] else "nobody")
+                    + f": \u201c{d['line'][:24]}{'…' if len(d['line']) > 24 else ''}\u201d" for d in use["lines"]]
+            text += "\nLines: " + " · ".join(said)
+        return text
+
+    def _cast_line(self, use: dict) -> str:
         if use["mode"] == "voices":
             faces = [f"@{c['name']}" for c in use["characters"] if c["images"]]
             voices = [f"@{c['name']}" for c in use["characters"]
@@ -3014,7 +3023,9 @@ class MainWindow(QMainWindow):
         def connect():
             from ..comfy import ComfyPromptRefiner
             return ComfyPromptRefiner(url, log=lambda _m: None, comfy_dir=comfy_dir, cleanup=False)
-        dlg = RefineDialog(self, text, kind, connect, self.qs, start_comfy=self.start_comfy)
+        cast = [{"name": c["name"], "desc": c.get("desc", ""), "voice": bool(c.get("voice"))}
+                for c in T.cast_of(self.tree)] if self.tree is not None and kind == "video" else []
+        dlg = RefineDialog(self, text, kind, connect, self.qs, start_comfy=self.start_comfy, cast=cast)
         try:
             return dlg.chosen() if dlg.exec() == QDialog.Accepted else None
         finally:

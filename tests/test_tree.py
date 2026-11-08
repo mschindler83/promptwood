@@ -818,6 +818,11 @@ def test_dialogue_speakers():
     assert [d["speaker"] for d in T.dialogue(o, 'She says "hi".')] == [None]
     assert T.dialogue(o, 'She says "hi".', default=T.character(o, "Anna"))[0]["speaker"]["name"] == "Anna"
     assert T.dialogue(o, "<d>[German] Hallo</d> says @Ben")[0]["line"] == "Hallo"
+    # "she" / "he" before a line: the last-mentioned character of that gender (from the description)
+    o = {"cast": [{"name": "Anna", "images": [], "desc": "woman, 30s"}, {"name": "Ben", "images": [], "desc": "a man"}]}
+    text = '@Anna and @Ben sit down; she says "good morning" and he answers "coffee?" @Ben looks at her and says "Hi."'
+    assert [d["speaker"]["name"] for d in T.dialogue(o, text)] == ["Anna", "Ben", "Ben"]
+    assert T.gender_of({"desc": "girl"}) == "f" and T.gender_of({"desc": "robot"}) is None
 
 
 def test_cast_voices(project, tmp_path):
@@ -883,3 +888,11 @@ def test_cast_voices(project, tmp_path):
     assert not (project / "refs/voice1.wav").exists() and T.cast_problems(project, t, [both.id]) == []
     T.remove_character(project, t, "Anna")
     assert not (project / "refs/voice2.wav").exists()
+
+
+def test_refine_problems():
+    a = '@Ben and @Anna stand at the window. He points: "Look, it is snowing!" She laughs: "Finally."'
+    assert T.refine_problems(a, '@Ben and @Anna stand there. @Ben says “Look, it is snowing!” @Anna: "Finally!"') == []
+    assert T.refine_problems(a, '@Ben and Anna stand there. Anna laughs: "Finally." "Finally."') == [
+        "the line \u201cLook, it is snowing!\u201d is gone or changed", "the line \u201cFinally.\u201d is there 2 times",
+        "@Anna is no longer mentioned"]

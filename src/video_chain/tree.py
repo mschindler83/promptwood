@@ -628,10 +628,27 @@ def mentions(options: dict, text: str) -> tuple[list[dict], list[str]]:
     return found, unknown
 
 
+_FEMALE = re.compile(r"\b(woman|women|girl|female|lady|mother|mom|mum|wife|daughter|sister|grandmother|frau|"
+                     r"mädchen|mutter)\b", re.IGNORECASE)
+_MALE = re.compile(r"\b(man|men|boy|male|guy|gentleman|father|dad|husband|son|brother|grandfather|mann|junge|"
+                   r"vater)\b", re.IGNORECASE)
+_PRONOUN = re.compile(r"\b(she|he|sie|er)\b", re.IGNORECASE)
+
+
+def gender_of(c: dict) -> str | None:
+    """'f' / 'm' from a character's description (woman, man, girl ...), else None."""
+    desc = c.get("desc") or ""
+    f, m = bool(_FEMALE.search(desc)), bool(_MALE.search(desc))
+    return "f" if f and not m else "m" if m and not f else None
+
+
 def dialogue(options: dict, text: str, default: dict | None = None) -> list[dict]:
-    """The spoken lines of a prompt, [{"start", "end", "line", "speaker": character or None}]. A line belongs to the
-    first @Name of its sentence (@Anna looks at @Ben and says "Hi." -> Anna), else to the first @Name after it in
-    the sentence ("Hi," says @Anna.), else to the last one before it, else to default."""
+    """The spoken lines of a prompt, [{"start", "end", "line", "speaker": character or None}]. Who says a line,
+    looking at the words since the sentence began (or since the line before, in the same sentence):
+    - a "she" / "he" there, the last one: the last-mentioned character of that gender (from its description);
+    - else the first @Name there (@Anna looks at @Ben and says "Hi." -> Anna);
+    - else the first @Name after the line in its sentence ("Hi," says @Anna.);
+    - else the last @Name before the line, else default."""
     text = text or ""
     spans = [(m.start(), m.end(), next(g for g in m.groups() if g is not None).strip())
              for m in DIALOGUE.finditer(text)]
@@ -643,17 +660,55 @@ def dialogue(options: dict, text: str, default: dict | None = None) -> list[dict
     masked = "".join(masked)
     marks = [(m.start(), character(options, m.group(1))) for m in MENTION.finditer(text)]
     marks = [(pos, c) for pos, c in marks if c is not None]
-    out = []
+    out, prev_end = [], 0
     for a, b, line in spans:
         if not line:
+            prev_end = b
             continue
         cut = max(masked.rfind(e, 0, a) for e in (". ", "! ", "? ", "\n"))
+        seg = max(cut, prev_end - 1)                # the words that lead up to this line
         after = [masked.find(e, b) for e in (". ", "! ", "? ", "\n")]
         stop = min([x for x in after if x >= 0] or [len(text)])
-        who = next((c for pos, c in marks if cut < pos < a), None) \
+        who = None
+        pron = [m for m in _PRONOUN.finditer(masked, seg + 1, a)]
+        if pron:
+            g = "f" if pron[-1].group(1).lower() in ("she", "sie") else "m"
+            if pron[-1].group(1).lower() == "sie" and any(gender_of(c) == "m" for _p, c in marks):
+                g = None                            # German "sie" is also "they" / "you"
+            if g:
+                who = next((c for pos, c in reversed(marks) if pos < pron[-1].start() and gender_of(c) == g), None)
+        who = who or next((c for pos, c in marks if seg < pos < a), None) \
             or next((c for pos, c in marks if b <= pos <= stop), None) \
             or next((c for pos, c in reversed(marks) if pos < a), None) or default
         out.append({"start": a, "end": b, "line": line, "speaker": who})
+        prev_end = b
+    return out
+
+
+def spoken_lines(text: str) -> list[str]:
+    """The quoted lines of a prompt, as written (normalised spaces, no trailing , ; :)."""
+    return [" ".join(next(g for g in m.groups() if g is not None).split()).rstrip(",;: ")
+            for m in DIALOGUE.finditer(text or "")]
+
+
+def refine_problems(original: str, refined: str) -> list[str]:
+    """What a refined prompt lost of the original: spoken lines (dropped, changed or repeated) and @mentions."""
+    def key(x: str) -> str:
+        return re.sub(r"[^\w]+", " ", x.lower()).strip()
+    before, after = spoken_lines(original), spoken_lines(refined)
+    have = [key(x) for x in after]
+    out = []
+    for line in dict.fromkeys(before):
+        n_want, n_got = [key(x) for x in before].count(key(line)), have.count(key(line))
+        short = line if len(line) <= 40 else line[:39] + "…"
+        if n_got == 0:
+            out.append(f"the line \u201c{short}\u201d is gone or changed")
+        elif n_got > n_want:
+            out.append(f"the line \u201c{short}\u201d is there {n_got} times")
+    gone = [f"@{m}" for m in dict.fromkeys(MENTION.findall(original or ""))
+            if not re.search(rf"(?<![\w@])@{re.escape(m)}(?![\w-])", refined or "", re.IGNORECASE)]
+    if gone:
+        out.append(f"{', '.join(gone)} {'is' if len(gone) == 1 else 'are'} no longer mentioned")
     return out
 
 
@@ -763,7 +818,8 @@ def _voiced_prompt(options: dict, text: str, found: list[dict], lines: list[dict
 def clip_cast(options: dict, prompt: str) -> dict:
     """How a clip uses the cast. The prompt is the clip's own (the style text is put around it here).
     {"mode": "voices" | "mention" | "tags" | "lead" | None, "characters": [...], "images": [rel], "voices": [rel],
-    "language": the dialogue language (voices only), "prompt": what the model gets, "record": [{"name", "desc"}]
+    "language": the dialogue language and "lines": [{"name": speaker or None, "line"}] (voices only), "prompt": what
+    the model gets, "record": [{"name", "desc"}]
     (voices / mention: what the model prompt says about them)}.
     voices:  a character with a voice says a line ("..." in the sentence of its @Name; with nobody mentioned, the
              lead's lines): MiniMax's structured format (see _voiced_prompt); the voices come after the sounds the
@@ -784,8 +840,10 @@ def clip_cast(options: dict, prompt: str) -> dict:
            and any(d["speaker"]["name"] == c["name"] for c in talking) for d in lines):
         out, images, voices = _voiced_prompt(options, text, talking, lines, audio_mentioned(text), implicit)
         lang = ((options.get("identity") or {}).get("language") or "English").strip() or "English"
+        said = [{"name": d["speaker"]["name"] if d["speaker"] else None, "line": d["line"]} for d in lines]
         return {"mode": "voices", "characters": talking, "images": images, "voices": voices, "language": lang,
-                "prompt": out, "record": [{"name": c["name"], "desc": c.get("desc", "")} for c in talking]}
+                "lines": said, "prompt": out,
+                "record": [{"name": c["name"], "desc": c.get("desc", "")} for c in talking]}
     found = [c for c in found if c["images"]]
     if found:
         tags, images = _picture_tags(found)

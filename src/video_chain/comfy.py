@@ -1213,10 +1213,30 @@ def clean_refined(text: str) -> str:
     return " ".join(text.split())
 
 
+def cast_instruction(cast: list[dict]) -> str:
+    """What the refiner is told about the cast ([{"name", "desc", "voice": bool}]): the names stay @Name, and a
+    spoken line goes in quotes into a sentence that starts with its speaker's @Name (the app finds the speaker
+    there and gives the line that character's voice)."""
+    if not cast:
+        return ""
+    people = "; ".join(f"@{c['name']}" + (f" ({c['desc'].strip().rstrip('.')})" if c.get("desc") else "")
+                       + (", has a voice" if c.get("voice") else "") for c in cast)
+    return (f"The cast, written as @Name: {people}. Write a cast member always as @Name, exactly as written (not "
+            "as a description or a plain name), at least once in each sentence about them. Mention a cast member only "
+            "if the user's prompt or request does. Each spoken line: in double quotes, in its own sentence that "
+            "starts with the speaker's @Name, never with he, she or they. Wrong: @A and @B sit down. She says "
+            "\"Hi.\" He answers \"Hello.\" Right: @A and @B sit down. @A says \"Hi.\" @B answers \"Hello.\" "
+            "Keep spoken lines in their language and word for word unless the user asks to change them, and do not add "
+            "spoken lines. Do not write any tags in angle brackets.")
+
+
 def build_refine_prompt_workflow(*, prompt: str, kind: str, model: dict, seed: int, hint: str = "",
-                                 temperature: float = 0.5) -> dict:
-    """CLIPLoader (the LLM) -> TextGenerate with the instruction for this kind of prompt -> PreviewAny (text out)."""
+                                 temperature: float = 0.5, cast: list[dict] | None = None) -> dict:
+    """CLIPLoader (the LLM) -> TextGenerate with the instruction for this kind of prompt -> PreviewAny (text out).
+    cast: the project's characters (video prompts), see cast_instruction."""
     system = REFINE_INSTRUCTIONS[kind] + " " + _SAFETY
+    if cast and kind == "video":
+        system += " " + cast_instruction(cast)
     tokens = re.findall(r"<[^<>]{1,40}>", prompt)          # <Picture 1>, <ref_image_0> …: only then mentioned
     tokens += re.findall(r"(?<![\w@])@\w[\w-]*", prompt)    # @Anna: the cast, mentioned by name
     if tokens:
@@ -1248,9 +1268,9 @@ class ComfyPromptRefiner(ComfyGenerator):
                              "Gemma 3 12B text encoder)")
 
     def refine_prompt(self, prompt: str, kind: str, model_file: str | None = None, seed: int = 0,
-                      hint: str = "") -> str:
+                      hint: str = "", cast: list[dict] | None = None) -> str:
         model = next((m for m in self.models if m["file"] == model_file), self.models[0])
-        wf = build_refine_prompt_workflow(prompt=prompt, kind=kind, model=model, seed=seed, hint=hint)
+        wf = build_refine_prompt_workflow(prompt=prompt, kind=kind, model=model, seed=seed, hint=hint, cast=cast)
         res = self._json("POST", "/prompt", {"prompt": wf, "client_id": self.client_id})
         if res.get("node_errors"):
             raise ComfyError(f"ComfyUI rejected the workflow: {json.dumps(res['node_errors'])[:600]}")

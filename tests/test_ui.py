@@ -585,7 +585,7 @@ def test_identity_references_in_the_window(app, win, tmp_path, image, monkeypatc
     type_prompt(win, ids[1], '@Tom waves and says "Hello there."')
     flush(app, win)
     card = next(c for c in win.cards if c.nid == ids[1])
-    assert card.faces.text() == "Faces: @Tom · Voices: @Tom" and "<d>[English] Hello there.</d>" in card.edit.toolTip()
+    assert card.faces.text() == "Faces: @Tom · Voices: @Tom\nLines: @Tom: \u201cHello there.\u201d" and "<d>[English] Hello there.</d>" in card.edit.toolTip()
     win.dialogue_lang.setCurrentText("German")
     assert win.tree.options["identity"]["language"] == "German"
     win._remove_voice()
@@ -1552,8 +1552,8 @@ def test_prompt_refiner_on_the_card(app, win, tmp_path, image, monkeypatch):
     seen = {}
 
     class FakeDialog:
-        def __init__(self, parent, text, kind, connect, settings=None, start_comfy=None):
-            seen.update(text=text, kind=kind)
+        def __init__(self, parent, text, kind, connect, settings=None, start_comfy=None, cast=None):
+            seen.update(text=text, kind=kind, cast=cast)
             self.refined_any = True
 
         def exec(self):
@@ -1567,7 +1567,7 @@ def test_prompt_refiner_on_the_card(app, win, tmp_path, image, monkeypatch):
     monkeypatch.setattr(M, "RefineDialog", FakeDialog)
     card = win.cards[0]
     card.b_refine.click()
-    assert seen == {"text": "a man walks", "kind": "video"}
+    assert seen == {"text": "a man walks", "kind": "video", "cast": []}
     assert win.tree.nodes[ids[0]].prompt == "A man walks slowly towards the camera; footsteps on gravel."
     card.edit.undo()                                              # one Ctrl+Z takes the refined text back
     assert card.edit.toPlainText() == "a man walks"

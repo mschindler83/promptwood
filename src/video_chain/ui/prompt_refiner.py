@@ -11,6 +11,8 @@ from PySide6.QtGui import QKeySequence, QShortcut, QTextCursor
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLineEdit, QPlainTextEdit,
                                QPushButton, QVBoxLayout)
 
+from ..tree import refine_problems
+from .theme import repolish
 from .widgets import guard_wheel, icon_button, label
 
 KIND_TEXT = {"video": "video clip prompt", "image": "image prompt", "edit": "edit instruction"}
@@ -39,8 +41,9 @@ class _Sig(QObject):
 class RefineDialog(QDialog):
     """connect() -> a ComfyPromptRefiner (called in a thread). chosen() -> the text to use, or None."""
 
-    def __init__(self, parent, text: str, kind: str, connect, settings=None, start_comfy=None):
+    def __init__(self, parent, text: str, kind: str, connect, settings=None, start_comfy=None, cast=None):
         super().__init__(parent)
+        self.cast = cast or []                    # the project's characters: the refiner keeps @Name, writes lines
         self.setWindowTitle(f"Refine the {KIND_TEXT.get(kind, 'prompt')}")
         self.resize(900, 560)
         self.kind, self.connect, self.qs, self.start_comfy = kind, connect, settings, start_comfy
@@ -168,11 +171,12 @@ class RefineDialog(QDialog):
         self.state.setText("Refining …")
         text, kind, model, hint = (self.original.toPlainText(), self.kind, self.model.currentData(),
                                    self.hint.text())
-        sig, refiner, seed = self._sig, self.refiner, random.randint(0, 2**31 - 1)
+        sig, refiner, seed, cast = self._sig, self.refiner, random.randint(0, 2**31 - 1), self.cast
 
         def work():
             try:
-                sig.result.emit(refiner.refine_prompt(text, kind, model, seed, hint), "")
+                sig.result.emit(refiner.refine_prompt(text, kind, model, seed, hint,
+                                                      **({"cast": cast} if cast else {})), "")
             except Exception as e:  # noqa: BLE001
                 try:
                     sig.result.emit("", str(e))
@@ -190,10 +194,14 @@ class RefineDialog(QDialog):
             self.out.setPlainText(text)
             same = " ".join(text.lower().strip(" .").split()) == \
                 " ".join(self.original.toPlainText().lower().strip(" .").split())
+            lost = [] if same else refine_problems(self.original.toPlainText(), text)
             self.state.setText("The model gave the prompt back unchanged. Refine for another try, or choose "
                                "another model (Qwen3-VL 4B refined most reliably in tests)." if same else
-                               f"{len(text.split())} words. Edit it if you like, Refine for another try, or "
-                               "Use this.")
+                               ("Check this: " + "; ".join(lost) + ". Refine for another try, or edit it." if lost
+                                else f"{len(text.split())} words. Edit it if you like, Refine for another try, or "
+                                "Use this."))
+            self.state.setProperty("severity", "warning" if lost else "")
+            repolish(self.state)
         self.buttons.button(QDialogButtonBox.Ok).setEnabled(bool(self.out.toPlainText().strip()))
 
     def _use(self):
