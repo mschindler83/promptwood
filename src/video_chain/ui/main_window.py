@@ -270,6 +270,18 @@ STEPS_TIP = "Sampling steps per clip: more is slower and rarely better; 20-30 is
 STEPS_DEFAULT = 3
 
 
+class _CurrentStack(QStackedWidget):
+    """A stack whose size is that of the page shown (not of its largest hidden page)."""
+
+    def sizeHint(self):
+        w = self.currentWidget()
+        return w.sizeHint() if w is not None else super().sizeHint()
+
+    def minimumSizeHint(self):
+        w = self.currentWidget()
+        return w.minimumSizeHint() if w is not None else super().minimumSizeHint()
+
+
 class PromptCard(QFrame):
     """One clip of the selected path: prompt, seed, LoRAs, own length / steps, status."""
     settings_open = False                      # the own-settings part is open (the same on every card)
@@ -1421,7 +1433,7 @@ class MainWindow(QMainWindow):
         self.b_fit = icon_button("frame", "Fit the view (F)")
         for btn, act in ((self.b_continue, "continue"), (self.b_add_video, "video"), (self.b_branch, "branch"),
                          (self.b_variant, "variant"), (self.b_delete, "delete")):
-            btn.clicked.connect(lambda _=False, a=act: self.node_action(a, self.selected_id()))
+            btn.clicked.connect(lambda _=False, a=act: self.node_action(a, self.target_id()))
             bh.addWidget(btn)
         bh.addSpacing(6)
         self.b_fit.clicked.connect(lambda: self.graph.fit())
@@ -1474,7 +1486,7 @@ class MainWindow(QMainWindow):
         nav.addWidget(self.focus_info, 1)
         nav.addWidget(self.b_next_clip)
         ctv.addLayout(nav)
-        self.card_stack = QStackedWidget()
+        self.card_stack = _CurrentStack()
         self.path_hint = label("", level="tertiary")
         self.path_hint.setWordWrap(True)
         self.path_hint.setAlignment(Qt.AlignTop | Qt.AlignLeft)
@@ -1496,13 +1508,22 @@ class MainWindow(QMainWindow):
         rv.addWidget(self.preview, 1)
         prow = QHBoxLayout()
         prow.setContentsMargins(8, 0, 8, 8)
-        self.b_play_path = QPushButton("Play path")
+        self.b_play_clip = QPushButton("▶ Clip")
+        self.b_play_clip.setToolTip("Play the clip shown in the inspector (Space in the timeline: double-click)")
+        self.b_play_clip.clicked.connect(lambda: self.focus and self._play_node(self.focus))
+        self.b_play_path = QPushButton("▶ Path")
         self.b_play_path.setToolTip("Join the clips of the selected path and play them")
         self.b_play_path.clicked.connect(lambda: self.join_selected("play"))
+        self.b_play_film = QPushButton("▶ Film")
+        self.b_play_film.setToolTip("Join all scenes of the film and play it")
+        self.b_play_film.clicked.connect(lambda: self.join_film("play"))
         self.b_export = QPushButton("Export path…")
         self.b_export.setToolTip("Save the selected path as one video")
         self.b_export.clicked.connect(self.export_path)
-        prow.addWidget(self.b_play_path)
+        prow.addWidget(label("Play", level="tertiary"))
+        for b in (self.b_play_clip, self.b_play_path, self.b_play_film):
+            prow.addWidget(b)
+        prow.addSpacing(12)
         prow.addWidget(self.b_export)
         prow.addStretch(1)
         rv.addLayout(prow)
@@ -1551,8 +1572,14 @@ class MainWindow(QMainWindow):
         self.progress.setRange(0, 1000)
         self.status = label("Open or create a project folder.", role="statusText")
         self.gpu = label("GPU …", role="statusText")
-        for w in (self.b_gen, self.b_gen_all, self.b_stop, self.progress):
-            sb.addWidget(w)
+        tb = self.addToolBar("Run")                # making clips: at the top, like an editor's render buttons
+        tb.setObjectName("runToolbar")
+        tb.setMovable(False)
+        for w in (self.b_gen, self.b_gen_all, self.b_stop):
+            tb.addWidget(w)
+        tb.addSeparator()
+        tb.addWidget(self.progress)
+        self.run_toolbar = tb
         sb.addWidget(self.status, 1)
         self.model_label = label("Model: not loaded", role="statusText")
         self.b_unload = QPushButton("Unload")
@@ -1578,10 +1605,10 @@ class MainWindow(QMainWindow):
                     self.turbo_lora.currentIndexChanged, self.turbo_steps.valueChanged,
                     self.turbo_strength.valueChanged):
             sig.connect(self._options_changed)
-        for keys, fn in (("Ctrl+N", lambda: self.node_action("continue", self.selected_id())),
-                         ("Ctrl+Shift+V", lambda: self.node_action("video", self.selected_id())),
-                         ("Ctrl+B", lambda: self.node_action("branch", self.selected_id())),
-                         ("Ctrl+D", lambda: self.node_action("variant", self.selected_id())),
+        for keys, fn in (("Ctrl+N", lambda: self.node_action("continue", self.target_id())),
+                         ("Ctrl+Shift+V", lambda: self.node_action("video", self.target_id())),
+                         ("Ctrl+B", lambda: self.node_action("branch", self.target_id())),
+                         ("Ctrl+D", lambda: self.node_action("variant", self.target_id())),
                          ("Ctrl+Return", self.generate_path), ("Ctrl+Shift+Return", self.generate_all),
                          ("Alt+Left", lambda: self._step_focus(-1)), ("Alt+Right", lambda: self._step_focus(1))):
             QShortcut(QKeySequence(keys), self, activated=fn)
@@ -2219,6 +2246,9 @@ class MainWindow(QMainWindow):
         self.project = self.tree = None
         self.project_edit.clear()
         self.qs.setValue("project", "")
+        self.focus = self._path_end = None
+        self.timeline.show_path([], None)
+        self.graph.set_focus(None)
         for c in self.cards:
             self.card_stack.removeWidget(c)
             c.setParent(None)
@@ -2275,6 +2305,7 @@ class MainWindow(QMainWindow):
                 pass
         self.project, self.tree = folder, tree
         self.film = film
+        self.focus = self._path_end = None         # (ids like n3 exist in every scene: no focus carried over)
         synced = ""
         if len(film.scenes) > 1 and film.shared_state and film.shared(tree.options) != film.shared_state:
             tree.options.update(json.loads(json.dumps(film.shared_state)))   # it missed a change of the film's cast
@@ -3380,6 +3411,8 @@ class MainWindow(QMainWindow):
         end = ids[-1] if ids else None
         if self.focus not in ids or end != getattr(self, "_path_end", None):
             self.focus = end                       # a new path (or a new clip at its end): where one goes on
+            if end is not None:
+                self.inspector.setCurrentIndex(0)
         self._path_end = end
         self._update_cards()
         self._show_focus()
@@ -3393,6 +3426,7 @@ class MainWindow(QMainWindow):
     def _show_focus(self):
         card = next((c for c in self.cards if c.nid == self.focus), None)
         self.card_stack.setCurrentWidget(card if card is not None else self.path_hint)
+        self.card_stack.updateGeometry()
         ids = [c.nid for c in self.cards]
         k = ids.index(self.focus) if self.focus in ids else -1
         self.b_prev_clip.setEnabled(k > 0)
@@ -3404,6 +3438,7 @@ class MainWindow(QMainWindow):
         else:
             self.focus_info.setText("")
         self.timeline.set_focus(self.focus)
+        self.graph.set_focus(self.focus)
 
     def focus_clip(self, nid: str):
         """Show a clip of the path in the inspector (the path stays as it is)."""
@@ -3417,6 +3452,12 @@ class MainWindow(QMainWindow):
         if self.focus in ids:
             k = max(0, min(len(ids) - 1, ids.index(self.focus) + d))
             self.focus_clip(ids[k])
+
+    def target_id(self):
+        """The clip the toolbar / shortcut actions work on: the one shown in the inspector, else the selected."""
+        if self.focus and self.tree is not None and self.focus in self.tree.nodes:
+            return self.focus
+        return self.selected_id()
 
     def _graph_clicked(self, nid):
         """A click in the graph: a clip of the shown path is shown in the inspector; another one is selected (its
@@ -3443,8 +3484,14 @@ class MainWindow(QMainWindow):
             secs = max(1, frames - a - b) / 24
             lead = int((n.overrides or {}).get("guide") or 0) / 24 if not n.is_video and n.parent else 0.0
             pm = self._pixmap(self._node_frame(n))
-            if pm is not None:
-                pm = pm.scaledToHeight(48, Qt.SmoothTransformation)
+            if pm is not None:                      # scaled once per picture (the timeline is redrawn often)
+                cache = self.__dict__.setdefault("_tl_thumbs", {})
+                key = pm.cacheKey()
+                if key not in cache:
+                    if len(cache) > 400:
+                        cache.clear()
+                    cache[key] = pm.scaledToHeight(48, Qt.SmoothTransformation)
+                pm = cache[key]
             what = (Path(n.source["file"]).name if n.is_video else (n.prompt or "(no prompt yet)"))
             tip = (f"{'Video' if n.is_video else 'Clip'} #{n.id[1:]} · {secs:.1f} s · {self.state(n.id)}\n"
                    f"{what[:160]}")
@@ -3557,6 +3604,10 @@ class MainWindow(QMainWindow):
         self.b_delete.setEnabled(is_clip and free)
         self.b_play_path.setEnabled(all_done and idle)
         self.b_export.setEnabled(all_done and idle)
+        fn = self.tree.nodes.get(self.focus) if has and self.focus else None
+        self.b_play_clip.setEnabled(bool(fn and fn.made))
+        self.b_play_film.setEnabled(self.film is not None and idle and not (self._copying or self._joins
+                                                                          or self._converts))
         todo = sum(1 for n in path if self.state(n.id) != "done")
         why = ("Select a clip first: its path is played" if not path else
                f"Not ready: {todo} clip{'s' if todo != 1 else ''} on this path {'are' if todo != 1 else 'is'} new or "

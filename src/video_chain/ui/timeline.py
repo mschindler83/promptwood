@@ -65,36 +65,33 @@ class _Lane(QWidget):
         h = self.height()
         x = 8.0
         self._rects = []
-        # ruler: a tick per second, a number every 5 s (or 10 s when crowded)
+        # ruler: one pass over the blocks (they have a minimum width, so time is mapped block by block); ticks
+        # spaced to be readable at this zoom
         p.setPen(QPen(t.textTertiary, 1))
         small = QFont(self.font())
         small.setPointSizeF(max(7.0, small.pointSizeF() - 2))
         p.setFont(small)
-        total = sum(b.secs for b in self.blocks)
-        step = 5 if self.px_per_sec >= 12 else 10 if self.px_per_sec >= 5 else 30
-        sec, px = 0, 8.0
-        pos = []                                    # the blocks' x by time (blocks have a minimum width)
+        pos, px = [], 8.0
         for b in self.blocks:
             w = max(MIN_BLOCK, b.secs * self.px_per_sec)
             pos.append((px, w, b))
             px += w
-        k = 0
-        while sec <= total + 0.01 and pos:
-            acc = 0.0                               # where this second falls (inside which block)
-            xx = 8.0
-            for bx, bw, b in pos:
-                if acc + b.secs >= sec or b is pos[-1][2]:
-                    xx = bx + (sec - acc) / max(b.secs, 0.001) * bw
-                    break
-                acc += b.secs
-            tick = 6 if sec % step == 0 else 3
-            p.drawLine(QPointF(xx, RULER - tick), QPointF(xx, RULER))
-            if sec % step == 0:
+        total = sum(b.secs for b in self.blocks)
+        gap = (px - 8.0) / max(total, 0.001)            # pixels per second on average
+        label_step = next((st for st in (1, 2, 5, 10, 15, 30, 60, 120, 300, 600) if st * gap >= 44), 1200)
+        tick_step = next((st for st in (1, 2, 5, 10, 30, 60, 300) if st * gap >= 6), 600)
+        sec, i, acc = 0, 0, 0.0
+        while pos and sec <= total + 0.01:
+            while i < len(pos) - 1 and acc + pos[i][2].secs < sec:
+                acc += pos[i][2].secs
+                i += 1
+            bx, bw, b = pos[i]
+            xx = bx + (sec - acc) / max(b.secs, 0.001) * bw
+            major = sec % label_step == 0
+            p.drawLine(QPointF(xx, RULER - (6 if major else 3)), QPointF(xx, RULER))
+            if major:
                 p.drawText(QPointF(xx + 2, RULER - 5), f"{sec // 60}:{sec % 60:02d}")
-            sec += 1
-            k += 1
-            if k > 20000:
-                break
+            sec += tick_step
         font = QFont(self.font())
         font.setBold(True)
         for bx, bw, b in pos:
@@ -137,7 +134,7 @@ class _Lane(QWidget):
 
     def mouseDoubleClickEvent(self, e):
         b = self._at(e.position())
-        if b is not None:
+        if b is not None and e.button() == Qt.LeftButton:   # (the first press already focused it)
             self.activated.emit(b.nid)
 
     def mouseMoveEvent(self, e):
