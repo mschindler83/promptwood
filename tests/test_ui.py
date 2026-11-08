@@ -2045,6 +2045,13 @@ def test_audio_tracks_in_the_window(app, win, tmp_path, image):
     assert win.tree.nodes[ids[0]].overrides["source_sound"] == f"track:{tid}"
     first = next(c for c in win.cards if c.nid == ids[0])
     assert first.src_sound.currentData() == f"track:{tid}" and "from its beginning" in first.src_sound_info.text()
+    assert first.sound_over.isVisibleTo(first) and not first.sound_over.isChecked()
+    first.sound_over.setChecked(True)                                         # full motion, the sound laid over
+    flush(app, win)
+    assert win.tree.nodes[ids[0]].overrides.get("sound_over") is True
+    first = next(c for c in win.cards if c.nid == ids[0])
+    assert first.sound_over.isChecked() and "laid over" in first.settings_toggle.text()
+    assert "<Audio" not in first.edit.toolTip()
     second = next(c for c in win.cards if c.nid == ids[1])
     second.src_sound.setCurrentIndex(second.src_sound.findData(f"track:{tid}"))
     flush(app, win)

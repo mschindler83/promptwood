@@ -509,6 +509,8 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
         elif source_sound.get("mode") == "track":      # an audio track of the project, carried on along the path
             s["source_sound"].update({"mode": "track", "track": str(source_sound["track"]),
                                       "pad": float(source_sound.get("pad") or 0.0)})
+        if source_sound.get("overlay"):                # laid over the made clip; the model never hears it
+            s["source_sound"]["overlay"] = True
     if lora_triggers:                           # the LoRAs' trigger words put before the prompt
         s["lora_triggers"] = [str(w) for w in lora_triggers]
     if guide:                                   # motion guide: frames of the neighbouring clips anchored

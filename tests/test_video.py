@@ -478,3 +478,32 @@ def test_audio_track_after_a_real_video_and_padding(project, tmp_path):
     assert abs(chain.audio_seconds(wav) - span["secs"]) < 0.05
     t.options["keep_repeated"] = True                                # the joined path keeps the repeated frames
     assert T.source_sound_span(t, a, project)["pad"] == 0.0
+
+
+def test_lay_the_sound_over(project, tmp_path):
+    """'Lay the sound over': the plain image-to-video model makes the clip (no sound reference, no sentence about
+    it), the exact track part is put in afterwards; the model's sound limits do not apply."""
+    with_start(project, tmp_path)
+    src = _two_tones(tmp_path / "song.mp3")
+    t = T.load(project)
+    t.options["frames"] = 24                                        # 1 s: under the model's 2 s
+    tid = T.add_track(project, t, src, 3.0, 8.0, "Song")["id"]
+    a = t.add(None, "she dances")
+    a.overrides = {"source_sound": f"track:{tid}", "sound_over": True}
+    T.save(project, t)
+    assert T.source_sound_problems(t, [a.id], project) == []        # (with lip sync: too short)
+    a.overrides = {"source_sound": f"track:{tid}"}
+    assert any("shorter than 2 s" in m for m in T.source_sound_problems(t, [a.id], project))
+    a.overrides = {"source_sound": f"track:{tid}", "sound_over": True}
+    T.save(project, t)
+    gen = FakeGenerator(frames=17, size=None)
+    T.run_tree(gen, project, [a.id], log=lambda _m: None)
+    call = gen.calls[-1]
+    assert not (call["settings"].get("audio_paths") or []) and "<Audio" not in call["prompt"]
+    t = T.load(project)
+    rec = t.nodes[a.id].made["settings"]
+    assert rec["source_sound"]["overlay"] is True and not T.uses_ref_model(rec)
+    assert abs(_main_hz(project / t.nodes[a.id].made["video"]) - 1200) < 30   # the track, not the model's 300 Hz
+    assert T.Checker(project, t).status(a.id) == "done"
+    t.nodes[a.id].overrides.pop("sound_over")                         # lip sync again: made again
+    assert T.Checker(project, t).status(a.id) == "changed"

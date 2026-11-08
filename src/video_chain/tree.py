@@ -53,7 +53,7 @@ from . import chain
 TREE_FILE = "tree.json"
 START_FILE = "start.png"
 NO_LORA = "none"                   # old override value: this node without any LoRA
-OVERRIDE_KEYS = ("loras", "frames", "steps", "guide", "source_sound")
+OVERRIDE_KEYS = ("loras", "frames", "steps", "guide", "source_sound", "sound_over")
 _OLD_LORA_KEYS = ("lora", "strength", "extra_loras")
 AI, VIDEO = "ai", "video"
 GUIDE_CHOICES = (5, 22, 39)        # motion guide lengths on H3's 17n+5 grid
@@ -1291,6 +1291,8 @@ class Checker:
         node = self.tree.nodes[nid]
         span = source_sound_span(self.tree, node, self.project) \
             if not node.is_video and (node.overrides or {}).get("source_sound") else None
+        if span is not None and (node.overrides or {}).get("sound_over"):
+            span = {**span, "overlay": True}       # laid over the clip afterwards: the plain model, no lip sync
         return None if base is None else node_settings(base, self.tree.options, node, self.audio_pool(),
                                                        self.picture_sha, source_sound=span)
 
@@ -1463,7 +1465,9 @@ SOURCE_SOUND_TEXT = ("<Audio {k}> is the complete original audio track of the ta
 def uses_ref_model(settings: dict) -> bool:
     """Whether a clip is made with H3's reference model: face pictures, sounds or voices, or the real video's sound
     (all go to MiniMaxH3ReferenceToVideo)."""
-    return bool(settings.get("refs") or settings.get("audio_refs") or settings.get("source_sound"))
+    ss = settings.get("source_sound")
+    return bool(settings.get("refs") or settings.get("audio_refs")
+                or (ss and not (isinstance(ss, dict) and ss.get("overlay"))))
 
 
 def source_video(tree: Tree, node: Node) -> Node | None:
@@ -1662,6 +1666,7 @@ def source_sound_problems(tree: Tree, todo: list[str], project: Path | None = No
         if node.is_video or not (node.overrides or {}).get("source_sound"):
             continue
         span = source_sound_span(tree, node, project)
+        over = bool((node.overrides or {}).get("sound_over"))   # laid over: not a sound for the model
         tid = track_id(node)
         if tid is not None:
             if span is None:
@@ -1675,23 +1680,25 @@ def source_sound_problems(tree: Tree, todo: list[str], project: Path | None = No
                 out.append(f"the audio track “{track['name']}” ({float(track['secs']):.1f} s) has ended before clip "
                            f"#{nid[1:]} (it would start at {span['start']:.1f} s); choose another sound")
                 continue
-            if span["secs"] < AUDIO_REF_MIN:
+            if not over and span["secs"] < AUDIO_REF_MIN:
                 out.append(f"clip #{nid[1:]} is shorter than {AUDIO_REF_MIN:.0f} s, the least sound the model "
                            "takes; make it longer to play the audio track")
-            out += _sound_room(tree, node, span)
+            if not over:
+                out += _sound_room(tree, node, span)
             continue
         if (node.overrides or {}).get("source_sound") == "previous":
             if span is None:
                 out.append(f"clip #{nid[1:]} repeats the sound of the clip before, but it is the first clip")
                 continue
             before = tree.nodes[span["video"]]
-            if span["secs"] < AUDIO_REF_MIN:
+            if not over and span["secs"] < AUDIO_REF_MIN:
                 out.append(f"clip #{nid[1:]} is shorter than {AUDIO_REF_MIN:.0f} s, the least sound the model "
                            "takes; make it longer to repeat the sound of the clip before")
             if span["loop"] < REPEAT_MIN:
                 out.append(f"the clip before clip #{nid[1:]} plays only {span['loop']:.2f} s in the film, too short "
                            f"to repeat (at least {REPEAT_MIN} s)")
-            out += _sound_room(tree, node, span)
+            if not over:
+                out += _sound_room(tree, node, span)
             if not before.is_video and before.id in todo:   # made (again) first in this run: checked then
                 continue
             if not span["file"]:
@@ -1710,7 +1717,7 @@ def source_sound_problems(tree: Tree, todo: list[str], project: Path | None = No
             continue
         have = chain.audio_seconds(Path(span["file"]))
         need = span["start"] + span["secs"]
-        if span["secs"] < AUDIO_REF_MIN:
+        if not over and span["secs"] < AUDIO_REF_MIN:
             out.append(f"clip #{nid[1:]} is shorter than {AUDIO_REF_MIN:.0f} s, the least sound the model takes; "
                        "make it longer to continue the video's sound")
         if have is None:
@@ -1719,7 +1726,8 @@ def source_sound_problems(tree: Tree, todo: list[str], project: Path | None = No
             out.append(f"clip #{nid[1:]} needs the sound of {Path(span['file']).name} up to "
                        f"{int(need // 60)}:{need % 60:04.1f}, but it ends at {int(have // 60)}:{have % 60:04.1f}; "
                        "make the clip shorter")
-        out += _sound_room(tree, node, span)
+        if not over:
+            out += _sound_room(tree, node, span)
     return out
 
 
@@ -1777,7 +1785,7 @@ def model_prompt(options: dict, node: Node, settings: dict | None) -> str:
     from .triggers import with_triggers
     text = with_triggers(clip_cast(options, node.prompt)["prompt"], list((settings or {}).get("lora_triggers") or []))
     ss = (settings or {}).get("source_sound")
-    if ss:
+    if ss and not (isinstance(ss, dict) and ss.get("overlay")):   # (a sound laid over is not the model's)
         k = len((settings or {}).get("audio_refs") or []) + 1
         mode = ss.get("mode") if isinstance(ss, dict) else ss
         sentence = (REPEAT_SOUND_TEXT if mode == "previous" else
@@ -2162,7 +2170,8 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
                         chain.to_wav(sound_file(project, ss), sound, ss["start"], ss["secs"], ss.get("loop"),
                                      ss.get("offset") or 0.0, ss.get("pad") or 0.0,
                                      fill=ss.get("mode") == "track")
-                        call["audio_paths"] = list(call.get("audio_paths") or []) + [str(sound)]
+                        if not ss.get("overlay"):  # the model makes the picture to it (lip sync)
+                            call["audio_paths"] = list(call.get("audio_paths") or []) + [str(sound)]
                     generator.generate(model_prompt(tree.options, node, settings), start, new_video, new_frame,
                                        node.seed, settings=call)
                     if sound is not None and new_video.exists():
