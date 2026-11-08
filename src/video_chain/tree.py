@@ -1493,10 +1493,16 @@ def source_sound_span(tree: Tree, node: Node, project: Path | None = None) -> di
     for p in path[vi + 1:-1]:
         n = made_frames(p) or clip_length(tree, p)
         h = handover_index(tree, p, n)
-        t += ((h + 1 if h is not None else n) - max(1, _guide_of(p, planned=True))) / chain.FPS
-    start = t - max(1, _guide_of(node, planned=True)) / chain.FPS
+        t += ((h + 1 if h is not None else n) - _join_lead(tree, p)) / chain.FPS
+    start = t - _join_lead(tree, node) / chain.FPS
     return {"file": str(src["file"]), "start": round(max(0.0, start), 3),
             "secs": round(clip_length(tree, node) / chain.FPS, 3), "video": v.id}
+
+
+def _join_lead(tree: Tree, node: Node) -> int:
+    """Frames of a generated clip (after another clip) left out at its start when the path is joined: its first
+    frame or its carry-over frames repeat the clip before; none with "keep the repeated frames"."""
+    return 0 if tree.options.get("keep_repeated") else max(1, _guide_of(node, planned=True))
 
 
 # ---- audio tracks: imported sound (cut to a range), played by clips one after another
@@ -1536,10 +1542,10 @@ def add_track(project: Path, tree: Tree, source: Path, start: float = 0.0, end: 
     """Cut the sound of an audio or video file (start-end, seconds) into refs/ as a new audio track."""
     rel, secs = _cut_track(project, source, start, end)
     have = {t["id"] for t in tracks(tree)}
-    k = 1
-    while f"t{k}" in have:
-        k += 1
-    entry = {"id": f"t{k}", "name": name or Path(source).stem, "file": rel, "secs": secs, "source": str(source),
+    tid = "t" + uuid.uuid4().hex[:6]               # never reused: a removed track's clips keep pointing nowhere
+    while tid in have:
+        tid = "t" + uuid.uuid4().hex[:6]
+    entry = {"id": tid, "name": name or Path(source).stem, "file": rel, "secs": secs, "source": str(source),
              "start": round(float(start), 3), "end": round(float(start) + secs, 3)}
     tree.options["tracks"] = tracks(tree) + [entry]
     return entry
@@ -1555,21 +1561,27 @@ def recut_track(project: Path, tree: Tree, tid: str, source: Path, start: float,
     entry = {**old, "name": name or old["name"], "file": rel, "secs": secs, "source": str(source),
              "start": round(float(start), 3), "end": round(float(start) + secs, 3)}
     tree.options["tracks"] = [entry if t["id"] == tid else t for t in tracks(tree)]
-    _drop_ref(project, old["file"])
     return entry
 
 
 def remove_track(project: Path, tree: Tree, tid: str) -> None:
-    old = track_of(tree, tid)
+    """Take a track out of the list; its file stays until no scene lists it (unused_track_files)."""
     tree.options["tracks"] = [t for t in tracks(tree) if t["id"] != tid]
-    if old is not None:
-        _drop_ref(project, old["file"])
 
 
-def _drop_ref(project: Path, rel: str) -> None:
-    target = (Path(project) / rel).resolve()
-    if (Path(project) / REFS_DIR).resolve() in target.parents:
-        target.unlink(missing_ok=True)
+def unused_track_files(project: Path, scene_dirs: list[Path], open_tree: Tree | None = None) -> list[Path]:
+    """Cut track files in refs/ that the saved tree of no scene lists any more (a track cut again or removed), nor
+    the open tree. A scene whose tree cannot be read keeps everything."""
+    listed = {tr["file"] for tr in tracks(open_tree)} if open_tree is not None else set()
+    for d in scene_dirs:
+        try:
+            t = load(Path(d))
+        except Exception:  # noqa: BLE001
+            return []
+        listed |= {tr["file"] for tr in tracks(t)}
+    refs = Path(project) / REFS_DIR
+    return sorted(f for f in refs.glob("track_*.wav") if f"{REFS_DIR}/{f.name}" not in listed) \
+        if refs.is_dir() else []
 
 
 def track_users(tree: Tree, tid: str) -> list[str]:
@@ -1590,7 +1602,7 @@ def track_sound_span(tree: Tree, node: Node) -> dict | None:
     path = tree.path_to(node.id)
 
     def lead(k: int) -> int:                       # frames of path[k] left out at its start when joined
-        return 0 if k == 0 else max(1, _guide_of(path[k], planned=True))
+        return 0 if k == 0 else _join_lead(tree, path[k])
     i = len(path) - 1
     while i > 0 and not path[i - 1].is_video and track_id(path[i - 1]) == tid:
         i -= 1                                     # the run of clips playing this track, up to this one
@@ -1620,7 +1632,7 @@ def previous_sound_span(tree: Tree, node: Node, project: Path | None = None) -> 
     k = len(path) - 2
     p = path[k]
     secs = round(clip_length(tree, node) / chain.FPS, 3)
-    lead = max(1, _guide_of(node, planned=True)) / chain.FPS
+    lead = _join_lead(tree, node) / chain.FPS
     if p.is_video:
         file, base = str((p.source or {}).get("file") or ""), float((p.source or {}).get("start") or 0.0)
     elif p.made:
@@ -1628,7 +1640,7 @@ def previous_sound_span(tree: Tree, node: Node, project: Path | None = None) -> 
     else:
         file, base = "", 0.0
     n = (made_frames(p) if not p.is_video else 0) or clip_length(tree, p)
-    a, b = path_cuts(tree, path, planned=not (p.made or p.is_video))[k]   # (as planned until it is made)
+    a, b = path_cuts(tree, path, bool(tree.options.get("keep_repeated")), planned=not (p.made or p.is_video))[k]   # (as planned until it is made)
     loop = max(1, n - a - b) / chain.FPS
     return {"file": file, "start": round(base + a / chain.FPS, 3), "secs": secs, "loop": round(loop, 3),
             "offset": round((loop - lead) % loop, 3), "video": p.id, "mode": "previous"}
@@ -2148,7 +2160,8 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
                             if bad:
                                 raise RuntimeError(bad[0])
                         chain.to_wav(sound_file(project, ss), sound, ss["start"], ss["secs"], ss.get("loop"),
-                                     ss.get("offset") or 0.0, ss.get("pad") or 0.0)
+                                     ss.get("offset") or 0.0, ss.get("pad") or 0.0,
+                                     fill=ss.get("mode") == "track")
                         call["audio_paths"] = list(call.get("audio_paths") or []) + [str(sound)]
                     generator.generate(model_prompt(tree.options, node, settings), start, new_video, new_frame,
                                        node.seed, settings=call)
@@ -2324,7 +2337,8 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
                     wav = tmp / f"{node.id}_sound.wav"     # the recorded sound, as in the clip
                     chain.to_wav(sound_file(project, s["source_sound"]), wav, s["source_sound"]["start"],
                                  s["source_sound"]["secs"], s["source_sound"].get("loop"),
-                                 s["source_sound"].get("offset") or 0.0, s["source_sound"].get("pad") or 0.0)
+                                 s["source_sound"].get("offset") or 0.0, s["source_sound"].get("pad") or 0.0,
+                                 fill=s["source_sound"].get("mode") == "track")
                     chain.replace_audio(target, wav)
                 target.with_suffix(".json").write_text(json.dumps(pins), encoding="utf-8")
             made_now.append(node.id)

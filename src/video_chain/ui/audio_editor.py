@@ -26,23 +26,43 @@ SOUND_FILTER = ("Sound or video (*.mp3 *.wav *.ogg *.oga *.opus *.flac *.m4a *.a
 PEAKS = 1200                                    # waveform columns
 
 
-def waveform(path: str | Path, columns: int = PEAKS, rate: int = 4000) -> list[float]:
-    """The loudest sample of each of `columns` equal parts of a file's sound (0..1); [] if it cannot be read."""
+def waveform(path: str | Path, duration: float, columns: int = PEAKS, rate: int = 4000,
+             cancelled=lambda: False) -> list[float]:
+    """The loudest sample of each of about `columns` equal parts of a file's sound (0..1), read as a stream (long
+    files need little memory); [] if it cannot be read or `cancelled()` turns true."""
+    import math
+    step = max(1, math.ceil(max(duration, 0.001) * rate / columns))     # samples per column
     try:
-        raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-map", "0:a:0", "-vn", "-ac", "1",
-                              "-ar", str(rate), "-f", "f32le", "-"], capture_output=True, timeout=300).stdout
-    except (OSError, subprocess.SubprocessError):
+        proc = subprocess.Popen(["ffmpeg", "-nostdin", "-v", "error", "-i", str(path), "-map", "0:a:0", "-vn",
+                                 "-ac", "1", "-ar", str(rate), "-f", "f32le", "-"],
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError:
         return []
-    a = array.array("f")
-    a.frombytes(raw[: len(raw) // 4 * 4])
-    if not a:
-        return []
-    step = max(1, len(a) // columns)
-    out = []
-    for k in range(0, len(a), step):
-        chunk = a[k:k + step]
-        out.append(min(1.0, max(max(chunk), -min(chunk))))
-    return out
+    out, rest = [], b""
+    try:
+        while True:
+            if cancelled():
+                return []
+            data = proc.stdout.read(step * 4 * 64)
+            if not data:
+                break
+            data = rest + data
+            n = len(data) // (step * 4) * (step * 4)
+            a = array.array("f")
+            a.frombytes(data[:n])
+            rest = data[n:]
+            for k in range(0, len(a), step):
+                chunk = a[k:k + step]
+                out.append(min(1.0, max(max(chunk), -min(chunk))))
+        if len(rest) >= 4:
+            a = array.array("f")
+            a.frombytes(rest[: len(rest) // 4 * 4])
+            out.append(min(1.0, max(max(a), -min(a))))
+        return out
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
 
 
 class WaveBar(RangeBar):
@@ -230,10 +250,12 @@ class AudioRangeDialog(QDialog):
         self.set_range(0.0 if start is None else float(start), dur if end is None else float(end))
         self.seek(self.start)
         self._gen += 1
-        gen, sig, f = self._gen, self._peaks, self.file
+        gen, sig, f, dur = self._gen, self._peaks, self.file, self.duration
 
         def work():
-            peaks = waveform(f)
+            peaks = waveform(f, dur, cancelled=lambda: gen != self._gen)
+            if gen != self._gen:
+                return
             try:
                 sig.ready.emit(gen, peaks)
             except RuntimeError:                       # the dialog is gone

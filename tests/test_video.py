@@ -414,11 +414,12 @@ def test_audio_track_carried_on_from_clip_to_clip(project, tmp_path):
     t = T.load(project)
     t.options["frames"] = 48
     tr = T.add_track(project, t, src, 3.0, 8.0, "Song")             # only the 1200 Hz part
-    assert tr["id"] == "t1" and abs(tr["secs"] - 5.0) < 0.05 and tr["file"].startswith("refs/track_")
+    tid = tr["id"]
+    assert tid.startswith("t") and abs(tr["secs"] - 5.0) < 0.05 and tr["file"].startswith("refs/track_")
     a = t.add(None, "she sings")
     b = t.add(a.id, "she sings on")
-    a.overrides = {"source_sound": "track:t1"}
-    b.overrides = {"source_sound": "track:t1", "guide": 5}
+    a.overrides = {"source_sound": f"track:{tid}"}
+    b.overrides = {"source_sound": f"track:{tid}", "guide": 5}
     T.save(project, t)
     sa, sb = T.track_sound_span(t, a), T.track_sound_span(t, b)
     assert sa["start"] == 0.0 and sa["pad"] == 0.0 and sa["from"] is None   # the first clip of a path loses nothing
@@ -431,22 +432,26 @@ def test_audio_track_carried_on_from_clip_to_clip(project, tmp_path):
     t = T.load(project)
     rec = t.nodes[b.id].made["settings"]["source_sound"]
     n_a = T.made_frames(t.nodes[a.id])
-    assert rec["mode"] == "track" and rec["track"] == "t1" and rec["file"] == tr["file"]
+    assert rec["mode"] == "track" and rec["track"] == tid and rec["file"] == tr["file"]
     assert rec["start"] == round((n_a - 5) / 24, 3)                  # after what a really played
     clip_b = project / t.nodes[b.id].made["video"]
     assert abs(_main_hz(clip_b) - 1200) < 30
     assert T.Checker(project, t).status(b.id) == "done"
-    T.recut_track(project, t, "t1", src, 0.0, 3.0)                   # another part: both clips are changed
-    assert not (project / tr["file"]).exists()
+    T.recut_track(project, t, tid, src, 0.0, 3.0)                    # another part: both clips are changed
+    assert (project / tr["file"]).exists()                           # (deleted only once the saved trees agree)
+    assert T.unused_track_files(project, [project], t) == []         # tree.json still lists it, t the new one
+    T.save(project, t)
+    assert T.unused_track_files(project, [project]) == [project / tr["file"]]
     ch = T.Checker(project, t)
     assert ch.status(a.id) == "changed" and ch.status(b.id) == "changed"
     d = t.add(None, "long")                                            # (not made: its planned 6 s count)
-    d.overrides = {"source_sound": "track:t1", "frames": 24 * 6}
+    d.overrides = {"source_sound": f"track:{tid}", "frames": 24 * 6}
     e = t.add(d.id, "after the end")
-    e.overrides = {"source_sound": "track:t1"}
+    e.overrides = {"source_sound": f"track:{tid}"}
     assert any("has ended before clip" in m for m in T.source_sound_problems(t, [d.id, e.id], project))
-    T.remove_track(project, t, "t1")
+    T.remove_track(project, t, tid)
     assert any("was removed" in m for m in T.source_sound_problems(t, [a.id], project))
+    assert T.add_track(project, t, src, 0.0, 3.0)["id"] != tid       # ids are never reused
     with pytest.raises(ValueError, match="at least 2 s"):
         T.add_track(project, t, src, 0.0, 1.0)
 
@@ -460,12 +465,16 @@ def test_audio_track_after_a_real_video_and_padding(project, tmp_path):
                     "libx264", "-pix_fmt", "yuv420p", str(vid)], check=True)
     t = T.load(project)
     t.options["frames"] = 48
-    T.add_track(project, t, src, 0.0, 2.5, "Short")
+    tid = T.add_track(project, t, src, 0.0, 2.5, "Short")["id"]
     v = t.add_video(None, str(vid), 0.0, 1.0)
     a = t.add(v.id, "after the video")
-    a.overrides = {"source_sound": "track:t1", "guide": 9}
+    a.overrides = {"source_sound": f"track:{tid}", "guide": 9}
     span = T.source_sound_span(t, a, project)
     assert span["start"] == 0.0 and span["pad"] == round(9 / 24, 3)
     wav = tmp_path / "out.wav"
-    chain.to_wav(T.sound_file(project, span), wav, span["start"], span["secs"], pad=span["pad"])
+    chain.to_wav(T.sound_file(project, span), wav, span["start"], span["secs"], pad=span["pad"], fill=True)
     assert abs(chain.audio_seconds(wav) - span["secs"]) < 0.05      # padded and filled up to the clip's length
+    chain.to_wav(T.sound_file(project, span), wav, 1.0, span["secs"], fill=True)    # no pad: filled up too
+    assert abs(chain.audio_seconds(wav) - span["secs"]) < 0.05
+    t.options["keep_repeated"] = True                                # the joined path keeps the repeated frames
+    assert T.source_sound_span(t, a, project)["pad"] == 0.0

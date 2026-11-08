@@ -2035,25 +2035,28 @@ def test_audio_tracks_in_the_window(app, win, tmp_path, image):
     dlg.done(0)
     ids = new_project(win, tmp_path, image, ("one", "two"))
     tid = win.add_track(str(src), 2.0, 9.0, "Song")
-    assert tid == "t1" and win.track_list.count() == 1 and "Song" in win.track_list.item(0).text()
+    assert tid and win.track_list.count() == 1 and "Song" in win.track_list.item(0).text()
     flush(app, win)
     first = next(c for c in win.cards if c.nid == ids[0])
-    k = first.src_sound.findData("track:t1")
+    k = first.src_sound.findData(f"track:{tid}")
     assert k >= 0 and first.sound_box.isVisibleTo(first)                       # offered on every clip
     first.src_sound.setCurrentIndex(k)
     flush(app, win)
-    assert win.tree.nodes[ids[0]].overrides["source_sound"] == "track:t1"
+    assert win.tree.nodes[ids[0]].overrides["source_sound"] == f"track:{tid}"
     first = next(c for c in win.cards if c.nid == ids[0])
-    assert first.src_sound.currentData() == "track:t1" and "from its beginning" in first.src_sound_info.text()
+    assert first.src_sound.currentData() == f"track:{tid}" and "from its beginning" in first.src_sound_info.text()
     second = next(c for c in win.cards if c.nid == ids[1])
-    second.src_sound.setCurrentIndex(second.src_sound.findData("track:t1"))
+    second.src_sound.setCurrentIndex(second.src_sound.findData(f"track:{tid}"))
     flush(app, win)
     second = next(c for c in win.cards if c.nid == ids[1])
     assert f"carries it on from clip #{ids[0][1:]}" in second.src_sound_info.text()
     assert T.TRACK_SOUND_TEXT.format(k=1) in second.edit.toolTip()
     assert "1 clip" not in win.track_list.item(0).text() and "2 clips" in win.track_list.item(0).text()
-    assert win.recut_track("t1", str(src), 2.0, 9.0, "Song 2")                # only the name
-    assert T.track_of(win.tree, "t1")["name"] == "Song 2"
+    old_file = T.track_of(win.tree, tid)["file"]
+    assert win.recut_track(tid, str(src), 2.0, 9.0, "Song 2")                # only the name
+    assert T.track_of(win.tree, tid)["name"] == "Song 2" and T.track_of(win.tree, tid)["file"] == old_file
+    assert win.recut_track(tid, str(src), 1.0, 9.0)                           # another part: the old file goes
+    assert not (win.project / old_file).exists() and (win.project / T.track_of(win.tree, tid)["file"]).exists()
     win.track_list.setCurrentRow(0)
     monkey = QMessageBox.question
     QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.Yes)
