@@ -839,14 +839,18 @@ def test_qwen21_inpaint_with_a_painted_mask(server, start, tmp_path):
     assert meta["inpaint"]["patch"] == ed.inpaint_patch
     ip = wf["inpaint"]["inputs"]
     assert wf["inpaint"]["class_type"] == C.INPAINT21_NODE and ip["inpaint_image"] == ["pic0", 0]
-    assert ip["mask"] == ["imask", 0] and ip["model"] == ["unet", 0] and wf["cache"]["inputs"]["model"] == ["inpaint", 0]
+    assert ip["mask"] == ["imask", 0] and ip["model"] == ["unet", 0] and "cache" not in wf   # (no prefix cache)
+    assert wf["guider"]["inputs"]["model"] == ["inpaint", 0]
     assert wf["ipatch"]["inputs"]["name"] == ed.inpaint_patch and wf["imask"]["inputs"]["channel"] == "red"
     comp = wf["icompose"]["inputs"]
     assert comp["destination"] == ["pic0", 0] and comp["source"] == ["decode", 0] and comp["resize_source"] is True
-    assert comp["mask"] == ["isoft", 0] and wf["igrow"]["inputs"]["expand"] == C.INPAINT_FEATHER // 2
+    assert comp["mask"] == ["isoft", 0] and meta["inpaint"]["feather"] == C.inpaint_feather(192, 108) == 4
+    assert wf["igrow"]["inputs"]["expand"] == 2 and wf["isoft_blur"]["inputs"]["sigma"] <= 10
+    assert C.inpaint_feather(4000, 3000) == 18 and C.inpaint_feather(10000, 9000) == 20
     assert wf["edit_save"]["inputs"]["images"] == ["icompose", 0]
     ed.edit(start, "night", out, 9, "fast", model="qwen21")                 # no mask: as before
     assert "inpaint" not in server.edited and server.edited["edit_save"]["inputs"]["images"] == ["decode", 0]
+    assert server.edited["guider"]["inputs"]["model"] == ["cache", 0]
     with pytest.raises(C.ComfyError, match="Qwen-Image 2.1"):
         ed.edit(start, "x", out, 1, "fast", mask=mask)                       # 2511: no mask
     server.inpaint21 = False

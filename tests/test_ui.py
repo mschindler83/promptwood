@@ -2170,6 +2170,14 @@ def test_paint_a_mask_and_inpaint(app, tmp_path, image, monkeypatch):
         assert mask_area(c.mask) > 0.5
         c.undo()
         assert abs(mask_area(c.mask) - painted) < 1e-9
+        from video_chain.ui.mask_painter import overlay
+        shown = overlay(src, c.mask)                               # red only where painted
+        inside, outside = shown.pixelColor(5, 5), shown.pixelColor(src.width() - 3, src.height() - 3)
+        assert inside != src.pixelColor(5, 5) and outside == src.pixelColor(src.width() - 3, src.height() - 3)
+        dot = QImage(src.size(), QImage.Format_Grayscale8)
+        dot.fill(0)
+        dot.setPixel(src.width() - 1, src.height() - 1, 0xFFFFFFFF)  # one pixel: still a mask
+        assert mask_area(dot) > 0
         dlg.set_mask(c.mask)
         painter.done(0)
         dlg.edit_model.setCurrentIndex(dlg.edit_model.findData("2511"))

@@ -28,6 +28,8 @@ class VideoChainQwen21FunInpaint:
     def apply(self, model, model_patch, vae, inpaint_image, mask, strength=1.0, control_image=None):
         if not isinstance(model_patch.model, comfy.ldm.qwen_image21.model.QwenImage21FunControl):
             raise ValueError("this model patch is not the Qwen-Image 2.1 Fun ControlNet")
+        if strength == 0:
+            return (model,)
         patched = model.clone()
         control = control_image[:, :, :, :3] if control_image is not None else None
         QwenImage21FunControlPatch(model_patch, vae, control, float(strength),

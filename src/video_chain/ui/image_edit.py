@@ -794,8 +794,9 @@ class ImageEditDialog(QDialog):
         self.b_mask.setEnabled(bool(self.source) and not self._busy)
         self.b_mask_clear.setVisible(on)
         why = self._mask_problem()
-        self.mask_info.setText(why or (f"Only the red part ({mask_area(self.mask) * 100:.0f} %) is drawn anew; the "
-                                       "rest stays exactly as it is." if on else ""))
+        a = mask_area(self.mask) if on else 0.0
+        self.mask_info.setText(why or (f"Only the red part ({f'{a * 100:.0f} %' if a >= 0.01 else 'under 1 %'}) is "
+                                       "drawn anew; the rest stays exactly as it is." if on else ""))
 
     # ---- results
     def _load_results(self, select: str | None = None):
@@ -1202,6 +1203,7 @@ class ImageEditDialog(QDialog):
             q = self.quality.findData(meta.get("quality"))
             if q >= 0:
                 self.quality.setCurrentIndex(q)
+            self.set_mask(None)                   # (a result made without a mask: none)
             m = meta.get("mask")                  # an inpaint of the image shown: its mask again
             if m and Path(m).is_file() and meta.get("source") == self.source:
                 img = QImage(m).convertToFormat(QImage.Format_Grayscale8)

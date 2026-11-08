@@ -21,16 +21,27 @@ def empty_mask(size) -> QImage:
     return m
 
 
+_HALF = bytes(0 if v < 128 else 1 for v in range(256))     # pixel value -> painted (white half) or not
+
+
 def mask_area(mask: QImage | None) -> float:
-    """The share of the image that is painted (0..1), on a coarse grid (fast)."""
+    """The share of the image that is painted (0..1), every pixel counted (a dot or a thin line is not 0)."""
     if mask is None or mask.isNull():
         return 0.0
-    small = mask.scaled(128, 128, Qt.IgnoreAspectRatio, Qt.FastTransformation).convertToFormat(
+    m = mask.convertToFormat(QImage.Format_Grayscale8)
+    data, row, w = bytes(m.constBits()), m.bytesPerLine(), m.width()
+    n = sum(data[y * row:y * row + w].translate(_HALF).count(1) for y in range(m.height()))
+    return n / (w * m.height())
+
+
+def tinted(mask: QImage, size) -> QImage:
+    """The mask as translucent red at size (white -> red, black -> clear)."""
+    alpha = mask.scaled(size, Qt.IgnoreAspectRatio, Qt.SmoothTransformation).convertToFormat(
         QImage.Format_Grayscale8)
-    bits = small.constBits()
-    row = small.bytesPerLine()
-    n = sum(1 for y in range(small.height()) for x in range(small.width()) if bits[y * row + x] >= 128)
-    return n / (small.width() * small.height())
+    tint = QImage(alpha.size(), QImage.Format_ARGB32)
+    tint.fill(QColor(MASK_COLOUR.red(), MASK_COLOUR.green(), MASK_COLOUR.blue()))
+    tint.setAlphaChannel(alpha)                    # (a grayscale picture: its values become the alpha)
+    return tint
 
 
 def overlay(image: QImage, mask: QImage | None) -> QImage:
@@ -38,15 +49,9 @@ def overlay(image: QImage, mask: QImage | None) -> QImage:
     out = image.convertToFormat(QImage.Format_ARGB32)
     if mask is None or mask.isNull() or mask_area(mask) == 0:
         return out
-    tint = QImage(out.size(), QImage.Format_ARGB32)
-    tint.fill(MASK_COLOUR)
-    alpha = mask.scaled(out.size()).convertToFormat(QImage.Format_Alpha8)
-    p = QPainter(tint)
-    p.setCompositionMode(QPainter.CompositionMode_DestinationIn)
-    p.drawImage(0, 0, alpha)
-    p.end()
     p = QPainter(out)
-    p.drawImage(0, 0, tint)
+    p.setOpacity(MASK_COLOUR.alphaF())
+    p.drawImage(0, 0, tinted(mask, out.size()))
     p.end()
     return out
 
@@ -66,6 +71,9 @@ class MaskCanvas(QWidget):
         self._last: QPointF | None = None
         self._stroke_erase = False
         self._cursor: QPointF | None = None
+        self._before: QImage | None = None
+        self._shown: tuple | None = None           # (frame size, display picture) of the image
+        self._tint: QImage | None = None           # the mask in red at the frame's size (redone after a change)
         self.setMouseTracking(True)
         self.setMinimumSize(480, 320)
         self.setCursor(Qt.CrossCursor)
@@ -87,8 +95,16 @@ class MaskCanvas(QWidget):
         p = QPainter(self)
         p.fillRect(self.rect(), QColor(20, 20, 22))
         f = self._frame()
-        p.setRenderHint(QPainter.SmoothPixmapTransform)
-        p.drawImage(f, overlay(self.image, self.mask))
+        size = f.size().toSize()
+        if self._shown is None or self._shown[0] != size:      # the image at the frame's size, once per size
+            self._shown = (size, self.image.scaled(size, Qt.IgnoreAspectRatio, Qt.SmoothTransformation))
+            self._tint = None
+        if self._tint is None or self._tint.size() != size:
+            self._tint = tinted(self.mask, size)
+        p.drawImage(f.topLeft(), self._shown[1])
+        p.setOpacity(MASK_COLOUR.alphaF())
+        p.drawImage(f.topLeft(), self._tint)
+        p.setOpacity(1.0)
         if self._cursor is not None:
             r = self.brush / 2 * f.width() / self.image.width()
             p.setRenderHint(QPainter.Antialiasing)
@@ -103,12 +119,12 @@ class MaskCanvas(QWidget):
                       Qt.RoundJoin))
         p.drawLine(a, b)
         p.end()
+        self._tint = None
 
     def mousePressEvent(self, e):
         if e.button() not in (Qt.LeftButton, Qt.RightButton):
             return
-        self._undo.append(self.mask.copy())
-        del self._undo[:-30]
+        self._before = self.mask.copy()
         self._stroke_erase = self.erase or e.button() == Qt.RightButton
         self._last = self._to_image(e.position())
         self._dab(self._last, self._last, self._stroke_erase)
@@ -125,6 +141,10 @@ class MaskCanvas(QWidget):
     def mouseReleaseEvent(self, _e):
         if self._last is not None:
             self._last = None
+            if self._before is not None and self._before != self.mask:   # (a stroke that changed nothing: no undo)
+                self._undo.append(self._before)
+                del self._undo[:-30]
+            self._before = None
             self.changed.emit()
 
     def leaveEvent(self, _e):
@@ -148,18 +168,21 @@ class MaskCanvas(QWidget):
     def clear(self):
         self._undo.append(self.mask.copy())
         self.mask.fill(0)
+        self._tint = None
         self.update()
         self.changed.emit()
 
     def invert(self):
         self._undo.append(self.mask.copy())
         self.mask.invertPixels()
+        self._tint = None
         self.update()
         self.changed.emit()
 
     def undo(self):
         if self._undo:
             self.mask = self._undo.pop()
+            self._tint = None
             self.update()
             self.changed.emit()
 
@@ -216,7 +239,8 @@ class MaskPainterDialog(QDialog):
     def _show_area(self):
         self.size_text.setText(f"{self.canvas.brush} px")
         a = mask_area(self.canvas.mask)
-        self.area.setText(f"{a * 100:.0f} % of the image drawn anew" if a else "nothing painted yet")
+        self.area.setText((f"{a * 100:.0f} %" if a >= 0.01 else "under 1 %") + " of the image drawn anew"
+                          if a else "nothing painted yet")
         if self.size.value() != self.canvas.brush:
             self.size.blockSignals(True)
             self.size.setValue(min(self.size.maximum(), self.canvas.brush))

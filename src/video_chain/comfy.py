@@ -929,7 +929,13 @@ def pick_qwen21_files(unets: list[str], clips: list[str], vaes: list[str]) -> di
 # source and the mask, since ComfyUI's QwenImageDiffsynthControlnet has no input for the image to keep. Afterwards
 # the result is laid into the source along a soft edge, so everything outside the mask stays exactly as it was.
 INPAINT21_NODE = "VideoChainQwen21FunInpaint"
-INPAINT_FEATHER = 12                        # px: the soft edge (the mask grown by half of it, then blurred)
+INPAINT_FEATHER = 12                        # px: the soft edge (the mask grown by half of it, then blurred), at
+                                            # a 2 MP picture; it grows with the picture (inpaint_feather)
+
+
+def inpaint_feather(width: int, height: int) -> int:
+    """The soft edge for a picture: about 1/170 of its short side, 4 to 20 px (ImageBlur's sigma stays <= 10)."""
+    return max(4, min(20, round(min(width, height) / 170)))
 
 
 def pick_qwen21_inpaint(patches: list[str]) -> str | None:
@@ -982,7 +988,12 @@ def build_qwen21_workflow(*, files: dict, prompt: str, seed: int, quality: str, 
                                     "inpaint_image": ["pic0", 0], "mask": ["imask", 0],
                                     "strength": float(inpaint.get("strength", 1.0))}}
         m = ["inpaint", 0]
-    wf["cache"] = {"class_type": "QwenImage21Cache", "inputs": {"model": m, "device": "auto", "dtype": "default"}}
+    if inpaint:                                # (the ControlNet's block patches turn the prefix cache off anyway)
+        sampling_model = m
+    else:
+        wf["cache"] = {"class_type": "QwenImage21Cache", "inputs": {"model": m, "device": "auto",
+                                                                    "dtype": "default"}}
+        sampling_model = ["cache", 0]
     wf["text"] = {"class_type": "TextEncodeQwenImage21", "inputs": te}
     if size is not None or not images:
         w, h = size or (1024, 1024)
@@ -995,20 +1006,20 @@ def build_qwen21_workflow(*, files: dict, prompt: str, seed: int, quality: str, 
         wf["noise"] = {"class_type": "RandomNoise", "inputs": {"noise_seed": int(seed)}}
         wf["sampler"] = {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}}
         wf["sigmas"] = {"class_type": "ManualSigmas", "inputs": {"sigmas": QWEN21_SIGMAS}}
-        wf["guider"] = {"class_type": "CFGGuider", "inputs": {"model": ["cache", 0], "positive": ["text", 0],
+        wf["guider"] = {"class_type": "CFGGuider", "inputs": {"model": sampling_model, "positive": ["text", 0],
                                                               "negative": ["text", 1], "cfg": 1.0}}
         wf["sample"] = {"class_type": "SamplerCustomAdvanced",
                         "inputs": {"noise": ["noise", 0], "guider": ["guider", 0], "sampler": ["sampler", 0],
                                    "sigmas": ["sigmas", 0], "latent_image": latent}}
     else:
         wf["sample"] = {"class_type": "KSampler",
-                        "inputs": {"model": ["cache", 0], "seed": int(seed), "steps": QWEN21_STEPS, "cfg": 1.0,
+                        "inputs": {"model": sampling_model, "seed": int(seed), "steps": QWEN21_STEPS, "cfg": 1.0,
                                    "sampler_name": "euler", "scheduler": "simple", "positive": ["text", 0],
                                    "negative": ["text", 1], "latent_image": latent, "denoise": 1.0}}
     wf["decode"] = {"class_type": "VAEDecode", "inputs": {"samples": ["sample", 0], "vae": ["vae", 0]}}
     out = ["decode", 0]
     if inpaint:                                # laid into the source: outside the (softened) mask it stays exact
-        feather = max(0, min(31, int(inpaint.get("feather", INPAINT_FEATHER))))
+        feather = max(0, min(20, int(inpaint.get("feather", INPAINT_FEATHER))))
         wf["igrow"] = {"class_type": "GrowMask", "inputs": {"mask": ["imask", 0], "expand": feather // 2,
                                                             "tapered_corners": True}}
         mask = ["igrow", 0]
@@ -1016,7 +1027,7 @@ def build_qwen21_workflow(*, files: dict, prompt: str, seed: int, quality: str, 
             wf["isoft_pic"] = {"class_type": "MaskToImage", "inputs": {"mask": mask}}
             wf["isoft_blur"] = {"class_type": "ImageBlur", "inputs": {"image": ["isoft_pic", 0],
                                                                       "blur_radius": feather,
-                                                                      "sigma": max(1.0, feather / 2)}}
+                                                                      "sigma": min(10.0, max(1.0, feather / 2))}}
             wf["isoft"] = {"class_type": "ImageToMask", "inputs": {"image": ["isoft_blur", 0], "channel": "red"}}
             mask = ["isoft", 0]
         wf["icompose"] = {"class_type": "ImageCompositeMasked",
@@ -1312,10 +1323,16 @@ class ComfyImageEditor(ComfyGenerator):
                 uploads.append((self.upload(Path(p)), Path(p)))
                 pics.append(uploads[-1][0])
             inpaint = None
+            feather = INPAINT_FEATHER
             if mask is not None:
                 uploads.append((self.upload(Path(mask)), Path(mask)))
+                try:
+                    from . import chain
+                    feather = inpaint_feather(*chain.image_size(Path(mask)))
+                except (RuntimeError, ValueError, OSError):
+                    pass
                 inpaint = {"patch": self.inpaint_patch, "mask": uploads[-1][0], "strength": 1.0,
-                           "feather": INPAINT_FEATHER}
+                           "feather": feather}
             wf = build_qwen21_workflow(files=self.files21, prompt=prompt, seed=seed, quality=quality,
                                        prefix=f"{SUBFOLDER}/edit_{uuid.uuid4().hex[:12]}", save_as="edit_save",
                                        images=pics, loras=names, inpaint=inpaint)
@@ -1328,7 +1345,7 @@ class ComfyImageEditor(ComfyGenerator):
                 "model": wf["unet"]["inputs"]["unet_name"], "lightning": None,
                 "loras": [{"path": str(p), "strength": float(st)} for p, st in loras]}
         if mask is not None:
-            meta["inpaint"] = {"patch": self.inpaint_patch, "feather": INPAINT_FEATHER}
+            meta["inpaint"] = {"patch": self.inpaint_patch, "feather": feather}
         return meta
 
 
