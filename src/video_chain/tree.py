@@ -1434,6 +1434,12 @@ SOURCE_SOUND_TEXT = ("<Audio {k}> is the complete original audio track of the ta
                      "voice and sound comes from <Audio {k}>, and the speaking person's lips move in sync with it.")
 
 
+def uses_ref_model(settings: dict) -> bool:
+    """Whether a clip is made with H3's reference model: face pictures, sounds or voices, or the real video's sound
+    (all go to MiniMaxH3ReferenceToVideo)."""
+    return bool(settings.get("refs") or settings.get("audio_refs") or settings.get("source_sound"))
+
+
 def source_video(tree: Tree, node: Node) -> Node | None:
     """The real video a generated clip continues (the nearest one before it on its path), or None."""
     path = tree.path_to(node.id)
@@ -1451,8 +1457,7 @@ def source_sound_span(tree: Tree, node: Node) -> dict | None:
         return None
     v = path[vi]
     src = v.source or {}
-    hv = handover_index(tree, v)
-    t = float(src["start"]) + (hv + 1) / chain.FPS if hv is not None else float(src["end"])
+    t = float(src["start"]) + clip_length(tree, v) / chain.FPS   # the frames the video really has (not the end)
     for p in path[vi + 1:-1]:
         n = made_frames(p) or clip_length(tree, p)
         h = handover_index(tree, p, n)
@@ -1478,6 +1483,9 @@ def source_sound_problems(tree: Tree, todo: list[str]) -> list[str]:
             continue
         have = chain.audio_seconds(Path(span["file"]))
         need = span["start"] + span["secs"]
+        if span["secs"] < AUDIO_REF_MIN:
+            out.append(f"clip #{nid[1:]} is shorter than {AUDIO_REF_MIN:.0f} s, the least sound the model takes; "
+                       "make it longer to continue the video's sound")
         if have is None:
             out.append(f"{Path(span['file']).name} has no sound, so clip #{nid[1:]} cannot continue it")
         elif have < need - 0.05:
@@ -1837,7 +1845,7 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
     no_end = missing_end_images(project, tree, todo)
     if no_end:
         raise FileNotFoundError(f"the end image of clip #{no_end[0][1:]} is missing")
-    faces = cast_problems(project, tree, todo)
+    faces = cast_problems(project, tree, todo) + source_sound_problems(tree, todo)
     if faces:
         raise ValueError(faces[0])
     for nid in sorted(on_paths - set(todo), key=lambda i: tree.depth(i)):
@@ -2049,6 +2057,9 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
                 generator.refine(project / node.made["video"], prompt, target, node.seed, (w, h),
                                  made_frames(node) or _clip_frames(project, node), loras, first, last,
                                  sparse=SOL_TAU if fast_attention else None)
+                if s.get("source_sound") and not Path(s["source_sound"]["file"]).is_file():
+                    log(f"[{k}/{len(order)}] {node.id}: the video file of its sound is missing "
+                        f"({Path(s['source_sound']['file']).name}); the refined copy keeps the model's sound")
                 if s.get("source_sound") and Path(s["source_sound"]["file"]).is_file():
                     wav = tmp / f"{node.id}_sound.wav"     # the recorded sound, as in the clip
                     chain.to_wav(Path(s["source_sound"]["file"]), wav, s["source_sound"]["start"],

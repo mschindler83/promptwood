@@ -24,7 +24,7 @@ import uuid
 from pathlib import Path
 
 from .comfy import (SUBFOLDER, ComfyError, ComfyGenerator, ComfyJobFailed, _combo_options, build_moss_workflow,
-                    build_qwen21_workflow, pick_moss_files, pick_qwen21_files)
+                    build_qwen21_workflow, is_qwen21_name, pick_moss_files, pick_qwen21_files)
 
 QWEN_NEGATIVE = ("低分辨率，低画质，肢体畸形，手指畸形，画面过饱和，蜡像感，人脸无细节，过度光滑，画面具有AI感。构图混乱。文字模糊，扭曲")
 SDXL_NEGATIVE = ("lowres, worst quality, low quality, bad anatomy, bad hands, extra digits, fewer digits, jpeg artifacts, "
@@ -91,12 +91,14 @@ def pick_files(unets: list[str], ckpts: list[str], clips: list[str], vaes: list[
     out["krea2"] = ({"models": krea, "clip": te, "vae": vae, "style": style} if krea and te and vae else
                     {"missing": "Krea-2 Turbo (krea2_turbo_fp8_scaled) and its text encoder qwen3vl_4b"})
     # Qwen-Image 2512 (and other Qwen-Image generation models; not the edit models)
-    qwen = [u for u in unets if "qwen" in _low(u) and "edit" not in _low(u) and "2.1" not in u
+    qwen = [u for u in unets if "qwen" in _low(u) and "edit" not in _low(u) and not is_qwen21_name(u)
             and ("qwen_image" in _low(u) or "qwenimage" in _low(u))]
     qwen.sort(key=lambda u: (0 if "qwen_image_2512" in _low(u) else 1 if "2512" in u else 2, u))
     qte = first(clips, "qwen_2.5_vl_7b")
     light = sorted([lo for lo in loras if "qwen_image_2512_lightning" in _low(lo)], key=len)
     edit = first(unets, "qwen_image_edit_2511", "qwen_image_edit")
+    out["edit2511"] = ({"models": [edit]} if edit and qte and vae else
+                       {"missing": "Qwen-Image-Edit 2511 (qwen_image_edit_2511_*), qwen_2.5_vl_7b and qwen_image_vae"})
     edit_light = sorted([lo for lo in loras if "qwen_image_edit" in _low(lo) and "lightning" in _low(lo)
                          and ("2511" in lo if edit and "2511" in edit else True) and "4steps" in _low(lo)], key=len)
     out["qwen"] = ({"models": qwen, "clip": qte, "vae": vae, "lightning4": next((lo for lo in light if "4steps" in lo), None),
@@ -511,7 +513,7 @@ def lora_file_family(path: str) -> str | None:
                     if fam in WIDTH:                   # the width tells models with such layer names apart
                         k = next((k for k in head if re.search(r"(attn[._]wq|attn[._]to_q|proj[._]q|proj[._]qkv)"
                                                                r"[._]lora_(A|down)", k)), None)
-                        if k is None or (head[k].get("shape") or [0, 0])[-1] != WIDTH[fam]:
+                        if k is not None and (head[k].get("shape") or [0, 0])[-1] != WIDTH[fam]:
                             fam = None
         except (OSError, ValueError):
             fam = None
@@ -536,6 +538,6 @@ def find_image_loras(roots: list[Path]) -> dict[str, list[tuple[str, str]]]:
                 seen.add(full)
                 fam = lora_file_family(full)
                 name = os.path.relpath(full, root)
-                if fam in out and not any(w in name.lower() for w in own):
+                if fam in out and not any(w in Path(name).name.lower() for w in own):
                     out[fam].append((full, name))
     return {k: sorted(v, key=lambda x: x[1].lower()) for k, v in out.items()}

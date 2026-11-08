@@ -869,15 +869,28 @@ QWEN21_STEPS = 25
 QWEN21_RESOLUTION = 1024           # pictures are seen at about 1024 x 1024 (multiples of 32, aspect kept)
 
 
+def _quantized(name: str) -> int:
+    """Sort key, accuracy first: full precision, then fp8 / int8, then 4-bit."""
+    n = name.lower()
+    return 2 if any(k in n for k in ("w4a8", "nvfp4", "int4", "q4", "gguf")) else \
+        1 if any(k in n for k in ("int8", "fp8", "q8")) else 0
+
+
+def is_qwen21_name(name: str) -> bool:
+    """A Qwen-Image 2.1 model file by its name (2.1 and 2512 must not be mixed up)."""
+    n = name.lower().replace("-", "_")
+    return "qwen_image_2.1" in n or "qwen_image_21" in n or "qwenimage2.1" in n or "qwenimage21" in n
+
+
 def pick_qwen21_files(unets: list[str], clips: list[str], vaes: list[str]) -> dict | None:
     """Qwen-Image 2.1's files ComfyUI lists: {"base", "turbo", "models", "clip", "vae"}, or None without a model,
     its text encoder (Qwen3-VL 8B) or its VAE."""
     def low(n):
         return n.lower().replace("-", "_")
-    q = [u for u in unets if "qwen_image_2.1" in low(u) or "qwen_image_21" in low(u)]
-    base = sorted([u for u in q if "turbo" not in low(u)], key=lambda u: ("int8" not in u, u))
-    turbo = sorted([u for u in q if "turbo" in low(u)], key=lambda u: ("int8" not in u, u))
-    clip = sorted([c for c in clips if "qwen3vl_8b" in low(c)], key=lambda c: ("int8" not in c, c))
+    q = [u for u in unets if is_qwen21_name(u)]
+    base = sorted([u for u in q if "turbo" not in low(u)], key=lambda u: (_quantized(u), u))
+    turbo = sorted([u for u in q if "turbo" in low(u)], key=lambda u: (_quantized(u), u))
+    clip = sorted([c for c in clips if "qwen3vl_8b" in low(c)], key=lambda c: (_quantized(c), c))
     vae = sorted([v for v in vaes if "qwen_image_2.1_vae" in low(v) or "qwen_image_21_vae" in low(v)])
     if not (base or turbo) or not clip or not vae:
         return None
@@ -892,10 +905,12 @@ def build_qwen21_workflow(*, files: dict, prompt: str, seed: int, quality: str, 
     first); size: the new picture's (width, height); None: the size of images[0] as the model sees it (an edit).
     quality 'fast': the Turbo model (8 steps), else the base (25 steps); model: a chosen file (a fine-tune) instead.
     save_as: the SaveImage node's id."""
-    turbo = quality == "fast" and bool(files.get("turbo"))
-    unet = model if model and model not in (files.get("base"), files.get("turbo")) else \
-        (files["turbo"] if turbo else files.get("base") or files["turbo"])
-    turbo = turbo or (unet == files.get("turbo"))
+    if model and model not in (files.get("base"), files.get("turbo")):
+        unet = model                               # a chosen fine-tune: Turbo sampling only for a Turbo build
+        turbo = "turbo" in model.lower()
+    else:
+        turbo = quality == "fast" and bool(files.get("turbo")) or not files.get("base")
+        unet = files["turbo"] if turbo else files["base"]
     wf: dict = {
         "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": unet, "weight_dtype": "default"}},
         "clip": {"class_type": "CLIPLoader", "inputs": {"clip_name": files["clip"], "type": "qwen_image",
@@ -956,12 +971,13 @@ def pick_moss_files(unets: list[str], clips: list[str], vaes: list[str], loras: 
     def low(n):
         return n.lower().replace("-", "_")
     m = [u for u in unets if "moss_image" in low(u)]
-    sft = sorted([u for u in m if "base" not in low(u)], key=lambda u: ("int8" not in u, u))
-    base = sorted([u for u in m if "base" in low(u)], key=lambda u: ("int8" not in u, u))
+    sft = sorted([u for u in m if "base" not in low(u)], key=lambda u: (_quantized(u), u))
+    base = sorted([u for u in m if "base" in low(u)], key=lambda u: (_quantized(u), u))
     clip = sorted([c for c in clips if "qwen3.5_9b" in low(c) and "qwen_image" not in low(c)],
-                  key=lambda c: ("w4a8" not in c, "int8" not in c, c))
+                  key=lambda c: (_quantized(c), c))
     vae = sorted([v for v in vaes if "flux2_vae" in low(v)], key=lambda v: ("small" not in v, v))
-    edit = sorted([lo for lo in loras if "moss_image_edit" in low(lo)])
+    edit = sorted([lo for lo in loras if "moss_image_edit_lora" in low(lo)],     # the official edit LoRA
+                  key=lambda lo: ("rank_64" not in low(lo), "bf16" not in low(lo), lo))
     if not (sft or base) or not clip or not vae:
         return None
     return {"sft": sft[0] if sft else None, "base": base[0] if base else None, "models": sft + base,

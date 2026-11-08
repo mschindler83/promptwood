@@ -46,6 +46,13 @@ def _clean(words) -> list[str]:
 
 
 def file_words(path: str | Path) -> tuple[list[str] | None, str]:
+    try:
+        return _file_words(path)
+    except Exception:  # noqa: BLE001  (an odd header must not stop a scan)
+        return None, ""
+
+
+def _file_words(path: str | Path) -> tuple[list[str] | None, str]:
     """Trigger words in a LoRA file's header: (words, 'file') from an explicit field, (words, 'tags') guessed from
     kohya's training tags, or (None, '') when the file says nothing."""
     try:
@@ -53,8 +60,11 @@ def file_words(path: str | Path) -> tuple[list[str] | None, str]:
             n = int.from_bytes(f.read(8), "little")
             if not 0 < n < 100 * 2**20:
                 return None, ""
-            meta = json.loads(f.read(n)).get("__metadata__") or {}
+            head = json.loads(f.read(n))
     except (OSError, ValueError):
+        return None, ""
+    meta = head.get("__metadata__") if isinstance(head, dict) else None
+    if not isinstance(meta, dict):
         return None, ""
     for key in ("modelspec.trigger_phrase", "modelspec.trigger_word", "trigger_phrase", "trigger_word",
                 "trigger_words", "ss_trigger_word"):
@@ -157,11 +167,26 @@ class TriggerDB:
             pass
 
     def save(self):
+        """Write the database; what another process added in between is kept (merged, ours first)."""
+        import tempfile
         with self._lock:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(".part")
-            tmp.write_text(json.dumps(self.data, indent=1, ensure_ascii=False), encoding="utf-8")
-            tmp.replace(self.path)
+            try:
+                disk = json.loads(self.path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                disk = {}
+            if isinstance(disk, dict):
+                for part in ("by_sha", "files"):
+                    for k, v in (disk.get(part) or {}).items():
+                        self.data[part].setdefault(k, v)
+            fd, tmp = tempfile.mkstemp(prefix=self.path.name + ".", suffix=".part", dir=str(self.path.parent))
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(self.data, f, indent=1, ensure_ascii=False)
+                os.replace(tmp, self.path)
+            finally:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
             self._mtime = self.path.stat().st_mtime_ns
 
     def _file(self, path: str) -> dict | None:
@@ -184,8 +209,9 @@ class TriggerDB:
             if f is None:
                 return None
             rec = self.data["by_sha"].get(f.get("sha256") or "") or {}
-            if rec.get("user") is not None:
-                return {"words": list(rec["user"]), "source": "user", "model": rec.get("model", ""),
+            user = f["user"] if f.get("user") is not None else rec.get("user")
+            if user is not None:
+                return {"words": list(user), "source": "user", "model": rec.get("model", ""),
                         "url": rec.get("url", "")}
             if f.get("file_source") == "file" and f.get("file_words"):
                 return {"words": list(f["file_words"]), "source": "file", "model": rec.get("model", ""),
@@ -193,8 +219,8 @@ class TriggerDB:
             if rec.get("civitai") is not None:
                 return {"words": list(rec["civitai"]), "source": "civitai", "model": rec.get("model", ""),
                         "url": rec.get("url", "")}
-            if f.get("file_words"):
-                return {"words": list(f["file_words"]), "source": "tags", "model": "", "url": ""}
+            if f.get("file_words"):                # a guess: shown as a suggestion, not put into prompts
+                return {"words": [], "source": "tags", "model": "", "url": "", "suggested": list(f["file_words"])}
             if rec.get("checked"):                 # CivitAI does not know it, the file says nothing
                 return {"words": [], "source": "none", "model": "", "url": ""}
             return None                            # not looked up yet
@@ -204,16 +230,19 @@ class TriggerDB:
         return list(i["words"]) if i else []
 
     def set_user(self, path: str, words: list[str] | None) -> None:
-        """The user's own words for a LoRA (None: back to the found ones)."""
+        """The user's own words for a LoRA (None: back to the found ones). Kept with the file (no hashing here, it
+        may be big) and with its content hash when that is known (then also for its copies)."""
         with self._lock:
             f = self._file(path) or self._remember(path)
-            sha = f.get("sha256") or sha256_of(path)
-            f["sha256"] = sha
-            rec = self.data["by_sha"].setdefault(sha, {})
+            rec = self.data["by_sha"].setdefault(f["sha256"], {}) if f.get("sha256") else None
             if words is None:
-                rec.pop("user", None)
+                f.pop("user", None)
+                if rec is not None:
+                    rec.pop("user", None)
             else:
-                rec["user"] = _clean(words)
+                f["user"] = _clean(words)
+                if rec is not None:
+                    rec["user"] = f["user"]
             self.save()
 
     def _remember(self, path: str) -> dict:
@@ -243,51 +272,70 @@ class TriggerDB:
              lookup: Callable[[str], dict | None] = civitai_lookup, gap: float = REQUEST_GAP) -> dict:
         """Look at LoRA files not known yet (header; then CivitAI by hash). Returns counts
         {"looked", "found", "unknown", "failed"}."""
-        n = {"looked": 0, "found": 0, "unknown": 0, "failed": 0}
-        asked = False
+        n = {"looked": 0, "found": 0, "unknown": 0, "failed": 0, "new": 0}
+        asked, dirty, failed_in_a_row = False, 0, 0
+
+        def flush(force=False):
+            nonlocal dirty
+            if dirty and (force or dirty >= 20):
+                with self._lock:
+                    self.save()
+                dirty = 0
         for path in paths:
             if stop():
                 break
-            if not os.path.isfile(path):
-                continue
-            with self._lock:
-                f = self._file(path)
-                if f is None:
-                    f = self._remember(path)
-                    self.save()
-            if not online or not self.needs_lookup(path):
-                continue
-            sha = f.get("sha256")
-            if not sha:
-                sha = sha256_of(path, stop)
-                if sha is None:
-                    break
-                with self._lock:
-                    f["sha256"] = sha
-                if not self.needs_lookup(path):    # known by its content (moved, renamed, a copy)
-                    with self._lock:
-                        self.save()
-                    continue
-            if asked and gap:
-                time.sleep(gap)
-            asked = True
-            n["looked"] += 1
             try:
-                hit = lookup(sha)
-            except OSError:
-                n["failed"] += 1
+                if not os.path.isfile(path):
+                    continue
                 with self._lock:
-                    self.save()                    # the hash is kept; asked again next time
-                continue
-            with self._lock:
-                rec = self.data["by_sha"].setdefault(sha, {})
-                rec["checked"] = time.time()
-                if hit is None:
-                    n["unknown"] += 1
-                else:
-                    rec.update({"civitai": hit["words"], "model": hit["model"], "url": hit["url"]})
-                    n["found"] += bool(hit["words"])
-                self.save()
+                    if self._file(path) is None:
+                        self._remember(path)
+                        n["new"] += 1
+                        dirty += 1
+                if not online or not self.needs_lookup(path):
+                    flush()
+                    continue
+                with self._lock:
+                    sha = (self._file(path) or {}).get("sha256")
+                if not sha:
+                    sha = sha256_of(path, stop)
+                    if sha is None:
+                        break
+                    with self._lock:
+                        f = self._file(path) or self._remember(path)   # (the data may have been re-read)
+                        f["sha256"] = sha
+                        if f.get("user") is not None:
+                            self.data["by_sha"].setdefault(sha, {}).setdefault("user", f["user"])
+                        dirty += 1
+                    if not self.needs_lookup(path):    # known by its content (moved, renamed, a copy)
+                        flush()
+                        continue
+                if asked and gap:
+                    time.sleep(gap)
+                asked = True
+                n["looked"] += 1
+                try:
+                    hit = lookup(sha)
+                except OSError:
+                    n["failed"] += 1
+                    failed_in_a_row += 1
+                    if failed_in_a_row >= 2:           # offline: try again with the next scan
+                        break
+                    continue
+                failed_in_a_row = 0
+                with self._lock:
+                    rec = self.data["by_sha"].setdefault(sha, {})
+                    rec["checked"] = time.time()
+                    if hit is None:
+                        n["unknown"] += 1
+                    else:
+                        rec.update({"civitai": hit["words"], "model": hit["model"], "url": hit["url"]})
+                        n["found"] += bool(hit["words"])
+                    dirty += 1
+                flush()
+            except (OSError, ValueError, TypeError, AttributeError):
+                continue                               # a file that vanished or cannot be read: the next one
+        flush(force=True)
         return n
 
 
@@ -322,6 +370,6 @@ def with_triggers(prompt: str, words: list[str]) -> str:
     if not missing:
         return prompt
     lead = ", ".join(missing)
-    if (prompt or "").startswith("subject_definitions:") and "[Shot 1] " in prompt:
-        return prompt.replace("[Shot 1] ", f"[Shot 1] {lead}. ", 1)
+    if (prompt or "").startswith("subject_definitions:") and re.search(r"\[Shot 1\]\s+", prompt):
+        return re.sub(r"\[Shot 1\]\s+", lambda _m: f"[Shot 1] {lead}. ", prompt, count=1)
     return f"{lead}, {prompt}" if prompt else lead

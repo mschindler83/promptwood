@@ -7,7 +7,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QHBoxLayout, QLineEdit,
-                               QListWidget, QListWidgetItem, QPushButton, QVBoxLayout, QWidget)
+                               QListWidget, QListWidgetItem, QMessageBox, QPushButton, QVBoxLayout, QWidget)
 
 from .. import tree as T
 from .widgets import guard_wheel, icon_button, label
@@ -250,13 +250,16 @@ class LoraStack(QWidget):
             info = None
         if info is None:
             text, tip = "trigger words: not looked up yet", "Looked up in the background (file, then CivitAI)"
+        elif info.get("suggested"):
+            text = (f"trigger words: none used; its training tags suggest {', '.join(info['suggested'])} "
+                    "(right-click to use them)")
+            tip = "A guess from the tags on its training images: not put into prompts unless you take it"
         elif not info["words"]:
             text = "trigger words: none" + (" (CivitAI lists none)" if info["source"] == "civitai" else
                                             " (set by you)" if info["source"] == "user" else "")
             tip = info.get("url") or "Neither the file nor CivitAI names any"
         else:
-            src = {"user": "set by you", "file": "from the file", "civitai": "from CivitAI",
-                   "tags": "guessed from its training tags"}[info["source"]]
+            src = {"user": "set by you", "file": "from the file", "civitai": "from CivitAI"}.get(info["source"], "")
             text = f"trigger words: {', '.join(info['words'])}  ({src})"
             tip = (f"{info.get('model') or ''}  {info.get('url') or ''}".strip() or src)
         lab.setText(text)
@@ -273,19 +276,29 @@ class LoraStack(QWidget):
         path = button.property("path")
         if not path or not Path(path).is_file():
             return
+        info = triggers.db().info(path) or {}
         menu = QMenu(self)
+        a_take = menu.addAction(f"Use the suggested words ({', '.join(info['suggested'])})") \
+            if info.get("suggested") else None
         a_edit = menu.addAction("Change the trigger words…")
         a_reset = menu.addAction("Use the found trigger words again")
         chosen = menu.exec(button.mapToGlobal(pos))
-        if chosen is a_edit:
-            words, ok = QInputDialog.getText(self, "Trigger words", f"Trigger words of {Path(path).stem} "
-                                             "(comma-separated; empty: none):", text=", ".join(triggers.db().words(path)))
-            if not ok:
+        try:
+            if chosen is not None and chosen is a_take:
+                triggers.db().set_user(path, list(info["suggested"]))
+            elif chosen is a_edit:
+                words, ok = QInputDialog.getText(
+                    self, "Trigger words", f"Trigger words of {Path(path).stem} (comma-separated; empty: none):",
+                    text=", ".join(triggers.db().words(path) or info.get("suggested") or []))
+                if not ok:
+                    return
+                triggers.db().set_user(path, [w for w in words.split(",") if w.strip()])
+            elif chosen is a_reset:
+                triggers.db().set_user(path, None)
+            else:
                 return
-            triggers.db().set_user(path, [w for w in words.split(",") if w.strip()])
-        elif chosen is a_reset:
-            triggers.db().set_user(path, None)
-        else:
+        except OSError as e:
+            QMessageBox.warning(self, "Trigger words", f"Could not save the trigger words: {e}")
             return
         self.refresh_triggers()
         self.changed.emit()

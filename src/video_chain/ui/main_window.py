@@ -397,6 +397,7 @@ class PromptCard(QFrame):
         link.addRow("Sound", self.sound_box)
         self._link = link
         link.setRowVisible(self.sound_box, False)          # only for clips after a real video
+        self._max_guide = 0
         erow = QHBoxLayout()
         erow.setSpacing(6)
         self.end_thumb = QLabel()
@@ -599,9 +600,10 @@ class PromptCard(QFrame):
         self._enable_guide()
 
     def _sound_toggled(self, on: bool):
-        """With the video's sound the picture should continue too: no carry-over yet -> the longest one."""
-        if on and not self.guide.currentData():
-            k = self.guide.findData(max(T.GUIDE_CHOICES))
+        """With the video's sound the picture should continue too: no carry-over yet -> the longest one that fits
+        (the clip before must be that long, and this clip longer)."""
+        if on and not self.guide.currentData() and self._max_guide:
+            k = self.guide.findData(self._max_guide)
             if k >= 0:
                 self.guide.blockSignals(True)
                 self.guide.setCurrentIndex(k)
@@ -609,8 +611,10 @@ class PromptCard(QFrame):
                 self._enable_guide()
         self._ov_changed()
 
-    def set_source_sound(self, available: bool, info: str):
-        """The 'Sound' row: shown for a clip after a real video (or when it is set); info: which part of the file."""
+    def set_source_sound(self, available: bool, info: str, max_guide: int = 0):
+        """The 'Sound' row: shown for a clip after a real video (or when it is set); info: which part of the file;
+        max_guide: the longest carry-over that fits (set when the sound is switched on)."""
+        self._max_guide = max_guide
         on = self.src_sound.isChecked()
         self._link.setRowVisible(self.sound_box, available or on)
         self.src_sound.setEnabled(not self.edit.isReadOnly() and (available or on))
@@ -1826,10 +1830,15 @@ class MainWindow(QMainWindow):
 
     # ---- LoRA trigger words (triggers.py), looked up in the background
     def _trigger_paths(self) -> list[str]:
+        """The LoRAs to know the trigger words of: those found in ComfyUI's folders, and those the clips use
+        (from anywhere)."""
         paths = [p for p, _n in self.h3_loras + self.qwen_loras]
         for items in self.image_loras.values():
             paths += [p for p, _n in items]
-        return list(dict.fromkeys(paths))
+        if self.tree is not None:
+            for n in self.tree.nodes.values():
+                paths += [p for p, _s in T.node_loras(n)]
+        return list(dict.fromkeys(p for p in paths if p))
 
     def _scan_triggers(self):
         """Read the trigger words of LoRAs not known yet (their files; CivitAI if allowed), in the background."""
@@ -1837,6 +1846,7 @@ class MainWindow(QMainWindow):
             return
         paths, online, bridge = self._trigger_paths(), self.triggers_online.isChecked(), self.bridge
         self._trigger_scan = threading.Event()
+        self._trigger_scan_online = online
         stop = self._trigger_scan
 
         def work():
@@ -1857,8 +1867,11 @@ class MainWindow(QMainWindow):
         for card in self.cards:
             if isinstance(card, PromptCard):
                 card.loras.refresh_triggers()
-        if self.tree is not None:
+        changed = counts.get("new") or counts.get("looked")
+        if self.tree is not None and changed and not self.running:
             self.refresh()                         # clips record their LoRAs' words
+        if self.triggers_online.isChecked() and not getattr(self, "_trigger_scan_online", True):
+            QTimer.singleShot(0, self._scan_triggers)     # switched on while an offline scan ran
         if counts.get("looked"):
             self.status.setText(f"LoRA trigger words: looked up {counts['looked']} LoRA"
                                 f"{'s' if counts['looked'] != 1 else ''} on CivitAI, {counts.get('found', 0)} with "
@@ -2710,19 +2723,27 @@ class MainWindow(QMainWindow):
             return f"Faces: all {len(use['images'])} pictures of the cast, in cast order (<Picture N> written)"
         return "Faces: none (the prompt mentions nobody and there is no lead)"
 
-    def _source_sound_text(self, n: T.Node) -> tuple[bool, str]:
+    def _source_sound_text(self, n: T.Node) -> tuple[bool, str, int]:
         """For the clip card's 'Sound' row: (a real video comes before this clip, which part of its file the clip's
-        sound is)."""
+        sound is, the longest carry-over that fits)."""
         video = T.source_video(self.tree, n)
         if video is None:
-            return False, "There is no real video before this clip any more: switch this off."
+            return False, "There is no real video before this clip any more: switch this off.", 0
+        parent = self.tree.nodes.get(n.parent) if n.parent else None
+        have = 0
+        if parent is not None:
+            pn = T.made_frames(parent) or T.clip_length(self.tree, parent)
+            h = T.handover_index(self.tree, parent, pn)
+            have = h + 1 if h is not None else pn
+        fits = [g for g in T.GUIDE_CHOICES if g <= have and g < T.clip_length(self.tree, n)]
         span = T.source_sound_span(self.tree, n)
 
         def t(x: float) -> str:
             return f"{int(x // 60)}:{x % 60:04.1f}"
         return True, (f"Uses {t(span['start'])}–{t(span['start'] + span['secs'])} of "
                       f"{Path(span['file']).name} (video #{video.id[1:]}): the sound right after its range, exactly as "
-                      "recorded. Write in the prompt what happens; the words come from the video.")
+                      "recorded. Write in the prompt what happens; the words come from the video."), \
+            max(fits, default=0)
 
     def _own_parts(self, n: T.Node) -> list[str]:
         """A clip's own LoRA / strength / length / steps in a few words."""
@@ -2841,8 +2862,9 @@ class MainWindow(QMainWindow):
                     if self.tree.options.get("lora_triggers", True) and T.node_loras(n) else []
                 sounds = [None] * (T.audio_mentioned(T.full_prompt(self.tree.options, n.prompt))
                                    + len(use.get("voices") or []))
+                cont = (n.overrides or {}).get("source_sound") and T.source_video(self.tree, n) is not None
                 sent = T.model_prompt(self.tree.options, n, {"lora_triggers": words, "audio_refs": sounds,
-                                                             "source_sound": (n.overrides or {}).get("source_sound")})
+                                                             "source_sound": cont})
                 card.edit.setToolTip("Sent to the model: " + sent if sent != n.prompt.strip() else "")
                 card.set_faces(self._faces_text(use))
                 card.set_source_sound(*self._source_sound_text(n))
@@ -4506,13 +4528,13 @@ class MainWindow(QMainWindow):
             self.scan_loras()
 
     def closeEvent(self, e):
-        if getattr(self, "_trigger_scan", None) is not None:
-            self._trigger_scan.set()                  # the trigger word lookup stops at the next file
         if self.running:
             if QMessageBox.question(self, "Promptwood", "Clips are being generated. Stop and quit?") \
                     != QMessageBox.Yes:
                 e.ignore()
                 return
+        if getattr(self, "_trigger_scan", None) is not None:
+            self._trigger_scan.set()                  # the trigger word lookup stops at the next file
         if self.proc is not None:                    # never leave the generator (and the model) behind
             p, self.proc = self.proc, None
             p.finished.disconnect()

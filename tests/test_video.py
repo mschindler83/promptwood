@@ -280,7 +280,7 @@ def test_continue_the_real_videos_sound(project, tmp_path):
                     "-i", "aevalsrc=0.5*sin(2*PI*if(lt(t\\,1)\\,700\\,1200)*t):d=5", "-c:v", "libx264",
                     "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(src)], check=True)
     t = T.load(project)
-    t.options["frames"] = 17
+    t.options["frames"] = 48                        # 2 s: the least sound the model takes
     v = t.add_video(None, str(src), 0.0, 1.0)
     a = t.add(v.id, "she keeps talking")
     b = t.add(a.id, "and talking")
@@ -288,10 +288,10 @@ def test_continue_the_real_videos_sound(project, tmp_path):
     b.overrides = {"source_sound": True, "guide": 5}
     other = t.add(None, "no video before")
     T.save(project, t)
-    assert T.source_sound_span(t, a) == {"file": str(src), "start": round(1.0 - 1 / 24, 3), "secs": round(17 / 24, 3),
+    assert T.source_sound_span(t, a) == {"file": str(src), "start": round(1.0 - 1 / 24, 3), "secs": 2.0,
                                          "video": v.id}
-    # b: after a's 17 frames (its first repeats the video's last one), its own first 5 frames repeat a's end
-    assert T.source_sound_span(t, b)["start"] == round(1.0 + 16 / 24 - 5 / 24, 3)
+    # b: after a's 48 frames (its first repeats the video's last one), its own first 5 frames repeat a's end
+    assert T.source_sound_span(t, b)["start"] == round(1.0 + 47 / 24 - 5 / 24, 3)
     assert T.source_sound_span(t, other) is None
     gen = FakeGenerator(frames=17, size=None)
     T.run_tree(gen, project, [a.id], log=lambda _m: None)
@@ -310,6 +310,8 @@ def test_continue_the_real_videos_sound(project, tmp_path):
     t.nodes[v.id].source["end"] = 1.0
     t.nodes[b.id].overrides["frames"] = 24 * 15                # longer than the file has sound for
     assert any("ends at 0:05.0" in m for m in T.source_sound_problems(t, [b.id]))
+    t.nodes[b.id].overrides["frames"] = 24                     # under the model's 2 s
+    assert any("shorter than 2 s" in m for m in T.source_sound_problems(t, [b.id]))
     t.nodes[other.id].overrides = {"source_sound": True}
     assert T.source_sound_problems(t, [other.id]) == [f"clip #{other.id[1:]} continues a real video's sound, but "
                                                       "there is no real video before it"]

@@ -243,6 +243,8 @@ class ImageEditDialog(QDialog):
         saved = settings.value("editModel", "", type=str) if settings is not None else ""
         self.edit_model.setCurrentIndex(max(0, self.edit_model.findData(saved)))
         self.edit_model.currentIndexChanged.connect(self._edit_model_changed)
+        self.edit_model.activated.connect(lambda _i: self.qs is not None and
+                                          self.qs.setValue("editModel", self.edit_model.currentData()))
         erow.addWidget(label("Model", level="tertiary"))
         erow.addWidget(self.edit_model, 1)
         ev.addLayout(erow)
@@ -519,7 +521,11 @@ class ImageEditDialog(QDialog):
         self.quality.clear()
         if create:
             fam = self.family.currentData()
+            files = self.families.get(fam) or {}
+            need = {"qwen21": {"fast": "turbo", "best": "base"}, "chroma": {"fast": "flash", "best": "hd"}}.get(fam, {})
             for key, text in (FAMILIES[fam]["qualities"].items() if fam in FAMILIES else []):
+                if "models" in files and key in need and not files.get(need[key]):
+                    continue                       # its model file is not installed
                 self.quality.addItem(text, key)
         elif self.edit_model.currentData() in ("qwen21", "moss"):
             qs = FAMILIES["qwen21"]["qualities"] if self.edit_model.currentData() == "qwen21" else MOSS_EDIT_QUALITIES
@@ -545,8 +551,6 @@ class ImageEditDialog(QDialog):
         return "editQuality" if self.edit_model.currentData() == "2511" else f"editQuality_{self.edit_model.currentData()}"
 
     def _edit_model_changed(self, *_):
-        if self.qs is not None:
-            self.qs.setValue("editModel", self.edit_model.currentData())
         if self.mode() == "edit":
             self.set_mode("edit")                # its qualities and LoRAs
 
@@ -555,8 +559,8 @@ class ImageEditDialog(QDialog):
         MOSS also needs its edit LoRA)."""
         if not self.families:
             return                                 # not listed yet: all stay offered
-        for key in ("qwen21", "moss"):
-            info = self.families.get(key) or {}
+        for key in ("2511", "qwen21", "moss"):
+            info = self.families.get({"2511": "edit2511"}.get(key, key)) or {}
             k = self.edit_model.findData(key)
             ok = "models" in info and (key != "moss" or bool(info.get("edit_lora")))
             why = info.get("missing") or ("MOSS-Image's edit LoRA (moss_image_edit_lora_rank_64_bf16) is missing"
@@ -564,8 +568,11 @@ class ImageEditDialog(QDialog):
             self.edit_model.model().item(k).setEnabled(ok)
             self.edit_model.setItemText(k, EDIT_MODELS[key] + ("" if ok else "  (not available)"))
             self.edit_model.setItemData(k, EDIT_MODELS[key] if ok else why, Qt.ToolTipRole)
-            if not ok and self.edit_model.currentData() == key:
-                self.edit_model.setCurrentIndex(self.edit_model.findData("2511"))
+        cur = self.edit_model.currentIndex()
+        if not self.edit_model.model().item(cur).isEnabled():   # the chosen one is not there: the first one that is
+            ok = [i for i in range(self.edit_model.count()) if self.edit_model.model().item(i).isEnabled()]
+            if ok:
+                self.edit_model.setCurrentIndex(ok[0])
 
     def _remember_quality(self):
         if self.qs is not None and self.quality.currentData():
@@ -631,10 +638,15 @@ class ImageEditDialog(QDialog):
         create = self.mode() == "create"
         refs = create and self.use_refs.isChecked() and f is not None
         n = f["refs"] if f else 0
+        moss_no_edit = fam == "moss" and "models" in (self.families.get("moss") or {}) \
+            and not (self.families.get("moss") or {}).get("edit_lora")
+        if moss_no_edit:
+            n = 0                                  # pictures go through MOSS's edit LoRA
         for k, slot in enumerate(self.cpics):
             slot.setVisible(refs and k < n)
         self.ref_text.setVisible(refs)
-        self.ref_text.setText(f["ref_text"] if f else "")
+        self.ref_text.setText("MOSS-Image needs its edit LoRA (moss_image_edit_lora_rank_64_bf16) for pictures"
+                              if moss_no_edit else f["ref_text"] if f else "")
         img2img = refs and fam in ("flux1", "sdxl", "chroma")
         self.ref_strength.setVisible(img2img)
         self.ref_strength_label.setVisible(img2img)
@@ -1068,7 +1080,7 @@ class ImageEditDialog(QDialog):
             i = self.family.findData(meta.get("family"))
             if i >= 0 and self.family.model().item(i).isEnabled():
                 self.family.setCurrentIndex(i)
-            j = self.model_file.findData(meta.get("model"))
+            j = self.model_file.findData(meta.get("chosen_model") or meta.get("model"))
             if j >= 0:
                 self.model_file.setCurrentIndex(j)
             q = self.quality.findData(meta.get("quality"))

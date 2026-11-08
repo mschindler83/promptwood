@@ -1751,6 +1751,7 @@ def test_qwen_image_21_in_the_image_window(app, tmp_path, image, monkeypatch):
         assert dlg.edit_model.currentData() == "2511"
         assert [dlg.quality.itemData(i) for i in range(dlg.quality.count())] == ["fast", "standard", "best"]
         dlg.edit_model.setCurrentIndex(1)
+        dlg.edit_model.activated.emit(1)                            # the user's choice is remembered
         assert [dlg.quality.itemText(i) for i in range(dlg.quality.count())] == ["Fast (Turbo, 8 steps)",
                                                                                  "Best (25 steps)"]
         assert q.value("editModel") == "qwen21" and "Qwen-Image 2.1" in dlg.lora_text.text()
@@ -1853,7 +1854,7 @@ def test_continue_the_real_videos_sound_on_the_card(app, win, tmp_path):
     card.src_sound.setChecked(True)
     flush(app, win)
     ov = win.tree.nodes[a].overrides
-    assert ov["source_sound"] is True and ov["guide"] == max(T.GUIDE_CHOICES)          # the picture continues too
+    assert ov["source_sound"] is True and ov["guide"] == 22    # the longest carry-over the 36-frame video allows
     card = next(c for c in win.cards if c.nid == a)
     assert card.src_sound_info.text().startswith("Uses 0:") and "real.mp4" in card.src_sound_info.text()
     assert "video's sound" in card.settings_toggle.text()

@@ -673,8 +673,9 @@ def test_image_families_from_comfyui_lists():
                                "qwen-image/qwen_image_2.1_int8_convrot.safetensors"],
                               ["qwen3vl_8b_bf16.safetensors", "qwen3vl_8b_int8_convrot.safetensors"],
                               ["qwen_image_2.1_vae_bf16.safetensors"])
-    assert q21["base"].endswith("2.1_int8_convrot.safetensors") and q21["turbo"].endswith("turbo_int8_convrot.safetensors")
-    assert q21["clip"] == "qwen3vl_8b_int8_convrot.safetensors" and q21["vae"] == "qwen_image_2.1_vae_bf16.safetensors"
+    # accuracy first: the full-precision file before int8 when both are there
+    assert q21["base"].endswith("2.1_bf16.safetensors") and q21["turbo"].endswith("turbo_int8_convrot.safetensors")
+    assert q21["clip"] == "qwen3vl_8b_bf16.safetensors" and q21["vae"] == "qwen_image_2.1_vae_bf16.safetensors"
     assert C.pick_qwen21_files(["qwen-image/qwen_image_2.1_bf16.safetensors"], [], []) is None   # no encoder
     assert G.size_for("qwen21", 16 / 9) == (1376, 768)
     mo = C.pick_moss_files(["moss-image/moss_image_base_bf16.safetensors", "moss-image/moss_image_sft_int8_convrot.safetensors"],
