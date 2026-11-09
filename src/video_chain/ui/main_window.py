@@ -3343,12 +3343,9 @@ class MainWindow(QMainWindow):
         c = self._selected_character()
         if c is None or not self._cast_edit_ok():
             return
-        start = self.qs.value("soundDir", "", type=str) or str(Path.home())
-        f, _ = QFileDialog.getOpenFileName(
-            self, f"Voice of @{c['name']} (one speaker, 2-{T.VOICE_MAX_SECS:g} s are used)", start,
-            "Sound or video (*.wav *.mp3 *.flac *.ogg *.m4a *.aac *.opus *.mp4 *.mov *.mkv *.webm);;All files (*)")
+        f = pick_image(self, f"Voice of @{c['name']} (one speaker, 2-{T.VOICE_MAX_SECS:g} s are used)", self.qs,
+                       places=self._picker_places(), collections=self.project_media("media"), kind="media")
         if f:
-            self.qs.setValue("soundDir", str(Path(f).parent))
             self.set_character_voice(f)
 
     def _voice_from_selected(self):
@@ -3411,12 +3408,9 @@ class MainWindow(QMainWindow):
         if self.project is None:
             self.status.setText("Open or create a project folder first.")
             return
-        start = self.qs.value("soundDir", "", type=str) or str(Path.home())
-        f, _ = QFileDialog.getOpenFileName(
-            self, "Sound reference (a voice, a soundtrack, a beat: 2-15 s)", start,
-            "Sound or video (*.wav *.mp3 *.flac *.ogg *.m4a *.aac *.opus *.mp4 *.mov *.mkv *.webm);;All files (*)")
+        f = pick_image(self, "Sound reference (a voice, a soundtrack, a beat: 2-15 s)", self.qs,
+                       places=self._picker_places(), collections=self.project_media("media"), kind="media")
         if f:
-            self.qs.setValue("soundDir", str(Path(f).parent))
             self.add_sound(f)
 
     def _sound_from_selected(self):
@@ -3791,6 +3785,26 @@ class MainWindow(QMainWindow):
         if (self.project / EDITS_DIR).is_dir():
             out.append(("Project AI edits", str(self.project / EDITS_DIR)))
         return out
+
+    def project_media(self, kind: str) -> list[tuple[str, list[tuple[str, str]]]]:
+        """The open project's videos ('video') or sounds and videos ('media'), for the file browser:
+        [(name, [(path, caption)])], kinds without files left out."""
+        if self.project is None or self.tree is None:
+            return []
+        videos, seen = [], set()
+        for n in sorted(self.tree.nodes.values(), key=lambda n: self.tree.number(n.id)):
+            if not n.is_video:
+                continue
+            src = (swap.replaced(n) or {}).get("original") or n.source or {}
+            f = src.get("file")
+            if f and f not in seen and Path(f).is_file():
+                seen.add(f)
+                videos.append((f, f"Video #{n.id[1:]} · {Path(f).name}"))
+        out = [("Real videos of this project", videos)]
+        if kind == "media":
+            out.insert(0, ("Audio tracks", [(str(self.project / t["file"]), f"Track \u201c{t['name']}\u201d")
+                                            for t in T.tracks(self.tree) if (self.project / t["file"]).is_file()]))
+        return [(name, items) for name, items in out if items]
 
     def project_images(self) -> list[tuple[str, list[tuple[str, str]]]]:
         """The open project's pictures by kind, for the image picker: [(name, [(path, caption)])] (kinds without
@@ -5183,7 +5197,7 @@ class MainWindow(QMainWindow):
             self.status.setText(f"Clip #{parent[1:]} already leads into video #{vc.id[1:]}: a generated clip can "
                                 "end at one video only. Branch from the clip before it for another one.")
             return
-        f = choose_video(self, self.qs)
+        f = choose_video(self, self.qs, places=self._picker_places(), collections=self.project_media("video"))
         if not f:
             return
         dlg = VideoRangeDialog(self, f, canvas=self._canvas_for(f), settings=self.qs)

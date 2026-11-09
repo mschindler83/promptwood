@@ -23,6 +23,11 @@ from .theme import theme
 from .widgets import icon_button, label
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
+VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mts", ".m2ts", ".wmv", ".flv", ".mpg", ".mpeg"}
+SOUND_EXTS = {".mp3", ".wav", ".ogg", ".oga", ".opus", ".flac", ".m4a", ".aac", ".wma", ".aiff", ".aif"}
+# what each kind of picker lists: image (pictures), video (videos), media (sounds and videos: voices, tracks)
+KINDS = {"image": (IMAGE_EXTS, "images", "pickerDir"), "video": (VIDEO_EXTS, "videos", "videoDir"),
+         "media": (SOUND_EXTS | VIDEO_EXTS, "files", "soundDir")}
 MAX_RECENT_DIRS = 8
 THUMB_MAX = 320                    # thumbnails are made at this size once and scaled for the grid
 THREADS = 8                        # parallel reads: on a network share every file costs round trips
@@ -66,8 +71,55 @@ def prune_cache(cache_dir: Path, keep: int = MAX_CACHED) -> None:
         f.unlink(missing_ok=True)
 
 
+def _video_frame(path: str, box: int = THUMB_MAX) -> QImage:
+    """A frame of a video (at 1 s, else the first), at most box pixels on its long side (ffmpeg; any thread)."""
+    import subprocess
+    for at in ("1", "0"):
+        try:
+            r = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-ss", at, "-i", path, "-frames:v", "1", "-vf",
+                                f"scale='min({box},iw)':'min({box},ih)':force_original_aspect_ratio=decrease",
+                                "-f", "image2pipe", "-c:v", "png", "-"], capture_output=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            return QImage()
+        img = QImage.fromData(r.stdout, "PNG") if r.stdout else QImage()
+        if not img.isNull():
+            return img
+    return QImage()
+
+
+def _media_info(path: str) -> str:
+    """'0:12.5 · 1920×1080 · 24 fps' (videos) or '0:08.0 · sound' (ffprobe; '' if unreadable)."""
+    import subprocess
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration:stream=codec_type,width,height,"
+                            "r_frame_rate", "-of", "json", path], capture_output=True, text=True, timeout=20)
+        d = json.loads(r.stdout or "{}")
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return ""
+    secs = float((d.get("format") or {}).get("duration") or 0)
+    m, sec = divmod(secs, 60)
+    parts = [f"{int(m)}:{sec:04.1f}"]
+    v = next((x for x in d.get("streams", []) if x.get("codec_type") == "video"), None)
+    if v and v.get("width"):
+        parts.append(f"{v['width']}×{v['height']}")
+        num, _sl, den = str(v.get("r_frame_rate") or "0/1").partition("/")
+        try:
+            fps = float(num) / float(den or 1)
+            if fps:
+                parts.append(f"{fps:.3g} fps")
+        except ValueError:
+            pass
+    if any(x.get("codec_type") == "audio" for x in d.get("streams", [])):
+        parts.append("sound" if not v else "with sound")
+    return " · ".join(parts)
+
+
 def _thumbnail(path: str) -> QImage:
-    """A small QImage of an image file, read at reduced size (QImage is fine outside the GUI thread)."""
+    """A small QImage of an image file (or a frame of a video), read at reduced size (any thread)."""
+    if Path(path).suffix.lower() in VIDEO_EXTS:
+        return _video_frame(path)
+    if Path(path).suffix.lower() in SOUND_EXTS:
+        return QImage()
     r = QImageReader(path)
     r.setAutoTransform(True)
     size = r.size()
@@ -79,13 +131,16 @@ def _thumbnail(path: str) -> QImage:
 
 class ImagePickerDialog(QDialog):
     """collections: the open project's pictures by kind, [(name, [(path, caption)])], shown first under "This
-    project" (captions such as "Clip #5 · last frame"); folders can be browsed as well."""
+    project" (captions such as "Clip #5 · last frame"); folders can be browsed as well.
+    kind: what is listed (KINDS): 'image', 'video' (thumbnails are frames) or 'media' (sounds and videos)."""
 
     def __init__(self, parent=None, title: str = "Choose an image", start_dir: str | None = None,
                  settings: QSettings | None = None, places: list[tuple[str, str]] | None = None,
                  cache_dir: Path | None = CACHE_DIR, desktop_thumbs: Path | None = DESKTOP_THUMBS,
-                 collections: list[tuple[str, list[tuple[str, str]]]] | None = None):
+                 collections: list[tuple[str, list[tuple[str, str]]]] | None = None, kind: str = "image"):
         super().__init__(parent)
+        self.kind = kind if kind in KINDS else "image"
+        self.exts, self.noun, self.dir_key = KINDS[self.kind]
         self.setWindowTitle(title)
         self.resize(1100, 700)
         self.qs = settings or QSettings()
@@ -175,10 +230,11 @@ class ImagePickerDialog(QDialog):
         self._fill_places()
         start = Path(os.path.expanduser(start_dir)) if start_dir else None
         if start is None or not start.is_dir():
-            last = self.qs.value("pickerDir", "", type=str)
+            last = self.qs.value(self.dir_key, "", type=str)
             start = Path(last) if last and Path(last).is_dir() else Path.home()
         names = [n for n, _items in self.collections]
-        place = self.qs.value("pickerPlace", "", type=str)
+        self._place_key = "pickerPlace" if self.kind == "image" else f"pickerPlace_{self.kind}"
+        place = self.qs.value(self._place_key, "", type=str)
         if self.collections and (start_dir is None or place.startswith("col:")):
             # the project's pictures first (the collection used last), unless a folder was used last and given
             self.folder = start
@@ -208,15 +264,15 @@ class ImagePickerDialog(QDialog):
             for name, items in self.collections:
                 it = QListWidgetItem(pic_icon, f"{name} ({len(items)})")
                 it.setData(Qt.UserRole, ("col", name))
-                it.setToolTip(f"{len(items)} picture{'s' if len(items) != 1 else ''} of the project")
+                it.setToolTip(f"{len(items)} {self.noun if len(items) != 1 else self.noun[:-1]} of the project")
                 self.places.addItem(it)
             head = QListWidgetItem("Folders")
             head.setFlags(Qt.NoItemFlags)
             self.places.addItem(head)
         entries = [("Home", str(Path.home()))]
-        pics = Path.home() / "Pictures"
-        if pics.is_dir():
-            entries.append(("Pictures", str(pics)))
+        for name in {"image": ("Pictures",), "video": ("Videos",), "media": ("Music", "Videos")}[self.kind]:
+            if (Path.home() / name).is_dir():
+                entries.append((name, str(Path.home() / name)))
         entries += list(self._extra_places)
         recent = [d for d in self._recent_dirs() if Path(d).is_dir()]
         for name, path in entries:
@@ -277,7 +333,7 @@ class ImagePickerDialog(QDialog):
             self.grid.addItem(it)
             self._items[path] = it
             self._pool.submit(self._make_thumb, gen, path)
-        self.setWindowTitle(f"{self.windowTitle().split(' — ')[0]} — {name} ({len(self._items)} images)")
+        self.setWindowTitle(f"{self.windowTitle().split(' — ')[0]} — {name} ({len(self._items)} {self.noun})")
 
     # ---- folder content
     def open_folder(self, folder: Path):
@@ -294,7 +350,7 @@ class ImagePickerDialog(QDialog):
         self._clear_grid()
         gen = self._gen
         dirs = sorted((e for e in entries if e.is_dir() and not e.name.startswith(".")), key=lambda e: e.name.lower())
-        imgs = [e for e in entries if e.is_file() and Path(e.name).suffix.lower() in IMAGE_EXTS]
+        imgs = [e for e in entries if e.is_file() and Path(e.name).suffix.lower() in self.exts]
         if self.sort.currentData() == "date":
             imgs.sort(key=lambda e: e.stat().st_mtime, reverse=True)
         else:
@@ -315,7 +371,7 @@ class ImagePickerDialog(QDialog):
             self._items[e.path] = it
             self._pool.submit(self._make_thumb, gen, e.path)   # file details are read there (network shares)
         n = len(imgs)
-        self.setWindowTitle(f"{self.windowTitle().split(' — ')[0]} — {folder.name or folder} ({n} images)")
+        self.setWindowTitle(f"{self.windowTitle().split(' — ')[0]} — {folder.name or folder} ({n} {self.noun})")
 
     def _make_thumb(self, gen: int, path: str):
         if gen != self._gen:                      # the folder changed meanwhile
@@ -371,6 +427,8 @@ class ImagePickerDialog(QDialog):
         if not img.isNull():
             item.setIcon(QIcon(QPixmap.fromImage(img)))
             item.setData(Qt.UserRole + 1, f"{img.width()}×{img.height()}")
+        elif Path(item.data(Qt.UserRole)[1]).suffix.lower() in SOUND_EXTS:     # a sound: its icon
+            item.setIcon(self.style().standardIcon(QStyle.SP_MediaVolume))
 
     def _blank_icon(self) -> QIcon:
         pm = QPixmap(THUMB_MAX, THUMB_MAX)
@@ -401,6 +459,24 @@ class ImagePickerDialog(QDialog):
             self.preview.clear()
             self.info.setText(f"Folder {Path(path).name}")
             self.buttons.button(QDialogButtonBox.Open).setEnabled(False)
+            return
+        ext = Path(path).suffix.lower()
+        if ext in VIDEO_EXTS or ext in SOUND_EXTS:              # a frame of the video / the sound's icon, its details
+            box = self.preview.size()
+            img = _video_frame(path, max(box.width(), box.height())) if ext in VIDEO_EXTS else QImage()
+            if not img.isNull():
+                self.preview.setPixmap(QPixmap.fromImage(img).scaled(box, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            else:
+                self.preview.setPixmap(self.style().standardIcon(QStyle.SP_MediaVolume).pixmap(96, 96))
+            try:
+                st = Path(path).stat()
+                mb, when = st.st_size / 2**20, time.strftime("%Y-%m-%d %H:%M", time.localtime(st.st_mtime))
+            except OSError:
+                mb, when = 0.0, ""
+            caption = item.data(Qt.UserRole + 2)
+            self.info.setText((f"{caption}\n" if caption else "") + f"{Path(path).name}\n{_media_info(path)}\n"
+                              f"{mb:.1f} MB · {when}")
+            self.buttons.button(QDialogButtonBox.Open).setEnabled(True)
             return
         r = QImageReader(path)
         r.setAutoTransform(True)
@@ -452,10 +528,10 @@ class ImagePickerDialog(QDialog):
                 self.open_folder(Path(item.data(Qt.UserRole)[1]))
             return
         if self.collection is not None:
-            self.qs.setValue("pickerPlace", f"col:{self.collection}")
+            self.qs.setValue(self._place_key, f"col:{self.collection}")
         else:
-            self.qs.setValue("pickerPlace", "dir")
-            self.qs.setValue("pickerDir", str(self.folder))
+            self.qs.setValue(self._place_key, "dir")
+            self.qs.setValue(self.dir_key, str(self.folder))
             recent = [str(self.folder)] + [d for d in self._recent_dirs() if d != str(self.folder)]
             self.qs.setValue("pickerRecent", json.dumps(recent[:MAX_RECENT_DIRS]))
         self.accept()
@@ -471,13 +547,14 @@ class ImagePickerDialog(QDialog):
 
 def pick_image(parent, title: str, settings: QSettings | None = None, start_dir: str | None = None,
                places: list[tuple[str, str]] | None = None,
-               collections: list[tuple[str, list[tuple[str, str]]]] | None = None) -> str | None:
-    """Show the picker; the chosen image's path or None. The thumbnail cache can be moved with the setting
-    'thumbCacheDir' (empty = no disk cache)."""
+               collections: list[tuple[str, list[tuple[str, str]]]] | None = None, kind: str = "image") -> str | None:
+    """Show the picker; the chosen file's path or None. kind: 'image', 'video' or 'media' (sounds and videos).
+    The thumbnail cache can be moved with the setting 'thumbCacheDir' (empty = no disk cache)."""
     qs = settings or QSettings()
     cache = qs.value("thumbCacheDir", None)
     cache_dir = CACHE_DIR if cache is None else (Path(cache) if cache else None)
-    dlg = ImagePickerDialog(parent, title, start_dir, qs, places, cache_dir=cache_dir, collections=collections)
+    dlg = ImagePickerDialog(parent, title, start_dir, qs, places, cache_dir=cache_dir, collections=collections,
+                            kind=kind)
     try:
         return dlg.chosen() if dlg.exec() == QDialog.Accepted else None
     finally:

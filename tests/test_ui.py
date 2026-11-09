@@ -2788,3 +2788,46 @@ def test_remove_the_start_image(app, win, tmp_path, image, monkeypatch):
     assert not list(win.project.glob("start_*x*.png")) and not win.b_start_clear.isEnabled()
     assert win.aspect.isEnabled() and "(Aspect)" in win.size_info.text() and win.state(ids[0]) == "changed"
     assert win.status.text().startswith("Start image removed")
+
+
+def test_file_browser_for_videos_and_sounds(app, win, tmp_path, image):
+    """The app's own browser also for videos (a frame as thumbnail, length and size) and sounds (their icon)."""
+    import subprocess
+
+    from PIL import Image as PImage
+
+    from PySide6.QtCore import Qt
+
+    from video_chain.ui.image_picker import ImagePickerDialog
+    d = tmp_path / "media"
+    d.mkdir()
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=red:s=96x54:r=24:d=2", "-c:v",
+                    "libx264", "-pix_fmt", "yuv420p", str(d / "clip.mp4")], check=True)
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+                    str(d / "voice.wav")], check=True)
+    PImage.new("RGB", (40, 30), (0, 0, 255)).save(d / "pic.png")
+    q = settings(tmp_path, "picker.ini")
+
+    def names(dlg):
+        return sorted(dlg.grid.item(i).text() for i in range(dlg.grid.count()))
+    vids = ImagePickerDialog(None, "Real video", str(d), q, cache_dir=None, desktop_thumbs=None, kind="video")
+    assert names(vids) == ["clip.mp4"] and "(1 videos)" in vids.windowTitle()
+    item = vids.grid.item(0)
+    wait(app, lambda: item.data(Qt.UserRole + 1) == "96×54", timeout=20)          # a frame became the thumbnail
+    vids.grid.setCurrentItem(item)
+    assert "0:02.0" in vids.info.text() and "96×54" in vids.info.text() and "24 fps" in vids.info.text()
+    vids._accept()
+    assert vids.chosen() == str(d / "clip.mp4") and q.value("videoDir", type=str) == str(d)   # (its own folder)
+    vids.deleteLater()
+    media = ImagePickerDialog(None, "Voice", str(d), q, cache_dir=None, desktop_thumbs=None, kind="media")
+    assert names(media) == ["clip.mp4", "voice.wav"]
+    media.grid.setCurrentItem(next(media.grid.item(i) for i in range(media.grid.count())
+                                   if media.grid.item(i).text() == "voice.wav"))
+    assert "0:01.0" in media.info.text() and "sound" in media.info.text()
+    media.deleteLater()
+    # the project's own real videos are offered first
+    win.open_project(tmp_path / "proj")
+    win.set_image(str(image))
+    v = win.add_video(None, str(d / "clip.mp4"), 0.0, 1.0)
+    cols = win.project_media("video")
+    assert cols == [("Real videos of this project", [(str(d / "clip.mp4"), f"Video #{v[1:]} · clip.mp4")])]

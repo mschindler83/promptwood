@@ -13,14 +13,13 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QPointF, QRectF, QSettings, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QImage, QPainter, QPen
-from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QHBoxLayout, QLineEdit,
+from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QDoubleSpinBox, QHBoxLayout, QLineEdit,
                                QPushButton, QStackedWidget, QVBoxLayout, QWidget)
 
 from .. import chain
 from .theme import icon, theme, with_alpha
 from .widgets import FrameTile, VideoView, guard_wheel, icon_button, label
 
-VIDEO_FILTER = "Videos (*.mp4 *.mov *.mkv *.webm *.avi *.m4v *.mts *.m2ts *.wmv *.flv *.mpg *.mpeg)"
 FPS = chain.FPS
 
 
@@ -29,13 +28,11 @@ def fmt(t: float) -> str:
     return f"{int(m)}:{s:06.3f}"
 
 
-def choose_video(parent, settings: QSettings | None, start: str | None = None) -> str | None:
-    """A file dialog for videos that remembers its folder."""
-    folder = start or (settings.value("videoDir", "", type=str) if settings is not None else "")
-    f, _ = QFileDialog.getOpenFileName(parent, "Real video", folder, VIDEO_FILTER + ";;All files (*)")
-    if f and settings is not None:
-        settings.setValue("videoDir", str(Path(f).parent))
-    return f or None
+def choose_video(parent, settings: QSettings | None, start: str | None = None,
+                 places: list | None = None, collections: list | None = None) -> str | None:
+    """The app's own file browser for videos (frames as thumbnails; it remembers its folder, 'videoDir')."""
+    from .image_picker import pick_image
+    return pick_image(parent, "Real video", settings, start, places=places, collections=collections, kind="video")
 
 
 class RangeBar(QWidget):

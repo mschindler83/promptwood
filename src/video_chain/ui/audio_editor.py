@@ -12,7 +12,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QPointF, QRectF, QSettings, Qt, QUrl, Signal
 from PySide6.QtGui import QKeySequence, QPainter, QPen, QShortcut
-from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QHBoxLayout,
+from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QHBoxLayout,
                                QLineEdit, QPushButton, QVBoxLayout)
 
 from .. import chain
@@ -21,8 +21,6 @@ from .theme import icon, theme, with_alpha
 from .video_editor import RangeBar, fmt
 from .widgets import guard_wheel, icon_button, label
 
-SOUND_FILTER = ("Sound or video (*.mp3 *.wav *.ogg *.oga *.opus *.flac *.m4a *.aac *.wma *.aiff *.aif *.mp4 *.mov "
-                "*.mkv *.webm *.avi *.m4v)")
 PEAKS = 1200                                    # waveform columns
 
 
@@ -218,11 +216,9 @@ class AudioRangeDialog(QDialog):
     def _choose(self):
         folder = str(Path(self.file).parent) if self.file else (
             self.settings.value("soundDir", "", type=str) if self.settings is not None else "")
-        f, _ = QFileDialog.getOpenFileName(self, "Sound for an audio track", folder or str(Path.home()),
-                                           SOUND_FILTER + ";;All files (*)")
+        from .image_picker import pick_image
+        f = pick_image(self, "Sound for an audio track", self.settings, folder or None, kind="media")
         if f:
-            if self.settings is not None:
-                self.settings.setValue("soundDir", str(Path(f).parent))
             self.load(f)
 
     def load(self, file: str, start: float | None = None, end: float | None = None) -> bool:
