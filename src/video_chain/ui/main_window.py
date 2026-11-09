@@ -1377,6 +1377,10 @@ class MainWindow(QMainWindow):
         airow.addWidget(self.b_ai_edit)
         airow.addWidget(self.b_ai_create)
         airow.addStretch(1)
+        self.b_start_clear = icon_button("trash", "Remove the start image: the first clip then starts from its "
+                                                  "prompt (the size follows the Aspect setting or a real video)")
+        self.b_start_clear.clicked.connect(lambda: self.clear_image(confirm=True))
+        airow.addWidget(self.b_start_clear)
         sv.addLayout(airow)
         proj_v.addWidget(sw)
 
@@ -3833,6 +3837,27 @@ class MainWindow(QMainWindow):
         ids = [r.id for r in roots] + [d.id for r in roots for d in self.tree.descendants(r.id)]
         return [i for i in ids if self.status_of.get(i) == "done"]
 
+    def clear_image(self, confirm: bool = False) -> bool:
+        """No start image any more. confirm: ask first when made clips depend on it."""
+        if self.running or self.project is None or not (self.project / T.START_FILE).is_file():
+            return False
+        made = [i for i, st in self.status_of.items() if st == "done"] if self.made_from_start() else []
+        if confirm and made and QMessageBox.question(
+                self, "Remove the start image",
+                f"Remove the start image?\n\n{len(made)} made clip{'s depend' if len(made) != 1 else ' depends'} on it "
+                "(it starts from it, or it sets the video size); they will count as CHANGED and be made again with "
+                "their paths. The first clip then starts from its prompt.") != QMessageBox.Yes:
+            return False
+        before = self._done_clips()
+        T.clear_start_image(self.project, self.tree)
+        self._pix.clear()
+        self._write_tree()
+        self._show_start_image()
+        self.refresh()
+        if not self._report_remade(before, "Start image removed"):
+            self.status.setText("Start image removed: the first clip starts from its prompt.")
+        return True
+
     def set_image(self, path: str, confirm: bool = False) -> bool:
         """Use an image as the start image. confirm: ask first when made clips start from the current one."""
         if self.running:
@@ -3903,6 +3928,7 @@ class MainWindow(QMainWindow):
             self.start_tile.setToolTip(self.tree.image or str(start))
         else:
             self.start_tile.clear_frame("Click or drop an image")
+        self.b_start_clear.setEnabled(bool(start and start.is_file()) and not self.running)
         self._update_size_info()
 
     def _update_size_info(self):
@@ -4438,6 +4464,7 @@ class MainWindow(QMainWindow):
                   self.b_film_gen, self.b_film_play, self.b_film_export, self.b_film_cast):
             w.setEnabled(idle)
         self.aspect.setEnabled(idle and self.project is not None and T.size_origin(self.project, self.tree) == "aspect")
+        self.b_start_clear.setEnabled(idle and self.project is not None and (self.project / T.START_FILE).is_file())
         busy = bool(self._copying or self._joins or self._converts)
         self.storyboard.setEnabled(idle and not busy)  # a scene switch would pull the files from under them
         self.b_film_play.setEnabled(idle and not busy)

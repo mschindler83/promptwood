@@ -2770,3 +2770,21 @@ def test_a_project_without_a_start_image(app, win, tmp_path, image):
     assert win.state(nid) == "changed"
     win.set_image(str(image))                                                 # a start image: its format
     assert not win.aspect.isEnabled() and "(Aspect)" not in win.size_info.text()
+
+
+def test_remove_the_start_image(app, win, tmp_path, image, monkeypatch):
+    ids = new_project(win, tmp_path, image, ("a",))
+    assert win.b_start_clear.isEnabled()
+    run_and_wait(app, win, win.generate_path)
+    flush(app, win)
+    asked = []
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: asked.append(a[2]) or QMessageBox.No)
+    win.b_start_clear.click()                                                # made clips depend on it: asked first
+    assert asked and "1 made clip depends" in asked[0] and (win.project / T.START_FILE).is_file()
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    win.b_start_clear.click()
+    flush(app, win)
+    assert not (win.project / T.START_FILE).is_file() and win.tree.image is None
+    assert not list(win.project.glob("start_*x*.png")) and not win.b_start_clear.isEnabled()
+    assert win.aspect.isEnabled() and "(Aspect)" in win.size_info.text() and win.state(ids[0]) == "changed"
+    assert win.status.text().startswith("Start image removed")

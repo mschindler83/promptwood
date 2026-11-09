@@ -1216,6 +1216,16 @@ def prepared_start(project: Path, width: int, height: int) -> Path | None:
     return dst
 
 
+def clear_start_image(project: Path, tree: Tree) -> None:
+    """No start image any more: start.png and its prepared copies go (the first clip then starts from its text, the
+    size follows the first video or the Aspect setting)."""
+    _unlink(Path(project) / START_FILE)
+    for f in Path(project).glob("start_*x*.png"):
+        _unlink(f)
+        _unlink(f.with_suffix(".json"))
+    tree.image = None
+
+
 def set_start_image(project: Path, image: Path, tree: Tree) -> None:
     chain.to_png(Path(image), Path(project) / START_FILE)
     tree.image = str(Path(image).resolve())
