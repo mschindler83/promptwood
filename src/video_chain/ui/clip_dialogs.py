@@ -3,6 +3,7 @@ side to pick one (CompareDialog)."""
 from __future__ import annotations
 
 import subprocess
+import tempfile
 import threading
 from pathlib import Path
 
@@ -341,4 +342,123 @@ class SplitDialog(QDialog):
 
     def done(self, r):
         self.player.stop_loading()
+        super().done(r)
+
+
+def grab_frame(video: Path, at: float, out: Path, width: int | None = None) -> bool:
+    """The frame of a video shown at `at` seconds as a PNG (full size, or scaled to width), accurately seeked
+    (ffmpeg decodes from the keyframe before it). False if there is none."""
+    vf = ["-vf", f"scale={int(width)}:-2:flags=lanczos"] if width else []
+    try:
+        r = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-ss", f"{max(0.0, at):.6f}", "-i", str(video),
+                            "-frames:v", "1", *vf, str(out)], capture_output=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return r.returncode == 0 and Path(out).is_file() and Path(out).stat().st_size > 0
+
+
+class _Grabbed(QObject):
+    ready = Signal(int, QImage)                 # request number, frame
+
+
+class VideoFrameDialog(QDialog):
+    """Choose one frame of any video (any length: only the frame shown is decoded): a slider over the whole
+    video, one frame / one second back and on. frame_file() writes the chosen frame at the video's full size."""
+
+    def __init__(self, parent, video: Path, title: str, info: dict | None = None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(860, 640)
+        self.video = Path(video)
+        info = info or chain.probe_source(self.video)
+        self.fps = float(info.get("fps") or FPS)
+        self.duration = float(info.get("duration") or 0.0)
+        self.frames = max(1, int(round(self.duration * self.fps)))
+        self._req = 0
+        self._sig = _Grabbed()
+        self._sig.ready.connect(self._ready)
+        self._tmp = tempfile.TemporaryDirectory(prefix="video-chain-frame-")
+        v = QVBoxLayout(self)
+        self.tile = FrameTile(800, 450)
+        self.tile.clear_frame("reading the frame …")
+        v.addWidget(self.tile, 1, Qt.AlignHCenter)
+        row = QHBoxLayout()
+        self.slider = QSlider(Qt.Horizontal)
+        self.slider.setRange(0, self.frames - 1)
+        buttons = []
+        for text, tip, step in (("«", "One second back (Shift+Left)", -round(self.fps)),
+                                ("‹", "One frame back (Left)", -1), ("›", "One frame on (Right)", 1),
+                                ("»", "One second on (Shift+Right)", round(self.fps))):
+            b = QPushButton(text)
+            b.setToolTip(tip)
+            b.setFixedWidth(34)
+            b.clicked.connect(lambda _c=False, s=step: self.slider.setValue(self.slider.value() + s))
+            buttons.append(b)
+        for b in buttons[:2]:
+            row.addWidget(b)
+        row.addWidget(self.slider, 1)
+        for b in buttons[2:]:
+            row.addWidget(b)
+        self.where = label("", level="secondary", type_="mono")
+        row.addWidget(self.where)
+        v.addLayout(row)
+        self.note = label(f"{self.video.name} · {info.get('width', '?')}×{info.get('height', '?')} · "
+                          f"{self.duration:.1f} s · {self.fps:.3g} fps", level="tertiary")
+        v.addWidget(self.note)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.buttons.button(QDialogButtonBox.Ok).setText("Use this frame")
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        v.addWidget(self.buttons)
+        for key, step in (("Left", -1), ("Right", 1), ("Shift+Left", -round(self.fps)),
+                          ("Shift+Right", round(self.fps))):
+            QShortcut(QKeySequence(key), self, activated=lambda s=step: self.slider.setValue(self.slider.value() + s))
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(90)                 # (dragging the slider: only the frame it stops at is read)
+        self._timer.timeout.connect(self._grab)
+        self.slider.valueChanged.connect(self._moved)
+        self._moved(0)
+        self._grab()
+
+    def at(self) -> float:
+        """The chosen frame's time in the video (its own frame rate)."""
+        return self.slider.value() / self.fps
+
+    def _seek(self) -> float:
+        """Where to seek for exactly the chosen frame: a quarter frame before it (ffmpeg gives the first frame at
+        or after the time; exactly k / fps can round to just after frame k and give the next one)."""
+        return max(0.0, (self.slider.value() - 0.25) / self.fps)
+
+    def _moved(self, k: int):
+        self.where.setText(f"frame {k + 1} / {self.frames} · {k / self.fps:.2f} s")
+        self._timer.start()
+
+    def _grab(self):
+        self._req += 1
+        req, at, sig = self._req, self._seek(), self._sig
+        out = Path(self._tmp.name) / f"p{req}.png"
+
+        def work():
+            img = QImage(str(out)) if grab_frame(self.video, at, out, width=960) else QImage()
+            try:
+                sig.ready.emit(req, img)
+            except RuntimeError:                    # (the dialog is gone)
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def _ready(self, req: int, img: QImage):
+        if req != self._req:
+            return                                  # an older position
+        if img.isNull():
+            self.tile.clear_frame("no frame here")
+        else:
+            self.tile.set_image(img)
+
+    def frame_file(self, out: Path) -> bool:
+        """The chosen frame at the video's full size into out (PNG)."""
+        return grab_frame(self.video, self._seek(), out)
+
+    def done(self, r):
+        self._req += 1
         super().done(r)

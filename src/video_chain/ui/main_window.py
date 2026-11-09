@@ -37,7 +37,7 @@ from .. import tree as T
 from ..comfy import REF_HINT
 from .graph import START, GraphView, NodeInfo
 from .image_picker import pick_image
-from .clip_dialogs import CompareDialog, HandoverDialog, SplitDialog
+from .clip_dialogs import CompareDialog, HandoverDialog, SplitDialog, VideoFrameDialog
 from .lora_stack import LORA_MAX, LORA_MIN, LoraStack, fill_lora_combo, lora_label, lora_path
 from .swap_dialog import SwapDialog
 from .mentions import MentionHelper
@@ -675,9 +675,13 @@ class PromptCard(QFrame):
         self.b_end_ai = icon_button("brush", "Make an end image with AI: edit this clip's frame (or any image) by a "
                                              "prompt, e.g. “she now sits on the sofa”")
         self.b_end_ai.clicked.connect(lambda: self.action.emit("end_ai", self.nid))
+        self.b_end_video = icon_button("frame", "End image from a video: choose a project or any video, then the "
+                                                "frame of it to end at")
+        self.b_end_video.clicked.connect(lambda: self.action.emit("end_video", self.nid))
         erow.addWidget(self.end_thumb)
         erow.addWidget(self.end_text, 1)
         erow.addWidget(self.b_end)
+        erow.addWidget(self.b_end_video)
         erow.addWidget(self.b_end_ai)
         erow.addWidget(self.b_end_clear)
         link.addRow("End", erow)
@@ -973,6 +977,7 @@ class PromptCard(QFrame):
     def _enable_end(self):
         on = not self.edit.isReadOnly()
         self.b_end.setEnabled(on and self._end_free)
+        self.b_end_video.setEnabled(on and self._end_free)
         self.b_end_ai.setEnabled(on and self._end_free)
         self.b_end_clear.setEnabled(on and self._has_end)
 
@@ -4751,6 +4756,9 @@ class MainWindow(QMainWindow):
         if action == "end_image" and node is not None and not node.is_video:
             self.choose_end_image(node.id)
             return
+        if action == "end_video" and node is not None and not node.is_video:
+            self.end_from_video(node.id)
+            return
         if action == "end_ai" and node is not None and not node.is_video:
             self.edit_image(node.id)
             return
@@ -5154,6 +5162,46 @@ class MainWindow(QMainWindow):
         if f:
             self.set_end_image(nid, f)
 
+    def end_from_video(self, nid: str, video: str | None = None, dialog: bool = True):
+        """End image from a video: choose a video (the project's real videos and clips first, or any file), then
+        one of its frames; that frame at the video's full size becomes the clip's end image."""
+        node = self.tree.nodes.get(nid) if self.tree else None
+        if node is None or node.is_video or self.running:
+            return None
+        if self.tree.video_child(nid) is not None:
+            self.status.setText(f"Clip #{nid[1:]} ends at the first frame of the video after it.")
+            return None
+        if video is None:
+            clips = [(str(self.project / n.made["video"]), f"Clip #{n.id[1:]} · {n.prompt[:40]}")
+                     for n in sorted(self.tree.nodes.values(), key=lambda n: self.tree.number(n.id))
+                     if not n.is_video and n.made and (self.project / n.made["video"]).is_file() and n.id != nid]
+            cols = self.project_media("video") + ([("Clips of this project", clips)] if clips else [])
+            video = choose_video(self, self.qs, places=self._picker_places(), collections=cols)
+            if not video:
+                return None
+        try:
+            dlg = VideoFrameDialog(self, Path(video), f"End image of clip #{nid[1:]}: a frame of {Path(video).name}")
+        except (RuntimeError, OSError) as e:
+            self.status.setText(f"Cannot read {Path(video).name}: {e}")
+            return None
+        if not dialog:
+            return dlg
+        try:
+            if dlg.exec() != QDialog.Accepted:
+                return None
+            import tempfile
+            with tempfile.TemporaryDirectory(prefix="video-chain-end-") as tmp:
+                png = Path(tmp) / f"{Path(video).stem}_f{dlg.slider.value()}.png"
+                if not dlg.frame_file(png):
+                    self.status.setText(f"Could not read that frame of {Path(video).name}.")
+                    return None
+                if self.set_end_image(nid, str(png)):
+                    self.status.setText(f"Clip #{nid[1:]} now ends at frame {dlg.slider.value() + 1} "
+                                        f"({dlg.at():.2f} s) of {Path(video).name}.")
+        finally:
+            dlg.deleteLater()
+        return None
+
     def set_end_image(self, nid: str, image: str | None) -> bool:
         """Give a generated clip its own end image (None: remove it); the clip then counts as changed."""
         if self.tree is None or self.running or nid not in self.tree.nodes:
@@ -5422,6 +5470,9 @@ class MainWindow(QMainWindow):
                 end = m.addAction("End image…" if vc is None else f"End image… (ends at video #{vc.id[1:]})")
                 end.setEnabled(vc is None)
                 acts[end] = "end_image"
+                endv = m.addAction("End image from a video frame…")
+                endv.setEnabled(vc is None)
+                acts[endv] = "end_video"
                 if node.end_image:
                     acts[m.addAction("Clear end image")] = "end_clear"
                 if T.changed_inputs(self.tree, nid):

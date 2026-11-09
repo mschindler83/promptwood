@@ -2899,3 +2899,44 @@ def test_split_a_video_and_insert_a_clip_in_the_window(app, win, tmp_path, monke
     assert "write the prompt of the new clip" in win.status.text()
     wait(app, lambda: not win._converts, timeout=30)
     assert win.state(v) == "done" and win.state(rest.id) == "done" and win.state(clip) == "new"
+
+
+def test_end_image_from_a_video_frame(app, win, tmp_path, image, monkeypatch):
+    """A frame of any video as a clip's end image: exactly the chosen frame, at the video's full size."""
+    import subprocess
+
+    from PIL import Image as PImage
+    from PySide6.QtWidgets import QDialog
+
+    from video_chain.ui import main_window as M
+    from video_chain.ui.clip_dialogs import VideoFrameDialog
+    vid = tmp_path / "ramp.mp4"                                             # frame k has the brightness 5k
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=gray:s=128x72:r=24:d=2",
+                    "-vf", "geq=lum='5*N':cb=128:cr=128", "-c:v", "libx264", "-crf", "0", "-pix_fmt", "yuv444p",
+                    str(vid)], check=True)
+    dlg = VideoFrameDialog(None, vid, "frame")
+    assert dlg.frames == 48 and dlg.fps == 24
+    def exact(k):                                                          # ffmpeg's decode of exactly frame k
+        ref = tmp_path / f"ref{k}.png"
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(vid), "-vf", f"select=eq(n\\,{k})", "-frames:v", "1",
+                        str(ref)], check=True)
+        return PImage.open(ref).convert("L").getpixel((64, 36))
+    for k in (0, 1, 13, 24, 47):
+        dlg.slider.setValue(k)
+        out = tmp_path / f"f{k}.png"
+        assert dlg.frame_file(out)
+        im = PImage.open(out).convert("L")
+        assert im.size == (128, 72) and im.getpixel((64, 36)) == exact(k), (k, im.getpixel((64, 36)), exact(k))
+    dlg.deleteLater()
+    ids = new_project(win, tmp_path, image, ("a",))
+    card = next(c for c in win.cards if c.nid == ids[0])
+    assert card.b_end_video.isEnabled()
+
+    def fake_exec(d):
+        d.slider.setValue(20)
+        return QDialog.Accepted
+    monkeypatch.setattr(M.VideoFrameDialog, "exec", fake_exec)
+    win.end_from_video(ids[0], video=str(vid))
+    end = win.tree.nodes[ids[0]].end_image
+    assert end and PImage.open(win.project / end).convert("L").getpixel((64, 36)) == exact(20)
+    assert "ends at frame 21 (0.83 s) of ramp.mp4" in win.status.text()
