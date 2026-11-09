@@ -57,6 +57,7 @@ def set_api_key(key: str | None) -> None:
     no keyring to keep it in."""
     global _API_KEY
     key = (key or "").strip()
+    _REJECTED.discard(key)                              # (a key saved anew gets another chance)
     try:
         import keyring
         import keyring.errors
@@ -165,12 +166,23 @@ class KeyRejected(OSError):
     """CivitAI turned the API key down (401 / 403)."""
 
 
+_REJECTED: set[str] = set()     # keys CivitAI turned down (this run): not sent again until a new key is saved
+
+
+def key_rejected() -> bool:
+    """CivitAI turned the current API key down (the lookups go on without it)."""
+    key = api_key()
+    return bool(key) and key in _REJECTED
+
+
 def _get_json(path: str, timeout: float, use_key: bool = True) -> dict | None:
     """A CivitAI API answer (the first site that answers); None for 404. OSError when no site could be asked.
     The key goes only to CivitAI's own sites: as an unredirected header (a redirect elsewhere does not carry it).
     A rejected key (401 / 403): asked once more without it."""
     last: Exception | None = None
     key = api_key() if use_key else ""
+    if key in _REJECTED:
+        key = ""
     for site in SITES:
         req = urllib.request.Request(f"{site}{path}", headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
         if key:
@@ -182,6 +194,7 @@ def _get_json(path: str, timeout: float, use_key: bool = True) -> dict | None:
             if e.code == 404:
                 return None
             if e.code in (401, 403) and key:
+                _REJECTED.add(key)                      # (not sent again: one request per lookup, not two)
                 try:
                     return _get_json(path, timeout, use_key=False)
                 except OSError as e2:
@@ -522,6 +535,7 @@ class TriggerDB:
             except (OSError, ValueError, TypeError, AttributeError):
                 continue                               # a file that vanished or cannot be read: the next one
         flush(force=True)
+        n["key_rejected"] = key_rejected() if online else False
         return n
 
 

@@ -132,6 +132,7 @@ def test_civitai_details_are_kept(tmp_path, monkeypatch):
     app = QApplication.instance() or QApplication([])
     from video_chain.ui.lora_details import LoraDetailsDialog, clean_html
     assert "<img" not in clean_html(d["version"]["description"]) and "Use 0.8" in clean_html(d["version"]["description"])
+    assert "file:" not in clean_html('<a title="x"href="file:///etc">x</a>')     # (no space before href)
     dirty = clean_html("<p style='background:url(file:///x)'>a</p><table background='/etc/x'><tr><td>b</td></tr></table>"
                        "<a href='javascript:x()'>c</a><a href=\"https://civitai.com/m\">d</a>")
     assert "style" not in dirty and "background" not in dirty and "javascript" not in dirty
@@ -190,6 +191,10 @@ def test_civitai_api_key(tmp_path, monkeypatch):
     assert not db.needs_lookup(str(p))
     TR.set_api_key("revoked")                                    # a rejected key: asked again without it
     assert TR._get_json("/api/v1/y", 5) == {"id": 1} and sent[-1] == ("https://civitai.com/api/v1/y", None)
+    assert TR.key_rejected()
+    n = len(sent)
+    TR._get_json("/api/v1/z", 5)                                 # not sent again: one request, without it
+    assert len(sent) == n + 1 and sent[-1][1] is None
     with pytest.raises(ValueError):
         db.details_path("../../etc/x")                           # only real hashes become file names
     monkeypatch.setenv("CIVITAI_API_KEY", "fromenv")
@@ -197,7 +202,7 @@ def test_civitai_api_key(tmp_path, monkeypatch):
     monkeypatch.delenv("CIVITAI_API_KEY")
     TR.set_api_key("")
     TR._API_KEY = None
-    assert TR.api_key() == ""
+    assert TR.api_key() == "" and not TR.key_rejected()
 
 
 def test_partial_details_keep_earlier_parts_and_gone_loras_are_not_reasked(tmp_path):

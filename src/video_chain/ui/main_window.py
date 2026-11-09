@@ -3111,7 +3111,10 @@ class MainWindow(QMainWindow):
             self.refresh()                         # clips record their LoRAs' words
         if self.triggers_online.isChecked() and not getattr(self, "_trigger_scan_online", True):
             QTimer.singleShot(0, self._scan_triggers)     # switched on while an offline scan ran
-        if counts.get("looked"):
+        if counts.get("key_rejected"):
+            self.status.setText("CivitAI rejected your API key: LoRAs are looked up without it. Check or renew the "
+                                "key in the settings (CivitAI → Account settings → API Keys).")
+        elif counts.get("looked"):
             self.status.setText(f"LoRA trigger words: looked up {counts['looked']} LoRA"
                                 f"{'s' if counts['looked'] != 1 else ''} on CivitAI, {counts.get('found', 0)} with "
                                 "trigger words" + (f", {counts['failed']} could not be asked (offline?)"

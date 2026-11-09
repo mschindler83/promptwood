@@ -22,8 +22,8 @@ def clean_html(text: str) -> str:
     s = re.sub(r"(?is)<(img|iframe|video|source|embed)\b[^>]*>", "", s)
     s = re.sub(r"(?i)\son\w+\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", "", s)
     # no styles or backgrounds (they could name local files), and links only to the web
-    s = re.sub(r"(?i)\s(style|background|src)\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", "", s)
-    s = re.sub(r"(?i)\shref\s*=\s*(?:\"(?!https?://)[^\"]*\"|'(?!https?://)[^']*'|(?![\"']|https?://)[^\s>]+)",
+    s = re.sub(r"(?i)(?<![\w-])(style|background|src)\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", "", s)
+    s = re.sub(r"(?i)(?<![\w-])href\s*=\s*(?:\"(?!https?://)[^\"]*\"|'(?!https?://)[^']*'|(?![\"']|https?://)[^\s>]+)",
                "", s)
     return s.strip()
 

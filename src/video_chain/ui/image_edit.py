@@ -1435,7 +1435,10 @@ class ImageEditDialog(QDialog):
         f = FAMILIES.get(self.family.currentData()) if self.mode() == "create" else None
         own = bool(f and f["negative"])
         cfg_on = hasattr(self, "cfg") and (self.cfg.value() or (getattr(self, "_sampling_auto", {}) or {}).get("cfg", 1)) > 1
+        was = self.negative.isVisibleTo(self)
         self.negative.setVisible(bool(f) and (own or cfg_on))
+        if was != self.negative.isVisibleTo(self) and hasattr(self, "_var_timer"):
+            self._var_timer.start()                 # (variations count the negative only while it is used)
         cfg = self.cfg.value() or (getattr(self, "_sampling_auto", {}) or {}).get("cfg", 1) if hasattr(self, "cfg") else 1
         self.negative.setPlaceholderText("Avoid (optional negative prompt; empty: the model's usual one)" if own else
                                          f"Avoid (optional negative prompt; counts because CFG is {cfg:g})"
@@ -1943,9 +1946,12 @@ class ImageEditDialog(QDialog):
         combination once (Ctrl+Z in the prompt brings the bullet points back)."""
         from ..variations import Value, Variable
         from .prompt_refiner import replace_text
-        name = "idea"
-        replace_text(self.prompt, "{" + name + "}")
         p = self.variations
+        name, k = "idea", 1
+        while p.variable(name) is not None and [v.text for v in p.variable(name).values] != prompts:
+            k += 1                                  # (an {idea} with other values stays: {idea2} …)
+            name = f"idea{k}"
+        replace_text(self.prompt, "{" + name + "}")
         p.vars = [v for v in p.vars if v.name != name] + [Variable(name, [Value(t) for t in prompts])]
         p.on.setChecked(True)
         p.mode_buttons["order"].setChecked(True)
@@ -1954,7 +1960,8 @@ class ImageEditDialog(QDialog):
         self._templates_changed()
         p._rebuild()
         self.state.setText(f"{len(prompts)} ideas are the values of {{{name}}} in Variations: Generate makes one image "
-                           "each (Ctrl+Z in the prompt brings your bullet points back).")
+                           "each. Ctrl+Z in the prompt brings your bullet points back ({" + name + "} stays in "
+                           "Variations until you remove it).")
 
     def _refine_pictures(self) -> list[tuple[str, str, bool]]:
         """What the refiner's model may see: the image to edit and the extra pictures (edit), the reference

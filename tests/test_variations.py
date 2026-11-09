@@ -69,3 +69,10 @@ def test_review_cases():
     big = [V.Variable(f"v{i}", [V.Value(str(k)) for k in range(10)]) for i in range(10)]   # 10^10 combinations
     assert len(V.plan_jobs(big, " ".join(f"{{v{i}}}" for i in range(10)))) == V.MAX_IMAGES
     assert len(V.plan_jobs(big, " ".join(f"{{v{i}}}" for i in range(10)), count=5, mode="shuffle")) == 5
+
+
+
+def test_tidy_only_the_line_with_the_empty_value():
+    t = "a cat,\n  {x}, smile,\nend"
+    assert V.substitute(t, {"x": ""}) == "a cat,\n  smile\nend"           # other lines keep their commas
+    assert V.substitute("  {x}, b", {"x": "a"}) == "  a, b"

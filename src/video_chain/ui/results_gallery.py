@@ -357,11 +357,17 @@ class ResultGallery(QScrollArea):
 
     def set_groups(self, groups: list[dict], in_use: set[str]):
         from PySide6.QtCore import QTimer
-        pos = self.verticalScrollBar().value()
+        if getattr(self, "_scroll_pending", None) is None:  # (two rebuilds in a row: the first position counts)
+            self._scroll_pending = self.verticalScrollBar().value()
         self._build(groups)
         for png, th in self.thumbs.items():
             th.in_use = png in in_use
-        QTimer.singleShot(0, lambda: self.verticalScrollBar().setValue(pos))   # (where it was, once laid out)
+
+        def restore():
+            if self._scroll_pending is not None:
+                self.verticalScrollBar().setValue(self._scroll_pending)
+                self._scroll_pending = None
+        QTimer.singleShot(0, restore)                          # (where it was, once laid out)
 
     def update_thumb(self, png: str, meta: dict, in_use: bool | None = None):
         """One result's badges anew (e.g. its star), without rebuilding the gallery."""

@@ -446,15 +446,21 @@ class VideoFrameDialog(QDialog):
         out = Path(self._tmp.name) / f"p{req}.png"
 
         def work():
-            img = QImage(str(out)) if grab_frame(self.video, at, out, width=960) else QImage()
+            img = QImage()
             try:
-                sig.ready.emit(req, img)
-            except RuntimeError:                    # (the dialog is gone)
-                pass
+                if grab_frame(self.video, at, out, width=960):
+                    img = QImage(str(out))
+            finally:                                # (always answered: a stuck "grabbing" would freeze the dialog)
+                try:
+                    sig.ready.emit(req, img)
+                except RuntimeError:                # (the dialog is gone)
+                    pass
         threading.Thread(target=work, daemon=True).start()
 
     def _ready(self, req: int, img: QImage):
         self._grabbing = False
+        if getattr(self, "_closed", False):
+            return
         if self._again:                              # moved on meanwhile: read the position it is at now
             self._again = False
             self._grab()
@@ -471,5 +477,6 @@ class VideoFrameDialog(QDialog):
         return grab_frame(self.video, self._seek(), out)
 
     def done(self, r):
+        self._closed = True                         # (no further grabs after it closed)
         self._req += 1
         super().done(r)

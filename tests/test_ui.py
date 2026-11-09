@@ -3267,6 +3267,18 @@ def test_variations_panel_review_cases(app, monkeypatch):
     app.processEvents()
     assert small.variable("c").values[0].on and small.amount() == 2 and "makes 2 images" in small.preview.toPlainText()
 
+    def nested(*a, **k):                                               # (a modal dialog runs its own event loop)
+        for _ in range(3):
+            app.processEvents()
+        return ("z", True)
+    monkeypatch.setattr(VP.QInputDialog, "getText", nested)
+    card = small.cards_box.itemAt(0).widget()
+    pill = card.pills.items[1]
+    pill.value.on = False
+    pill.mouseDoubleClickEvent(ev)                                     # OK with a new text: no error, shown
+    app.processEvents()
+    assert [v.text for v in small.variable("c").values] == ["x", "z"] and "z" in small.preview.toPlainText()
+
 
 def test_all_ideas_become_variations(app, tmp_path):
     from PySide6.QtCore import QSettings

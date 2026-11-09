@@ -137,16 +137,15 @@ class Pill(QFrame):
     def mouseDoubleClickEvent(self, e):          # noqa: N802
         if e.button() == Qt.LeftButton:
             self.value.on = not self.value.on    # (the first click of the double-click switched it)
-            self.refresh()
-            self.changed.emit()                  # (also when the edit is cancelled)
-            self.edit()
+            self.edit(notify=False)              # (the dialog first: a rebuild meanwhile would delete this pill)
+            self.changed.emit()                  # once, edited or cancelled
 
-    def edit(self):
+    def edit(self, notify: bool = True):
         text, ok = QInputDialog.getText(self, "Edit value", "Value (empty: nothing):", text=self.value.text)
         if ok:
             self.value.text = " ".join(text.split())
-            self.refresh()
-            self.changed.emit()
+        if notify and ok:
+            self.changed.emit()                  # (the cards are rebuilt: no refresh of this pill needed)
 
     def _menu(self, pos):
         m = QMenu(self)

@@ -54,37 +54,40 @@ def names_in(*templates: str) -> list[str]:
     return out
 
 
-def _tidy(text: str) -> str:
-    """After an empty value: no doubled spaces or commas, nothing dangling at the ends (within lines: line
-    breaks, brackets and the rest of the prompt stay as written)."""
-    text = re.sub(r"[ \t]{2,}", " ", text)
-    text = re.sub(r"[ \t]+([,;])", r"\1", text)
-    text = re.sub(r"([,;])([ \t]*[,;])+", r"\1", text)
-    return "\n".join(line.strip(" \t,;") if line.strip(" \t,;") != line.strip() else line.rstrip(" \t")
-                     for line in text.split("\n")).strip()
+def _tidy(line: str) -> str:
+    """One line after an empty value: no doubled spaces or commas, nothing dangling at its ends (its indentation
+    stays)."""
+    indent = line[:len(line) - len(line.lstrip(" \t"))]
+    body = re.sub(r"[ \t]{2,}", " ", line.strip(" \t"))
+    body = re.sub(r"[ \t]+([,;])", r"\1", body)
+    body = re.sub(r"([,;])([ \t]*[,;])+", r"\1", body)
+    return indent + body.strip(" \t,;")
 
 
 def substitute(template: str, combo: dict[str, str]) -> str:
-    """The template with the chosen values (unknown placeholders stay as they are)."""
-    empty = False
+    """The template with the chosen values (unknown placeholders stay as they are). Only a line where a value was
+    empty is tidied; values are inserted once (a value with {x} in it stays as it is)."""
+    def one_line(line: str) -> str:
+        empty = False
 
-    def one(m):
-        nonlocal empty
-        if m.group(1) is not None:                          # {?name|text with {name}}
-            val = combo.get(m.group(1))
+        def one(m):
+            nonlocal empty
+            if m.group(1) is not None:                      # {?name|text with {name}}
+                val = combo.get(m.group(1))
+                if val is None:
+                    return m.group(0)
+                if not val.strip():
+                    empty = True
+                    return ""
+                return _PLAIN.sub(lambda p: combo.get(p.group(1), p.group(0)), m.group(2))
+            val = combo.get(m.group(3))
             if val is None:
                 return m.group(0)
-            if not val.strip():
-                empty = True
-                return ""
-            return _PLAIN.sub(lambda p: combo.get(p.group(1), p.group(0)), m.group(2))
-        val = combo.get(m.group(3))
-        if val is None:
-            return m.group(0)
-        empty = empty or not val.strip()
-        return val
-    text = _ANY.sub(one, template or "")
-    return _tidy(text) if empty else text
+            empty = empty or not val.strip()
+            return val
+        out = _ANY.sub(one, line)
+        return _tidy(out) if empty else out
+    return "\n".join(one_line(line) for line in (template or "").split("\n"))
 
 
 class Plan:
