@@ -182,9 +182,10 @@ class RefineDialog(QDialog):
     def _show_pictures(self):
         while self.pics_row.count():
             it = self.pics_row.takeAt(0)
-            if it.widget() is not None:
-                it.widget().setParent(None)
-                it.widget().deleteLater()
+            w = it.widget()                        # (after setParent(None) the item no longer knows it)
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
         for i, pic in enumerate(self.pictures):
             b = QToolButton()
             b.setCheckable(True)

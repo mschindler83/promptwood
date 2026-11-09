@@ -3191,6 +3191,9 @@ def test_prompt_variations_in_the_create_window(app, tmp_path, image, monkeypatc
         cards[2].add_values(["warm", ""])
         app.processEvents()
         assert [len(v.values) for v in panel.vars] == [2, 1, 2]
+        cards = [panel.cards_box.itemAt(i).widget() for i in range(panel.cards_box.count())]
+        assert [c.var.name for c in cards] == ["animal", "place", "mood"]          # the cards, once each
+        assert [len(c.pills.items) for c in cards] == [2, 1, 2]
         assert "2 × 1 × 2 = 4 combinations" in panel.summary.text() and panel.active()
         assert dlg.b_gen.text() == "Generate 4 images" and not dlg.tries.isEnabled()
         assert "The next Generate makes 4 images" in panel.preview.toPlainText()

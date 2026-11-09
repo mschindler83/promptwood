@@ -262,3 +262,38 @@ def test_a_server_on_the_port_must_be_the_right_one(fake_server, tmp_path):
     plain.start()
     assert plain.proc.pid != first and "--mmproj" in json.loads((tmp_path / "llama-server.args").read_text())
     plain.stop()
+
+
+def test_adding_pictures_keeps_the_thumbnails(tmp_path, monkeypatch):
+    os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    from PIL import Image
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from video_chain.ui import image_picker as IP
+    from video_chain.ui.prompt_refiner import RefineDialog
+    a, b = tmp_path / "a.png", tmp_path / "b.png"
+    for f in (a, b):
+        Image.new("RGB", (64, 48)).save(f)
+
+    class Fake:
+        models = [{"file": "llama:/m/q.gguf", "label": "Q", "chat": True, "vision": True}]
+    dlg = RefineDialog(None, "x", "image", lambda: Fake(), pictures=[("Start frame", str(a), True)])
+    dlg.show()
+    end = __import__("time").time() + 3
+    while dlg.refiner is None and __import__("time").time() < end:
+        app.processEvents()
+    app.processEvents()
+    monkeypatch.setattr(IP, "pick_image", lambda *a_, **k: str(b))
+
+    def shown():
+        ws = [dlg.pics_row.itemAt(i).widget() for i in range(dlg.pics_row.count())]
+        return [w.text() for w in ws if w is not None and w.isVisible()]
+    add = [w for w in (dlg.pics_row.itemAt(i).widget() for i in range(dlg.pics_row.count()))
+           if w is not None and w.text() == "+ Picture"][0]
+    add.click()
+    app.processEvents()
+    assert shown() == ["Start frame", "b", "+ Picture"]
+    dlg._remove_picture(0)
+    app.processEvents()
+    assert shown() == ["b", "+ Picture"]
+    dlg.reject()

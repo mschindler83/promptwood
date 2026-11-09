@@ -601,10 +601,11 @@ class VariationsPanel(QFrame):
     def _rebuild(self):
         while self.cards_box.count():
             it = self.cards_box.takeAt(0)
-            if it.widget() is not None:
-                it.widget().hide()
-                it.widget().setParent(None)
-                it.widget().deleteLater()
+            w = it.widget()                        # (after setParent(None) the item no longer knows it)
+            if w is not None:
+                w.hide()
+                w.setParent(None)
+                w.deleteLater()
         on = self.enabled()
         self.body.setVisible(on)
         self.b_new.setVisible(True)
