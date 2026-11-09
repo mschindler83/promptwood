@@ -2989,3 +2989,58 @@ def test_civitai_api_key_field(app, win):
     assert "kept" in win.civitai_key.placeholderText() and "keyring" in win.status.text()
     win._save_civitai_key()                                   # empty: removed
     assert triggers.api_key() == "" and "none" in win.civitai_key.placeholderText()
+
+
+def test_lora_presets_in_the_image_window(app, tmp_path, monkeypatch):
+    """Named presets per LoRA (prompt, negative, quality, sampling, strength): save, choose, change, rename,
+    delete; with two LoRAs the preset names say whose they are."""
+    from PySide6.QtCore import QSettings
+
+    from video_chain import imagegen as G
+    from video_chain import presets
+    from video_chain.ui import image_edit as IE
+    a, b = tmp_path / "walk.safetensors", tmp_path / "run.safetensors"
+    for f in (a, b):
+        f.write_bytes(b"x")
+    q = QSettings(str(tmp_path / "pre.ini"), QSettings.IniFormat)
+    dlg = IE.ImageEditDialog(None, tmp_path, [], None, None, lambda p: None, lambda k, p: False, q,
+                             connect_create=lambda p: None)
+    files = G.pick_files(["krea2/krea2_turbo_fp8_scaled.safetensors"], ["illustrij_v20.safetensors"],
+                         ["qwen3vl_4b_fp8_scaled.safetensors"], ["qwen_image_vae.safetensors"], [])
+    q.setValue("createFamily", "sdxl")
+    dlg._families_found(files, "")
+    dlg.set_mode("create")
+    assert not dlg.b_preset_new.isEnabled() and "add a LoRA" in dlg.preset.itemText(0)
+    dlg.loras.set_items([], [{"path": str(a), "strength": 0.8}])
+    dlg.loras.changed.emit()
+    assert dlg.b_preset_new.isEnabled() and not dlg.b_preset_delete.isEnabled()
+    dlg.prompt.setPlainText("a woman walks, w4lk, very long prompt " * 20)
+    dlg.negative.setText("blurry")
+    dlg.set_sampling({"steps": 30, "cfg": 5.5, "sampler": "dpmpp_2m", "scheduler": "karras"})
+    assert dlg.save_preset_as("  Slow   walk ")
+    p = presets.store().get(str(a), "Slow walk")
+    assert p["prompt"].startswith("a woman walks") and p["negative"] == "blurry" and p["strength"] == 0.8
+    assert p["sampling"] == {"steps": 30, "cfg": 5.5, "sampler": "dpmpp_2m", "scheduler": "karras"}
+    assert dlg.preset.currentText() == "Slow walk" and dlg.b_preset_delete.isEnabled()
+    dlg.prompt.setPlainText("something else")                        # choosing the preset puts it back
+    dlg.set_sampling({})
+    dlg.loras.set_items([], [{"path": str(a), "strength": 0.3}])
+    dlg.apply_preset()
+    assert dlg.prompt.toPlainText().startswith("a woman walks") and dlg.sampling()["steps"] == 30
+    assert dlg.loras.items()[0]["strength"] == 0.8 and dlg.preset.currentText() == "Slow walk"
+    dlg.cfg.setValue(7.0)                                             # edit: saved into the chosen preset
+    assert dlg.update_preset() and presets.store().get(str(a), "Slow walk")["sampling"]["cfg"] == 7.0
+    assert dlg.rename_preset("Walk, cfg 7") and dlg.preset.currentText() == "Walk, cfg 7"
+    assert presets.store().get(str(a), "Slow walk") is None
+    dlg.loras.set_items([], [{"path": str(a), "strength": 0.8}, {"path": str(b), "strength": 1.0}])
+    dlg.loras.changed.emit()
+    assert dlg.save_preset_as("Sprint", lora=str(b))
+    texts = [dlg.preset.itemText(i) for i in range(1, dlg.preset.count())]
+    assert texts == ["walk: Walk, cfg 7", "run: Sprint"]
+    monkeypatch.setattr(IE.QMessageBox, "question", lambda *a, **k: IE.QMessageBox.No)
+    assert not dlg.save_preset_as("Sprint", lora=str(b))                    # same name: replace only if confirmed
+    assert not dlg.delete_preset()
+    monkeypatch.setattr(IE.QMessageBox, "question", lambda *a, **k: IE.QMessageBox.Yes)
+    assert dlg.delete_preset() and presets.store().list(str(b)) == []
+    assert [dlg.preset.itemText(i) for i in range(1, dlg.preset.count())] == ["walk: Walk, cfg 7"]
+    dlg.reject()

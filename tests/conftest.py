@@ -1,4 +1,4 @@
-"""Every test gets its own LoRA trigger database (never the app's real one in ~/.local/share) and an in-memory
+"""Every test gets its own LoRA trigger database and LoRA presets (never the app's real one in ~/.local/share) and an in-memory
 keyring (never the system keyring with the user's CivitAI key)."""
 import pytest
 
@@ -23,6 +23,7 @@ class _MemoryKeyring:
 @pytest.fixture(autouse=True)
 def own_trigger_db(tmp_path, monkeypatch):
     monkeypatch.setenv("VIDEO_CHAIN_TRIGGERS", str(tmp_path / "lora_triggers.json"))
+    monkeypatch.setenv("VIDEO_CHAIN_PRESETS", str(tmp_path / "lora_presets.json"))
     monkeypatch.delenv("CIVITAI_API_KEY", raising=False)
     import keyring
     from video_chain import triggers
