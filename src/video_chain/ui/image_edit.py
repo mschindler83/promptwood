@@ -97,17 +97,34 @@ def project_edits(project: Path) -> list[tuple[Path, dict]]:
     return sorted(out, key=lambda x: _mtime(x[0]), reverse=True)
 
 
+def write_meta(meta_file: Path, meta: dict) -> None:
+    """A result's record, written atomically (a reader never sees half a file)."""
+    import os
+    import tempfile
+    meta_file = Path(meta_file)
+    fd, tmp = tempfile.mkstemp(prefix=meta_file.name + ".", suffix=".part", dir=str(meta_file.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(meta, fh, indent=2, ensure_ascii=False)
+        os.replace(tmp, meta_file)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
 def record_use(png: str | Path, use: dict) -> None:
     """Note in a result's record which project copy it became ({"kind": "start", "sha1"} / {"kind": "end",
     "file"} / {"kind": "ref", "file"}), so the window knows it is in use."""
     meta_file = Path(png).with_suffix(".json")
     try:
         meta = json.loads(meta_file.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except FileNotFoundError:
         meta = {}
+    except (OSError, ValueError):
+        return                                      # (an unreadable record is not replaced by a near-empty one)
     uses = [u for u in meta.get("uses") or [] if u != use]
     meta["uses"] = uses + [use]
-    meta_file.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+    write_meta(meta_file, meta)
 
 
 def uses_of(project: Path, tree, meta: dict) -> list[str]:
@@ -210,6 +227,7 @@ class ImageEditDialog(QDialog):
         self._trash: Path | None = None                  # the result deleted last (Undo delete brings it back)
         self._thumbs: dict[str, tuple[int, QPixmap]] = {}  # result thumbnails: png -> (its mtime_ns, pixmap)
         self._requested: set[tuple[str, int]] = set()
+        self._failed: set[tuple[str, int]] = set()
         self._entries: list[tuple[str, dict, float]] = []
         self._loader = ThumbLoader(self)
         self._loader.ready.connect(self._thumb_ready)
@@ -578,7 +596,8 @@ class ImageEditDialog(QDialog):
         self.gallery = ResultGallery()
         self.gallery.clicked.connect(self._gallery_clicked)
         self.gallery.opened.connect(self._gallery_opened)
-        self.gallery.starred.connect(lambda png: self.toggle_favorite(png))
+        # (later: the star's thumbnail is still handling its click; a rebuild now would delete it under it)
+        self.gallery.starred.connect(lambda png: QTimer.singleShot(0, lambda: self.toggle_favorite(png)))
         self.gallery.back.connect(lambda: self.set_view("single"))
         self.stack.addWidget(self.gallery)
         right.addWidget(self.stack, 1)
@@ -971,7 +990,8 @@ class ImageEditDialog(QDialog):
             it.setData(Qt.UserRole, (png, meta))
             it.setToolTip(meta.get("prompt", Path(png).name))
             self.results.addItem(it)
-            if self._thumbs.get(png, (None,))[0] != ns and (png, ns) not in self._requested:
+            if self._thumbs.get(png, (None,))[0] != ns and (png, ns) not in self._requested \
+                    and (png, ns) not in self._failed:
                 self._requested.add((png, ns))
                 self._loader.request(png, ns)
         self.results.blockSignals(False)
@@ -980,10 +1000,16 @@ class ImageEditDialog(QDialog):
             self.gallery.set_thumb(png, pix)
         n, total = len(shown), len(entries)
         self.f_count.setText(f"{n} result{'s' if n != 1 else ''}" if n == total else f"{n} of {total}")
+        alive = {p for p, *_r in entries}
+        for png in [p for p in self._thumbs if p not in alive]:     # deleted results: their thumbnails go
+            del self._thumbs[png]
         if self.results.count():
             k = next((i for i in range(self.results.count())
                       if self.results.item(i).data(Qt.UserRole)[0] == select), 0)
+            self.results.blockSignals(True)            # (shown once below, not also through the signal)
             self.results.setCurrentRow(k)
+            self.results.blockSignals(False)
+            self._strip_selection(self.results.currentItem(), None)
         self._show_selected()
 
     def _strip_icon(self, png: str, meta: dict, selected: bool = False) -> QIcon:
@@ -999,6 +1025,7 @@ class ImageEditDialog(QDialog):
     def _thumb_ready(self, png: str, ns: int, img: QImage):
         self._requested.discard((png, ns))
         if img.isNull():
+            self._failed.add((png, ns))                # (not asked again until the file changes)
             return
         pix = QPixmap.fromImage(img)
         self._thumbs[png] = (ns, pix)
@@ -1050,7 +1077,8 @@ class ImageEditDialog(QDialog):
         self.set_view("single")
 
     def toggle_favorite(self, png: str | None = None) -> bool:
-        """★ a result (the selected one if none is given) or take its star away; kept in its record."""
+        """★ a result (the selected one if none is given) or take its star away; kept in its record. A result
+        whose record is not written yet (still being made) or cannot be read is left alone."""
         sel = self.selected()
         png = png or (sel[0] if sel else None)
         if not png:
@@ -1058,18 +1086,30 @@ class ImageEditDialog(QDialog):
         f = Path(png).with_suffix(".json")
         try:
             meta = json.loads(f.read_text(encoding="utf-8"))
+            if not isinstance(meta, dict):
+                raise ValueError("not a record")
         except (OSError, ValueError):
-            meta = {}
+            self.state.setText("This result's record is not written yet (or cannot be read): try again in a moment.")
+            return False
         meta["favorite"] = not meta.get("favorite")
         if not meta["favorite"]:
             meta.pop("favorite")
         try:
-            f.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+            write_meta(f, meta)
         except OSError as e:
             self.state.setText(f"Could not mark it: {e}")
             return False
-        self._load_results(select=png if self.f_show.currentData() != "fav" or meta.get("favorite") else None,
-                           keep=True)
+        if self.f_show.currentData() == "fav" and not meta.get("favorite"):
+            self._load_results(keep=True)              # (it leaves the Favourites view)
+        else:                                          # in place: no rebuild, the view stays where it is
+            for i in range(self.results.count()):
+                it = self.results.item(i)
+                if it.data(Qt.UserRole)[0] == png:
+                    it.setData(Qt.UserRole, (png, meta))
+                    it.setIcon(self._strip_icon(png, meta, it is self.results.currentItem()))
+            self.gallery.update_thumb(png, meta)
+            if sel is not None and sel[0] == png:
+                self.b_fav.setChecked(bool(meta.get("favorite")))
         if self.view_mode() == "gallery":
             self.gallery.setFocus()
         return bool(meta.get("favorite"))
@@ -1365,7 +1405,8 @@ class ImageEditDialog(QDialog):
                 except ValueError:
                     saved = {}
             self.set_sampling(saved if isinstance(saved, dict) else {})
-        refs = sum(1 for s in self.cpics if s.path) if self.use_refs.isChecked() else 0
+        refs = sum(1 for s in self.cpics[:FAMILIES.get(fam, {}).get("refs", 0)] if s.path) \
+            if self.use_refs.isChecked() else 0
         auto = default_sampling(fam, (self.families or {}).get(fam) or {}, self.model_file.currentData(),
                                 self.quality.currentData() or "", refs, self.ref_strength.value()) if fam in FAMILIES \
             else None
@@ -1376,6 +1417,7 @@ class ImageEditDialog(QDialog):
         self.sampler.setItemText(0, f"auto ({a['sampler']})" if a else "auto")
         self.scheduler.setItemText(0, f"auto ({a['scheduler']})" if a else "auto")
         self._sampling_note()
+        self._show_negative()                       # (a model's own CFG above 1 shows the negative prompt)
 
     def _sampling_changed(self):
         self._show_negative()
@@ -1392,10 +1434,11 @@ class ImageEditDialog(QDialog):
             return
         f = FAMILIES.get(self.family.currentData()) if self.mode() == "create" else None
         own = bool(f and f["negative"])
-        cfg_on = hasattr(self, "cfg") and self.cfg.value() > 1
+        cfg_on = hasattr(self, "cfg") and (self.cfg.value() or (getattr(self, "_sampling_auto", {}) or {}).get("cfg", 1)) > 1
         self.negative.setVisible(bool(f) and (own or cfg_on))
+        cfg = self.cfg.value() or (getattr(self, "_sampling_auto", {}) or {}).get("cfg", 1) if hasattr(self, "cfg") else 1
         self.negative.setPlaceholderText("Avoid (optional negative prompt; empty: the model's usual one)" if own else
-                                         f"Avoid (optional negative prompt; counts because CFG is {self.cfg.value():g})"
+                                         f"Avoid (optional negative prompt; counts because CFG is {cfg:g})"
                                          if cfg_on else "")
 
     def _sampling_note(self):
@@ -1463,7 +1506,7 @@ class ImageEditDialog(QDialog):
 
     def _chosen_preset(self) -> tuple[str, str] | None:
         data = self.preset.currentData()
-        return tuple(data.split("\n", 1)) if data else None
+        return tuple(data.rsplit("\n", 1)) if data else None
 
     def _preset_buttons(self):
         chosen = self.preset.currentData() is not None
@@ -1500,19 +1543,23 @@ class ImageEditDialog(QDialog):
             self.prompt.setPlainText(p["prompt"])
         if p.get("negative") is not None:
             self.negative.setText(p["negative"])
+        other = p.get("family") and p["family"] != self.family.currentData()
         if p.get("variations") is not None:
             self.variations.set_state(p["variations"])
-        q = self.quality.findData(p.get("quality"))
+        q = self.quality.findData(p.get("quality")) if not other else -1
         if q >= 0:
             self.quality.setCurrentIndex(q)
-        self.set_sampling(p.get("sampling") or {})
+        if not other:                               # (sampling settings of another model would not fit this one)
+            self.set_sampling(p.get("sampling") or {})
         if p.get("strength") is not None:
             items = [dict(it, strength=float(p["strength"])) if os.path.realpath(it["path"]) ==
                      os.path.realpath(data[0]) else it for it in self.loras.items()]
             self.loras.set_items(self._known(), items)
             self._remember_loras()
             self._fill_presets(data)
-        self.state.setText(f"Preset “{p['name']}” of {lora_label(data[0])} is in the fields.")
+        self.state.setText(f"Preset “{p['name']}” of {lora_label(data[0])} is in the fields."
+                           + (f" It was made with {FAMILIES.get(p['family'], {}).get('label', p['family'])}: its "
+                              "quality and sampling settings were left as they are." if other else ""))
 
     def save_preset_as(self, name: str | None = None, lora: str | None = None) -> bool:
         """A new preset from the fields (asks for its name, and for the LoRA when there are several)."""

@@ -356,9 +356,18 @@ class ResultGallery(QScrollArea):
         self.setWidget(inner)
 
     def set_groups(self, groups: list[dict], in_use: set[str]):
+        from PySide6.QtCore import QTimer
+        pos = self.verticalScrollBar().value()
         self._build(groups)
         for png, th in self.thumbs.items():
             th.in_use = png in in_use
+        QTimer.singleShot(0, lambda: self.verticalScrollBar().setValue(pos))   # (where it was, once laid out)
+
+    def update_thumb(self, png: str, meta: dict, in_use: bool | None = None):
+        """One result's badges anew (e.g. its star), without rebuilding the gallery."""
+        th = self.thumbs.get(png)
+        if th is not None:
+            th.set_state(meta=meta, in_use=in_use)
 
     def set_thumb(self, png: str, pix: QPixmap):
         th = self.thumbs.get(png)
@@ -373,7 +382,8 @@ class ResultGallery(QScrollArea):
         if th is not None:
             th.set_state(selected=True)
             if scroll:
-                self.ensureWidgetVisible(th, 20, 20)
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(0, lambda: png in self.thumbs and self.ensureWidgetVisible(self.thumbs[png], 20, 20))
 
     def set_thumb_size(self, px: int):
         self.size_px = int(px)
@@ -391,11 +401,25 @@ class ResultGallery(QScrollArea):
             self.opened.emit(self._selected)
         elif e.key() == Qt.Key_Escape:
             self.back.emit()
-        elif e.key() in (Qt.Key_Right, Qt.Key_Left, Qt.Key_Down, Qt.Key_Up) and order:
+        elif e.key() in (Qt.Key_Right, Qt.Key_Left) and order:
             i = order.index(self._selected) if self._selected in order else -1
-            per_row = max(1, (self.viewport().width() - 8) // (self.size_px + 8))
-            step = {Qt.Key_Right: 1, Qt.Key_Left: -1, Qt.Key_Down: per_row, Qt.Key_Up: -per_row}[e.key()]
-            self.clicked.emit(order[max(0, min(len(order) - 1, i + step))])
+            self.clicked.emit(order[max(0, min(len(order) - 1, i + (1 if e.key() == Qt.Key_Right else -1)))])
+        elif e.key() in (Qt.Key_Down, Qt.Key_Up) and order:
+            cur = self.thumbs.get(self._selected)
+            if cur is None:
+                self.clicked.emit(order[0])
+                return
+            inner = self.widget()
+            here = cur.mapTo(inner, cur.rect().center())
+            down = e.key() == Qt.Key_Down
+            rows = []                                   # the thumbnails in the nearest row above / below
+            for png, th in self.thumbs.items():
+                c = th.mapTo(inner, th.rect().center())
+                if (c.y() > here.y() + 4) if down else (c.y() < here.y() - 4):
+                    rows.append((abs(c.y() - here.y()), abs(c.x() - here.x()), png))
+            if rows:
+                nearest = min(r[0] for r in rows)
+                self.clicked.emit(min((r for r in rows if r[0] == nearest), key=lambda r: r[1])[2])
         else:
             super().keyPressEvent(e)
 
@@ -445,7 +469,7 @@ class Chip(QLabel):
 class InfoCard(QFrame):
     """The selected result's facts as chips (model, quality, sampling, size, LoRAs, seed, date), where it is used,
     and its prompt (collapsible, with Copy). text() / toolTip() give the facts as one line too."""
-    use_seed = Signal(int)
+    use_seed = Signal(object)                     # (object: a seed can be bigger than a Qt int)
 
     def __init__(self, parent=None):
         super().__init__(parent)

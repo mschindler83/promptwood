@@ -3121,7 +3121,14 @@ def test_results_gallery_groups_filters_and_favourites(app, tmp_path):
     assert dlg.selected()[0] == b2 and dlg.gallery.thumbs[b2].selected
     assert dlg.toggle_favorite() is True                             # F / the button: ★ kept in the record
     assert json.loads(Path(b2).with_suffix(".json").read_text())["favorite"] is True
-    dlg.gallery.starred.emit(a2)                                     # the star corner of another one
+    from PySide6.QtTest import QTest
+    dlg.show()
+    th = dlg.gallery.thumbs[a2]
+    QTest.mouseClick(th, Qt.LeftButton, pos=th.rect().topRight() + __import__("PySide6.QtCore", fromlist=["QPoint"]).QPoint(-8, 8))
+    for _ in range(5):                                               # a real click on the star corner (crashed)
+        app.processEvents()
+    assert json.loads(Path(a2).with_suffix(".json").read_text()).get("favorite") is True
+    assert a2 in dlg.gallery.thumbs and dlg.gallery.thumbs[a2].meta.get("favorite")   # updated in place
     dlg.f_show.setCurrentIndex(dlg.f_show.findData("fav"))
     assert {dlg.results.item(i).data(Qt.UserRole)[0] for i in range(dlg.results.count())} == {b2, a2}
     assert dlg.f_count.text() == "2 of 5"
