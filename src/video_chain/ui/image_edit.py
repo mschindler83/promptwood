@@ -1932,9 +1932,29 @@ class ImageEditDialog(QDialog):
             takes = False
         new = self.refine(self.prompt.toPlainText(), self.prompt_kind(),
                           **({"pictures": self._refine_pictures()} if takes else {}))
-        if new:
+        if isinstance(new, list) and new:
+            self.use_ideas(new)
+        elif new:
             from .prompt_refiner import replace_text
             replace_text(self.prompt, new)
+
+    def use_ideas(self, prompts: list[str]):
+        """All ideas from the refiner as one Generate: the prompt becomes {idea}, its values the ideas, every
+        combination once (Ctrl+Z in the prompt brings the bullet points back)."""
+        from ..variations import Value, Variable
+        from .prompt_refiner import replace_text
+        name = "idea"
+        replace_text(self.prompt, "{" + name + "}")
+        p = self.variations
+        p.vars = [v for v in p.vars if v.name != name] + [Variable(name, [Value(t) for t in prompts])]
+        p.on.setChecked(True)
+        p.mode_buttons["order"].setChecked(True)
+        p.repeat.setValue(1)
+        p.all.setChecked(True)
+        self._templates_changed()
+        p._rebuild()
+        self.state.setText(f"{len(prompts)} ideas are the values of {{{name}}} in Variations: Generate makes one image "
+                           "each (Ctrl+Z in the prompt brings your bullet points back).")
 
     def _refine_pictures(self) -> list[tuple[str, str, bool]]:
         """What the refiner's model may see: the image to edit and the extra pictures (edit), the reference

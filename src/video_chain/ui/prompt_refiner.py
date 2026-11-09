@@ -11,7 +11,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QIcon, QImage, QKeySequence, QPixmap, QShortcut, QTextCursor
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLineEdit, QPlainTextEdit,
-                               QPushButton, QTextBrowser, QToolButton, QVBoxLayout)
+                               QPushButton, QSpinBox, QTextBrowser, QToolButton, QVBoxLayout)
 
 from ..tree import refine_problems
 from .theme import repolish
@@ -38,6 +38,7 @@ def replace_text(edit: QPlainTextEdit, text: str) -> None:
 class _Sig(QObject):
     models = Signal(object, str)          # [model dicts], error
     result = Signal(str, str)             # text, error
+    ideas = Signal(object, str)           # [idea dicts], error
 
 
 class RefineDialog(QDialog):
@@ -68,6 +69,9 @@ class RefineDialog(QDialog):
         self._sig = _Sig()
         self._sig.models.connect(self._models)
         self._sig.result.connect(self._result)
+        self._sig.ideas.connect(self._ideas_ready)
+        self.ideas: list[dict] = []
+        self._chosen_ideas: list[str] | None = None
         v = QVBoxLayout(self)
         top = QHBoxLayout()
         top.addWidget(label("Model", level="tertiary"))
@@ -81,10 +85,23 @@ class RefineDialog(QDialog):
         top.addWidget(self.model, 1)
         self.caps = label("", level="tertiary")
         top.addWidget(self.caps)
+        self.b_mode_refine = QPushButton("Refine")
+        self.b_mode_ideas = QPushButton("Ideas from bullet points")
+        self.b_mode_refine.setToolTip("Improve this prompt, step by step in a conversation")
+        self.b_mode_ideas.setToolTip("Write bullet points; the model makes several clearly different image ideas from "
+                                     "them (each uses every bullet point)")
+        for b in (self.b_mode_refine, self.b_mode_ideas):
+            b.setCheckable(True)
+            b.setAutoDefault(False)
+            top.addWidget(b)
+        self.b_mode_refine.setChecked(True)
+        self.b_mode_refine.clicked.connect(lambda: self.set_ideas_mode(False))
+        self.b_mode_ideas.clicked.connect(lambda: self.set_ideas_mode(True))
         v.addLayout(top)
         row = QHBoxLayout()
         left, right = QVBoxLayout(), QVBoxLayout()
-        left.addWidget(label("Your prompt", level="tertiary"))
+        self.original_title = label("Your prompt", level="tertiary")
+        left.addWidget(self.original_title)
         self.original = QPlainTextEdit(text)
         self.original.setReadOnly(True)
         left.addWidget(self.original, 1)
@@ -104,6 +121,12 @@ class RefineDialog(QDialog):
         self.out = QPlainTextEdit()
         self.out.setPlaceholderText("Press Refine")
         right.addWidget(self.out, 1)
+        self.ideas_title = label("Ideas", level="tertiary")
+        right.addWidget(self.ideas_title)
+        self.ideas_view = QTextBrowser()
+        self.ideas_view.setOpenLinks(False)
+        self.ideas_view.anchorClicked.connect(self._idea_link)
+        right.addWidget(self.ideas_view, 3)
         row.addLayout(left, 2)
         row.addLayout(right, 3)
         v.addLayout(row, 1)
@@ -111,10 +134,22 @@ class RefineDialog(QDialog):
         self.hint = QLineEdit()
         self.hint.returnPressed.connect(lambda: self.refine())
         hrow.addWidget(self.hint, 1)
+        self.count = QSpinBox()
+        self.count.setRange(2, 8)
+        self.count.setValue(5)
+        self.count.setSuffix(" ideas")
+        self.count.setToolTip("How many different ideas (one answer: the model keeps them apart)")
+        self.count.valueChanged.connect(lambda *_: self._mode_changed())
+        hrow.addWidget(self.count)
+        self.b_all = QPushButton("Generate all")
+        self.b_all.setToolTip("Put all ideas into the image window's Variations as {idea}: one Generate makes one "
+                              "image per idea")
+        self.b_all.clicked.connect(lambda: self._use_all())
         self.b_again = QPushButton("Another try")
         self.b_again.setToolTip("Ask the last message again (another answer to it)")
         self.b_again.clicked.connect(lambda: self.again())
         hrow.addWidget(self.b_again)
+        hrow.addWidget(self.b_all)
         self.b_refine = QPushButton("Refine")
         self.b_refine.setProperty("variant", "primary")
         self.b_refine.clicked.connect(lambda: self.refine())     # (clicked would pass checked=False as ask)
@@ -152,16 +187,42 @@ class RefineDialog(QDialog):
     def seeing(self) -> bool:
         return bool(self.current_model().get("vision"))
 
+    def ideas_mode(self) -> bool:
+        return self.b_mode_ideas.isChecked() and self.ideas_possible()
+
+    def ideas_possible(self) -> bool:
+        return self.kind == "image" and self.chatting()
+
+    def set_ideas_mode(self, on: bool):
+        self.b_mode_ideas.setChecked(bool(on))
+        self.b_mode_refine.setChecked(not on)
+        self._mode_changed()
+
     def _mode_changed(self):
         chat, see = self.chatting(), self.seeing()
+        ideas = self.ideas_mode()
+        for b in (self.b_mode_refine, self.b_mode_ideas):
+            b.setVisible(self.ideas_possible())
+        self.original.setReadOnly(not ideas)
+        self.original_title.setText("Your bullet points (one per line; you can edit them here)" if ideas
+                                    else "Your prompt")
+        for w in (self.ideas_title, self.ideas_view, self.count):
+            w.setVisible(ideas)
+        self.b_all.setVisible(ideas)
+        self.b_all.setEnabled(ideas and bool(self.ideas) and not self._busy)
+        self._render_ideas()
         self.caps.setText(" · ".join(x for x in ("conversation" if chat else "", "sees pictures" if see else "") if x)
                           or ("one refine per press" if self.model.currentData() else ""))
-        self.talk.setVisible(chat)
-        self.b_again.setVisible(chat)
-        self.b_refine.setText("Send" if chat and self.turns else "Refine")
+        self.talk.setVisible(chat and not ideas)
+        self.out.setVisible(not ideas)
+        self.out_title.setVisible(not ideas)
+        self.b_again.setVisible(chat and not ideas)
+        self.b_refine.setText(f"Make {self.count.value()} ideas" if ideas else
+                              "Send" if chat and self.turns else "Refine")
         self.b_refine.setToolTip("Send this message: the model changes the current version (Ctrl+Enter)" if chat
                                  else "Ask the model (again: another try) (Ctrl+Enter)")
         self.hint.setPlaceholderText(
+            "Optional, for all ideas: e.g. “surreal”, “35mm film photo”, “always at night”" if ideas else
             "Tell it what to change, e.g. “darker mood”, “keep her coat, camera behind her”, “use what you see in "
             "the picture” (empty: just improve it)" if chat else
             "Optional: how should it change? e.g. “more cinematic”, “shorter”, “add rain sounds”")
@@ -325,6 +386,7 @@ class RefineDialog(QDialog):
 
     def _update_buttons(self):
         idle = not self._busy and self.refiner is not None
+        self.b_all.setEnabled(idle and bool(self.ideas))
         self.b_refine.setEnabled(idle)
         self.b_again.setEnabled(idle and self.chatting() and bool(self.turns) and self.base >= 0)
 
@@ -342,6 +404,8 @@ class RefineDialog(QDialog):
         if self._busy or self.refiner is None or not self.original.toPlainText().strip():
             self._base_before = None
             return
+        if self.ideas_mode():
+            return self.make_ideas()
         chat = self.chatting()
         if chat and capture:
             self._capture_edit()
@@ -407,6 +471,92 @@ class RefineDialog(QDialog):
             repolish(self.state)
         self._mode_changed()
         self.buttons.button(QDialogButtonBox.Ok).setEnabled(bool(self.out.toPlainText().strip()))
+
+    # ---- ideas from bullet points (image prompts)
+    def make_ideas(self):
+        if self._busy or self.refiner is None or not self.original.toPlainText().strip():
+            return
+        self._busy = True
+        self._update_buttons()
+        self._mode_changed()
+        n, wish, bullets = self.count.value(), self.hint.text().strip(), self.original.toPlainText()
+        self.state.setText(f"Making {n} ideas … (about {4 * n} s)")
+        self.state.setProperty("severity", "")
+        repolish(self.state)
+        sig, refiner, seed, cast, pics = self._sig, self.refiner, random.randint(0, 2**31 - 1), self.cast, \
+            self.chosen_pictures()
+
+        def work():
+            try:
+                sig.ideas.emit(refiner.ideas(bullets, n, wish, pictures=pics, cast=cast or None, seed=seed), "")
+            except Exception as e:  # noqa: BLE001
+                try:
+                    sig.ideas.emit([], str(e))
+                except RuntimeError:
+                    pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def _ideas_ready(self, ideas: list, error: str):
+        self._busy = False
+        if error:
+            self.state.setText(f"Could not make ideas: {error}")
+        else:
+            from ..llm_server import missing_bullets
+            bullets = self.original.toPlainText()
+            for d in ideas:
+                d["missing"] = missing_bullets(bullets, d["prompt"])
+            self.ideas = ideas
+            short = sum(1 for d in ideas if d["missing"])
+            self.state.setText(f"{len(ideas)} ideas. Use one, refine one further, or Generate all (one image each)."
+                               + (f" {short} may leave a bullet point out (marked)." if short else ""))
+            self.state.setProperty("severity", "warning" if short else "")
+            repolish(self.state)
+        self._update_buttons()
+        self._mode_changed()
+
+    def _render_ideas(self):
+        if not self.ideas_view.isVisibleTo(self):
+            return
+        if not self.ideas:
+            self.ideas_view.setHtml("<p style='color:gray'>Write bullet points on the left, e.g.<br>"
+                                    "- @Anna in a red coat<br>- an old lighthouse<br>- heavy rain<br>"
+                                    f"then press Make {self.count.value()} ideas.</p>")
+            return
+        rows = []
+        for k, d in enumerate(self.ideas):
+            miss = ("<br><span style='color:#e0a040'>may leave out: "
+                    + html.escape("; ".join(d["missing"])) + "</span>") if d.get("missing") else ""
+            rows.append(f"<p style='margin:0 0 10px 0'><b>{k + 1}. {html.escape(d['title'])}</b>"
+                        f" <span style='color:gray'>— {html.escape(d['angle'])}</span><br>"
+                        f"{html.escape(d['prompt'])}{miss}<br>"
+                        f"<a href='use:{k}'>Use this</a> &nbsp; <a href='more:{k}'>Refine further</a></p>")
+        self.ideas_view.setHtml("".join(rows))
+
+    def _idea_link(self, url):
+        s = url.toString()
+        try:
+            kind, k = s.split(":", 1)
+            d = self.ideas[int(k)]
+        except (ValueError, IndexError):
+            return
+        if kind == "use":
+            self._chosen = d["prompt"]
+            self.accept()
+        elif kind == "more":                       # a conversation that starts at this idea
+            self.turns, self.base, self._edited = [(f"Idea “{d['title']}” ({d['angle']})", d["prompt"])], 0, {}
+            self.set_ideas_mode(False)
+            self.out.setPlainText(d["prompt"])
+            self._render()
+            self.state.setText(f"Idea {int(k) + 1} is version 1: tell the model what to change.")
+
+    def _use_all(self):
+        if self.ideas:
+            self._chosen_ideas = [d["prompt"] for d in self.ideas]
+            self.accept()
+
+    def chosen_ideas(self) -> list[str] | None:
+        """All ideas, when the user chose Generate all (the caller makes them variations)."""
+        return self._chosen_ideas
 
     def _use(self):
         text = " ".join(self.out.toPlainText().split())

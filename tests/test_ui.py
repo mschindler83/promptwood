@@ -3262,3 +3262,21 @@ def test_variations_panel_review_cases(app, monkeypatch):
     pill.mouseDoubleClickEvent(ev)                                     # then Cancel
     app.processEvents()
     assert small.variable("c").values[0].on and small.amount() == 2 and "makes 2 images" in small.preview.toPlainText()
+
+
+def test_all_ideas_become_variations(app, tmp_path):
+    from PySide6.QtCore import QSettings
+
+    from video_chain.ui.image_edit import ImageEditDialog
+    q = QSettings(str(tmp_path / "i.ini"), QSettings.IniFormat)
+    dlg = ImageEditDialog(None, tmp_path, [], None, None, lambda p: None, lambda k, p: False, q,
+                          connect_create=lambda p: None, refine=lambda text, kind, pictures=None: ["a cat", "a dog"])
+    dlg.set_mode("create")
+    dlg.prompt.setPlainText("- an animal")
+    dlg._refine_prompt()
+    assert dlg.prompt.toPlainText() == "{idea}" and dlg.variations.active()
+    assert [v.text for v in dlg.variations.variable("idea").values] == ["a cat", "a dog"] and dlg.variations.amount() == 2
+    assert dlg.b_gen.text() == "Generate 2 images"
+    dlg.prompt.undo()
+    assert dlg.prompt.toPlainText() == "- an animal"                  # Ctrl+Z: the bullet points back
+    dlg.reject()

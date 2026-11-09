@@ -297,3 +297,63 @@ def test_adding_pictures_keeps_the_thumbnails(tmp_path, monkeypatch):
     app.processEvents()
     assert shown() == ["b", "+ Picture"]
     dlg.reject()
+
+
+def test_ideas_parsing_and_bullet_check():
+    got = L.parse_ideas('Here:\n```json\n[{"title": "Rain", "angle": "night", "prompt": "a  cat"}, "a dog", {"x": 1}]\n```')
+    assert got == [{"title": "Rain", "angle": "night", "prompt": "a cat"},
+                   {"title": "Idea 2", "angle": "", "prompt": "a dog"}]
+    with pytest.raises(L.LlmServerError):
+        L.parse_ideas("no list here")
+    bullets = "- @Anna in a red coat\n- an old lighthouse\n* heavy rain\n\n1. seagulls"
+    assert L.missing_bullets(bullets, "@Anna wears a red coat near an old lighthouse; seagulls circle") == ["heavy rain"]
+    assert L.missing_bullets(bullets, "Anna in a red coat, old lighthouse, heavy rain, seagulls") == ["@Anna in a red coat"]
+    msgs = L.idea_messages(bullets="- a cat", n=4, wish="surreal")
+    assert "Make 4 creative" in msgs[0]["content"] and "Also: surreal" in msgs[1]["content"]
+
+
+def test_ideas_mode_in_the_refine_window(tmp_path):
+    os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    from PySide6.QtCore import QUrl
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from video_chain.ui.prompt_refiner import RefineDialog
+    asked = []
+
+    class Fake:
+        models = [{"file": "llama:/m/q.gguf", "label": "Q", "chat": True, "vision": False}]
+
+        def ideas(self, bullets, n, wish, pictures=(), cast=None, seed=0):
+            asked.append((bullets, n, wish))
+            return [{"title": f"T{k}", "angle": f"a{k}", "prompt": f"cat {k}" + (" in rain" if k else "")}
+                    for k in range(n)]
+
+    def make(kind):
+        d = RefineDialog(None, "- cat\n- rain", kind, lambda: Fake())
+        d.show()
+        end = __import__("time").time() + 3
+        while d.refiner is None and __import__("time").time() < end:
+            app.processEvents()
+        app.processEvents()
+        return d
+    clip = make("video")                                               # clips: no ideas mode
+    assert not clip.b_mode_ideas.isVisible()
+    clip.reject()
+    dlg = make("image")
+    assert dlg.b_mode_ideas.isVisible() and dlg.original.isReadOnly()
+    dlg.set_ideas_mode(True)
+    assert not dlg.original.isReadOnly() and dlg.b_refine.text() == "Make 5 ideas" and not dlg.out.isVisible()
+    dlg.count.setValue(3)
+    dlg.hint.setText("surreal")
+    dlg.b_refine.click()
+    end = __import__("time").time() + 3
+    while dlg._busy and __import__("time").time() < end:
+        app.processEvents()
+    assert asked[-1] == ("- cat\n- rain", 3, "surreal") and len(dlg.ideas) == 3
+    assert dlg.ideas[0]["missing"] == ["rain"] and "may leave out: rain" in dlg.ideas_view.toPlainText()
+    assert dlg.b_all.isEnabled()
+    dlg._idea_link(QUrl("more:1"))                                     # continue from idea 2 as version 1
+    assert not dlg.ideas_mode() and dlg.turns[0][1] == "cat 1 in rain" and dlg.out.toPlainText() == "cat 1 in rain"
+    dlg.set_ideas_mode(True)
+    dlg._use_all()
+    assert dlg.chosen_ideas() == ["cat 0", "cat 1 in rain", "cat 2 in rain"]

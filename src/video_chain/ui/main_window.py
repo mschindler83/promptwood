@@ -5024,7 +5024,7 @@ class MainWindow(QMainWindow):
         return done
 
     # ---- prompt refiner
-    def refine_text(self, text: str, kind: str, pictures: list | None = None) -> str | None:
+    def refine_text(self, text: str, kind: str, pictures: list | None = None) -> str | list[str] | None:
         """Open the prompt refiner for a prompt ('video' / 'image' / 'edit'); the text to use, or None."""
         if not text.strip():
             self.status.setText("Write a prompt first; the refiner improves it.")
@@ -5049,7 +5049,10 @@ class MainWindow(QMainWindow):
         dlg = RefineDialog(self, text, kind, connect, self.qs, start_comfy=self.start_comfy, cast=cast,
                            pictures=pictures or [])
         try:
-            return dlg.chosen() if dlg.exec() == QDialog.Accepted else None
+            if dlg.exec() != QDialog.Accepted:
+                return None
+            ideas = dlg.chosen_ideas() if hasattr(dlg, "chosen_ideas") else None
+            return ideas if ideas else dlg.chosen()       # (a list: all ideas, for the image window's variations)
         finally:
             if dlg.refined_any and not self.running and self._comfy_model not in ("qwen",):
                 # a language model is in ComfyUI now: unloaded before the next clips, idle time as usual

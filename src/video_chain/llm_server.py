@@ -96,6 +96,72 @@ def chat_messages(*, prompt: str, kind: str, turns: list[tuple[str, str]], instr
     return msgs
 
 
+IDEA_RULES = ("Now the user gives bullet points instead of a prompt. Make {n} creative, interesting and clearly "
+              "different image ideas from them. Every idea uses every bullet point (each subject, attribute, place and "
+              "action stays as given; @Names stay exactly as written) and must not add other people. Make the ideas "
+              "differ in: camera and framing, light and mood, time of day or weather, composition, style or medium, "
+              "and one surprising but fitting detail; never give two ideas the same look. Answer with JSON only, no "
+              "markdown: a list of {n} objects, each {{\"title\": a 2-5 word name, \"angle\": a few words on what makes "
+              "it different (e.g. \"low angle, dusk, film noir\"), \"prompt\": the complete prompt as one paragraph}}.")
+
+
+def idea_messages(*, bullets: str, n: int, wish: str = "", pictures: list[tuple[str, str]] = (),
+                  cast: list[dict] | None = None) -> list[dict]:
+    """The request for n image ideas from bullet points (kind 'image': the refiner's image rules apply)."""
+    system, _first = refine_messages(prompt=bullets, kind="image", cast=cast)
+    text = (f"My bullet points:\n{bullets.strip()}" + (f"\n\nAlso: {wish.strip()}" if wish.strip() else ""))
+    content: list[dict] = [{"type": "text", "text": text}]
+    for title, path in pictures:
+        content += [{"type": "text", "text": f"\n[{title}]"}, image_part(path)]
+    return [{"role": "system", "content": system + " " + IDEA_RULES.format(n=int(n))},
+            {"role": "user", "content": content if pictures else text}]
+
+
+def parse_ideas(text: str) -> list[dict]:
+    """The ideas in a model's answer: [{"title", "angle", "prompt"}] (JSON, also inside code fences or with
+    text around it; a missing title / angle is filled in)."""
+    import re
+    text = re.sub(r"<think>.*?</think>", "", text or "", flags=re.S | re.I)
+    start, end = text.find("["), text.rfind("]")
+    if start < 0 or end <= start:
+        raise LlmServerError("the model gave no list of ideas")
+    try:
+        data = json.loads(text[start:end + 1])
+    except ValueError as e:
+        raise LlmServerError(f"the model's list of ideas is not readable ({e})") from e
+    out = []
+    for k, d in enumerate(data if isinstance(data, list) else []):
+        if isinstance(d, str):
+            d = {"prompt": d}
+        if not isinstance(d, dict) or not str(d.get("prompt") or "").strip():
+            continue
+        out.append({"title": " ".join(str(d.get("title") or f"Idea {k + 1}").split()),
+                    "angle": " ".join(str(d.get("angle") or "").split()),
+                    "prompt": " ".join(str(d["prompt"]).split())})
+    if not out:
+        raise LlmServerError("the model gave no usable ideas")
+    return out
+
+
+def missing_bullets(bullets: str, prompt: str) -> list[str]:
+    """The bullet points a prompt seems to leave out: fewer than half of a bullet's words (4+ letters, compared by
+    their first 5 letters) appear in it; @Names must appear as written."""
+    import re
+    low = prompt.lower()
+    stems = {w[:5] for w in re.findall(r"[^\W\d_]{4,}", low)}
+    out = []
+    for line in bullets.splitlines():
+        b = re.sub(r"^\s*([-*•·]|\d+[.)])\s*", "", line).strip()
+        if not b:
+            continue
+        names = re.findall(r"@[\w-]+", b)
+        words = [w.lower()[:5] for w in re.findall(r"[^\W\d_]{4,}", re.sub(r"@[\w-]+", "", b))]
+        lost_name = any(n.lower() not in low for n in names)
+        if lost_name or (words and sum(w in stems for w in words) * 2 < len(words)):
+            out.append(b)
+    return out
+
+
 def server_command(server: str, model: str, port: int, cpu_moe: bool = True, mmproj: str | None = None,
                    threads: int | None = None) -> list[str]:
     """llama-server's command: all layers on the GPU except (cpu_moe) the experts, which stay in RAM."""
@@ -251,14 +317,25 @@ class LlamaServer:
         return self._complete(chat_messages(prompt=prompt, kind=kind, turns=turns, instruction=instruction,
                                             pictures=pictures, cast=cast), seed, temperature, timeout)
 
+    def ideas(self, bullets: str, n: int = 5, wish: str = "", pictures: list[tuple[str, str]] = (),
+              cast: list[dict] | None = None, seed: int = 0, temperature: float = 0.9,
+              timeout: float = 600.0) -> list[dict]:
+        """n distinct image ideas from bullet points (see IDEA_RULES): [{"title", "angle", "prompt"}]."""
+        if pictures and not self.mmproj:
+            raise LlmServerError("this model has no vision part (mmproj file) next to it: it cannot see pictures")
+        raw = self._complete(idea_messages(bullets=bullets, n=n, wish=wish, pictures=pictures, cast=cast), seed,
+                             temperature, timeout, max_tokens=300 * int(n) + 300, clean=False)
+        return parse_ideas(raw)
+
     def interrupt(self):
         """A load in progress stops waiting (the request of a closed window is not awaited; the server stays)."""
         self._cancel.set()
 
-    def _complete(self, messages: list[dict], seed: int, temperature: float, timeout: float) -> str:
+    def _complete(self, messages: list[dict], seed: int, temperature: float, timeout: float,
+                  max_tokens: int = MAX_TOKENS, clean: bool = True) -> str:
         self.start()
         body = {"messages": messages,
-                "max_tokens": MAX_TOKENS, "temperature": float(temperature), "top_k": 64, "top_p": 0.95,
+                "max_tokens": int(max_tokens), "temperature": float(temperature), "top_k": 64, "top_p": 0.95,
                 "min_p": 0.05, "repeat_penalty": 1.05, "seed": int(seed), "stream": False,
                 "chat_template_kwargs": {"enable_thinking": False}}     # (a thinking model: the prompt, no essay)
         req = urllib.request.Request(self.url + "/v1/chat/completions", data=json.dumps(body).encode(),
@@ -283,8 +360,10 @@ class LlamaServer:
         except (KeyError, IndexError, TypeError) as e:
             raise LlmServerError(f"unexpected answer from the llama.cpp server: {str(data)[:300]}") from e
         if choice.get("finish_reason") == "length":
-            raise LlmServerError(f"the answer was cut off after {MAX_TOKENS} tokens (the model went on too long); "
-                                 "try again, or ask for a shorter prompt")
+            raise LlmServerError(f"the answer was cut off after {max_tokens} tokens (the model went on too long); "
+                                 "try again, or ask for a shorter prompt or fewer ideas")
+        if not clean:
+            return text
         text = clean_refined(text)
         if not text:
             raise LlmServerError("the language model gave no answer")
@@ -307,6 +386,11 @@ class CombinedRefiner:
                 raise LlmServerError("the llama.cpp server is not set up")
             return self.llama.refine_prompt(prompt, kind, model_file, seed, hint, cast)
         return self.comfy.refine_prompt(prompt, kind, model_file, seed, hint, cast)
+
+    def ideas(self, *a, **k):
+        if self.llama is None:
+            raise LlmServerError("ideas need a llama.cpp model")
+        return self.llama.ideas(*a, **k)
 
     def chat(self, *a, **k):
         if self.llama is None:
