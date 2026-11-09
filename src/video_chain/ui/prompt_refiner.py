@@ -61,6 +61,8 @@ class RefineDialog(QDialog):
         self.turns: list[tuple[str, str]] = []   # the conversation: (what the user asked, the version it gave)
         self.base = -1                           # the version the next message changes (-1: the original)
         self._pending = ""
+        self._base_before: int | None = None     # (Another try: the base to go back to if it fails)
+        self._edited: dict[int, bool] = {}       # versions the user edited by hand
         self.pictures = [{"title": t, "path": str(p), "on": bool(on)} for t, p, on in (pictures or [])
                          if p and Path(p).is_file()]
         self._sig = _Sig()
@@ -279,16 +281,29 @@ class RefineDialog(QDialog):
             QTimer.singleShot(5000, self._load_models)
 
     # ---- the conversation
+    def _capture_edit(self):
+        """The user's own edits of the current version count as that version (before switching or sending)."""
+        if not self.chatting() or not (0 <= self.base < len(self.turns)):
+            return
+        edited = self.out.toPlainText().strip()
+        if edited and " ".join(edited.split()) != " ".join(self.turns[self.base][1].split()):
+            self.turns[self.base] = (self.turns[self.base][0], edited)
+            self._edited[self.base] = True
+
     def _version_clicked(self, url):
         s = url.toString()
-        if not s.startswith("v:"):
+        if not s.startswith("v:") or self._busy:
             return
         k = int(s[2:])
+        if not 0 <= k < len(self.turns):
+            return
+        self._capture_edit()
         self.base = k
-        self.out.setPlainText(self.turns[k][1] if k >= 0 else "")
+        self.out.setPlainText(self.turns[k][1])
         self._render()
+        self._update_buttons()
         self.state.setText(f"Back at version {k + 1}: the next message changes this one (the later versions stay "
-                           "listed until you send)." if k >= 0 else "Back at your prompt.")
+                           "listed until you send).")
 
     def _render(self):
         if not self.turns:
@@ -302,7 +317,7 @@ class RefineDialog(QDialog):
             rows.append(f"<p style='margin:4px 0 0 0'><b>You:</b> {html.escape(ask) if ask else '<i>improve it</i>'}</p>"
                         f"<p style='margin:0 0 6px 12px'><a href='v:{k}' style='text-decoration:none'>"
                         f"<b>{'▶ ' if cur else ''}Version {k + 1}</b></a>"
-                        f"{' <i>(edited by you)</i>' if getattr(self, '_edited', {}).get(k) else ''}<br>"
+                        f"{' <i>(edited by you)</i>' if self._edited.get(k) else ''}<br>"
                         f"<span style='color:{'#ddd' if cur else 'gray'}'>{short}</span></p>")
         self.talk.setHtml("".join(rows))
         self.talk.verticalScrollBar().setValue(self.talk.verticalScrollBar().maximum())
@@ -313,27 +328,28 @@ class RefineDialog(QDialog):
         self.b_again.setEnabled(idle and self.chatting() and bool(self.turns) and self.base >= 0)
 
     def again(self):
-        """The message that led to the current version, asked again (another answer replaces it)."""
-        if self._busy or self.base < 0:
+        """The message that led to the current version, asked again (another answer replaces it; the version
+        before it stays as it was)."""
+        if self._busy or self.base < 0 or self.refiner is None:
             return
         ask = self.turns[self.base][0]
+        self._base_before = self.base
         self.base -= 1
-        self.refine(ask, replace=True)
+        self.refine(ask, capture=False)
 
-    def refine(self, ask: str | None = None, replace: bool = False):
+    def refine(self, ask: str | None = None, capture: bool = True):
         if self._busy or self.refiner is None or not self.original.toPlainText().strip():
+            self._base_before = None
             return
         chat = self.chatting()
-        if chat and self.base >= 0:                   # the user's own edits count as the current version
-            edited = " ".join(self.out.toPlainText().split())
-            if edited and edited != " ".join(self.turns[self.base][1].split()):
-                self.turns[self.base] = (self.turns[self.base][0], self.out.toPlainText().strip())
-                self._edited = {**getattr(self, "_edited", {}), self.base: True}
+        if chat and capture:
+            self._capture_edit()
         self._busy = True
         self._update_buttons()
         self.buttons.button(QDialogButtonBox.Ok).setEnabled(False)
         self.state.setText("Thinking …" if chat else "Refining …")
-        self.refined_any = True                    # its model is being loaded (unloaded before clips)
+        if not str(self.model.currentData() or "").startswith("llama:"):
+            self.refined_any = True                # a ComfyUI model is being loaded (unloaded before clips)
         self.state.setProperty("severity", "")
         repolish(self.state)
         text, kind, model = self.original.toPlainText(), self.kind, self.model.currentData()
@@ -359,14 +375,21 @@ class RefineDialog(QDialog):
     def _result(self, text: str, error: str):
         self._busy = False
         if error:
+            if self._base_before is not None:          # Another try failed: back where it was
+                self.base = self._base_before
+                self._render()
+            self._base_before = None
             self.state.setText(f"Could not refine: {error}")
             self.state.setProperty("severity", "")
             repolish(self.state)
         else:
-            self.refined_any = True
+            self._base_before = None
+            if not str(self.model.currentData() or "").startswith("llama:"):
+                self.refined_any = True
             if self.chatting():
                 self.turns = self.turns[:self.base + 1] + [(self._pending, text)]
                 self.base = len(self.turns) - 1
+                self._edited = {k: v for k, v in self._edited.items() if k < self.base}
                 self.hint.clear()
                 self._render()
             self.out.setPlainText(text)

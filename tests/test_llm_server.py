@@ -216,6 +216,23 @@ def test_refine_window_conversation(tmp_path, monkeypatch):
     dlg.b_again.click()                                                  # another answer to "brighter"
     wait_idle()
     assert len(calls) == n + 1 and calls[-1][1] == "brighter" and len(dlg.turns) == 2
+    assert calls[-1][0] == [("", "v1:improved")] and dlg.turns[0] == ("", "v1:improved")   # version 1 untouched
+    assert not dlg._edited.get(0)
+    fail = {"on": True}
+    orig_chat = Fake.chat
+
+    def broken(self, *a, **k):
+        if fail["on"]:
+            raise RuntimeError("server down")
+        return orig_chat(self, *a, **k)
+    Fake.chat = broken
+    dlg.b_again.click()                                                  # fails: still at version 2
+    wait_idle()
+    assert dlg.base == 1 and "server down" in dlg.state.text()
+    Fake.chat = orig_chat
+    dlg.out.setPlainText("my own words")                                 # an edit, then a version click: kept
+    dlg._version_clicked(QUrl("v:0"))
+    assert dlg.turns[1][1] == "my own words" and dlg._edited.get(1)
     dlg.model.setCurrentIndex(1)                                         # a ComfyUI model: one refine per press
     assert not dlg.chatting() and not dlg.talk.isVisibleTo(dlg) and dlg.b_refine.text() == "Refine"
     dlg.hint.setText("shorter")

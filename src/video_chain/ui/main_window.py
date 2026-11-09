@@ -56,15 +56,21 @@ from ..llm_server import DEFAULT_PORT as LLM_DEFAULT_PORT, DEFAULT_SERVER as LLM
 LLM_MODEL_DIRS = (Path("/path/to/ai/hf-models"), Path.home() / ".cache" / "huggingface" / "hub")
 
 
+CHAT_HINTS = ("instruct", "chat", "-it-", "-it.", "_it_", "abliterated", "uncensored")
+
+
 def find_gguf_models(roots=LLM_MODEL_DIRS) -> list[Path]:
-    """GGUF language models in the model folders (Hugging Face cache layout: the snapshots' links), without the
-    vision projectors (mmproj) and the imatrix files."""
+    """GGUF chat language models in the model folders (Hugging Face cache layout: the snapshots' links): those
+    with a vision projector next to them or a chat / instruct name; not the projectors, imatrix files, or GGUF
+    image / video models and text encoders."""
     out: list[Path] = []
     for root in roots:
         try:
             for f in sorted(Path(root).glob("models--*/snapshots/*/*.gguf")):
                 low = f.name.lower()
-                if "mmproj" not in low and "imatrix" not in low and f.exists():
+                if "mmproj" in low or "imatrix" in low or not f.exists():
+                    continue
+                if any(f.parent.glob("*mmproj*.gguf")) or any(h in low for h in CHAT_HINTS):
                     out.append(f)
         except OSError:
             continue
@@ -5104,6 +5110,8 @@ class MainWindow(QMainWindow):
 
         def before_edit():                          # GUI thread, before each Generate
             self._qwen_timer.stop()
+            if not (getattr(self, "_llama", None) is not None and self._llama.cpu_moe):
+                self.stop_llama("its VRAM is needed for the image")     # (with experts in RAM it takes ~3 GB)
             # the clip model is loaded: unload it (once: after the first image of this window it is gone)
             switch["free"] = not switch["loaded"] and self._comfy_model in ("h3", "h3-hyperflow")
             if self.worker_alive and not self.running:

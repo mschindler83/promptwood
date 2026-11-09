@@ -2025,6 +2025,7 @@ def pick_refiner_models(clip_names: list[str]) -> list[dict]:
 def clean_refined(text: str) -> str:
     """The model's answer without thinking blocks, prefaces, wrapping quotes or markdown."""
     text = re.sub(r"<think>.*?</think>", "", text or "", flags=re.S | re.I).strip()
+    text = re.sub(r"^\s*<think>.*", "", text, flags=re.S | re.I).strip()     # a thought cut off: no prompt in it
     text = re.sub(r"^(here(?:'s| is)[^:\n]*:|refined prompt:|prompt:)\s*", "", text, flags=re.I).strip()
     text = re.sub(r"^\*\*|\*\*$", "", text).strip()
     pairs = {'"': '"', "'": "'", "“": "”", "„": "“", "‘": "’", "«": "»"}

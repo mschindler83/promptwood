@@ -1867,10 +1867,13 @@ class ImageEditDialog(QDialog):
     def _refine_prompt(self):
         if self.refine is None:
             return
+        import inspect
         try:
-            new = self.refine(self.prompt.toPlainText(), self.prompt_kind(), pictures=self._refine_pictures())
-        except TypeError:                          # (a refine callback without pictures)
-            new = self.refine(self.prompt.toPlainText(), self.prompt_kind())
+            takes = "pictures" in inspect.signature(self.refine).parameters
+        except (TypeError, ValueError):
+            takes = False
+        new = self.refine(self.prompt.toPlainText(), self.prompt_kind(),
+                          **({"pictures": self._refine_pictures()} if takes else {}))
         if new:
             from .prompt_refiner import replace_text
             replace_text(self.prompt, new)

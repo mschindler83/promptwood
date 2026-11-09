@@ -24,6 +24,7 @@ DEFAULT_PORT = 8091
 DEFAULT_SERVER = "/path/to/ai/llama.cpp/build/bin/llama-server"
 START_TIMEOUT = 600.0                            # a 25 GB model from a cold disk takes minutes
 CONTEXT = 16384                                  # a conversation with pictures (one ~1 MP picture: ~1-2k tokens)
+MAX_TOKENS = 1024                                # a prompt is a few hundred tokens; more means it rambles
 IMAGE_SIDE = 1024                                # pictures are sent at most this large (fewer tokens, same gist)
 
 
@@ -53,7 +54,13 @@ def image_part(path: str | Path) -> dict:
     from PIL import Image, ImageOps
     import io
     with Image.open(path) as im:
-        im = ImageOps.exif_transpose(im).convert("RGB")
+        im = ImageOps.exif_transpose(im)
+        if im.mode in ("RGBA", "LA", "P"):                # transparent parts on grey, not black
+            im = im.convert("RGBA")
+            bg = Image.new("RGBA", im.size, (128, 128, 128, 255))
+            bg.alpha_composite(im)
+            im = bg
+        im = im.convert("RGB")
         im.thumbnail((IMAGE_SIDE, IMAGE_SIDE), Image.LANCZOS)
         buf = io.BytesIO()
         im.save(buf, "PNG")
@@ -112,6 +119,7 @@ class LlamaServer:
         self.log_dir = log_dir
         self.proc: subprocess.Popen | None = None
         self._lock = threading.Lock()
+        self._cancel = threading.Event()
 
     @property
     def url(self) -> str:
@@ -160,60 +168,72 @@ class LlamaServer:
     def start(self, stop=lambda: False, timeout: float = START_TIMEOUT) -> None:
         """Start the server (if it is not answering yet) and wait until the model is loaded. A server already on
         the port must run this model (with its vision part when there is one): one this object started is
-        restarted otherwise; another one is an error (its port is taken)."""
+        restarted otherwise; another one is an error (its port is taken). The lock is held only while the
+        process is started, not while the model loads: stop() (from the GUI) never waits for a load; it cancels
+        it (as does interrupt())."""
+        self._cancel.clear()
+        if self.ready():
+            why = self.mismatch()
+            if not why:
+                return
+            if not self.running():
+                raise LlmServerError(f"port {self.port} is used by another llama.cpp server ({why}). Close the "
+                                     "program that started it, or choose another port in the settings")
+            self.stop()
+            self._cancel.clear()
+        bad = self.problems()
+        if bad:
+            raise LlmServerError("; ".join(bad))
         with self._lock:
-            if self.ready():
-                why = self.mismatch()
-                if not why:
-                    return
-                if not self.running():
-                    raise LlmServerError(f"port {self.port} is used by another llama.cpp server ({why}). Close the "
-                                         "program that started it, or choose another port in the settings")
-                self._lock.release()
-                try:
-                    self.stop()
-                finally:
-                    self._lock.acquire()
-            bad = self.problems()
-            if bad:
-                raise LlmServerError("; ".join(bad))
             if not self.running():
                 log = subprocess.DEVNULL
                 if self.log_dir is not None:
                     self.log_dir.mkdir(parents=True, exist_ok=True)
                     log = open(self.log_dir / "llama-server.log", "ab")    # noqa: SIM115  (kept by the process)
-                self.proc = subprocess.Popen(server_command(self.server, self.model, self.port, self.cpu_moe,
-                                                            self.mmproj),
-                                             stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                             start_new_session=True)
-            end = time.time() + timeout
-            while time.time() < end:
-                if stop():
-                    raise LlmServerError("cancelled")
-                if self.proc is not None and self.proc.poll() is not None:
-                    raise LlmServerError(f"the llama.cpp server stopped while loading (exit {self.proc.returncode}"
-                                         + (f"; see {self.log_dir / 'llama-server.log'}" if self.log_dir else "")
-                                         + ")")
-                if self.ready():
-                    return
-                time.sleep(0.5)
-            raise LlmServerError(f"the llama.cpp server did not load the model within {int(timeout)} s")
+                try:
+                    self.proc = subprocess.Popen(server_command(self.server, self.model, self.port, self.cpu_moe,
+                                                                self.mmproj),
+                                                 stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                                 start_new_session=True)
+                except OSError as e:
+                    raise LlmServerError(f"the llama.cpp server could not be started: {e}") from e
+                finally:
+                    if log is not subprocess.DEVNULL:
+                        log.close()                        # (the process has its own copy)
+            proc = self.proc
+        log_hint = f"; see {self.log_dir / 'llama-server.log'}" if self.log_dir else ""
+        end = time.time() + timeout
+        while time.time() < end:
+            if stop() or self._cancel.is_set():
+                raise LlmServerError("cancelled")
+            if proc is None or proc is not self.proc:
+                raise LlmServerError("the llama.cpp server was stopped while loading")
+            if proc.poll() is not None:
+                raise LlmServerError(f"the llama.cpp server stopped while loading (exit {proc.returncode}{log_hint})")
+            if self.ready():
+                return
+            time.sleep(0.5)
+        self.stop()                                        # (not left holding the RAM)
+        raise LlmServerError(f"the llama.cpp server did not load the model within {int(timeout)} s{log_hint}")
 
     def stop(self) -> bool:
-        """Stop the server this object started (frees its RAM and VRAM). True if one was running."""
+        """Stop the server this object started (frees its RAM and VRAM); a load in progress is cancelled. True if
+        one was running."""
+        self._cancel.set()
         with self._lock:
             p, self.proc = self.proc, None
-            if p is None or p.poll() is not None:
-                return False
+        if p is None or p.poll() is not None:
+            return False
+        try:
+            os.killpg(p.pid, signal.SIGTERM)
+            p.wait(timeout=20)
+        except (OSError, subprocess.TimeoutExpired):
             try:
-                os.killpg(p.pid, signal.SIGTERM)
-                p.wait(timeout=20)
+                os.killpg(p.pid, signal.SIGKILL)
+                p.wait(timeout=10)                       # (the port is free before a restart)
             except (OSError, subprocess.TimeoutExpired):
-                try:
-                    os.killpg(p.pid, signal.SIGKILL)
-                except OSError:
-                    pass
-            return True
+                pass
+        return True
 
     def refine_prompt(self, prompt: str, kind: str, model_file: str | None = None, seed: int = 0,
                       hint: str = "", cast: list[dict] | None = None, temperature: float = 0.5,
@@ -232,26 +252,39 @@ class LlamaServer:
                                             pictures=pictures, cast=cast), seed, temperature, timeout)
 
     def interrupt(self):
-        pass                                          # (a request ends by itself; closing the window drops it)
+        """A load in progress stops waiting (the request of a closed window is not awaited; the server stays)."""
+        self._cancel.set()
 
     def _complete(self, messages: list[dict], seed: int, temperature: float, timeout: float) -> str:
         self.start()
         body = {"messages": messages,
-                "max_tokens": 768, "temperature": float(temperature), "top_k": 64, "top_p": 0.95, "min_p": 0.05,
-                "repeat_penalty": 1.05, "seed": int(seed), "stream": False}
+                "max_tokens": MAX_TOKENS, "temperature": float(temperature), "top_k": 64, "top_p": 0.95,
+                "min_p": 0.05, "repeat_penalty": 1.05, "seed": int(seed), "stream": False,
+                "chat_template_kwargs": {"enable_thinking": False}}     # (a thinking model: the prompt, no essay)
         req = urllib.request.Request(self.url + "/v1/chat/completions", data=json.dumps(body).encode(),
                                      headers={"Content-Type": "application/json"})
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 data = json.loads(r.read().decode("utf-8", "replace"))
         except urllib.error.HTTPError as e:
-            raise LlmServerError(f"the llama.cpp server answered {e.code}: {e.read()[:300]!r}") from e
+            body = e.read()[:2000].decode("utf-8", "replace")
+            try:
+                body = (json.loads(body).get("error") or {}).get("message") or body
+            except (ValueError, AttributeError):
+                pass
+            raise LlmServerError(f"the llama.cpp server answered {e.code}: {body[:300]}") from e
+        except ValueError as e:
+            raise LlmServerError(f"unreadable answer from the llama.cpp server: {e}") from e
         except OSError as e:
             raise LlmServerError(f"the llama.cpp server could not be asked: {e}") from e
         try:
-            text = data["choices"][0]["message"]["content"] or ""
+            choice = data["choices"][0]
+            text = choice["message"]["content"] or ""
         except (KeyError, IndexError, TypeError) as e:
             raise LlmServerError(f"unexpected answer from the llama.cpp server: {str(data)[:300]}") from e
+        if choice.get("finish_reason") == "length":
+            raise LlmServerError(f"the answer was cut off after {MAX_TOKENS} tokens (the model went on too long); "
+                                 "try again, or ask for a shorter prompt")
         text = clean_refined(text)
         if not text:
             raise LlmServerError("the language model gave no answer")
