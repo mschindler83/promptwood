@@ -5292,7 +5292,7 @@ class MainWindow(QMainWindow):
             return gen
 
         dlg = SwapDialog(self, self.project, nid, self.project / node.made["video"], self.face_detector(), pictures,
-                         connect, self.qs, on_start=before, play=lambda p, t: self.preview.open(Path(p), t),
+                         connect, self.qs, on_start=before,
                          source=node.source, h3={
                              "lora": self.find_lora("head_swap"),
                              "turbo": self.find_lora(swap.H3_SWAP_TURBO),

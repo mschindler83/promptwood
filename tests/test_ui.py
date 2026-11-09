@@ -2255,6 +2255,20 @@ def test_replace_a_person_in_a_real_video(app, tmp_path, image, monkeypatch):
         assert server.animated["ref"]["inputs"]["image"] and "dw_pose" in server.animated
         assert "stored for the next try" in dlg.state.text(), dlg.state.text()
         assert len(list((w.project / swap.POSE_CACHE_DIR).glob("*/info.json"))) == 1
+        # the result in this window: before | after, frame by frame (not in the main window's preview)
+        p = dlg.player
+        wait(app, lambda: p.result is not None, timeout=20)
+        assert p.count() == n and len(p.result) == n and p.view.after is not None
+        assert not dlg.show_head.isChecked()                           # the head area off for comparing
+        dlg.b_play.click()
+        assert p.playing() and p.position() == 0
+        p.step(1)                                                      # a step pauses
+        assert not p.playing() and p.position() == 1 and p.time.text().startswith(f"frame 2 / {n}")
+        p.b_fwd.click()
+        assert p.position() == 25
+        p.b_back.click()
+        p.b_prev.click()
+        assert p.position() == 0
         dlg.generate()                                                 # again: DWPose is not run again
         wait(app, lambda: not dlg._busy, timeout=60)
         assert dlg.result is not None and "dw_pose" not in server.animated, dlg.state.text()
@@ -2420,3 +2434,47 @@ def test_find_lora_in_both_lists_and_on_disk(app, win, tmp_path, monkeypatch):
     monkeypatch.setattr(C, "comfy_lora_roots", lambda comfy_dir: [root])
     assert win.find_lora("fresh_lora") == str(root / "new" / "Fresh_LoRA.safetensors")   # added after the scan
     assert win.find_lora("nothing_like_this") is None
+
+
+def test_compare_player_frames_and_divider(app, tmp_path):
+    """The before / after player: every frame of both clips, exact; the divider follows the mouse."""
+    import subprocess
+
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+
+    from video_chain.ui.compare_player import ComparePlayer, store_size
+    assert store_size(832, 480, 107) == (832, 480)                       # small clips at their own size
+    w, h = store_size(1920, 1080, 2000)
+    assert w <= 1280 and 2 * 2000 * w * h * 3 <= 900 * 2**20 and abs(w / h - 16 / 9) < 0.02
+    clips = []
+    for name, colour in (("before", "red"), ("after", "blue")):
+        f = tmp_path / f"{name}.mp4"
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"color={colour}:s=64x36:r=24:d=1",
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p", str(f)], check=True)
+        clips.append(f)
+    p = ComparePlayer()
+    p.resize(640, 420)
+    p.load(clips[0], 24, (64, 36))
+    wait(app, lambda: p.count() == 24, timeout=20)
+    assert p.b_play.isEnabled() and p.view.after is None
+    p.load_result(clips[1])
+    wait(app, lambda: p.result is not None, timeout=20)
+    assert len(p.result) == 24
+    before, after = p.image(5), p.image(5, True)
+    assert before.pixelColor(32, 18).red() > 200 and after.pixelColor(32, 18).blue() > 200
+    p.show()
+    r = p.view.picture_rect()
+    QTest.mouseClick(p.view, Qt.LeftButton, pos=QPoint(int(r.left() + r.width() * 0.25), int(r.center().y())))
+    assert abs(p.view.split - 0.25) < 0.02
+    p.seek(23)
+    p.play()                                                             # at the end: from the start again
+    assert p.position() == 0 and p.playing()
+    wait(app, lambda: not p.playing(), timeout=10)                       # plays through and stops at the end
+    assert p.position() == 23
+    p.load(clips[1], 24, (64, 36))                                       # another clip: the result is gone
+    assert p.result is None and p.count() == 0
+    wait(app, lambda: p.count() == 24, timeout=20)
+    p.stop_loading()
+    p.close()
+    p.deleteLater()

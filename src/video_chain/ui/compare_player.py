@@ -1,0 +1,364 @@
+"""A frame-exact player for two clips of the same length: the original and the result side by side under a
+draggable before / after divider (left of it the original, right of it the result).
+
+Both clips are decoded once, frame by frame (ffmpeg, the clip's own frames: no frame is dropped or doubled), into
+memory at the size they are shown at; stepping and playing then only paint stored frames, so every frame can be
+inspected exactly. The stored size keeps the memory below MEMORY_BUDGET."""
+from __future__ import annotations
+
+import subprocess
+import threading
+from pathlib import Path
+
+from PySide6.QtCore import QObject, QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen
+from PySide6.QtWidgets import QHBoxLayout, QSlider, QToolButton, QVBoxLayout, QWidget
+
+from .theme import icon
+from .widgets import icon_button, label
+
+MEMORY_BUDGET = 900 * 2**20               # bytes for the stored frames of both clips (RGB, 3 bytes a pixel)
+MAX_SIZE = (1280, 720)                    # never stored larger than this (the view is smaller)
+
+
+def store_size(width: int, height: int, frames: int, clips: int = 2) -> tuple[int, int]:
+    """The size frames are stored at: the clip's own size, made smaller to fit MAX_SIZE and MEMORY_BUDGET (even)."""
+    k = min(1.0, MAX_SIZE[0] / max(1, width), MAX_SIZE[1] / max(1, height))
+    per = MEMORY_BUDGET / max(1, frames * clips * 3)               # pixels a frame may have
+    k = min(k, (per / max(1, width * height)) ** 0.5)
+    return max(2, int(width * k) // 2 * 2), max(2, int(height * k) // 2 * 2)
+
+
+def decode(clip: Path, size: tuple[int, int], progress=None, cancelled=None) -> list[bytes]:
+    """Every frame of the clip as RGB bytes at size (in the clip's own frame order and count)."""
+    w, h = size
+    n = w * h * 3
+    proc = subprocess.Popen(["ffmpeg", "-nostdin", "-v", "error", "-i", str(clip), "-map", "0:v:0",
+                             "-fps_mode", "passthrough", "-vf", f"scale={w}:{h}:flags=area", "-f", "rawvideo",
+                             "-pix_fmt", "rgb24", "-"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    frames: list[bytes] = []
+    try:
+        while True:
+            if cancelled is not None and cancelled():
+                proc.kill()
+                break
+            buf = proc.stdout.read(n)
+            if len(buf) < n:
+                break
+            frames.append(buf)
+            if progress is not None:
+                progress(len(frames))
+    finally:
+        proc.stdout.close()
+        err = proc.stderr.read().decode(errors="replace").strip()
+        proc.stderr.close()
+        code = proc.wait()
+    if code and not (cancelled is not None and cancelled()):
+        raise RuntimeError(f"cannot read {Path(clip).name}: {err.splitlines()[-1] if err else code}")
+    return frames
+
+
+class CompareView(QWidget):
+    """Paints a frame (before), or two (before | after) split at a divider the mouse moves."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(480, 270)
+        self.before = QImage()
+        self.after: QImage | None = None
+        self.split = 0.5                                 # the divider, as a share of the picture's width
+        self.text = ""
+        self.setMouseTracking(True)
+
+    def sizeHint(self):
+        return QSize(640, 360)
+
+    def show_frames(self, before: QImage, after: QImage | None = None) -> None:
+        self.before, self.after, self.text = before, after, ""
+        self.setCursor(Qt.SplitHCursor if after is not None else Qt.ArrowCursor)
+        self.update()
+
+    def show_text(self, text: str) -> None:
+        self.before, self.after, self.text = QImage(), None, text
+        self.update()
+
+    def picture_rect(self) -> QRectF:
+        img = self.before
+        if img.isNull():
+            return QRectF()
+        k = min(self.width() / img.width(), self.height() / img.height())
+        w, h = img.width() * k, img.height() * k
+        return QRectF((self.width() - w) / 2, (self.height() - h) / 2, w, h)
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(12, 12, 14))
+        if self.before.isNull():
+            p.setPen(QColor(150, 150, 160))
+            p.drawText(self.rect(), Qt.AlignCenter | Qt.TextWordWrap, self.text)
+            return
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        r = self.picture_rect()
+        if self.after is None or self.after.isNull():
+            p.drawImage(r, self.before)
+            return
+        x = r.left() + r.width() * self.split
+        iw = self.before.width()
+        cut = self.split * iw                            # the divider in the stored frame's pixels
+        p.drawImage(QRectF(r.left(), r.top(), x - r.left(), r.height()), self.before,
+                    QRectF(0, 0, cut, self.before.height()))
+        p.drawImage(QRectF(x, r.top(), r.right() - x, r.height()), self.after,
+                    QRectF(cut * self.after.width() / iw, 0, self.after.width() * (1 - self.split),
+                           self.after.height()))
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(QPen(QColor(255, 255, 255, 230), 2))
+        p.drawLine(QPointF(x, r.top()), QPointF(x, r.bottom()))
+        p.setBrush(QColor(255, 255, 255, 230))
+        p.drawEllipse(QPointF(x, r.center().y()), 7, 7)
+        f = QFont(self.font())
+        f.setBold(True)
+        p.setFont(f)
+        for text, left in (("Before", True), ("After", False)):
+            w = p.fontMetrics().horizontalAdvance(text) + 12
+            box = QRectF(r.left() + 8 if left else r.right() - 8 - w, r.top() + 8, w, 20)
+            if (left and box.right() > x - 4) or (not left and box.left() < x + 4):
+                continue                                 # (no label over the divider)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(0, 0, 0, 150))
+            p.drawRoundedRect(box, 4, 4)
+            p.setPen(QColor(255, 255, 255))
+            p.drawText(box, Qt.AlignCenter, text)
+
+    def _move_split(self, x: float):
+        r = self.picture_rect()
+        if self.after is None or r.width() <= 0:
+            return
+        self.split = min(1.0, max(0.0, (x - r.left()) / r.width()))
+        self.update()
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self._move_split(e.position().x())
+
+    def mouseMoveEvent(self, e):
+        if e.buttons() & Qt.LeftButton:
+            self._move_split(e.position().x())
+
+
+class _Sig(QObject):
+    loaded = Signal(int, object, str, int)          # load number, frames (or None), error, which (0 before, 1 after)
+    progress = Signal(int, int, int)                # load number, which, frames done
+
+
+class ComparePlayer(QWidget):
+    """The original clip (and the result, once there is one) with play / pause, a frame and a second back and on,
+    a frame slider and the before / after divider. overlay(k, image) may draw onto the original's frame k (e.g. the
+    head area; the image is at the stored size, scale() maps clip pixels to it)."""
+
+    frameChanged = Signal(int)
+
+    def __init__(self, parent=None, fps: float = 24.0):
+        super().__init__(parent)
+        self.fps = fps
+        self.overlay = None
+        self.size_ = (0, 0)                              # the stored frame size
+        self.clip_size = (0, 0)
+        self.frames: list[bytes] = []
+        self.result: list[bytes] | None = None
+        self._gen = [0, 0]                               # the current load of the clip / the result
+        self._cancel = threading.Event()
+        self._sig = _Sig()
+        self._sig.loaded.connect(self._loaded)
+        self._sig.progress.connect(self._progress)
+        self.timer = QTimer(self)
+        self.timer.setTimerType(Qt.PreciseTimer)
+        self.timer.timeout.connect(self._tick)
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        self.view = CompareView()
+        v.addWidget(self.view, 1)
+        self.slider = QSlider(Qt.Horizontal)
+        self.slider.setEnabled(False)
+        self.slider.valueChanged.connect(self._show)
+        v.addWidget(self.slider)
+        row = QHBoxLayout()
+        self.b_back = self._button("«", "One second back (Shift+Left)", lambda: self.step(-round(self.fps)))
+        self.b_prev = icon_button("skipb", "One frame back (Left)")
+        self.b_prev.clicked.connect(lambda: self.step(-1))
+        self.b_play = icon_button("play", "Play / pause (Space)")
+        self.b_play.clicked.connect(self.toggle)
+        self.b_next = icon_button("skipf", "One frame on (Right)")
+        self.b_next.clicked.connect(lambda: self.step(1))
+        self.b_fwd = self._button("»", "One second on (Shift+Right)", lambda: self.step(round(self.fps)))
+        for b in (self.b_back, self.b_prev, self.b_play, self.b_next, self.b_fwd):
+            row.addWidget(b)
+        self.time = label("", level="tertiary", type_="mono")
+        row.addSpacing(8)
+        row.addWidget(self.time)
+        row.addStretch(1)
+        self.hint = label("", level="tertiary")
+        row.addWidget(self.hint)
+        v.addLayout(row)
+        self._controls(False)
+        from PySide6.QtGui import QKeySequence, QShortcut
+        for key, fn in (("Space", self.toggle), ("Left", lambda: self.step(-1)), ("Right", lambda: self.step(1)),
+                        ("Shift+Left", lambda: self.step(-round(self.fps))),
+                        ("Shift+Right", lambda: self.step(round(self.fps))), ("Home", lambda: self.seek(0)),
+                        ("End", lambda: self.seek(self.count() - 1))):
+            QShortcut(QKeySequence(key), self, activated=fn, context=Qt.WidgetWithChildrenShortcut)
+
+    @staticmethod
+    def _button(text: str, tip: str, fn) -> QToolButton:
+        b = QToolButton()
+        b.setProperty("role", "iconButton")
+        b.setText(text)
+        b.setToolTip(tip)
+        b.clicked.connect(fn)
+        return b
+
+    def _controls(self, on: bool):
+        for b in (self.b_back, self.b_prev, self.b_play, self.b_next, self.b_fwd):
+            b.setEnabled(on)
+        self.slider.setEnabled(on and self.count() > 1)
+
+    # ---- loading
+    def load(self, clip: Path, frames: int, size: tuple[int, int]) -> None:
+        """The original clip (frames: its frame count, size: its pixel size)."""
+        self.pause()
+        self._cancel.set()
+        self._cancel = threading.Event()
+        self.frames, self.result = [], None
+        self.clip_size = (int(size[0]), int(size[1]))
+        self.size_ = store_size(size[0], size[1], frames)
+        self._controls(False)
+        self.view.show_text("Reading the clip …")
+        self._decode(Path(clip), 0)
+
+    def load_result(self, clip: Path) -> None:
+        """The result (the same frames as the original): shown right of the divider."""
+        self.pause()
+        self.result = None
+        self.hint.setText("Reading the result …")
+        self._decode(Path(clip), 1)
+
+    def _decode(self, clip: Path, which: int):
+        self._gen[which] += 1
+        if not which:
+            self._gen[1] += 1                            # a result of the clip before is not shown
+        tid, size, cancel, sig = self._gen[which], self.size_, self._cancel, self._sig
+
+        def work():
+            try:
+                fr = decode(clip, size, lambda k: sig.progress.emit(tid, which, k) if k % 12 == 0 else None,
+                            cancel.is_set)
+                if not cancel.is_set():
+                    sig.loaded.emit(tid, fr, "", which)
+            except Exception as e:  # noqa: BLE001
+                try:
+                    sig.loaded.emit(tid, None, str(e), which)
+                except RuntimeError:
+                    pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def _progress(self, tid: int, which: int, k: int):
+        if self._gen[which] != tid:
+            return
+        if which:
+            self.hint.setText(f"Reading the result: frame {k}")
+        elif not self.frames:
+            self.view.show_text(f"Reading the clip: frame {k}")
+
+    def _loaded(self, tid: int, frames, error: str, which: int):
+        if self._gen[which] != tid:
+            return                                      # an older clip
+        if frames is None or not frames:
+            if which:
+                self.hint.setText(f"Cannot show the result: {error or 'no frames'}")
+            else:
+                self.view.show_text(f"Cannot show the clip: {error or 'no frames'}")
+            return
+        if which:
+            self.result = frames
+            n = len(self.frames)
+            self.hint.setText("Drag over the picture to move the divider" + (
+                f" (the result has {len(frames)} frames, the clip {n})" if len(frames) != n else ""))
+        else:
+            self.frames = frames
+            self.slider.blockSignals(True)
+            self.slider.setRange(0, max(0, len(frames) - 1))
+            self.slider.setValue(min(self.slider.value(), len(frames) - 1))
+            self.slider.blockSignals(False)
+            self._controls(True)
+        self._show(self.slider.value())
+
+    # ---- frames
+    def count(self) -> int:
+        return len(self.frames)
+
+    def scale(self) -> float:
+        """Clip pixels -> stored pixels."""
+        return self.size_[0] / max(1, self.clip_size[0])
+
+    def image(self, k: int, after: bool = False) -> QImage:
+        src = self.result if after else self.frames
+        if src is None or not 0 <= k < len(src):
+            return QImage()
+        w, h = self.size_
+        return QImage(src[k], w, h, w * 3, QImage.Format_RGB888).copy()
+
+    def position(self) -> int:
+        return self.slider.value()
+
+    def _show(self, k: int):
+        if not self.frames:
+            return
+        before = self.image(k)
+        if self.overlay is not None:
+            before = before.convertToFormat(QImage.Format_ARGB32)
+            self.overlay(k, before)
+        after = self.image(k, True) if self.result is not None else None
+        self.view.show_frames(before, after if after is not None and not after.isNull() else None)
+        n = self.count()
+        self.time.setText(f"frame {k + 1} / {n} · {k / self.fps:.2f} s")
+        self.frameChanged.emit(k)
+
+    def refresh(self):
+        self._show(self.slider.value())
+
+    def seek(self, k: int):
+        if self.frames:
+            self.slider.setValue(max(0, min(self.count() - 1, int(k))))
+
+    def step(self, d: int):
+        self.pause()
+        self.seek(self.position() + d)
+
+    # ---- playing
+    def playing(self) -> bool:
+        return self.timer.isActive()
+
+    def play(self, from_start: bool = False):
+        if not self.frames:
+            return
+        if from_start or self.position() >= self.count() - 1:
+            self.seek(0)
+        self.timer.start(round(1000 / self.fps))
+        self.b_play.setIcon(icon("pause"))
+
+    def pause(self):
+        self.timer.stop()
+        self.b_play.setIcon(icon("play"))
+
+    def toggle(self):
+        self.pause() if self.playing() else self.play()
+
+    def _tick(self):
+        if self.position() >= self.count() - 1:
+            self.pause()
+            return
+        self.slider.setValue(self.position() + 1)
+
+    def stop_loading(self):
+        self.pause()
+        self._cancel.set()

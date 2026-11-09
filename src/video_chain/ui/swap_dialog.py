@@ -15,7 +15,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLineEdit,
-                               QProgressBar, QPushButton, QSlider, QVBoxLayout)
+                               QProgressBar, QPushButton, QVBoxLayout)
 
 from .. import chain, swap
 from ..animate import DEFAULT_PROMPT, SIZES, gen_size, window_count
@@ -23,6 +23,7 @@ from ..animate import DEFAULT_PROMPT, SIZES, gen_size, window_count
 METHODS = (("animate+lock", "Head + face lock (Animate, then face swap)"), ("animate", "Head only (Animate)"),
            ("face", "Face only (face swap, the clip's own motion)"),
            ("h3", "Head swap with H3 (head swap LoRA, the clip as guide)"))
+from .compare_player import ComparePlayer
 from .widgets import FrameTile, guard_wheel, label
 
 
@@ -54,17 +55,17 @@ class _Sig(QObject):
 class SwapDialog(QDialog):
     """clip: the converted clip of the video node; pictures: [(label, path)] offered as the new person;
     connect(progress) -> ComfyAnimator (worker thread); on_start(): before Generate (GUI thread);
-    play(path, title): show a clip. .result: (path, meta, frames) of the clip to use."""
+    .result: (path, meta, frames) of the clip to use; it is played and compared with the clip in the window."""
 
     def __init__(self, parent, project: Path, nid: str, clip: Path, detector: Path | None,
-                 pictures: list[tuple[str, str]], connect, settings=None, on_start=None, play=None,
+                 pictures: list[tuple[str, str]], connect, settings=None, on_start=None,
                  source: dict | None = None, pick=None, groups: list[list[str]] | None = None,
                  h3: dict | None = None):
         super().__init__(parent)
         self.setWindowTitle(f"Replace a person in video #{nid[1:]}")
         self.resize(1180, 720)
         self.project, self.nid, self.clip, self.detector = Path(project), nid, Path(clip), detector
-        self.connect, self.qs, self.on_start, self.play = connect, settings, on_start, play
+        self.connect, self.qs, self.on_start = connect, settings, on_start
         self.source = dict(source or {})          # the video's file and range (the DWPose cache is bound to it)
         self.pick = pick                          # pick(title) -> an image path or None (the app's image picker)
         self.groups = [list(g) for g in groups or []]   # the pictures of each Cast character (the face pass uses all)
@@ -77,7 +78,6 @@ class SwapDialog(QDialog):
         self.animator = None
         self._busy = False
         self._cancel = False
-        self._frames: dict[int, QImage] = {}
         self._tmp = tempfile.TemporaryDirectory(prefix="video-chain-swap-")
         self._sig = _Sig()
         self._sig.found.connect(self._found)
@@ -89,18 +89,18 @@ class SwapDialog(QDialog):
         top = QHBoxLayout(self)
         left = QVBoxLayout()
         left.addWidget(label("The head that is drawn anew", type_="heading"))
-        self.view = FrameTile(640, 360)
-        self.view.clear_frame("Looking for the head …")
-        left.addWidget(self.view)
-        srow = QHBoxLayout()
-        self.slider = QSlider(Qt.Horizontal)
-        self.slider.setEnabled(False)
-        self.slider.valueChanged.connect(self._show_frame)
-        self.frame_text = label("", level="tertiary")
-        srow.addWidget(self.slider, 1)
-        srow.addWidget(self.frame_text)
-        left.addLayout(srow)
+        self.player = ComparePlayer(self)               # the clip; with a result: before | after, frame by frame
+        self.player.overlay = self._draw_head
+        self.player.view.show_text("Looking for the head …")
+        self.slider = self.player.slider
+        left.addWidget(self.player, 1)
         hrow = QHBoxLayout()
+        self.show_head = QCheckBox("Show the head area")
+        self.show_head.setChecked(True)
+        self.show_head.setToolTip("The head area that is drawn anew, on the original (left of the divider)")
+        self.show_head.toggled.connect(lambda *_: self.player.refresh())
+        hrow.addWidget(self.show_head)
+        hrow.addSpacing(12)
         self.head_size = QDoubleSpinBox()
         self.head_size.setRange(0.7, 2.0)
         self.head_size.setSingleStep(0.05)
@@ -200,8 +200,9 @@ class SwapDialog(QDialog):
         self.b_stop = QPushButton("Stop")
         self.b_stop.clicked.connect(self.stop)
         self.b_play = QPushButton("Play result")
-        self.b_play.clicked.connect(lambda: self.result and self.play and
-                                    self.play(self.result[0], f"Video #{nid[1:]}: person replaced"))
+        self.b_play.setToolTip("Play the result here, the original left of the divider (drag it over the "
+                               "picture); step frame by frame with the buttons under it")
+        self.b_play.clicked.connect(self.play_result)
         self.b_use = QPushButton("Use this")
         self.b_use.setToolTip("The video plays this clip from now on (its menu can go back to the original)")
         self.b_use.clicked.connect(self.accept)
@@ -231,11 +232,9 @@ class SwapDialog(QDialog):
             return
         self.heads = {"boxes": [], "found": 0, "frames": n, "size": (w, h), "fps": fps, "track": []}
         self.boxes = []
-        self.slider.setRange(0, max(0, n - 1))
-        self.slider.setEnabled(n > 1)
+        self.player.load(self.clip, n, (w, h))
         self.found_text.setText(why + " Face only and the H3 head swap work without it; the Animate methods need "
                                 "the head.")
-        self._show_frame(self.slider.value())
         self._update()
 
     def _find(self):
@@ -270,15 +269,13 @@ class SwapDialog(QDialog):
         self.heads = heads
         self.boxes = heads["boxes"]
         n = heads["frames"]
-        self.slider.setRange(0, max(0, n - 1))
-        self.slider.setEnabled(n > 1)
+        self.player.load(self.clip, n, heads["size"])
         missing = n - heads["found"]
         self.found_text.setText(
             f"The face was found in {heads['found']} of {n} frames"
             + (f"; in the other {missing} the head is placed between the frames around them" if missing else "")
             + f". The clip is made in {window_count(n)} part{'s' if window_count(n) != 1 else ''} of up to 77 "
               "frames.")
-        self._show_frame(self.slider.value())
         self._update()
 
     def _resize_heads(self, *_):
@@ -287,34 +284,22 @@ class SwapDialog(QDialog):
         if self.heads is not None:
             w, h = self.heads["size"]
             self.boxes = swap.head_boxes(self.heads["track"], w, h, self.head_size.value())
-            self._show_frame(self.slider.value())
-
-    def _frame(self, k: int) -> QImage:
-        if k not in self._frames:
-            png = Path(self._tmp.name) / f"f{k}.png"
-            try:
-                chain.frame_at(self.clip, k, png)
-                self._frames[k] = QImage(str(png))
-            except Exception:  # noqa: BLE001
-                self._frames[k] = QImage()
-        return self._frames[k]
-
-    def _show_frame(self, k: int):
-        if self.heads is None:
+    
+    def _draw_head(self, k: int, img: QImage):
+        """The head area of frame k onto the original's picture (stored size)."""
+        if not self.show_head.isChecked() or not 0 <= k < len(self.boxes):
             return
-        img = self._frame(k).convertToFormat(QImage.Format_ARGB32)
-        if img.isNull():
-            return
-        if 0 <= k < len(self.boxes):
-            x1, y1, x2, y2 = self.boxes[k]
-            p = QPainter(img)
-            p.setRenderHint(QPainter.Antialiasing)
-            p.setPen(QPen(QColor(255, 60, 60), max(2, img.width() // 300)))
-            p.setBrush(QColor(255, 40, 40, 70))
-            p.drawEllipse(QRectF(x1, y1, x2 - x1, y2 - y1))
-            p.end()
-        self.view.set_image(img)
-        self.frame_text.setText(f"frame {k + 1} / {self.heads['frames']}")
+        x1, y1, x2, y2 = (v * self.player.scale() for v in self.boxes[k])
+        p = QPainter(img)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(QPen(QColor(255, 60, 60), max(2, img.width() // 300)))
+        p.setBrush(QColor(255, 40, 40, 70))
+        p.drawEllipse(QRectF(x1, y1, x2 - x1, y2 - y1))
+        p.end()
+
+    def play_result(self):
+        if self.result is not None:
+            self.player.play(from_start=True)
 
     # ---- the new person
     def _ref_picked(self, i: int):
@@ -424,7 +409,7 @@ class SwapDialog(QDialog):
         self.b_gen.setEnabled(ready)
         self.b_gen.setToolTip("" if ready else "Wait for the head to be found and choose the new person's picture")
         self.b_stop.setEnabled(self._busy)
-        self.b_play.setEnabled(self.result is not None and self.play is not None and not self._busy)
+        self.b_play.setEnabled(self.result is not None and not self._busy)
         self.b_use.setEnabled(self.result is not None and not self._busy)
         for w in (self.head_size, self.ref_combo, self.size, self.prompt, self.method, self.body, self.sharpen):
             w.setEnabled(not self._busy)
@@ -616,16 +601,14 @@ class SwapDialog(QDialog):
                            else "")
                         + ("; its motion is stored for the next try" if meta.get("pose_made") else "")
                         + (", the face locked with HyperSwap" if meta.get("lock") else "") + ".")
-            self.state.setText(text + " Play it, then “Use this” to put it into the video.")
-            first = Path(self._tmp.name) / "result.png"
-            try:
-                chain.frame_at(out, min(self.slider.value(), n - 1), first)
-                self.view.set_image(QImage(str(first)))
-            except Exception:  # noqa: BLE001
-                pass
+            self.state.setText(text + " Compare it frame by frame on the left (drag the divider), then “Use "
+                               "this” to put it into the video.")
+            self.show_head.setChecked(False)
+            self.player.load_result(out)
         self._update()
 
     def done(self, r):
         if self._busy:
             self.stop()
+        self.player.stop_loading()
         super().done(r)
