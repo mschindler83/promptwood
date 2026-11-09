@@ -5202,6 +5202,24 @@ class MainWindow(QMainWindow):
     def _exec_menu(self, menu: QMenu, pos):
         return menu.exec(pos)
 
+    def find_lora(self, key: str) -> str | None:
+        """A LoRA file whose name contains key: among the LoRAs found (H3 and turbo ones), else straight in ComfyUI's
+        LoRA folders (a file added after the last scan)."""
+        key = key.lower()
+        for p, name in self.h3_loras + self.turbo_loras:
+            if key in name.lower():
+                return p
+        comfy_dir = os.path.expanduser(self.comfy_dir.text().strip()) or None
+        try:
+            from ..comfy import comfy_lora_roots
+            for root in comfy_lora_roots(comfy_dir):
+                for f in sorted(Path(root).rglob("*.safetensors")):
+                    if key in f.name.lower():
+                        return str(f)
+        except Exception:  # noqa: BLE001  (no ComfyUI folder set, a folder offline)
+            pass
+        return None
+
     # ---- replace a person in a real video (Wan 2.2 Animate)
     def replace_person(self, nid: str, dialog: bool = True):
         """The swap window for a video node (its converted clip). dialog=False: returned without exec (tests)."""
@@ -5254,9 +5272,8 @@ class MainWindow(QMainWindow):
         dlg = SwapDialog(self, self.project, nid, self.project / node.made["video"], self.face_detector(), pictures,
                          connect, self.qs, on_start=before, play=lambda p, t: self.preview.open(Path(p), t),
                          source=node.source, h3={
-                             "lora": next((pth for pth, name in self.h3_loras if "head_swap" in name.lower()), None),
-                             "turbo": next((pth for pth, name in self.h3_loras
-                                            if swap.H3_SWAP_TURBO in name.lower()), None),
+                             "lora": self.find_lora("head_swap"),
+                             "turbo": self.find_lora(swap.H3_SWAP_TURBO),
                              "settings": T.current_settings(self.project, self.tree.options, self.tree),
                              "connect": connect_h3, "describe": describe_face},
                          groups=[[str(self.project / rel) for rel in c["images"]] for c in T.cast_of(self.tree)],

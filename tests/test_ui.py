@@ -2383,3 +2383,19 @@ def test_image_picker_shows_the_projects_pictures(app, win, tmp_path, image):
         d._pool.shutdown(wait=True)
         d.deleteLater()
     app.processEvents()
+
+
+def test_find_lora_in_both_lists_and_on_disk(app, win, tmp_path, monkeypatch):
+    """A LoRA is found among the H3 and the turbo LoRAs (a turbo LoRA is listed as one), else in ComfyUI's folders."""
+    from video_chain import comfy as C
+    win.h3_loras = [("/l/MiniMax H3/minimax_h3_head_swap_v1.0_r32.safetensors", "MiniMax H3/minimax_h3_head_swap_v1.0_r32")]
+    win.turbo_loras = [("/l/MiniMax H3/minimax_h3_dmd_ref2va_8step_turbo_pruned.safetensors",
+                        "MiniMax H3/minimax_h3_dmd_ref2va_8step_turbo_pruned")]
+    assert win.find_lora("head_swap").endswith("head_swap_v1.0_r32.safetensors")
+    assert win.find_lora("minimax_h3_dmd_ref2va_8step_turbo_pruned").endswith("turbo_pruned.safetensors")
+    root = tmp_path / "loras"
+    (root / "new").mkdir(parents=True)
+    (root / "new" / "Fresh_LoRA.safetensors").write_bytes(b"x")
+    monkeypatch.setattr(C, "comfy_lora_roots", lambda comfy_dir: [root])
+    assert win.find_lora("fresh_lora") == str(root / "new" / "Fresh_LoRA.safetensors")   # added after the scan
+    assert win.find_lora("nothing_like_this") is None
