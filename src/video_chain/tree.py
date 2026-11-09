@@ -1191,6 +1191,29 @@ def missing_end_images(project: Path, tree: Tree, todo: list[str]) -> list[str]:
             and not (Path(project) / tree.nodes[nid].end_image).is_file()]
 
 
+def prepared_start(project: Path, width: int, height: int) -> Path | None:
+    """The start image prepared for a canvas (chain.prepare_image): start_<w>x<h>.png in the project, made again
+    when start.png changes. None without a start image."""
+    src = Path(project) / START_FILE
+    if not src.is_file():
+        return None
+    dst = Path(project) / f"start_{int(width)}x{int(height)}.png"
+    rec = dst.with_suffix(".json")
+    sig = chain.file_signature(src)
+    try:
+        if dst.is_file() and json.loads(rec.read_text(encoding="utf-8")).get("source") == sig:
+            return dst
+    except (OSError, ValueError):
+        pass
+    for old in Path(project).glob("start_*x*.png"):        # (one prepared copy at a time)
+        if old != dst:
+            old.unlink(missing_ok=True)
+            old.with_suffix(".json").unlink(missing_ok=True)
+    chain.prepare_image(src, dst, width, height)
+    rec.write_text(json.dumps({"source": sig}), encoding="utf-8")
+    return dst
+
+
 def set_start_image(project: Path, image: Path, tree: Tree) -> None:
     chain.to_png(Path(image), Path(project) / START_FILE)
     tree.image = str(Path(image).resolve())
@@ -2158,6 +2181,11 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
             start = checker.start_frame(node)
             log(f"[{k}/{len(todo)}] {nid}: generating (seed {node.seed}) from "
                 f"{start.name if start else 'nothing (no start frame)'}")
+            send = start                                 # what H3 gets: start.png prepared for the canvas
+            if start is not None and start == project / START_FILE:   # (the record keeps start.png's hash)
+                base = checker.base() or {}
+                if base.get("width") and base.get("height"):
+                    send = prepared_start(project, base["width"], base["height"])
             emit({"e": "node", "id": nid, "state": "generating", "k": k, "n": len(todo)})
             # a new clip gets new file names: nothing is overwritten, a failed or stopped generation keeps the
             # previous clip and its record, and a still-open old file (SMB) does not stop anything
@@ -2191,7 +2219,7 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
                                      fill=ss.get("mode") == "track")
                         if not ss.get("overlay"):  # the model makes the picture to it (lip sync)
                             call["audio_paths"] = list(call.get("audio_paths") or []) + [str(sound)]
-                    generator.generate(model_prompt(tree.options, node, settings), start, new_video, new_frame,
+                    generator.generate(model_prompt(tree.options, node, settings), send, new_video, new_frame,
                                        node.seed, settings=call)
                     if sound is not None and new_video.exists():
                         chain.replace_audio(new_video, sound)    # exactly the recorded speech, not a remake
@@ -2340,8 +2368,9 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
             if pin and not single and not node.is_video and method == "refine":
                 i = path.index(node)
                 if i == 0:
-                    start = project / START_FILE
-                    first = start if start.is_file() else None
+                    s0 = node.made.get("settings") or {}
+                    first = prepared_start(project, *refine_size(int(s0["width"]), int(s0["height"]), size)) \
+                        if s0.get("width") and s0.get("height") else None
                 else:
                     before = path[i - 1]
                     n_before = made_frames(before) or _clip_frames(project, before)

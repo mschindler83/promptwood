@@ -2716,10 +2716,29 @@ def test_export_shows_the_enlargement_and_size_1024(app, win, tmp_path, image):
     assert dlg.scale_note.isHidden()                                         # 1.9×: no note
     dlg.size.setCurrentIndex(2)
     assert not dlg.scale_note.isHidden() and "2.5× the draft" in dlg.scale_note.text()
-    assert "1080p stays within 2× here" in dlg.scale_note.text() and "Size 1024" in dlg.scale_note.text()
+    assert "1080p stays within 2× here" in dlg.scale_note.text() and "H3's native size" in dlg.scale_note.text()
     dlg.reject()
     win.open_project(tmp_path / "proj")
-    k = win.resolution.findData(1024)
-    assert k >= 0
     from video_chain import chain
-    assert chain.canvas_size(1600, 2000, 1024) == (896, 1120) and chain.canvas_size(1920, 1080, 1024) == (1344, 768)
+    k = win.resolution.findData(chain.H3_NATIVE)
+    assert k >= 0 and "H3's native size" in win.resolution.itemText(k)
+
+
+def test_buttons_open_their_windows(app, win, tmp_path, image, monkeypatch):
+    """Real clicks (a button's clicked passes checked=False: it must not land in an optional parameter)."""
+    from video_chain.ui import main_window as M
+    ids = new_project(win, tmp_path, image, ("a",))
+    run_and_wait(app, win, win.generate_path)
+    wait(app, lambda: not win._joins, timeout=30)
+    opened = []
+    monkeypatch.setattr(M.ExportDialog, "exec", lambda dlg: opened.append(dlg.windowTitle()) or 0)
+    win.b_export.click()                                                    # Export path…: the path's dialog
+    assert opened == ["Export path"], (opened, win.status.text())
+    win.select(ids[0])
+    flush(app, win)
+    win.b_export_clip.click()
+    assert opened[-1] == f"Export clip #{ids[0][1:]}"
+    seen = []
+    monkeypatch.setattr(win, "edit_image", lambda **kw: seen.append(kw))
+    win.b_ref_create.click()                                                # Cast → Create…: the window opens
+    assert seen and seen[0]["mode"] == "create" and seen[0]["dialog"] is True

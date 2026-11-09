@@ -64,7 +64,7 @@ def test_generate_a_path_makes_only_that_path(project):
     gen = run(project, [c.id])
     assert [x["prompt"] for x in gen.calls] == ["a", "b1", "c"]
     starts = [x["start"] for x in gen.calls]
-    assert starts[0] == "start.png" and starts[1].startswith(f"{a.id}_") and starts[2].startswith(f"{b1.id}_")
+    assert starts[0] == "start_672x384.png" and starts[1].startswith(f"{a.id}_") and starts[2].startswith(f"{b1.id}_")
     assert statuses(project) == {"a": "done", "b1": "done", "c": "done", "b2": "new"}
     gen2 = run(project, [b2.id])                                        # the branch reuses a
     assert [x["prompt"] for x in gen2.calls] == ["b2"] and gen2.calls[0]["start"].startswith(f"{a.id}_")
@@ -771,7 +771,7 @@ def test_export_a_path_refined(project, tmp_path):
     T.refine_path(gen, project, b1.id, "2k", out, log=lambda _m: None)
     assert [r["prompt"] for r in gen.refines] == ["cinematic, a", "cinematic, b1"]
     # pinned: the first clip at the start image, the next at the refined hand-over frame of the clip before
-    assert gen.refines[0]["first"] == T.START_FILE and gen.refines[1]["first"] == f"{b1.id}_first.png"
+    assert gen.refines[0]["first"] == "start_2528x1440.png" and gen.refines[1]["first"] == f"{b1.id}_first.png"
     t = T.load(project)
     w, h = gen.refines[0]["size"]
     info = chain.probe(out)
@@ -1140,3 +1140,45 @@ def test_camera_move_is_recorded_and_sent_to_the_model(project):
     t.nodes[a.id].overrides = {}
     T.save(project, t)
     assert "camera" not in T.Checker(project, T.load(project)).settings(a.id)
+
+
+def test_h3_native_canvas():
+    """ComfyUI's H3 rule (adapt_canvas): short edge 768, area at most 768 x 1344, multiples of 32."""
+    assert chain.h3_canvas(1920, 1080) == (1344, 768) and chain.h3_canvas(1080, 1920) == (768, 1344)
+    assert chain.h3_canvas(1000, 1000) == (768, 768) and chain.h3_canvas(1600, 2000) == (768, 960)
+    assert chain.h3_canvas(2560, 1080) == (1568, 672)                       # 21:9: capped, then rounded (as ComfyUI)
+    assert chain.canvas_size(1600, 2000, chain.H3_NATIVE) == (768, 960)    # the size setting "768p native"
+    assert chain.canvas_size(1920, 1080, 512) == (672, 384)                # (the area rule as before)
+
+
+def test_start_image_prepared_for_h3(project, tmp_path):
+    """Cut to the canvas's exact ratio (not stretched), Lanczos to the exact size, transparency on grey, EXIF
+    rotation applied; kept as start_<w>x<h>.png until start.png changes; the clip records start.png."""
+    from PIL import Image
+    src = tmp_path / "wide.png"                                           # 2:1, red | green | blue thirds,
+    im = Image.new("RGBA", (900, 450), (0, 0, 0, 0))                        # a transparent band at the top
+    for i, c in enumerate(((255, 0, 0), (0, 255, 0), (0, 0, 255))):
+        im.paste(c + (255,), (300 * i, 60, 300 * (i + 1), 450))
+    im.save(src)
+    out = tmp_path / "p.png"
+    chain.prepare_image(src, out, 672, 384)                               # 1.75: the sides are cut, not squeezed
+    p = Image.open(out)
+    assert p.size == (672, 384) and p.mode == "RGB"
+    assert p.getpixel((5, 300))[0] > 200 and p.getpixel((336, 300))[1] > 200 and p.getpixel((666, 300))[2] > 200
+    assert p.getpixel((336, 5)) == (128, 128, 128)                          # transparent -> neutral grey
+    third = sum(1 for x in range(672) if p.getpixel((x, 300))[1] > 200)
+    assert 672 / 3 * 1.05 < third                                            # the green middle got wider: cut sides
+    rot = tmp_path / "rot.jpg"                                             # EXIF "rotate 90": a portrait photo
+    exif = Image.Exif(); exif[0x0112] = 6
+    Image.new("RGB", (400, 200), (200, 50, 50)).save(rot, exif=exif)
+    chain.prepare_image(rot, out, 384, 672)
+    assert Image.open(out).size == (384, 672)
+    # in a project: made once per canvas, again when start.png changes
+    a = T.prepared_start(project, 672, 384)
+    assert a.name == "start_672x384.png" and T.prepared_start(project, 672, 384) == a
+    stamp = a.stat().st_mtime_ns
+    Image.new("RGB", (96, 54), (10, 200, 10)).save(project / T.START_FILE)
+    b = T.prepared_start(project, 672, 384)
+    assert b.stat().st_mtime_ns != stamp and Image.open(b).getpixel((300, 200))[1] > 150
+    T.prepared_start(project, 1344, 768)
+    assert sorted(f.name for f in project.glob("start_*x*.png")) == ["start_1344x768.png"]   # one at a time

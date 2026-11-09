@@ -431,7 +431,7 @@ class ExportDialog(QDialog):
         self.scale_note.setText(
             f"{factor:.1f}× the draft: above about 2× SeedVR2 invents texture that shimmers in motion (measured: "
             "+29 % in a pan at 2.5× against 1.9×). " + ("1080p stays within 2× here. " if calmer else "")
-            + "Larger drafts help: Clips → Size 1024." if factor > 2.05 else "")
+            + "Larger drafts help: Clips → Size \u201c768p — H3's native size\u201d." if factor > 2.05 else "")
         self.scale_note.setVisible(factor > 2.05)
 
     def _choose(self):
@@ -1454,7 +1454,7 @@ class MainWindow(QMainWindow):
         self.b_ref_create = QPushButton("Create…")
         self.b_ref_create.setToolTip("Create a face picture with AI (the Create image window); there “Add as face "
                                      "reference” adds a result to the selected character")
-        self.b_ref_create.clicked.connect(self.create_reference)
+        self.b_ref_create.clicked.connect(lambda: self.create_reference())   # (clicked passes checked=False)
         self.b_ref_start = QPushButton("Start image")
         self.b_ref_start.clicked.connect(self._reference_from_start)
         self.b_ref_clip = QPushButton("Selected clip")
@@ -1595,7 +1595,7 @@ class MainWindow(QMainWindow):
         c.addRow("Length", self.frames)
         self.resolution = QComboBox()
         for r, txt in ((384, "384 (fast draft)"), (512, "512 (like the training)"), (640, "640"), (768, "768"),
-                       (1024, "1024 (drafts for 2K: 16:9 = 1344×768; slower, Veda helps)")):
+                       (chain.H3_NATIVE, "768p — H3's native size (16:9 = 1344×768; slower, Veda helps)")):
             self.resolution.addItem(txt, r)
         self.resolution.setCurrentIndex(1)
         self.resolution.setToolTip("About this many pixels squared, in the start image's aspect ratio")
@@ -1898,7 +1898,7 @@ class MainWindow(QMainWindow):
         self.b_play_film.clicked.connect(lambda: self.join_film("play"))
         self.b_export = QPushButton("Export path…")
         self.b_export.setToolTip("Save the selected path as one video")
-        self.b_export.clicked.connect(self.export_path)
+        self.b_export.clicked.connect(lambda: self.export_path())          # (clicked passes checked=False)
         self.b_export_clip = QPushButton("Export clip…")
         self.b_export_clip.setToolTip("Save the clip in the inspector on its own (as made, or upscaled)")
         self.b_export_clip.clicked.connect(lambda: self.focus and self.export_path(self.focus))
@@ -3919,7 +3919,9 @@ class MainWindow(QMainWindow):
             return
         vw, vh = chain.canvas_size(w, h, self.resolution.currentData())
         r = (w / h) / (vw / vh)
-        note = "" if 0.97 < r < 1.03 else " (ratio outside 2:5 … 5:2, it gets stretched)"
+        note = "" if 0.97 < r < 1.03 else " (ratio outside 2:5 … 5:2: its edges are cut off to fit)"
+        if w < vw or h < vh:
+            note += f" · smaller than the video: the first frame starts soft (best: at least {vw}×{vh})"
         name = Path(self.tree.image).name if self.tree and self.tree.image else T.START_FILE
         self._canvas = (vw, vh)
         self.size_info.setText(f"{name}: {w}×{h} → {vw}×{vh} video{note}" + self._veda_note(vw, vh))

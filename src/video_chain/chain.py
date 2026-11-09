@@ -75,6 +75,20 @@ def read_prompts(path: Path) -> list[str]:
     return prompts
 
 
+H3_NATIVE = 1024          # the size setting for H3's own canvas rule (h3_canvas), instead of an area
+
+
+def h3_canvas(width: int, height: int) -> tuple[int, int]:
+    """MiniMax H3's native canvas for an aspect ratio, as ComfyUI's H3 nodes compute it (adapt_canvas): the short
+    edge 768, the area at most 768 x 1344, each side rounded to 32 (16:9 -> 1344x768, 4:5 -> 768x960)."""
+    ratio = min(MAX_RATIO, max(1 / MAX_RATIO, width / height))
+    w, h = (768 * ratio, 768) if ratio >= 1 else (768, 768 / ratio)
+    if w * h > 768 * 1344:
+        k = math.sqrt(768 * 1344 / (w * h))
+        w, h = w * k, h * k
+    return max(32, round(w / 32) * 32), max(32, round(h / 32) * 32)
+
+
 def canvas_size(width: int, height: int, resolution: int = 512, divisibility: int = DIVISIBILITY) -> tuple[int, int]:
     """Video size for a start image: about resolution² pixels, the image's aspect ratio (clamped to 2:5 … 5:2),
     both sides a multiple of 32. Same rule as ai-toolkit's training buckets, so the clips match the LoRA's
@@ -83,6 +97,8 @@ def canvas_size(width: int, height: int, resolution: int = 512, divisibility: in
     H3 stretches the start image onto the canvas, so a canvas with the image's own ratio keeps it undistorted."""
     if width <= 0 or height <= 0:
         raise ValueError("image size must be positive")
+    if int(resolution) == H3_NATIVE and divisibility == DIVISIBILITY:
+        return h3_canvas(width, height)
     ratio = min(MAX_RATIO, max(1 / MAX_RATIO, width / height))
     w = math.sqrt(resolution * resolution * ratio)
     h = w / ratio
@@ -138,6 +154,27 @@ def last_frame(video: Path, png: Path) -> None:
           str(png)])
     if not Path(png).is_file():
         raise RuntimeError(f"could not read the last frame of {Path(video).name}")
+
+
+START_BACKGROUND = "0x808080"   # what transparent parts of a start image become (H3 drops the alpha channel)
+
+
+def prepare_image(src: Path, dst: Path, width: int, height: int) -> None:
+    """A start image exactly as H3 takes it best: cut from the centre to the canvas's exact aspect ratio (H3 would
+    stretch it), scaled once with Lanczos in RGB to width x height, transparent parts on neutral grey. The image's
+    own EXIF rotation is applied by ffmpeg when it reads it. Written under a temporary name first."""
+    dst = Path(dst)
+    r = int(width) / int(height)
+    tmp = dst.with_name(dst.stem + ".part.png")
+    graph = (f"[0:v]crop=w='min(iw,ih*{r:.8f})':h='min(ih,iw/{r:.8f})',"
+             f"scale={int(width)}:{int(height)}:flags=lanczos+accurate_rnd+full_chroma_int,format=rgba[fg];"
+             f"color=c={START_BACKGROUND}:s={int(width)}x{int(height)}:d=1,format=rgba[bg];"
+             f"[bg][fg]overlay=shortest=1,format=rgb24")
+    try:
+        _run(["ffmpeg", "-v", "error", "-y", "-i", str(src), "-filter_complex", graph, "-frames:v", "1", str(tmp)])
+        tmp.replace(dst)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def to_png(image: Path, png: Path, crop: tuple[int, int, int, int] | None = None) -> None:
