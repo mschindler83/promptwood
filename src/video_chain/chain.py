@@ -128,6 +128,29 @@ def _run(cmd: list[str]) -> str:
     return r.stdout
 
 
+CUT_SIZE = (32, 18)                 # frames are compared this small (grey): motion averages out, a cut does not
+CUT_RATIO, CUT_FLOOR = 8.0, 10.0    # a cut: the change is this many times the clip's usual change, and this big
+
+
+def hard_cuts(video: Path) -> list[int]:
+    """Frames (0-based) where a clip jumps to another picture instead of moving there: the change from the frame
+    before is many times the clip's typical frame-to-frame change and large in itself. [] when it cannot be read."""
+    w, h = CUT_SIZE
+    try:
+        raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(video), "-map", "0:v:0", "-vf",
+                              f"scale={w}:{h}:flags=area,format=gray", "-f", "rawvideo", "-"],
+                             capture_output=True, timeout=300, check=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    n = w * h
+    frames = [raw[i:i + n] for i in range(0, len(raw) - n + 1, n)]
+    diffs = [sum(abs(a - b) for a, b in zip(frames[i], frames[i - 1])) / n for i in range(1, len(frames))]
+    if len(diffs) < 3:
+        return []
+    usual = sorted(diffs)[len(diffs) // 2]
+    return [i + 1 for i, d in enumerate(diffs) if d >= CUT_FLOOR and d >= CUT_RATIO * max(usual, 0.5)]
+
+
 def probe(path: Path) -> dict:
     out = _run(["ffprobe", "-v", "error", "-count_frames", "-print_format", "json", "-show_streams", str(path)])
     streams = json.loads(out).get("streams") or []

@@ -136,6 +136,12 @@ def prepare_job(project: Path, targets: list[str]) -> dict:
     no_end = treemod.missing_end_images(project, tree, todo)
     if no_end:
         raise JobError(f"the end image of clip #{no_end[0][1:]} is missing")
+    no_key = treemod.missing_keyframes(project, tree, todo)
+    if no_key:
+        raise JobError(f"a keyframe picture of clip #{no_key[0][1:]} is missing")
+    problem = treemod.keyframe_problem(tree, checker, todo)
+    if problem:
+        raise JobError(problem)
     ai_todo = [nid for nid in todo if not tree.nodes[nid].is_video]     # what needs the model
     # which H3 models the clips use: the reference one (face references or a sound) and/or the normal one
     ref_kinds = sorted({treemod.uses_ref_model(checker.settings(nid) or {}) for nid in ai_todo})

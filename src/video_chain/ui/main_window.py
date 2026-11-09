@@ -21,7 +21,7 @@ import urllib.request
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QSettings, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QIcon, QImage, QKeySequence, QPixmap, QShortcut
+from PySide6.QtGui import QCursor, QDesktopServices, QIcon, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QInputDialog, QLabel,
                                QFrame, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu,
@@ -38,6 +38,7 @@ from ..comfy import REF_HINT
 from .graph import START, GraphView, NodeInfo
 from .image_picker import pick_image
 from .clip_dialogs import CompareDialog, HandoverDialog, SplitDialog, VideoFrameDialog
+from .keyframe_strip import KeyframeStrip
 from .lora_stack import LORA_MAX, LORA_MIN, LoraStack, fill_lora_combo, lora_label, lora_path
 from .swap_dialog import SwapDialog
 from .mentions import MentionHelper
@@ -518,6 +519,7 @@ class PromptCard(QFrame):
     chooseLora = Signal(str)
     lora_picked = Signal(str, str)             # node id, LoRA path chosen in the picker
     action = Signal(str, str)                  # action, node id
+    keyframe = Signal(str, str, object)        # keyframe action, node id, {"index", "at"}
     play = Signal(str)
 
     def __init__(self, node: T.Node, parent=None, names=lambda: []):
@@ -709,6 +711,25 @@ class PromptCard(QFrame):
         erow.addWidget(self.b_end_ai)
         erow.addWidget(self.b_end_clear)
         link.addRow("End", erow)
+        kbox = QVBoxLayout()
+        kbox.setSpacing(2)
+        krow = QHBoxLayout()
+        krow.setSpacing(6)
+        self.keys = KeyframeStrip()
+        self.keys.addAt.connect(self._add_key_menu)
+        self.keys.moved.connect(lambda i, at: self.keyframe.emit("move", self.nid, {"index": i, "at": at}))
+        self.keys.wanted.connect(lambda act, i: self.keyframe.emit(act, self.nid, {"index": i}))
+        self.b_key = icon_button("plus", "Add a middle keyframe: a picture the clip passes through at a moment "
+                                         "(or click the strip where it should be)")
+        self.b_key.clicked.connect(lambda: self._add_key_menu(None))
+        krow.addWidget(self.keys, 1)
+        krow.addWidget(self.b_key)
+        kbox.addLayout(krow)
+        self.key_warn = label("", level="secondary")
+        self.key_warn.setWordWrap(True)
+        self.key_warn.hide()
+        kbox.addWidget(self.key_warn)
+        link.addRow("Keyframes", kbox)
         hrow = QHBoxLayout()
         hrow.setSpacing(6)
         self.hand_text = label("last frame", level="secondary")
@@ -998,8 +1019,35 @@ class PromptCard(QFrame):
                               "nothing to carry over" + (" — this setting has no effect; set it back to "
                                                          "'last frame only'" if has else ""))
 
+    def _add_key_menu(self, at: float | None):
+        """Where the new keyframe's picture comes from (at: the moment clicked; None: the biggest free gap)."""
+        if at is None:
+            times = [0.0] + [it["at"] for it in self.keys.items] + [self.keys.duration]
+            gap = max(range(len(times) - 1), key=lambda i: times[i + 1] - times[i])
+            at = self.keys.at_of(self.keys.x_of((times[gap] + times[gap + 1]) / 2))
+        m = QMenu(self)
+        acts = {m.addAction(f"A picture at {at:.2f} s…"): "add", m.addAction("A frame of a video…"): "add_video"}
+        if self.keys.made:
+            acts[m.addAction("This clip's frame at that moment (keep it, re-roll the rest)…")] = "add_moment"
+        a = self._exec_menu(m)
+        if a in acts:
+            self.keyframe.emit(acts[a], self.nid, {"at": at})
+
+    def _exec_menu(self, m):
+        return m.exec(QCursor.pos())
+
+    def set_keyframes(self, duration: float, items: list[dict], cuts: list[float], made: bool):
+        self.keys.set_data(duration, items, cuts, made)
+        if cuts:
+            self.key_warn.setText("⚠ The clip cuts at " + ", ".join(f"{c:.2f} s" for c in cuts) +
+                                  ": a keyframe (or the end image) is probably too far from what comes before it "
+                                  "— move it later, or use a picture closer to the scene.")
+        self.key_warn.setVisible(bool(cuts))
+
     def _enable_end(self):
         on = not self.edit.isReadOnly()
+        self.keys.setEnabled(on)
+        self.b_key.setEnabled(on)
         self.b_end.setEnabled(on and self._end_free)
         self.b_end_video.setEnabled(on and self._end_free)
         self.b_end_ai.setEnabled(on and self._end_free)
@@ -4332,6 +4380,10 @@ class MainWindow(QMainWindow):
             parts.append(f"carry-over {ov['guide']}")
         if T.end_image_used(self.tree, n):
             parts.append("end image")
+        if n.keyframes:
+            parts.append(f"{len(n.keyframes)} keyframe{'s' if len(n.keyframes) != 1 else ''}")
+        if (n.made or {}).get("cuts"):
+            parts.append("⚠ cuts")
         k = T.handover_index(self.tree, n)
         if k is not None:
             parts.append(f"hands over at {k / 24:.1f} s")
@@ -4470,6 +4522,7 @@ class MainWindow(QMainWindow):
             card.set_choices(int(self.tree.options.get("frames", 73)), int(self.tree.options.get("steps", 28)),
                              self.known_loras())
             card.action.connect(self.node_action)
+            card.keyframe.connect(self.keyframe_action)
             card.play.connect(self._play_node)
             self._fit_card(card)
             self.card_stack.addWidget(card)
@@ -4656,6 +4709,12 @@ class MainWindow(QMainWindow):
                     card.set_end(end, vc.id, self._pixmap(self.project / vc.made["first"]) if vc.made else None)
                 else:
                     card.set_end(end, None, self._pixmap(end) if end is not None and end.is_file() else None)
+                card.set_keyframes(T.clip_length(self.tree, n) / chain.FPS,
+                                   [{"at": k["at"], "pixmap": self._pixmap(self.project / k["image"]),
+                                     "note": k["note"], "ok": (self.project / k["image"]).is_file()}
+                                    for k in n.keyframes],
+                                   [c / chain.FPS for c in (n.made or {}).get("cuts") or []],
+                                   bool(n.made and (self.project / n.made["video"]).is_file()))
             card.set_state(st, self._pixmap(self._node_frame(n)), step)
             why = self.why_of.get(n.id) if st == "changed" else ""
             card.tag.setToolTip(f"Changed: {why}. It is made again with the path." if why else STATE_TIP.get(st, ""))
@@ -5027,6 +5086,10 @@ class MainWindow(QMainWindow):
                 start = ck.start_frame(node)
                 end = T.end_image_used(self.tree, node)
                 pics = [("The frame the clip starts from", str(start), True)] if start and start.is_file() else []
+                for k in node.keyframes:
+                    if (self.project / k["image"]).is_file():
+                        pics.append((f"The picture the clip passes through at {k['at']:.1f} s",
+                                     str(self.project / k["image"]), True))
                 if end and (self.project / end).is_file():
                     pics.append(("The image the clip should end at", str(self.project / end), True))
                 new = self.refine_text(card.edit.toPlainText(), "video", pictures=pics)
@@ -5100,8 +5163,9 @@ class MainWindow(QMainWindow):
             T.copy_video(self.project, self.tree, vc, target)
         try:
             T.copy_end_image(self.project, self.tree, source, target)
+            T.copy_keyframes(self.project, self.tree, source, target)
         except (OSError, RuntimeError, ValueError) as e:
-            self.status.setText(f"Could not copy the end image: {e}")
+            self.status.setText(f"Could not copy the end image or the keyframes: {e}")
 
     def revert_clip(self, nid: str) -> list[str]:
         """Undo the edits of a made clip (prompt, seed, own settings, end image) so it counts as done again."""
@@ -5494,6 +5558,120 @@ class MainWindow(QMainWindow):
         self._write_tree()
         self.refresh()
         self.status.setText(f"Clip #{nid[1:]} " + ("now ends at its end image." if image else "ends freely now."))
+        return True
+
+    # ---- middle keyframes
+    def keyframe_action(self, act: str, nid: str, data: dict | None = None) -> None:
+        """A keyframe action of a clip card: add / add_video / add_moment (data "at"), move (data "index", "at"),
+        change / video / moment / note / remove (data "index")."""
+        node = self.tree.nodes.get(nid) if self.tree else None
+        if node is None or node.is_video or self.running:
+            return
+        data = data or {}
+        i, at = data.get("index"), data.get("at")
+        if i is not None:
+            if not 0 <= i < len(node.keyframes):
+                return
+            if at is None:
+                at = node.keyframes[i]["at"]
+        if at is None:
+            return
+        if act == "move":
+            self._set_keyframe(nid, None, at, index=i)
+        elif act in ("add", "change"):
+            f = pick_image(self, f"Keyframe of clip #{nid[1:]} at {at:.2f} s (a picture the clip passes through)",
+                           self.qs, None, self._picker_places(), self.project_images())
+            if f:
+                self._set_keyframe(nid, f, at, index=i)
+        elif act in ("add_video", "video", "add_moment", "moment"):
+            self._keyframe_from_video(nid, at, i, own=act in ("add_moment", "moment"))
+        elif act == "note":
+            text, ok = QInputDialog.getText(
+                self, f"Keyframe at {at:.2f} s", "What happens at this moment (added to the prompt with its time, "
+                "e.g. “she turns to the camera”; empty: nothing):", text=node.keyframes[i]["note"])
+            if ok:
+                self._set_keyframe(nid, None, at, note=text.strip(), index=i)
+        elif act == "remove":
+            T.remove_keyframe(self.project, self.tree, nid, i)
+            self._write_tree()
+            self.refresh()
+            self.status.setText(f"Clip #{nid[1:]}: keyframe at {at:.2f} s removed.")
+
+    def _keyframe_from_video(self, nid: str, at: float, index: int | None, own: bool = False,
+                             video: str | None = None, dialog: bool = True):
+        """A keyframe from a frame of a video. own: this clip's frame at that moment ("keep this moment": its time
+        follows the frame chosen); else any video (the project's first), the keyframe stays at its time."""
+        node = self.tree.nodes[nid]
+        if own:
+            if not node.made or not (self.project / node.made["video"]).is_file():
+                self.status.setText(f"Clip #{nid[1:]} is not made yet: there is no moment of it to keep.")
+                return None
+            video = str(self.project / node.made["video"])
+        elif video is None:
+            clips = [(str(self.project / n.made["video"]), f"Clip #{n.id[1:]} · {n.prompt[:40]}")
+                     for n in sorted(self.tree.nodes.values(), key=lambda n: self.tree.number(n.id))
+                     if not n.is_video and n.made and (self.project / n.made["video"]).is_file()]
+            cols = self.project_media("video") + ([("Clips of this project", clips)] if clips else [])
+            video = choose_video(self, self.qs, places=self._picker_places(), collections=cols)
+            if not video:
+                return None
+        title = (f"Keep a moment of clip #{nid[1:]}: the frame to keep (it is pinned at its time)" if own else
+                 f"Keyframe of clip #{nid[1:]} at {at:.2f} s: a frame of {Path(video).name}")
+        try:
+            dlg = VideoFrameDialog(self, Path(video), title)
+        except (RuntimeError, OSError) as e:
+            self.status.setText(f"Cannot read {Path(video).name}: {e}")
+            return None
+        if own:
+            dlg.slider.setValue(min(dlg.frames - 2, max(1, T.keyframe_frame(at))))
+        if not dialog:
+            return dlg
+        try:
+            if dlg.exec() != QDialog.Accepted:
+                return None
+            return self._keyframe_from_dialog(nid, dlg, at, index, own)
+        finally:
+            dlg.deleteLater()
+
+    def _keyframe_from_dialog(self, nid: str, dlg, at: float, index: int | None, own: bool) -> bool:
+        import tempfile
+        k = dlg.slider.value()
+        if own:                                          # (never its first or last frame)
+            k = min(dlg.frames - 2, max(1, k))
+            dlg.slider.setValue(k)
+            at = k / chain.FPS
+        with tempfile.TemporaryDirectory(prefix="video-chain-key-") as tmp:
+            png = Path(tmp) / f"key_f{k}.png"
+            if not dlg.frame_file(png):
+                self.status.setText("Could not read that frame.")
+                return False
+            return self._set_keyframe(nid, str(png), at, index=index)
+
+    def _set_keyframe(self, nid: str, image: str | None, at: float, note: str | None = None,
+                      index: int | None = None) -> bool:
+        """Add or change a keyframe (image None: keeps its picture); the clip then counts as changed."""
+        if self.tree is None or self.running or nid not in self.tree.nodes:
+            return False
+        if image is not None and QImage(image).isNull():
+            self.status.setText(f"Not an image: {Path(image).name}")
+            return False
+        frames = T.clip_length(self.tree, self.tree.nodes[nid])
+        at = min((frames - 2) / chain.FPS, max(1 / chain.FPS, round(float(at) * chain.FPS) / chain.FPS))
+        try:
+            T.set_keyframe(self.project, self.tree, nid, Path(image) if image else None, at, note, index)
+        except (ValueError, OSError, RuntimeError) as e:
+            self.status.setText(f"Could not set the keyframe: {e}")
+            return False
+        self._write_tree()
+        self.refresh()
+        msg = f"Clip #{nid[1:]}: keyframe at {at:.2f} s" + (" set." if index is None or image else " changed.")
+        canvas = self._canvas_for()
+        if image is not None and canvas:
+            img = QImage(image)
+            if abs(img.width() / img.height() - canvas[0] / canvas[1]) > 0.05 * canvas[0] / canvas[1]:
+                msg += (f" Its shape ({img.width()}×{img.height()}) differs from the clip's ({canvas[0]}×{canvas[1]}):"
+                        " H3 crops it to the middle.")
+        self.status.setText(msg + " Keep it reachable by motion from what comes before it, or H3 cuts to it.")
         return True
 
     # ---- real videos

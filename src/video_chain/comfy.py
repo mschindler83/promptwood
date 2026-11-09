@@ -279,13 +279,16 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
                    guides: list[dict] = (), hyperflow: tuple[str, float] | None = None,
                    pika: tuple[str, float] | None = None, audio_refs: list[str] = (),
                    audio_key=lambda i: f"ref_audios.ref_audio_{i}", start_pin: int = 1,
-                   recipe: dict | None = None, veda: str | None = None) -> dict:
+                   recipe: dict | None = None, veda: str | None = None,
+                   keyframes: list[tuple[str, int]] = ()) -> dict:
     """The API-format workflow for one clip (image = the uploaded start image, as LoadImage names it; None: a
     clip without a start frame).
 
     end_image: the uploaded frame the clip must end at (the first frame of the video after it).
     guides: motion guides, [{"name": uploaded clip, "frame_idx", "audio": bool, "at": "start" | "end"}]; a guide
     at the start replaces the start image, one at the end replaces end_image (the guide clip ends / begins with it).
+    keyframes: middle keyframes, [(uploaded picture, frame)]: MiniMaxH3AddGuide pins each at its frame (H3 places
+    it on the clip's timeline; one it cannot reach by motion makes it cut there).
 
     With refs (uploaded reference images): the ref2va model; MiniMaxH3ReferenceToVideo gets the references
     (<Picture 1> ... in the prompt) and MiniMaxH3AddGuide anchors the start image at frame 0, so the clip starts
@@ -378,6 +381,12 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
             gin.update({"audio": [f"gparts{k}", 1], "audio_vae": ["audio_vae", 0]})
         wf[f"guide{k}"] = {"class_type": "MiniMaxH3AddGuide", "inputs": gin}
         positive = [f"guide{k}", 0]
+    for k, (name, idx) in enumerate(keyframes):    # middle keyframes
+        wf[f"key{k}"] = {"class_type": "LoadImage", "inputs": {"image": name}}
+        wf[f"key_guide{k}"] = {"class_type": "MiniMaxH3AddGuide",
+                               "inputs": {"positive": positive, "vae": ["vae", 0], "latent": latent,
+                                          "image": [f"key{k}", 0], "frame_idx": int(idx)}}
+        positive = [f"key_guide{k}", 0]
     model = ["unet", 0]
     if pika and (turbo or hyperflow):
         raise ValueError("Pika H3 Flex cannot be combined with Turbo or HyperFlow")
@@ -734,6 +743,13 @@ class ComfyGenerator:
                 name = self.upload(Path(g["video"]))
                 uploads.append((name, g["video"]))
                 guides.append({**g, "name": name})
+        keyframes = []
+        if s.get("keyframes"):
+            self.check_guides()
+            for kf in s["keyframes"]:
+                name = self.upload(Path(kf["image"]))
+                uploads.append((name, kf["image"]))
+                keyframes.append((name, int(kf["frame_idx"])))
         end_image = None
         if s.get("end_image") and not any(g.get("at") == "end" for g in guides):
             end_image = self.upload(Path(s["end_image"]))
@@ -761,7 +777,7 @@ class ComfyGenerator:
                             turbo=turbo, end_image=end_image, guides=guides, hyperflow=hyper, pika=pika,
                             cfg=float(s.get("cfg", 1.0)),
                             audio_refs=sounds, **({"audio_key": self.audio_key()} if sounds else {}),
-                            start_pin=int(s.get("start_pin") or 1), recipe=s.get("recipe"),
+                            start_pin=int(s.get("start_pin") or 1), recipe=s.get("recipe"), keyframes=keyframes,
                             veda=self.veda_predictor(bool(refs or sounds)) if s.get("veda") else None)
         ws = self._connect_ws()
         try:

@@ -3304,3 +3304,54 @@ def test_all_ideas_become_variations(app, tmp_path):
     dlg.prompt.undo()
     assert dlg.prompt.toPlainText() == "- an animal"                  # Ctrl+Z: the bullet points back
     dlg.reject()
+
+
+def test_middle_keyframes_on_the_card(app, win, tmp_path, image, monkeypatch):
+    """The keyframe strip: add (picture; the strip's menu), move, note, keep a moment of the made clip, remove;
+    the clip counts as changed and the made clip's hard cuts show as a warning."""
+    from PIL import Image as PImage
+    from PySide6.QtWidgets import QInputDialog
+
+    from video_chain import tree as T
+    from video_chain.ui import main_window as M
+    ids = new_project(win, tmp_path, image, ("a",))
+    nid = ids[0]
+    card = next(c for c in win.cards if c.nid == nid)
+    assert card.keys.isEnabled() and card.keys.items == [] and not card.keys.made
+    pic = tmp_path / "key.png"
+    PImage.new("RGB", (192, 108), (0, 200, 0)).save(pic)
+    monkeypatch.setattr(M, "pick_image", lambda *a, **k: str(pic))
+    monkeypatch.setattr(M.PromptCard, "_exec_menu", lambda self, m: m.actions()[0])     # "A picture at …"
+    card.keys.addAt.emit(1.0)                                     # a click on the strip at 1 s
+    node = win.tree.nodes[nid]
+    assert [k["at"] for k in node.keyframes] == [1.0] and "keyframe at 1.00 s set" in win.status.text()
+    card = next(c for c in win.cards if c.nid == nid)
+    assert len(card.keys.items) == 1 and card.keys.items[0]["ok"] and "1 keyframe" in win.badge(node)
+    win.keyframe_action("move", nid, {"index": 0, "at": 1.5})
+    assert node.keyframes[0]["at"] == 1.5
+    win.keyframe_action("move", nid, {"index": 0, "at": 99.0})    # never past the clip's second-to-last frame
+    assert round(node.keyframes[0]["at"] * 24) == T.clip_length(win.tree, node) - 2
+    win.keyframe_action("move", nid, {"index": 0, "at": 1.5})
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("she turns", True)))
+    win.keyframe_action("note", nid, {"index": 0})
+    assert node.keyframes[0]["note"] == "she turns"
+    run_and_wait(app, win, win.generate_path)
+    node = win.tree.nodes[nid]
+    assert node.made["keyframes"] == node.keyframes and T.Checker(win.project, win.tree).status(nid) == "done"
+    card = next(c for c in win.cards if c.nid == nid)
+    assert card.keys.made
+    if node.made.get("cuts"):                                     # (the fake clip's coloured last frame is a jump)
+        assert card.key_warn.isVisibleTo(card) and "cuts at" in card.key_warn.text()
+    # keep a moment of the made clip: its frame, pinned at its time
+    dlg = win._keyframe_from_video(nid, 0.5, None, own=True, dialog=False)
+    assert dlg is not None and dlg.slider.value() == 12
+    dlg.slider.setValue(6)
+    assert win._keyframe_from_dialog(nid, dlg, 0.5, None, True)
+    dlg.deleteLater()
+    assert [k["at"] for k in node.keyframes] == [0.25, 1.5]
+    assert T.changed_inputs(win.tree, nid) == ["keyframes"]
+    win.keyframe_action("remove", nid, {"index": 0})
+    assert [k["at"] for k in node.keyframes] == [1.5] and "removed" in win.status.text()
+    win.node_action("revert", nid)
+    assert node.keyframes == node.made["keyframes"]
+

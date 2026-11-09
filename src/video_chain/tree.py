@@ -9,6 +9,8 @@ With a motion guide (override "guide": 5, 22 or 39 frames) a generated clip gets
 before and the first frames of a following video (with their sound) instead of a single frame at each end.
 A generated clip with no video after it can have an end image of its own (Node.end_image, a copy in ends/): the
 frame H3 steers the clip's end to. It is not a frame of the chain, so nothing is cut when the path is joined.
+Middle keyframes (Node.keyframes: [{"image": ends/..., "at": seconds, "note": text}]) pin pictures at moments inside
+a generated clip (MiniMaxH3AddGuide at that frame); a keyframe the action cannot reach makes H3 cut to it.
 A made generated clip without a video after it can hand over at an earlier frame (Node.end_at, a frame index): the
 clips after it start from that frame, and the frames after it are left out when a path is joined. The clip itself
 stays as made (nothing is generated again for it); only what follows it changes.
@@ -26,6 +28,7 @@ Project folder:
   nodes/<id>_<tag>_f<k>.png    a clip's hand-over frame k (Node.end_at), the start image of its children
   paths/<id>.mp4       a joined path (start -> node), made on demand
   ends/<id>_<tag>.png  a generated clip's own end image
+  ends/<id>_k<tag>.png a middle keyframe of a generated clip (Node.keyframes)
 
 Every generated clip has its own LoRA stack (Node.overrides["loras"]: [{"path", "strength"}], applied in order;
 none by default) and can override the project's clip length and steps
@@ -117,6 +120,7 @@ class Node:
     source: dict | None = None     # VIDEO: {"file": absolute path, "start": s, "end": s}
     end_image: str | None = None   # AI: its own end image (ends/..., project-relative); a video after it wins
     end_at: int | None = None      # AI: hand over at this frame instead of the last one (see handover_index)
+    keyframes: list = field(default_factory=list)   # AI: [{"image": ends/..., "at": s, "note": str}], by time
 
     @property
     def is_video(self) -> bool:
@@ -236,7 +240,7 @@ class Tree:
             if project is not None:
                 for f in list(node_files(project, g)) + clip_files(project, node):
                     _unlink(f)
-                for rel in {node.end_image, (node.made or {}).get("end_image")} - {None}:
+                for rel in ({node.end_image, (node.made or {}).get("end_image")} | keyframe_files(node)) - {None}:
                     if _in_ends(project, rel):
                         _unlink(Path(project) / rel)
                 for ext in (".mp4", ".json"):
@@ -304,7 +308,8 @@ class Tree:
             at = int(at) if kind == AI and isinstance(at, (int, float)) and not isinstance(at, bool) and at >= 1 \
                 else None
             n = Node(nd["id"], nd.get("parent"), nd.get("prompt", ""), int(nd.get("seed", 42)), nd.get("made"), ov,
-                     kind, dict(src) if kind == VIDEO else None, end, at)
+                     kind, dict(src) if kind == VIDEO else None, end, at,
+                     clean_keyframes(nd.get("keyframes")) if kind == AI else [])
             t.nodes[n.id] = n
         for n in t.nodes.values():
             if n.parent is not None and n.parent not in t.nodes:
@@ -1181,6 +1186,8 @@ def changed_inputs(tree: Tree, nid: str) -> list[str]:
         out.append("settings")
     if "end_image" in m and m["end_image"] != node.end_image:
         out.append("end image")
+    if "keyframes" in m and clean_keyframes(m["keyframes"]) != node.keyframes:
+        out.append("keyframes")
     return out
 
 
@@ -1199,6 +1206,11 @@ def revert(project: Path, tree: Tree, nid: str) -> list[str]:
     if "end image" in done:
         clear_end_image(project, tree, nid)       # the newer image goes (unless it is the made one)
         node.end_image = m["end_image"]
+    if "keyframes" in done:
+        newer = {k["image"] for k in node.keyframes}
+        node.keyframes = clean_keyframes(m["keyframes"])
+        for rel in newer:
+            _drop_keyframe_file(project, node, rel)
     return done
 
 
@@ -1207,6 +1219,107 @@ def copy_end_image(project: Path, tree: Tree, src: str, dst: str) -> None:
     rel = tree.nodes[src].end_image
     if rel and (Path(project) / rel).is_file() and tree.video_child(dst) is None:
         set_end_image(project, tree, dst, Path(project) / rel)
+
+
+def clean_keyframes(raw) -> list[dict]:
+    """Keyframes as tree.json holds them: {"image": "ends/...", "at": s > 0, "note"}, sorted by time (damaged
+    entries are left out)."""
+    out = []
+    for k in raw if isinstance(raw, list) else []:
+        if not isinstance(k, dict) or not isinstance(k.get("image"), str) or not k["image"].startswith(ENDS_DIR + "/"):
+            continue
+        at = k.get("at")
+        if isinstance(at, bool) or not isinstance(at, (int, float)) or not at > 0:
+            continue
+        out.append({"image": k["image"], "at": round(float(at), 3), "note": str(k.get("note") or "")})
+    return sorted(out, key=lambda k: k["at"])
+
+
+def keyframe_files(node: Node) -> set[str]:
+    """The keyframe pictures a node and its made clip use (project-relative)."""
+    return {k["image"] for k in node.keyframes} | {k["image"] for k in (node.made or {}).get("keyframes") or []
+                                                    if isinstance(k, dict) and k.get("image")}
+
+
+def _drop_keyframe_file(project: Path, node: Node, rel: str) -> None:
+    """Delete a keyframe picture no longer used (the made clip's stay until it is made again: Undo)."""
+    made = {k.get("image") for k in (node.made or {}).get("keyframes") or [] if isinstance(k, dict)}
+    if rel not in made and rel not in {k["image"] for k in node.keyframes} and _in_ends(project, rel):
+        _unlink(Path(project) / rel)
+
+
+def set_keyframe(project: Path, tree: Tree, nid: str, image: Path | None, at: float, note: str | None = None,
+                 index: int | None = None) -> int:
+    """Add a middle keyframe (index None) or change one (a new picture, time and / or note; image None keeps the
+    picture). The picture is copied in (a new name every time). Returns its index after sorting by time."""
+    node = tree.nodes[nid]
+    if node.is_video:
+        raise ValueError("a real video has no keyframes")
+    if not at > 0:
+        raise ValueError("a keyframe needs a time after the start")
+    old = dict(node.keyframes[index]) if index is not None else None
+    rel = old["image"] if old else None
+    if image is not None:
+        d = Path(project) / ENDS_DIR
+        d.mkdir(parents=True, exist_ok=True)
+        rel = f"{ENDS_DIR}/{nid}_k{uuid.uuid4().hex[:8]}.png"
+        chain.to_png(Path(image), Path(project) / rel)
+    if rel is None:
+        raise ValueError("a new keyframe needs a picture")
+    entry = {"image": rel, "at": round(float(at), 3), "note": (old or {}).get("note", "") if note is None else note}
+    kfs = [k for i, k in enumerate(node.keyframes) if i != index] + [entry]
+    node.keyframes = sorted(kfs, key=lambda k: k["at"])
+    if old and old["image"] != rel:
+        _drop_keyframe_file(project, node, old["image"])
+    return node.keyframes.index(entry)
+
+
+def remove_keyframe(project: Path, tree: Tree, nid: str, index: int) -> None:
+    node = tree.nodes[nid]
+    gone = node.keyframes.pop(index)
+    _drop_keyframe_file(project, node, gone["image"])
+
+
+def copy_keyframes(project: Path, tree: Tree, src: str, dst: str) -> None:
+    """A variant gets its own copies of the keyframe pictures."""
+    for k in list(tree.nodes[src].keyframes):
+        if (Path(project) / k["image"]).is_file():
+            set_keyframe(project, tree, dst, Path(project) / k["image"], k["at"], k["note"])
+
+
+def keyframe_frame(at: float) -> int:
+    return int(round(float(at) * chain.FPS))
+
+
+def missing_keyframes(project: Path, tree: Tree, todo: list[str]) -> list[str]:
+    return [nid for nid in todo if any(not (Path(project) / k["image"]).is_file() for k in tree.nodes[nid].keyframes)]
+
+
+def keyframe_problem(tree: Tree, checker: "Checker", todo: list[str]) -> str | None:
+    """Why a clip's keyframes cannot be used (one past its end, on its first or last frame, inside a motion guide,
+    two on the same frame), or None. Checked with the length the clip will have."""
+    for nid in todo:
+        node = tree.nodes[nid]
+        if node.is_video or not node.keyframes:
+            continue
+        s = checker.settings(nid) or {}
+        frames = int(s.get("frames") or clip_length(tree, node))
+        guide = int(s.get("guide") or 0)
+        lo = guide if guide and node.parent is not None else 1
+        hi = frames - 2 - (guide if guide and tree.video_child(nid) is not None else 0)
+        seen = set()
+        for k in node.keyframes:
+            f = keyframe_frame(k["at"])
+            where = f"clip #{nid[1:]}'s keyframe at {k['at']:.2f} s"
+            if f > hi:
+                return (f"{where} is at or past its end ({frames / chain.FPS:.2f} s{', minus its motion guide' if hi < frames - 2 else ''}): "
+                        "move it earlier or make the clip longer")
+            if f < lo:
+                return f"{where} is {'inside its motion guide' if lo > 1 else 'on its first frame'}: move it later"
+            if f in seen:
+                return f"{where} falls on the same frame as another one: move one of them"
+            seen.add(f)
+    return None
 
 
 def end_image_used(tree: Tree, node: Node) -> str | None:
@@ -1406,6 +1519,12 @@ class Checker:
             return {"image": self.sha(self.project / own)} if own else None
         return vc.made.get("key") if self.status(vc.id) == "done" else False
 
+    def keyframe_key(self, node: Node) -> list | None:
+        """What a generated clip's middle keyframes are: [[picture sha1, frame, note], ...], None without any."""
+        if node.is_video or not node.keyframes:
+            return None
+        return [[self.sha(self.project / k["image"]), keyframe_frame(k["at"]), k["note"]] for k in node.keyframes]
+
     def guide_from(self, node: Node) -> str | None:
         """The parent clip a start motion guide is cut from (its file name: every new clip gets a new one), or None
         without a start guide."""
@@ -1441,6 +1560,7 @@ class Checker:
               or (node.parent is not None and self.status(node.parent) != "done")
               or m.get("start_sha1") != self.sha(self.start_frame(node))
               or m.get("end_key") != self.end_key(node)
+              or m.get("keyframe_key") != self.keyframe_key(node)
               or m.get("guide_from") != self.guide_from(node)):
             st = "changed"
         else:
@@ -1472,6 +1592,8 @@ class Checker:
             return "the frame it starts from changed"
         if m.get("end_key") != self.end_key(node):
             return "its end (the video after it or its end image) changed"
+        if m.get("keyframe_key") != self.keyframe_key(node):
+            return "its keyframes changed"
         if m.get("guide_from") != self.guide_from(node):
             return "the clip its motion guide comes from changed"
         return "something it depends on changed"
@@ -1885,6 +2007,9 @@ def model_prompt(options: dict, node: Node, settings: dict | None) -> str:
                     TRACK_SOUND_TEXT if mode == "track" or (isinstance(mode, str) and mode.startswith(TRACK_PREFIX))
                     else SOURCE_SOUND_TEXT)
         text = f"{text.rstrip()} {sentence.format(k=k)}"
+    notes = [f"At {k['at']:.1f} s: {k['note'].strip().rstrip('.')}." for k in node.keyframes if k["note"].strip()]
+    if notes:                                      # what happens at each keyframe, in time order
+        text = f"{text.rstrip()} {' '.join(notes)}"
     return text
 
 
@@ -2217,6 +2342,12 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
     no_end = missing_end_images(project, tree, todo)
     if no_end:
         raise FileNotFoundError(f"the end image of clip #{no_end[0][1:]} is missing")
+    no_key = missing_keyframes(project, tree, todo)
+    if no_key:
+        raise FileNotFoundError(f"a keyframe picture of clip #{no_key[0][1:]} is missing")
+    problem = keyframe_problem(tree, checker, todo)
+    if problem:
+        raise ValueError(problem)
     faces = cast_problems(project, tree, todo) + source_sound_problems(tree, todo, project)
     if faces:
         raise ValueError(faces[0])
@@ -2253,8 +2384,12 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
             settings = checker.settings(nid)
             start_sha = checker.sha(start)
             end_key = checker.end_key(node)
+            key_key = checker.keyframe_key(node)
             guide_from = checker.guide_from(node)
             call = dict(settings)
+            if node.keyframes:
+                call["keyframes"] = [{"image": str(project / k["image"]), "frame_idx": keyframe_frame(k["at"])}
+                                     for k in node.keyframes]
             if settings.get("refs"):               # the generator gets the files; the record keeps names + hashes
                 call["ref_paths"] = [str(project / r["file"]) for r in settings["refs"]]
             if settings.get("audio_refs"):
@@ -2291,14 +2426,26 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
                     _unlink(f)
                 raise
             old_end = (node.made or {}).get("end_image")
+            old_keys = {k.get("image") for k in (node.made or {}).get("keyframes") or [] if isinstance(k, dict)}
+            cut = chain.hard_cuts(new_video) if node.keyframes or end_image_used(tree, node) else []
             node.made = {"prompt": node.prompt, "seed": node.seed, "settings": settings,
                          "overrides": copy.deepcopy(node.overrides or {}), "end_image": node.end_image,
+                         "keyframes": copy.deepcopy(node.keyframes),
                          "start_sha1": start_sha, "video": f"nodes/{new_video.name}",
                          "frame": f"nodes/{new_frame.name}", "frames": made_n}
             if old_end and old_end != node.end_image and _in_ends(project, old_end):
                 old.append(project / old_end)          # the end image of the previous version
+            for rel in old_keys - {k["image"] for k in node.keyframes} - {None}:
+                if _in_ends(project, rel):
+                    old.append(project / rel)          # keyframe pictures of the previous version
+            if cut:
+                node.made["cuts"] = cut                # hard cuts H3 made (a keyframe / end it could not reach)
+                log(f"{nid}: the clip cuts at {', '.join(f'{c / chain.FPS:.2f} s' for c in cut)} "
+                    "(a keyframe or the end image is probably too far from what comes before it)")
             if end_key is not None:
                 node.made["end_key"] = end_key
+            if key_key is not None:
+                node.made["keyframe_key"] = key_key
             if guide_from is not None:
                 node.made["guide_from"] = guide_from
             new_files = [new_video, new_frame]

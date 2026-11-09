@@ -1240,3 +1240,78 @@ def test_split_a_video_and_insert_a_clip(project, tmp_path):
     T.save(project, t)
     t2 = T.load(project)
     assert t2.nodes[r2.id].source["start"] == 1.5 and swap.replaced(t2.nodes[r2.id]) is not None
+
+
+def test_middle_keyframes(project, tmp_path):
+    """Keyframes: copied in, sent with their frame, recorded; editing one makes the clip changed (Undo goes back);
+    a variant gets its own copies; a keyframe past the end, on a motion guide or a missing picture is refused."""
+    t, a, b1, b2, c = build(project)
+    pic, pic2 = tmp_path / "k.png", tmp_path / "k2.png"
+    Image.new("RGB", (40, 30), (0, 255, 0)).save(pic)
+    Image.new("RGB", (40, 30), (0, 0, 255)).save(pic2)
+    t.options["frames"] = 22
+    assert T.set_keyframe(project, t, a.id, pic, 0.5, "she turns") == 0
+    assert T.set_keyframe(project, t, a.id, pic2, 0.25) == 0                     # sorted by time
+    assert [k["at"] for k in a.keyframes] == [0.25, 0.5] and all((project / k["image"]).is_file() for k in a.keyframes)
+    T.save(project, t)
+    assert T.load(project).nodes[a.id].keyframes == a.keyframes                   # kept in tree.json
+    gen = run(project, [a.id])
+    sent = gen.calls[0]["settings"]["keyframes"]
+    assert [k["frame_idx"] for k in sent] == [6, 12] and sent[1]["image"] == str(project / a.keyframes[1]["image"])
+    assert "At 0.5 s: she turns." in gen.calls[0]["prompt"]
+    t = T.load(project)
+    a = t.nodes[a.id]
+    assert a.made["keyframes"] == a.keyframes and T.Checker(project, t).status(a.id) == "done"
+    made_pics = [k["image"] for k in a.keyframes]
+    # move one, change a picture: changed, with the reason; Undo restores them and deletes the newer copy
+    T.set_keyframe(project, t, a.id, None, 0.75, index=0)
+    T.set_keyframe(project, t, a.id, pic, 0.5, index=0)
+    newer = next(k["image"] for k in a.keyframes if k["image"] not in made_pics)
+    ch = T.Checker(project, t)
+    assert ch.status(a.id) == "changed" and T.changed_inputs(t, a.id) == ["keyframes"]
+    assert T.revert(project, t, a.id) == ["keyframes"] and [k["image"] for k in a.keyframes] == made_pics
+    assert not (project / newer).exists() and T.Checker(project, t).status(a.id) == "done"
+    # the note alone changes the clip (it is in the prompt)
+    T.set_keyframe(project, t, a.id, None, 0.5, "she waves", index=1)
+    assert T.Checker(project, t).why(a.id) == "its keyframes changed"
+    T.revert(project, t, a.id)
+    # removing: the made copy stays for Undo; a variant gets its own copies
+    T.remove_keyframe(project, t, a.id, 0)
+    assert (project / made_pics[0]).is_file()
+    T.copy_keyframes(project, t, a.id, b2.id)
+    assert len(t.nodes[b2.id].keyframes) == 1 and t.nodes[b2.id].keyframes[0]["image"] != a.keyframes[0]["image"]
+    # problems: past the end, on a motion guide, a missing picture
+    ch = T.Checker(project, t)
+    T.set_keyframe(project, t, b1.id, pic, 0.9)                                   # frame 22 of 22
+    assert "past its end" in T.keyframe_problem(t, ch, [b1.id])
+    t.nodes[b1.id].keyframes[0]["at"] = 0.1                                       # frame 2
+    t.nodes[b1.id].overrides["guide"] = 5                                         # frames 0-4 are the guide
+    assert "inside its motion guide" in T.keyframe_problem(t, T.Checker(project, t), [b1.id])
+    t.nodes[b1.id].keyframes[0]["at"] = 5 / 24                                    # the first frame after it
+    assert T.keyframe_problem(t, T.Checker(project, t), [b1.id]) is None
+    t.nodes[b1.id].overrides.pop("guide")
+    assert T.keyframe_problem(t, T.Checker(project, t), [b1.id]) is None
+    (project / t.nodes[b1.id].keyframes[0]["image"]).unlink()
+    assert T.missing_keyframes(project, t, [b1.id]) == [b1.id]
+    # removing a clip removes its keyframe pictures
+    files = [project / k["image"] for k in t.nodes[b2.id].keyframes]
+    t.remove(b2.id, project)
+    assert not any(f.exists() for f in files)
+    # damaged entries are left out when loading
+    assert T.clean_keyframes([{"image": "../x.png", "at": 1}, {"image": "ends/a.png", "at": 0}, "x",
+                              {"image": "ends/b.png", "at": 1.5, "note": None}]) == [
+        {"image": "ends/b.png", "at": 1.5, "note": ""}]
+
+
+def test_hard_cuts(tmp_path):
+    """A jump to another picture is a cut; motion is not (lavfi test pictures)."""
+    smooth, cut = tmp_path / "smooth.mp4", tmp_path / "cut.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=24:duration=2",
+                    "-pix_fmt", "yuv420p", str(smooth)], check=True)
+    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=24:duration=1",
+                    "-f", "lavfi", "-i", "mandelbrot=size=160x90:rate=24", "-filter_complex",
+                    "[1]trim=duration=1,setpts=PTS-STARTPTS[b];[0][b]concat=n=2:v=1", "-pix_fmt", "yuv420p", str(cut)],
+                   check=True)
+    assert chain.hard_cuts(smooth) == []
+    assert chain.hard_cuts(cut) == [24]
+    assert chain.hard_cuts(tmp_path / "missing.mp4") == []

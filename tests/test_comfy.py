@@ -1127,3 +1127,29 @@ def test_negative_prompt_for_cfg1_families(server, start, tmp_path):
     assert wf["neg0"]["inputs"]["image1"] == wf["pos0"]["inputs"]["image1"] and wf["guider"]["inputs"]["negative"] == ["neg", 0]
     cr.create("flux1", None, "a cat", out, 5, "standard", 1024, 1024, negative="dog")
     assert server.created["neg"]["inputs"]["text"] == "dog"
+
+
+def test_middle_keyframes_in_the_workflow(server, start, tmp_path):
+    """Each keyframe: a LoadImage and a MiniMaxH3AddGuide at its frame, after the end frame and the motion guides,
+    in every model (also the reference one and with CFG: the negative is made from the same conditioning)."""
+    keys = [("k0.png", 20), ("k1.png", 40)]
+    wf = C.build_workflow(prompt="x", image="s.png", seed=1, width=512, height=512, frames=73, steps=20, loras=[],
+                          audio=True, prefix="p", end_image="e.png", keyframes=keys)
+    k0, k1 = wf["key_guide0"]["inputs"], wf["key_guide1"]["inputs"]
+    assert wf["key0"]["inputs"]["image"] == "k0.png" and k0["image"] == ["key0", 0] and k0["frame_idx"] == 20
+    assert k0["positive"] == ["cond", 0] and k1["positive"] == ["key_guide0", 0] and k1["latent"] == ["cond", 1]
+    assert wf["guider"]["inputs"]["conditioning"] == ["key_guide1", 0]
+    wf = C.build_workflow(prompt="x", image="s.png", seed=1, width=512, height=512, frames=73, steps=20, loras=[],
+                          audio=False, prefix="p", refs=["r.png"], end_image="e.png", keyframes=keys, cfg=2.0)
+    assert wf["key_guide0"]["inputs"]["positive"] == ["end_guide", 0]
+    assert wf["guider"]["inputs"]["positive"] == ["key_guide1", 0] and \
+        wf["neg"]["inputs"]["conditioning"] == ["key_guide1", 0]
+    (server.root / "main.py").write_text("")
+    pic = tmp_path / "key.png"
+    Image.new("RGB", (192, 108), (0, 250, 0)).save(pic)
+    gen = C.ComfyGenerator(server.url, comfy_dir=server.root)
+    gen.generate("x", start, tmp_path / "v.mp4", tmp_path / "v.png", 1,
+                 settings(keyframes=[{"image": str(pic), "frame_idx": 12}]))
+    wf = server.prompts[-1]
+    assert wf["key_guide0"]["inputs"]["frame_idx"] == 12 and wf["key0"]["inputs"]["image"].endswith(".png")
+    assert not list((server.root / "input" / "video-chain").glob("*"))      # the upload is cleaned up
