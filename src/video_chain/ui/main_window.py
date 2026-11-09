@@ -1317,6 +1317,10 @@ class MainWindow(QMainWindow):
         self.b_ref_add = QPushButton("Image…")
         self.b_ref_add.setToolTip("Add an image file as a face picture of the selected character")
         self.b_ref_add.clicked.connect(self._add_reference)
+        self.b_ref_create = QPushButton("Create…")
+        self.b_ref_create.setToolTip("Create a face picture with AI (the Create image window); there “Add as face "
+                                     "reference” adds a result to the selected character")
+        self.b_ref_create.clicked.connect(self.create_reference)
         self.b_ref_start = QPushButton("Start image")
         self.b_ref_start.clicked.connect(self._reference_from_start)
         self.b_ref_clip = QPushButton("Selected clip")
@@ -1330,7 +1334,7 @@ class MainWindow(QMainWindow):
         self.refs.itemDoubleClicked.connect(lambda _i: self._recrop_reference())
         self.refs.currentRowChanged.connect(lambda _r: self._update_cast_buttons())
         rrow.addWidget(label("Add face:", level="tertiary"))
-        for b in (self.b_ref_add, self.b_ref_start, self.b_ref_clip):
+        for b in (self.b_ref_add, self.b_ref_create, self.b_ref_start, self.b_ref_clip):
             rrow.addWidget(b)
         rrow.addStretch(1)
         rrow.addWidget(self.b_ref_crop)
@@ -3002,6 +3006,11 @@ class MainWindow(QMainWindow):
         finally:
             dlg.deleteLater()
 
+    def create_reference(self, dialog: bool = True):
+        """The Create image window for a face picture of the selected character (its "Add as face reference")."""
+        c = self._selected_character()
+        return self.edit_image(mode="create", dialog=dialog, character=c["name"] if c else None)
+
     def add_reference(self, path: str, crop="ask") -> bool:
         """A face picture for the selected character (none selected: the lead, or a new character). crop: "ask"
         opens the crop window, else the square (x, y, side) or None (the whole picture)."""
@@ -4221,7 +4230,8 @@ class MainWindow(QMainWindow):
         self._update_comfy_label()
         for w in (self.start_tile, self.frames, self.resolution, self.steps,
                   self.audio, self.keep_rep, self.b_project,
-                  self.comfy_url, self.ref_size, self.ref_hint, self.b_ref_add, self.b_ref_start,
+                  self.comfy_url, self.ref_size, self.ref_hint, self.b_ref_add, self.b_ref_create,
+                  self.b_ref_start,
                   self.b_ref_del, self.b_ref_crop, self.b_char_new, self.b_char_rename, self.b_char_del, self.char_desc,
                   self.char_lead, self.b_voice_file, self.b_voice_del, self.dialogue_lang, self.speed, self.style_prefix,
                   self.style_suffix, self.lora_triggers, self.b_ai_edit, self.b_ai_create, self.storyboard,
@@ -4628,9 +4638,10 @@ class MainWindow(QMainWindow):
 
     # ---- AI image edit
     def edit_image(self, nid: str | None = None, from_node: bool = False, start: bool = False,
-                   dialog: bool = True, mode: str = "auto") -> ImageEditDialog | None:
+                   dialog: bool = True, mode: str = "auto", character: str | None = None) -> ImageEditDialog | None:
         """The image edit dialog. nid: the clip whose end image a result can become (its frame is offered first);
-        start: the start image first. Returns the dialog (dialog=False: not shown, for tests)."""
+        start: the start image first; character: opened for a face picture of this character (its name on the
+        face button). Returns the dialog (dialog=False: not shown, for tests)."""
         if self.project is None or self.tree is None:
             self.status.setText("Open or create a project folder first.")
             return None
@@ -4742,6 +4753,8 @@ class MainWindow(QMainWindow):
                               collections=self.project_images,
                               use_triggers=bool(self.tree.options.get("lora_triggers", True)))
         self._edit_switch = switch
+        if character:
+            dlg.b_use_ref.setText(f"Add as face of @{character}")
         if dialog:
             dlg.exec()
             dlg.deleteLater()

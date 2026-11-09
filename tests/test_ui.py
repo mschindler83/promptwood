@@ -573,6 +573,22 @@ def test_identity_references_in_the_window(app, win, tmp_path, image, monkeypatc
     monkeypatch.setattr(win, "crop_face", lambda path, title, crop=None: False)     # cancelled: nothing added
     assert not win.add_reference(str(other)) and len(T.character(win.tree, "Ben")["images"]) == 1
     monkeypatch.delattr(win, "crop_face")                                     # the window's own again
+    # Create…: the Create image window, its face button for the selected character
+    assert win.b_ref_create.isEnabled()
+    dlg = win.create_reference(dialog=False)
+    assert dlg.mode() == "create" and dlg.b_use_ref.text() == "Add as face of @Ben"
+    made = tmp_path / "made.png"
+    Image.new("RGB", (90, 90), (20, 90, 160)).save(made)
+    monkeypatch.setattr(win, "crop_face", lambda path, title, crop=None: None)
+    assert dlg.on_use("ref", str(made)).startswith("Added as a face of @Ben")
+    assert len(T.character(win.tree, "Ben")["images"]) == 2
+    monkeypatch.delattr(win, "crop_face")
+    win.refs.setCurrentRow(1)
+    win._remove_reference()                                                  # (one face again for the rest)
+    assert len(T.character(win.tree, "Ben")["images"]) == 1
+    dlg.reject()
+    dlg.deleteLater()
+    win.edits_closed()
     type_prompt(win, ids[1], "@Bem waves")
     flush(app, win)
     win.select(ids[1])
