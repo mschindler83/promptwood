@@ -52,6 +52,23 @@ from .theme import icon, repolish, theme
 from .widgets import FrameTile, VideoView, guard_wheel, icon_button, label, section_bar
 
 DEFAULT_COMFY_URL = "http://127.0.0.1:8188"
+from ..llm_server import DEFAULT_PORT as LLM_DEFAULT_PORT, DEFAULT_SERVER as LLM_DEFAULT_SERVER  # noqa: E402
+LLM_MODEL_DIRS = (Path("/path/to/ai/hf-models"), Path.home() / ".cache" / "huggingface" / "hub")
+
+
+def find_gguf_models(roots=LLM_MODEL_DIRS) -> list[Path]:
+    """GGUF language models in the model folders (Hugging Face cache layout: the snapshots' links), without the
+    vision projectors (mmproj) and the imatrix files."""
+    out: list[Path] = []
+    for root in roots:
+        try:
+            for f in sorted(Path(root).glob("models--*/snapshots/*/*.gguf")):
+                low = f.name.lower()
+                if "mmproj" not in low and "imatrix" not in low and f.exists():
+                    out.append(f)
+        except OSError:
+            continue
+    return out
 DEFAULT_COMFY_LAUNCHER = str(Path.home() / "bin" / "comfyui")
 DEFAULT_COMFY_DIR = str(Path.home() / "ComfyUI")
 # H3's 17n+5 frame grid from 3 s to 15 s (362 frames = 15.1 s, the top of its trained range of ~124-362)
@@ -1742,6 +1759,35 @@ class MainWindow(QMainWindow):
                                         "lora_triggers.json, everything else CivitAI tells (descriptions, example "
                                         "prompts, base model, files, license) next to it in civitai/. Right-click a "
                                         "LoRA for its CivitAI details.")
+        self.llm_on = QCheckBox("Prompt refiner: also a llama.cpp server (GGUF language models)")
+        self.llm_on.setToolTip("For language models ComfyUI cannot run (GGUF, e.g. Huihui Qwen3-VL-30B-A3B "
+                               "abliterated). The app starts llama-server when you refine with such a model and "
+                               "stops it before clips are made and when it closes (the model fills a lot of RAM).")
+        a.addRow("", self.llm_on)
+        self.llm_server = QLineEdit(LLM_DEFAULT_SERVER)
+        self.llm_server.setToolTip("The llama-server program (llama.cpp)")
+        a.addRow("llama-server", self.llm_server)
+        lrow = QHBoxLayout()
+        self.llm_model = QComboBox()
+        self.llm_model.setEditable(True)
+        self.llm_model.setToolTip("The GGUF model file (found in the model folders; a path can be typed too)")
+        for f in find_gguf_models():
+            self.llm_model.addItem(f.name, str(f))
+            self.llm_model.setItemData(self.llm_model.count() - 1, str(f), Qt.ToolTipRole)
+        self.llm_port = QSpinBox()
+        self.llm_port.setRange(1024, 65535)
+        self.llm_port.setValue(LLM_DEFAULT_PORT)
+        self.llm_port.setToolTip("The local port of the llama.cpp server")
+        lrow.addWidget(self.llm_model, 1)
+        lrow.addWidget(label("port", level="tertiary"))
+        lrow.addWidget(self.llm_port)
+        a.addRow("GGUF model", lrow)
+        self.llm_cpu_moe = QCheckBox("Keep the model's experts in RAM (GPU stays free for ComfyUI; slower)")
+        self.llm_cpu_moe.setChecked(True)
+        self.llm_cpu_moe.setToolTip("Mixture-of-experts models (…-A3B): their expert weights stay in RAM and only "
+                                    "attention runs on the GPU, a few GB of VRAM. Off: as much as fits on the GPU "
+                                    "(faster, but it competes with ComfyUI for VRAM)")
+        a.addRow("", self.llm_cpu_moe)
         self.video_gpu = QCheckBox("Play videos on the GPU (smooth; takes effect after a restart)")
         self.video_gpu.setChecked(True)
         self.video_gpu.setToolTip("On: the preview players decode on the GPU and draw through Qt's GPU video surface: "
@@ -2054,6 +2100,17 @@ class MainWindow(QMainWindow):
         self.comfy_cleanup.setChecked(q.value("comfyCleanup", True, type=bool))
         self.comfy_autostart.setChecked(q.value("comfyAutoStart", True, type=bool))
         self.triggers_online.setChecked(q.value("loraTriggersOnline", True, type=bool))
+        self.llm_on.setChecked(q.value("llmServerOn", self.llm_model.count() > 0, type=bool))  # on when one is found
+        self.llm_server.setText(q.value("llmServer", LLM_DEFAULT_SERVER, type=str))
+        saved = q.value("llmModel", "", type=str)
+        if saved:
+            i = self.llm_model.findData(saved)
+            if i < 0:
+                self.llm_model.addItem(Path(saved).name, saved)
+                i = self.llm_model.count() - 1
+            self.llm_model.setCurrentIndex(i)
+        self.llm_port.setValue(q.value("llmPort", LLM_DEFAULT_PORT, type=int))
+        self.llm_cpu_moe.setChecked(q.value("llmCpuMoe", True, type=bool))
         self.video_gpu.blockSignals(True)
         self.video_gpu.setChecked(q.value("videoGpu", True, type=bool))
         self.video_gpu.blockSignals(False)
@@ -2076,6 +2133,11 @@ class MainWindow(QMainWindow):
         q.setValue("comfyAutoStart", self.comfy_autostart.isChecked())
         q.setValue("loraTriggersOnline", self.triggers_online.isChecked())
         q.setValue("videoGpu", self.video_gpu.isChecked())
+        q.setValue("llmServerOn", self.llm_on.isChecked())
+        q.setValue("llmServer", self.llm_server.text().strip())
+        q.setValue("llmModel", self.llm_model_path())
+        q.setValue("llmPort", self.llm_port.value())
+        q.setValue("llmCpuMoe", self.llm_cpu_moe.isChecked())
         q.setValue("idleMinutes", self.idle_minutes.value())
         q.setValue("project", str(self.project) if self.project else "")
         if self.tree is not None:
@@ -2965,6 +3027,34 @@ class MainWindow(QMainWindow):
         self.qs.setValue("videoGpu", on)           # at once: read at the next start, also after a crash
         self.qs.sync()
         self.status.setText("Videos play on the " + ("GPU" if on else "CPU") + " after the app is restarted.")
+
+    def llm_model_path(self) -> str:
+        i = self.llm_model.currentIndex()
+        typed = self.llm_model.currentText().strip()
+        data = self.llm_model.itemData(i) if i >= 0 else None
+        return data if data and self.llm_model.itemText(i) == typed else os.path.expanduser(typed)
+
+    def llama_server(self):
+        """The llama.cpp server of the refiner (one per app; renewed when its settings change), None when off."""
+        if not self.llm_on.isChecked() or not self.llm_model_path():
+            return None
+        from ..llm_server import LlamaServer
+        key = (self.llm_server.text().strip() or LLM_DEFAULT_SERVER, self.llm_model_path(), self.llm_port.value(),
+               self.llm_cpu_moe.isChecked())
+        cur = getattr(self, "_llama", None)
+        if cur is None or (cur.server, cur.model, cur.port, cur.cpu_moe) != key:
+            if cur is not None:
+                cur.stop()
+            self._llama = LlamaServer(*key, log_dir=Path.home() / ".cache" / "video-chain")
+        return self._llama
+
+    def stop_llama(self, why: str = "") -> bool:
+        """Stop the refiner's llama.cpp server if the app started it (its RAM / VRAM back for ComfyUI)."""
+        cur = getattr(self, "_llama", None)
+        stopped = bool(cur is not None and cur.stop())
+        if stopped and why:
+            self.log.appendPlainText(f"Stopped the llama.cpp server ({why}).")
+        return stopped
 
     def _show_civitai_key(self):
         from .. import triggers
@@ -4929,9 +5019,18 @@ class MainWindow(QMainWindow):
         url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL)
         comfy_dir = os.path.expanduser(self.comfy_dir.text().strip()) or None
 
+        llama = self.llama_server()
+
         def connect():
             from ..comfy import ComfyPromptRefiner
-            return ComfyPromptRefiner(url, log=lambda _m: None, comfy_dir=comfy_dir, cleanup=False)
+            from ..llm_server import CombinedRefiner
+            if llama is None:
+                return ComfyPromptRefiner(url, log=lambda _m: None, comfy_dir=comfy_dir, cleanup=False)
+            try:
+                comfy, err = ComfyPromptRefiner(url, log=lambda _m: None, comfy_dir=comfy_dir, cleanup=False), ""
+            except Exception as e:  # noqa: BLE001  (ComfyUI down: the llama.cpp model still refines)
+                comfy, err = None, str(e)
+            return CombinedRefiner(comfy, llama, err)
         cast = [{"name": c["name"], "desc": c.get("desc", ""), "voice": bool(c.get("voice"))}
                 for c in T.cast_of(self.tree)] if self.tree is not None and kind == "video" else []
         dlg = RefineDialog(self, text, kind, connect, self.qs, start_comfy=self.start_comfy, cast=cast)
@@ -6084,6 +6183,7 @@ class MainWindow(QMainWindow):
             return
         self._job["sent"] = True
         self._worker_idle = False
+        self.stop_llama("its RAM and VRAM are needed for the clips")
         cmd = {"cmd": "run", "tree": str(self.project), "targets": self._job["targets"],
                "free_first": self._comfy_model in ("qwen", "llm")}          # an image edit model is loaded: unload it
         if self._comfy_model in ("h3", "h3-hyperflow"):             # earlier workers: was HyperFlow last?
@@ -6526,6 +6626,7 @@ class MainWindow(QMainWindow):
             return
         if getattr(self, "_trigger_scan", None) is not None:
             self._trigger_scan.set()                  # the trigger word lookup stops at the next file
+        self.stop_llama()                             # never leave the language model server behind
         if self.proc is not None:                    # never leave the generator (and the model) behind
             p, self.proc = self.proc, None
             p.finished.disconnect()

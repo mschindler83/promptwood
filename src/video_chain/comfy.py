@@ -2052,9 +2052,8 @@ def cast_instruction(cast: list[dict]) -> str:
             "spoken lines. Do not write any tags in angle brackets.")
 
 
-def build_refine_prompt_workflow(*, prompt: str, kind: str, model: dict, seed: int, hint: str = "",
-                                 temperature: float = 0.5, cast: list[dict] | None = None) -> dict:
-    """CLIPLoader (the LLM) -> TextGenerate with the instruction for this kind of prompt -> PreviewAny (text out).
+def refine_messages(*, prompt: str, kind: str, hint: str = "", cast: list[dict] | None = None) -> tuple[str, str]:
+    """The refiner's (system instruction, user message) for this kind of prompt (any backend).
     cast: the project's characters (video prompts), see cast_instruction."""
     system = REFINE_INSTRUCTIONS[kind] + " " + _SAFETY
     if cast and kind == "video":
@@ -2064,6 +2063,13 @@ def build_refine_prompt_workflow(*, prompt: str, kind: str, model: dict, seed: i
     if tokens:
         system += f" Keep these tokens exactly as they are, where they are: {', '.join(dict.fromkeys(tokens))}."
     user = prompt.strip() + (f"\n\nWhat the user wants changed in the prompt: {hint.strip()}" if hint.strip() else "")
+    return system, user
+
+
+def build_refine_prompt_workflow(*, prompt: str, kind: str, model: dict, seed: int, hint: str = "",
+                                 temperature: float = 0.5, cast: list[dict] | None = None) -> dict:
+    """CLIPLoader (the LLM) -> TextGenerate with the instruction for this kind of prompt -> PreviewAny (text out)."""
+    system, user = refine_messages(prompt=prompt, kind=kind, hint=hint, cast=cast)
     return {
         "llm": {"class_type": "CLIPLoader", "inputs": {"clip_name": model["file"], "type": model["type"],
                                                        "device": "default"}},
