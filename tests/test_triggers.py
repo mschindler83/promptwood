@@ -43,7 +43,8 @@ def test_database_and_background_lookup(tmp_path):
         return None
     assert db.info(str(known)) is None                                       # not looked at yet
     n = db.scan([str(p) for p in (known, named, unknown, offline)], lookup=lookup, gap=0)
-    assert n == {"looked": 4, "found": 1, "unknown": 2, "failed": 1, "new": 4}   # the named one too (details)
+    assert n == {"looked": 4, "found": 1, "unknown": 2, "failed": 1, "new": 4,      # the named one too (details)
+                 "key_rejected": False}
     assert db.info(str(known))["words"] == ["Braces"] and db.info(str(known))["source"] == "civitai"
     assert db.info(str(named)) == {"words": ["zzz"], "source": "file", "model": "", "url": ""}
     assert db.info(str(unknown))["source"] == "none" and db.info(str(offline)) is None
