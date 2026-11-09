@@ -2525,3 +2525,25 @@ def test_new_clips_get_random_seeds_and_the_seed_button(app, win, tmp_path, imag
     card.set_editable(False)
     assert not card.b_seed.isEnabled()
     card.set_editable(True)
+
+
+def test_veda_setting_and_marks(app, win, tmp_path, image):
+    """Veda is on by default, used only for large clips, and every clip that gets it says so."""
+    ids = new_project(win, tmp_path, image, ("a",))
+    assert win.veda.isChecked() and "Veda not used at this size" in win.size_info.text()     # 672x384: never
+    node = win.tree.nodes[ids[0]]
+    assert not win.veda_used(node) and "Veda" not in win.badge(node)
+    win.resolution.setCurrentIndex(win.resolution.findData(768))                            # 1024x576
+    assert "⚡ Veda for clips from" in win.size_info.text()
+    node.overrides = {"frames": 241}                                                        # 10 s: large enough
+    win.refresh()
+    assert win.veda_used(node) and "⚡ Veda" in win.badge(node)
+    card = next(c for c in win.cards if c.nid == ids[0])
+    assert card.veda_mark.isVisibleTo(card) and "Veda" not in card.settings_toggle.text()
+    assert T.Checker(win.project, win.tree).settings(ids[0])["veda"] is True
+    win.veda.setChecked(False)                                                              # off: saved, no mark
+    assert win.tree.options["veda"] == {"on": False} and not win.veda_used(node)
+    win.refresh()
+    card = next(c for c in win.cards if c.nid == ids[0])
+    assert not card.veda_mark.isVisibleTo(card)
+    assert "Veda" not in win.size_info.text() and "veda" not in T.Checker(win.project, win.tree).settings(ids[0])

@@ -66,6 +66,8 @@ DEFAULT_OPTIONS = {"model": "Comfy-Org/MiniMax-H3", "frames": 73, "steps": 28,
                    "hyperflow": {"on": False, "strength": 1.0},
                    # Pika H3 Flex: Pika's post-trained H3 as a LoRA, 6 steps (ComfyUI template recipe)
                    "pika": {"on": False, "strength": 1.0},
+                   # Veda sparse attention: used automatically for clips large enough to gain (chain.veda_useful)
+                   "veda": {"on": True},
                    # the cast: characters with face pictures (copies in refs/); a prompt mentions them as @Name and
                    # the clip is made with exactly their pictures. A clip that mentions nobody gets the lead's.
                    # [{"name", "images": [rel], "desc", "lead": bool, "voice": {"file", "name", "secs"} (optional)}]
@@ -1837,7 +1839,14 @@ def node_settings(base: dict, options: dict, node: Node, audio_pool: list[dict] 
                                style=(base.get("prompt_prefix", ""), base.get("prompt_suffix", "")),
                                audio_refs=sounds or None, voice_language=use.get("language"),
                                lora_triggers=_stack_triggers(options, node, stack),
-                               source_sound=source_sound)
+                               source_sound=source_sound,
+                               veda=veda_for(options, base["width"], base["height"],
+                                             int(ov.get("frames", options.get("frames", 73)))))
+
+
+def veda_for(options: dict, width: int, height: int, frames: int) -> bool:
+    """A clip of this size is made with Veda sparse attention: the project allows it and it is large enough."""
+    return bool((options.get("veda") or {"on": True}).get("on", True)) and chain.veda_useful(width, height, frames)
 
 
 def loras_needed(tree: Tree, checker: "Checker", nids: list[str]) -> list[str]:

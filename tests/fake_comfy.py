@@ -28,6 +28,7 @@ KNOWN = {"UNETLoader", "CLIPLoader", "VAELoader", "LoadImage", "MiniMaxH3ImageTo
          # Qwen-Image 2.1 inpaint
          "ModelPatchLoader", "VideoChainQwen21FunInpaint", "ImageToMask", "MaskToImage", "ImageBlur", "GrowMask",
          "ImageCompositeMasked", "EmptyImage",
+         "VedaSparseAttention",
          # SeedVR2
          "SeedVR2Preprocess", "SeedVR2Conditioning", "SeedVR2PostProcessing", "SeedVR2TemporalChunk",
          "SeedVR2TemporalMerge", "VAEEncodeTiled",
@@ -54,6 +55,8 @@ HYPERFLOW = "custom_node_hyperflow_8step_v1.0_comfyui_pruned.safetensors"
 SEEDVR_UNETS = ["seedvr2_3b_int8_convrot.safetensors", "seedvr2_7b_int8_convrot.safetensors",
                 "seedvr2_7b_sharp_int8_convrot.safetensors", "seedvr2_7b_fp16.safetensors"]
 SEEDVR_VAE = ["seedvr2_ema_vae_fp16.safetensors"]
+VEDA_PREDICTORS = ["minimax_h3_r2va_veda_preview_fp8.safetensors",
+                   "minimax_h3_t2va_veda_8nfe_600step_preview_fp8.safetensors"]
 C_REFINE_SIGMAS = {"0.6, 0.5657, 0.4403, 0": "soft", "0.7, 0.66, 0.5136, 0": "natural", "0.8, 0.7542, 0.587, 0": "crisp"}
 QWEN_UNET, QWEN_CLIP, QWEN_VAE = ("qwen-image/qwen_image_edit_2511_fp8mixed.safetensors",
                                   "qwen_2.5_vl_7b_fp8_scaled.safetensors", "qwen_image_vae.safetensors")
@@ -80,6 +83,8 @@ SCHEMAS = {
     "VideoChainFaceSwap": ({"images", "person", "swapper", "enhancer", "enhance"},
                            {"person_2", "person_3", "person_4"}),
     "MiniMaxH3SigmaShift": ({"model", "shift_video", "shift_audio"}, set()),
+    "VedaSparseAttention": ({"model", "predictor", "generated_sparsity", "reference_sparsity", "full_attention_layers",
+                             "full_attention_steps", "verbose"}, set()),
     "SeedVR2Preprocess": ({"resized_images"}, set()),
     "SeedVR2Conditioning": ({"model", "vae_conditioning"}, set()),
     "SeedVR2PostProcessing": ({"images", "original_resized_images", "color_correction_method"}, set()),
@@ -117,6 +122,7 @@ class FakeComfy:
         self.refine = True                         # the H3 2K nodes, the latent upscaler and the refiner LoRA
         self.refine_strengths: list[str] = []      # the strength of every refine job
         self.seedvr = True                         # SeedVR2's 7B / 3B models and VAE
+        self.veda = True                           # the Veda node and its two predictors
         self.seedvr_jobs: list[str] = []           # the model of every SeedVR2 job
         self.audio_refs = True                     # MiniMaxH3ReferenceToVideo takes reference sounds
         self.fail_next: str | None = None          # the next job fails with this message (once)
@@ -175,6 +181,9 @@ class FakeComfy:
         if node in C.SEEDVR_NODES and node not in ("LoadVideo", "GetVideoComponents", "CreateVideo", "SaveVideo",
                                                    "ImageScale", "VAEDecodeTiled"):
             return {node: {"input": {"required": {}}}} if self.seedvr else {}
+        if node == "VedaSparseAttention":
+            return {node: {"input": {"required": {"predictor": ["COMBO", {"options": VEDA_PREDICTORS}]}}}} \
+                if self.veda else {}
         if node == "VideoChainQwen21FunInpaint":
             return {node: {"input": {"required": {}}}} if self.inpaint21 else {}
         if node in C.REFINE_NODES + ("BlockSparseAttention",) and node != "LatentUpscaleModelLoader":

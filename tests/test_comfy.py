@@ -920,3 +920,32 @@ def test_seedvr2_upscale(server, start, tmp_path):
     server.seedvr = False                                                       # not installed: a clear message
     with pytest.raises(C.ComfyError, match="SeedVR2"):
         gen.seedvr(draft, out, (1888, 1088))
+
+
+def test_veda_only_where_it_gains_and_in_the_workflow(server, start, tmp_path):
+    """Veda: used from VEDA_MIN_TOKENS (a 5 s clip at 672x384 measured slower, 10 s at 1344x768 2.3x faster); the
+    node sits after every LoRA, before the guider; the R2VA predictor for clips with references."""
+    assert chain.h3_tokens(672, 384, 121) == 37 * 42 * 24 and not chain.veda_useful(672, 384, 121)
+    assert chain.veda_useful(1344, 768, 241) and chain.veda_useful(1344, 768, 124)        # 290k / 149k tokens
+    assert chain.veda_from_seconds(672, 384) is None                                      # not even at 15 s
+    assert abs(chain.veda_from_seconds(1344, 768) - 107 / 24) < 1e-9
+    assert "veda" not in settings() and settings(veda=True)["veda"] is True
+    assert chain.settings_dict(model="m", lora=None, strength=1.0, frames=39, steps=8, width=672, height=384,
+                               audio=True, veda=True)["veda"] is True
+    names = ["minimax_h3_r2va_veda_preview_fp8.safetensors",
+             "minimax_h3_t2va_veda_8nfe_600step_preview_fp8.safetensors"]
+    assert C.pick_veda_predictor(names, False).startswith("minimax_h3_t2va")
+    assert C.pick_veda_predictor(names, True).startswith("minimax_h3_r2va")
+    assert C.pick_veda_predictor(names[1:], True) == names[1] and C.pick_veda_predictor([], False) is None
+    gen = C.ComfyGenerator(server.url)
+    out, frame = tmp_path / "v.mp4", tmp_path / "v.png"
+    lora = "/data/my_models/loras/MiniMax H3/glow.safetensors"
+    gen.generate("x", start, out, frame, 1, settings(veda=True, lora=lora))
+    wf = server.prompts[-1]
+    assert wf["veda"]["inputs"]["model"] == ["lora0", 0] and wf["guider"]["inputs"]["model"] == ["veda", 0]
+    assert wf["veda"]["inputs"]["predictor"].startswith("minimax_h3_t2va")
+    gen.generate("x", start, out, frame, 1, settings())
+    assert "veda" not in server.prompts[-1]                                               # small clip: none
+    server.veda = False                                                                   # not installed: said so
+    with pytest.raises(C.ComfyError, match="Veda"):
+        gen.generate("x", start, out, frame, 1, settings(veda=True))

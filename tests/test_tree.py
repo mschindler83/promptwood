@@ -1071,3 +1071,14 @@ def test_export_with_seedvr2(project, tmp_path):
     assert len(gen.refines) == 2                                                   # the refine: its own copies
     with pytest.raises(ValueError, match="unknown method"):
         T.refine_path(gen, project, b1.id, "2k", tmp_path / "x.mp4", log=lambda _m: None, method="topaz")
+
+
+def test_veda_recorded_for_large_clips_only(project):
+    t, a, b1, b2, c = build(project)
+    base = {"model": "Comfy-Org/MiniMax-H3", "steps": 28, "width": 1344, "height": 768, "audio": True}
+    assert T.node_settings(base, t.options, t.nodes[a.id]).get("veda") is None          # 73 frames: 89k tokens
+    t.nodes[a.id].overrides = {"frames": 241}
+    assert T.node_settings(base, t.options, t.nodes[a.id])["veda"] is True               # 10 s: 290k tokens
+    assert T.node_settings({**base, "width": 672, "height": 384}, t.options, t.nodes[a.id]).get("veda") is None
+    t.options["veda"] = {"on": False}
+    assert T.node_settings(base, t.options, t.nodes[a.id]).get("veda") is None           # switched off

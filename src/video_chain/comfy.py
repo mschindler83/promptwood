@@ -237,6 +237,19 @@ def with_ref_hint(prompt: str) -> str:
     return prompt if "<Picture" in prompt else f"{prompt.rstrip()} {REF_HINT}"
 
 
+VEDA_NODE = "VedaSparseAttention"            # veda-sparse-attention (Veda-on-ComfyUI): learned sparse attention
+VEDA_SETTINGS = {"generated_sparsity": "32", "reference_sparsity": "32", "full_attention_layers": "",
+                 "full_attention_steps": "", "verbose": False}   # the node's defaults (as benchmarked)
+
+
+def pick_veda_predictor(names: list[str], refs: bool) -> str | None:
+    """The Veda predictor for a clip: the R2VA one for clips with references (faces, sounds), else the T2VA / FL2VA
+    one (start / end frames); either when only one is there."""
+    want, other = ("r2va", "t2va") if refs else ("t2va", "r2va")
+    return next((n for n in names if want in n.lower()), None) or next((n for n in names if other in n.lower()),
+                                                                        names[0] if names else None)
+
+
 def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, height: int, frames: int, steps: int,
                    loras: list[tuple[str, float]], audio: bool, prefix: str, refs: list[str] = (),
                    ref_size: str = "match", ref_key=lambda i: f"ref_images.ref_image_{i}",
@@ -244,7 +257,7 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
                    guides: list[dict] = (), hyperflow: tuple[str, float] | None = None,
                    pika: tuple[str, float] | None = None, audio_refs: list[str] = (),
                    audio_key=lambda i: f"ref_audios.ref_audio_{i}", start_pin: int = 1,
-                   recipe: dict | None = None) -> dict:
+                   recipe: dict | None = None, veda: str | None = None) -> dict:
     """The API-format workflow for one clip (image = the uploaded start image, as LoadImage names it; None: a
     clip without a start frame).
 
@@ -387,6 +400,9 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
                                                                     or SCHEDULER,
                                                                     "steps": int(steps), "denoise": 1.0}}
         sigmas = ["sigmas", 0]
+    if veda:                                       # Veda sparse attention (after every LoRA, before the guider)
+        wf["veda"] = {"class_type": VEDA_NODE, "inputs": {"model": model, "predictor": veda, **VEDA_SETTINGS}}
+        model = ["veda", 0]
     wf["guider"] = {"class_type": "BasicGuider", "inputs": {"model": model, "conditioning": positive}}
     wf["sample"] = {"class_type": "SamplerCustomAdvanced",
                     "inputs": {"noise": ["noise", 0], "guider": ["guider", 0], "sampler": ["sampler", 0],
@@ -494,6 +510,21 @@ class ComfyGenerator:
             raise ComfyError(f"ComfyUI does not list {UNET_REF} (needed for reference images)")
         if not self._object_info("MiniMaxH3ReferenceToVideo"):
             raise ComfyError("this ComfyUI has no MiniMax H3 Reference to Video node")
+
+    def veda_predictor(self, refs: bool) -> str:
+        """The Veda predictor to use (the node must be there: a clip recorded as made with Veda is never made
+        without it)."""
+        info = self._object_info(VEDA_NODE)
+        if not info:
+            raise ComfyError("this clip is large enough for Veda sparse attention, but this ComfyUI has no Veda node "
+                             "(install veda-sparse-attention: comfy node install veda-sparse-attention, then restart "
+                             "ComfyUI), or switch off \u201cFast attention (Veda)\u201d in the project settings")
+        names = _combo_options(info.get("input", {}).get("required", {}).get("predictor"))
+        name = pick_veda_predictor(names, refs)
+        if name is None:
+            raise ComfyError("ComfyUI lists no Veda predictor in models/veda "
+                             "(https://huggingface.co/Veda-Sparse/Minimax-H3-T2VA-Veda-8NFE-600Step-Preview)")
+        return name
 
     def check_guides(self):
         for node in ("MiniMaxH3AddGuide", "LoadVideo", "GetVideoComponents"):
@@ -695,7 +726,8 @@ class ComfyGenerator:
                             ref_size=s.get("ref_size", "match"), ref_key=self.ref_key() if refs else None,
                             turbo=turbo, end_image=end_image, guides=guides, hyperflow=hyper, pika=pika,
                             audio_refs=sounds, **({"audio_key": self.audio_key()} if sounds else {}),
-                            start_pin=int(s.get("start_pin") or 1), recipe=s.get("recipe"))
+                            start_pin=int(s.get("start_pin") or 1), recipe=s.get("recipe"),
+                            veda=self.veda_predictor(bool(refs or sounds)) if s.get("veda") else None)
         ws = self._connect_ws()
         try:
             self._queue(wf)

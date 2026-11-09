@@ -512,6 +512,12 @@ class PromptCard(QFrame):
         self.b_refine.clicked.connect(lambda: self.action.emit("refine", self.nid))
         foot.addWidget(self.b_refine)
         foot.addStretch(1)
+        self.veda_mark = label("⚡ Veda", level="tertiary")
+        self.veda_mark.setToolTip("This clip is large enough for Veda sparse attention: it is made with it (much "
+                                  "faster for long / large clips, very slightly different from full attention). "
+                                  "Switch it off in the project settings: “Fast attention (Veda)”")
+        self.veda_mark.hide()
+        foot.addWidget(self.veda_mark)
         foot.addWidget(label("Seed", level="tertiary"))
         self.seed = QSpinBox()
         self.seed.setRange(0, T.SEED_MAX)
@@ -761,6 +767,9 @@ class PromptCard(QFrame):
     def set_faces(self, text: str):
         self.faces.setText(text)
         self.faces.setVisible(bool(text))
+
+    def set_veda(self, on: bool):
+        self.veda_mark.setVisible(bool(on))
 
     def set_summary(self, text: str):
         """The own settings in a few words, shown on the (closed) settings toggle."""
@@ -1522,6 +1531,15 @@ class MainWindow(QMainWindow):
                               "Turbo: a step-distilled LoRA with its own sampler renders every clip in 4-8 steps "
                               "instead of ~20 (needs the ComfyUI-MiniMax-H3-Turbo nodes)")
         c.addRow("Speed", self.speed)
+        self.veda = QCheckBox("Fast attention (Veda) for large and long clips")
+        self.veda.setChecked(True)
+        self.veda.setToolTip(
+            "Veda sparse attention (the veda-sparse-attention node in ComfyUI) computes only the attention that "
+            "matters. It is used automatically for clips large enough to gain, marked “⚡ Veda” on the clip. "
+            "Measured on an RTX 4090: a 10 s clip at 1344×768 took 146 s instead of 338 s (2.3× faster) and stayed "
+            "coherent; a 5 s clip at 672×384 got 25–30 % slower, so small clips keep full attention. A clip made "
+            "with Veda differs slightly from one made without (switching this makes such clips CHANGED)")
+        c.addRow("", self.veda)
         self.turbo_lora = QComboBox()
         self.turbo_lora.setToolTip("The turbo LoRA (only turbo LoRAs are listed here, and they are left out of the "
                                    "normal LoRA lists); v4 step600 ema is the recommended one")
@@ -1875,7 +1893,7 @@ class MainWindow(QMainWindow):
         self.start_tile.dropped.connect(lambda f: self.set_image(f, confirm=True))
         for sig in (self.frames.currentIndexChanged, self.resolution.currentIndexChanged,
                     self.steps.valueChanged, self.audio.toggled, self.keep_rep.toggled,
-                    self.speed.currentIndexChanged,
+                    self.speed.currentIndexChanged, self.veda.toggled,
                     self.turbo_lora.currentIndexChanged, self.turbo_steps.valueChanged,
                     self.turbo_strength.valueChanged):
             sig.connect(self._options_changed)
@@ -2716,6 +2734,7 @@ class MainWindow(QMainWindow):
             self.turbo_strength.setValue(float(turbo.get("strength", 1.0)))
             self._fill_turbo(turbo.get("lora"))
             self.keep_rep.setChecked(bool(o.get("keep_repeated", False)))
+            self.veda.setChecked(bool((o.get("veda") or {"on": True}).get("on", True)))
             style = o.get("style") or {}
             self.style_prefix.setText(style.get("prefix") or "")
             self.style_suffix.setText(style.get("suffix") or "")
@@ -2734,7 +2753,8 @@ class MainWindow(QMainWindow):
                       "steps": self.turbo_steps.value(), "strength": round(self.turbo_strength.value(), 2)},
             "hyperflow": {**(self.tree.options.get("hyperflow") or {"strength": 1.0}),
                           "on": self.speed.currentData() == "hyperflow"},
-            "pika": {**(self.tree.options.get("pika") or {"strength": 1.0}), "on": self.speed.currentData() == "pika"}})
+            "pika": {**(self.tree.options.get("pika") or {"strength": 1.0}), "on": self.speed.currentData() == "pika"},
+            "veda": {"on": self.veda.isChecked()}})
         self._update_size_info()
         self._show_references()
         self._turbo_widgets()
@@ -3794,8 +3814,10 @@ class MainWindow(QMainWindow):
                 pass
             if dims:
                 vw, vh = chain.canvas_size(*dims, self.resolution.currentData())
+                self._canvas = (vw, vh)
                 self.size_info.setText(f"No start image: the size follows the first video ({dims[0]}×{dims[1]} → "
-                                       f"{vw}×{vh}); a first generated clip starts without a start frame.")
+                                       f"{vw}×{vh}); a first generated clip starts without a start frame."
+                                       + self._veda_note(vw, vh))
             else:
                 self.size_info.setText("Choose a start image, or begin with a real video (Clips → camera button).")
             return
@@ -3808,7 +3830,24 @@ class MainWindow(QMainWindow):
         r = (w / h) / (vw / vh)
         note = "" if 0.97 < r < 1.03 else " (ratio outside 2:5 … 5:2, it gets stretched)"
         name = Path(self.tree.image).name if self.tree and self.tree.image else T.START_FILE
-        self.size_info.setText(f"{name}: {w}×{h} → {vw}×{vh} video{note}")
+        self._canvas = (vw, vh)
+        self.size_info.setText(f"{name}: {w}×{h} → {vw}×{vh} video{note}" + self._veda_note(vw, vh))
+
+    def _veda_note(self, vw: int, vh: int) -> str:
+        """Where Veda is used at this size (for the size line)."""
+        if not self.veda.isChecked():
+            return ""
+        secs = chain.veda_from_seconds(vw, vh)
+        return (f" · ⚡ Veda for clips from {secs:.1f} s" if secs is not None else
+                " · Veda not used at this size (too small to gain)")
+
+    def veda_used(self, n: T.Node) -> bool:
+        """This generated clip is made with Veda sparse attention (see tree.veda_for)."""
+        canvas = getattr(self, "_canvas", None)
+        if n.is_video or canvas is None or self.tree is None:
+            return False
+        frames = int((n.overrides or {}).get("frames", self.tree.options.get("frames", 73)))
+        return T.veda_for(self.tree.options, canvas[0], canvas[1], frames)
 
     # ------------------------------------------------------------------ tree view
     def selected_id(self) -> str | None:
@@ -3893,6 +3932,8 @@ class MainWindow(QMainWindow):
         k = T.handover_index(self.tree, n)
         if k is not None:
             parts.append(f"hands over at {k / 24:.1f} s")
+        if self.veda_used(n):
+            parts.append("⚡ Veda")
         return " · ".join(parts)
 
     def _faces_text(self, use: dict) -> str:
@@ -4203,6 +4244,7 @@ class MainWindow(QMainWindow):
                               "afterwards; it may be shorter than 2 s.")
                 card.set_source_sound(avail, info, max_guide, rep_ok)
                 card.set_summary(" · ".join(self._own_parts(n)))
+                card.set_veda(self.veda_used(n))
                 end = self.project / n.end_image if n.end_image else None
                 if vc is not None:
                     card.set_end(end, vc.id, self._pixmap(self.project / vc.made["first"]) if vc.made else None)
@@ -4273,7 +4315,7 @@ class MainWindow(QMainWindow):
                   self.b_ref_start,
                   self.b_ref_del, self.b_ref_crop, self.b_char_new, self.b_char_rename, self.b_char_del, self.char_desc,
                   self.char_lead, self.b_voice_file, self.b_voice_del, self.dialogue_lang, self.speed, self.style_prefix,
-                  self.style_suffix, self.lora_triggers, self.b_ai_edit, self.b_ai_create, self.storyboard,
+                  self.style_suffix, self.lora_triggers, self.veda, self.b_ai_edit, self.b_ai_create, self.storyboard,
                   self.b_film_gen, self.b_film_play, self.b_film_export, self.b_film_cast):
             w.setEnabled(idle)
         busy = bool(self._copying or self._joins or self._converts)
@@ -5861,7 +5903,10 @@ class MainWindow(QMainWindow):
                 self.progress_of[nid] = 0.0
                 k = self._plan.index(nid) + 1 if nid in self._plan else 1
                 self._overall(k, 0)
-                self.status.setText(f"Clip #{nid[1:]} ({k} of {len(self._plan)}) …")
+                node = self.tree.nodes.get(nid) if self.tree else None
+                fast = node is not None and self.veda_used(node) and not (self._job or {}).get("refine")
+                self.status.setText(f"Clip #{nid[1:]} ({k} of {len(self._plan)}) …"
+                                    + (" with ⚡ Veda fast attention (a large clip)" if fast else ""))
             else:
                 self.live.pop(nid, None)
                 self.progress_of.pop(nid, None)

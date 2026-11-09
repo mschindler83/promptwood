@@ -26,6 +26,32 @@ from typing import Callable, Protocol
 FPS = 24
 HYPERFLOW_STEPS = 8      # HyperFlow's trained sigma grid
 PIKA_STEPS = 6           # Pika H3 Flex (its template's 6-step sigmas)
+# Veda sparse attention (veda-sparse-attention node) pays off only for large clips: measured on an RTX 4090 it made a
+# 5 s clip at 672x384 (37k tokens) 25-30 % slower and a 10 s clip at 1344x768 (290k tokens) 2.3x faster; the
+# predictor's own RTX 4090 numbers give 1.77x at 1344x768 for 5 s (149k). So it is used from this many tokens on.
+VEDA_MIN_TOKENS = 120_000
+
+
+def h3_tokens(width: int, height: int, frames: int) -> int:
+    """The video tokens H3 attends over for a clip (latent frames x 16-px patches), as ComfyUI counts them."""
+    f = int(frames)
+    while f > 5 and f % 17 != 5:                # (off the 17n+5 grid: rounded up, as ComfyUI does)
+        f += 1
+    latent = 2 if f <= 5 else ((f - 5) // 17) * 5 + 2
+    return latent * (int(width) // 16) * (int(height) // 16)
+
+
+def veda_useful(width: int, height: int, frames: int) -> bool:
+    """Veda makes a clip of this size faster (see VEDA_MIN_TOKENS)."""
+    return h3_tokens(width, height, frames) >= VEDA_MIN_TOKENS
+
+
+def veda_from_seconds(width: int, height: int) -> float | None:
+    """The clip length (s) from which Veda is used at this size (None: not even at 15 s)."""
+    for frames in range(5, 15 * 24 + 3, 17):
+        if veda_useful(width, height, frames):
+            return frames / 24
+    return None
 DIVISIBILITY = 32
 MAX_RATIO = 2.5          # H3 custom sizes go from 2:5 to 5:2
 
@@ -462,7 +488,7 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
                   style: tuple[str, str] | None = None, hyperflow: float | None = None,
                   pika: float | None = None, audio_refs: list | None = None, cast: list | None = None,
                   voice_language: str | None = None, lora_triggers: list | None = None,
-                  source_sound: dict | None = None) -> dict:
+                  source_sound: dict | None = None, veda: bool = False) -> dict:
     """What a clip depends on besides prompt, seed and start image; a clip is reused only if this is unchanged.
     The LoRA counts by content (lora_sha1), so a LoRA retrained into the same file makes its clips change.
     extra_loras: further LoRAs stacked after the first ([(path, strength)]), only present when there are any, so
@@ -513,6 +539,8 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
             s["source_sound"]["overlay"] = True
     if lora_triggers:                           # the LoRAs' trigger words put before the prompt
         s["lora_triggers"] = [str(w) for w in lora_triggers]
+    if veda:                                    # made with Veda sparse attention (a large clip, see veda_useful)
+        s["veda"] = True
     if guide:                                   # motion guide: frames of the neighbouring clips anchored
         s["guide"] = int(guide)
     prefix, suffix = ((style[0] or "").strip(), (style[1] or "").strip()) if style else ("", "")
