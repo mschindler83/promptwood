@@ -3005,6 +3005,7 @@ def test_lora_presets_in_the_image_window(app, tmp_path, monkeypatch):
     for f in (a, b):
         f.write_bytes(b"x")
     q = QSettings(str(tmp_path / "pre.ini"), QSettings.IniFormat)
+    q.setValue("createLoras_sdxl", json.dumps([{"path": str(a), "strength": 0.5}]))      # remembered from before
     dlg = IE.ImageEditDialog(None, tmp_path, [], None, None, lambda p: None, lambda k, p: False, q,
                              connect_create=lambda p: None)
     files = G.pick_files(["krea2/krea2_turbo_fp8_scaled.safetensors"], ["illustrij_v20.safetensors"],
@@ -3012,9 +3013,11 @@ def test_lora_presets_in_the_image_window(app, tmp_path, monkeypatch):
     q.setValue("createFamily", "sdxl")
     dlg._families_found(files, "")
     dlg.set_mode("create")
+    assert dlg.loras.items() == [{"path": str(a), "strength": 0.5}]
+    assert dlg.b_preset_new.isEnabled(), "the remembered LoRA's presets can be saved at once"
+    dlg.loras.set_items([], [])
     assert not dlg.b_preset_new.isEnabled() and "add a LoRA" in dlg.preset.itemText(0)
-    dlg.loras.set_items([], [{"path": str(a), "strength": 0.8}])
-    dlg.loras.changed.emit()
+    dlg.loras.set_items([], [{"path": str(a), "strength": 0.8}])    # (as the remembered LoRAs come in: no changed)
     assert dlg.b_preset_new.isEnabled() and not dlg.b_preset_delete.isEnabled()
     dlg.prompt.setPlainText("a woman walks, w4lk, very long prompt " * 20)
     dlg.negative.setText("blurry")
@@ -3035,7 +3038,6 @@ def test_lora_presets_in_the_image_window(app, tmp_path, monkeypatch):
     assert dlg.rename_preset("Walk, cfg 7") and dlg.preset.currentText() == "Walk, cfg 7"
     assert presets.store().get(str(a), "Slow walk") is None
     dlg.loras.set_items([], [{"path": str(a), "strength": 0.8}, {"path": str(b), "strength": 1.0}])
-    dlg.loras.changed.emit()
     assert dlg.save_preset_as("Sprint", lora=str(b))
     texts = [dlg.preset.itemText(i) for i in range(1, dlg.preset.count())]
     assert texts == ["walk: Walk, cfg 7", "run: Sprint"]

@@ -389,6 +389,7 @@ class ImageEditDialog(QDialog):
         self.loras.picked.connect(self._lora_picked)
         self.loras.changed.connect(self._remember_loras)
         self.loras.changed.connect(lambda: self._fill_presets())
+        self.loras.filled.connect(lambda: self._fill_presets())      # (also the LoRAs remembered for this family)
         left.addWidget(self.loras)
 
         opts = QGridLayout()
@@ -1225,7 +1226,14 @@ class ImageEditDialog(QDialog):
 
     def _preset_buttons(self):
         chosen = self.preset.currentData() is not None
-        self.b_preset_new.setEnabled(bool(self._preset_loras()))
+        has = bool(self._preset_loras())
+        self.b_preset_new.setEnabled(has)
+        self.b_preset_new.setToolTip("Save the prompt and these settings as a new preset of a LoRA" if has else
+                                     "Presets belong to a LoRA: add a LoRA above first")
+        for b, tip in ((self.b_preset_save, "Save the current prompt and settings into the chosen preset"),
+                       (self.b_preset_rename, "Rename the chosen preset"),
+                       (self.b_preset_delete, "Delete the chosen preset")):
+            b.setToolTip(tip if chosen else tip + " (choose a preset first)")
         for b in (self.b_preset_save, self.b_preset_rename, self.b_preset_delete):
             b.setEnabled(chosen)
 

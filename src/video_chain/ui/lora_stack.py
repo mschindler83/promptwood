@@ -178,6 +178,7 @@ class LoraStack(QWidget):
     changed = Signal()
     fileWanted = Signal()                          # kept for callers that add a file themselves
     picked = Signal(str)                           # a LoRA was chosen in the picker (e.g. a file from elsewhere)
+    filled = Signal()                              # set_items put a new list in (e.g. the remembered LoRAs)
     pick = staticmethod(pick_lora)
 
     def __init__(self, parent=None, add_text: str = "+ LoRA"):
@@ -213,6 +214,7 @@ class LoraStack(QWidget):
             if it.get("path"):
                 self._add_row(it["path"], float(it.get("strength", 1.0)))
         self.none.setVisible(not self.rows)
+        self.filled.emit()
 
     def _used(self) -> set[str]:
         return {b.property("path") for _w, b, _s in self.rows}
