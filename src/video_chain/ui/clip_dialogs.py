@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
 
 from .. import chain
 from .theme import icon
-from .widgets import FrameTile, icon_button, label
+from .widgets import FrameTile, VideoView, icon_button, label
 
 FPS = chain.FPS
 PREVIEW_W = 480                    # frames are decoded once at this width, so scrubbing is instant
@@ -166,7 +166,6 @@ class CompareDialog(QDialog):
         if player:
             try:
                 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
-                from PySide6.QtMultimediaWidgets import QVideoWidget
                 has_player = True
             except ImportError:
                 has_player = False
@@ -176,13 +175,13 @@ class CompareDialog(QDialog):
             bv.setContentsMargins(0, 0, 0, 0)
             bv.setSpacing(4)
             if has_player:
-                view = QVideoWidget()
+                view = VideoView()                 # (painted frames: no native GPU window, see VideoView)
                 view.setMinimumSize(360, 220)
                 out = QAudioOutput(self)
                 out.setMuted(k != 0)
                 p = QMediaPlayer(self)
                 p.setAudioOutput(out)
-                p.setVideoOutput(view)
+                p.setVideoOutput(view.sink)
                 p.setSource(QUrl.fromLocalFile(str(video)))
                 p.mediaStatusChanged.connect(lambda st, p=p: self._ended(p, st))
                 self.players.append(p)

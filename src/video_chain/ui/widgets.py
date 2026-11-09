@@ -1,12 +1,103 @@
 """Small themed widgets shared by the windows (same conventions as another app / the design)."""
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QObject, QSize, Qt, Signal
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtCore import QEvent, QObject, QRect, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QHBoxLayout, QLabel, QSizePolicy,
                                QToolButton, QWidget)
 
 from .theme import icon, theme
+
+
+def frame_image(frame) -> QImage:
+    """A decoded video frame as an RGB image, converted on the CPU (YUV420P / NV12, limited or full range, BT.709
+    when the frame says so, else BT.601 as Qt does): QVideoFrame.toImage() may use a GPU (OpenGL through the EGL driver that crashed).
+    Other formats fall back to toImage()."""
+    from PySide6.QtMultimedia import QVideoFrame, QVideoFrameFormat
+    try:
+        import numpy as np
+    except ImportError:                            # (numpy is optional for the app)
+        return frame.toImage()
+    fmt = frame.pixelFormat()
+    if fmt not in (QVideoFrameFormat.Format_YUV420P, QVideoFrameFormat.Format_NV12) or \
+            not frame.map(QVideoFrame.ReadOnly):
+        return frame.toImage()
+    try:
+        w, h = frame.width(), frame.height()
+
+        def plane(i, rows, cols, ch=1):
+            line = frame.bytesPerLine(i)
+            a = np.frombuffer(frame.bits(i), np.uint8, count=line * rows).reshape(rows, line)
+            return a[:, :cols * ch].reshape(rows, cols, ch) if ch > 1 else a[:, :cols]
+        hw, hh = (w + 1) // 2, (h + 1) // 2
+        y = plane(0, h, w).astype(np.float32)
+        if fmt == QVideoFrameFormat.Format_NV12:
+            uv = plane(1, hh, hw, 2).astype(np.float32)
+            u, v = uv[..., 0], uv[..., 1]
+        else:
+            u, v = plane(1, hh, hw).astype(np.float32), plane(2, hh, hw).astype(np.float32)
+    finally:
+        frame.unmap()
+    u = np.repeat(np.repeat(u, 2, axis=0), 2, axis=1)[:h, :w] - 128.0
+    v = np.repeat(np.repeat(v, 2, axis=0), 2, axis=1)[:h, :w] - 128.0
+    sf = frame.surfaceFormat()
+    if sf.colorRange() == QVideoFrameFormat.ColorRange_Full:
+        k, cs = 1.0, 1.0
+    else:                                          # limited (video) range: 16-235, chroma 16-240
+        y, k, cs = y - 16.0, 255.0 / 219.0, 255.0 / 224.0
+    if sf.colorSpace() == QVideoFrameFormat.ColorSpace_BT709:
+        cr, cgu, cgv, cb = 1.5748, 0.187324, 0.468124, 1.8556
+    else:                                          # BT.601: also when the clip does not say (as Qt converts it)
+        cr, cgu, cgv, cb = 1.402, 0.344136, 0.714136, 1.772
+    y, u, v = y * k, u * cs, v * cs
+    rgb = np.empty((h, w, 3), np.float32)
+    rgb[..., 0] = y + cr * v
+    rgb[..., 1] = y - cgu * u - cgv * v
+    rgb[..., 2] = y + cb * u
+    out = np.ascontiguousarray(rgb.clip(0, 255).astype(np.uint8))
+    return QImage(out.data, w, h, w * 3, QImage.Format_RGB888).copy()
+
+
+class VideoView(QWidget):
+    """Shows a QMediaPlayer's video: its frames come through a QVideoSink and are painted like an image (kept in
+    proportion, black around). Unlike QVideoWidget there is no native GPU window: QVideoWidget renders through its
+    own EGL/OpenGL window, and NVIDIA's EGL driver crashed there (segfault in libnvidia-eglcore while the first frame
+    was drawn) when ComfyUI held nearly all GPU memory after a long clip. Use: player.setVideoOutput(view.sink)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        from PySide6.QtMultimedia import QVideoSink
+        self.sink = QVideoSink(self)
+        self.sink.videoFrameChanged.connect(self._frame)
+        self._img = QImage()
+        self.setAttribute(Qt.WA_OpaquePaintEvent)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+    def _frame(self, frame):
+        if not frame.isValid():                    # (the end of a clip: its last frame stays, as in QVideoWidget)
+            return
+        self._img = frame_image(frame)
+        self.update()
+
+    def image(self) -> QImage:
+        return self._img
+
+    def clear(self):
+        self._img = QImage()
+        self.update()
+
+    def sizeHint(self):
+        return QSize(640, 360)
+
+    def paintEvent(self, _e):                     # noqa: N802  (Qt naming)
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(0, 0, 0))
+        if not self._img.isNull():
+            size = self._img.size().scaled(self.size(), Qt.KeepAspectRatio)
+            x, y = (self.width() - size.width()) // 2, (self.height() - size.height()) // 2
+            p.setRenderHint(QPainter.SmoothPixmapTransform)
+            p.drawImage(QRect(x, y, size.width(), size.height()), self._img)
+        p.end()
 
 
 def label(text: str = "", *, level: str | None = None, type_: str | None = None, role: str | None = None,

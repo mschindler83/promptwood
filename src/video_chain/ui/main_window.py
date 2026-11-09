@@ -48,7 +48,7 @@ from .prompt_refiner import RefineDialog, replace_text
 from .image_edit import EDITS_DIR, ImageEditDialog, project_edits, record_use, uses_of
 from .video_editor import VideoRangeDialog, choose_video
 from .theme import icon, repolish, theme
-from .widgets import FrameTile, guard_wheel, icon_button, label, section_bar
+from .widgets import FrameTile, VideoView, guard_wheel, icon_button, label, section_bar
 
 DEFAULT_COMFY_URL = "http://127.0.0.1:8188"
 DEFAULT_COMFY_LAUNCHER = str(Path.home() / "bin" / "comfyui")
@@ -1071,17 +1071,16 @@ class Preview(QWidget):
             return True
         try:
             from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
-            from PySide6.QtMultimediaWidgets import QVideoWidget
         except ImportError:
             self.placeholder.setText("Video playback is not available (QtMultimedia missing).")
             return False
-        self.video = QVideoWidget()
+        self.video = VideoView()                    # (painted frames: no native GPU window, see VideoView)
         self.video.setMinimumHeight(200)
         self.stack.addWidget(self.video)
         self.audio = QAudioOutput(self)
         self.player = QMediaPlayer(self)
         self.player.setAudioOutput(self.audio)
-        self.player.setVideoOutput(self.video)
+        self.player.setVideoOutput(self.video.sink)
         self.player.positionChanged.connect(self._pos)
         self.player.durationChanged.connect(lambda d: self.slider.setRange(0, int(d)))
         self.player.playbackStateChanged.connect(self._state)
@@ -1113,6 +1112,7 @@ class Preview(QWidget):
         if self.player is not None:
             self.player.stop()
             self.player.setSource(QUrl())
+            self.video.clear()
 
     def _pos(self, ms):
         if not self.slider.isSliderDown():

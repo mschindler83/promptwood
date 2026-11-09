@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QDoubleSpinBox, QFileD
 
 from .. import chain
 from .theme import icon, theme, with_alpha
-from .widgets import FrameTile, guard_wheel, icon_button, label
+from .widgets import FrameTile, VideoView, guard_wheel, icon_button, label
 
 VIDEO_FILTER = "Videos (*.mp4 *.mov *.mkv *.webm *.avi *.m4v *.mts *.m2ts *.wmv *.flv *.mpg *.mpeg)"
 FPS = chain.FPS
@@ -306,17 +306,16 @@ class VideoRangeDialog(QDialog):
         if self.player is None:
             try:
                 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
-                from PySide6.QtMultimediaWidgets import QVideoWidget
             except ImportError:
                 self.placeholder.setText("Video playback is not available (QtMultimedia missing); "
                                          "the frames below show the range.")
                 return
-            self.video = QVideoWidget()
+            self.video = VideoView()                # (painted frames: no native GPU window, see VideoView)
             self.stack.addWidget(self.video)
             self.audio = QAudioOutput(self)
             self.player = QMediaPlayer(self)
             self.player.setAudioOutput(self.audio)
-            self.player.setVideoOutput(self.video)
+            self.player.setVideoOutput(self.video.sink)
             self.player.positionChanged.connect(self._player_pos)
             self.player.playbackStateChanged.connect(self._player_state)
         self.player.setSource(QUrl.fromLocalFile(self.file))

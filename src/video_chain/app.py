@@ -6,6 +6,10 @@ import sys
 
 
 def main(argv: list[str] | None = None) -> int:
+    import os
+    # the video players decode on the CPU: Qt's FFmpeg backend took CUDA by default, the same GPU ComfyUI fills
+    # (frames are then converted to RGB on the CPU too, see widgets.VideoView); a value set by the user is kept
+    os.environ.setdefault("QT_FFMPEG_DECODING_HW_DEVICE_TYPES", "none")
     from PySide6.QtCore import QLoggingCategory
     from PySide6.QtWidgets import QApplication, QMessageBox
 

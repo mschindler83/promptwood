@@ -2547,3 +2547,37 @@ def test_veda_setting_and_marks(app, win, tmp_path, image):
     card = next(c for c in win.cards if c.nid == ids[0])
     assert not card.veda_mark.isVisibleTo(card)
     assert "Veda" not in win.size_info.text() and "veda" not in T.Checker(win.project, win.tree).settings(ids[0])
+
+
+def test_preview_paints_frames_without_a_native_video_window(app, tmp_path, monkeypatch):
+    """The players show frames through a QVideoSink painted in a normal widget: QVideoWidget's own GPU window
+    crashed in NVIDIA's EGL driver (segfault) while ComfyUI held the GPU memory."""
+    import subprocess
+
+    from video_chain.ui.main_window import Preview
+    from video_chain.ui.widgets import VideoView
+    monkeypatch.undo()                                                   # (this test plays: a clip without sound,
+    clip = tmp_path / "c.mp4"                                            # the player muted as well)
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=320x180:r=24:d=2", "-an",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", str(clip)], check=True)
+    p = Preview()
+    p.resize(640, 420)
+    p.show()
+    p._ensure_player()
+    p.audio.setMuted(True)
+    p.open(clip, "clip")
+    assert isinstance(p.video, VideoView)
+    wait(app, lambda: not p.video.image().isNull(), timeout=20)
+    assert p.video.image().width() == 320
+    p.video.repaint()                                                    # (paints the frame scaled into the view)
+    wait(app, lambda: p.player.position() >= 1900, timeout=20)
+    for _ in range(50):
+        app.processEvents()
+    assert not p.video.image().isNull()                                  # the end: the last frame stays
+    p.stop()
+    assert p.video.image().isNull()
+    p.close()
+    p.deleteLater()
+    import video_chain.ui as ui
+    for f in Path(ui.__file__).parent.glob("*.py"):                      # no QVideoWidget anywhere in the app
+        assert "QVideoWidget()" not in f.read_text(encoding="utf-8"), f.name
