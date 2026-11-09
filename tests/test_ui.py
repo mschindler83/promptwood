@@ -2478,3 +2478,17 @@ def test_compare_player_frames_and_divider(app, tmp_path):
     p.stop_loading()
     p.close()
     p.deleteLater()
+
+
+def test_new_clips_get_random_seeds_and_the_seed_button(app, win, tmp_path, image):
+    ids = new_project(win, tmp_path, image, ("a", "b", "c"))
+    seeds = [win.tree.nodes[i].seed for i in ids]
+    assert len(set(seeds)) == 3 and 42 not in seeds and all(1 <= s <= T.SEED_MAX for s in seeds)
+    card = next(c for c in win.cards if c.nid == ids[1])
+    before = card.seed.value()
+    card.b_seed.click()                                                  # a new random seed, saved with the clip
+    assert card.seed.value() != before and win.tree.nodes[ids[1]].seed == card.seed.value()
+    assert card.seed.value() not in (seeds[0], seeds[2])
+    card.set_editable(False)
+    assert not card.b_seed.isEnabled()
+    card.set_editable(True)

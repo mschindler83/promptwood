@@ -1026,3 +1026,10 @@ def test_refined_export_can_refine_a_video_with_a_replaced_person(project, tmp_p
     T.refine_path(gen, project, a.id, "2k", tmp_path / "plain.mp4", log=lambda _m: None)
     assert json.loads(refined.with_suffix(".json").read_text())["video"] == "converted"   # only scaled up now
     assert len(gen.refines) == 3 and gen.refines[2]["prompt"] == "a"   # (pinned to the other first frame)
+
+
+def test_new_clips_get_random_unused_seeds():
+    t = T.Tree()
+    seeds = [t.add(None, str(k)).seed for k in range(20)]
+    assert len(set(seeds)) == 20 and all(1 <= s <= T.SEED_MAX for s in seeds)
+    assert len({T.Tree().add(None, "x").seed for _ in range(5)}) > 1     # random, not a fixed start seed

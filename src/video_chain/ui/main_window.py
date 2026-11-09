@@ -475,10 +475,14 @@ class PromptCard(QFrame):
         foot.addStretch(1)
         foot.addWidget(label("Seed", level="tertiary"))
         self.seed = QSpinBox()
-        self.seed.setRange(0, 2_000_000_000)
+        self.seed.setRange(0, T.SEED_MAX)
         self.seed.setValue(node.seed)
         self.seed.setToolTip("Seed of this clip; another seed gives another version")
         foot.addWidget(self.seed)
+        self.new_seed = None
+        self.b_seed = icon_button("rotate", "New random seed for this clip (another version when it is made again)")
+        self.b_seed.clicked.connect(self.random_seed)
+        foot.addWidget(self.b_seed)
         v.addLayout(foot)
 
         # own settings of this clip; "default" = the project's
@@ -665,6 +669,10 @@ class PromptCard(QFrame):
     def text(self) -> str:
         return " ".join(self.edit.toPlainText().split())
 
+    def random_seed(self):
+        """A new random seed in the field (new_seed(): one no other clip has, else any)."""
+        self.seed.setValue(self.new_seed() if self.new_seed is not None else random.randint(1, T.SEED_MAX))
+
     def _text(self):
         self._words()
         self.edited.emit(self.nid)
@@ -693,8 +701,8 @@ class PromptCard(QFrame):
 
     def set_editable(self, on: bool):
         self.edit.setReadOnly(not on)
-        for w in (self.seed, self.length, self.steps, self.loras, self.guide, self.src_sound, self.sound_over,
-                  self.b_refine, *self.buttons):
+        for w in (self.seed, self.b_seed, self.length, self.steps, self.loras, self.guide, self.src_sound,
+                  self.sound_over, self.b_refine, *self.buttons):
             w.setEnabled(on)
         self.steps.setEnabled(on and not self.steps_locked)
         self._enable_guide()
@@ -3959,6 +3967,7 @@ class MainWindow(QMainWindow):
             card = PromptCard(n, names=self._cast_names)
             card.edited.connect(self._card_edited)
             card.seedChanged.connect(self._seed_changed)
+            card.new_seed = self._new_seed
             card.overridesChanged.connect(self._overrides_changed)
             card.chooseLora.connect(self._choose_node_lora)
             card.lora_picked.connect(self._lora_picked)
@@ -4450,11 +4459,7 @@ class MainWindow(QMainWindow):
             self._changed()
 
     def _new_seed(self) -> int:
-        used = {n.seed for n in self.tree.nodes.values()}
-        while True:
-            s = random.randint(1, 2_000_000_000)
-            if s not in used:
-                return s
+        return self.tree.new_seed()
 
     def node_action(self, action: str, nid: str | None):
         if self.tree is None or self.running:

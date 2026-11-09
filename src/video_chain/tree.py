@@ -40,6 +40,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import random
 import re
 import shutil
 import tempfile
@@ -158,14 +159,19 @@ class Tree:
             raise KeyError(parent)
         nid = f"n{self.next_num}"
         self.next_num += 1
-        if seed is None:                           # never the seed of an existing clip (also after deletes)
-            used = {n.seed for n in self.nodes.values()}
-            seed = int(self.options.get("seed", 42)) + len(self.nodes)
-            while seed in used:
-                seed += 1
+        if seed is None:
+            seed = self.new_seed()
         node = Node(nid, parent, prompt, int(seed))
         self.nodes[nid] = node
         return node
+
+    def new_seed(self) -> int:
+        """A random seed no clip of the tree has."""
+        used = {n.seed for n in self.nodes.values()}
+        while True:
+            s = random.randint(1, SEED_MAX)
+            if s not in used:
+                return s
 
     def video_child(self, nid: str | None) -> Node | None:
         """The video a generated clip leads into (its end frame), or None. Only generated clips have one."""
@@ -283,6 +289,7 @@ class Tree:
         return t
 
 
+SEED_MAX = 2_000_000_000            # (the seed field's range)
 REFINED = ("1080p", "2k")          # refined copies of a clip version for export: nodes/<id>_<tag>_<size>.mp4
 _CLIP_NAME = re.compile(r"^n\d+(_[0-9a-f]{8})?((_first|_f\d+)?\.(mp4|png)|_(1080p|2k)\.(mp4|json))$")   # also the fixed names of older versions
 
@@ -379,7 +386,7 @@ def load(project: Path) -> Tree:
         parent = None
         project_loras = {k: t.options.pop(k) for k in _OLD_LORA_KEYS if k in t.options}
         for c in old.get("clips", []):
-            n = t.add(parent, c.get("prompt", ""), c.get("seed", 42))
+            n = t.add(parent, c.get("prompt", ""), c.get("seed"))
             n.overrides = migrate_loras(project_loras, {})
             video, frame = project / c.get("video", ""), project / c.get("last_frame", "")
             if video.is_file() and frame.is_file():
