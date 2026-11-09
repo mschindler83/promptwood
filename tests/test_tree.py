@@ -1033,3 +1033,19 @@ def test_new_clips_get_random_unused_seeds():
     seeds = [t.add(None, str(k)).seed for k in range(20)]
     assert len(set(seeds)) == 20 and all(1 <= s <= T.SEED_MAX for s in seeds)
     assert len({T.Tree().add(None, "x").seed for _ in range(5)}) > 1     # random, not a fixed start seed
+
+
+def test_refine_strength_is_used_and_recorded(project, tmp_path):
+    from video_chain import comfy as C
+    assert C.refine_sigmas("natural") == "0.7, 0.66, 0.5136, 0" and C.REFINE_DEFAULT == "natural"
+    assert C.refine_sigmas("crisp").startswith("0.8, ") and C.refine_sigmas("soft").startswith("0.6, ")
+    t, a, b1, b2, c = build(project)
+    gen = run(project, [b1.id])
+    T.refine_path(gen, project, b1.id, "2k", tmp_path / "n.mp4", log=lambda _m: None)
+    assert [r["strength"] for r in gen.refines] == ["natural", "natural"]
+    t = T.load(project)
+    assert T.refine_record(T.refined_file(project, t.nodes[a.id], "2k"))["strength"] == "natural"
+    T.refine_path(gen, project, b1.id, "2k", tmp_path / "c.mp4", log=lambda _m: None, strength="crisp")
+    assert [r["strength"] for r in gen.refines[2:]] == ["crisp", "crisp"]        # another strength: made again
+    T.refine_path(gen, project, b1.id, "2k", tmp_path / "c2.mp4", log=lambda _m: None, strength="crisp")
+    assert len(gen.refines) == 4                                                   # then reused

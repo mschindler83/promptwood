@@ -1382,7 +1382,19 @@ class ComfyImageEditor(ComfyGenerator):
 
 # ----------------------------------------------------------------------------- 2K refine (Open-H3-Regenerate-2K)
 
-REFINE_SIGMAS = "0.909, 0.857, 0.667, 0"   # the release's 3 Euler steps, re-noised from 0.909, no CFG
+REFINE_RELEASE = (0.909, 0.857, 0.667, 0.0)  # the release's 3 Euler steps, re-noised from 0.909, no CFG
+# How much noise the refine adds before its 3 steps: the release's schedule scaled down to start at this sigma.
+# Measured on a 1.6 s face clip at 1080p (RTX 4090): from 0.909 (the release) the refine repaints faces (closed eyes
+# drawn half open with lashes, eye and hair colour changed, frizz and grain); 0.8 keeps the person, crisp; 0.7 calm
+# and clean; 0.6 softer, little more than a scale-up. Grain on flat areas: 1.42 at 0.909, 1.01-1.07 at 0.6-0.8.
+REFINE_STRENGTHS = {"soft": 0.6, "natural": 0.7, "crisp": 0.8}
+REFINE_DEFAULT = "natural"
+
+
+def refine_sigmas(strength: str = REFINE_DEFAULT) -> str:
+    """The refine's sigmas for a strength (soft / natural / crisp)."""
+    start = REFINE_STRENGTHS[strength]
+    return ", ".join(f"{s * start / REFINE_RELEASE[0]:.4g}" for s in REFINE_RELEASE)
 SOL_TAU = 1.3                               # Sol-Attn threshold (ComfyUI's default); measured at 2K on an RTX 4090:
                                             # 2.2x faster refine, PSNR 33 dB against dense attention
 # The refine pass at 2K runs out of memory on a 24 GB GPU for long clips (measured on an RTX 4090: 10 s = 880k tokens
@@ -1428,13 +1440,14 @@ def pick_refine_files(loras: list[str], upscalers: list[str]) -> dict:
 def build_refine_workflow(*, prompt: str, draft: str, seed: int, width: int, height: int, frames: int,
                           loras: list[tuple[str, float]], refiner: str, upscaler: str, prefix: str,
                           first_frame: str | None = None, last_frame: str | None = None,
-                          sparse: float | None = None) -> dict:
+                          sparse: float | None = None, strength: str = REFINE_DEFAULT) -> dict:
     """Re-render a finished clip (the uploaded draft video, with sound) at width x height: its video and sound are
     encoded into H3's AV latent, the video upscaled with the latent upscaler, then refined in 3 steps with the
     refiner LoRA (and the clip's own LoRAs, as it was made); the clip's own sound is kept.
     first_frame / last_frame (uploaded images): pinned as keyframes, so a refined clip starts exactly where the
     refined clip before it hands over (and ends at a real video's refined first frame).
-    sparse: Sol-Attn block-sparse attention at this threshold (ComfyUI's BlockSparseAttention; not exact)."""
+    sparse: Sol-Attn block-sparse attention at this threshold (ComfyUI's BlockSparseAttention; not exact).
+    strength: how much is drawn anew (REFINE_STRENGTHS)."""
     wf: dict = {
         "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": UNET, "weight_dtype": "default"}},
         "clip": {"class_type": "CLIPLoader", "inputs": {"clip_name": TEXT_ENCODER, "type": "minimax",
@@ -1456,7 +1469,7 @@ def build_refine_workflow(*, prompt: str, draft: str, seed: int, width: int, hei
                             **({"last_frame": ["last", 0]} if last_frame else {})}},
         "noise": {"class_type": "RandomNoise", "inputs": {"noise_seed": int(seed)}},
         "sampler": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
-        "sigmas": {"class_type": "ManualSigmas", "inputs": {"sigmas": REFINE_SIGMAS}},
+        "sigmas": {"class_type": "ManualSigmas", "inputs": {"sigmas": refine_sigmas(strength)}},
     }
     if first_frame:
         wf["first"] = {"class_type": "LoadImage", "inputs": {"image": first_frame}}
@@ -1514,7 +1527,7 @@ def _with_audio(video: Path, out: Path) -> Path:
 
 def _refine(self, draft: Path, prompt: str, out: Path, seed: int, size: tuple[int, int], frames: int,
             loras: list[tuple[str, float]], first_frame: Path | None = None, last_frame: Path | None = None,
-            sparse: float | None = None) -> None:
+            sparse: float | None = None, strength: str = REFINE_DEFAULT) -> None:
     """ComfyGenerator.refine: re-render one finished clip at size (see build_refine_workflow)."""
     for node in REFINE_NODES:
         if not self._object_info(node):
@@ -1535,11 +1548,11 @@ def _refine(self, draft: Path, prompt: str, out: Path, seed: int, size: tuple[in
         raise ComfyError("ComfyUI lists no H3 latent upscaler (minimax_h3_latent_upscaler_3d_conv_v1_bf16"
                          ".safetensors in models/latent_upscale_models)")
     names = []
-    for path, strength in loras:
+    for path, weight in loras:
         name = self.name_for(path)
         if name is None:
             raise ComfyError(f"{Path(path).name} is not in ComfyUI's LoRA folders")
-        names.append((name, float(strength)))
+        names.append((name, float(weight)))
     import tempfile
     uploads: list[tuple[str, Path]] = []
     with tempfile.TemporaryDirectory(prefix="video-chain-refine-") as tmp:
@@ -1555,7 +1568,8 @@ def _refine(self, draft: Path, prompt: str, out: Path, seed: int, size: tuple[in
             prefix = f"{SUBFOLDER}/refine_{uuid.uuid4().hex[:12]}"
             wf = build_refine_workflow(prompt=prompt, draft=name, seed=seed, width=size[0], height=size[1],
                                        frames=frames, loras=names, refiner=files["refiner"],
-                                       upscaler=files["upscaler"], prefix=prefix, sparse=sparse, **pins)
+                                       upscaler=files["upscaler"], prefix=prefix, sparse=sparse,
+                                       strength=strength, **pins)
             ws = self._connect_ws()
             try:
                 self._queue(wf)

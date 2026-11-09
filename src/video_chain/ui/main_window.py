@@ -292,7 +292,7 @@ class ExportDialog(QDialog):
     2K by Open-H3-Regenerate-2K in ComfyUI (every clip once; the refined clips are kept for the next export)."""
 
     def __init__(self, parent, default: str, made_size: tuple[int, int] | None, refined: dict[str, bool],
-                 swapped: int = 0):
+                 swapped: int = 0, strength: str = "natural"):
         super().__init__(parent)
         self.setWindowTitle("Export path")
         self.setMinimumWidth(620)
@@ -331,6 +331,20 @@ class ExportDialog(QDialog):
         self.fast.setEnabled(False)
         self.size.currentIndexChanged.connect(lambda *_: self.fast.setEnabled(self.size.currentData() != "made"))
         f.addRow("", self.fast)
+        self.strength = QComboBox()
+        for key, text in (("soft", "Soft — calm, little new detail"),
+                          ("natural", "Natural — clean, keeps the person (default)"),
+                          ("crisp", "Crisp — sharper hair and texture, busier")):
+            self.strength.addItem(text, key)
+        self.strength.setCurrentIndex(max(0, self.strength.findData(strength)))
+        self.strength.setToolTip("How much the refine draws anew. Natural keeps faces, eyes and hair as made and "
+                                 "adds clean detail; Crisp adds more texture (hair, knit) and some grain; Soft "
+                                 "stays closest to the clip but is softer. (The release's own setting repainted "
+                                 "faces: closed eyes drawn half open, eye and hair colour changed.) Refined copies "
+                                 "are kept per strength")
+        self.strength.setEnabled(False)
+        self.size.currentIndexChanged.connect(lambda *_: self.strength.setEnabled(self.size.currentData() != "made"))
+        f.addRow("Refine", self.strength)
         self.swapped = QCheckBox(f"Refine the video{'s' if swapped != 1 else ''} with a replaced person too")
         self.swapped.setToolTip("A video whose person was replaced was made at the generation size. On: it is "
                                 "re-rendered by the refine like a generated clip (a sharper face at the higher "
@@ -5414,21 +5428,28 @@ class MainWindow(QMainWindow):
             return
         default = str(self.project / f"{self.project.name}-{path[-1].id}.mp4")
         base = T.Checker(self.project, self.tree).base()
-        refined = {size: all(n.made and T.refined_file(self.project, n, size).is_file() for n in path)
+        strength = self.qs.value("refineStrength", "natural", type=str)
+        refined = {size: all(n.made and T.refined_file(self.project, n, size).is_file() and
+                             (n.is_video or T.refine_record(T.refined_file(self.project, n, size)).get("strength")
+                              == strength) for n in path)
                    for size in T.REFINED}
         swapped = sum(1 for n in path if T.swapped_video(n))
-        dlg = ExportDialog(self, default, (base["width"], base["height"]) if base else None, refined, swapped)
+        dlg = ExportDialog(self, default, (base["width"], base["height"]) if base else None, refined, swapped,
+                           strength)
         try:
             if dlg.exec() != QDialog.Accepted:
                 return
             out, size, fast = dlg.target(), dlg.size.currentData(), dlg.fast.isChecked()
             refine_swapped = bool(swapped) and dlg.swapped.isChecked()
+            strength = dlg.strength.currentData()
         finally:
             dlg.deleteLater()
-        self.export(out, size, fast, refine_swapped)
+        if size != "made":
+            self.qs.setValue("refineStrength", strength)
+        self.export(out, size, fast, refine_swapped, strength)
 
     def export(self, out: Path, size: str = "made", fast_attention: bool = False,
-               refine_swapped: bool = False) -> None:
+               refine_swapped: bool = False, strength: str = "natural") -> None:
         """Export the selected path to out: as made (joined here), or refined at '1080p' / '2k' (a generator job)."""
         path = self.selected_path()
         if not path:
@@ -5437,7 +5458,7 @@ class MainWindow(QMainWindow):
             self.join_selected("export", out)
             return
         self._start([path[-1].id], refine={"size": size, "out": str(out), "fast_attention": bool(fast_attention),
-                                           "refine_swapped": bool(refine_swapped)})
+                                           "refine_swapped": bool(refine_swapped), "strength": strength})
 
     # ------------------------------------------------------------------ GPU
     def _poll_gpu(self):

@@ -517,6 +517,7 @@ def test_refine_a_clip_at_2k(server, start, tmp_path):
     assert size == (2528, 1440) and C.refine_size(672, 384, "1080p") == (1888, 1088)
     out = tmp_path / "r.mp4"
     gen.refine(draft, "smoke", out, 5, size, 39, [(lora, 0.7)])
+    assert server.refine_strengths[-1] == "natural"                          # the default strength
     info = chain.probe(out)
     assert (info["width"], info["height"], info["frames"], info["audio"]) == (2528, 1440, 39, True)
     wf = server.prompts[-1]

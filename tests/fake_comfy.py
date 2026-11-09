@@ -47,7 +47,8 @@ LLM_FILES = ["gemma-3-12b-abliterated-text-encoder.safetensors", "qwen_2.5_vl_7b
 REFINER = "minimax-h3-refiner/minimax_h3_open_regenerate_2k_refiner_rank_384_bf16.safetensors"
 UPSCALER = "minimax_h3_latent_upscaler_3d_conv_v1_bf16.safetensors"
 HYPERFLOW = "custom_node_hyperflow_8step_v1.0_comfyui_pruned.safetensors"
-C_REFINE_SIGMAS = "0.909, 0.857, 0.667, 0"
+# the refine strengths: the release's 0.909, 0.857, 0.667 scaled to start at 0.6 / 0.7 / 0.8
+C_REFINE_SIGMAS = {"0.6, 0.5657, 0.4403, 0": "soft", "0.7, 0.66, 0.5136, 0": "natural", "0.8, 0.7542, 0.587, 0": "crisp"}
 QWEN_UNET, QWEN_CLIP, QWEN_VAE = ("qwen-image/qwen_image_edit_2511_fp8mixed.safetensors",
                                   "qwen_2.5_vl_7b_fp8_scaled.safetensors", "qwen_image_vae.safetensors")
 QWEN_LIGHTNING = "qwen-image-edit/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
@@ -101,6 +102,7 @@ class FakeComfy:
         self.faceswap = True                       # Promptwood's face swap node with HyperSwap and GPEN
         self.hyperflow = True                      # ComfyUI-HyperFlow-H3 with its weights
         self.refine = True                         # the H3 2K nodes, the latent upscaler and the refiner LoRA
+        self.refine_strengths: list[str] = []      # the strength of every refine job
         self.audio_refs = True                     # MiniMaxH3ReferenceToVideo takes reference sounds
         self.fail_next: str | None = None          # the next job fails with this message (once)
         self.prompts, self.calls, self.history = [], [], {}
@@ -250,7 +252,8 @@ class FakeComfy:
         if "refine_save" in wf:                      # 2K refine: the draft at the target size, its frames and sound
             draft = self.root / "input" / wf["draft"]["inputs"]["file"]
             assert draft.is_file(), "draft not uploaded"
-            assert wf["sigmas"]["inputs"]["sigmas"] == C_REFINE_SIGMAS
+            assert wf["sigmas"]["inputs"]["sigmas"] in C_REFINE_SIGMAS, wf["sigmas"]["inputs"]["sigmas"]
+            self.refine_strengths.append(C_REFINE_SIGMAS[wf["sigmas"]["inputs"]["sigmas"]])
             up = wf["up"]["inputs"]
             prefix = wf["refine_save"]["inputs"]["filename_prefix"]
             out = self.root / "output" / (prefix + "_00001_.mp4")
