@@ -2258,13 +2258,15 @@ def test_replace_a_person_in_a_real_video(app, tmp_path, image, monkeypatch):
         import subprocess
 
         from PySide6.QtGui import QImage
-        calls = []
+        calls, seen_ref = [], []
 
         class Gen:
             def generate(self, prompt, start, out_video, out_last, seed, settings=None):
                 calls.append((prompt, start, settings))
                 ref_img = QImage(settings["ref_paths"][0])                 # letterboxed to 256 x 256 on black
                 assert (ref_img.width(), ref_img.height()) == (256, 256)
+                seen_ref.append((ref_img.width(), ref_img.height(), ref_img.pixelColor(128, 3).black() == 255
+                                 and ref_img.pixelColor(128, 3).lightness() == 0))
                 subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
                                 f"color=green:s={settings['width']}x{settings['height']}:r=24",
                                 "-frames:v", str(settings["frames"]), "-c:v", "libx264", "-pix_fmt", "yuv420p",
@@ -2275,6 +2277,24 @@ def test_replace_a_person_in_a_real_video(app, tmp_path, image, monkeypatch):
                   "turbo": "/loras/MiniMax H3/minimax_h3_dmd_ref2va_8step_turbo_pruned.safetensors",
                   "settings": {"steps": 6, "turbo": {"lora": "/t.safetensors"}, "pika": {"strength": 1.0}},
                   "connect": lambda progress: Gen()}
+        # a 16:9 photo: the head square found in it is what the H3 head swap gets (not the whole wide picture)
+        from video_chain import faces as F
+        wide = tmp_path / "wide.png"
+        wide_img = QImage(1600, 900, QImage.Format_RGB32)
+        wide_img.fill(0xC86432)                                        # (no black anywhere: bars would show)
+        wide_img.save(str(wide))
+        monkeypatch.setattr(F, "available", lambda model: None)
+        monkeypatch.setattr(F, "detect", lambda png, model: [(700.0, 300.0, 820.0, 450.0, 0.9)])
+        dlg.set_reference(str(wide))
+        assert dlg.ref_crop is not None and dlg.ref_crop[2] == round(150 * swap.HEAD_CROP_MARGIN)
+        dlg.method.setCurrentIndex(dlg.method.findData("h3"))
+        assert dlg.head_crop.isVisibleTo(dlg) and dlg.head_crop.isChecked() and "head square" in dlg.crop_info.text()
+        from video_chain.ui.swap_dialog import letterbox
+        sq = tmp_path / "sq.png"
+        assert letterbox(str(wide), sq, 256, dlg.ref_crop) and QImage(str(sq)).size().width() == 256
+        dlg.head_crop.setChecked(False)
+        assert "whole picture" in dlg.crop_info.text()
+        dlg.head_crop.setChecked(True)
         dlg.h3["describe"] = lambda pic: "Male, oval face, short black hair"   # (the vision model)
         dlg.method.setCurrentIndex(dlg.method.findData("h3"))
         dlg.prompt.setText("")                                         # empty: described automatically
@@ -2289,6 +2309,7 @@ def test_replace_a_person_in_a_real_video(app, tmp_path, image, monkeypatch):
         assert st["extra_loras"] == [{"lora": dlg.h3["lora"], "strength": 1.0}]       # the turbo first, then the swap
         assert st["recipe"] == {"sampler": "euler", "scheduler": "beta", "shift": (12.0, 3.0)}
         assert st["ref_paths"][0].endswith("_head_ref.png") and st["steps"] == 8 and not st["ref_hint"]
+        assert seen_ref and seen_ref[-1] == (256, 256, False)              # the head square, no black bars
         assert not Path(st["ref_paths"][0]).exists()                  # (a temporary copy, removed after)
         assert "turbo" not in st and "pika" not in st and "hyperflow" not in st     # (the project's speed modes)
         assert prompt.startswith("head_swap:") and "Male, oval face, short black hair" in prompt

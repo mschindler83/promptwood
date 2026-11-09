@@ -26,11 +26,15 @@ METHODS = (("animate+lock", "Head + face lock (Animate, then face swap)"), ("ani
 from .widgets import FrameTile, guard_wheel, label
 
 
-def letterbox(src: str, dest, size: int) -> bool:
-    """The picture fitted into a size x size square, centred on black (the head swap LoRA's reference format)."""
+def letterbox(src: str, dest, size: int, crop: tuple[int, int, int] | None = None) -> bool:
+    """The picture (cut to the square crop (x, y, side) first, when given) fitted into a size x size square, centred
+    on black (the head swap LoRA's reference format)."""
     img = QImage(src)
     if img.isNull():
         return False
+    if crop is not None:
+        x, y, side = crop
+        img = img.copy(int(x), int(y), int(side), int(side))
     fit = img.convertToFormat(QImage.Format_RGB32).scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
     out = QImage(size, size, QImage.Format_RGB32)
     out.fill(QColor(0, 0, 0))
@@ -126,6 +130,23 @@ class SwapDialog(QDialog):
         self.ref_combo.addItem("Other picture (project or file)…", "")
         self.ref_combo.activated.connect(self._ref_picked)
         right.addWidget(self.ref_combo)
+        crow = QHBoxLayout()
+        self.head_crop = QCheckBox("Crop to the head")
+        self.head_crop.setChecked(True)
+        self.head_crop.setToolTip("H3 head swap: the picture is reduced to 256 x 256 px; cut to a square around the "
+                                  "head (with hair and chin), the face keeps its detail. Off: the whole picture "
+                                  "(black bars where it is not square)")
+        self.head_crop.toggled.connect(lambda _on: self._show_reference())
+        self.b_crop = QPushButton("Adjust crop…")
+        self.b_crop.setToolTip("Move or resize the square around the head")
+        self.b_crop.clicked.connect(self.adjust_crop)
+        crow.addWidget(self.head_crop)
+        crow.addWidget(self.b_crop)
+        crow.addStretch(1)
+        right.addLayout(crow)
+        self.crop_info = label("", level="tertiary")
+        self.crop_info.setWordWrap(True)
+        right.addWidget(self.crop_info)
         right.addWidget(label("One picture: the head and shoulders, the face well lit and seen from the front work "
                               "best.", level="tertiary"))
         form = QFormLayout()
@@ -193,6 +214,8 @@ class SwapDialog(QDialog):
         right.addStretch(1)
         top.addLayout(right, 2)
         self.ref: str | None = None
+        self.ref_png: Path | None = None              # the picture upright as PNG (what is shown and cropped)
+        self.ref_crop: tuple[int, int, int] | None = None   # the head square (x, y, side) in it
         self._update()
         self._find()
 
@@ -289,13 +312,78 @@ class SwapDialog(QDialog):
         self.set_reference(path)
 
     def set_reference(self, path: str | None):
-        img = QImage(path) if path else QImage()
-        self.ref = str(path) if path and not img.isNull() else None
-        if self.ref:
-            self.ref_tile.set_image(img)
-        else:
-            self.ref_tile.clear_frame("Choose a picture of the person")
+        """The new person's picture (turned upright as a PNG; the head found for the crop)."""
+        self.ref, self.ref_png, self.ref_crop = None, None, None
+        if path:
+            png = Path(self._tmp.name) / f"ref_{uuid.uuid4().hex[:6]}.png"
+            try:
+                chain.to_png(Path(path), png)            # upright (EXIF), as shown and as cropped
+            except Exception:  # noqa: BLE001
+                png = Path(path)
+            if not QImage(str(png)).isNull():
+                self.ref, self.ref_png = str(path), png
+                self.ref_crop = self._find_head(png)
+        self._show_reference()
         self._update()
+
+    def _find_head(self, png: Path):
+        """The square (x, y, side) around the head in the picture, or None (no face found / no detector)."""
+        from .. import faces as F
+        if self.detector is None or F.available(self.detector) is not None:
+            return None
+        try:
+            found = F.detect(png, self.detector)
+        except Exception:  # noqa: BLE001
+            return None
+        if not found:
+            return None
+        w, h = F.image_size(png)
+        return F.face_square(found[0], w, h, swap.HEAD_CROP_MARGIN)
+
+    def head_picture(self) -> str | None:
+        """The picture the H3 head swap gets: the upright picture, cut to the head square when cropping is on."""
+        return str(self.ref_png) if self.ref_png else None
+
+    def adjust_crop(self):
+        if not self.ref_png:
+            return
+        from .face_crop import FaceCropDialog
+        try:
+            dlg = FaceCropDialog(self, self.ref_png, self.detector, "Crop to the head (with hair and chin)",
+                                 self.ref_crop)
+        except ValueError:
+            return
+        try:
+            if dlg.exec() == QDialog.Accepted:
+                self.ref_crop = dlg.crop()
+                self.head_crop.setChecked(self.ref_crop is not None)
+                self._show_reference()
+        finally:
+            dlg.deleteLater()
+
+    def _show_reference(self):
+        if not self.ref_png:
+            self.ref_tile.clear_frame("Choose a picture of the person")
+            self.crop_info.setText("")
+            return
+        img = QImage(str(self.ref_png)).convertToFormat(QImage.Format_ARGB32)
+        crop = self.ref_crop if self.head_crop.isChecked() else None
+        if crop is not None:
+            x, y, side = crop
+            p = QPainter(img)
+            p.setPen(QPen(QColor(255, 60, 60), max(2, img.width() // 200)))
+            p.drawRect(QRectF(x, y, side, side))
+            p.end()
+        self.ref_tile.set_image(img)
+        if self.head_crop.isChecked() and crop is None:
+            self.crop_info.setText("No face found in the picture: the whole picture is used (Adjust crop… to set "
+                                   "the square by hand).")
+        elif crop is not None:
+            self.crop_info.setText(f"The head square ({crop[2]} px) goes to the H3 head swap at 256 px"
+                                   + (" (small: a larger picture of the face gives more detail)."
+                                      if crop[2] < 256 else "."))
+        else:
+            self.crop_info.setText("The whole picture (black bars where it is not square).")
 
     # ---- generating
     def _update(self):
@@ -311,6 +399,10 @@ class SwapDialog(QDialog):
         animate = m in ("animate", "animate+lock")
         for w in (self.size, self.body, self.head_size):
             w.setEnabled(not self._busy and animate)
+        for w in (self.head_crop, self.b_crop):           # (the H3 head swap's picture)
+            w.setVisible(m == "h3")
+            w.setEnabled(not self._busy and bool(self.ref_png))
+        self.crop_info.setVisible(m == "h3")
         self.prompt.setEnabled(not self._busy and m != "face")
         self.sharpen.setEnabled(not self._busy and m in ("face", "animate+lock"))
         self.prompt.setPlaceholderText("The new person's face (empty: described automatically), e.g. “Male, oval "
@@ -345,6 +437,8 @@ class SwapDialog(QDialog):
         size, prompt, seed = self.size.currentData(), self.prompt.text().strip(), random.randint(1, 2**31 - 1)
         scale, sig, connect = self.head_size.value(), self._sig, self.connect
         project, source = self.project, self.source
+        ref_png = self.ref_png
+        crop = self.ref_crop if self.head_crop.isChecked() else None
         method, body = self.method.currentData(), self.body.isChecked()
         enhance = 0.8 if self.sharpen.isChecked() else 0.0
         persons = next(([Path(ref)] + [Path(x) for x in g if x != ref] for g in self.groups if ref in g),
@@ -373,7 +467,7 @@ class SwapDialog(QDialog):
                         details = self.h3["describe"](Path(ref))
                         sig.details.emit(details)
                     head_ref = out_dir / f"{stem}_head_ref.png"   # as the LoRA was trained: 256 px, letterboxed
-                    if not letterbox(str(ref), head_ref, swap.H3_REF_SIZE):
+                    if not letterbox(str(ref_png or ref), head_ref, swap.H3_REF_SIZE, crop):
                         raise RuntimeError(f"cannot read the picture {Path(ref).name}")
                     st = dict(self.h3["settings"] or {})
                     for speed in ("turbo", "hyperflow", "pika"):   # the recipe's own turbo LoRA instead

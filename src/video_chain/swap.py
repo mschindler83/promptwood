@@ -224,6 +224,8 @@ H3_MAX_FRAMES = 362                         # H3's 17n+5 grid up to 15 s
 H3_SWAP_STEPS = 8
 H3_SWAP_TURBO = "minimax_h3_dmd_ref2va_8step_turbo_pruned"
 H3_SWAP_RECIPE = {"sampler": "euler", "scheduler": "beta", "shift": (12.0, 3.0)}
+HEAD_CROP_MARGIN = 2.2                      # the head square for the H3 head swap: 2.2 x the face box (forehead to
+                                            # chin), so the hair, ears and chin are in it
 H3_REF_SIZE = 256                           # the face picture letterboxed to 256 x 256 on black (as the LoRA's creator
                                             # prepares it, Henge's edit_modes.head_reference)
 HEAD_SWAP_HEAD = 'head_swap:\n\nsubject_definitions:\n\n<Subject 1> is the reference head identity from <Picture 1>, including the complete head, facial identity, facial structure, head shape, hairstyle, hairline, skin appearance, proportions, and all distinctive visual features.\n\nFacial details of <Subject 1>:\n'
