@@ -31,6 +31,8 @@ from .lora_stack import LoraStack, lora_label
 from .mask_painter import MaskPainterDialog, mask_area, overlay
 from .widgets import FrameTile, guard_wheel, icon_button, label
 
+SEED_MAX = 2**31 - 1                      # (the seeds ComfyUI's image samplers take here)
+
 EDITS_DIR = "edits"
 MOSS_EDIT_QUALITIES = {"standard": "Standard (30 steps)"}
 LORA_FAMILY = {"chroma": "flux1"}         # Chroma LoRAs have FLUX.1's layer names (and FLUX.1 LoRAs often work)
@@ -405,8 +407,25 @@ class ImageEditDialog(QDialog):
         opts.addWidget(self.quality, 0, 1)
         opts.addWidget(label("Results", level="tertiary"), 0, 2)
         opts.addWidget(self.tries, 0, 3)
-        opts.addWidget(self.keep_size, 1, 0, 1, 4)
-        opts.addWidget(self.tags, 2, 0, 1, 4)
+        srow = QHBoxLayout()
+        self.seed = QSpinBox()
+        self.seed.setRange(1, SEED_MAX)
+        self.seed.setValue(random.randint(1, SEED_MAX))
+        self.seed.setToolTip("The seed of the next result (more results at once: this seed, +1, +2 …); the same "
+                             "seed and prompt give the same image again")
+        self.b_seed = icon_button("rotate", "New random seed")
+        self.b_seed.clicked.connect(lambda: self.new_seed())
+        self.fresh_seed = QCheckBox("New seed after each Generate")
+        self.fresh_seed.setChecked(True)
+        self.fresh_seed.setToolTip("On: Generate again gives new images. Off: the seed stays, so a changed prompt can "
+                                   "be compared with the same seed")
+        srow.addWidget(self.seed, 1)
+        srow.addWidget(self.b_seed)
+        srow.addWidget(self.fresh_seed)
+        opts.addWidget(label("Seed", level="tertiary"), 1, 0)
+        opts.addLayout(srow, 1, 1, 1, 3)
+        opts.addWidget(self.keep_size, 2, 0, 1, 4)
+        opts.addWidget(self.tags, 3, 0, 1, 4)
         left.addLayout(opts)
         brow = QHBoxLayout()
         self.b_gen = QPushButton("Generate")
@@ -920,6 +939,7 @@ class ImageEditDialog(QDialog):
         sig, connect = self._sig, self.connect_editor
         if not self._run_on_start():
             return
+        seeds = self._seeds(n)                         # (after the checks: a refused Generate keeps the seed)
         self.bar.setValue(0)
         self.bar.show()
         self.b_start_comfy.hide()
@@ -950,7 +970,7 @@ class ImageEditDialog(QDialog):
                     if self._cancel:
                         break
                     cur["k"] = k
-                    seed = random.randint(1, 2**31 - 1)
+                    seed = seeds[k - 1]
                     stem = f"edit_{time.strftime('%Y%m%d-%H%M%S')}_{seed}"
                     out = edits / f"{stem}.png"
                     meta = self.editor.edit(Path(source), sent, out, seed, quality, [Path(r) for r in refs], loras,
@@ -977,6 +997,18 @@ class ImageEditDialog(QDialog):
                             Path(f).unlink(missing_ok=True)
         threading.Thread(target=work, daemon=True).start()
 
+    def new_seed(self):
+        """A fresh random seed in the field."""
+        self.seed.setValue(random.randint(1, SEED_MAX))
+
+    def _seeds(self, n: int) -> list[int]:
+        """The seeds of the next n results (the field's, +1 ...); a fresh one in the field afterwards if wanted."""
+        first = self.seed.value()
+        seeds = [(first - 1 + k) % SEED_MAX + 1 for k in range(n)]
+        if self.fresh_seed.isChecked():
+            self.new_seed()
+        return seeds
+
     def generate_new(self):
         """Create mode: new images from the prompt (and reference pictures) with the chosen model family."""
         if self._busy or not self.b_gen.isEnabled():
@@ -997,6 +1029,7 @@ class ImageEditDialog(QDialog):
         sig, connect = self._sig, self.connect_create
         if not self._run_on_start():
             return
+        seeds = self._seeds(n)                         # (after the checks: a refused Generate keeps the seed)
         self.bar.setValue(0)
         self.bar.show()
         self.b_start_comfy.hide()
@@ -1019,7 +1052,7 @@ class ImageEditDialog(QDialog):
                     if self._cancel:
                         break
                     cur["k"] = k
-                    seed = random.randint(1, 2**31 - 1)
+                    seed = seeds[k - 1]
                     out = edits / f"new_{time.strftime('%Y%m%d-%H%M%S')}_{seed}.png"
                     meta = self.editor.create(fam, model, sent, out, seed, quality, w, h, negative, loras,
                                               [Path(r) for r in refs], strength, tags)

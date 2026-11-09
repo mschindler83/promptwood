@@ -1731,10 +1731,19 @@ def test_create_a_new_image_in_the_window(app, tmp_path, image, monkeypatch):
         dlg.prompt.setPlainText("1girl, red coat, rainy street")
         dlg.tries.setValue(1)
         assert dlg.b_gen.isEnabled()
+        dlg.seed.setValue(4242)                                         # a chosen seed, kept for another try
+        dlg.fresh_seed.setChecked(False)
         dlg.generate()
         wait(app, lambda: not dlg._busy, timeout=60)
         assert dlg.state.text().startswith("Done") and dlg.results.count() == 1
         png, meta = dlg.selected()
+        assert meta["seed"] == 4242 and dlg.seed.value() == 4242                # (kept: "new seed" is off)
+        assert dlg._seeds(3) == [4242, 4243, 4244] and dlg.seed.value() == 4242    # several results: +1, +2
+        dlg.fresh_seed.setChecked(True)
+        assert dlg._seeds(1) == [4242] and dlg.seed.value() != 4242               # a fresh one afterwards
+        before = dlg.seed.value()
+        dlg.b_seed.click()                                                       # one click: a new seed
+        assert dlg.seed.value() != before
         assert meta["mode"] == "create" and meta["family"] == "sdxl" and meta["loras"][0]["strength"] == 0.8
         from PySide6.QtTest import QTest
         dlg.show()
