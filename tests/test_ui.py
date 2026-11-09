@@ -2865,3 +2865,37 @@ def test_file_browser_favorites(app, tmp_path):
     vids._places_menu(pos)
     assert vids.favorites() == [str(b)]
     vids.deleteLater()
+
+
+def test_split_a_video_and_insert_a_clip_in_the_window(app, win, tmp_path, monkeypatch):
+    from PySide6.QtCore import QPoint
+
+    from video_chain.ui import main_window as M
+    src = make_real_video(tmp_path / "real.mp4", secs=4.0)
+    win.open_project(tmp_path / "proj")
+    win.node_action("delete", "n1")                                            # (a new project's empty first clip)
+    v = win.add_video(None, str(src), 0.0, 3.0)
+    wait(app, lambda: not win._converts)
+    assert win.state(v) == "done"
+    # the menu entry opens the dialog; the dialog's frame becomes the moment in the file
+    seen = {}
+
+    def fake_exec(dlg):
+        wait(app, lambda: dlg.player.count() > 0, timeout=20)
+        dlg.player.seek(48)                                                    # frame 48 = 2.0 s into the range
+        seen["text"] = dlg.summary.text()
+        seen["at"] = dlg.at()
+        return QDialog.Accepted
+    from PySide6.QtWidgets import QDialog
+    monkeypatch.setattr(M.SplitDialog, "exec", fake_exec)
+    monkeypatch.setattr(win, "_exec_menu", lambda m, pos: next(a for a in m.actions()
+                                                                if a.text() == "Split here and insert a clip…"))
+    win._context(v, QPoint(0, 0))
+    wait(app, lambda: len(win.tree.nodes) == 3, timeout=10)
+    assert seen["at"] == 2.0 and "Part 1: 0.00–2.00 s" in seen["text"]
+    clip = win.selected_id()
+    rest = win.tree.video_child(clip)
+    assert win.tree.nodes[v].source["end"] == 2.0 and rest.source == {"file": str(src), "start": 2.0, "end": 3.0}
+    assert "write the prompt of the new clip" in win.status.text()
+    wait(app, lambda: not win._converts, timeout=30)
+    assert win.state(v) == "done" and win.state(rest.id) == "done" and win.state(clip) == "new"

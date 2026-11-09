@@ -1199,3 +1199,32 @@ def test_first_clip_without_a_start_image(tmp_path):
     t.options["aspect"] = "4:5"
     T.save(p, t)
     assert statuses(p)["a lighthouse at dusk"] == "changed"
+
+
+def test_split_a_video_and_insert_a_clip(project, tmp_path):
+    t = T.load(project)
+    src = tmp_path / "real.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=96x54:r=24:d=10", "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p", str(src)], check=True)
+    v = t.add_video(None, str(src), 0.0, 9.0)
+    after = t.add(v.id, "goes on")
+    clip, rest = t.split_video(v.id, 5.0)
+    assert t.nodes[v.id].source == {"file": str(src), "start": 0.0, "end": 5.0}
+    assert clip.parent == v.id and not clip.is_video and clip.prompt == ""
+    assert rest.parent == clip.id and rest.source == {"file": str(src), "start": 5.0, "end": 9.0}
+    assert t.nodes[after.id].parent == rest.id                                 # what followed goes on after the rest
+    assert t.video_child(clip.id).id == rest.id                                 # the clip ends at the rest's first frame
+    with pytest.raises(ValueError):
+        t.split_video(v.id, 0.0)                                                # not at the very start / end
+    with pytest.raises(ValueError):
+        t.split_video(clip.id, 1.0)                                             # (only real videos)
+    # a video whose person was replaced: both parts keep it, the original's range split at the same moment
+    from video_chain import swap
+    w = t.add_video(None, str(src), 2.0, 6.0)
+    swap.apply(w, src, 96, {"method": "h3"}, fps=24.0)                          # now plays the swap (0..4 s)
+    c2, r2 = t.split_video(w.id, 1.5)
+    assert swap.replaced(w)["original"] == {"file": str(src), "start": 2.0, "end": 3.5}
+    assert swap.replaced(r2)["original"] == {"file": str(src), "start": 3.5, "end": 6.0}
+    T.save(project, t)
+    t2 = T.load(project)
+    assert t2.nodes[r2.id].source["start"] == 1.5 and swap.replaced(t2.nodes[r2.id]) is not None

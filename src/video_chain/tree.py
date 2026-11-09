@@ -199,6 +199,34 @@ class Tree:
         node.source = {"file": str(file), "start": round(float(start), 4), "end": round(float(end), 4)}
         return node
 
+    def split_video(self, nid: str, at: float) -> tuple[Node, Node]:
+        """Insert a generated clip into a real video at `at` seconds (of its file): the video ends there, a new empty
+        clip follows it, then the rest of the same video (at .. its old end), whose first frame the clip ends at.
+        Clips that followed the video follow its rest now. A video whose person was replaced keeps that in both
+        parts (its original range split at the same moment). Returns (the new clip, the rest)."""
+        v = self.nodes[nid]
+        if not v.is_video:
+            raise ValueError(f"#{nid[1:]} is not a real video")
+        start, end = float(v.source["start"]), float(v.source["end"])
+        at = round(float(at), 4)
+        if not start + 1 / 24 <= at <= end - 1 / 24:
+            raise ValueError("split inside the video's range (not at its first or last frame)")
+        kids = self.children(nid)
+        rest_source = {**v.source, "start": at, "end": round(end, 4)}
+        v.source = {**v.source, "end": at}
+        rep = v.source.get("replaced")
+        if isinstance(rep, dict) and isinstance(rep.get("original"), dict):   # the original's range, split too
+            o = rep["original"]
+            cut = round(float(o["start"]) + (at - start), 4)
+            v.source["replaced"] = {**rep, "original": {**o, "end": cut}}
+            rest_source["replaced"] = {**rep, "original": {**o, "start": cut}}
+        clip = self.add(nid, "")
+        rest = self.add_video(clip.id, rest_source["file"], at, end)
+        rest.source = rest_source
+        for k in kids:
+            k.parent = rest.id
+        return clip, rest
+
     def remove(self, nid: str, project: Path | None = None) -> list[str]:
         """Remove a node and everything below it (and their files). Returns the removed ids."""
         gone = [nid] + [n.id for n in self.descendants(nid)]

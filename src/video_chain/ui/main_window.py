@@ -37,7 +37,7 @@ from .. import tree as T
 from ..comfy import REF_HINT
 from .graph import START, GraphView, NodeInfo
 from .image_picker import pick_image
-from .clip_dialogs import CompareDialog, HandoverDialog
+from .clip_dialogs import CompareDialog, HandoverDialog, SplitDialog
 from .lora_stack import LORA_MAX, LORA_MIN, LoraStack, fill_lora_combo, lora_label, lora_path
 from .swap_dialog import SwapDialog
 from .mentions import MentionHelper
@@ -4745,6 +4745,9 @@ class MainWindow(QMainWindow):
         if action == "edit" and node is not None and node.is_video:
             self.edit_video(node.id)
             return
+        if action == "split" and node is not None and node.is_video:
+            self.split_video(node.id)
+            return
         if action == "end_image" and node is not None and not node.is_video:
             self.choose_end_image(node.id)
             return
@@ -5403,6 +5406,11 @@ class MainWindow(QMainWindow):
         if nid != START:
             if node is not None and node.is_video:
                 acts[m.addAction("Edit range…")] = "edit"
+                split = m.addAction("Split here and insert a clip…")
+                split.setEnabled(bool(node.made) and self.state(nid) == "done")
+                split.setToolTip("Put a generated clip into the middle of this video: the video ends at a frame you "
+                                 "choose, the clip follows, then the rest of the video")
+                acts[split] = "split"
                 acts[m.addAction("Replace a person…")] = "swap"
                 if swap.replaced(node):
                     acts[m.addAction("Back to the original video (undo the replacement)")] = "swap_undo"
@@ -5595,6 +5603,44 @@ class MainWindow(QMainWindow):
             self.status.setText(f"Video #{nid[1:]} plays the clip with the replaced person now (its menu goes back "
                                 "to the original).")
         return True
+
+    def split_video(self, nid: str, at: float | None = None) -> str | None:
+        """Insert a generated clip into a real video: choose the frame (at: the moment in its file, else asked),
+        the video ends there, a new clip follows, then the rest of the video. Returns the new clip's id."""
+        node = self.tree.nodes.get(nid) if self.tree else None
+        if node is None or not node.is_video or self.running:
+            return None
+        if not node.made or self.state(nid) != "done":
+            self.status.setText(f"Video #{nid[1:]} is not converted yet; wait for it, then split it.")
+            return None
+        if at is None:
+            clip = self.project / node.made["video"]
+            frames = int(node.made.get("frames") or chain.probe(clip)["frames"])
+            key = node.made.get("key") or {}
+            size = (int(key.get("width") or 0) or 672, int(key.get("height") or 0) or 384)
+            dlg = SplitDialog(self, clip, frames, size, node.source["start"], node.source["end"],
+                              f"Split video #{nid[1:]}")
+            try:
+                if dlg.exec() != QDialog.Accepted:
+                    return None
+                at = dlg.at()
+            finally:
+                dlg.deleteLater()
+        before = self._done_clips() - {nid}
+        try:
+            clip_node, rest = self.tree.split_video(nid, at)
+        except ValueError as e:
+            self.status.setText(f"Could not split video #{nid[1:]}: {e}")
+            return None
+        self._write_tree()
+        self.refresh(rebuild_path=True)
+        self.select(clip_node.id)
+        self.convert_video(nid)
+        self.convert_video(rest.id)
+        if not self._report_remade(before, f"Video #{nid[1:]} split"):
+            self.status.setText(f"Video #{nid[1:]} split at {at:.2f} s: write the prompt of the new clip "
+                                f"#{clip_node.id[1:]}; it ends at the first frame of video #{rest.id[1:]}.")
+        return clip_node.id
 
     def undo_replacement(self, nid: str) -> bool:
         node = self.tree.nodes.get(nid) if self.tree else None

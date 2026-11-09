@@ -294,3 +294,51 @@ class CompareDialog(QDialog):
             p.stop()
             p.setSource(QUrl())
         super().done(r)
+
+
+class SplitDialog(QDialog):
+    """Choose where to split a real video and insert a generated clip: the video (as converted for the chain)
+    frame by frame; at() is the moment in the video's file (start + frame / 24 s)."""
+
+    def __init__(self, parent, clip: Path, frames: int, size: tuple[int, int], start: float, end: float,
+                 title: str):
+        from .compare_player import ComparePlayer
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(820, 640)
+        self.start, self.end, self.n = float(start), float(end), int(frames)
+        v = QVBoxLayout(self)
+        info = label("The video ends at the frame you choose; a new clip follows it (it starts from that frame), "
+                     "then the rest of the video, whose first frame the clip ends at. Clips after the video come "
+                     "after its rest.", level="secondary")
+        info.setWordWrap(True)
+        v.addWidget(info)
+        self.player = ComparePlayer(self)
+        self.player.load(Path(clip), self.n, size)
+        self.player.frameChanged.connect(self._show)
+        v.addWidget(self.player, 1)
+        self.summary = label("", level="tertiary")
+        self.summary.setWordWrap(True)
+        v.addWidget(self.summary)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.buttons.button(QDialogButtonBox.Ok).setText("Split here and insert a clip")
+        self.buttons.button(QDialogButtonBox.Ok).setEnabled(False)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        v.addWidget(self.buttons)
+
+    def at(self) -> float:
+        """The moment in the video's file the chosen frame shows."""
+        return round(self.start + self.player.position() / chain.FPS, 4)
+
+    def _show(self, k: int):
+        ok = 0 < k < self.n - 1
+        self.buttons.button(QDialogButtonBox.Ok).setEnabled(ok)
+        t = self.at()
+        self.summary.setText(
+            f"Part 1: {self.start:.2f}–{t:.2f} s · the new clip · part 2: {t:.2f}–{self.end:.2f} s" if ok else
+            "Choose a frame inside the video (not its first or last).")
+
+    def done(self, r):
+        self.player.stop_loading()
+        super().done(r)
