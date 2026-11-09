@@ -3039,10 +3039,11 @@ class MainWindow(QMainWindow):
         if not self.llm_on.isChecked() or not self.llm_model_path():
             return None
         from ..llm_server import LlamaServer
+        from ..llm_server import find_mmproj
         key = (self.llm_server.text().strip() or LLM_DEFAULT_SERVER, self.llm_model_path(), self.llm_port.value(),
-               self.llm_cpu_moe.isChecked())
+               self.llm_cpu_moe.isChecked(), find_mmproj(self.llm_model_path()))
         cur = getattr(self, "_llama", None)
-        if cur is None or (cur.server, cur.model, cur.port, cur.cpu_moe) != key:
+        if cur is None or (cur.server, cur.model, cur.port, cur.cpu_moe, cur.mmproj) != key:
             if cur is not None:
                 cur.stop()
             self._llama = LlamaServer(*key, log_dir=Path.home() / ".cache" / "video-chain")
@@ -4921,7 +4922,13 @@ class MainWindow(QMainWindow):
         if action == "refine" and node is not None and not node.is_video:
             card = next((c for c in self.cards if c.nid == node.id and isinstance(c, PromptCard)), None)
             if card is not None:
-                new = self.refine_text(card.edit.toPlainText(), "video")
+                ck = T.Checker(self.project, self.tree)
+                start = ck.start_frame(node)
+                end = T.end_image_used(self.tree, node)
+                pics = [("The frame the clip starts from", str(start), True)] if start and start.is_file() else []
+                if end and (self.project / end).is_file():
+                    pics.append(("The image the clip should end at", str(self.project / end), True))
+                new = self.refine_text(card.edit.toPlainText(), "video", pictures=pics)
                 if new:
                     replace_text(card.edit, new)          # Ctrl+Z in the prompt takes it back
                     self.status.setText(f"Clip #{node.id[1:]}: prompt refined (Ctrl+Z in the prompt undoes it).")
@@ -5011,7 +5018,7 @@ class MainWindow(QMainWindow):
         return done
 
     # ---- prompt refiner
-    def refine_text(self, text: str, kind: str) -> str | None:
+    def refine_text(self, text: str, kind: str, pictures: list | None = None) -> str | None:
         """Open the prompt refiner for a prompt ('video' / 'image' / 'edit'); the text to use, or None."""
         if not text.strip():
             self.status.setText("Write a prompt first; the refiner improves it.")
@@ -5033,7 +5040,8 @@ class MainWindow(QMainWindow):
             return CombinedRefiner(comfy, llama, err)
         cast = [{"name": c["name"], "desc": c.get("desc", ""), "voice": bool(c.get("voice"))}
                 for c in T.cast_of(self.tree)] if self.tree is not None and kind == "video" else []
-        dlg = RefineDialog(self, text, kind, connect, self.qs, start_comfy=self.start_comfy, cast=cast)
+        dlg = RefineDialog(self, text, kind, connect, self.qs, start_comfy=self.start_comfy, cast=cast,
+                           pictures=pictures or [])
         try:
             return dlg.chosen() if dlg.exec() == QDialog.Accepted else None
         finally:

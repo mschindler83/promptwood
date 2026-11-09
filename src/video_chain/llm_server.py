@@ -23,7 +23,8 @@ PREFIX = "llama:"                                # model ids of this backend in 
 DEFAULT_PORT = 8091
 DEFAULT_SERVER = "/path/to/ai/llama.cpp/build/bin/llama-server"
 START_TIMEOUT = 600.0                            # a 25 GB model from a cold disk takes minutes
-CONTEXT = 8192
+CONTEXT = 16384                                  # a conversation with pictures (one ~1 MP picture: ~1-2k tokens)
+IMAGE_SIDE = 1024                                # pictures are sent at most this large (fewer tokens, same gist)
 
 
 class LlmServerError(RuntimeError):
@@ -35,6 +36,57 @@ def model_label(path: str) -> str:
     stem = name[:-5] if name.endswith(".gguf") else name
     free = "abliterated" in stem.lower() or "uncensored" in stem.lower()
     return f"{stem}{' (uncensored)' if free else ''}  ·  llama.cpp"
+
+
+def find_mmproj(model: str) -> str | None:
+    """The vision projector next to a GGUF model (mmproj-*.gguf; F16 / BF16 before Q8 / F32), or None."""
+    files = sorted(Path(model).parent.glob("*mmproj*.gguf"))
+    rank = {"f16": 0, "bf16": 1, "q8_0": 2, "f32": 3}
+    files.sort(key=lambda f: next((r for k, r in rank.items() if k in f.name.lower()), 9))
+    return str(files[0]) if files else None
+
+
+def image_part(path: str | Path) -> dict:
+    """A picture for the chat (OpenAI format, a PNG data URL), at most IMAGE_SIDE large."""
+    import base64
+
+    from PIL import Image, ImageOps
+    import io
+    with Image.open(path) as im:
+        im = ImageOps.exif_transpose(im).convert("RGB")
+        im.thumbnail((IMAGE_SIDE, IMAGE_SIDE), Image.LANCZOS)
+        buf = io.BytesIO()
+        im.save(buf, "PNG")
+    return {"type": "image_url", "image_url": {"url": "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()}}
+
+
+CHAT_RULES = ("This is a conversation about one prompt. The user's first message is their prompt; each later "
+              "message asks for a change to the current version. Answer every time with the complete new prompt only "
+              "(no explanations, no quotes around it), changing only what is asked and keeping everything else. "
+              "If pictures are attached, they show what the prompt is about (e.g. the frame a clip starts from); "
+              "use what you see when the user asks for it.")
+
+
+def chat_messages(*, prompt: str, kind: str, turns: list[tuple[str, str]], instruction: str,
+                  pictures: list[tuple[str, str]] = (), cast: list[dict] | None = None) -> list[dict]:
+    """The conversation for the model. turns: the earlier [(instruction, version)]; the last version is the current
+    prompt (also when the user edited it). The first user message holds the user's prompt, the pictures (labelled)
+    and the first instruction; then the turns alternate; the new instruction comes last."""
+    system, first = refine_messages(prompt=prompt, kind=kind, cast=cast)
+    asks = [a for a, _v in turns] + [instruction]
+
+    def ask_text(a: str) -> str:
+        return a.strip() or "Improve this prompt."
+    opening = f"My prompt:\n{first}\n\nWhat I want: {ask_text(asks[0])}"
+    content: list[dict] = [{"type": "text", "text": opening}]
+    for title, path in pictures:
+        content += [{"type": "text", "text": f"\n[{title}]"}, image_part(path)]
+    msgs = [{"role": "system", "content": system + " " + CHAT_RULES},
+            {"role": "user", "content": content if pictures else opening}]
+    for i, (_ask, version) in enumerate(turns):
+        msgs.append({"role": "assistant", "content": version})
+        msgs.append({"role": "user", "content": ask_text(asks[i + 1])})
+    return msgs
 
 
 def server_command(server: str, model: str, port: int, cpu_moe: bool = True, mmproj: str | None = None,
@@ -68,7 +120,7 @@ class LlamaServer:
     @property
     def models(self) -> list[dict]:
         return [{"file": PREFIX + self.model, "type": "llama", "label": model_label(self.model),
-                 "uncensored": "abliterated" in self.model.lower()}]
+                 "uncensored": "abliterated" in self.model.lower(), "chat": True, "vision": bool(self.mmproj)}]
 
     def problems(self) -> list[str]:
         out = []
@@ -91,11 +143,37 @@ class LlamaServer:
     def running(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
 
+    def mismatch(self) -> str:
+        """Why the server answering on the port is not the one wanted ("" when it is: this model, and the vision
+        part when there is one)."""
+        try:
+            props = self._get("/props", 3.0)
+        except (OSError, ValueError):
+            return ""                                  # (an older server without /props: trusted)
+        path = props.get("model_path") or ""
+        if path and os.path.realpath(path) != os.path.realpath(self.model):
+            return f"it runs {Path(path).name}"
+        if self.mmproj and (props.get("modalities") or {}).get("vision") is False:
+            return "it runs this model without its vision part"
+        return ""
+
     def start(self, stop=lambda: False, timeout: float = START_TIMEOUT) -> None:
-        """Start the server (if it is not answering yet) and wait until the model is loaded."""
+        """Start the server (if it is not answering yet) and wait until the model is loaded. A server already on
+        the port must run this model (with its vision part when there is one): one this object started is
+        restarted otherwise; another one is an error (its port is taken)."""
         with self._lock:
             if self.ready():
-                return
+                why = self.mismatch()
+                if not why:
+                    return
+                if not self.running():
+                    raise LlmServerError(f"port {self.port} is used by another llama.cpp server ({why}). Close the "
+                                         "program that started it, or choose another port in the settings")
+                self._lock.release()
+                try:
+                    self.stop()
+                finally:
+                    self._lock.acquire()
             bad = self.problems()
             if bad:
                 raise LlmServerError("; ".join(bad))
@@ -140,10 +218,26 @@ class LlamaServer:
     def refine_prompt(self, prompt: str, kind: str, model_file: str | None = None, seed: int = 0,
                       hint: str = "", cast: list[dict] | None = None, temperature: float = 0.5,
                       timeout: float = 300.0) -> str:
-        self.start()
         system, user = refine_messages(prompt=prompt, kind=kind, hint=hint, cast=cast)
-        body = {"messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-                "max_tokens": 512, "temperature": float(temperature), "top_k": 64, "top_p": 0.95, "min_p": 0.05,
+        return self._complete([{"role": "system", "content": system}, {"role": "user", "content": user}], seed,
+                              temperature, timeout)
+
+    def chat(self, prompt: str, kind: str, turns: list[tuple[str, str]], instruction: str,
+             pictures: list[tuple[str, str]] = (), cast: list[dict] | None = None, seed: int = 0,
+             temperature: float = 0.5, timeout: float = 300.0) -> str:
+        """The next version in a refine conversation (see chat_messages); pictures need the vision projector."""
+        if pictures and not self.mmproj:
+            raise LlmServerError("this model has no vision part (mmproj file) next to it: it cannot see pictures")
+        return self._complete(chat_messages(prompt=prompt, kind=kind, turns=turns, instruction=instruction,
+                                            pictures=pictures, cast=cast), seed, temperature, timeout)
+
+    def interrupt(self):
+        pass                                          # (a request ends by itself; closing the window drops it)
+
+    def _complete(self, messages: list[dict], seed: int, temperature: float, timeout: float) -> str:
+        self.start()
+        body = {"messages": messages,
+                "max_tokens": 768, "temperature": float(temperature), "top_k": 64, "top_p": 0.95, "min_p": 0.05,
                 "repeat_penalty": 1.05, "seed": int(seed), "stream": False}
         req = urllib.request.Request(self.url + "/v1/chat/completions", data=json.dumps(body).encode(),
                                      headers={"Content-Type": "application/json"})
@@ -180,3 +274,12 @@ class CombinedRefiner:
                 raise LlmServerError("the llama.cpp server is not set up")
             return self.llama.refine_prompt(prompt, kind, model_file, seed, hint, cast)
         return self.comfy.refine_prompt(prompt, kind, model_file, seed, hint, cast)
+
+    def chat(self, *a, **k):
+        if self.llama is None:
+            raise LlmServerError("conversations need a llama.cpp model")
+        return self.llama.chat(*a, **k)
+
+    def interrupt(self):
+        if self.comfy is not None:
+            self.comfy.interrupt()

@@ -1674,11 +1674,12 @@ def test_lora_picker_search_and_full_names(app, tmp_path):
 def test_prompt_refiner_on_the_card(app, win, tmp_path, image, monkeypatch):
     from video_chain.ui import main_window as M
     ids = new_project(win, tmp_path, image, ("a man walks",))
-    seen = {}
+    seen, seen_pics = {}, []
 
     class FakeDialog:
-        def __init__(self, parent, text, kind, connect, settings=None, start_comfy=None, cast=None):
+        def __init__(self, parent, text, kind, connect, settings=None, start_comfy=None, cast=None, pictures=None):
             seen.update(text=text, kind=kind, cast=cast)
+            seen_pics.extend(pictures or [])
             self.refined_any = True
 
         def exec(self):
@@ -1693,6 +1694,7 @@ def test_prompt_refiner_on_the_card(app, win, tmp_path, image, monkeypatch):
     card = win.cards[0]
     card.b_refine.click()
     assert seen == {"text": "a man walks", "kind": "video", "cast": []}
+    assert [t for t, _p, on in seen_pics] == ["The frame the clip starts from"]   # (the start image; no end image)
     assert win.tree.nodes[ids[0]].prompt == "A man walks slowly towards the camera; footsteps on gravel."
     card.edit.undo()                                              # one Ctrl+Z takes the refined text back
     assert card.edit.toPlainText() == "a man walks"

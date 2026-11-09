@@ -23,7 +23,11 @@ class H(BaseHTTPRequestHandler):
         self.send_response(200); self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
     def do_GET(self):
-        self._send({"status": "ok"})
+        if self.path == "/props":
+            self._send({"model_path": args[args.index("-m") + 1],
+                        "modalities": {"vision": "--mmproj" in args}})
+        else:
+            self._send({"status": "ok"})
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         with open(sys.argv[0] + ".req", "w") as f:
@@ -126,3 +130,118 @@ def test_main_window_settings_and_stop(fake_server, tmp_path, monkeypatch):
     finally:
         win.stop_llama()
         win.deleteLater()
+
+
+def test_chat_messages_and_pictures(tmp_path):
+    from PIL import Image
+    pic = tmp_path / "start.png"
+    Image.new("RGB", (2000, 1000), (10, 20, 30)).save(pic)
+    msgs = L.chat_messages(prompt="a cat", kind="image", turns=[("", "a fluffy cat"), ("darker", "a cat at night")],
+                           instruction="add rain", pictures=[("The start frame", str(pic))])
+    assert [m["role"] for m in msgs] == ["system", "user", "assistant", "user", "assistant", "user"]
+    assert "conversation about one prompt" in msgs[0]["content"]
+    parts = msgs[1]["content"]
+    assert parts[0]["text"].startswith("My prompt:\na cat") and "Improve this prompt." in parts[0]["text"]
+    assert parts[1]["text"].strip() == "[The start frame]" and parts[2]["image_url"]["url"].startswith("data:image/png")
+    import base64, io
+    small = Image.open(io.BytesIO(base64.b64decode(parts[2]["image_url"]["url"].split(",", 1)[1])))
+    assert max(small.size) == L.IMAGE_SIDE                                  # sent smaller
+    assert [m["content"] for m in msgs[2:]] == ["a fluffy cat", "darker", "a cat at night", "add rain"]
+    model = tmp_path / "m" / "x-Q6_K.gguf"
+    model.parent.mkdir()
+    model.write_bytes(b"x")
+    assert L.find_mmproj(str(model)) is None
+    for n in ("mmproj-F32.gguf", "mmproj-F16.gguf"):
+        (model.parent / n).write_bytes(b"x")
+    assert L.find_mmproj(str(model)).endswith("mmproj-F16.gguf")
+    srv = L.LlamaServer("s", str(model), 1)
+    with pytest.raises(L.LlmServerError, match="cannot see"):
+        srv.chat("a", "image", [], "x", pictures=[("p", str(pic))])
+    assert L.LlamaServer("s", str(model), 1, mmproj="m").models[0]["vision"]
+
+
+def test_refine_window_conversation(tmp_path, monkeypatch):
+    """The refine window with a conversation model: versions build on each other, an earlier version can be
+    continued from (the later ones go), the user's edit counts, Another try replaces the answer, pictures are
+    sent only when the model sees and they are switched on."""
+    os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    from PIL import Image
+    from PySide6.QtCore import QUrl
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from video_chain.ui.prompt_refiner import RefineDialog
+    pic = tmp_path / "s.png"
+    Image.new("RGB", (64, 48)).save(pic)
+    calls = []
+
+    class Fake:
+        models = [{"file": "llama:/m/q.gguf", "label": "Q", "chat": True, "vision": True},
+                  {"file": "gemma.safetensors", "label": "G"}]
+
+        def chat(self, prompt, kind, turns, ask, pictures=(), cast=None, seed=0):
+            calls.append((list(turns), ask, list(pictures)))
+            return f"v{len(turns) + 1}:{ask or 'improved'}"
+
+        def refine_prompt(self, prompt, kind, model, seed, hint, **k):
+            return "one-shot " + hint
+    dlg = RefineDialog(None, "a cat", "image", lambda: Fake(), pictures=[("The start frame", str(pic), True),
+                                                                          ("A result", str(pic), False)])
+
+    def wait_idle():
+        end = __import__("time").time() + 5
+        while (dlg._busy or dlg.refiner is None) and __import__("time").time() < end:
+            app.processEvents()
+        app.processEvents()
+    wait_idle()
+    assert dlg.chatting() and dlg.seeing() and dlg.talk.isVisibleTo(dlg) and "conversation" in dlg.caps.text()
+    dlg.refine()                                                         # empty: improve it
+    wait_idle()
+    assert calls[-1] == ([], "", [("The start frame", str(pic))]) and dlg.out.toPlainText() == "v1:improved"
+    dlg.hint.setText("darker")
+    dlg.b_refine.click()
+    wait_idle()
+    assert calls[-1][0] == [("", "v1:improved")] and dlg.out.toPlainText() == "v2:darker" and dlg.base == 1
+    dlg.out.setPlainText("v2 edited by me")                              # the user's edit is the current version
+    dlg.hint.setText("rain")
+    dlg.refine()
+    wait_idle()
+    assert calls[-1][0][-1] == ("darker", "v2 edited by me") and len(dlg.turns) == 3
+    dlg._version_clicked(QUrl("v:0"))                                    # back to version 1, continue from there
+    assert dlg.out.toPlainText() == "v1:improved"
+    dlg.hint.setText("brighter")
+    dlg.refine()
+    wait_idle()
+    assert calls[-1][0] == [("", "v1:improved")] and [a for a, _v in dlg.turns] == ["", "brighter"]
+    n = len(calls)
+    dlg.b_again.click()                                                  # another answer to "brighter"
+    wait_idle()
+    assert len(calls) == n + 1 and calls[-1][1] == "brighter" and len(dlg.turns) == 2
+    dlg.model.setCurrentIndex(1)                                         # a ComfyUI model: one refine per press
+    assert not dlg.chatting() and not dlg.talk.isVisibleTo(dlg) and dlg.b_refine.text() == "Refine"
+    dlg.hint.setText("shorter")
+    dlg.refine()
+    wait_idle()
+    assert dlg.out.toPlainText() == "one-shot shorter"
+    dlg.reject()
+
+
+def test_a_server_on_the_port_must_be_the_right_one(fake_server, tmp_path):
+    script, model = fake_server
+    port = free_port()
+    other = tmp_path / "other.gguf"
+    other.write_bytes(b"GGUF")
+    foreign = L.LlamaServer(str(script), str(other), port)
+    foreign.start()
+    try:
+        mine = L.LlamaServer(str(script), str(model), port)
+        with pytest.raises(L.LlmServerError, match="port .* is used by another llama.cpp server .*other.gguf"):
+            mine.start()
+    finally:
+        foreign.stop()
+    plain = L.LlamaServer(str(script), str(model), port)                 # ours, started without vision ...
+    plain.start()
+    plain.mmproj = str(tmp_path / "mmproj-F16.gguf")                     # ... now wanted with it: restarted
+    first = plain.proc.pid
+    plain.start()
+    assert plain.proc.pid != first and "--mmproj" in json.loads((tmp_path / "llama-server.args").read_text())
+    plain.stop()

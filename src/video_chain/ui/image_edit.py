@@ -1867,10 +1867,30 @@ class ImageEditDialog(QDialog):
     def _refine_prompt(self):
         if self.refine is None:
             return
-        new = self.refine(self.prompt.toPlainText(), self.prompt_kind())
+        try:
+            new = self.refine(self.prompt.toPlainText(), self.prompt_kind(), pictures=self._refine_pictures())
+        except TypeError:                          # (a refine callback without pictures)
+            new = self.refine(self.prompt.toPlainText(), self.prompt_kind())
         if new:
             from .prompt_refiner import replace_text
             replace_text(self.prompt, new)
+
+    def _refine_pictures(self) -> list[tuple[str, str, bool]]:
+        """What the refiner's model may see: the image to edit and the extra pictures (edit), the reference
+        pictures (create), and the selected result (off at first)."""
+        out = []
+        if self.mode() == "edit":
+            if self.source:
+                out.append(("The image to edit (Picture 1)", self.source, True))
+            for k, p in ((2, self.pic2.path), (3, self.pic3.path)):
+                if p:
+                    out.append((f"Picture {k}", p, True))
+        elif self.use_refs.isChecked():
+            out += [(f"Reference picture {k + 1}", s.path, True) for k, s in enumerate(self.cpics) if s.path]
+        sel = self.selected()
+        if sel is not None:
+            out.append(("A result made here", sel[0], False))
+        return out
 
     def _add_reference(self):
         """The selected result as one more face reference; the dialog stays open."""
