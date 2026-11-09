@@ -364,6 +364,75 @@ def build_create_workflow(*, family: str, files: dict, model: str, prompt: str, 
     return wf
 
 
+SAMPLERS = ("euler", "euler_ancestral", "heun", "dpm_2", "dpm_2_ancestral", "lms", "dpmpp_2s_ancestral", "dpmpp_sde",
+            "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_3m_sde", "ddim", "uni_pc", "res_multistep", "er_sde")
+SCHEDULERS = ("simple", "normal", "karras", "exponential", "sgm_uniform", "beta", "linear_quadratic", "kl_optimal",
+              "ddim_uniform")
+
+
+def sampling_of(wf: dict) -> dict:
+    """The sampling settings of a create workflow: {"steps", "cfg", "sampler", "scheduler"} (scheduler "manual":
+    a fixed sigma list, e.g. Qwen-Image 2.1 Turbo's)."""
+    smp = wf.get("sample") or {}
+    i = smp.get("inputs") or {}
+    if smp.get("class_type") == "KSampler":
+        return {"steps": int(i["steps"]), "cfg": float(i["cfg"]), "sampler": i["sampler_name"],
+                "scheduler": i["scheduler"]}
+    sig = wf.get(i.get("sigmas", [None])[0]) or {}
+    si = sig.get("inputs") or {}
+    if sig.get("class_type") == "ManualSigmas":
+        steps, sched = len([x for x in str(si.get("sigmas", "")).split(",") if x.strip()]) - 1, "manual"
+    else:
+        steps, sched = int(si.get("steps", 0)), si.get("scheduler", "simple")
+    return {"steps": steps, "cfg": float(((wf.get(i.get("guider", [None])[0]) or {}).get("inputs") or {}).get("cfg", 1.0)),
+            "sampler": ((wf.get(i.get("sampler", [None])[0]) or {}).get("inputs") or {}).get("sampler_name", "euler"),
+            "scheduler": sched}
+
+
+def apply_sampling(wf: dict, steps: int | None = None, cfg: float | None = None, sampler: str | None = None,
+                   scheduler: str | None = None) -> dict:
+    """The workflow with the given sampling settings (None: the model's own). A fixed sigma list (ManualSigmas) is
+    replaced by ComfyUI's BasicScheduler when steps or scheduler are set. Returns the settings now used."""
+    smp = wf["sample"]
+    i = smp["inputs"]
+    if smp["class_type"] == "KSampler":
+        for key, val in (("steps", steps), ("cfg", cfg), ("sampler_name", sampler), ("scheduler", scheduler)):
+            if val is not None:
+                i[key] = int(val) if key == "steps" else float(val) if key == "cfg" else str(val)
+        return sampling_of(wf)
+    guider = wf[i["guider"][0]]["inputs"]
+    if cfg is not None:
+        guider["cfg"] = float(cfg)
+    if sampler is not None:
+        wf[i["sampler"][0]]["inputs"]["sampler_name"] = str(sampler)
+    key = i["sigmas"][0]
+    sig = wf[key]
+    if steps is not None or scheduler is not None:
+        now = sampling_of(wf)
+        if sig["class_type"] != "BasicScheduler":
+            wf[key] = sig = {"class_type": "BasicScheduler",
+                             "inputs": {"model": guider["model"], "scheduler": "simple", "steps": now["steps"],
+                                        "denoise": 1.0}}
+        if steps is not None:
+            sig["inputs"]["steps"] = int(steps)
+        if scheduler is not None:
+            sig["inputs"]["scheduler"] = str(scheduler)
+    return sampling_of(wf)
+
+
+def default_sampling(family: str, files: dict, model: str | None, quality: str, refs: int = 0,
+                     ref_strength: float = 0.65) -> dict | None:
+    """The sampling settings a family uses by itself for this model and quality (None if it cannot be built)."""
+    try:
+        model = model if model in (files.get("models") or []) else (files.get("models") or [None])[0]
+        wf = build_create_workflow(family=family, files=files, model=model, prompt="x", negative="", width=1024,
+                                   height=1024, seed=1, quality=quality, loras=[],
+                                   refs=[f"ref{k}.png" for k in range(refs)], ref_strength=ref_strength, prefix="x")
+        return sampling_of(wf)
+    except Exception:  # noqa: BLE001  (missing files of a family: no defaults to show)
+        return None
+
+
 def size_for(family: str, aspect: float) -> tuple[int, int]:
     """Width x height for a family at an aspect ratio (w/h): its trained pixel count, its size multiple."""
     import math
@@ -421,6 +490,8 @@ class ComfyImageCreator(ComfyGenerator):
         self.files = pick_files(combo("UNETLoader", "unet_name"), combo("CheckpointLoaderSimple", "ckpt_name"),
                                 combo("CLIPLoader", "clip_name"), combo("VAELoader", "vae_name"),
                                 combo("LoraLoaderModelOnly", "lora_name"))
+        self.files["sampling"] = {"samplers": combo("KSampler", "sampler_name") or list(SAMPLERS),
+                                  "schedulers": combo("KSampler", "scheduler") or list(SCHEDULERS)}
         from .comfy import MOSS_NODES, QWEN21_NODES
         for fam, nodes in (("qwen21", QWEN21_NODES), ("moss", MOSS_NODES)):
             if "models" in self.files.get(fam, {}):
@@ -430,7 +501,10 @@ class ComfyImageCreator(ComfyGenerator):
 
     def create(self, family: str, model: str | None, prompt: str, out_png: Path, seed: int, quality: str,
                width: int, height: int, negative: str = "", loras: list[tuple[str, float]] = (),
-               refs: list[Path] = (), ref_strength: float = 0.65, quality_tags: bool = True) -> dict:
+               refs: list[Path] = (), ref_strength: float = 0.65, quality_tags: bool = True,
+               sampling: dict | None = None) -> dict:
+        """sampling: {"steps", "cfg", "sampler", "scheduler"} to use instead of the model's own (None or a missing
+        key: its own)."""
         files = self.files.get(family) or {}
         if "missing" in files:
             raise ComfyError(f"{FAMILIES[family]['label']} is not available: {files['missing']}")
@@ -452,6 +526,8 @@ class ComfyImageCreator(ComfyGenerator):
                                        width=width, height=height, seed=seed, quality=quality, loras=names,
                                        refs=ref_names, ref_strength=ref_strength, prefix=prefix,
                                        quality_tags=quality_tags)
+            sp = {k: v for k, v in (sampling or {}).items() if v is not None}
+            used_sampling = apply_sampling(wf, sp.get("steps"), sp.get("cfg"), sp.get("sampler"), sp.get("scheduler"))
             ws = self._connect_ws()
             try:
                 self._queue(wf)
@@ -481,9 +557,9 @@ class ComfyImageCreator(ComfyGenerator):
                                  Path(local), same_size=False)
         used = (wf.get("unet") or {}).get("inputs", {}).get("unet_name") or \
             (wf.get("ckpt") or {}).get("inputs", {}).get("ckpt_name") or model
-        smp = wf["sample"]["inputs"] if wf["sample"]["class_type"] == "KSampler" else {}
         return {"mode": "create", "family": family, "model": used, "chosen_model": model,
-                "steps": smp.get("steps", 8), "cfg": smp.get("cfg", 1.0), "quality": quality, "width": width,
+                "steps": used_sampling["steps"], "cfg": used_sampling["cfg"], "sampler": used_sampling["sampler"],
+                "scheduler": used_sampling["scheduler"], "sampling_set": sp, "quality": quality, "width": width,
                 "height": height, "negative": negative, "ref_strength": ref_strength if refs else None,
                 "loras": [{"path": str(p), "strength": float(s)} for p, s in loras]}
 

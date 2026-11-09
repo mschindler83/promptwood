@@ -1065,3 +1065,35 @@ def test_every_video_is_saved_at_a_set_quality():
     for wf in (clip, up, ref):
         saves = [n for n in wf.values() if n["class_type"] == "SaveVideo"]
         assert saves and all(n["inputs"]["format.codec.encoding.crf"] == C.VIDEO_CRF for n in saves)
+
+
+def test_own_sampling_settings_for_new_images(server, start, tmp_path):
+    """Steps, cfg, sampler and scheduler can be set for every family: KSampler workflows directly, the custom
+    sampler ones (Krea-2 with pictures, Qwen-Image 2.1 Turbo's fixed sigmas) through their nodes."""
+    from video_chain import imagegen as G
+    cr = G.ComfyImageCreator(server.url)
+    assert "euler" in cr.files["sampling"]["samplers"] and "karras" in cr.files["sampling"]["schedulers"]
+    out = tmp_path / "n.png"
+    own = {"steps": 33, "cfg": 2.5, "sampler": "dpmpp_2m", "scheduler": "karras"}
+    meta = cr.create("sdxl", None, "1girl", out, 5, "fast", 1024, 1024, sampling=own)
+    s = server.created["sample"]["inputs"]
+    assert (s["steps"], s["cfg"], s["sampler_name"], s["scheduler"]) == (33, 2.5, "dpmpp_2m", "karras")
+    assert {k: meta[k] for k in own} == own and meta["sampling_set"] == own
+    meta = cr.create("sdxl", None, "1girl", out, 5, "best", 1024, 1024, sampling={"steps": 12, "cfg": None})
+    s = server.created["sample"]["inputs"]
+    assert (s["steps"], s["cfg"], s["sampler_name"]) == (12, 6.0, "dpmpp_2m") and meta["sampling_set"] == {"steps": 12}
+    cr.create("krea2", None, "in this style", out, 5, "standard", 1024, 1024, refs=[start], sampling=own)
+    wf = server.created
+    assert wf["sigmas"]["inputs"]["steps"] == 33 and wf["sigmas"]["inputs"]["scheduler"] == "karras"
+    assert wf["guider"]["inputs"]["cfg"] == 2.5 and wf["sampler"]["inputs"]["sampler_name"] == "dpmpp_2m"
+    wf = G.build_create_workflow(family="qwen21", files=cr.files["qwen21"], model=None, prompt="x", negative="",
+                                 width=1024, height=1024, seed=1, quality="fast", loras=[], refs=[], ref_strength=0.6,
+                                 prefix="p")
+    assert wf["sample"]["class_type"] == "SamplerCustomAdvanced"       # Turbo: its fixed sigma list
+    assert G.sampling_of(wf)["scheduler"] == "manual" and G.sampling_of(wf)["steps"] == 8
+    assert G.apply_sampling(wf, sampler="heun")["scheduler"] == "manual"              # kept unless asked
+    used = G.apply_sampling(wf, steps=12)
+    assert wf["sigmas"]["class_type"] == "BasicScheduler" and used["steps"] == 12 and used["scheduler"] == "simple"
+    auto = G.default_sampling("chroma", cr.files["chroma"], None, "best")
+    assert auto == {"steps": 26, "cfg": 3.5, "sampler": "euler", "scheduler": "beta"}
+    assert G.default_sampling("flux3", cr.files["flux3"], None, "fast") is None

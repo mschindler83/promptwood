@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDia
 from .image_picker import pick_image
 from ..comfy import EDIT_MODELS
 from ..triggers import stack_words, with_triggers
-from ..imagegen import FAMILIES, size_for
+from ..imagegen import FAMILIES, SAMPLERS, SCHEDULERS, default_sampling, size_for
 from .lora_stack import LoraStack, lora_label
 from .mask_painter import MaskPainterDialog, mask_area, overlay
 from .widgets import FrameTile, guard_wheel, icon_button, label
@@ -341,6 +341,7 @@ class ImageEditDialog(QDialog):
         arow.addWidget(self.aspect, 1)
         arow.addWidget(self.size_text)
         cv.addLayout(arow)
+        self._build_sampling(cv)
         left.addWidget(self.create_box)
 
         prow0 = QHBoxLayout()
@@ -391,6 +392,7 @@ class ImageEditDialog(QDialog):
         self.quality.setToolTip("Faster settings use the model's speed LoRA or distilled version; Best samples "
                                 "longer and can follow the prompt more closely")
         self.quality.currentIndexChanged.connect(lambda *_: self._remember_quality())
+        self.quality.currentIndexChanged.connect(lambda *_: self._sampling_defaults())
         self.tries = QSpinBox()
         self.tries.setRange(1, 4)
         self.tries.setValue(2)
@@ -718,6 +720,7 @@ class ImageEditDialog(QDialog):
                               if moss_no_edit else f["ref_text"] if f else "")
         img2img = refs and fam in ("flux1", "sdxl", "chroma")
         self.ref_strength.setVisible(img2img)
+        self._sampling_defaults()
         self.ref_strength_label.setVisible(img2img)
         self.negative.setVisible(create and bool(f and f["negative"]))
         self.tags.setVisible(create and fam == "sdxl")
@@ -997,6 +1000,149 @@ class ImageEditDialog(QDialog):
                             Path(f).unlink(missing_ok=True)
         threading.Thread(target=work, daemon=True).start()
 
+    # ---- sampling (Create): steps, cfg, sampler, scheduler; each "auto" = what the model uses by itself
+    def _build_sampling(self, cv):
+        self._sampling_family, self._sampling_loading = None, False
+        row = QHBoxLayout()
+        self.steps = QSpinBox()
+        self.steps.setRange(0, 200)
+        self.steps.setToolTip("Sampling steps (auto: the model's own for this quality). More steps rarely help a "
+                              "distilled / Turbo / Lightning model and cost time in proportion")
+        self.cfg = QDoubleSpinBox()
+        self.cfg.setRange(0.0, 30.0)
+        self.cfg.setSingleStep(0.1)
+        self.cfg.setDecimals(1)
+        self.cfg.setToolTip("CFG (auto: the model's own). Above 1 the negative prompt counts and each step runs "
+                            "twice (about twice as slow); distilled / Turbo / Lightning models want 1")
+        self.sampler = QComboBox()
+        self.sampler.setToolTip("The sampler (auto: the model's own)")
+        self.scheduler = QComboBox()
+        self.scheduler.setToolTip("The scheduler: how the noise levels are spread over the steps (auto: the "
+                                  "model's own; Qwen-Image 2.1 Turbo uses a fixed list of its own, any choice here "
+                                  "replaces it)")
+        b_reset = icon_button("rotate", "Back to the model's own settings (all auto)")
+        b_reset.clicked.connect(lambda: self.set_sampling({}))
+        for w in (self.steps, self.cfg):
+            guard_wheel(w)
+        grid = QGridLayout()                       # two rows, so the panel stays narrow
+        for k, (w, text) in enumerate(((self.steps, "Steps"), (self.cfg, "CFG"), (self.sampler, "Sampler"),
+                                       (self.scheduler, "Scheduler"))):
+            grid.addWidget(label(text, level="tertiary"), k // 2, (k % 2) * 2)
+            grid.addWidget(w, k // 2, (k % 2) * 2 + 1)
+            w.setMinimumWidth(60)
+            if isinstance(w, QComboBox):
+                w.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+                w.setMinimumContentsLength(8)
+        grid.addWidget(b_reset, 0, 4)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1)
+        row.addLayout(grid, 1)
+        cv.addLayout(row)
+        self.sampling_note = label("", level="tertiary")
+        self.sampling_note.setWordWrap(True)
+        cv.addWidget(self.sampling_note)
+        self.steps.valueChanged.connect(lambda *_: self._sampling_changed())
+        self.cfg.valueChanged.connect(lambda *_: self._sampling_changed())
+        self.sampler.currentIndexChanged.connect(lambda *_: self._sampling_changed())
+        self.scheduler.currentIndexChanged.connect(lambda *_: self._sampling_changed())
+        self.model_file.currentIndexChanged.connect(lambda *_: self._sampling_defaults())
+        self._sampling_auto: dict = {}
+        self._fill_sampling_lists()
+
+    def _fill_sampling_lists(self):
+        lists = (self.families or {}).get("sampling") or {}
+        for combo, names in ((self.sampler, lists.get("samplers") or SAMPLERS),
+                             (self.scheduler, lists.get("schedulers") or SCHEDULERS)):
+            cur = combo.currentData()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem("auto", None)
+            for n in names:
+                combo.addItem(n, n)
+            i = combo.findData(cur)
+            combo.setCurrentIndex(i if i >= 0 else 0)
+            combo.blockSignals(False)
+
+    def sampling(self) -> dict:
+        """The chosen sampling settings; a missing key: the model's own."""
+        out = {}
+        if self.steps.value():
+            out["steps"] = self.steps.value()
+        if self.cfg.value():
+            out["cfg"] = round(self.cfg.value(), 2)
+        if self.sampler.currentData():
+            out["sampler"] = self.sampler.currentData()
+        if self.scheduler.currentData():
+            out["scheduler"] = self.scheduler.currentData()
+        return out
+
+    def set_sampling(self, sp: dict):
+        self._sampling_loading = True
+        try:
+            self.steps.setValue(int(sp.get("steps") or 0))
+            self.cfg.setValue(float(sp.get("cfg") or 0))
+            for combo, key in ((self.sampler, "sampler"), (self.scheduler, "scheduler")):
+                name = sp.get(key)
+                if name and combo.findData(name) < 0:
+                    combo.addItem(name, name)          # (one this ComfyUI does not list: kept, ComfyUI says no)
+                combo.setCurrentIndex(max(0, combo.findData(name)) if name else 0)
+        finally:
+            self._sampling_loading = False
+        self._sampling_changed()
+
+    def _sampling_key(self) -> str:
+        return f"createSampling_{self.family.currentData()}"
+
+    def _sampling_defaults(self):
+        """The model's own settings shown as "auto (…)"; the family's remembered settings when it changed."""
+        if not hasattr(self, "steps") or not hasattr(self, "quality"):
+            return
+        fam = self.family.currentData()
+        if self.sampler.count() <= 1 or (self.families or {}).get("sampling"):
+            self._fill_sampling_lists()
+        if fam != self._sampling_family:
+            self._sampling_family = fam
+            saved = {}
+            if self.qs is not None and fam:
+                try:
+                    saved = json.loads(self.qs.value(self._sampling_key(), "{}", type=str) or "{}")
+                except ValueError:
+                    saved = {}
+            self.set_sampling(saved if isinstance(saved, dict) else {})
+        refs = sum(1 for s in self.cpics if s.path) if self.use_refs.isChecked() else 0
+        auto = default_sampling(fam, (self.families or {}).get(fam) or {}, self.model_file.currentData(),
+                                self.quality.currentData() or "", refs, self.ref_strength.value()) if fam in FAMILIES \
+            else None
+        self._sampling_auto = auto or {}
+        a = self._sampling_auto
+        self.steps.setSpecialValueText(f"auto ({a['steps']})" if a else "auto")
+        self.cfg.setSpecialValueText(f"auto ({a['cfg']:g})" if a else "auto")
+        self.sampler.setItemText(0, f"auto ({a['sampler']})" if a else "auto")
+        self.scheduler.setItemText(0, f"auto ({a['scheduler']})" if a else "auto")
+        self._sampling_note()
+
+    def _sampling_changed(self):
+        if self._sampling_loading:
+            return
+        if self.qs is not None and self.family.currentData():
+            self.qs.setValue(self._sampling_key(), json.dumps(self.sampling()))
+        self._sampling_note()
+
+    def _sampling_note(self):
+        sp, a = self.sampling(), self._sampling_auto
+        notes = []
+        if a and sp.get("cfg") and sp["cfg"] > 1 and a.get("cfg", 1) <= 1:
+            notes.append(f"CFG {sp['cfg']:g} on a model made for CFG 1 (distilled / Turbo / Lightning): about twice "
+                         "as slow, colours often burn")
+        if a and sp.get("steps") and a.get("steps") and sp["steps"] < a["steps"] * 0.6:
+            notes.append(f"{sp['steps']} steps is far below the model's own {a['steps']}: expect unfinished, "
+                         "noisy images")
+        if a and sp.get("scheduler") and a.get("scheduler") == "manual":
+            notes.append("replaces Qwen-Image 2.1 Turbo's own sigma list")
+        self.sampling_note.setText(("Own settings: " + "; ".join(notes) + ".") if notes else
+                                   "Own settings in use (each auto field uses the model's own)." if sp else "")
+        self.sampling_note.setVisible(bool(self.sampling_note.text()))
+
     def new_seed(self):
         """A fresh random seed in the field."""
         self.seed.setValue(random.randint(1, SEED_MAX))
@@ -1025,6 +1171,7 @@ class ImageEditDialog(QDialog):
         self._remember_loras()                    # what it was made with is offered next time
         w, h = size_for(fam, self.aspect.currentData() or 1.0)
         strength, tags = self.ref_strength.value(), self.tags.isChecked()
+        sampling = self.sampling()
         edits = self.project / EDITS_DIR
         sig, connect = self._sig, self.connect_create
         if not self._run_on_start():
@@ -1055,7 +1202,7 @@ class ImageEditDialog(QDialog):
                     seed = seeds[k - 1]
                     out = edits / f"new_{time.strftime('%Y%m%d-%H%M%S')}_{seed}.png"
                     meta = self.editor.create(fam, model, sent, out, seed, quality, w, h, negative, loras,
-                                              [Path(r) for r in refs], strength, tags)
+                                              [Path(r) for r in refs], strength, tags, sampling)
                     meta.update({"prompt": prompt, "trigger_words": words, "seed": seed, "refs": refs, "tags": tags,
                                  "source_copy": str(kept) if kept else None})
                     out.with_suffix(".json").write_text(json.dumps(meta, indent=2, ensure_ascii=False),
@@ -1236,6 +1383,7 @@ class ImageEditDialog(QDialog):
             if q >= 0:
                 self.quality.setCurrentIndex(q)
             self.negative.setText(meta.get("negative") or "")
+            self.set_sampling(meta.get("sampling_set") or {})
             if "tags" in meta:
                 self.tags.setChecked(bool(meta["tags"]))
         elif meta.get("mode") != "create":

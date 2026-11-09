@@ -1815,6 +1815,41 @@ def test_image_window_lora_rows_fit_and_can_be_removed(app, tmp_path):
     dlg.reject()
 
 
+def test_image_window_own_sampling(app, tmp_path):
+    """Create: steps / cfg / sampler / scheduler, each "auto (the model's own)"; remembered per family, warned
+    about when they fight the model, sent with Generate and taken back with a result's settings."""
+    from PySide6.QtCore import QSettings
+
+    from video_chain import imagegen as G
+    from video_chain.ui.image_edit import ImageEditDialog
+    q = QSettings(str(tmp_path / "samp.ini"), QSettings.IniFormat)
+    dlg = ImageEditDialog(None, tmp_path, [], None, None, lambda p: None, lambda k, p: False, q,
+                          connect_create=lambda p: None)
+    files = G.pick_files(["krea2/krea2_turbo_fp8_scaled.safetensors"], ["illustrij_v20.safetensors"],
+                         ["qwen3vl_4b_fp8_scaled.safetensors"], ["qwen_image_vae.safetensors"], [])
+    files["sampling"] = {"samplers": ["euler", "heun", "dpmpp_2m"], "schedulers": ["simple", "karras", "beta"]}
+    q.setValue("createFamily", "krea2")
+    dlg._families_found(files, "")
+    dlg.set_mode("create")
+    assert dlg.family.currentData() == "krea2" and dlg.sampling() == {}
+    assert dlg.steps.specialValueText() == "auto (8)" and dlg.cfg.specialValueText() == "auto (1)"
+    assert dlg.sampler.itemText(0) == "auto (euler)" and dlg.sampler.count() == 4
+    dlg.cfg.setValue(4.0)
+    dlg.steps.setValue(3)
+    dlg.scheduler.setCurrentIndex(dlg.scheduler.findData("karras"))
+    assert dlg.sampling() == {"steps": 3, "cfg": 4.0, "scheduler": "karras"}
+    assert "twice as slow" in dlg.sampling_note.text() and "far below" in dlg.sampling_note.text()
+    dlg.family.setCurrentIndex(dlg.family.findData("sdxl"))
+    assert dlg.sampling() == {} and dlg.sampler.itemText(0).startswith("auto (euler")      # its own settings
+    dlg.family.setCurrentIndex(dlg.family.findData("krea2"))
+    assert dlg.sampling() == {"steps": 3, "cfg": 4.0, "scheduler": "karras"}              # remembered per family
+    dlg.set_sampling({"sampler": "dpmpp_2m"})
+    assert dlg.sampling() == {"sampler": "dpmpp_2m"} and "Own settings in use" in dlg.sampling_note.text()
+    dlg.set_sampling({})
+    assert dlg.sampling() == {} and not dlg.sampling_note.text()
+    dlg.reject()
+
+
 def test_face_crop_dialog(app, tmp_path):
     from video_chain.ui.face_crop import FaceCropDialog
     p = tmp_path / "pic.png"
