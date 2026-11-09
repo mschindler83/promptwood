@@ -5149,6 +5149,8 @@ class MainWindow(QMainWindow):
             ideas = dlg.chosen_ideas() if hasattr(dlg, "chosen_ideas") else None
             return ideas if ideas else dlg.chosen()       # (a list: all ideas, for the image window's variations)
         finally:
+            # the llama.cpp model goes with the window: it slows image / clip generation down while it is loaded
+            self.stop_llama("the prompt refiner was closed")
             if dlg.refined_any and not self.running and self._comfy_model not in ("qwen",):
                 # a language model is in ComfyUI now: unloaded before the next clips, idle time as usual
                 self._comfy_model = "llm"
@@ -5208,8 +5210,7 @@ class MainWindow(QMainWindow):
 
         def before_edit():                          # GUI thread, before each Generate
             self._qwen_timer.stop()
-            if not (getattr(self, "_llama", None) is not None and self._llama.cpu_moe):
-                self.stop_llama("its VRAM is needed for the image")     # (with experts in RAM it takes ~3 GB)
+            self.stop_llama("its memory is needed for the image")
             # the clip model is loaded: unload it (once: after the first image of this window it is gone)
             switch["free"] = not switch["loaded"] and self._comfy_model in ("h3", "h3-hyperflow")
             if self.worker_alive and not self.running:

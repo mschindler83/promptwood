@@ -127,6 +127,24 @@ def test_main_window_settings_and_stop(fake_server, tmp_path, monkeypatch):
         assert srv.ready() and win.stop_llama("test") and "Stopped the llama.cpp server" in win.log.toPlainText()
         win.save_settings()
         assert win.qs.value("llmModel") == str(model) and win.qs.value("llmServerOn", type=bool)
+
+
+        class Closed:                                   # the refine window, closed without using anything
+            refined_any = False
+
+            def __init__(self, *a, **k):
+                pass
+
+            def exec(self):
+                assert srv.ready()                      # (loaded while it is open)
+                return 0
+
+            def deleteLater(self):
+                pass
+        monkeypatch.setattr(MW, "RefineDialog", Closed)
+        srv.start()
+        assert win.refine_text("a cat", "image") is None
+        assert srv.proc is None and "prompt refiner was closed" in win.log.toPlainText()   # unloaded on close
     finally:
         win.stop_llama()
         win.deleteLater()
