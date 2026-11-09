@@ -235,7 +235,7 @@ class LoraStack(QWidget):
         button.setProperty("path", path)
         missing = "" if Path(path).is_file() else " (missing)"
         button.setText(Path(path).stem + missing)
-        button.setToolTip(f"{path}{missing}\nClick to choose another LoRA; right-click for its trigger words")
+        button.setToolTip(f"{path}{missing}\nClick to choose another LoRA; right-click for its trigger words and CivitAI details")
         trig = getattr(button.parentWidget(), "trigger_label", None)
         if trig is not None:
             self._show_trigger(trig, path)
@@ -262,8 +262,11 @@ class LoraStack(QWidget):
             src = {"user": "set by you", "file": "from the file", "civitai": "from CivitAI"}.get(info["source"], "")
             text = f"trigger words: {', '.join(info['words'])}  ({src})"
             tip = (f"{info.get('model') or ''}  {info.get('url') or ''}".strip() or src)
+        if info and info.get("base_model"):
+            text += f"  · base model {info['base_model']}"
         lab.setText(text)
-        lab.setToolTip(tip + "\nRight-click the LoRA to change them")
+        lab.setToolTip(tip + "\nRight-click the LoRA to change them or to see all CivitAI says about it "
+                       "(description, example prompts)")
 
     def refresh_triggers(self):
         for w, b, _s in self.rows:
@@ -282,7 +285,13 @@ class LoraStack(QWidget):
             if info.get("suggested") else None
         a_edit = menu.addAction("Change the trigger words…")
         a_reset = menu.addAction("Use the found trigger words again")
+        menu.addSeparator()
+        a_details = menu.addAction("CivitAI details (description, example prompts)…")
         chosen = menu.exec(button.mapToGlobal(pos))
+        if chosen is not None and chosen is a_details:
+            from .lora_details import LoraDetailsDialog
+            LoraDetailsDialog(path, self.window()).exec()
+            return
         try:
             if chosen is not None and chosen is a_take:
                 triggers.db().set_user(path, list(info["suggested"]))

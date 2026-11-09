@@ -7,7 +7,12 @@ training tags (the tags on nearly every training image). A LoRA CivitAI does not
 RECHECK_DAYS; one whose lookup failed (network) is asked again next time.
 
 The database is keyed by the file's content hash, so a LoRA keeps its words when it is moved or renamed; the hash of
-each path is cached by (size, date)."""
+each path is cached by (size, date).
+
+Everything CivitAI tells about a LoRA is kept too (details_path(): one JSON file per hash next to the database): the
+model version (base model, description, files, images), the model page (its description, often with sample prompts,
+tags, creator, license) and the generation data of its example images (prompts, seeds, settings; text only, no
+pictures are downloaded). LoRAs whose files name their trigger are looked up for these details as well."""
 from __future__ import annotations
 
 import hashlib
@@ -113,13 +118,11 @@ def sha256_of(path: str | Path, stop: Callable[[], bool] = lambda: False) -> str
     return h.hexdigest()
 
 
-def civitai_lookup(sha: str, timeout: float = 20.0) -> dict | None:
-    """CivitAI's model version for a file hash: {"words", "model", "url"}; None when CivitAI does not know it.
-    Raises OSError when no site could be asked (offline, server error)."""
+def _get_json(path: str, timeout: float) -> dict | None:
+    """A CivitAI API answer (the first site that answers); None for 404. OSError when no site could be asked."""
     last: Exception | None = None
     for site in SITES:
-        req = urllib.request.Request(f"{site}/api/v1/model-versions/by-hash/{sha}",
-                                     headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+        req = urllib.request.Request(f"{site}{path}", headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 data = json.loads(r.read().decode("utf-8", "replace"))
@@ -131,13 +134,66 @@ def civitai_lookup(sha: str, timeout: float = 20.0) -> dict | None:
         except (OSError, ValueError) as e:
             last = e
             continue
-        if not isinstance(data, dict) or data.get("error"):
-            return None
-        model = data.get("model") or {}
-        mid = data.get("modelId") or model.get("id")
-        return {"words": _clean(data.get("trainedWords") or []), "model": str(model.get("name") or ""),
-                "url": f"https://civitai.com/models/{mid}?modelVersionId={data.get('id')}" if mid else ""}
+        return data if isinstance(data, dict) and not data.get("error") else None
     raise OSError(f"CivitAI could not be asked: {last}")
+
+
+EXAMPLE_IMAGES = 100        # example images whose generation data (prompts) is kept
+
+
+def civitai_lookup(sha: str, timeout: float = 20.0, gap: float = REQUEST_GAP) -> dict | None:
+    """CivitAI's model version for a file hash: {"words", "model", "url", "details"}; None when CivitAI does not
+    know it. details = {"version": the version as CivitAI gives it, "model": the model page (description, tags,
+    creator, license; its other versions only as id / name / base model), "examples": the example images (their
+    generation data: prompt, negative prompt, seed, settings)}. The model page and the examples are optional (a
+    failed request leaves them out). Raises OSError when the version could not be asked (offline, server error)."""
+    data = _get_json(f"/api/v1/model-versions/by-hash/{sha}", timeout)
+    if data is None:
+        return None
+    model = data.get("model") or {}
+    mid = data.get("modelId") or model.get("id")
+    details: dict = {"version": data, "fetched": time.time()}
+    if mid:
+        try:
+            time.sleep(gap)
+            page = _get_json(f"/api/v1/models/{int(mid)}", timeout)
+            if page:
+                page = dict(page)
+                page["modelVersions"] = [{"id": v.get("id"), "name": v.get("name"), "baseModel": v.get("baseModel")}
+                                         for v in page.get("modelVersions") or [] if isinstance(v, dict)]
+                details["model"] = page
+        except (OSError, ValueError, TypeError):
+            pass
+    if data.get("id"):
+        try:
+            time.sleep(gap)
+            imgs = _get_json(f"/api/v1/images?modelVersionId={int(data['id'])}&limit={EXAMPLE_IMAGES}"
+                             "&sort=Most%20Reactions&nsfw=X", timeout)
+            if imgs and isinstance(imgs.get("items"), list):
+                details["examples"] = imgs["items"]
+        except (OSError, ValueError, TypeError):
+            pass
+    return {"words": _clean(data.get("trainedWords") or []), "model": str(model.get("name") or ""),
+            "url": f"https://civitai.com/models/{mid}?modelVersionId={data.get('id')}" if mid else "",
+            "details": details}
+
+
+def example_prompts(details: dict | None) -> list[dict]:
+    """The generation data of a LoRA's example images (details from civitai_lookup), each prompt once:
+    [{"prompt", "negative", "seed", "steps", "cfg", "sampler", "image"}], the most liked first."""
+    out, seen = [], set()
+    for it in (details or {}).get("examples") or []:
+        meta = (it or {}).get("meta") or {}
+        if not isinstance(meta, dict):
+            continue
+        prompt = str(meta.get("prompt") or "").strip()
+        if not prompt or prompt in seen:
+            continue
+        seen.add(prompt)
+        out.append({"prompt": prompt, "negative": str(meta.get("negativePrompt") or "").strip(),
+                    "seed": meta.get("seed"), "steps": meta.get("steps"), "cfg": meta.get("cfgScale"),
+                    "sampler": meta.get("sampler"), "image": it.get("url") or ""})
+    return out
 
 
 class TriggerDB:
@@ -189,6 +245,36 @@ class TriggerDB:
                     os.unlink(tmp)
             self._mtime = self.path.stat().st_mtime_ns
 
+    def details_path(self, sha: str) -> Path:
+        return self.path.parent / "civitai" / f"{sha}.json"
+
+    def details(self, path: str) -> dict | None:
+        """Everything CivitAI told about a LoRA (civitai_lookup's details), None when there is nothing."""
+        with self._lock:
+            self._load()
+            f = self._file(path)
+            sha = (f or {}).get("sha256")
+        if not sha:
+            return None
+        try:
+            d = json.loads(self.details_path(sha).read_text(encoding="utf-8"))
+            return d if isinstance(d, dict) else None
+        except (OSError, ValueError):
+            return None
+
+    def _save_details(self, sha: str, details: dict):
+        import tempfile
+        target = self.details_path(sha)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=target.name + ".", suffix=".part", dir=str(target.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(details, f, ensure_ascii=False)
+            os.replace(tmp, target)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+
     def _file(self, path: str) -> dict | None:
         """The cached entry of a path while its size and date are unchanged."""
         try:
@@ -209,21 +295,28 @@ class TriggerDB:
             if f is None:
                 return None
             rec = self.data["by_sha"].get(f.get("sha256") or "") or {}
-            user = f["user"] if f.get("user") is not None else rec.get("user")
-            if user is not None:
-                return {"words": list(user), "source": "user", "model": rec.get("model", ""),
-                        "url": rec.get("url", "")}
-            if f.get("file_source") == "file" and f.get("file_words"):
-                return {"words": list(f["file_words"]), "source": "file", "model": rec.get("model", ""),
-                        "url": rec.get("url", "")}
-            if rec.get("civitai") is not None:
-                return {"words": list(rec["civitai"]), "source": "civitai", "model": rec.get("model", ""),
-                        "url": rec.get("url", "")}
-            if f.get("file_words"):                # a guess: shown as a suggestion, not put into prompts
-                return {"words": [], "source": "tags", "model": "", "url": "", "suggested": list(f["file_words"])}
-            if rec.get("checked"):                 # CivitAI does not know it, the file says nothing
-                return {"words": [], "source": "none", "model": "", "url": ""}
-            return None                            # not looked up yet
+            out = self._info(f, rec)
+            if out is not None and rec.get("base_model"):
+                out["base_model"] = rec["base_model"]
+            return out
+
+    @staticmethod
+    def _info(f: dict, rec: dict) -> dict | None:
+        user = f["user"] if f.get("user") is not None else rec.get("user")
+        if user is not None:
+            return {"words": list(user), "source": "user", "model": rec.get("model", ""),
+                    "url": rec.get("url", "")}
+        if f.get("file_source") == "file" and f.get("file_words"):
+            return {"words": list(f["file_words"]), "source": "file", "model": rec.get("model", ""),
+                    "url": rec.get("url", "")}
+        if rec.get("civitai") is not None:
+            return {"words": list(rec["civitai"]), "source": "civitai", "model": rec.get("model", ""),
+                    "url": rec.get("url", "")}
+        if f.get("file_words"):                # a guess: shown as a suggestion, not put into prompts
+            return {"words": [], "source": "tags", "model": "", "url": "", "suggested": list(f["file_words"])}
+        if rec.get("checked"):                 # CivitAI does not know it, the file says nothing
+            return {"words": [], "source": "none", "model": "", "url": ""}
+        return None                            # not looked up yet
 
     def words(self, path: str) -> list[str]:
         i = self.info(path)
@@ -257,13 +350,11 @@ class TriggerDB:
             f = self._file(path)
             if f is None:
                 return True
-            if f.get("file_source") == "file" and f.get("file_words"):
-                return False                       # the file names its trigger
             rec = self.data["by_sha"].get(f.get("sha256") or "") if f.get("sha256") else None
             if rec is None:
-                return True
-            if rec.get("civitai") is not None:
-                return False                       # CivitAI knows it (its words, maybe none)
+                return True                        # (also a LoRA whose file names its trigger: for the details)
+            if rec.get("civitai") is not None:     # CivitAI knows it (its words, maybe none); asked again once
+                return "asked_details" not in rec  # when it was found before its details were kept
             if rec.get("checked"):
                 return time.time() - float(rec["checked"]) > RECHECK_DAYS * 86400
             return True
@@ -330,6 +421,16 @@ class TriggerDB:
                         n["unknown"] += 1
                     else:
                         rec.update({"civitai": hit["words"], "model": hit["model"], "url": hit["url"]})
+                        rec["asked_details"] = time.time()
+                        if hit.get("details"):
+                            try:
+                                self._save_details(sha, hit["details"])
+                                rec["details"] = True
+                                base = (hit["details"].get("version") or {}).get("baseModel")
+                                if base:
+                                    rec["base_model"] = str(base)
+                            except (OSError, TypeError, ValueError):
+                                pass
                         n["found"] += bool(hit["words"])
                     dirty += 1
                 flush()

@@ -43,7 +43,7 @@ def test_database_and_background_lookup(tmp_path):
         return None
     assert db.info(str(known)) is None                                       # not looked at yet
     n = db.scan([str(p) for p in (known, named, unknown, offline)], lookup=lookup, gap=0)
-    assert n == {"looked": 3, "found": 1, "unknown": 1, "failed": 1, "new": 4}   # the named one needs no lookup
+    assert n == {"looked": 4, "found": 1, "unknown": 2, "failed": 1, "new": 4}   # the named one too (details)
     assert db.info(str(known))["words"] == ["Braces"] and db.info(str(known))["source"] == "civitai"
     assert db.info(str(named)) == {"words": ["zzz"], "source": "file", "model": "", "url": ""}
     assert db.info(str(unknown))["source"] == "none" and db.info(str(offline)) is None
@@ -86,3 +86,58 @@ def test_tag_guesses_are_suggestions_and_user_words_need_no_hash(tmp_path):
     odd.write_bytes((4).to_bytes(8, "little") + b"[1] ")
     assert TR.file_words(odd) == (None, "")
     assert db.scan([str(odd), str(p)], online=False)["new"] == 1             # the scan goes on
+
+
+def test_civitai_details_are_kept(tmp_path, monkeypatch):
+    """Everything CivitAI tells is kept (version, model page, example prompts) in a file per hash; LoRAs found
+    before the details were kept are asked once more; the details window shows it as text."""
+    db = TR.TriggerDB(tmp_path / "db.json")
+    p = lora(tmp_path / "loras" / "walk.safetensors", {"modelspec.trigger_word": "w4lk"})
+    sha = TR.sha256_of(p)
+    asked = []
+
+    def get(path, timeout):
+        asked.append(path)
+        if path.startswith("/api/v1/model-versions/by-hash/"):
+            return {"id": 7, "modelId": 3, "name": "v2", "baseModel": "Wan Video 14B t2v", "trainedWords": ["w4lk"],
+                    "description": "<p>Use 0.8.</p><img src='https://x/y.jpg'>", "model": {"name": "Walk", "type": "LORA"},
+                    "files": [{"name": "walk.safetensors", "sizeKB": 150000, "hashes": {"SHA256": sha.upper()}}]}
+        if path == "/api/v1/models/3":
+            return {"id": 3, "name": "Walk", "description": "<p>Sample: <b>a woman walks, w4lk</b></p>",
+                    "tags": ["motion"], "modelVersions": [{"id": 7, "name": "v2", "baseModel": "Wan", "images": [1] * 50}]}
+        if path.startswith("/api/v1/images?modelVersionId=7"):
+            return {"items": [{"url": "u1", "meta": {"prompt": "a man runs, w4lk", "seed": 5, "steps": 20}},
+                              {"url": "u2", "meta": {"prompt": "a man runs, w4lk"}}, {"url": "u3", "meta": None}]}
+        return None
+    monkeypatch.setattr(TR, "_get_json", get)
+    hit = TR.civitai_lookup(sha, gap=0)
+    assert hit["words"] == ["w4lk"] and hit["url"].endswith("/models/3?modelVersionId=7")
+    assert hit["details"]["model"]["modelVersions"] == [{"id": 7, "name": "v2", "baseModel": "Wan"}]
+    assert TR.example_prompts(hit["details"]) == [{"prompt": "a man runs, w4lk", "negative": "", "seed": 5,
+                                                   "steps": 20, "cfg": None, "sampler": None, "image": "u1"}]
+
+    db.scan([str(p)], lookup=lambda s: TR.civitai_lookup(s, gap=0), gap=0)
+    assert db.info(str(p))["source"] == "file" and db.info(str(p))["base_model"] == "Wan Video 14B t2v"
+    d = db.details(str(p))
+    assert d["version"]["baseModel"] == "Wan Video 14B t2v" and db.details_path(sha).is_file()
+    assert "lora_triggers" not in str(db.details_path(sha)) and not db.needs_lookup(str(p))
+
+    rec = db.data["by_sha"][sha]                                     # found before details were kept: asked again
+    del rec["asked_details"]
+    assert db.needs_lookup(str(p))
+
+    os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from video_chain.ui.lora_details import LoraDetailsDialog, clean_html
+    assert "<img" not in clean_html(d["version"]["description"]) and "Use 0.8" in clean_html(d["version"]["description"])
+    dlg = LoraDetailsDialog(str(p), details=d)
+    text = dlg.view.toPlainText()
+    for want in ("Walk", "Wan Video 14B t2v", "Use 0.8.", "a woman walks, w4lk", "a man runs, w4lk", "motion",
+                 "walk.safetensors"):
+        assert want in text, want
+    from PySide6.QtCore import QUrl
+    dlg._link(QUrl("copy:0"))
+    assert app.clipboard().text() == "a man runs, w4lk" and "Copied" in dlg.note.text()
+    empty = LoraDetailsDialog(str(p), details={})
+    assert "nothing" in empty.view.toPlainText()

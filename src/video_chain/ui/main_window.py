@@ -1736,10 +1736,12 @@ class MainWindow(QMainWindow):
         a.addRow("", self.comfy_autostart)
         self.triggers_online = QCheckBox("Look up LoRA trigger words on CivitAI")
         self.triggers_online.setChecked(True)
-        self.triggers_online.setToolTip("In the background, after each LoRA scan: LoRAs whose files do not name their "
-                                        "trigger words are looked up on CivitAI by their file hash (this tells "
-                                        "CivitAI which LoRA files you have, nothing else). Found words are kept in "
-                                        "~/.local/share/video-chain/lora_triggers.json")
+        self.triggers_online.setToolTip("In the background, after each LoRA scan: LoRAs are looked up on CivitAI by their "
+                                        "file hash (this tells CivitAI which LoRA files you have, nothing else). "
+                                        "Found trigger words are kept in ~/.local/share/video-chain/"
+                                        "lora_triggers.json, everything else CivitAI tells (descriptions, example "
+                                        "prompts, base model, files, license) next to it in civitai/. Right-click a "
+                                        "LoRA for its CivitAI details.")
         self.triggers_online.toggled.connect(lambda on: on and self._scan_triggers())
         a.addRow("", self.triggers_online)
         krow = QHBoxLayout()
