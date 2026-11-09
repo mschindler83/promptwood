@@ -955,3 +955,39 @@ def test_veda_only_where_it_gains_and_in_the_workflow(server, start, tmp_path):
     server.veda = False                                                                   # not installed: said so
     with pytest.raises(C.ComfyError, match="Veda"):
         gen.generate("x", start, out, frame, 1, settings(veda=True))
+
+
+def test_seedvr2_long_clip_in_pieces_within_ram(server, tmp_path, monkeypatch):
+    """A long clip goes to SeedVR2 in pieces that fit the RAM budget (a 10 s 2K clip as one job made systemd-oomd
+    kill ComfyUI): overlapping by SEEDVR_PIECE_OVERLAP frames, crossfaded, the clip's own frame count and sound;
+    ComfyUI's other models are unloaded before the first SeedVR2 job, its cached frames after every piece."""
+    import subprocess
+
+    assert C.seedvr_piece_frames(2560, 1440) == 33 and C.seedvr_piece_frames(1920, 1088) == 61
+    assert C.seedvr_pieces(30, 45) == [(0, 30)]
+    assert C.seedvr_pieces(100, 45) == [(0, 45), (37, 45), (55, 45)]                  # the last one ends at the end
+    assert C.seedvr_pieces(82, 45) == [(0, 45), (37, 45)]
+    draft = tmp_path / "long.mp4"                                                     # 4 s: gray, then white
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=gray:s=64x36:r=24:d=2", "-f", "lavfi",
+                    "-i", "color=white:s=64x36:r=24:d=2", "-f", "lavfi", "-i", "sine=frequency=440:duration=4",
+                    "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]", "-map", "[v]", "-map", "2:a",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(draft)], check=True)
+    monkeypatch.setattr(C, "SEEDVR_RAM_BUDGET", 8 * 128 * 72 * 3 * 4 * 33)          # 33 frames at 128x72
+    gen = C.ComfyGenerator(server.url)
+    gen.generate("x", None, tmp_path / "c.mp4", tmp_path / "c.png", 1, settings())    # an H3 clip before
+    server.calls.clear()
+    out = tmp_path / "up.mp4"
+    gen.seedvr(draft, out, (128, 72))
+    info = chain.probe(out)
+    assert (info["width"], info["height"], info["frames"], info["audio"]) == (128, 72, 96, True)
+    assert len(server.seedvr_jobs) == 4                                               # 96 frames in 33-frame pieces
+    frees = [c[2] for c in server.calls if c[:2] == ("BODY", "/free")]
+    assert frees[0] == {"unload_models": True, "free_memory": True}                   # the H3 models' RAM first
+    assert frees[1:] == [{"unload_models": False, "free_memory": True}] * 4           # each piece's cache after
+    r = subprocess.run(["ffmpeg", "-v", "error", "-i", str(out), "-vf", "scale=1:1", "-f", "rawvideo", "-pix_fmt",
+                        "gray", "-"], capture_output=True, check=True).stdout
+    assert r[0] < 160 and r[-1] > 230 and all(b >= a - 3 for a, b in zip(r, r[1:]))  # gray -> white, no jumps back
+    server.calls.clear()
+    gen.seedvr(draft, out, (128, 72))                                                 # SeedVR2 again: no unload
+    assert [c[2] for c in server.calls if c[:2] == ("BODY", "/free")][0] == {"unload_models": False,
+                                                                             "free_memory": True}

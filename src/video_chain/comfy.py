@@ -596,6 +596,13 @@ class ComfyGenerator:
         except ComfyError:
             pass
 
+    def free_cache(self) -> None:
+        """Ask ComfyUI to drop its cached results (the last job's frames), keeping the models loaded."""
+        try:
+            self._json("POST", "/free", {"unload_models": False, "free_memory": True})
+        except ComfyError:
+            pass
+
     def _save(self, f: dict, dest: Path) -> None:
         """Download a result into dest, written under a temporary name first (never a truncated file)."""
         dest = Path(dest)
@@ -656,6 +663,7 @@ class ComfyGenerator:
     def generate(self, prompt: str, start_image: Path, out_video: Path, out_last_frame: Path, seed: int,
                  settings: dict | None = None) -> None:
         s = settings or {}
+        self._last_seedvr = False                  # (a SeedVR2 job after this one frees the H3 models first)
         loras = []
         stack = ([(s["lora"], s.get("strength", 1.0))] if s.get("lora") else []) + \
             [(e["lora"], e.get("strength", 1.0)) for e in s.get("extra_loras") or []]
@@ -1570,6 +1578,7 @@ def _refine(self, draft: Path, prompt: str, out: Path, seed: int, size: tuple[in
             loras: list[tuple[str, float]], first_frame: Path | None = None, last_frame: Path | None = None,
             sparse: float | None = None, strength: str = REFINE_DEFAULT) -> None:
     """ComfyGenerator.refine: re-render one finished clip at size (see build_refine_workflow)."""
+    self._last_seedvr = False
     for node in REFINE_NODES:
         if not self._object_info(node):
             raise ComfyError(f"this ComfyUI has no {node} node (update ComfyUI: the H3 2K nodes are in its "
@@ -1705,15 +1714,105 @@ def build_seedvr_workflow(*, draft: str, width: int, height: int, unet: str, vae
     }
 
 
+SEEDVR_RAM_BUDGET = 12 * 2**30           # bytes of full-size frames one SeedVR2 job may hold in ComfyUI's RAM
+SEEDVR_FRAME_COPIES = 8                  # copies of the clip ComfyUI holds at once (scaled, padded, decoded, matched,
+                                         # the video; float32): a 10 s 2K clip as one job took 65 GB RAM + 36 GB swap
+                                         # and systemd-oomd killed ComfyUI
+SEEDVR_PIECE_OVERLAP = 8                 # frames two neighbouring pieces share, crossfaded
+
+
+def seedvr_piece_frames(width: int, height: int) -> int:
+    """How many frames of this size one SeedVR2 job gets (4n+1, at least 17)."""
+    n = SEEDVR_RAM_BUDGET // (SEEDVR_FRAME_COPIES * int(width) * int(height) * 3 * 4)
+    return max(17, 4 * ((int(n) - 1) // 4) + 1)
+
+
+def seedvr_pieces(total: int, per: int, overlap: int = SEEDVR_PIECE_OVERLAP) -> list[tuple[int, int]]:
+    """(first frame, frame count) of the pieces a clip of `total` frames is upscaled in: at most `per` frames each,
+    neighbours sharing `overlap` frames; one piece when it fits."""
+    total, per = int(total), int(per)
+    if total <= per:
+        return [(0, total)]
+    out, start = [], 0
+    while True:
+        if start + per >= total:
+            out.append((max(0, total - per), min(per, total)))   # (the last one full length, ending at the end)
+            break
+        out.append((start, per))
+        start += per - overlap
+    return out
+
+
 def _seedvr(self, draft: Path, out: Path, size: tuple[int, int], method: str = "seedvr2_7b",
             seed: int = 42) -> None:
-    """ComfyGenerator.seedvr: upscale one finished clip (or video) to size with SeedVR2 (build_seedvr_workflow)."""
+    """ComfyGenerator.seedvr: upscale one finished clip (or video) to size with SeedVR2 (build_seedvr_workflow).
+    The first SeedVR2 job unloads ComfyUI's other models (their RAM); a long clip goes in pieces that fit
+    SEEDVR_RAM_BUDGET, crossfaded over SEEDVR_PIECE_OVERLAP frames, with the clip's own sound."""
+    import subprocess
+    import tempfile
+    from .chain import probe
+    files = self._seedvr_files(method)
+    if not getattr(self, "_last_seedvr", False):  # the job before was another model: its RAM goes to SeedVR2
+        self.free()
+        self.last_hyperflow = False
+    self._last_seedvr = True
+    total = probe(Path(draft))["frames"]
+    pieces = seedvr_pieces(total, seedvr_piece_frames(*size))
+    if len(pieces) == 1:
+        self._seedvr_job(files, Path(draft), Path(out), size, seed)
+        self.free_cache()
+        return
+    with tempfile.TemporaryDirectory(prefix="video-chain-seedvr-pieces-") as tmp:
+        tmp, made = Path(tmp), []
+        for i, (first, count) in enumerate(pieces):
+            part = tmp / f"in{i}.mp4"
+            subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(draft), "-vf",
+                            f"trim=start_frame={first}:end_frame={first + count},setpts=PTS-STARTPTS", "-an",
+                            "-c:v", "libx264", "-crf", "6", "-pix_fmt", "yuv420p", str(part)],
+                           check=True, capture_output=True)
+            done = tmp / f"out{i}.mp4"
+            self._seedvr_job(files, part, done, size, seed)
+            self.free_cache()                      # (ComfyUI keeps the last job's frames cached otherwise)
+            made.append(done)
+        _join_pieces(made, pieces, Path(draft), Path(out), total)
+
+
+def _join_pieces(made: list[Path], pieces: list[tuple[int, int]], draft: Path, out: Path, total: int) -> None:
+    """The upscaled pieces as one clip: each overlap crossfaded (ffmpeg xfade, frame-exact at 24 fps), the draft's
+    own sound; checked to have the draft's frame count."""
+    import subprocess
+    from .chain import probe
+    args, filt, last, length = [], [], None, 0
+    for i, (f, (first, count)) in enumerate(zip(made, pieces)):
+        args += ["-i", str(f)]
+        filt.append(f"[{i}:v]settb=1/24,setpts=N,fps=24,format=yuv420p[p{i}]")
+        if last is None:
+            last, length = f"[p{i}]", count
+            continue
+        overlap = length - first                   # frames this piece shares with the clip so far
+        filt.append(f"{last}[p{i}]xfade=transition=fade:duration={overlap / 24:.6f}:"
+                    f"offset={(length - overlap) / 24:.6f}[x{i}]")
+        last, length = f"[x{i}]", first + count
+    args += ["-i", str(draft)]
+    part = out.with_name(out.stem + ".part.mp4")
+    try:
+        subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", *args, "-filter_complex", ";".join(filt),
+                        "-map", last, "-map", f"{len(made)}:a:0?", "-frames:v", str(int(total)), "-c:v", "libx264",
+                        "-crf", "12", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "256k", "-r", "24", str(part)],
+                       check=True, capture_output=True)
+        got = probe(part)["frames"]
+        if got != int(total):
+            raise ComfyError(f"the upscaled pieces joined to {got} frames instead of {total}")
+        part.replace(out)
+    finally:
+        part.unlink(missing_ok=True)
+
+
+def _seedvr_files(self, method: str) -> dict:
+    """The SeedVR2 model and VAE ComfyUI lists for this method (clear errors when something is missing)."""
     for node in SEEDVR_NODES:
         if not self._object_info(node):
             raise ComfyError(f"this ComfyUI has no {node} node (update ComfyUI: SeedVR2 is in its core nodes)")
-    if self.last_hyperflow is not False:
-        self.free()                                # (an H3 model patched by HyperFlow is not needed here)
-        self.last_hyperflow = False
     model = SEEDVR_METHODS[method]
     unets = _combo_options(self._object_info("UNETLoader").get("input", {}).get("required", {}).get("unet_name"))
     vaes = _combo_options(self._object_info("VAELoader").get("input", {}).get("required", {}).get("vae_name"))
@@ -1724,6 +1823,11 @@ def _seedvr(self, draft: Path, out: Path, size: tuple[int, int], method: str = "
     if not files["vae"]:
         raise ComfyError("ComfyUI lists no SeedVR2 VAE (seedvr2_ema_vae_fp16.safetensors in models/vae, "
                          "https://huggingface.co/Comfy-Org/SeedVR2)")
+    return files
+
+
+def _seedvr_job(self, files: dict, draft: Path, out: Path, size: tuple[int, int], seed: int) -> None:
+    """One SeedVR2 job in ComfyUI: draft (with its sound, silence if none) upscaled to size into out."""
     import tempfile
     uploads: list[tuple[str, Path]] = []
     with tempfile.TemporaryDirectory(prefix="video-chain-seedvr-") as tmp:
@@ -1766,6 +1870,8 @@ def _seedvr(self, draft: Path, out: Path, size: tuple[int, int], method: str = "
 
 
 ComfyGenerator.seedvr = _seedvr
+ComfyGenerator._seedvr_files = _seedvr_files
+ComfyGenerator._seedvr_job = _seedvr_job
 
 
 # ----------------------------------------------------------------------------- prompt refiner (an LLM in ComfyUI)
