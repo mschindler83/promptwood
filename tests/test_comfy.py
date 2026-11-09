@@ -862,3 +862,29 @@ def test_qwen21_inpaint_with_a_painted_mask(server, start, tmp_path):
     with pytest.raises(C.ComfyError, match="Fun ControlNet"):
         ed.edit(start, "x", out, 1, "fast", model="qwen21", mask=mask)
     assert C.pick_qwen21_inpaint(["qwen_image_inpaint_diffsynth_controlnet.safetensors"]) is None
+
+
+def test_lora_recipe_sampling():
+    """A LoRA's own sampling (the head swap recipe): sigma shift after the LoRAs, its sampler and scheduler."""
+    wf = C.build_workflow(prompt="head_swap: x", image=None, seed=1, width=672, height=384, frames=107, steps=8,
+                          loras=[("MiniMax H3/dmd.safetensors", 1.0), ("MiniMax H3/head_swap.safetensors", 1.0)],
+                          audio=True, prefix="p", refs=["ref.png"],
+                          guides=[{"name": "clip.mp4", "frame_idx": 0, "audio": True, "at": "start"}],
+                          recipe={"sampler": "euler", "scheduler": "beta", "shift": (12.0, 3.0)})
+    assert wf["lora1"]["inputs"]["model"] == ["lora0", 0] and wf["shift"]["inputs"]["model"] == ["lora1", 0]
+    assert (wf["shift"]["inputs"]["shift_video"], wf["shift"]["inputs"]["shift_audio"]) == (12.0, 3.0)
+    assert wf["sampler"]["inputs"]["sampler_name"] == "euler" and wf["sigmas"]["inputs"]["scheduler"] == "beta"
+    assert wf["sigmas"]["inputs"]["steps"] == 8 and wf["guider"]["inputs"]["model"] == ["shift", 0]
+    assert wf["guide0"]["inputs"]["frame_idx"] == 0 and "audio" in wf["guide0"]["inputs"]
+    with pytest.raises(ValueError, match="Turbo"):
+        C.build_workflow(prompt="x", image=None, seed=1, width=64, height=64, frames=22, steps=8, loras=[],
+                         audio=False, prefix="p", turbo=("t.safetensors", 1.0), recipe={"sampler": "euler"})
+
+
+def test_describe_face_workflow():
+    """The head swap's face details: a vision model (Qwen3-VL) looks at the picture with the creator's instruction."""
+    wf = C.build_describe_face_workflow(image="video-chain/ref.png", model={"file": "qwen3vl_4b_fp8_scaled.safetensors",
+                                                                         "type": "krea2"})
+    g = wf["gen"]["inputs"]
+    assert g["image"] == ["pic", 0] and g["prompt"] == C.FACE_INSTRUCTION and "Never name" in g["prompt"]
+    assert wf["llm"]["inputs"]["type"] == "krea2" and wf["show"]["inputs"]["source"] == ["gen", 0]

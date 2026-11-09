@@ -2272,10 +2272,12 @@ def test_replace_a_person_in_a_real_video(app, tmp_path, image, monkeypatch):
             def interrupt(self):
                 pass
         dlg.h3 = {"lora": "/loras/MiniMax H3/minimax_h3_head_swap_v1.0_r32.safetensors",
+                  "turbo": "/loras/MiniMax H3/minimax_h3_dmd_ref2va_8step_turbo_pruned.safetensors",
                   "settings": {"steps": 6, "turbo": {"lora": "/t.safetensors"}, "pika": {"strength": 1.0}},
                   "connect": lambda progress: Gen()}
+        dlg.h3["describe"] = lambda pic: "Male, oval face, short black hair"   # (the vision model)
         dlg.method.setCurrentIndex(dlg.method.findData("h3"))
-        dlg.prompt.setText("Male, oval face, short black hair")
+        dlg.prompt.setText("")                                         # empty: described automatically
         assert dlg.b_gen.isEnabled() and "face" in dlg.prompt.placeholderText()
         dlg.generate()
         wait(app, lambda: not dlg._busy, timeout=60)
@@ -2283,17 +2285,23 @@ def test_replace_a_person_in_a_real_video(app, tmp_path, image, monkeypatch):
         prompt, start, st = calls[-1]
         assert start is None and st["guides"] == [{"video": str(dlg.clip), "frame_idx": 0, "audio": True,
                                                     "at": "start"}]
-        assert st["frames"] == swap.h3_length(n) >= n and st["lora"].endswith("head_swap_v1.0_r32.safetensors")
-        assert st["ref_paths"][0].endswith("_head_ref.png") and st["steps"] == 20 and not st["ref_hint"]
+        assert st["frames"] == swap.h3_length(n) >= n and st["lora"].endswith("dmd_ref2va_8step_turbo_pruned.safetensors")
+        assert st["extra_loras"] == [{"lora": dlg.h3["lora"], "strength": 1.0}]       # the turbo first, then the swap
+        assert st["recipe"] == {"sampler": "euler", "scheduler": "beta", "shift": (12.0, 3.0)}
+        assert st["ref_paths"][0].endswith("_head_ref.png") and st["steps"] == 8 and not st["ref_hint"]
         assert not Path(st["ref_paths"][0]).exists()                  # (a temporary copy, removed after)
-        assert "turbo" not in st and "pika" not in st and "hyperflow" not in st     # the plain model, 20 steps
+        assert "turbo" not in st and "pika" not in st and "hyperflow" not in st     # (the project's speed modes)
         assert prompt.startswith("head_swap:") and "Male, oval face, short black hair" in prompt
+        assert dlg.prompt.text() == "Male, oval face, short black hair"   # shown (and editable) for the next try
         h3_out = dlg.result[0]
         assert swap.probe(h3_out)[2] == n and "H3" in dlg.state.text()
         has_sound = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries",
                                     "stream=index", "-of", "csv=p=0", str(h3_out)], capture_output=True,
                                    text=True).stdout.strip()
         assert has_sound                                               # the clip's own sound
+        dlg.h3["turbo"] = None
+        dlg._update()
+        assert not dlg.b_gen.isEnabled() and "DMD 8-step" in dlg.b_gen.toolTip()
         dlg.h3["lora"] = None
         dlg._update()
         assert not dlg.b_gen.isEnabled() and "head swap LoRA" in dlg.b_gen.toolTip()

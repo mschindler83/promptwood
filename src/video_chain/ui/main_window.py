@@ -5241,6 +5241,11 @@ class MainWindow(QMainWindow):
                 switch["free"] = False
             return an
 
+        def describe_face(picture):                 # worker thread: the face details for the head swap
+            from ..comfy import ComfyPromptRefiner
+            return ComfyPromptRefiner(url, log=lambda _m: None, comfy_dir=comfy_dir, cleanup=cleanup).describe_face(
+                picture)
+
         def connect_h3(progress):                   # worker thread: the clip generator (H3 head swap)
             from ..comfy import ComfyGenerator
             gen = ComfyGenerator(url, log=lambda _m: None, progress=progress, comfy_dir=comfy_dir, cleanup=cleanup)
@@ -5250,8 +5255,10 @@ class MainWindow(QMainWindow):
                          connect, self.qs, on_start=before, play=lambda p, t: self.preview.open(Path(p), t),
                          source=node.source, h3={
                              "lora": next((pth for pth, name in self.h3_loras if "head_swap" in name.lower()), None),
+                             "turbo": next((pth for pth, name in self.h3_loras
+                                            if swap.H3_SWAP_TURBO in name.lower()), None),
                              "settings": T.current_settings(self.project, self.tree.options, self.tree),
-                             "connect": connect_h3},
+                             "connect": connect_h3, "describe": describe_face},
                          groups=[[str(self.project / rel) for rel in c["images"]] for c in T.cast_of(self.tree)],
                          pick=lambda title: pick_image(
                              self, title, self.qs, None, self._picker_places(), self.project_images()))

@@ -44,6 +44,7 @@ class _Sig(QObject):
     found = Signal(object, str)             # find_heads result (or None), error
     progress = Signal(str, int, int)        # what, done, of
     finished = Signal(object, str)          # (out path, meta) or None, error
+    details = Signal(str)                   # the face details written by the vision model
 
 
 class SwapDialog(QDialog):
@@ -78,6 +79,7 @@ class SwapDialog(QDialog):
         self._sig.found.connect(self._found)
         self._sig.progress.connect(self._progress)
         self._sig.finished.connect(self._finished)
+        self._sig.details.connect(lambda text: self.prompt.setText(text))
 
         top = QHBoxLayout(self)
         left = QVBoxLayout()
@@ -311,11 +313,14 @@ class SwapDialog(QDialog):
             w.setEnabled(not self._busy and animate)
         self.prompt.setEnabled(not self._busy and m != "face")
         self.sharpen.setEnabled(not self._busy and m in ("face", "animate+lock"))
-        self.prompt.setPlaceholderText("The new person's face, e.g. “Male, oval face, short black hair, dark beard, "
-                                       "brown eyes”" if m == "h3" else DEFAULT_PROMPT)
+        self.prompt.setPlaceholderText("The new person's face (empty: described automatically), e.g. “Male, oval "
+                                       "face, short black hair, dark beard, brown eyes”" if m == "h3" else DEFAULT_PROMPT)
         why = ""
         if m == "h3" and not self.h3.get("lora"):
             why = "The head swap LoRA (minimax_h3_head_swap_v1.0_r32) is not among the H3 LoRAs"
+        elif m == "h3" and not self.h3.get("turbo"):
+            why = (f"The DMD 8-step turbo LoRA ({swap.H3_SWAP_TURBO}.safetensors, drbaph/MiniMax-H3-Turbo-Lora-"
+                   "ComfyUI on Hugging Face) is not among the H3 LoRAs")
         elif m == "h3" and self.heads is not None and swap.h3_length(self.heads["frames"]) > swap.H3_MAX_FRAMES:
             why = "H3 makes at most 15 s: use a shorter range of the video"
         if why:
@@ -362,23 +367,29 @@ class SwapDialog(QDialog):
                     gen = self.h3["connect"](lambda i, s: sig.progress.emit("make", i, s))
                     self.animator = gen
                     length = swap.h3_length(n)
+                    details = prompt
+                    if not details and self.h3.get("describe"):  # the face details, as the creator's workflow
+                        sig.progress.emit("describe", 0, 0)
+                        details = self.h3["describe"](Path(ref))
+                        sig.details.emit(details)
                     head_ref = out_dir / f"{stem}_head_ref.png"   # as the LoRA was trained: 256 px, letterboxed
                     if not letterbox(str(ref), head_ref, swap.H3_REF_SIZE):
                         raise RuntimeError(f"cannot read the picture {Path(ref).name}")
                     st = dict(self.h3["settings"] or {})
-                    for speed in ("turbo", "hyperflow", "pika"):   # no speed LoRA or patch: the plain model
+                    for speed in ("turbo", "hyperflow", "pika"):   # the recipe's own turbo LoRA instead
                         st.pop(speed, None)
-                    st.update({"steps": swap.H3_SWAP_STEPS, "frames": length, "width": w, "height": h, "lora": self.h3["lora"], "strength": 1.0,
-                               "extra_loras": [], "ref_paths": [str(head_ref)], "ref_size": "match", "ref_hint": False,
+                    st.update({"steps": swap.H3_SWAP_STEPS, "frames": length, "width": w, "height": h,
+                               "lora": self.h3["turbo"], "strength": 1.0, "recipe": dict(swap.H3_SWAP_RECIPE),
+                               "extra_loras": [{"lora": self.h3["lora"], "strength": 1.0}], "ref_paths": [str(head_ref)], "ref_size": "match", "ref_hint": False,
                                "audio": True, "guides": [{"video": str(clip), "frame_idx": 0, "audio": True,
                                                           "at": "start"}]})
                     made_raw = out_dir / f"{stem}_h3.mp4"
-                    gen.generate(swap.head_swap_prompt(prompt), None, made_raw, out_dir / f"{stem}_h3.png", seed,
+                    gen.generate(swap.head_swap_prompt(details), None, made_raw, out_dir / f"{stem}_h3.png", seed,
                                  settings=st)
                     swap.trim_with_sound(made_raw, clip, out, n)
                     for f in (made_raw, out_dir / f"{stem}_h3.png", head_ref):
                         f.unlink(missing_ok=True)
-                    meta = {"method": "h3", "lora": self.h3["lora"], "frames_made": length, "details": prompt,
+                    meta = {"method": "h3", "lora": self.h3["lora"], "frames_made": length, "details": details,
                             "steps": st.get("steps"), "seed": seed}
                 elif method == "face":
                     meta = self.animator.face_only(clip, out, persons, fps, enhance)
@@ -424,6 +435,9 @@ class SwapDialog(QDialog):
                 pass
 
     def _progress(self, what: str, k: int, n: int):
+        if what == "describe":
+            self.state.setText("Describing the new person's face (vision model in ComfyUI) …")
+            return
         if what == "cached":
             self.state.setText("Using the stored pose and face motion of this clip (DWPose is skipped) …")
             return

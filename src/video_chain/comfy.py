@@ -243,7 +243,8 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
                    turbo: tuple[str, float] | None = None, end_image: str | None = None,
                    guides: list[dict] = (), hyperflow: tuple[str, float] | None = None,
                    pika: tuple[str, float] | None = None, audio_refs: list[str] = (),
-                   audio_key=lambda i: f"ref_audios.ref_audio_{i}", start_pin: int = 1) -> dict:
+                   audio_key=lambda i: f"ref_audios.ref_audio_{i}", start_pin: int = 1,
+                   recipe: dict | None = None) -> dict:
     """The API-format workflow for one clip (image = the uploaded start image, as LoadImage names it; None: a
     clip without a start frame).
 
@@ -269,7 +270,11 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
     Euler on the 8-step sigma grid it returns (no scheduler).
 
     With pika (ComfyUI name of the Pika H3 Flex LoRA for this model, strength): that LoRA right after the model,
-    the other LoRAs after it, the lcm sampler on ManualSigmas PIKA_SIGMAS (ComfyUI's Pika H3 Flex templates)."""
+    the other LoRAs after it, the lcm sampler on ManualSigmas PIKA_SIGMAS (ComfyUI's Pika H3 Flex templates).
+
+    recipe: a LoRA's own sampling (e.g. the head swap LoRA's: {"sampler": "euler", "scheduler": "beta",
+    "shift": (12.0, 3.0)}): MiniMaxH3SigmaShift after the LoRAs, that sampler and scheduler (not with turbo,
+    hyperflow or pika)."""
     wf: dict = {
         "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": UNET_REF if refs or audio_refs else UNET,
                                                          "weight_dtype": "default"}},
@@ -360,6 +365,15 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
         wf[f"lora{k}"] = {"class_type": "LoraLoaderModelOnly",
                           "inputs": {"model": model, "lora_name": name, "strength_model": float(strength)}}
         model = [f"lora{k}", 0]
+    if recipe and (turbo or hyperflow or pika):
+        raise ValueError("a LoRA's own sampling recipe cannot be combined with Turbo, HyperFlow or Pika")
+    if recipe and recipe.get("shift"):
+        wf["shift"] = {"class_type": "MiniMaxH3SigmaShift",
+                       "inputs": {"model": model, "shift_video": float(recipe["shift"][0]),
+                                  "shift_audio": float(recipe["shift"][1])}}
+        model = ["shift", 0]
+    if recipe and recipe.get("sampler"):
+        wf["sampler"] = {"class_type": "KSamplerSelect", "inputs": {"sampler_name": recipe["sampler"]}}
     if pika:
         wf["sampler"] = {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "lcm"}}
         wf["sigmas"] = {"class_type": "ManualSigmas", "inputs": {"sigmas": PIKA_SIGMAS}}
@@ -368,7 +382,9 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
         wf["sampler"] = {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}}
         sigmas = ["hyperflow", 1]
     else:
-        wf["sigmas"] = {"class_type": "BasicScheduler", "inputs": {"model": model, "scheduler": SCHEDULER,
+        wf["sigmas"] = {"class_type": "BasicScheduler", "inputs": {"model": model,
+                                                                    "scheduler": (recipe or {}).get("scheduler")
+                                                                    or SCHEDULER,
                                                                     "steps": int(steps), "denoise": 1.0}}
         sigmas = ["sigmas", 0]
     wf["guider"] = {"class_type": "BasicGuider", "inputs": {"model": model, "conditioning": positive}}
@@ -679,7 +695,7 @@ class ComfyGenerator:
                             ref_size=s.get("ref_size", "match"), ref_key=self.ref_key() if refs else None,
                             turbo=turbo, end_image=end_image, guides=guides, hyperflow=hyper, pika=pika,
                             audio_refs=sounds, **({"audio_key": self.audio_key()} if sounds else {}),
-                            start_pin=int(s.get("start_pin") or 1))
+                            start_pin=int(s.get("start_pin") or 1), recipe=s.get("recipe"))
         ws = self._connect_ws()
         try:
             self._queue(wf)
@@ -1681,6 +1697,32 @@ def build_refine_prompt_workflow(*, prompt: str, kind: str, model: dict, seed: i
     }
 
 
+# The head swap LoRA's face description (the creator's instruction, Henge backend/edit_modes.py FACE_INSTRUCTION)
+FACE_INSTRUCTION = ('Describe this face in a short comma-separated attribute list, in exactly this style: "Male, oval face '
+                    'shape, average-sized head with strong jawline, light brown skin, dark eyes, black tousled hair, silver '
+                    'hoop earring." Cover, in order: gender, head/face shape and proportions (e.g. oval/round/square/'
+                    'heart-shaped, narrow/wide, jaw structure, whether the head reads as small/average/large relative to '
+                    'the shoulders), skin tone, eye color, hair color and style, and any distinctive features (facial '
+                    'hair, jewelry, makeup, glasses, etc.). Never name or guess real people, celebrities or fictional '
+                    'characters. Only output the description, nothing else.')
+
+
+def build_describe_face_workflow(*, image: str, model: dict, seed: int = 0) -> dict:
+    """A vision language model describes the face in an uploaded picture (TextGenerate with the image)."""
+    return {
+        "llm": {"class_type": "CLIPLoader", "inputs": {"clip_name": model["file"], "type": model["type"],
+                                                       "device": "default"}},
+        "pic": {"class_type": "LoadImage", "inputs": {"image": image}},
+        "gen": {"class_type": "TextGenerate",
+                "inputs": {"clip": ["llm", 0], "prompt": FACE_INSTRUCTION, "image": ["pic", 0], "max_length": 160,
+                           "sampling_mode": "on", "sampling_mode.temperature": 0.2, "sampling_mode.top_k": 64,
+                           "sampling_mode.top_p": 0.95, "sampling_mode.min_p": 0.05,
+                           "sampling_mode.repetition_penalty": 1.05, "sampling_mode.seed": int(seed),
+                           "thinking": False, "use_default_template": True, "system_prompt": ""}},
+        "show": {"class_type": "PreviewAny", "inputs": {"source": ["gen", 0]}},
+    }
+
+
 class ComfyPromptRefiner(ComfyGenerator):
     """Refines a prompt with a language model in ComfyUI (TextGenerate)."""
 
@@ -1692,6 +1734,45 @@ class ComfyPromptRefiner(ComfyGenerator):
         if not self.models:
             raise ComfyError("ComfyUI lists no language model the prompt refiner can use (e.g. the Qwen3-VL 4B or a "
                              "Gemma 3 12B text encoder)")
+
+    def vision_models(self) -> list[dict]:
+        """The models that can look at a picture (Qwen3-VL)."""
+        return [m for m in self.models if "vl" in m["file"].lower().replace("-", "")]
+
+    def describe_face(self, picture: Path, seed: int = 0) -> str:
+        """The face in a picture as the head swap LoRA's face details (a short attribute list)."""
+        models = self.vision_models()
+        if not models:
+            raise ComfyError("ComfyUI lists no vision model to describe the face (e.g. the Qwen3-VL 4B text "
+                             "encoder); write the face details yourself")
+        uploads = [(self.upload(Path(picture)), Path(picture))]
+        try:
+            wf = build_describe_face_workflow(image=uploads[0][0], model=models[0], seed=seed)
+            self._queue(wf)
+            ws = self._connect_ws()
+            try:
+                entry = self._wait(self.current, ws)
+            except ComfyJobFailed:
+                raise
+            except Exception:
+                self.interrupt()
+                raise
+            finally:
+                self.current = None
+                if ws is not None:
+                    try:
+                        ws.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+        finally:
+            if self.cleanup:
+                self._drop_uploads(uploads)
+        out = (entry.get("outputs") or {}).get("show") or {}
+        text = (out.get("text") or [""])[0]
+        text = " ".join(clean_refined(text if isinstance(text, str) else str(text)).split()).strip().strip('"')
+        if not text:
+            raise ComfyError("the vision model gave no face description")
+        return text[:600]
 
     def refine_prompt(self, prompt: str, kind: str, model_file: str | None = None, seed: int = 0,
                       hint: str = "", cast: list[dict] | None = None) -> str:
