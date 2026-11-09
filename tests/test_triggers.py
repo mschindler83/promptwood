@@ -141,3 +141,47 @@ def test_civitai_details_are_kept(tmp_path, monkeypatch):
     assert app.clipboard().text() == "a man runs, w4lk" and "Copied" in dlg.note.text()
     empty = LoraDetailsDialog(str(p), details={})
     assert "nothing" in empty.view.toPlainText()
+
+
+def test_civitai_api_key(tmp_path, monkeypatch):
+    """The key lives in the keyring (here an in-memory one), goes only into CivitAI requests as a Bearer token,
+    and LoRAs looked up without it are asked once more with it."""
+    sent = []
+
+    class Resp:
+        def __init__(self, body):
+            self.body = body
+
+        def read(self):
+            return self.body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def urlopen(req, timeout):
+        sent.append((req.full_url, req.get_header("Authorization")))
+        return Resp(b'{"id": 1}')
+    monkeypatch.setattr(TR.urllib.request, "urlopen", urlopen)
+    assert TR.api_key() == ""
+    TR._get_json("/api/v1/x", 5)
+    assert sent[-1] == ("https://civitai.com/api/v1/x", None)
+    db = TR.TriggerDB(tmp_path / "db.json")
+    p = lora(tmp_path / "loras" / "a.safetensors", {"x": "1"})
+    db.scan([str(p)], lookup=lambda s: {"words": ["a"], "model": "A", "url": "", "details": {"version": {}}}, gap=0)
+    assert not db.needs_lookup(str(p))
+    TR.set_api_key("  secret123 ")
+    TR._API_KEY = None                                           # read back from the keyring
+    assert TR.api_key() == "secret123" and db.needs_lookup(str(p))          # once more, with the key
+    TR._get_json("/api/v1/x", 5)
+    assert sent[-1] == ("https://civitai.com/api/v1/x", "Bearer secret123")
+    db.scan([str(p)], lookup=lambda s: {"words": ["a"], "model": "A", "url": "", "details": {"version": {}}}, gap=0)
+    assert not db.needs_lookup(str(p))
+    monkeypatch.setenv("CIVITAI_API_KEY", "fromenv")
+    assert TR.api_key() == "fromenv"
+    monkeypatch.delenv("CIVITAI_API_KEY")
+    TR.set_api_key("")
+    TR._API_KEY = None
+    assert TR.api_key() == ""

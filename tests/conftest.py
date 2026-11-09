@@ -1,10 +1,35 @@
-"""Every test gets its own LoRA trigger database (never the app's real one in ~/.local/share)."""
+"""Every test gets its own LoRA trigger database (never the app's real one in ~/.local/share) and an in-memory
+keyring (never the system keyring with the user's CivitAI key)."""
 import pytest
+
+
+class _MemoryKeyring:
+    def __init__(self):
+        self.store = {}
+
+    def get_password(self, service, user):
+        return self.store.get((service, user))
+
+    def set_password(self, service, user, pw):
+        self.store[(service, user)] = pw
+
+    def delete_password(self, service, user):
+        import keyring.errors
+        if (service, user) not in self.store:
+            raise keyring.errors.PasswordDeleteError("none")
+        del self.store[(service, user)]
 
 
 @pytest.fixture(autouse=True)
 def own_trigger_db(tmp_path, monkeypatch):
     monkeypatch.setenv("VIDEO_CHAIN_TRIGGERS", str(tmp_path / "lora_triggers.json"))
+    monkeypatch.delenv("CIVITAI_API_KEY", raising=False)
+    import keyring
+    from video_chain import triggers
+    mem = _MemoryKeyring()
+    for name in ("get_password", "set_password", "delete_password"):
+        monkeypatch.setattr(keyring, name, getattr(mem, name))
+    monkeypatch.setattr(triggers, "_API_KEY", None)
 
 
 def pytest_sessionfinish(session, exitstatus):

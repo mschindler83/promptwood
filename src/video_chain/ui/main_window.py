@@ -1744,6 +1744,20 @@ class MainWindow(QMainWindow):
                                         "LoRA for its CivitAI details.")
         self.triggers_online.toggled.connect(lambda on: on and self._scan_triggers())
         a.addRow("", self.triggers_online)
+        crow = QHBoxLayout()
+        self.civitai_key = QLineEdit()
+        self.civitai_key.setEchoMode(QLineEdit.Password)
+        self.civitai_key.setToolTip("Your CivitAI API key (civitai.com → Account settings → API Keys). With it CivitAI "
+                                    "answers as your account, e.g. with the prompts of example images it holds back "
+                                    "otherwise. Kept in the system keyring, never in a settings file; sent only to "
+                                    "CivitAI. ($CIVITAI_API_KEY wins when it is set.)")
+        b_key = QPushButton("Save key")
+        b_key.setAutoDefault(False)
+        b_key.clicked.connect(lambda: self._save_civitai_key())
+        crow.addWidget(self.civitai_key, 1)
+        crow.addWidget(b_key)
+        a.addRow("CivitAI API key", crow)
+        self._show_civitai_key()
         krow = QHBoxLayout()
         self.keep_loaded = QCheckBox("Keep the model loaded for")
         self.keep_loaded.setChecked(True)
@@ -2933,6 +2947,29 @@ class MainWindow(QMainWindow):
             except RuntimeError:
                 pass
         threading.Thread(target=work, daemon=True).start()
+
+    def _show_civitai_key(self):
+        from .. import triggers
+        has = bool(triggers.api_key())
+        self.civitai_key.clear()
+        self.civitai_key.setPlaceholderText("a key is kept (type a new one, or save empty to remove it)" if has else
+                                            "none: paste your key to get everything CivitAI holds back")
+
+    def _save_civitai_key(self):
+        from .. import triggers
+        key = self.civitai_key.text().strip()
+        try:
+            triggers.set_api_key(key)
+        except RuntimeError as e:
+            QMessageBox.warning(self, "CivitAI API key", f"Could not keep the key: {e}")
+            return
+        self._show_civitai_key()
+        if key:
+            self.status.setText("CivitAI API key kept in the system keyring; LoRAs are looked up once more with it.")
+            if self.triggers_online.isChecked():
+                self._scan_triggers()
+        else:
+            self.status.setText("CivitAI API key removed.")
 
     def _triggers_found(self, counts: dict):
         self._trigger_scan = None

@@ -2975,3 +2975,16 @@ def test_end_image_from_a_video_frame(app, win, tmp_path, image, monkeypatch):
     end = win.tree.nodes[ids[0]].end_image
     assert end and PImage.open(win.project / end).convert("L").getpixel((64, 36)) == exact(20)
     assert "ends at frame 21 (0.83 s) of ramp.mp4" in win.status.text()
+
+
+def test_civitai_api_key_field(app, win):
+    """The settings field keeps the key in the (test's in-memory) keyring, never shows it back, and removes it
+    when saved empty."""
+    from video_chain import triggers
+    win.triggers_online.setChecked(False)
+    win.civitai_key.setText(" abc123 ")
+    win._save_civitai_key()
+    assert triggers.api_key() == "abc123" and win.civitai_key.text() == ""
+    assert "kept" in win.civitai_key.placeholderText() and "keyring" in win.status.text()
+    win._save_civitai_key()                                   # empty: removed
+    assert triggers.api_key() == "" and "none" in win.civitai_key.placeholderText()

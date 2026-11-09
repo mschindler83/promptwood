@@ -69,7 +69,7 @@ def details_html(details: dict, prompts: list[dict]) -> str:
     out.append(f"<h3>Prompts of the example images ({len(prompts)})</h3>")
     if not prompts:
         out.append("<p><i>CivitAI's API gave no prompts for the example images (it often holds their generation "
-                   "data back; the page on civitai.com may show them). Sample prompts in the descriptions above "
+                   "data back, at least without an API key: set yours in the settings; the page on civitai.com may show them). Sample prompts in the descriptions above "
                    "are kept.</i></p>")
     for i, p in enumerate(prompts):
         settings = ", ".join(f"{k} {p[k]}" for k in ("seed", "steps", "cfg", "sampler") if p.get(k) not in (None, ""))

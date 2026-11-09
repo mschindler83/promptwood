@@ -32,6 +32,46 @@ REQUEST_GAP = 1.0                                          # seconds between loo
 USER_AGENT = "video-chain (LoRA trigger lookup)"
 
 
+KEYRING_SERVICE, KEYRING_USER = "video-chain", "civitai-api-key"
+_API_KEY: str | None = None
+
+
+def api_key() -> str:
+    """The CivitAI API key: $CIVITAI_API_KEY, else the one kept in the system keyring (set_api_key); "" if none.
+    With it CivitAI answers as your account (e.g. the generation data of example images it holds back otherwise)."""
+    global _API_KEY
+    env = os.environ.get("CIVITAI_API_KEY", "").strip()
+    if env:
+        return env
+    if _API_KEY is None:
+        try:
+            import keyring
+            _API_KEY = (keyring.get_password(KEYRING_SERVICE, KEYRING_USER) or "").strip()
+        except Exception:  # noqa: BLE001  (no keyring backend: no key)
+            _API_KEY = ""
+    return _API_KEY
+
+
+def set_api_key(key: str | None) -> None:
+    """Keep the CivitAI API key in the system keyring (empty / None: remove it). Raises RuntimeError when there is
+    no keyring to keep it in."""
+    global _API_KEY
+    key = (key or "").strip()
+    try:
+        import keyring
+        import keyring.errors
+        if key:
+            keyring.set_password(KEYRING_SERVICE, KEYRING_USER, key)
+        else:
+            try:
+                keyring.delete_password(KEYRING_SERVICE, KEYRING_USER)
+            except keyring.errors.PasswordDeleteError:
+                pass
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(f"the system keyring is not available ({e})") from e
+    _API_KEY = key
+
+
 def default_path() -> Path:
     env = os.environ.get("VIDEO_CHAIN_TRIGGERS")
     if env:
@@ -122,7 +162,11 @@ def _get_json(path: str, timeout: float) -> dict | None:
     """A CivitAI API answer (the first site that answers); None for 404. OSError when no site could be asked."""
     last: Exception | None = None
     for site in SITES:
-        req = urllib.request.Request(f"{site}{path}", headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+        headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+        key = api_key()
+        if key:                                        # (only ever sent to CivitAI's own sites)
+            headers["Authorization"] = f"Bearer {key}"
+        req = urllib.request.Request(f"{site}{path}", headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 data = json.loads(r.read().decode("utf-8", "replace"))
@@ -354,7 +398,9 @@ class TriggerDB:
             if rec is None:
                 return True                        # (also a LoRA whose file names its trigger: for the details)
             if rec.get("civitai") is not None:     # CivitAI knows it (its words, maybe none); asked again once
-                return "asked_details" not in rec  # when it was found before its details were kept
+                if "asked_details" not in rec:     # when it was found before its details were kept,
+                    return True
+                return bool(api_key()) and not rec.get("asked_with_key")   # and once with an API key
             if rec.get("checked"):
                 return time.time() - float(rec["checked"]) > RECHECK_DAYS * 86400
             return True
@@ -422,6 +468,8 @@ class TriggerDB:
                     else:
                         rec.update({"civitai": hit["words"], "model": hit["model"], "url": hit["url"]})
                         rec["asked_details"] = time.time()
+                        if api_key():
+                            rec["asked_with_key"] = time.time()
                         if hit.get("details"):
                             try:
                                 self._save_details(sha, hit["details"])
