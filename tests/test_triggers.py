@@ -106,6 +106,7 @@ def test_civitai_details_are_kept(tmp_path, monkeypatch):
             return {"id": 3, "name": "Walk", "description": "<p>Sample: <b>a woman walks, w4lk</b></p>",
                     "tags": ["motion"], "modelVersions": [{"id": 7, "name": "v2", "baseModel": "Wan", "images": [1] * 50}]}
         if path.startswith("/api/v1/images?modelVersionId=7"):
+            assert "withMeta=true" in path                       # without it CivitAI leaves the prompts out
             return {"items": [{"url": "u1", "meta": {"prompt": "a man runs, w4lk", "seed": 5, "steps": 20}},
                               {"url": "u2", "meta": {"prompt": "a man runs, w4lk"}}, {"url": "u3", "meta": None}]}
         return None
@@ -123,7 +124,7 @@ def test_civitai_details_are_kept(tmp_path, monkeypatch):
     assert "lora_triggers" not in str(db.details_path(sha)) and not db.needs_lookup(str(p))
 
     rec = db.data["by_sha"][sha]                                     # found before details were kept: asked again
-    del rec["asked_details"]
+    rec["details_v"] = 1                                             # (asked before withMeta)
     assert db.needs_lookup(str(p))
 
     os.environ["QT_QPA_PLATFORM"] = "offscreen"

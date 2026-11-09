@@ -183,6 +183,8 @@ def _get_json(path: str, timeout: float) -> dict | None:
 
 
 EXAMPLE_IMAGES = 100        # example images whose generation data (prompts) is kept
+DETAILS_VERSION = 2         # raised when the details asked for change: every LoRA is asked once more
+                            # (2: the example images' generation data, which CivitAI sends only with withMeta=true)
 
 
 def civitai_lookup(sha: str, timeout: float = 20.0, gap: float = REQUEST_GAP) -> dict | None:
@@ -212,7 +214,7 @@ def civitai_lookup(sha: str, timeout: float = 20.0, gap: float = REQUEST_GAP) ->
         try:
             time.sleep(gap)
             imgs = _get_json(f"/api/v1/images?modelVersionId={int(data['id'])}&limit={EXAMPLE_IMAGES}"
-                             "&sort=Most%20Reactions&nsfw=X", timeout)
+                             "&sort=Most%20Reactions&nsfw=X&withMeta=true", timeout)
             if imgs and isinstance(imgs.get("items"), list):
                 details["examples"] = imgs["items"]
         except (OSError, ValueError, TypeError):
@@ -398,8 +400,8 @@ class TriggerDB:
             if rec is None:
                 return True                        # (also a LoRA whose file names its trigger: for the details)
             if rec.get("civitai") is not None:     # CivitAI knows it (its words, maybe none); asked again once
-                if "asked_details" not in rec:     # when it was found before its details were kept,
-                    return True
+                if int(rec.get("details_v") or 0) < DETAILS_VERSION:   # when it was found before these details
+                    return True                                         # were kept,
                 return bool(api_key()) and not rec.get("asked_with_key")   # and once with an API key
             if rec.get("checked"):
                 return time.time() - float(rec["checked"]) > RECHECK_DAYS * 86400
@@ -468,6 +470,7 @@ class TriggerDB:
                     else:
                         rec.update({"civitai": hit["words"], "model": hit["model"], "url": hit["url"]})
                         rec["asked_details"] = time.time()
+                        rec["details_v"] = DETAILS_VERSION
                         if api_key():
                             rec["asked_with_key"] = time.time()
                         if hit.get("details"):
