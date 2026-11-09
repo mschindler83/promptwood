@@ -2581,3 +2581,43 @@ def test_preview_paints_frames_without_a_native_video_window(app, tmp_path, monk
     import video_chain.ui as ui
     for f in Path(ui.__file__).parent.glob("*.py"):                      # no QVideoWidget anywhere in the app
         assert "QVideoWidget()" not in f.read_text(encoding="utf-8"), f.name
+
+
+def test_export_one_clip(app, win, tmp_path, image, monkeypatch):
+    ids = new_project(win, tmp_path, image, ("a", "b"))
+    assert not win.b_export_clip.isEnabled()                               # not made yet
+    run_and_wait(app, win, win.generate_path)
+    wait(app, lambda: not win._joins, timeout=30)
+    win.select(ids[0])
+    flush(app, win)
+    assert win.focus == ids[0] and win.b_export_clip.isEnabled()
+    node = win.tree.nodes[ids[0]]
+    out = tmp_path / "clip-a.mp4"
+    win.export(out, "made", single=ids[0])                                 # as made: the clip itself
+    assert out.read_bytes() == (win.project / node.made["video"]).read_bytes()
+    assert win.status.text() == f"Exported clip-a.mp4 (clip #{ids[0][1:]}, as made)."
+    up = tmp_path / "clip-a-2k.mp4"
+    win.export(up, "2k", single=ids[0])                                    # upscaled: that clip only
+    assert win.running
+    wait(app, lambda: not win.running, timeout=120)
+    assert chain.probe(up)["frames"] == chain.probe(win.project / node.made["video"])["frames"]
+    assert win.status.text().startswith(f"Exported {up.name} (2k, SeedVR2 7B; 1 clip upscaled now"), win.status.text()
+    # the dialog: titled for the clip, its default file named after it
+    from video_chain.ui import main_window as M
+    seen = {}
+
+    def fake_exec(dlg):
+        seen.update(title=dlg.windowTitle(), file=dlg.file.text())
+        return QDialog.Rejected
+    from PySide6.QtWidgets import QDialog
+    monkeypatch.setattr(M.ExportDialog, "exec", fake_exec)
+    win.export_path(ids[1])
+    assert seen["title"] == f"Export clip #{ids[1][1:]}" and seen["file"].endswith(f"-{ids[1]}-clip.mp4")
+    # the clip's menu: "Export this clip…" opens the same dialog for that clip
+    called = []
+    monkeypatch.setattr(win, "export_path", lambda nid=None: called.append(nid))
+    monkeypatch.setattr(win, "_exec_menu", lambda m, pos: next(a for a in m.actions() if a.text() == "Export this clip…"))
+    from PySide6.QtCore import QPoint
+    win._context(ids[1], QPoint(0, 0))
+    wait(app, lambda: called, timeout=5)
+    assert called == [ids[1]]

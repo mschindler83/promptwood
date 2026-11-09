@@ -1812,11 +1812,15 @@ class MainWindow(QMainWindow):
         self.b_export = QPushButton("Export path…")
         self.b_export.setToolTip("Save the selected path as one video")
         self.b_export.clicked.connect(self.export_path)
+        self.b_export_clip = QPushButton("Export clip…")
+        self.b_export_clip.setToolTip("Save the clip in the inspector on its own (as made, or upscaled)")
+        self.b_export_clip.clicked.connect(lambda: self.focus and self.export_path(self.focus))
         prow.addWidget(label("Play", level="tertiary"))
         for b in (self.b_play_clip, self.b_play_path, self.b_play_film):
             prow.addWidget(b)
         prow.addSpacing(12)
         prow.addWidget(self.b_export)
+        prow.addWidget(self.b_export_clip)
         prow.addStretch(1)
         rv.addLayout(prow)
         self.log = QPlainTextEdit()
@@ -4291,6 +4295,10 @@ class MainWindow(QMainWindow):
         self.b_export.setEnabled(all_done and idle)
         fn = self.tree.nodes.get(self.focus) if has and self.focus else None
         self.b_play_clip.setEnabled(bool(fn and fn.made))
+        self.b_export_clip.setEnabled(bool(fn and fn.made) and idle and self.state(fn.id) == "done")
+        self.b_export_clip.setToolTip(f"Save clip #{fn.id[1:]} on its own (as made, or upscaled)" if fn and fn.made
+                                      else "The clip in the inspector is not made yet" if fn else
+                                      "Show a clip in the inspector first")
         self.b_play_clip.setToolTip(f"Play clip #{fn.id[1:]}, the one in the inspector" if fn and fn.made else
                                     "The clip in the inspector is not made yet" if fn else
                                     "Show a clip in the inspector first")
@@ -5238,7 +5246,7 @@ class MainWindow(QMainWindow):
         vid = m.addAction("Add a real video after this…")
         vid.setEnabled(self.tree.can_add_video(None if nid == START else nid))
         acts[vid] = "video"
-        play = gen = delete = keep_here = keep_path = ref_first = ref_last = None
+        play = gen = delete = keep_here = keep_path = ref_first = ref_last = export_one = None
         if nid != START:
             if node is not None and node.is_video:
                 acts[m.addAction("Edit range…")] = "edit"
@@ -5270,6 +5278,9 @@ class MainWindow(QMainWindow):
             m.addSeparator()
             play = m.addAction("Play this video" if node is not None and node.is_video else "Play this clip")
             play.setEnabled(bool(self.tree.nodes[nid].made))
+            export_one = m.addAction("Export this video…" if node is not None and node.is_video else
+                                     "Export this clip…")
+            export_one.setEnabled(bool(self.tree.nodes[nid].made) and self.state(nid) == "done")
             if node is not None and node.is_video:
                 ref_first = m.addAction("Add first frame as face reference")
                 ref_first.setEnabled(bool(node.made))
@@ -5298,6 +5309,8 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, lambda: self.node_action(act, nid))
         elif chosen is play:
             QTimer.singleShot(0, lambda: self._play_node(nid))
+        elif chosen is export_one:
+            QTimer.singleShot(0, lambda: self.export_path(nid))
         elif chosen is not None and chosen in (ref_first, ref_last):
             which = "first" if chosen is ref_first else "last"
             QTimer.singleShot(0, lambda: self.reference_from_node(nid, which))
@@ -5489,11 +5502,19 @@ class MainWindow(QMainWindow):
         else:
             self.status.setText(f"{pre}Exported {Path(path).name} ({fmt_time(secs)}).")
 
-    def export_path(self):
-        path = self.selected_path()
+    def export_path(self, single: str | None = None):
+        """The export dialog for the selected path, or (single: a clip id) for that clip on its own."""
+        if single is not None:
+            node = self.tree.nodes.get(single) if self.tree else None
+            if node is None or not node.made or self.state(single) != "done":
+                self.status.setText("Make the clip first, then export it.")
+                return
+            path = [node]
+        else:
+            path = self.selected_path()
         if not path:
             return
-        default = str(self.project / f"{self.project.name}-{path[-1].id}.mp4")
+        default = str(self.project / f"{self.project.name}-{path[-1].id}{'-clip' if single else ''}.mp4")
         base = T.Checker(self.project, self.tree).base()
         strength = self.qs.value("refineStrength", "natural", type=str)
         method = self.qs.value("exportUpscaler", "seedvr2_7b", type=str)
@@ -5512,6 +5533,8 @@ class MainWindow(QMainWindow):
         swapped = sum(1 for n in path if T.swapped_video(n))
         dlg = ExportDialog(self, default, (base["width"], base["height"]) if base else None, ready, swapped,
                            strength, method)
+        if single is not None:
+            dlg.setWindowTitle(f"Export {'video' if path[0].is_video else 'clip'} #{single[1:]}")
         try:
             if dlg.exec() != QDialog.Accepted:
                 return
@@ -5523,20 +5546,39 @@ class MainWindow(QMainWindow):
         if size != "made":
             self.qs.setValue("refineStrength", strength)
             self.qs.setValue("exportUpscaler", method)
-        self.export(out, size, fast, refine_swapped, strength, method)
+        self.export(out, size, fast, refine_swapped, strength, method, single)
 
     def export(self, out: Path, size: str = "made", fast_attention: bool = False,
-               refine_swapped: bool = False, strength: str = "natural", method: str = "seedvr2_7b") -> None:
-        """Export the selected path to out: as made (joined here), or refined at '1080p' / '2k' (a generator job)."""
-        path = self.selected_path()
-        if not path:
-            return
-        if size == "made":
-            self.join_selected("export", out)
-            return
-        self._start([path[-1].id], refine={"size": size, "out": str(out), "fast_attention": bool(fast_attention),
-                                           "refine_swapped": bool(refine_swapped), "strength": strength,
-                                           "method": method})
+               refine_swapped: bool = False, strength: str = "natural", method: str = "seedvr2_7b",
+               single: str | None = None) -> None:
+        """Export the selected path (single: that clip alone) to out: as made (joined / copied here), or upscaled at
+        '1080p' / '2k' (a generator job)."""
+        if single is not None:
+            node = self.tree.nodes.get(single) if self.tree else None
+            if node is None or not node.made:
+                return
+            if size == "made":
+                out = Path(out)
+                try:
+                    out.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(self.project / node.made["video"], out)
+                except OSError as e:
+                    self.status.setText(f"Could not export clip #{single[1:]}: {e}")
+                    return
+                self.status.setText(f"Exported {out.name} (clip #{single[1:]}, as made).")
+                return
+            target = single
+        else:
+            path = self.selected_path()
+            if not path:
+                return
+            if size == "made":
+                self.join_selected("export", out)
+                return
+            target = path[-1].id
+        self._start([target], refine={"size": size, "out": str(out), "fast_attention": bool(fast_attention),
+                                      "refine_swapped": bool(refine_swapped), "strength": strength,
+                                      "method": method, **({"single": True} if single is not None else {})})
 
     # ------------------------------------------------------------------ GPU
     def _poll_gpu(self):

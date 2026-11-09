@@ -1082,3 +1082,27 @@ def test_veda_recorded_for_large_clips_only(project):
     assert T.node_settings({**base, "width": 672, "height": 384}, t.options, t.nodes[a.id]).get("veda") is None
     t.options["veda"] = {"on": False}
     assert T.node_settings(base, t.options, t.nodes[a.id]).get("veda") is None           # switched off
+
+
+def test_export_one_clip(project, tmp_path):
+    """single: only that clip, whole; SeedVR2 copies are shared with path exports; a refine reuses the path's
+    (pinned) copy, else makes an unpinned one that is not kept (the path's copy stays as it is)."""
+    t, a, b1, b2, c = build(project)
+    gen = run(project, [b1.id])
+    t = T.load(project)
+    out = tmp_path / "b1.mp4"
+    T.refine_path(gen, project, b1.id, "2k", out, log=lambda _m: None, method="seedvr2_7b", single=True)
+    assert [x["draft"] for x in gen.seedvrs] == [Path(t.nodes[b1.id].made["video"]).name]   # b1 only
+    assert chain.probe(out)["frames"] == chain.probe(project / t.nodes[b1.id].made["video"])["frames"]   # whole
+    T.refine_path(gen, project, b1.id, "2k", tmp_path / "p.mp4", log=lambda _m: None, method="seedvr2_7b")
+    assert len(gen.seedvrs) == 2                                    # the path: b1's copy reused, a made
+    kept = T.refined_file(project, t.nodes[a.id], "2k")
+    T.refine_path(gen, project, a.id, "2k", tmp_path / "a1.mp4", log=lambda _m: None, single=True)
+    assert gen.refines[-1]["first"] is None and gen.refines[-1]["strength"] == "natural"   # unpinned
+    assert T.refine_record(kept).get("method") == "seedvr2_7b"     # the kept (SeedVR2) copy untouched
+    T.refine_path(gen, project, b1.id, "2k", tmp_path / "r.mp4", log=lambda _m: None)      # path refine: pinned
+    n = len(gen.refines)
+    T.refine_path(gen, project, b1.id, "2k", tmp_path / "b1r.mp4", log=lambda _m: None, single=True)
+    assert len(gen.refines) == n                                    # the pinned copy is the same clip: reused
+    with pytest.raises(ValueError, match="not made yet"):
+        T.refine_path(gen, project, c.id, "2k", tmp_path / "x.mp4", log=lambda _m: None, single=True)

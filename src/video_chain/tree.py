@@ -2289,7 +2289,7 @@ def refine_record(target: Path) -> dict:
 def refine_path(generator, project: Path, nid: str, size: str, out: Path,
                 events: Callable[[dict], None] | None = None, log: Callable[[str], None] = print,
                 pin: bool = True, fast_attention: bool = False, refine_swapped: bool = False,
-                strength: str = "natural", method: str = "refine") -> Path:
+                strength: str = "natural", method: str = "refine", single: bool = False) -> Path:
     """Export the path start -> nid at a higher size ('1080p' / '2k'): every generated clip is re-rendered by
     generator.refine (Open-H3-Regenerate-2K) as it was made (its prompt, style text, LoRAs, seed), every real video
     is converted again from its file at that size. Refined copies are kept (nodes/<clip>_<size>.mp4) and reused.
@@ -2305,6 +2305,8 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
     method: "refine" (above), or "seedvr2_7b" / "seedvr2_3b": every generated clip (and, with refine_swapped, every
     video with a replaced person) is upscaled by generator.seedvr instead, which restores what is there rather than
     drawing it anew (no pins needed: neighbouring clips stay as alike as they were made); recorded per copy too.
+    single: only the clip nid itself (whole, nothing left out); its kept copy is shared with path exports, except a
+    refine without one: that is made unpinned (no neighbours) into a temporary file, the path's copy stays.
     Then the path is joined (the same frames left out as at the normal size) into out."""
     from .comfy import SEEDVR_METHODS, refine_size
     if method != "refine" and method not in SEEDVR_METHODS:
@@ -2315,11 +2317,14 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
     emit = events or (lambda _e: None)
     tree = load(project)
     checker = Checker(project, tree)
-    path = tree.path_to(nid)
+    if single and nid not in tree.nodes:
+        raise ValueError(f"no clip {nid}")
+    path = [tree.nodes[nid]] if single else tree.path_to(nid)
     missing = [n.id for n in path if checker.status(n.id) != "done"]
     if missing:
         raise ValueError(f"not made yet: {', '.join(missing)}")
     order = [n for n in path if n.is_video] + [n for n in path if not n.is_video]   # videos first: pins
+    files: dict[str, Path] = {}
     emit({"e": "plan", "make": [n.id for n in order]})
     made_now = []
     with tempfile.TemporaryDirectory(prefix="video-chain-", dir=str(project / "nodes")) as tmp:
@@ -2327,7 +2332,7 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
         for k, node in enumerate(order, start=1):
             target = refined_file(project, node, size)
             first = last = None
-            if pin and not node.is_video and method == "refine":
+            if pin and not single and not node.is_video and method == "refine":
                 i = path.index(node)
                 if i == 0:
                     start = project / START_FILE
@@ -2357,6 +2362,13 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
                 reuse = target.is_file()                 # (copies converted before the record named it)
             else:
                 reuse = target.is_file() and record == pins
+            if single and regen and method == "refine" and not reuse:
+                loose = {k_: v for k_, v in pins.items() if k_ not in ("first", "last")}
+                if target.is_file() and {k_: v for k_, v in record.items() if k_ not in ("first", "last")} == loose:
+                    reuse = True                         # (a copy pinned to its path: the same clip refined)
+                else:
+                    target = tmp / f"{node.id}_{size}_single.mp4"   # unpinned: not kept, the path's copy stays
+            files[node.id] = target
             if reuse:
                 emit({"e": "node", "id": node.id, "state": "reused"})
                 continue
@@ -2435,12 +2447,12 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
             target.with_suffix(".json").write_text(json.dumps(pins), encoding="utf-8")
             made_now.append(node.id)
             emit({"e": "node", "id": node.id, "state": "done"})
-    videos = [refined_file(project, n, size) for n in path]
-    cuts = path_cuts(tree, path, bool(tree.options.get("keep_repeated")))
-    out = Path(out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    emit({"e": "joining"})
-    chain.concat(videos, out, cuts=cuts)
+        videos = [files.get(n.id) or refined_file(project, n, size) for n in path]
+        cuts = [(0, 0)] if single else path_cuts(tree, path, bool(tree.options.get("keep_repeated")))
+        out = Path(out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        emit({"e": "joining"})
+        chain.concat(videos, out, cuts=cuts)            # (inside: a temporary single copy is still there)
     emit({"e": "exported", "file": str(out)})
     emit({"e": "done", "made": made_now})
     return out
