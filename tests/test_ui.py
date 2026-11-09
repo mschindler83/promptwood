@@ -2256,11 +2256,15 @@ def test_replace_a_person_in_a_real_video(app, tmp_path, image, monkeypatch):
         # H3 head swap: the whole clip as the guide, the picture as <Picture 1>, the LoRA, its prompt; the result
         # cut to the clip's frames with the clip's own sound
         import subprocess
+
+        from PySide6.QtGui import QImage
         calls = []
 
         class Gen:
             def generate(self, prompt, start, out_video, out_last, seed, settings=None):
                 calls.append((prompt, start, settings))
+                ref_img = QImage(settings["ref_paths"][0])                 # letterboxed to 256 x 256 on black
+                assert (ref_img.width(), ref_img.height()) == (256, 256)
                 subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
                                 f"color=green:s={settings['width']}x{settings['height']}:r=24",
                                 "-frames:v", str(settings["frames"]), "-c:v", "libx264", "-pix_fmt", "yuv420p",
@@ -2280,7 +2284,8 @@ def test_replace_a_person_in_a_real_video(app, tmp_path, image, monkeypatch):
         assert start is None and st["guides"] == [{"video": str(dlg.clip), "frame_idx": 0, "audio": True,
                                                     "at": "start"}]
         assert st["frames"] == swap.h3_length(n) >= n and st["lora"].endswith("head_swap_v1.0_r32.safetensors")
-        assert st["ref_paths"] == [str(image)] and st["steps"] == 20 and not st["ref_hint"]
+        assert st["ref_paths"][0].endswith("_head_ref.png") and st["steps"] == 20 and not st["ref_hint"]
+        assert not Path(st["ref_paths"][0]).exists()                  # (a temporary copy, removed after)
         assert "turbo" not in st and "pika" not in st and "hyperflow" not in st     # the plain model, 20 steps
         assert prompt.startswith("head_swap:") and "Male, oval face, short black hair" in prompt
         h3_out = dlg.result[0]

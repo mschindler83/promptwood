@@ -26,6 +26,20 @@ METHODS = (("animate+lock", "Head + face lock (Animate, then face swap)"), ("ani
 from .widgets import FrameTile, guard_wheel, label
 
 
+def letterbox(src: str, dest, size: int) -> bool:
+    """The picture fitted into a size x size square, centred on black (the head swap LoRA's reference format)."""
+    img = QImage(src)
+    if img.isNull():
+        return False
+    fit = img.convertToFormat(QImage.Format_RGB32).scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    out = QImage(size, size, QImage.Format_RGB32)
+    out.fill(QColor(0, 0, 0))
+    p = QPainter(out)
+    p.drawImage((size - fit.width()) // 2, (size - fit.height()) // 2, fit)
+    p.end()
+    return out.save(str(dest), "PNG")
+
+
 class _Sig(QObject):
     found = Signal(object, str)             # find_heads result (or None), error
     progress = Signal(str, int, int)        # what, done, of
@@ -348,18 +362,21 @@ class SwapDialog(QDialog):
                     gen = self.h3["connect"](lambda i, s: sig.progress.emit("make", i, s))
                     self.animator = gen
                     length = swap.h3_length(n)
+                    head_ref = out_dir / f"{stem}_head_ref.png"   # as the LoRA was trained: 256 px, letterboxed
+                    if not letterbox(str(ref), head_ref, swap.H3_REF_SIZE):
+                        raise RuntimeError(f"cannot read the picture {Path(ref).name}")
                     st = dict(self.h3["settings"] or {})
                     for speed in ("turbo", "hyperflow", "pika"):   # no speed LoRA or patch: the plain model
                         st.pop(speed, None)
                     st.update({"steps": swap.H3_SWAP_STEPS, "frames": length, "width": w, "height": h, "lora": self.h3["lora"], "strength": 1.0,
-                               "extra_loras": [], "ref_paths": [str(ref)], "ref_size": "match", "ref_hint": False,
+                               "extra_loras": [], "ref_paths": [str(head_ref)], "ref_size": "match", "ref_hint": False,
                                "audio": True, "guides": [{"video": str(clip), "frame_idx": 0, "audio": True,
                                                           "at": "start"}]})
                     made_raw = out_dir / f"{stem}_h3.mp4"
                     gen.generate(swap.head_swap_prompt(prompt), None, made_raw, out_dir / f"{stem}_h3.png", seed,
                                  settings=st)
                     swap.trim_with_sound(made_raw, clip, out, n)
-                    for f in (made_raw, out_dir / f"{stem}_h3.png"):
+                    for f in (made_raw, out_dir / f"{stem}_h3.png", head_ref):
                         f.unlink(missing_ok=True)
                     meta = {"method": "h3", "lora": self.h3["lora"], "frames_made": length, "details": prompt,
                             "steps": st.get("steps"), "seed": seed}
