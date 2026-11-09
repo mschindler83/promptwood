@@ -70,6 +70,7 @@ class VideoView(QWidget):
         self.sink = QVideoSink(self)
         self.sink.videoFrameChanged.connect(self._frame)
         self._img = QImage()
+        self._shown: tuple | None = None           # (the frame, the size) -> the frame scaled to fit, for painting
         self.setAttribute(Qt.WA_OpaquePaintEvent)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
@@ -89,14 +90,27 @@ class VideoView(QWidget):
     def sizeHint(self):
         return QSize(640, 360)
 
+    def scaled_frame(self) -> QImage:
+        """The frame scaled to fit the view with Qt's smooth (area-averaging) scaling, once per frame and size:
+        a painter's bilinear scaling skips most source pixels when it shrinks a lot (a 2K portrait into a small
+        preview), and fine detail then shimmers as grain and moving artifacts."""
+        dpr = self.devicePixelRatioF()
+        target = self._img.size().scaled(self.size() * dpr, Qt.KeepAspectRatio)
+        key = (self._img.cacheKey(), target.width(), target.height())
+        if self._shown is None or self._shown[0] != key:
+            img = self._img if target == self._img.size() else \
+                self._img.scaled(target, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            img.setDevicePixelRatio(dpr)
+            self._shown = (key, img)
+        return self._shown[1]
+
     def paintEvent(self, _e):                     # noqa: N802  (Qt naming)
         p = QPainter(self)
         p.fillRect(self.rect(), QColor(0, 0, 0))
         if not self._img.isNull():
-            size = self._img.size().scaled(self.size(), Qt.KeepAspectRatio)
-            x, y = (self.width() - size.width()) // 2, (self.height() - size.height()) // 2
-            p.setRenderHint(QPainter.SmoothPixmapTransform)
-            p.drawImage(QRect(x, y, size.width(), size.height()), self._img)
+            img = self.scaled_frame()
+            w, h = round(img.width() / img.devicePixelRatio()), round(img.height() / img.devicePixelRatio())
+            p.drawImage(QRect((self.width() - w) // 2, (self.height() - h) // 2, w, h), img)
         p.end()
 
 

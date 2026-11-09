@@ -2651,3 +2651,25 @@ def test_progress_says_what_runs_and_how_long_it_still_takes(app, win, tmp_path,
     card = next(c for c in win.cards if c.nid == ids[0])
     assert card.step.text() == "25 % · about 3 min left"
     win._job = None
+
+
+def test_video_view_shrinks_frames_without_aliasing(app):
+    """A 2K portrait in a small preview: shrunk by area averaging, so fine detail does not turn into shimmering
+    grain (a painter's bilinear scaling skips most source pixels)."""
+    import numpy as np
+    from PySide6.QtGui import QImage
+
+    from video_chain.ui.widgets import VideoView
+    board = (np.indices((2112, 1696)).sum(axis=0) % 2 * 255).astype(np.uint8)       # 1-px checkerboard
+    rgb = np.ascontiguousarray(np.repeat(board[..., None], 3, axis=2))
+    img = QImage(rgb.data, 1696, 2112, 1696 * 3, QImage.Format_RGB888).copy()
+    v = VideoView()
+    v.resize(200, 250)
+    v._img = img
+    small = v.scaled_frame()
+    assert small.height() <= 250 * v.devicePixelRatioF() and small.width() < 1696
+    g = small.convertToFormat(QImage.Format_Grayscale8)
+    a = np.frombuffer(g.constBits(), np.uint8).reshape(g.height(), g.bytesPerLine())[:, :g.width()].astype(float)
+    assert abs(a.mean() - 127.5) < 6 and a.std() < 8                                  # an even grey, no false pattern
+    assert v.scaled_frame() is small                                                    # (once per frame and size)
+    v.deleteLater()
