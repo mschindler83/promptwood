@@ -2305,3 +2305,8 @@ def test_image_picker_shows_the_projects_pictures(app, win, tmp_path, image):
     plain = ImagePickerDialog(None, "x", str(tmp_path), q, cache_dir=None, desktop_thumbs=None)
     assert plain.collection is None and plain.places.item(0).text() == "Home"   # no project: folders only
     plain.reject()
+    wait(app, lambda: not win._joins, timeout=30)                              # (the path joined after generating)
+    for d in (dlg, again, plain):                                              # as pick_image does
+        d._pool.shutdown(wait=True)
+        d.deleteLater()
+    app.processEvents()
