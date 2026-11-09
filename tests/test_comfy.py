@@ -338,12 +338,12 @@ def test_turbo_workflow_and_generation(server, start, tmp_path):
     gen.generate("x", start, tmp_path / "v.mp4", tmp_path / "v.png", 1, s)
     assert server.prompts[-1]["turbo"]["inputs"]["lora_name"] == "MiniMax H3/minimax_h3_turbo_v4_step600_ema.safetensors"
     assert server.prompts[-1]["guider"]["class_type"] == "BasicGuider" and "neg" not in server.prompts[-1]
-    s2 = dict(s, turbo=dict(s["turbo"], cfg=1.5))                 # own CFG: CFGGuider against an empty prompt
+    s2 = dict(s, cfg=1.5)                                          # own CFG: CFGGuider against an empty prompt
     gen.generate("x", start, tmp_path / "c.mp4", tmp_path / "c.png", 1, s2)
     wf = server.prompts[-1]
     assert wf["guider"]["class_type"] == "CFGGuider" and wf["guider"]["inputs"]["cfg"] == 1.5
     assert wf["neg"] == {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": wf["guider"]["inputs"]["positive"]}}
-    gen.generate("x", start, tmp_path / "d.mp4", tmp_path / "d.png", 1, dict(s, turbo=dict(s["turbo"], cfg=0.9)))
+    gen.generate("x", start, tmp_path / "d.mp4", tmp_path / "d.png", 1, dict(s, cfg=0.9))
     assert server.prompts[-1]["guider"]["inputs"]["cfg"] == 0.9
     server.turbo_nodes = False
     with pytest.raises(C.ComfyError, match="ComfyUI-MiniMax-H3-Turbo"):
@@ -506,8 +506,9 @@ def test_hyperflow_workflow(server, start, tmp_path):
     gen = C.ComfyGenerator(server.url)
     lora = "/data/my_models/loras/MiniMax H3/glow.safetensors"
     gen.generate("x", start, tmp_path / "v.mp4", tmp_path / "v.png", 3,
-                 settings(lora=lora, strength=0.8, steps=8, hyperflow={"strength": 1.0}))
+                 settings(lora=lora, strength=0.8, steps=8, hyperflow={"strength": 1.0}, cfg=1.2))
     wf = server.prompts[-1]
+    assert wf["guider"]["class_type"] == "CFGGuider" and wf["guider"]["inputs"]["cfg"] == 1.2   # HyperFlow's CFG
     hf = wf["hyperflow"]["inputs"]
     assert wf["hyperflow"]["class_type"] == "ApplyHyperFlowH3" and hf["model"] == ["unet", 0]
     assert hf["hyperflow_file"].endswith("_pruned.safetensors") and hf["experimental_curve_refit"] is True
@@ -790,6 +791,8 @@ def test_pika_h3_flex_workflow(server, start, tmp_path):
     assert wf["sampler"]["inputs"]["sampler_name"] == "lcm" and wf["sigmas"]["class_type"] == "ManualSigmas"
     assert wf["sigmas"]["inputs"]["sigmas"] == C.PIKA_SIGMAS and len(C.PIKA_SIGMAS.split(",")) == 7
     assert gen.pika_lora(True).endswith("pika_h3_flex_ref2va_v1_bf16.safetensors")
+    gen.generate("x", start, tmp_path / "c.mp4", tmp_path / "c.png", 3, settings(steps=6, pika={"strength": 1.0}, cfg=1.3))
+    assert server.prompts[-1]["guider"]["class_type"] == "CFGGuider" and server.prompts[-1]["guider"]["inputs"]["cfg"] == 1.3
     assert not [n for _p, n in C.find_h3_loras([tmp_path])]                     # never offered as a normal LoRA
     with pytest.raises(ValueError):                                               # one speed mode at a time
         C.build_workflow(prompt="x", image="s.png", seed=1, width=672, height=384, frames=73, steps=6, loras=[],

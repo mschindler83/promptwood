@@ -64,7 +64,7 @@ DEFAULT_OPTIONS = {"model": "Comfy-Org/MiniMax-H3", "frames": 73, "steps": 28,
                    # the aspect ratio of a project without a start image or video (its first clip starts from text)
                    "aspect": "16:9",
                    # turbo: a step-distilled LoRA + its sampler, few steps for every clip (ComfyUI only)
-                   "turbo": {"on": False, "lora": None, "steps": 6, "strength": 1.0, "cfg": 1.0},
+                   "turbo": {"on": False, "lora": None, "steps": 6, "strength": 1.0},
                    # HyperFlow: Video Rebirth's 8-step LoRA with its own sigma grid (ComfyUI-HyperFlow-H3 nodes)
                    "hyperflow": {"on": False, "strength": 1.0},
                    # Pika H3 Flex: Pika's post-trained H3 as a LoRA, 6 steps (ComfyUI template recipe)
@@ -1506,8 +1506,9 @@ def current_settings(project: Path, options: dict, tree: "Tree | None" = None) -
                                hyperflow=float(hyper.get("strength", 1.0)) if hyper_on else None,
                                pika=float(pika.get("strength", 1.0)) if pika_on else None,
                                width=w, height=h, audio=options.get("audio", True),
-                               turbo=(turbo["lora"], turbo.get("strength", 1.0), turbo.get("cfg", 1.0))
-                               if turbo_on else None,
+                               turbo=(turbo["lora"], turbo.get("strength", 1.0)) if turbo_on else None,
+                               cfg=float((turbo if turbo_on else hyper if hyper_on else pika if pika_on
+                                          else options).get("cfg", 1.0)),
                                backend="comfyui",
                                style=(style.get("prefix") or "", style.get("suffix") or ""))
 
@@ -1915,8 +1916,8 @@ def node_settings(base: dict, options: dict, node: Node, audio_pool: list[dict] 
                                hyperflow=(base["hyperflow"]["strength"] if base.get("hyperflow") else None),
                                pika=(base["pika"]["strength"] if base.get("pika") else None),
                                width=base["width"], height=base["height"], audio=base["audio"],
-                               turbo=(base["turbo"]["lora"], base["turbo"]["strength"], base["turbo"].get("cfg", 1.0))
-                               if base.get("turbo") else None,
+                               turbo=(base["turbo"]["lora"], base["turbo"]["strength"]) if base.get("turbo") else None,
+                               cfg=float(base.get("cfg", 1.0)),
                                backend="comfyui", refs=refs or None, cast=use["record"],
                                ref_size=ident.get("size", "match"), ref_hint=ident.get("hint", True),
                                guide=int(ov.get("guide") or 0),

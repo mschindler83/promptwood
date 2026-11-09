@@ -759,7 +759,7 @@ class ComfyGenerator:
                             loras=loras, audio=bool(s.get("audio", True)), prefix=prefix, refs=refs,
                             ref_size=s.get("ref_size", "match"), ref_key=self.ref_key() if refs else None,
                             turbo=turbo, end_image=end_image, guides=guides, hyperflow=hyper, pika=pika,
-                            cfg=float((s.get("turbo") or {}).get("cfg", 1.0)) if turbo else 1.0,
+                            cfg=float(s.get("cfg", 1.0)),
                             audio_refs=sounds, **({"audio_key": self.audio_key()} if sounds else {}),
                             start_pin=int(s.get("start_pin") or 1), recipe=s.get("recipe"),
                             veda=self.veda_predictor(bool(refs or sounds)) if s.get("veda") else None)

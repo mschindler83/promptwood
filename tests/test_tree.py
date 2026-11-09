@@ -585,12 +585,16 @@ def test_turbo_mode(project, tmp_path):
     t.options["turbo"]["on"] = True
     T.save(project, t)
     assert statuses(project)["a"] == "done"
-    assert "cfg" not in T.Checker(project, T.load(project)).settings(a.id)["turbo"]   # CFG 1: settings as before
-    t.options["turbo"]["cfg"] = 1.5                                  # an own CFG: in the settings, clips change
+    assert "cfg" not in T.Checker(project, T.load(project)).settings(a.id)       # CFG 1: settings as before
+    t.options["turbo"]["cfg"] = 1.5                                  # turbo's own CFG: in the settings, clips change
     T.save(project, t)
-    assert T.Checker(project, T.load(project)).settings(a.id)["turbo"]["cfg"] == 1.5
+    assert T.Checker(project, T.load(project)).settings(a.id)["cfg"] == 1.5
+    t.options["cfg"] = 2.0                                           # (Normal's CFG does not count in turbo mode)
+    T.save(project, t)
+    assert T.Checker(project, T.load(project)).settings(a.id)["cfg"] == 1.5
     assert statuses(project)["a"] == "changed"
     t.options["turbo"]["cfg"] = 1.0
+    t.options.pop("cfg")
     T.save(project, t)
     assert statuses(project)["a"] == "done"
 

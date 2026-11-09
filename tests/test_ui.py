@@ -778,10 +778,18 @@ def test_turbo_in_the_window(app, tmp_path, image, monkeypatch):
     w.speed.setCurrentIndex(w.speed.findData("turbo"))
     flush(app, w)
     assert w.tree.options["turbo"]["on"] and w.tree.options["turbo"]["lora"].endswith("_ema.safetensors")
-    assert w.tree.options["turbo"]["cfg"] == 1.0
-    w.turbo_cfg.setValue(0.9)                                          # below 1 is possible too
+    w.clip_cfg.setValue(0.9)                                           # the turbo mode's CFG (below 1 too)
     flush(app, w)
-    assert w.tree.options["turbo"]["cfg"] == 0.9
+    assert w.tree.options["turbo"]["cfg"] == 0.9 and "two passes" in w.cfg_note.text()
+    w.speed.setCurrentIndex(w.speed.findData("normal"))                # another mode: its own CFG (1)
+    flush(app, w)
+    assert w.clip_cfg.value() == 1.0 and w.tree.options["turbo"]["cfg"] == 0.9
+    w.clip_cfg.setValue(1.3)
+    flush(app, w)
+    assert w.tree.options["cfg"] == 1.3
+    w.speed.setCurrentIndex(w.speed.findData("turbo"))                 # back: the turbo value again
+    flush(app, w)
+    assert w.clip_cfg.value() == 0.9
     assert not w.steps.isEnabled() and not w.cards[0].steps.isEnabled() and w.state(ids[0]) == "changed"
     wait(app, lambda: not w._joins, timeout=30)
     run_and_wait(app, w, w.generate_path)

@@ -1657,6 +1657,24 @@ class MainWindow(QMainWindow):
                               "Turbo: a step-distilled LoRA with its own sampler renders every clip in 4-8 steps "
                               "instead of ~20 (needs the ComfyUI-MiniMax-H3-Turbo nodes)")
         c.addRow("Speed", self.speed)
+        crow = QHBoxLayout()
+        crow.setContentsMargins(0, 0, 0, 0)
+        self.clip_cfg = QDoubleSpinBox()
+        self.clip_cfg.setRange(0.0, 10.0)
+        self.clip_cfg.setSingleStep(0.05)
+        self.clip_cfg.setDecimals(2)
+        self.clip_cfg.setValue(1.0)
+        self.clip_cfg.setToolTip(
+            "CFG of the chosen speed mode (each mode keeps its own value). 1: off, one pass per step, as H3 and its "
+            "speed LoRAs (turbo, HyperFlow, Pika) are made for. Above 1: real classifier-free guidance against an "
+            "empty prompt (start / end frames stay): the prompt is followed more strongly, but every step runs twice "
+            "(about twice as slow) and the step-distilled LoRAs can burn colours or over-sharpen from about 1.5-2; "
+            "try 1.2-1.5 first. Below 1 (e.g. 0.9): the prompt is followed a little less, also two passes per step")
+        self.cfg_note = label("", level="tertiary")
+        crow.addWidget(self.clip_cfg)
+        crow.addWidget(self.cfg_note, 1)
+        c.addRow("CFG", crow)
+        self._cfg_mode = "normal"
         self.veda = QCheckBox("Fast attention (Veda) for large and long clips")
         self.veda.setChecked(True)
         self.veda.setToolTip(
@@ -1685,19 +1703,6 @@ class MainWindow(QMainWindow):
         trow.addWidget(self.turbo_steps)
         trow.addWidget(label("strength", level="tertiary"))
         trow.addWidget(self.turbo_strength)
-        self.turbo_cfg = QDoubleSpinBox()
-        self.turbo_cfg.setRange(0.0, 10.0)
-        self.turbo_cfg.setSingleStep(0.05)
-        self.turbo_cfg.setDecimals(2)
-        self.turbo_cfg.setValue(1.0)
-        self.turbo_cfg.setToolTip("CFG with the turbo LoRA. 1 (off): one pass per step, as the turbo LoRA is made for. "
-                                  "Above 1: real classifier-free guidance against an empty prompt (the start / end "
-                                  "frames stay): the prompt is followed more strongly, but every step runs twice "
-                                  "(about twice as slow) and a step-distilled LoRA can burn colours or over-sharpen "
-                                  "from about 1.5-2; try 1.2-1.5 first. Below 1 (e.g. 0.9): the prompt is followed "
-                                  "a little less (blended towards no prompt), also with two passes per step")
-        trow.addWidget(label("CFG", level="tertiary"))
-        trow.addWidget(self.turbo_cfg)
         trow.addStretch(1)
         self._turbo_row = QWidget()
         self._turbo_row.setLayout(trow)
@@ -2093,7 +2098,7 @@ class MainWindow(QMainWindow):
                     self.steps.valueChanged, self.audio.toggled, self.keep_rep.toggled,
                     self.speed.currentIndexChanged, self.veda.toggled,
                     self.turbo_lora.currentIndexChanged, self.turbo_steps.valueChanged,
-                    self.turbo_strength.valueChanged, self.turbo_cfg.valueChanged):
+                    self.turbo_strength.valueChanged, self.clip_cfg.valueChanged):
             sig.connect(self._options_changed)
         for keys, fn in (("Ctrl+N", lambda: self.node_action("continue", self.target_id())),
                          ("Ctrl+Shift+V", lambda: self.node_action("video", self.target_id())),
@@ -2951,7 +2956,9 @@ class MainWindow(QMainWindow):
                 else "pika" if (o.get("pika") or {}).get("on") else "normal"))
             self.turbo_steps.setValue(int(turbo.get("steps", 6)))
             self.turbo_strength.setValue(float(turbo.get("strength", 1.0)))
-            self.turbo_cfg.setValue(float(turbo.get("cfg", 1.0)))
+            self._cfg_mode = self.speed.currentData()
+            self.clip_cfg.setValue(float(self._mode_options(o, self._cfg_mode).get("cfg", 1.0)))
+            self._cfg_hint()
             self._fill_turbo(turbo.get("lora"))
             self.keep_rep.setChecked(bool(o.get("keep_repeated", False)))
             self.veda.setChecked(bool((o.get("veda") or {"on": True}).get("on", True)))
@@ -2962,21 +2969,44 @@ class MainWindow(QMainWindow):
         finally:
             self._loading = False
 
+    @staticmethod
+    def _mode_options(options: dict, mode: str) -> dict:
+        """Where a speed mode keeps its settings (its CFG): the project options for Normal."""
+        return options if mode == "normal" else (options.get(mode) or {})
+
+    def _cfg_hint(self):
+        v = self.clip_cfg.value()
+        name = {"normal": "Normal", "turbo": "Turbo", "hyperflow": "HyperFlow", "pika": "Pika"}.get(
+            self.speed.currentData(), "")
+        self.cfg_note.setText(f"for {name}: off (one pass per step)" if abs(v - 1) < 1e-6 else
+                              f"for {name}: two passes per step (about twice as slow)")
+
     def _options_changed(self, *_):
         if self._loading or self.tree is None or self.running:
             return
         before = self._done_clips()
+        mode = self.speed.currentData()
+        if mode != self._cfg_mode:                  # another speed mode: its own CFG into the field (not this one's)
+            self._cfg_mode = mode
+            self.clip_cfg.blockSignals(True)
+            self.clip_cfg.setValue(float(self._mode_options(self.tree.options, mode).get("cfg", 1.0)))
+            self.clip_cfg.blockSignals(False)
+        cfg = round(self.clip_cfg.value(), 2)
+        self._cfg_hint()
         self.tree.options.update({
             "frames": self.frames.currentData(), "resolution": self.resolution.currentData(),
             "aspect": self.aspect.currentData(),
             "steps": self.steps.value(), "audio": self.audio.isChecked(), "keep_repeated": self.keep_rep.isChecked(),
-            "turbo": {"on": self.speed.currentData() == "turbo", "lora": self.turbo_lora.currentData(),
-                      "steps": self.turbo_steps.value(), "strength": round(self.turbo_strength.value(), 2),
-                      "cfg": round(self.turbo_cfg.value(), 2)},
-            "hyperflow": {**(self.tree.options.get("hyperflow") or {"strength": 1.0}),
-                          "on": self.speed.currentData() == "hyperflow"},
-            "pika": {**(self.tree.options.get("pika") or {"strength": 1.0}), "on": self.speed.currentData() == "pika"},
+            "turbo": {**(self.tree.options.get("turbo") or {}),
+                      "on": mode == "turbo", "lora": self.turbo_lora.currentData(),
+                      "steps": self.turbo_steps.value(), "strength": round(self.turbo_strength.value(), 2)},
+            "hyperflow": {**(self.tree.options.get("hyperflow") or {"strength": 1.0}), "on": mode == "hyperflow"},
+            "pika": {**(self.tree.options.get("pika") or {"strength": 1.0}), "on": mode == "pika"},
             "veda": {"on": self.veda.isChecked()}})
+        if mode == "normal":                        # the CFG belongs to the speed mode it was set for
+            self.tree.options["cfg"] = cfg
+        else:
+            self.tree.options[mode]["cfg"] = cfg
         self._update_size_info()
         self._show_references()
         self._turbo_widgets()

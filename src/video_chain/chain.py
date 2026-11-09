@@ -529,7 +529,8 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
                   style: tuple[str, str] | None = None, hyperflow: float | None = None,
                   pika: float | None = None, audio_refs: list | None = None, cast: list | None = None,
                   voice_language: str | None = None, lora_triggers: list | None = None,
-                  source_sound: dict | None = None, veda: bool = False, camera: dict | None = None) -> dict:
+                  source_sound: dict | None = None, veda: bool = False, camera: dict | None = None,
+                  cfg: float = 1.0) -> dict:
     """What a clip depends on besides prompt, seed and start image; a clip is reused only if this is unchanged.
     The LoRA counts by content (lora_sha1), so a LoRA retrained into the same file makes its clips change.
     extra_loras: further LoRAs stacked after the first ([(path, strength)]), only present when there are any, so
@@ -549,8 +550,8 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
         s["pika"] = {"strength": float(pika)}
     if turbo:                                   # (turbo LoRA, strength[, cfg]); steps are already the turbo steps
         s["turbo"] = {"lora": turbo[0], "sha1": file_signature(turbo[0]), "strength": float(turbo[1])}
-        if len(turbo) > 2 and abs(float(turbo[2]) - 1.0) > 1e-6:   # (only when not 1: earlier clips keep theirs)
-            s["turbo"]["cfg"] = round(float(turbo[2]), 2)
+    if abs(float(cfg) - 1.0) > 1e-6:            # CFG of the speed mode (only when not 1: earlier clips keep theirs)
+        s["cfg"] = round(float(cfg), 2)
     if extra_loras:
         s["extra_loras"] = [{"lora": p, "sha1": file_signature(p), "strength": float(st)} for p, st in extra_loras]
     if audio_refs:                              # sound references (<Audio 1> ...) this clip's prompt names
