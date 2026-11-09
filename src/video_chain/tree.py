@@ -61,6 +61,8 @@ AI, VIDEO = "ai", "video"
 GUIDE_CHOICES = (5, 22, 39)        # motion guide lengths on H3's 17n+5 grid
 DEFAULT_OPTIONS = {"model": "Comfy-Org/MiniMax-H3", "frames": 73, "steps": 28,
                    "resolution": 512, "audio": True, "keep_repeated": False, "seed": 42,
+                   # the aspect ratio of a project without a start image or video (its first clip starts from text)
+                   "aspect": "16:9",
                    # turbo: a step-distilled LoRA + its sampler, few steps for every clip (ComfyUI only)
                    "turbo": {"on": False, "lora": None, "steps": 6, "strength": 1.0},
                    # HyperFlow: Video Rebirth's 8-step LoRA with its own sigma grid (ComfyUI-HyperFlow-H3 nodes)
@@ -1237,9 +1239,24 @@ def source_info(file: str | Path) -> dict | None:
     return _SRC_INFO[key]
 
 
+ASPECTS = {"16:9": (16, 9), "9:16": (9, 16), "1:1": (1, 1), "4:5": (4, 5), "5:4": (5, 4), "3:2": (3, 2),
+           "2:3": (2, 3), "21:9": (21, 9)}
+
+
+def size_origin(project: Path, tree: "Tree | None") -> str:
+    """What the video size follows: 'image' (the start image), 'video' (the first video) or 'aspect' (the project's
+    aspect setting: a project without either)."""
+    if (Path(project) / START_FILE).is_file():
+        return "image"
+    if tree is not None and any(n.is_video for n in tree.nodes.values()):
+        return "video"
+    return "aspect"
+
+
 def size_source(project: Path, tree: "Tree | None") -> tuple[int, int] | None:
     """The picture whose aspect ratio the video size follows: the start image, else the first video of the tree
-    (by number). None while there is neither."""
+    (by number), else the project's aspect setting (ASPECTS; a first clip then starts from its text). None only
+    without a tree and a start image."""
     start = Path(project) / START_FILE
     try:
         st = start.stat()
@@ -1260,6 +1277,8 @@ def size_source(project: Path, tree: "Tree | None") -> tuple[int, int] | None:
             key = (n.made or {}).get("key") or {}
             if key.get("width") and key.get("height"):     # the file is gone, its converted clip is still here
                 return int(key["width"]), int(key["height"])
+        a = ASPECTS.get(str(tree.options.get("aspect") or "16:9"), ASPECTS["16:9"])
+        return a[0] * 120, a[1] * 120
     return None
 
 

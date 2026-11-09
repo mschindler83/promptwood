@@ -251,7 +251,7 @@ def test_failure_and_stop(app, win, tmp_path, image, monkeypatch):
 def test_start_explains_what_is_missing(app, win, tmp_path, image):
     win.open_project(tmp_path / "proj")
     win.generate_path()
-    assert not win.running and "start image" in win.status.text() and "prompt of clip #1" in win.status.text()
+    assert not win.running and "start image" not in win.status.text() and "prompt of clip #1" in win.status.text()
 
 
 def test_step_progress_and_export(app, win, tmp_path, image, monkeypatch):
@@ -2751,3 +2751,22 @@ def test_buttons_open_their_windows(app, win, tmp_path, image, monkeypatch):
     monkeypatch.setattr(win, "edit_image", lambda **kw: seen.append(kw))
     win.b_ref_create.click()                                                # Cast → Create…: the window opens
     assert seen and seen[0]["mode"] == "create" and seen[0]["dialog"] is True
+
+
+def test_a_project_without_a_start_image(app, win, tmp_path, image):
+    """No start image nor video: the Aspect setting gives the size, the first clip starts from its text."""
+    win.open_project(tmp_path / "proj")
+    nid = win.selected_id()
+    type_prompt(win, nid, "a lighthouse at dusk")
+    flush(app, win)
+    assert win.aspect.isEnabled() and win.aspect.currentData() == "16:9"
+    assert "16:9 → 672×384 (Aspect)" in win.size_info.text() and "starts from its prompt" in win.size_info.text()
+    win.aspect.setCurrentIndex(win.aspect.findData("9:16"))
+    assert win.tree.options["aspect"] == "9:16" and "9:16 → 384×672" in win.size_info.text()
+    run_and_wait(app, win, win.generate_path)
+    assert win.state(nid) == "done" and win.tree.nodes[nid].made["settings"]["width"] == 384
+    win.aspect.setCurrentIndex(win.aspect.findData("1:1"))                   # another format: made again
+    flush(app, win)
+    assert win.state(nid) == "changed"
+    win.set_image(str(image))                                                 # a start image: its format
+    assert not win.aspect.isEnabled() and "(Aspect)" not in win.size_info.text()

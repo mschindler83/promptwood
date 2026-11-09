@@ -1182,3 +1182,20 @@ def test_start_image_prepared_for_h3(project, tmp_path):
     assert b.stat().st_mtime_ns != stamp and Image.open(b).getpixel((300, 200))[1] > 150
     T.prepared_start(project, 1344, 768)
     assert sorted(f.name for f in project.glob("start_*x*.png")) == ["start_1344x768.png"]   # one at a time
+
+
+def test_first_clip_without_a_start_image(tmp_path):
+    p = tmp_path / "proj"
+    p.mkdir()
+    t = T.Tree()
+    a = t.add(None, "a lighthouse at dusk")
+    T.save(p, t)
+    assert T.size_origin(p, t) == "aspect" and T.size_source(p, t) == (16 * 120, 9 * 120)
+    gen = run(p, [a.id])
+    assert gen.calls[0]["start"] is None                                       # from text: no start frame
+    made = T.load(p).nodes[a.id].made
+    assert (made["settings"]["width"], made["settings"]["height"]) == (672, 384)
+    t = T.load(p)
+    t.options["aspect"] = "4:5"
+    T.save(p, t)
+    assert statuses(p)["a lighthouse at dusk"] == "changed"

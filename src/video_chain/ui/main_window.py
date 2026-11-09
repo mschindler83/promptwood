@@ -1600,6 +1600,13 @@ class MainWindow(QMainWindow):
         self.resolution.setCurrentIndex(1)
         self.resolution.setToolTip("About this many pixels squared, in the start image's aspect ratio")
         c.addRow("Size", self.resolution)
+        self.aspect = QComboBox()
+        for key in T.ASPECTS:
+            self.aspect.addItem(key, key)
+        self.aspect.setToolTip("The picture format of a project without a start image or real video: its first clip "
+                               "starts from the prompt alone (with the cast's face pictures as references when it "
+                               "mentions someone). With a start image or video, their format is used instead")
+        c.addRow("Aspect", self.aspect)
         self.steps = QSpinBox()
         self.steps.setRange(4, 80)
         self.steps.setValue(28)
@@ -1983,6 +1990,7 @@ class MainWindow(QMainWindow):
         self.start_tile.clicked.connect(lambda _t: self._choose_image())
         self.start_tile.dropped.connect(lambda f: self.set_image(f, confirm=True))
         for sig in (self.frames.currentIndexChanged, self.resolution.currentIndexChanged,
+                    self.aspect.currentIndexChanged,
                     self.steps.valueChanged, self.audio.toggled, self.keep_rep.toggled,
                     self.speed.currentIndexChanged, self.veda.toggled,
                     self.turbo_lora.currentIndexChanged, self.turbo_steps.valueChanged,
@@ -2811,6 +2819,7 @@ class MainWindow(QMainWindow):
                 select_frames(self.frames, fr)
             i = self.resolution.findData(int(o.get("resolution", 512)))
             self.resolution.setCurrentIndex(i if i >= 0 else 1)
+            self.aspect.setCurrentIndex(max(0, self.aspect.findData(o.get("aspect", "16:9"))))
             self.steps.setValue(int(o.get("steps", 28)))
             self.audio.setChecked(bool(o.get("audio", True)))
             ident = o.get("identity") or {}
@@ -2839,6 +2848,7 @@ class MainWindow(QMainWindow):
         before = self._done_clips()
         self.tree.options.update({
             "frames": self.frames.currentData(), "resolution": self.resolution.currentData(),
+            "aspect": self.aspect.currentData(),
             "steps": self.steps.value(), "audio": self.audio.isChecked(), "keep_repeated": self.keep_rep.isChecked(),
             "turbo": {"on": self.speed.currentData() == "turbo", "lora": self.turbo_lora.currentData(),
                       "steps": self.turbo_steps.value(), "strength": round(self.turbo_strength.value(), 2)},
@@ -3903,7 +3913,15 @@ class MainWindow(QMainWindow):
                 dims = T.size_source(self.project, self.tree) if self.project else None
             except Exception:  # noqa: BLE001
                 pass
-            if dims:
+            origin = T.size_origin(self.project, self.tree) if self.project else "aspect"
+            self.aspect.setEnabled(origin == "aspect" and not self.running)
+            if dims and origin == "aspect":
+                vw, vh = chain.canvas_size(*dims, self.resolution.currentData())
+                self._canvas = (vw, vh)
+                self.size_info.setText(f"No start image: {self.aspect.currentData()} → {vw}×{vh} (Aspect); the first "
+                                       "clip starts from its prompt (and the cast's face pictures)."
+                                       + self._veda_note(vw, vh))
+            elif dims:
                 vw, vh = chain.canvas_size(*dims, self.resolution.currentData())
                 self._canvas = (vw, vh)
                 self.size_info.setText(f"No start image: the size follows the first video ({dims[0]}×{dims[1]} → "
@@ -3912,6 +3930,7 @@ class MainWindow(QMainWindow):
             else:
                 self.size_info.setText("Choose a start image, or begin with a real video (Clips → camera button).")
             return
+        self.aspect.setEnabled(False)                  # (the start image's format applies)
         img = QImage(str(start))
         w, h = img.width(), img.height()
         if img.isNull() or w < 1 or h < 1:
@@ -4418,6 +4437,7 @@ class MainWindow(QMainWindow):
                   self.style_suffix, self.lora_triggers, self.veda, self.b_ai_edit, self.b_ai_create, self.storyboard,
                   self.b_film_gen, self.b_film_play, self.b_film_export, self.b_film_cast):
             w.setEnabled(idle)
+        self.aspect.setEnabled(idle and self.project is not None and T.size_origin(self.project, self.tree) == "aspect")
         busy = bool(self._copying or self._joins or self._converts)
         self.storyboard.setEnabled(idle and not busy)  # a scene switch would pull the files from under them
         self.b_film_play.setEnabled(idle and not busy)
