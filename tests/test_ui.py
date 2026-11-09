@@ -1960,7 +1960,8 @@ def test_lora_trigger_words_in_the_image_window(app, tmp_path, image, monkeypatc
         meta = dlg.selected()[1]
         assert server.prompts[-1]["pos"]["inputs"]["prompt"] == "glowx, she smiles"
         assert meta["prompt"] == "she smiles" and meta["trigger_words"] == ["glowx"]
-        assert "“she smiles” + glowx" in dlg.res_info.text()
+        assert "she smiles" not in dlg.res_info.text()             # (a long prompt pushed over the picture)
+        assert "Prompt: she smiles" in dlg.res_info.toolTip() and "Trigger words added: glowx" in dlg.view.toolTip()
         dlg.done(0)
         w.lora_triggers.setChecked(False)                                       # the project's choice
         dlg = w.edit_image(start=True, dialog=False)

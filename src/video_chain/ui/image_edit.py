@@ -864,6 +864,8 @@ class ImageEditDialog(QDialog):
         if sel is None:
             self.view.clear_frame("Results appear here")
             self.res_info.setText("")
+            self.res_info.setToolTip("")
+            self.view.setToolTip("")
         else:
             png, meta = sel
             orig = meta.get("source_copy") or meta.get("source")
@@ -880,11 +882,19 @@ class ImageEditDialog(QDialog):
                    f"{EDIT_MODELS['moss']} {MOSS_EDIT_QUALITIES['standard']}" if meta.get("edit_model") == "moss"
                    else QUALITY_TEXT.get(meta.get("quality"), ""))
             trig = meta.get("trigger_words") or []
+            smp = " ".join(x for x in (f"{meta['steps']} steps" if meta.get("steps") else "",
+                                       f"cfg {meta['cfg']:g}" if isinstance(meta.get("cfg"), (int, float)) else "",
+                                       meta.get("sampler") or "", meta.get("scheduler") or "") if x)
+            # (not the prompt: a long one wrapped into many lines and pushed over the picture; it is the tooltip)
             self.res_info.setText(("ORIGINAL · " if show != png else "") +
-                                  (f"IN USE: {', '.join(where)} · " if where else "") +
-                                  f"“{meta.get('prompt', '')}”" + (f" + {', '.join(trig)}" if trig else "") +
-                                  f" · {how} · "
-                                  + (f"{used} · " if used else "") + f"seed {meta.get('seed', '?')} · {when}")
+                                  (f"IN USE: {', '.join(where)} · " if where else "") + f"{how.strip()} · "
+                                  + (f"{smp} · " if smp else "") + (f"{used} · " if used else "")
+                                  + f"seed {meta.get('seed', '?')} · {when}")
+            tip = (f"Prompt: {meta.get('prompt', '')}" + (f"\nTrigger words added: {', '.join(trig)}" if trig else "")
+                   + (f"\nNegative: {meta['negative']}" if meta.get("negative") else "")
+                   + "\n\n“Prompt again” puts it into the prompt field")
+            self.res_info.setToolTip(tip)
+            self.view.setToolTip(tip)
         self._update_buttons()
 
     def _update_buttons(self):
