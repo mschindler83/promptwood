@@ -337,6 +337,12 @@ def test_turbo_workflow_and_generation(server, start, tmp_path):
                                  "strength": 1.0})
     gen.generate("x", start, tmp_path / "v.mp4", tmp_path / "v.png", 1, s)
     assert server.prompts[-1]["turbo"]["inputs"]["lora_name"] == "MiniMax H3/minimax_h3_turbo_v4_step600_ema.safetensors"
+    assert server.prompts[-1]["guider"]["class_type"] == "BasicGuider" and "neg" not in server.prompts[-1]
+    s2 = dict(s, turbo=dict(s["turbo"], cfg=1.5))                 # own CFG: CFGGuider against an empty prompt
+    gen.generate("x", start, tmp_path / "c.mp4", tmp_path / "c.png", 1, s2)
+    wf = server.prompts[-1]
+    assert wf["guider"]["class_type"] == "CFGGuider" and wf["guider"]["inputs"]["cfg"] == 1.5
+    assert wf["neg"] == {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": wf["guider"]["inputs"]["positive"]}}
     server.turbo_nodes = False
     with pytest.raises(C.ComfyError, match="ComfyUI-MiniMax-H3-Turbo"):
         gen.generate("x", start, tmp_path / "w.mp4", tmp_path / "w.png", 1, s)

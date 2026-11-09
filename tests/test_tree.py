@@ -585,6 +585,14 @@ def test_turbo_mode(project, tmp_path):
     t.options["turbo"]["on"] = True
     T.save(project, t)
     assert statuses(project)["a"] == "done"
+    assert "cfg" not in T.Checker(project, T.load(project)).settings(a.id)["turbo"]   # CFG 1: settings as before
+    t.options["turbo"]["cfg"] = 1.5                                  # an own CFG: in the settings, clips change
+    T.save(project, t)
+    assert T.Checker(project, T.load(project)).settings(a.id)["turbo"]["cfg"] == 1.5
+    assert statuses(project)["a"] == "changed"
+    t.options["turbo"]["cfg"] = 1.0
+    T.save(project, t)
+    assert statuses(project)["a"] == "done"
 
 
 def test_old_records_count_as_ai_toolkit(project):

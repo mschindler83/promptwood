@@ -778,6 +778,10 @@ def test_turbo_in_the_window(app, tmp_path, image, monkeypatch):
     w.speed.setCurrentIndex(w.speed.findData("turbo"))
     flush(app, w)
     assert w.tree.options["turbo"]["on"] and w.tree.options["turbo"]["lora"].endswith("_ema.safetensors")
+    assert w.tree.options["turbo"]["cfg"] == 1.0 and w.turbo_cfg.text() == "1 (off)"
+    w.turbo_cfg.setValue(1.4)
+    flush(app, w)
+    assert w.tree.options["turbo"]["cfg"] == 1.4
     assert not w.steps.isEnabled() and not w.cards[0].steps.isEnabled() and w.state(ids[0]) == "changed"
     wait(app, lambda: not w._joins, timeout=30)
     run_and_wait(app, w, w.generate_path)

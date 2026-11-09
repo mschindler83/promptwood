@@ -1685,6 +1685,19 @@ class MainWindow(QMainWindow):
         trow.addWidget(self.turbo_steps)
         trow.addWidget(label("strength", level="tertiary"))
         trow.addWidget(self.turbo_strength)
+        self.turbo_cfg = QDoubleSpinBox()
+        self.turbo_cfg.setRange(1.0, 10.0)
+        self.turbo_cfg.setSingleStep(0.1)
+        self.turbo_cfg.setDecimals(1)
+        self.turbo_cfg.setValue(1.0)
+        self.turbo_cfg.setSpecialValueText("1 (off)")
+        self.turbo_cfg.setToolTip("CFG with the turbo LoRA. 1 (off): one pass per step, as the turbo LoRA is made for. "
+                                  "Above 1: real classifier-free guidance against an empty prompt (the start / end "
+                                  "frames stay): the prompt is followed more strongly, but every step runs twice "
+                                  "(about twice as slow) and a step-distilled LoRA can burn colours or over-sharpen "
+                                  "from about 1.5-2; try 1.2-1.5 first")
+        trow.addWidget(label("CFG", level="tertiary"))
+        trow.addWidget(self.turbo_cfg)
         trow.addStretch(1)
         self._turbo_row = QWidget()
         self._turbo_row.setLayout(trow)
@@ -2080,7 +2093,7 @@ class MainWindow(QMainWindow):
                     self.steps.valueChanged, self.audio.toggled, self.keep_rep.toggled,
                     self.speed.currentIndexChanged, self.veda.toggled,
                     self.turbo_lora.currentIndexChanged, self.turbo_steps.valueChanged,
-                    self.turbo_strength.valueChanged):
+                    self.turbo_strength.valueChanged, self.turbo_cfg.valueChanged):
             sig.connect(self._options_changed)
         for keys, fn in (("Ctrl+N", lambda: self.node_action("continue", self.target_id())),
                          ("Ctrl+Shift+V", lambda: self.node_action("video", self.target_id())),
@@ -2938,6 +2951,7 @@ class MainWindow(QMainWindow):
                 else "pika" if (o.get("pika") or {}).get("on") else "normal"))
             self.turbo_steps.setValue(int(turbo.get("steps", 6)))
             self.turbo_strength.setValue(float(turbo.get("strength", 1.0)))
+            self.turbo_cfg.setValue(float(turbo.get("cfg", 1.0)))
             self._fill_turbo(turbo.get("lora"))
             self.keep_rep.setChecked(bool(o.get("keep_repeated", False)))
             self.veda.setChecked(bool((o.get("veda") or {"on": True}).get("on", True)))
@@ -2957,7 +2971,8 @@ class MainWindow(QMainWindow):
             "aspect": self.aspect.currentData(),
             "steps": self.steps.value(), "audio": self.audio.isChecked(), "keep_repeated": self.keep_rep.isChecked(),
             "turbo": {"on": self.speed.currentData() == "turbo", "lora": self.turbo_lora.currentData(),
-                      "steps": self.turbo_steps.value(), "strength": round(self.turbo_strength.value(), 2)},
+                      "steps": self.turbo_steps.value(), "strength": round(self.turbo_strength.value(), 2),
+                      "cfg": round(self.turbo_cfg.value(), 2)},
             "hyperflow": {**(self.tree.options.get("hyperflow") or {"strength": 1.0}),
                           "on": self.speed.currentData() == "hyperflow"},
             "pika": {**(self.tree.options.get("pika") or {"strength": 1.0}), "on": self.speed.currentData() == "pika"},

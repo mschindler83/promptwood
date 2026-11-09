@@ -275,7 +275,7 @@ def pick_veda_predictor(names: list[str], refs: bool) -> str | None:
 def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, height: int, frames: int, steps: int,
                    loras: list[tuple[str, float]], audio: bool, prefix: str, refs: list[str] = (),
                    ref_size: str = "match", ref_key=lambda i: f"ref_images.ref_image_{i}",
-                   turbo: tuple[str, float] | None = None, end_image: str | None = None,
+                   turbo: tuple[str, float] | None = None, end_image: str | None = None, cfg: float = 1.0,
                    guides: list[dict] = (), hyperflow: tuple[str, float] | None = None,
                    pika: tuple[str, float] | None = None, audio_refs: list[str] = (),
                    audio_key=lambda i: f"ref_audios.ref_audio_{i}", start_pin: int = 1,
@@ -425,7 +425,12 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
     if veda:                                       # Veda sparse attention (after every LoRA, before the guider)
         wf["veda"] = {"class_type": VEDA_NODE, "inputs": {"model": model, "predictor": veda, **VEDA_SETTINGS}}
         model = ["veda", 0]
-    wf["guider"] = {"class_type": "BasicGuider", "inputs": {"model": model, "conditioning": positive}}
+    if cfg > 1.0:                                  # real CFG: a negative without text, the same frames (keyframes stay
+        wf["neg"] = {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": positive}}   # in the cond)
+        wf["guider"] = {"class_type": "CFGGuider", "inputs": {"model": model, "positive": positive,
+                                                              "negative": ["neg", 0], "cfg": float(cfg)}}
+    else:                                          # guidance 1 (the reference workflows): one pass per step
+        wf["guider"] = {"class_type": "BasicGuider", "inputs": {"model": model, "conditioning": positive}}
     wf["sample"] = {"class_type": "SamplerCustomAdvanced",
                     "inputs": {"noise": ["noise", 0], "guider": ["guider", 0], "sampler": ["sampler", 0],
                                "sigmas": sigmas, "latent_image": latent}}
@@ -754,6 +759,7 @@ class ComfyGenerator:
                             loras=loras, audio=bool(s.get("audio", True)), prefix=prefix, refs=refs,
                             ref_size=s.get("ref_size", "match"), ref_key=self.ref_key() if refs else None,
                             turbo=turbo, end_image=end_image, guides=guides, hyperflow=hyper, pika=pika,
+                            cfg=float((s.get("turbo") or {}).get("cfg", 1.0)) if turbo else 1.0,
                             audio_refs=sounds, **({"audio_key": self.audio_key()} if sounds else {}),
                             start_pin=int(s.get("start_pin") or 1), recipe=s.get("recipe"),
                             veda=self.veda_predictor(bool(refs or sounds)) if s.get("veda") else None)
