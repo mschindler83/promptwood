@@ -1834,7 +1834,9 @@ def test_image_window_own_sampling(app, tmp_path):
     assert dlg.family.currentData() == "krea2" and dlg.sampling() == {}
     assert dlg.steps.specialValueText() == "auto (8)" and dlg.cfg.specialValueText() == "auto (1)"
     assert dlg.sampler.itemText(0) == "auto (euler)" and dlg.sampler.count() == 4
+    assert not dlg.negative.isVisibleTo(dlg)                   # Krea-2 at CFG 1: a negative does nothing
     dlg.cfg.setValue(4.0)
+    assert dlg.negative.isVisibleTo(dlg) and "counts because CFG is 4" in dlg.negative.placeholderText()
     dlg.steps.setValue(3)
     dlg.scheduler.setCurrentIndex(dlg.scheduler.findData("karras"))
     assert dlg.sampling() == {"steps": 3, "cfg": 4.0, "scheduler": "karras"}

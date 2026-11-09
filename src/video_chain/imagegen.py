@@ -183,7 +183,13 @@ def build_create_workflow(*, family: str, files: dict, model: str, prompt: str, 
                           "inputs": {"clip": ["clip", 0], "prompt": prompt, "vae": ["vae", 0], **pics}}
             wf["pos"] = {"class_type": "FluxKontextMultiReferenceLatentMethod",
                          "inputs": {"conditioning": ["pos0", 0], "reference_latents_method": "index_timestep_zero"}}
-            wf["neg"] = {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["pos", 0]}}
+            if negative:                           # (counts only with CFG above 1, which the user can set)
+                wf["neg0"] = {"class_type": "TextEncodeQwenImageEditPlus",
+                              "inputs": {"clip": ["clip", 0], "prompt": negative, "vae": ["vae", 0], **pics}}
+                wf["neg"] = {"class_type": "FluxKontextMultiReferenceLatentMethod",
+                             "inputs": {"conditioning": ["neg0", 0], "reference_latents_method": "index_timestep_zero"}}
+            else:
+                wf["neg"] = {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["pos", 0]}}
             wf["guider"] = {"class_type": "CFGGuider", "inputs": {"model": ["shift", 0], "positive": ["pos", 0],
                                                                   "negative": ["neg", 0], "cfg": 1.0}}
             wf["noise"] = {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}}
@@ -195,7 +201,8 @@ def build_create_workflow(*, family: str, files: dict, model: str, prompt: str, 
                                        "sigmas": ["sigmas", 0], "latent_image": ["latent", 0]}}
         else:                                      # Text to Image (Krea-2 Turbo)
             wf["pos"] = {"class_type": "CLIPTextEncode", "inputs": {"clip": ["clip", 0], "text": prompt}}
-            wf["neg"] = {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["pos", 0]}}
+            wf["neg"] = ({"class_type": "CLIPTextEncode", "inputs": {"clip": ["clip", 0], "text": negative}}
+                         if negative else {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["pos", 0]}})
             wf["sample"] = {"class_type": "KSampler",
                             "inputs": {"model": m, "seed": seed, "steps": 8, "cfg": 1.0, "sampler_name": "euler",
                                        "scheduler": "simple", "positive": ["pos", 0], "negative": ["neg", 0],
@@ -286,7 +293,8 @@ def build_create_workflow(*, family: str, files: dict, model: str, prompt: str, 
         m = _lora_chain(wf, ["unet", 0], loras)
         wf["pos0"] = {"class_type": "CLIPTextEncode", "inputs": {"clip": ["clip", 0], "text": prompt}}
         wf["pos"] = {"class_type": "FluxGuidance", "inputs": {"conditioning": ["pos0", 0], "guidance": 3.5}}
-        wf["neg"] = {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["pos0", 0]}}
+        wf["neg"] = ({"class_type": "CLIPTextEncode", "inputs": {"clip": ["clip", 0], "text": negative}}
+                     if negative else {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["pos0", 0]}})
         denoise = 1.0
         if refs:
             wf["ref0"] = {"class_type": "LoadImage", "inputs": {"image": refs[0]}}

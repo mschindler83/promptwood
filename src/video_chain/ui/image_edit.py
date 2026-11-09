@@ -726,7 +726,7 @@ class ImageEditDialog(QDialog):
         self.ref_strength.setVisible(img2img)
         self._sampling_defaults()
         self.ref_strength_label.setVisible(img2img)
-        self.negative.setVisible(create and bool(f and f["negative"]))
+        self._show_negative()
         self.tags.setVisible(create and fam == "sdxl")
         if f:
             w, h = size_for(fam, self.aspect.currentData() or 1.0)
@@ -1136,11 +1136,25 @@ class ImageEditDialog(QDialog):
         self._sampling_note()
 
     def _sampling_changed(self):
+        self._show_negative()
         if self._sampling_loading:
             return
         if self.qs is not None and self.family.currentData():
             self.qs.setValue(self._sampling_key(), json.dumps(self.sampling()))
         self._sampling_note()
+
+    def _show_negative(self):
+        """The negative prompt: for families that use one, and for the others (made for CFG 1, where a negative
+        prompt does nothing) as soon as CFG is set above 1."""
+        if not hasattr(self, "negative"):
+            return
+        f = FAMILIES.get(self.family.currentData()) if self.mode() == "create" else None
+        own = bool(f and f["negative"])
+        cfg_on = hasattr(self, "cfg") and self.cfg.value() > 1
+        self.negative.setVisible(bool(f) and (own or cfg_on))
+        self.negative.setPlaceholderText("Avoid (optional negative prompt; empty: the model's usual one)" if own else
+                                         f"Avoid (optional negative prompt; counts because CFG is {self.cfg.value():g})"
+                                         if cfg_on else "")
 
     def _sampling_note(self):
         sp, a = self.sampling(), self._sampling_auto

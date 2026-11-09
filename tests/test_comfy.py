@@ -1097,3 +1097,22 @@ def test_own_sampling_settings_for_new_images(server, start, tmp_path):
     auto = G.default_sampling("chroma", cr.files["chroma"], None, "best")
     assert auto == {"steps": 26, "cfg": 3.5, "sampler": "euler", "scheduler": "beta"}
     assert G.default_sampling("flux3", cr.files["flux3"], None, "fast") is None
+
+
+def test_negative_prompt_for_cfg1_families(server, start, tmp_path):
+    """Krea-2 and FLUX.1 encode an empty negative unless one is given (it counts with CFG above 1)."""
+    from video_chain import imagegen as G
+    cr = G.ComfyImageCreator(server.url)
+    out = tmp_path / "n.png"
+    cr.create("krea2", None, "a fox", out, 5, "standard", 1024, 1024)
+    assert server.created["neg"]["class_type"] == "ConditioningZeroOut"
+    cr.create("krea2", None, "a fox", out, 5, "standard", 1024, 1024, negative="blurry", sampling={"cfg": 3.0})
+    wf = server.created
+    assert wf["neg"] == {"class_type": "CLIPTextEncode", "inputs": {"clip": ["clip", 0], "text": "blurry"}}
+    assert wf["sample"]["inputs"]["cfg"] == 3.0
+    cr.create("krea2", None, "in this style", out, 5, "standard", 1024, 1024, refs=[start], negative="blurry")
+    wf = server.created
+    assert wf["neg0"]["class_type"] == "TextEncodeQwenImageEditPlus" and wf["neg0"]["inputs"]["prompt"] == "blurry"
+    assert wf["neg0"]["inputs"]["image1"] == wf["pos0"]["inputs"]["image1"] and wf["guider"]["inputs"]["negative"] == ["neg", 0]
+    cr.create("flux1", None, "a cat", out, 5, "standard", 1024, 1024, negative="dog")
+    assert server.created["neg"]["inputs"]["text"] == "dog"
