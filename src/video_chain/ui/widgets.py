@@ -4,7 +4,7 @@ from __future__ import annotations
 from PySide6.QtCore import QEvent, QObject, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QHBoxLayout, QLabel, QSizePolicy,
-                               QToolButton, QWidget)
+                               QToolButton, QVBoxLayout, QWidget)
 
 from .theme import icon, theme
 
@@ -58,21 +58,43 @@ def frame_image(frame) -> QImage:
     return QImage(out.data, w, h, w * 3, QImage.Format_RGB888).copy()
 
 
-class VideoView(QWidget):
-    """Shows a QMediaPlayer's video: its frames come through a QVideoSink and are painted like an image (kept in
-    proportion, black around). Unlike QVideoWidget there is no native GPU window: QVideoWidget renders through its
-    own EGL/OpenGL window, and NVIDIA's EGL driver crashed there (segfault in libnvidia-eglcore while the first frame
-    was drawn) when ComfyUI held nearly all GPU memory after a long clip. Use: player.setVideoOutput(view.sink)."""
+GPU_VIDEO = False          # set at start-up from the setting (app.py): players draw through Qt's GPU video surface
 
-    def __init__(self, parent=None):
+
+def set_gpu_video(on: bool) -> None:
+    global GPU_VIDEO
+    GPU_VIDEO = bool(on)
+
+
+class VideoView(QWidget):
+    """Shows a QMediaPlayer's video. Use: player.setVideoOutput(view.sink).
+
+    GPU (the "Play videos on the GPU" setting): a QVideoWidget inside, with hardware decoding: smooth with big
+    clips, but it renders through its own EGL/OpenGL window, and NVIDIA's EGL driver crashed there once (segfault
+    in libnvidia-eglcore while the first frame was drawn) when ComfyUI held nearly all GPU memory after a long clip.
+    CPU: frames come through a QVideoSink and are painted like an image (kept in proportion, black around): never
+    crashes, but decoding, colour conversion and smooth scaling of every frame on the CPU lag with large clips."""
+
+    def __init__(self, parent=None, gpu: bool | None = None):
         super().__init__(parent)
-        from PySide6.QtMultimedia import QVideoSink
-        self.sink = QVideoSink(self)
-        self.sink.videoFrameChanged.connect(self._frame)
+        self.gpu = GPU_VIDEO if gpu is None else bool(gpu)
         self._img = QImage()
         self._shown: tuple | None = None           # (the frame, the size) -> the frame scaled to fit, for painting
-        self.setAttribute(Qt.WA_OpaquePaintEvent)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        if self.gpu:
+            from PySide6.QtMultimediaWidgets import QVideoWidget
+            lay = QVBoxLayout(self)
+            lay.setContentsMargins(0, 0, 0, 0)
+            self.widget = QVideoWidget(self)
+            self.widget.setAspectRatioMode(Qt.KeepAspectRatio)
+            lay.addWidget(self.widget)
+            self.sink = self.widget.videoSink()
+            return
+        from PySide6.QtMultimedia import QVideoSink
+        self.widget = None
+        self.sink = QVideoSink(self)
+        self.sink.videoFrameChanged.connect(self._frame)
+        self.setAttribute(Qt.WA_OpaquePaintEvent)
 
     def _frame(self, frame):
         if not frame.isValid():                    # (the end of a clip: its last frame stays, as in QVideoWidget)
@@ -81,10 +103,17 @@ class VideoView(QWidget):
         self.update()
 
     def image(self) -> QImage:
+        """The frame shown (GPU: converted only when asked)."""
+        if self.gpu:
+            frame = self.sink.videoFrame()
+            return frame.toImage() if frame.isValid() else QImage()
         return self._img
 
     def clear(self):
         self._img = QImage()
+        if self.gpu:
+            from PySide6.QtMultimedia import QVideoFrame
+            self.sink.setVideoFrame(QVideoFrame())
         self.update()
 
     def sizeHint(self):
@@ -105,6 +134,8 @@ class VideoView(QWidget):
         return self._shown[1]
 
     def paintEvent(self, _e):                     # noqa: N802  (Qt naming)
+        if self.gpu:
+            return                                 # (the video widget draws)
         p = QPainter(self)
         p.fillRect(self.rect(), QColor(0, 0, 0))
         if not self._img.isNull():

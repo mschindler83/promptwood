@@ -3044,3 +3044,19 @@ def test_lora_presets_in_the_image_window(app, tmp_path, monkeypatch):
     assert dlg.delete_preset() and presets.store().list(str(b)) == []
     assert [dlg.preset.itemText(i) for i in range(1, dlg.preset.count())] == ["walk: Walk, cfg 7"]
     dlg.reject()
+
+
+def test_video_view_gpu_or_cpu(app, win):
+    """The player view draws through Qt's video widget (GPU) or paints frames itself (CPU); the setting is kept
+    at once (read at the next start, also after a crash)."""
+    from video_chain.ui.widgets import VideoView
+    gpu, cpu = VideoView(gpu=True), VideoView(gpu=False)
+    assert gpu.widget is not None and gpu.sink is gpu.widget.videoSink() and gpu.image().isNull()
+    assert cpu.widget is None and cpu.sink is not None
+    gpu.clear()
+    gpu.deleteLater()
+    cpu.deleteLater()
+    win.video_gpu.setChecked(False)
+    assert win.qs.value("videoGpu", True, type=bool) is False and "CPU" in win.status.text()
+    win.video_gpu.setChecked(True)
+    assert win.qs.value("videoGpu", False, type=bool) is True

@@ -1742,6 +1742,15 @@ class MainWindow(QMainWindow):
                                         "lora_triggers.json, everything else CivitAI tells (descriptions, example "
                                         "prompts, base model, files, license) next to it in civitai/. Right-click a "
                                         "LoRA for its CivitAI details.")
+        self.video_gpu = QCheckBox("Play videos on the GPU (smooth; takes effect after a restart)")
+        self.video_gpu.setChecked(True)
+        self.video_gpu.setToolTip("On: the preview players decode on the GPU and draw through Qt's GPU video surface: "
+                                  "smooth also with big or 2K clips. NVIDIA's driver crashed there once while "
+                                  "ComfyUI held nearly all GPU memory; if the app crashes when playing, switch it "
+                                  "off. Off: decoded and drawn on the CPU: never crashes, but lags with big clips. "
+                                  "(The before / after comparison is always drawn on the CPU.)")
+        self.video_gpu.toggled.connect(lambda on: self._video_gpu_changed(on))
+        a.addRow("", self.video_gpu)
         self.triggers_online.toggled.connect(lambda on: on and self._scan_triggers())
         a.addRow("", self.triggers_online)
         crow = QHBoxLayout()
@@ -2045,6 +2054,9 @@ class MainWindow(QMainWindow):
         self.comfy_cleanup.setChecked(q.value("comfyCleanup", True, type=bool))
         self.comfy_autostart.setChecked(q.value("comfyAutoStart", True, type=bool))
         self.triggers_online.setChecked(q.value("loraTriggersOnline", True, type=bool))
+        self.video_gpu.blockSignals(True)
+        self.video_gpu.setChecked(q.value("videoGpu", True, type=bool))
+        self.video_gpu.blockSignals(False)
         self.idle_minutes.setValue(q.value("idleMinutes", 15, type=int))
         if g := q.value("geometry"):
             self.restoreGeometry(g)
@@ -2063,6 +2075,7 @@ class MainWindow(QMainWindow):
         q.setValue("comfyCleanup", self.comfy_cleanup.isChecked())
         q.setValue("comfyAutoStart", self.comfy_autostart.isChecked())
         q.setValue("loraTriggersOnline", self.triggers_online.isChecked())
+        q.setValue("videoGpu", self.video_gpu.isChecked())
         q.setValue("idleMinutes", self.idle_minutes.value())
         q.setValue("project", str(self.project) if self.project else "")
         if self.tree is not None:
@@ -2947,6 +2960,11 @@ class MainWindow(QMainWindow):
             except RuntimeError:
                 pass
         threading.Thread(target=work, daemon=True).start()
+
+    def _video_gpu_changed(self, on: bool):
+        self.qs.setValue("videoGpu", on)           # at once: read at the next start, also after a crash
+        self.qs.sync()
+        self.status.setText("Videos play on the " + ("GPU" if on else "CPU") + " after the app is restarted.")
 
     def _show_civitai_key(self):
         from .. import triggers
