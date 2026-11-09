@@ -269,6 +269,7 @@ def serve(a, emit, make_generator: Callable[[dict], object], stdin=None) -> int:
                                     strength=str(cmd.get("strength") or "natural"),
                                     method=str(cmd.get("method") or "refine"),
                                     single=bool(cmd.get("single")),
+                                    denoise=bool(cmd.get("denoise")),
                                     events=lambda ev: (ev.get("e") == "node" and ev.get("state") == "generating"
                                                        and current.update(id=ev["id"], k=ev.get("k", 0)),
                                                        emit(ev)))

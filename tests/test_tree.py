@@ -1106,3 +1106,17 @@ def test_export_one_clip(project, tmp_path):
     assert len(gen.refines) == n                                    # the pinned copy is the same clip: reused
     with pytest.raises(ValueError, match="not made yet"):
         T.refine_path(gen, project, c.id, "2k", tmp_path / "x.mp4", log=lambda _m: None, single=True)
+
+
+def test_seedvr2_light_denoise_is_recorded(project, tmp_path):
+    t, a, b1, b2, c = build(project)
+    gen = run(project, [b1.id])
+    T.refine_path(gen, project, b1.id, "2k", tmp_path / "s.mp4", log=lambda _m: None, method="seedvr2_7b")
+    T.refine_path(gen, project, b1.id, "2k", tmp_path / "d.mp4", log=lambda _m: None, method="seedvr2_7b",
+                  denoise=True)
+    assert [x["denoise"] for x in gen.seedvrs] == [False, False, True, True]        # the other choice: made again
+    t = T.load(project)
+    assert T.refine_record(T.refined_file(project, t.nodes[a.id], "2k"))["denoise"] is True
+    T.refine_path(gen, project, b1.id, "2k", tmp_path / "d2.mp4", log=lambda _m: None, method="seedvr2_7b",
+                  denoise=True)
+    assert len(gen.seedvrs) == 4                                                     # then reused

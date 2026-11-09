@@ -308,19 +308,19 @@ class VariantsDialog(QDialog):
 class ExportDialog(QDialog):
     """Where to save a path, and at which size: as made (quick: the clips are joined), or at 1080p / 2K, upscaled in
     ComfyUI by SeedVR2 (restores the clips as made) or re-rendered by the Open-H3 refine (draws detail anew); every
-    clip once, the copies are kept for the next export. ready(size, method, strength) -> True when every clip has a
-    kept copy for that choice (a dict {size: bool} works too)."""
+    clip once, the copies are kept for the next export. ready(size, method, strength, denoise) -> True when every
+    clip has a kept copy for that choice (a dict {size: bool} works too)."""
 
     METHODS = (("seedvr2_7b", "SeedVR2 7B — restores the clips as made, clean (default)"),
                ("seedvr2_3b", "SeedVR2 3B — crisper, a little harder"),
                ("refine", "Open-H3 refine — draws detail anew"))
 
     def __init__(self, parent, default: str, made_size: tuple[int, int] | None, refined,
-                 swapped: int = 0, strength: str = "natural", method: str = "seedvr2_7b"):
+                 swapped: int = 0, strength: str = "natural", method: str = "seedvr2_7b", denoise: bool = False):
         super().__init__(parent)
         self.setWindowTitle("Export path")
         self.setMinimumWidth(620)
-        self.ready = refined if callable(refined) else (lambda size, _m, _s: bool(refined.get(size)))
+        self.ready = refined if callable(refined) else (lambda size, _m, _s, _d=False: bool(refined.get(size)))
         self.made_size = made_size
         f = QFormLayout(self)
         row = QHBoxLayout()
@@ -351,6 +351,12 @@ class ExportDialog(QDialog):
             "latent upscale (3 steps); it invents more new detail but can change faces (see Refine). About 1.7 min "
             "(1080p) and 4-5 min (2K) per 3 s clip")
         f.addRow("Upscaler", self.method)
+        self.denoise = QCheckBox("Light denoise before SeedVR2")
+        self.denoise.setChecked(bool(denoise))
+        self.denoise.setToolTip("Calms the draft's fine noise first (mostly the noise that changes from frame to frame, "
+                                "little blur), so SeedVR2 does not sharpen it into grain or a painted texture on "
+                                "smooth areas (walls, long hair, skin). Upscaled copies are kept per choice")
+        f.addRow("", self.denoise)
         self.strength = QComboBox()
         for key, text in (("soft", "Soft — calm, little new detail"),
                           ("natural", "Natural — clean, keeps the person (default)"),
@@ -383,6 +389,7 @@ class ExportDialog(QDialog):
         f.addRow("", note)
         for w_ in (self.size, self.method, self.strength):
             w_.currentIndexChanged.connect(lambda *_: self._update())
+        self.denoise.toggled.connect(lambda *_: self._update())
         self._update()
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("Export")
@@ -391,12 +398,17 @@ class ExportDialog(QDialog):
         f.addRow(buttons)
         guard_wheel(self)
 
+    def _ready(self, size: str) -> bool:
+        how, st = self.method.currentData(), self.strength.currentData()
+        return bool(self.ready(size, how, st, self.denoise.isChecked() and how != "refine"))
+
     def _update(self):
         up = self.size.currentData() != "made"
         refine = self.method.currentData() == "refine"
         self.method.setEnabled(up)
         self.strength.setEnabled(up and refine)
         self.fast.setEnabled(up and refine)
+        self.denoise.setEnabled(up and not refine)
         self.swapped.setEnabled(up)
         w, h = self.made_size or (0, 0)
         from ..comfy import refine_size
@@ -406,7 +418,7 @@ class ExportDialog(QDialog):
             if self.made_size:
                 rw, rh = refine_size(w, h, key)
                 text += f" — {rw}×{rh}"
-            if self.ready(key, self.method.currentData(), self.strength.currentData()):
+            if self._ready(key):
                 text += " · already upscaled, quick"
             self.size.setItemText(i, text)
 
@@ -5536,8 +5548,9 @@ class MainWindow(QMainWindow):
         base = T.Checker(self.project, self.tree).base()
         strength = self.qs.value("refineStrength", "natural", type=str)
         method = self.qs.value("exportUpscaler", "seedvr2_7b", type=str)
+        denoise = self.qs.value("exportDenoise", False, type=bool)
 
-        def ready(size, how, strength_):              # every generated clip has a kept copy made this way
+        def ready(size, how, strength_, denoise_=False):   # every generated clip has a kept copy made this way
             def kept(n):
                 f = T.refined_file(self.project, n, size)
                 if not (n.made and f.is_file()):
@@ -5545,12 +5558,12 @@ class MainWindow(QMainWindow):
                 if n.is_video:
                     return True
                 rec = T.refine_record(f)
-                return rec.get("method") == how if how != "refine" else \
-                    ("method" not in rec and rec.get("strength") == strength_)
+                return (rec.get("method") == how and bool(rec.get("denoise")) == bool(denoise_)) if how != "refine" \
+                    else ("method" not in rec and rec.get("strength") == strength_)
             return all(kept(n) for n in path)
         swapped = sum(1 for n in path if T.swapped_video(n))
         dlg = ExportDialog(self, default, (base["width"], base["height"]) if base else None, ready, swapped,
-                           strength, method)
+                           strength, method, denoise)
         if single is not None:
             dlg.setWindowTitle(f"Export {'video' if path[0].is_video else 'clip'} #{single[1:]}")
         try:
@@ -5559,16 +5572,18 @@ class MainWindow(QMainWindow):
             out, size, fast = dlg.target(), dlg.size.currentData(), dlg.fast.isChecked()
             refine_swapped = bool(swapped) and dlg.swapped.isChecked()
             strength, method = dlg.strength.currentData(), dlg.method.currentData()
+            denoise = dlg.denoise.isChecked()
         finally:
             dlg.deleteLater()
         if size != "made":
             self.qs.setValue("refineStrength", strength)
             self.qs.setValue("exportUpscaler", method)
-        self.export(out, size, fast, refine_swapped, strength, method, single)
+            self.qs.setValue("exportDenoise", denoise)
+        self.export(out, size, fast, refine_swapped, strength, method, single, denoise and method != "refine")
 
     def export(self, out: Path, size: str = "made", fast_attention: bool = False,
                refine_swapped: bool = False, strength: str = "natural", method: str = "seedvr2_7b",
-               single: str | None = None) -> None:
+               single: str | None = None, denoise: bool = False) -> None:
         """Export the selected path (single: that clip alone) to out: as made (joined / copied here), or upscaled at
         '1080p' / '2k' (a generator job)."""
         if single is not None:
@@ -5596,7 +5611,8 @@ class MainWindow(QMainWindow):
             target = path[-1].id
         self._start([target], refine={"size": size, "out": str(out), "fast_attention": bool(fast_attention),
                                       "refine_swapped": bool(refine_swapped), "strength": strength,
-                                      "method": method, **({"single": True} if single is not None else {})})
+                                      "method": method, **({"single": True} if single is not None else {}),
+                                      **({"denoise": True} if denoise else {})})
 
     # ------------------------------------------------------------------ GPU
     def _poll_gpu(self):

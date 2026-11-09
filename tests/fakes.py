@@ -29,10 +29,10 @@ class FakeGenerator:
         subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(draft), "-vf", f"scale={size[0]}:{size[1]},setsar=1",
                         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(out)], check=True)
 
-    def seedvr(self, draft, out, size, method="seedvr2_7b", seed=42):
+    def seedvr(self, draft, out, size, method="seedvr2_7b", seed=42, denoise=False):
         """Fake SeedVR2 upscale: the draft scaled to size (frames and sound kept)."""
         self.seedvrs = getattr(self, "seedvrs", [])
-        self.seedvrs.append({"draft": Path(draft).name, "size": tuple(size), "method": method})
+        self.seedvrs.append({"draft": Path(draft).name, "size": tuple(size), "method": method, "denoise": denoise})
         subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(draft), "-vf", f"scale={size[0]}:{size[1]},setsar=1",
                         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(out)], check=True)
 

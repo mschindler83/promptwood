@@ -1023,3 +1023,30 @@ def test_seedvr2_progress_is_one_steady_bar():
     one = []
     C.SeedvrProgress(1, lambda i, n: None).piece(0, one.append)
     assert one == ["SeedVR2"]
+
+
+def test_light_denoise_before_seedvr2(server, tmp_path):
+    """SEEDVR_DENOISE calms noise that changes from frame to frame, keeps frames and sound; with denoise the
+    uploaded clip is the denoised one."""
+    import subprocess
+    noisy = tmp_path / "noisy.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=gray:s=96x64:r=24:d=1", "-f", "lavfi",
+                    "-i", "sine=frequency=440:duration=1", "-vf", "noise=alls=3:allf=t", "-c:v", "libx264",
+                    "-crf", "4", "-pix_fmt", "yuv420p", "-c:a", "aac", str(noisy)], check=True)
+    clean = tmp_path / "clean.mp4"
+    C._denoise(noisy, clean)
+    def change(v):
+        r = subprocess.run(["ffmpeg", "-v", "error", "-i", str(v), "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+                           capture_output=True, check=True).stdout
+        return sum(abs(a - b) for a, b in zip(r, r[96 * 64:])) / (len(r) - 96 * 64)
+    assert change(clean) < 0.6 * change(noisy)                 # fine frame-to-frame noise (as in drafts) calmed
+    a, b = chain.probe(noisy), chain.probe(clean)
+    assert (b["frames"], b["audio"]) == (a["frames"], True)
+    gen = C.ComfyGenerator(server.url)
+    out = tmp_path / "up.mp4"
+    before = set((server.root / "input").rglob("*.mp4"))
+    gen.cleanup = False
+    gen.seedvr(noisy, out, (192, 128), denoise=True)
+    uploaded = [f for f in (server.root / "input").rglob("*.mp4") if f not in before]
+    assert uploaded and change(uploaded[0]) < 0.6 * change(noisy)               # SeedVR2 got the denoised clip
+    assert chain.probe(out)["frames"] == a["frames"]

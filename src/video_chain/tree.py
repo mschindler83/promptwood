@@ -2289,7 +2289,8 @@ def refine_record(target: Path) -> dict:
 def refine_path(generator, project: Path, nid: str, size: str, out: Path,
                 events: Callable[[dict], None] | None = None, log: Callable[[str], None] = print,
                 pin: bool = True, fast_attention: bool = False, refine_swapped: bool = False,
-                strength: str = "natural", method: str = "refine", single: bool = False) -> Path:
+                strength: str = "natural", method: str = "refine", single: bool = False,
+                denoise: bool = False) -> Path:
     """Export the path start -> nid at a higher size ('1080p' / '2k'): every generated clip is re-rendered by
     generator.refine (Open-H3-Regenerate-2K) as it was made (its prompt, style text, LoRAs, seed), every real video
     is converted again from its file at that size. Refined copies are kept (nodes/<clip>_<size>.mp4) and reused.
@@ -2305,6 +2306,7 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
     method: "refine" (above), or "seedvr2_7b" / "seedvr2_3b": every generated clip (and, with refine_swapped, every
     video with a replaced person) is upscaled by generator.seedvr instead, which restores what is there rather than
     drawing it anew (no pins needed: neighbouring clips stay as alike as they were made); recorded per copy too.
+    denoise: with SeedVR2, a light denoise of each clip first (comfy.SEEDVR_DENOISE); recorded per copy too.
     single: only the clip nid itself (whole, nothing left out); its kept copy is shared with path exports, except a
     refine without one: that is made unpinned (no neighbours) into a temporary file, the path's copy stays.
     Then the path is joined (the same frames left out as at the normal size) into out."""
@@ -2353,6 +2355,8 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
                 pins["video"] = "refined" if regen else "converted"
             if regen and method != "refine":
                 pins["method"] = method
+                if denoise:
+                    pins["denoise"] = True
             elif regen:
                 pins["strength"] = strength
                 if fast_attention:
@@ -2384,7 +2388,8 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
                 w, h = refine_size(int(dims["width"]), int(dims["height"]), size)
                 name = "SeedVR2 " + SEEDVR_METHODS[method].upper()
                 log(f"[{k}/{len(order)}] {node.id}: upscaling with {name} to {w}x{h}")
-                generator.seedvr(project / node.made["video"], target, (w, h), method, seed=node.seed)
+                generator.seedvr(project / node.made["video"], target, (w, h), method, seed=node.seed,
+                                 denoise=denoise)
             elif node.is_video and regen:                # a replaced person: re-rendered like a generated clip
                 key = node.made.get("key") or {}
                 w, h = refine_size(int(key["width"]), int(key["height"]), size)

@@ -1721,6 +1721,11 @@ SEEDVR_FRAME_COPIES = 7                  # copies of the clip ComfyUI holds at o
                                          # the video; float32): a 10 s 2K clip as one job took 65 GB RAM + 36 GB swap
                                          # (about 5-6 copies besides the cached models) and systemd-oomd killed it
 SEEDVR_PIECE_OVERLAP = 8                 # frames two neighbouring pieces share, crossfaded
+# a light denoise before SeedVR2 (optional): mostly temporal (noise that changes from frame to frame), little
+# spatial blur, so SeedVR2 does not sharpen the draft's fine noise into texture. Measured on synthetic noise at the
+# drafts' level (about 1.5 grey levels frame to frame): 1.56 -> 0.66; strong noise (8.5) it leaves (7.8): hqdn3d
+# takes large changes for motion, so real motion is not smeared either
+SEEDVR_DENOISE = "hqdn3d=1:1:4:4"
 
 
 def seedvr_budget(ram_free: int | None) -> int:
@@ -1790,12 +1795,18 @@ def seedvr_pieces(total: int, per: int, overlap: int = SEEDVR_PIECE_OVERLAP) -> 
 
 
 def _seedvr(self, draft: Path, out: Path, size: tuple[int, int], method: str = "seedvr2_7b",
-            seed: int = 42) -> None:
+            seed: int = 42, denoise: bool = False) -> None:
     """ComfyGenerator.seedvr: upscale one finished clip (or video) to size with SeedVR2 (build_seedvr_workflow).
     The first SeedVR2 job unloads ComfyUI's other models (their RAM); a long clip goes in pieces that fit
     SEEDVR_RAM_BUDGET, crossfaded over SEEDVR_PIECE_OVERLAP frames, with the clip's own sound. Progress: one bar
-    for the whole clip (SeedvrProgress) and a note per piece."""
+    for the whole clip (SeedvrProgress) and a note per piece. denoise: SEEDVR_DENOISE on the clip first."""
+    import tempfile
     from .chain import probe
+    if denoise:
+        with tempfile.TemporaryDirectory(prefix="video-chain-denoise-") as tmp:
+            clean = Path(tmp) / "denoised.mp4"
+            _denoise(Path(draft), clean)
+            return self.seedvr(clean, out, size, method, seed)
     files = self._seedvr_files(method)
     if not getattr(self, "_last_seedvr", False):  # the job before was another model: its RAM goes to SeedVR2
         self.free()
@@ -1841,6 +1852,14 @@ def _seedvr_pieces(self, files, draft, out, size, seed, pieces, total, track) ->
         self.note("joining the upscaled pieces")
         _join_pieces(made, pieces, Path(draft), Path(out), total)
         track.finish()
+
+
+def _denoise(src: Path, out: Path) -> None:
+    """The clip with SEEDVR_DENOISE applied, nearly lossless, its sound copied."""
+    import subprocess
+    subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(src), "-map", "0:v:0", "-map", "0:a:0?",
+                    "-vf", SEEDVR_DENOISE, "-c:v", "libx264", "-crf", "6", "-pix_fmt", "yuv420p", "-c:a", "copy",
+                    str(out)], check=True, capture_output=True)
 
 
 def _join_pieces(made: list[Path], pieces: list[tuple[int, int]], draft: Path, out: Path, total: int) -> None:

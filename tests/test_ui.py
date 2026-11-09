@@ -1569,12 +1569,20 @@ def test_export_refined_and_hyperflow_speed(app, win, tmp_path, image):
     assert [dlg.strength.itemData(i) for i in range(dlg.strength.count())] == ["soft", "natural", "crisp"]
     dlg.size.setCurrentIndex(2)
     assert dlg.method.isEnabled() and not dlg.strength.isEnabled() and not dlg.fast.isEnabled()   # (refine only)
+    assert dlg.denoise.isEnabled() and not dlg.denoise.isChecked()                # SeedVR2 only, off by default
     dlg.method.setCurrentIndex(dlg.method.findData("refine"))
-    assert dlg.strength.isEnabled() and dlg.fast.isEnabled()
+    assert dlg.strength.isEnabled() and dlg.fast.isEnabled() and not dlg.denoise.isEnabled()
+    dlg.reject()
+    asked = []
+    dlg = ExportDialog(None, str(tmp_path / "x.mp4"), (672, 384),
+                       lambda size, how, st, dn=False: asked.append(dn) or dn, denoise=True)
+    assert dlg.denoise.isChecked() and "already upscaled" in dlg.size.itemText(2)   # kept copies per choice
+    dlg.denoise.setChecked(False)
+    assert "already upscaled" not in dlg.size.itemText(2) and asked[-1] is False
     dlg.reject()
     seen = []
     dlg = ExportDialog(None, str(tmp_path / "x.mp4"), (672, 384),
-                       lambda size, how, st: seen.append((size, how, st)) or how == "seedvr2_3b", swapped=2)
+                       lambda size, how, st, dn=False: seen.append((size, how, st)) or how == "seedvr2_3b", swapped=2)
     assert "already upscaled" not in dlg.size.itemText(2) and ("2k", "seedvr2_7b", "natural") in seen
     dlg.method.setCurrentIndex(dlg.method.findData("seedvr2_3b"))         # kept copies are per method
     assert "already upscaled" in dlg.size.itemText(2)
