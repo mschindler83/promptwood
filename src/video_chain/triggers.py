@@ -47,8 +47,8 @@ def api_key() -> str:
         try:
             import keyring
             _API_KEY = (keyring.get_password(KEYRING_SERVICE, KEYRING_USER) or "").strip()
-        except Exception:  # noqa: BLE001  (no keyring backend: no key)
-            _API_KEY = ""
+        except Exception:  # noqa: BLE001  (no keyring now, e.g. locked: no key this time, asked again later)
+            return ""
     return _API_KEY
 
 
@@ -158,21 +158,35 @@ def sha256_of(path: str | Path, stop: Callable[[], bool] = lambda: False) -> str
     return h.hexdigest()
 
 
-def _get_json(path: str, timeout: float) -> dict | None:
-    """A CivitAI API answer (the first site that answers); None for 404. OSError when no site could be asked."""
+MAX_ANSWER = 32 * 2**20      # bytes read from one CivitAI answer at most
+
+
+class KeyRejected(OSError):
+    """CivitAI turned the API key down (401 / 403)."""
+
+
+def _get_json(path: str, timeout: float, use_key: bool = True) -> dict | None:
+    """A CivitAI API answer (the first site that answers); None for 404. OSError when no site could be asked.
+    The key goes only to CivitAI's own sites: as an unredirected header (a redirect elsewhere does not carry it).
+    A rejected key (401 / 403): asked once more without it."""
     last: Exception | None = None
+    key = api_key() if use_key else ""
     for site in SITES:
-        headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
-        key = api_key()
-        if key:                                        # (only ever sent to CivitAI's own sites)
-            headers["Authorization"] = f"Bearer {key}"
-        req = urllib.request.Request(f"{site}{path}", headers=headers)
+        req = urllib.request.Request(f"{site}{path}", headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+        if key:
+            req.add_unredirected_header("Authorization", f"Bearer {key}")
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
-                data = json.loads(r.read().decode("utf-8", "replace"))
+                data = json.loads(r.read(MAX_ANSWER).decode("utf-8", "replace"))
         except urllib.error.HTTPError as e:
             if e.code == 404:
                 return None
+            if e.code in (401, 403) and key:
+                try:
+                    return _get_json(path, timeout, use_key=False)
+                except OSError as e2:
+                    raise KeyRejected(f"CivitAI rejected the API key ({e.code}) and could not be asked without "
+                                      f"it: {e2}") from e2
             last = e
             continue
         except (OSError, ValueError) as e:
@@ -198,7 +212,7 @@ def civitai_lookup(sha: str, timeout: float = 20.0, gap: float = REQUEST_GAP) ->
         return None
     model = data.get("model") or {}
     mid = data.get("modelId") or model.get("id")
-    details: dict = {"version": data, "fetched": time.time()}
+    details: dict = {"version": data, "fetched": time.time(), "complete": True}
     if mid:
         try:
             time.sleep(gap)
@@ -209,7 +223,7 @@ def civitai_lookup(sha: str, timeout: float = 20.0, gap: float = REQUEST_GAP) ->
                                          for v in page.get("modelVersions") or [] if isinstance(v, dict)]
                 details["model"] = page
         except (OSError, ValueError, TypeError):
-            pass
+            details["complete"] = False                # (asked again with the next scan)
     if data.get("id"):
         try:
             time.sleep(gap)
@@ -218,7 +232,7 @@ def civitai_lookup(sha: str, timeout: float = 20.0, gap: float = REQUEST_GAP) ->
             if imgs and isinstance(imgs.get("items"), list):
                 details["examples"] = imgs["items"]
         except (OSError, ValueError, TypeError):
-            pass
+            details["complete"] = False
     return {"words": _clean(data.get("trainedWords") or []), "model": str(model.get("name") or ""),
             "url": f"https://civitai.com/models/{mid}?modelVersionId={data.get('id')}" if mid else "",
             "details": details}
@@ -292,7 +306,9 @@ class TriggerDB:
             self._mtime = self.path.stat().st_mtime_ns
 
     def details_path(self, sha: str) -> Path:
-        return self.path.parent / "civitai" / f"{sha}.json"
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", str(sha)):
+            raise ValueError(f"not a SHA-256: {sha!r}")
+        return self.path.parent / "civitai" / f"{sha.lower()}.json"
 
     def details(self, path: str) -> dict | None:
         """Everything CivitAI told about a LoRA (civitai_lookup's details), None when there is nothing."""
@@ -391,7 +407,8 @@ class TriggerDB:
         self.data["files"][str(path)] = f
         return f
 
-    def needs_lookup(self, path: str) -> bool:
+    def needs_lookup(self, path: str, key: str | None = None) -> bool:
+        key = api_key() if key is None else key            # (outside the lock: the keyring may ask to unlock)
         with self._lock:
             f = self._file(path)
             if f is None:
@@ -402,7 +419,7 @@ class TriggerDB:
             if rec.get("civitai") is not None:     # CivitAI knows it (its words, maybe none); asked again once
                 if int(rec.get("details_v") or 0) < DETAILS_VERSION:   # when it was found before these details
                     return True                                         # were kept,
-                return bool(api_key()) and not rec.get("asked_with_key")   # and once with an API key
+                return bool(key) and not rec.get("asked_with_key")   # and once with an API key
             if rec.get("checked"):
                 return time.time() - float(rec["checked"]) > RECHECK_DAYS * 86400
             return True
@@ -413,6 +430,7 @@ class TriggerDB:
         {"looked", "found", "unknown", "failed"}."""
         n = {"looked": 0, "found": 0, "unknown": 0, "failed": 0, "new": 0}
         asked, dirty, failed_in_a_row = False, 0, 0
+        key = api_key() if online else ""                  # (once, outside the lock)
 
         def flush(force=False):
             nonlocal dirty
@@ -431,7 +449,7 @@ class TriggerDB:
                         self._remember(path)
                         n["new"] += 1
                         dirty += 1
-                if not online or not self.needs_lookup(path):
+                if not online or not self.needs_lookup(path, key):
                     flush()
                     continue
                 with self._lock:
@@ -446,7 +464,7 @@ class TriggerDB:
                         if f.get("user") is not None:
                             self.data["by_sha"].setdefault(sha, {}).setdefault("user", f["user"])
                         dirty += 1
-                    if not self.needs_lookup(path):    # known by its content (moved, renamed, a copy)
+                    if not self.needs_lookup(path, key):    # known by its content (moved, renamed, a copy)
                         flush()
                         continue
                 if asked and gap:
@@ -467,15 +485,31 @@ class TriggerDB:
                     rec["checked"] = time.time()
                     if hit is None:
                         n["unknown"] += 1
+                        if rec.get("civitai") is not None:    # known before, gone now: not asked on every scan
+                            rec["details_v"] = DETAILS_VERSION
+                            if key:
+                                rec["asked_with_key"] = time.time()
                     else:
                         rec.update({"civitai": hit["words"], "model": hit["model"], "url": hit["url"]})
                         rec["asked_details"] = time.time()
-                        rec["details_v"] = DETAILS_VERSION
-                        if api_key():
-                            rec["asked_with_key"] = time.time()
+                        complete = (hit.get("details") or {}).get("complete", True)
+                        if complete:                   # (a part failed, e.g. rate limited: asked again later)
+                            rec["details_v"] = DETAILS_VERSION
+                            if key:
+                                rec["asked_with_key"] = time.time()
                         if hit.get("details"):
                             try:
-                                self._save_details(sha, hit["details"])
+                                new = dict(hit["details"])
+                                old = self.details_path(sha)
+                                if not complete and old.is_file():      # keep what an earlier answer had
+                                    try:
+                                        prev = json.loads(old.read_text(encoding="utf-8"))
+                                        for part in ("model", "examples"):
+                                            if part not in new and part in prev:
+                                                new[part] = prev[part]
+                                    except (OSError, ValueError):
+                                        pass
+                                self._save_details(sha, new)
                                 rec["details"] = True
                                 base = (hit["details"].get("version") or {}).get("baseModel")
                                 if base:

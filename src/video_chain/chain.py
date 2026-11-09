@@ -267,7 +267,11 @@ def probe_source(path: Path) -> dict:
     rot = rot or int(float((v.get("tags") or {}).get("rotate", 0) or 0))
     if rot % 180:
         w, h = h, w
-    return {"width": w, "height": h, "fps": fps, "duration": duration,
+    try:
+        frames = int(v.get("nb_frames") or 0)           # (not every container says; 0: unknown)
+    except ValueError:
+        frames = 0
+    return {"width": w, "height": h, "fps": fps, "duration": duration, "frames": frames,
             "audio": any(s.get("codec_type") == "audio" for s in streams)}
 
 

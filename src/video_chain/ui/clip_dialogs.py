@@ -374,7 +374,10 @@ class VideoFrameDialog(QDialog):
         self.fps = float(info.get("fps") or FPS)
         self.duration = float(info.get("duration") or 0.0)
         self.frames = max(1, int(round(self.duration * self.fps)))
+        if int(info.get("frames") or 0) > 0:           # the video stream's own count (a longer sound track
+            self.frames = min(self.frames, int(info["frames"]))   # must not add positions without a frame)
         self._req = 0
+        self._grabbing = self._again = False        # one ffmpeg at a time; the newest position after it
         self._sig = _Grabbed()
         self._sig.ready.connect(self._ready)
         self._tmp = tempfile.TemporaryDirectory(prefix="video-chain-frame-")
@@ -418,8 +421,7 @@ class VideoFrameDialog(QDialog):
         self._timer.setInterval(90)                 # (dragging the slider: only the frame it stops at is read)
         self._timer.timeout.connect(self._grab)
         self.slider.valueChanged.connect(self._moved)
-        self._moved(0)
-        self._grab()
+        self._moved(0)                               # (the first frame: read when the timer fires)
 
     def at(self) -> float:
         """The chosen frame's time in the video (its own frame rate)."""
@@ -435,6 +437,10 @@ class VideoFrameDialog(QDialog):
         self._timer.start()
 
     def _grab(self):
+        if self._grabbing:                           # a decode is running: the newest position comes after it
+            self._again = True
+            return
+        self._grabbing = True
         self._req += 1
         req, at, sig = self._req, self._seek(), self._sig
         out = Path(self._tmp.name) / f"p{req}.png"
@@ -448,6 +454,11 @@ class VideoFrameDialog(QDialog):
         threading.Thread(target=work, daemon=True).start()
 
     def _ready(self, req: int, img: QImage):
+        self._grabbing = False
+        if self._again:                              # moved on meanwhile: read the position it is at now
+            self._again = False
+            self._grab()
+            return
         if req != self._req:
             return                                  # an older position
         if img.isNull():

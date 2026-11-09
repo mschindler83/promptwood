@@ -524,7 +524,8 @@ class ImagePickerDialog(QDialog):
         ext = Path(path).suffix.lower()
         if ext in TEXT_EXTS:                                     # a list: its first lines
             try:
-                head = Path(path).read_text(encoding="utf-8", errors="replace")[:4000].splitlines()[:14]
+                with open(path, encoding="utf-8", errors="replace") as fh:   # (only the start of a big file)
+                    head = fh.read(4000).splitlines()[:14]
             except OSError:
                 head = []
             self.preview.setPixmap(self.style().standardIcon(QStyle.SP_FileIcon).pixmap(64, 64))

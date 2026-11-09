@@ -132,6 +132,10 @@ def test_civitai_details_are_kept(tmp_path, monkeypatch):
     app = QApplication.instance() or QApplication([])
     from video_chain.ui.lora_details import LoraDetailsDialog, clean_html
     assert "<img" not in clean_html(d["version"]["description"]) and "Use 0.8" in clean_html(d["version"]["description"])
+    dirty = clean_html("<p style='background:url(file:///x)'>a</p><table background='/etc/x'><tr><td>b</td></tr></table>"
+                       "<a href='javascript:x()'>c</a><a href=\"https://civitai.com/m\">d</a>")
+    assert "style" not in dirty and "background" not in dirty and "javascript" not in dirty
+    assert 'href="https://civitai.com/m"' in dirty
     dlg = LoraDetailsDialog(str(p), details=d)
     text = dlg.view.toPlainText()
     for want in ("Walk", "Wan Video 14B t2v", "Use 0.8.", "a woman walks, w4lk", "a man runs, w4lk", "motion",
@@ -153,7 +157,7 @@ def test_civitai_api_key(tmp_path, monkeypatch):
         def __init__(self, body):
             self.body = body
 
-        def read(self):
+        def read(self, n=-1):
             return self.body
 
         def __enter__(self):
@@ -163,7 +167,11 @@ def test_civitai_api_key(tmp_path, monkeypatch):
             return False
 
     def urlopen(req, timeout):
-        sent.append((req.full_url, req.get_header("Authorization")))
+        auth = req.get_header("Authorization") or req.unredirected_hdrs.get("Authorization")
+        assert "Authorization" not in req.headers                   # (never a header a redirect would carry on)
+        sent.append((req.full_url, auth))
+        if auth == "Bearer revoked":
+            raise TR.urllib.error.HTTPError(req.full_url, 401, "no", {}, None)
         return Resp(b'{"id": 1}')
     monkeypatch.setattr(TR.urllib.request, "urlopen", urlopen)
     assert TR.api_key() == ""
@@ -180,9 +188,29 @@ def test_civitai_api_key(tmp_path, monkeypatch):
     assert sent[-1] == ("https://civitai.com/api/v1/x", "Bearer secret123")
     db.scan([str(p)], lookup=lambda s: {"words": ["a"], "model": "A", "url": "", "details": {"version": {}}}, gap=0)
     assert not db.needs_lookup(str(p))
+    TR.set_api_key("revoked")                                    # a rejected key: asked again without it
+    assert TR._get_json("/api/v1/y", 5) == {"id": 1} and sent[-1] == ("https://civitai.com/api/v1/y", None)
+    with pytest.raises(ValueError):
+        db.details_path("../../etc/x")                           # only real hashes become file names
     monkeypatch.setenv("CIVITAI_API_KEY", "fromenv")
     assert TR.api_key() == "fromenv"
     monkeypatch.delenv("CIVITAI_API_KEY")
     TR.set_api_key("")
     TR._API_KEY = None
     assert TR.api_key() == ""
+
+
+def test_partial_details_keep_earlier_parts_and_gone_loras_are_not_reasked(tmp_path):
+    db = TR.TriggerDB(tmp_path / "db.json")
+    p = lora(tmp_path / "loras" / "x.safetensors", {"x": "1"})
+    full = {"words": ["w"], "model": "M", "url": "", "details": {"version": {"baseModel": "B"}, "complete": True,
+                                                                   "model": {"description": "d"}, "examples": [1]}}
+    db.scan([str(p)], lookup=lambda s: full, gap=0)
+    sha = TR.sha256_of(p)
+    db.data["by_sha"][sha]["details_v"] = 1                      # asked again (e.g. a newer details version) ...
+    part = {"words": ["w"], "model": "M", "url": "", "details": {"version": {"baseModel": "B"}, "complete": False}}
+    db.scan([str(p)], lookup=lambda s: part, gap=0)              # ... rate limited: the earlier parts stay
+    d = db.details(str(p))
+    assert d["model"] == {"description": "d"} and d["examples"] == [1] and db.needs_lookup(str(p))
+    db.scan([str(p)], lookup=lambda s: None, gap=0)              # deleted on CivitAI: not asked on every scan
+    assert not db.needs_lookup(str(p))
