@@ -24,7 +24,7 @@ class FakeGenerator:
         self.refines.append({"draft": Path(draft).name, "prompt": prompt, "size": tuple(size), "frames": frames,
                              "loras": loras, "first": first_frame and Path(first_frame).name,
                              "last": last_frame and Path(last_frame).name, "sparse": sparse})
-        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(draft), "-vf", f"scale={size[0]}:{size[1]}",
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(draft), "-vf", f"scale={size[0]}:{size[1]},setsar=1",
                         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(out)], check=True)
 
     def generate(self, prompt, start_image, out_video, out_last_frame, seed, settings=None):

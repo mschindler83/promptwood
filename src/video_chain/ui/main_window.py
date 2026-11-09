@@ -291,7 +291,8 @@ class ExportDialog(QDialog):
     """Where to save a path, and at which size: as made (quick: the clips are joined), or re-rendered at 1080p /
     2K by Open-H3-Regenerate-2K in ComfyUI (every clip once; the refined clips are kept for the next export)."""
 
-    def __init__(self, parent, default: str, made_size: tuple[int, int] | None, refined: dict[str, bool]):
+    def __init__(self, parent, default: str, made_size: tuple[int, int] | None, refined: dict[str, bool],
+                 swapped: int = 0):
         super().__init__(parent)
         self.setWindowTitle("Export path")
         self.setMinimumWidth(620)
@@ -330,6 +331,17 @@ class ExportDialog(QDialog):
         self.fast.setEnabled(False)
         self.size.currentIndexChanged.connect(lambda *_: self.fast.setEnabled(self.size.currentData() != "made"))
         f.addRow("", self.fast)
+        self.swapped = QCheckBox(f"Refine the video{'s' if swapped != 1 else ''} with a replaced person too")
+        self.swapped.setToolTip("A video whose person was replaced was made at the generation size. On: it is "
+                                "re-rendered by the refine like a generated clip (a sharper face at the higher "
+                                "size; its prompt is the new person's face description), its recorded sound kept. "
+                                "Off: it is only scaled up from its made size. The refine re-noises the picture, so "
+                                "small details can change. Costs the same time as a generated clip of that length")
+        self.swapped.setChecked(True)
+        self.swapped.setVisible(bool(swapped))
+        self.swapped.setEnabled(False)
+        self.size.currentIndexChanged.connect(lambda *_: self.swapped.setEnabled(self.size.currentData() != "made"))
+        f.addRow("", self.swapped)
         note = label("Refined export needs ComfyUI with the H3 2K nodes, the latent upscaler and the refiner LoRA. "
                      "Generating and the preview stay at the normal size.", level="tertiary")
         note.setWordWrap(True)
@@ -5386,16 +5398,19 @@ class MainWindow(QMainWindow):
         base = T.Checker(self.project, self.tree).base()
         refined = {size: all(n.made and T.refined_file(self.project, n, size).is_file() for n in path)
                    for size in T.REFINED}
-        dlg = ExportDialog(self, default, (base["width"], base["height"]) if base else None, refined)
+        swapped = sum(1 for n in path if T.swapped_video(n))
+        dlg = ExportDialog(self, default, (base["width"], base["height"]) if base else None, refined, swapped)
         try:
             if dlg.exec() != QDialog.Accepted:
                 return
             out, size, fast = dlg.target(), dlg.size.currentData(), dlg.fast.isChecked()
+            refine_swapped = bool(swapped) and dlg.swapped.isChecked()
         finally:
             dlg.deleteLater()
-        self.export(out, size, fast)
+        self.export(out, size, fast, refine_swapped)
 
-    def export(self, out: Path, size: str = "made", fast_attention: bool = False) -> None:
+    def export(self, out: Path, size: str = "made", fast_attention: bool = False,
+               refine_swapped: bool = False) -> None:
         """Export the selected path to out: as made (joined here), or refined at '1080p' / '2k' (a generator job)."""
         path = self.selected_path()
         if not path:
@@ -5403,7 +5418,8 @@ class MainWindow(QMainWindow):
         if size == "made":
             self.join_selected("export", out)
             return
-        self._start([path[-1].id], refine={"size": size, "out": str(out), "fast_attention": bool(fast_attention)})
+        self._start([path[-1].id], refine={"size": size, "out": str(out), "fast_attention": bool(fast_attention),
+                                           "refine_swapped": bool(refine_swapped)})
 
     # ------------------------------------------------------------------ GPU
     def _poll_gpu(self):

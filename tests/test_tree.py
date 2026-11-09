@@ -1,6 +1,7 @@
 """Branching tree with the fake generator (synthetic clips); no model."""
 import json
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -997,3 +998,31 @@ def test_lora_trigger_words_in_clips(project, tmp_path):
     t.options["lora_triggers"] = False                                         # off: the prompt as written
     T.save(project, t)
     assert "lora_triggers" not in T.Checker(project, T.load(project)).settings(a.id)
+
+
+def test_refined_export_can_refine_a_video_with_a_replaced_person(project, tmp_path):
+    from video_chain import swap
+    clip = tmp_path / "swapped.mp4"                    # 1 s at 24 fps (off H3's frame grid), with sound
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=96x54:r=24:d=1", "-f", "lavfi",
+                    "-i", "sine=frequency=440:duration=1", "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", str(clip)], check=True)
+    t = T.load(project)
+    v = t.add_video(None, str(clip), 0.0, 1.0)
+    a = t.add(v.id, "a")
+    swap.apply(v, clip, 24, {"method": "h3", "details": "Male, short black hair", "seed": 7})
+    T.save(project, t)
+    gen = run(project, [a.id])
+    out = tmp_path / "out.mp4"
+    T.refine_path(gen, project, a.id, "2k", out, log=lambda _m: None, refine_swapped=True)
+    r = gen.refines[0]
+    assert r["prompt"] == "Male, short black hair" and r["frames"] == 39 and r["draft"] == f"{v.id}_draft.mp4"
+    assert r["loras"] == [] and gen.refines[1]["first"] == f"{a.id}_first.png"   # the next clip pinned to it
+    t = T.load(project)
+    refined = T.refined_file(project, t.nodes[v.id], "2k")
+    info = chain.probe(refined)
+    assert info["frames"] == 24 and info["audio"] and (info["width"], info["height"]) == r["size"]
+    T.refine_path(gen, project, a.id, "2k", tmp_path / "again.mp4", log=lambda _m: None, refine_swapped=True)
+    assert len(gen.refines) == 2                                     # reused
+    T.refine_path(gen, project, a.id, "2k", tmp_path / "plain.mp4", log=lambda _m: None)
+    assert json.loads(refined.with_suffix(".json").read_text())["video"] == "converted"   # only scaled up now
+    assert len(gen.refines) == 3 and gen.refines[2]["prompt"] == "a"   # (pinned to the other first frame)

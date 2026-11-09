@@ -2251,6 +2251,17 @@ def refined_file(project: Path, node: Node, size: str) -> Path:
     return Path(project) / v.parent / f"{v.stem}_{size}.mp4"
 
 
+SWAPPED_REFINE_PROMPT = "A realistic video of a person, natural skin texture, sharp detailed face."
+
+
+def swapped_video(node: Node) -> dict | None:
+    """A video node whose person was replaced: what it was replaced with (see swap.replaced), else None."""
+    if not node.is_video:
+        return None
+    from .swap import replaced
+    return replaced(node)
+
+
 def _refine_record(target: Path) -> dict:
     try:
         return json.loads(target.with_suffix(".json").read_text(encoding="utf-8"))
@@ -2260,7 +2271,7 @@ def _refine_record(target: Path) -> dict:
 
 def refine_path(generator, project: Path, nid: str, size: str, out: Path,
                 events: Callable[[dict], None] | None = None, log: Callable[[str], None] = print,
-                pin: bool = True, fast_attention: bool = False) -> Path:
+                pin: bool = True, fast_attention: bool = False, refine_swapped: bool = False) -> Path:
     """Export the path start -> nid at a higher size ('1080p' / '2k'): every generated clip is re-rendered by
     generator.refine (Open-H3-Regenerate-2K) as it was made (its prompt, style text, LoRAs, seed), every real video
     is converted again from its file at that size. Refined copies are kept (nodes/<clip>_<size>.mp4) and reused.
@@ -2269,6 +2280,8 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
     higher size; a kept copy is reused only while those frames are the same (its .json records them).
     fast_attention: Sol-Attn block-sparse attention for the refine (about 2x faster at 2K, not exact); the
     attention a copy was made with is recorded too, so the other choice makes new copies.
+    refine_swapped: a real video whose person was replaced (made at the generation size) is re-rendered by the
+    refine like a generated clip (prompt: the new person's face details), not only converted at the higher size.
     Then the path is joined (the same frames left out as at the normal size) into out."""
     from .comfy import refine_size
     if size not in REFINED:
@@ -2305,9 +2318,17 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
                     last = tmp / f"{node.id}_last.png"
                     chain.frame_at(refined_file(project, vc, size), 0, last)
             pins = {"first": chain.file_signature(first), "last": chain.file_signature(last)}
-            if fast_attention:
+            regen = not node.is_video or bool(refine_swapped and swapped_video(node))
+            if node.is_video:
+                pins["video"] = "refined" if regen else "converted"
+            if fast_attention and regen:
                 pins["attention"] = "sol-attn"
-            if target.is_file() and (node.is_video or _refine_record(target) == pins):
+            record = _refine_record(target)
+            if node.is_video and not regen and record.get("video", "converted") == "converted":
+                reuse = target.is_file()                 # (copies converted before the record named it)
+            else:
+                reuse = target.is_file() and record == pins
+            if reuse:
                 emit({"e": "node", "id": node.id, "state": "reused"})
                 continue
             emit({"e": "node", "id": node.id, "state": "generating", "k": k, "n": len(order)})
@@ -2317,7 +2338,34 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
                     not node.is_video and not all(k_ in s for k_ in ("width", "height")):
                 raise ValueError(f"{'video' if node.is_video else 'clip'} #{node.id[1:]} has no recorded size; "
                                  "make it again, then export")
-            if node.is_video:
+            if node.is_video and regen:                  # a replaced person: re-rendered like a generated clip
+                key = node.made.get("key") or {}
+                w, h = refine_size(int(key["width"]), int(key["height"]), size)
+                info = swapped_video(node)
+                prompt = info.get("details") or info.get("prompt") or SWAPPED_REFINE_PROMPT
+                log(f"[{k}/{len(order)}] {node.id}: refining the video with the replaced person at {w}x{h}")
+                from .comfy import SOL_TAU
+                import subprocess
+                draft, n = project / node.made["video"], _clip_frames(project, node)
+                grid = n if n <= 5 or n % 17 == 5 else n + (5 - n) % 17       # H3's 17n+5 frame grid
+                padded = tmp / f"{node.id}_draft.mp4"
+                if grid != n:                            # the last frame held to the grid, cut off again after
+                    subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(draft), "-vf",
+                                    f"tpad=stop_mode=clone:stop={grid - n}", "-c:v", "libx264", "-crf", "10",
+                                    "-pix_fmt", "yuv420p", "-c:a", "copy", str(padded)], check=True,
+                                   capture_output=True)
+                made = tmp / f"{node.id}_refined.mp4" if grid != n else target
+                generator.refine(padded if grid != n else draft, prompt, made, int(info.get("seed") or 0), (w, h),
+                                 grid, [], None, None, sparse=SOL_TAU if fast_attention else None)
+                if grid != n:
+                    subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(made), "-frames:v", str(n),
+                                    "-c:v", "libx264", "-crf", "12", "-pix_fmt", "yuv420p", "-an", str(target)],
+                                   check=True, capture_output=True)
+                if chain.audio_seconds(draft):                # the recorded sound exactly, not the model's
+                    wav = tmp / f"{node.id}_sound.wav"
+                    chain.to_wav(draft, wav)
+                    chain.replace_audio(target, wav)
+            elif node.is_video:
                 src = node.source
                 if not Path(src["file"]).is_file():
                     raise FileNotFoundError(f"video file not found: {src['file']}")
@@ -2349,7 +2397,7 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
                                  s["source_sound"].get("offset") or 0.0, s["source_sound"].get("pad") or 0.0,
                                  fill=s["source_sound"].get("mode") == "track")
                     chain.replace_audio(target, wav)
-                target.with_suffix(".json").write_text(json.dumps(pins), encoding="utf-8")
+            target.with_suffix(".json").write_text(json.dumps(pins), encoding="utf-8")
             made_now.append(node.id)
             emit({"e": "node", "id": node.id, "state": "done"})
     videos = [refined_file(project, n, size) for n in path]

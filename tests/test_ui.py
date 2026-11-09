@@ -1546,6 +1546,13 @@ def test_export_refined_and_hyperflow_speed(app, win, tmp_path, image):
     texts = [dlg.size.itemText(i) for i in range(dlg.size.count())]
     assert texts[0].startswith("As made (672×384)") and "1888×1088 · already refined" in texts[1] \
         and "2528×1440" in texts[2]
+    assert dlg.swapped.isHidden()                                            # no video with a replaced person
+    dlg.reject()
+    dlg = ExportDialog(None, str(tmp_path / "x.mp4"), (672, 384), {}, swapped=2)
+    assert not dlg.swapped.isHidden() and dlg.swapped.isChecked() and not dlg.swapped.isEnabled()
+    assert dlg.swapped.text() == "Refine the videos with a replaced person too"
+    dlg.size.setCurrentIndex(2)
+    assert dlg.swapped.isEnabled()
     dlg.reject()
     out = tmp_path / "export-2k.mp4"
     win.export(out, "2k")
