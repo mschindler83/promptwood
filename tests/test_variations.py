@@ -56,3 +56,16 @@ def test_node_json_and_lists():
     assert V.wildcard_values("# animals\ncat\n\n dog \n#x") == ["cat", "dog"]
     assert V.split_values("red, green , blue") == ["red", "green", "blue"]
     assert V.split_values("a, b\nc") == ["a, b", "c"]
+
+
+def test_review_cases():
+    # a value with braces is not read again; normal prompts are not tidied; {cat|dog} is no placeholder
+    assert V.substitute("{?c|see {a}} and {b}", {"a": "{b}", "b": "B", "c": "1"}) == "see {b} and B"
+    assert V.substitute("Shot 1: {x}\n...then he runs ()", {"x": "cat"}) == "Shot 1: cat\n...then he runs ()"
+    assert V.substitute("[Shot 1] @Anna says: hi !\n\n? {x}", {"x": "ok"}) == "[Shot 1] @Anna says: hi !\n\n? ok"
+    assert V.substitute("a {m} dog, {s}, running", {"m": "", "s": ""}) == "a dog, running"
+    assert V.names_in("{cat|dog} {?s|x} {a}") == ["s", "a"]
+    assert [v.name for v in V.from_json('{"a": [[], "x"]}')] == ["a"] and len(V.from_json('{"a": [[], "x"]}')[0].values) == 1
+    big = [V.Variable(f"v{i}", [V.Value(str(k)) for k in range(10)]) for i in range(10)]   # 10^10 combinations
+    assert len(V.plan_jobs(big, " ".join(f"{{v{i}}}" for i in range(10)))) == V.MAX_IMAGES
+    assert len(V.plan_jobs(big, " ".join(f"{{v{i}}}" for i in range(10)), count=5, mode="shuffle")) == 5

@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 NAME = r"[A-Za-z_][\w-]*"
 _COND = re.compile(r"\{\?(" + NAME + r")\|((?:[^{}]|\{" + NAME + r"\})*)\}")
 _PLAIN = re.compile(r"\{(" + NAME + r")\}")
+_ANY = re.compile(_COND.pattern + "|" + _PLAIN.pattern)       # both in one pass (values are not read again)
+MAX_IMAGES = 100_000                       # one Generate makes at most this many
 SHUFFLE_LIMIT = 100_000                     # bigger products: shuffle falls back to random picks
 MODES = ("order", "shuffle", "random")
 
@@ -45,32 +47,44 @@ def names_in(*templates: str) -> list[str]:
     """The placeholder names used in the templates, in order of first appearance."""
     out: list[str] = []
     for t in templates:
-        for m in re.finditer(r"\{\??(" + NAME + r")[|}]", t or ""):
-            if m.group(1) not in out:
-                out.append(m.group(1))
+        for m in re.finditer(r"\{(?:\?(" + NAME + r")\||(" + NAME + r")\})", t or ""):   # ({cat|dog} is not one)
+            name = m.group(1) or m.group(2)
+            if name not in out:
+                out.append(name)
     return out
 
 
 def _tidy(text: str) -> str:
-    """After empty values: no doubled spaces or commas, nothing dangling at the ends."""
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\s+([,.;:!?])", r"\1", text)
-    text = re.sub(r"([,;])(\s*[,;])+", r"\1", text)
-    text = re.sub(r"\(\s*\)", "", text)
-    text = re.sub(r"[ \t]+", " ", text)
-    return text.strip(" ,;")
+    """After an empty value: no doubled spaces or commas, nothing dangling at the ends (within lines: line
+    breaks, brackets and the rest of the prompt stay as written)."""
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"[ \t]+([,;])", r"\1", text)
+    text = re.sub(r"([,;])([ \t]*[,;])+", r"\1", text)
+    return "\n".join(line.strip(" \t,;") if line.strip(" \t,;") != line.strip() else line.rstrip(" \t")
+                     for line in text.split("\n")).strip()
 
 
 def substitute(template: str, combo: dict[str, str]) -> str:
     """The template with the chosen values (unknown placeholders stay as they are)."""
-    def cond(m):
-        val = combo.get(m.group(1))
+    empty = False
+
+    def one(m):
+        nonlocal empty
+        if m.group(1) is not None:                          # {?name|text with {name}}
+            val = combo.get(m.group(1))
+            if val is None:
+                return m.group(0)
+            if not val.strip():
+                empty = True
+                return ""
+            return _PLAIN.sub(lambda p: combo.get(p.group(1), p.group(0)), m.group(2))
+        val = combo.get(m.group(3))
         if val is None:
             return m.group(0)
-        return "" if not val.strip() else _PLAIN.sub(lambda p: combo.get(p.group(1), p.group(0)), m.group(2))
-    text = _COND.sub(cond, template or "")
-    text = _PLAIN.sub(lambda m: combo.get(m.group(1), m.group(0)), text)
-    return _tidy(text) if combo else text
+        empty = empty or not val.strip()
+        return val
+    text = _ANY.sub(one, template or "")
+    return _tidy(text) if empty else text
 
 
 class Plan:
@@ -123,6 +137,7 @@ class Job:
     combo: dict[str, str]
     prompt: str
     negative: str
+    key: str = ""                 # (the panel's position key it was planned under)
 
 
 def plan_jobs(variables: list[Variable], prompt: str, negative: str = "", mode: str = "order", repeat: int = 1,
@@ -131,7 +146,7 @@ def plan_jobs(variables: list[Variable], prompt: str, negative: str = "", mode: 
     from position `start` (order / shuffle continue there; random uses it only to vary its picks)."""
     plan = Plan(variables, prompt, negative)
     repeat = max(1, int(repeat))
-    n = plan.total * repeat if count is None else max(0, int(count))
+    n = min(MAX_IMAGES, plan.total * repeat if count is None else max(0, int(count)))
     order = plan.shuffled(seed) if mode == "shuffle" else None
     rng = random.Random(f"{seed}:{start}")
     jobs = []
@@ -161,7 +176,9 @@ def from_json(text: str) -> list[Variable]:
             continue
         var = Variable(str(name))
         for v in vals:
-            if isinstance(v, list) and v:
+            if isinstance(v, list) and not v:
+                continue                                    # (an empty list is no value)
+            if isinstance(v, list):
                 var.values.append(Value(str(v[0]), int(v[1]) if len(v) > 1 and str(v[1]).isdigit() else 1))
             elif isinstance(v, dict):
                 var.values.append(Value(str(v.get("text", "")), int(v.get("weight", 1) or 1), bool(v.get("on", True))))

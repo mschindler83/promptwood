@@ -3217,3 +3217,38 @@ def test_prompt_variations_in_the_create_window(app, tmp_path, image, monkeypatc
         w.close()
     finally:
         server.close()
+
+
+def test_variations_panel_review_cases(app, monkeypatch):
+    """Double-click + Cancel keeps pill and preview in step; the preview builds only what it shows; the position
+    key knows the repeat; done() stores under the planned key."""
+    from video_chain import variations as V
+    from video_chain.ui import variations_panel as VP
+    p = VP.VariationsPanel()
+    p.set_templates("{a} {b}")
+    p.on.setChecked(True)
+    p.variable("a").values = [V.Value(str(k)) for k in range(300)]
+    p.variable("b").values = [V.Value(str(k)) for k in range(300)]
+    p._rebuild()
+    assert p.amount() == 90000 and "… and 89900 more" in p.preview.toPlainText()
+    key1 = p.position_key()
+    p.repeat.setValue(3)
+    assert p.position_key() != key1                                    # repeat is part of the position
+    p.done(4, key1)
+    assert p.positions[key1] == 5 and p.start() == 0
+    small = VP.VariationsPanel()
+    small.set_templates("{c}")
+    small.on.setChecked(True)
+    small.variable("c").values = [V.Value("x"), V.Value("y")]
+    small._rebuild()
+    card = small.cards_box.itemAt(0).widget()
+    pill = card.pills.items[0]
+    monkeypatch.setattr(VP.QInputDialog, "getText", lambda *a, **k: ("", False))
+    pill.value.on = False                                              # (the first click of the double-click)
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+    ev = QMouseEvent(QEvent.MouseButtonDblClick, QPointF(5, 5), QPointF(5, 5), Qt.LeftButton, Qt.LeftButton,
+                     Qt.NoModifier)
+    pill.mouseDoubleClickEvent(ev)                                     # then Cancel
+    app.processEvents()
+    assert small.variable("c").values[0].on and small.amount() == 2 and "makes 2 images" in small.preview.toPlainText()

@@ -137,6 +137,8 @@ class Pill(QFrame):
     def mouseDoubleClickEvent(self, e):          # noqa: N802
         if e.button() == Qt.LeftButton:
             self.value.on = not self.value.on    # (the first click of the double-click switched it)
+            self.refresh()
+            self.changed.emit()                  # (also when the edit is cancelled)
             self.edit()
 
     def edit(self):
@@ -176,6 +178,7 @@ class Pill(QFrame):
 class VariableCard(QFrame):
     """A placeholder and its values."""
     changed = Signal()
+    typing = Signal(str)
     insert = Signal(str)
     remove = Signal(str)
 
@@ -243,6 +246,7 @@ class VariableCard(QFrame):
         if not text.strip():
             return
         self.add.clear()
+        self.typing.emit(self.var.name)          # (the panel puts the cursor back here after it rebuilt)
         self.add_values(V.split_values(text) if ("\n" in text or "," in text) else [text])
 
     def paste_list(self):
@@ -473,12 +477,22 @@ class VariationsPanel(QFrame):
     def _key(self) -> str:
         plan = V.Plan(self.vars, self.prompt, self.negative)
         raw = json.dumps([self.prompt, self.negative, [(v.name, [x.text for x in v.active()]) for v in plan.vars],
-                          self.mode()], ensure_ascii=False)
+                          self.mode(), self.repeat.value()], ensure_ascii=False)
         return hashlib.sha1(raw.encode()).hexdigest()[:16]
 
+    def position_key(self) -> str:
+        return self._key() if self.mode() != "random" else "random"
+
     def start(self) -> int:
-        return int(self.positions.get(self._key(), 0)) if self.mode() != "random" else \
-            int(self.positions.get("random", 0))
+        return int(self.positions.get(self.position_key(), 0))
+
+    def amount(self) -> int:
+        """How many images the next Generate makes (without building them)."""
+        if not self.active():
+            return 0
+        n = V.Plan(self.vars, self.prompt, self.negative).total * self.repeat.value() if self.all.isChecked() \
+            else self.count.value()
+        return min(n, V.MAX_IMAGES)
 
     def jobs(self, seed: int = 0) -> list[V.Job]:
         """The prompts of the next Generate (empty when variations are not active)."""
@@ -487,10 +501,11 @@ class VariationsPanel(QFrame):
         return V.plan_jobs(self.vars, self.prompt, self.negative, self.mode(), self.repeat.value(),
                            None if self.all.isChecked() else self.count.value(), self.start(), seed)
 
-    def done(self, step: int):
-        """An image of position `step` was made: the next Generate continues after it."""
-        key = self._key() if self.mode() != "random" else "random"
-        self.positions[key] = max(int(self.positions.get(key, 0)), int(step) + 1)
+    def done(self, step: int, key: str | None = None):
+        """An image of position `step` was made (planned under `key`): the next Generate continues after it."""
+        key = key or self.position_key()
+        pos = max(int(self.positions.pop(key, 0)), int(step) + 1)
+        self.positions[key] = pos                    # (re-inserted: the most recently used are kept)
         if len(self.positions) > POSITIONS_KEPT:
             for k in list(self.positions)[:len(self.positions) - POSITIONS_KEPT]:
                 self.positions.pop(k, None)
@@ -498,7 +513,7 @@ class VariationsPanel(QFrame):
         self.changed.emit()
 
     def restart(self):
-        self.positions.pop(self._key() if self.mode() != "random" else "random", None)
+        self.positions.pop(self.position_key(), None)
         self._refresh()
         self.changed.emit()
 
@@ -602,10 +617,21 @@ class VariationsPanel(QFrame):
                 card = VariableCard(var, color_of(var.name, names), var.name in used, self.mode() == "random",
                                     self.pick_file)
                 card.changed.connect(self._rebuild_later)
+                card.typing.connect(self._remember_typing)
                 card.insert.connect(self.insert)
                 card.remove.connect(self._remove)
                 self.cards_box.addWidget(card)
+        focus = getattr(self, "_typing_in", None)
+        if focus:
+            self._typing_in = None
+            for i in range(self.cards_box.count()):
+                card = self.cards_box.itemAt(i).widget()
+                if card is not None and card.var.name == focus:
+                    card.add.setFocus()
         self._refresh()
+
+    def _remember_typing(self, name: str):
+        self._typing_in = name
 
     def _rebuild_later(self):
         from PySide6.QtCore import QTimer
@@ -654,8 +680,9 @@ class VariationsPanel(QFrame):
             self.preview.setVisible(False)
             return
         self.preview.setVisible(True)
+        n = self.amount()
         jobs = V.plan_jobs(self.vars, self.prompt, self.negative, self.mode(), self.repeat.value(),
-                           None if self.all.isChecked() else self.count.value(), self.start(), 0)
+                           min(n, 100), self.start(), 0)                    # (only what is shown is built)
         names = self.names()
         rows = []
         for k, j in enumerate(jobs[:100]):
@@ -664,10 +691,12 @@ class VariationsPanel(QFrame):
             short = j.prompt if len(j.prompt) <= 150 else j.prompt[:148] + "…"
             rows.append(f"<p style='margin:0 0 4px 0'><span style='color:gray'>{k + 1}.</span> {vals}"
                         f"<br><span style='color:gray'>{html.escape(short)}</span></p>")
-        more = f"<p style='color:gray'>… and {len(jobs) - 100} more</p>" if len(jobs) > 100 else ""
-        head = (f"<p style='margin:0 0 6px 0'><b>The next Generate makes {len(jobs)} image"
-                f"{'s' if len(jobs) != 1 else ''}</b>" + (" (random picks; seeds decide)" if self.mode() == "random"
-                                                         else "") + ":</p>")
+        more = f"<p style='color:gray'>… and {n - 100} more</p>" if n > 100 else ""
+        big = self.mode() == "shuffle" and plan.total > V.SHUFFLE_LIMIT
+        head = (f"<p style='margin:0 0 6px 0'><b>The next Generate makes {n} image{'s' if n != 1 else ''}</b>"
+                + (" (random picks)" if self.mode() == "random" else
+                   f" (more than {V.SHUFFLE_LIMIT:,} combinations cannot be shuffled: random picks)" if big else "")
+                + ":</p>")
         self.preview.setHtml(head + "".join(rows) + more)
 
     def sizeHint(self):                          # noqa: N802

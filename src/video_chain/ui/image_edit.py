@@ -1239,7 +1239,7 @@ class ImageEditDialog(QDialog):
                                  "seed": seed, "source": source,
                                  "source_copy": str(kept), **({"mask": str(mask_file)} if mask_file else {}),
                                  "refs": refs, "size": list(size) if size else None,
-                                 **(self._variation_meta(job, prompt) if job else {})})
+                                 **(self._variation_meta(job, prompt, job.key) if job else {})})
                     out.with_suffix(".json").write_text(json.dumps(meta, indent=2, ensure_ascii=False),
                                                         encoding="utf-8")
                     sig.result.emit(str(out), meta)
@@ -1605,8 +1605,13 @@ class ImageEditDialog(QDialog):
         return True
 
     # ---- prompt variations (variations_panel.py)
+    def _negative_used(self) -> bool:
+        """The negative prompt goes with the next Generate (create mode, its field shown for this model)."""
+        return self.mode() == "create" and self.negative.isVisibleTo(self)
+
     def _templates_changed(self):
-        self.variations.set_templates(self.prompt.toPlainText(), self.negative.text())
+        self.variations.set_templates(self.prompt.toPlainText(),
+                                      self.negative.text() if self._negative_used() else "")
 
     def _variations_changed(self):
         if self.qs is not None:
@@ -1626,7 +1631,7 @@ class ImageEditDialog(QDialog):
                                        "pick the best one. They are made one after another and each appears when it "
                                        "is ready; Cancel stops after the current one")
         if hasattr(self, "b_gen"):
-            n = len(self.variations.jobs()) if active else 0
+            n = self.variations.amount() if active else 0
             self.b_gen.setText(f"Generate {n} image{'s' if n != 1 else ''}" if active else "Generate")
 
     def _insert_placeholder(self, name: str):
@@ -1652,14 +1657,20 @@ class ImageEditDialog(QDialog):
             return None
         self._templates_changed()
         many = self.variations.too_many()
-        if many and QMessageBox.question(self, "Variations", f"Every combination makes {many} images. Make them "
-                                         "all?") != QMessageBox.Yes:
+        from ..variations import MAX_IMAGES
+        if many and QMessageBox.question(self, "Variations", f"Every combination makes {many:,} images"
+                                         + (f" (one Generate makes at most {MAX_IMAGES:,})" if many > MAX_IMAGES
+                                            else "") + ". Make them all?") != QMessageBox.Yes:
             return []
-        return self.variations.jobs()
+        jobs = self.variations.jobs()
+        key = self.variations.position_key()
+        for j in jobs:                                     # (as the plain prompt: one line, single spaces)
+            j.prompt, j.negative, j.key = " ".join(j.prompt.split()), " ".join(j.negative.split()), key
+        return jobs
 
-    @staticmethod
-    def _variation_meta(job, prompt: str) -> dict:
-        return {"template": prompt, "variation": {"values": job.combo, "step": job.step, "index": job.index}}
+    def _variation_meta(self, job, prompt: str, key: str) -> dict:
+        return {"template": prompt, "variation": {"values": job.combo, "step": job.step, "index": job.index,
+                                                  "key": key}}
 
     def new_seed(self):
         """A fresh random seed in the field."""
@@ -1680,7 +1691,7 @@ class ImageEditDialog(QDialog):
         self._busy, self._cancel = True, False
         fam, model = self.family.currentData(), self.model_file.currentData()
         prompt = " ".join(self.prompt.toPlainText().split())
-        negative = " ".join(self.negative.text().split()) if self.negative.isVisible() else ""
+        negative = " ".join(self.negative.text().split()) if self._negative_used() else ""
         quality, n = self.quality.currentData(), self.tries.value()
         jobs = self._variation_jobs()
         if jobs is not None:
@@ -1733,7 +1744,7 @@ class ImageEditDialog(QDialog):
                                               quality, w, h, neg_k, loras, [Path(r) for r in refs], strength, tags,
                                               sampling)
                     meta.update({"run": run, "prompt": job.prompt if job else prompt, "trigger_words": words,
-                                 "seed": seed, "refs": refs, **(self._variation_meta(job, prompt) if job else {}),
+                                 "seed": seed, "refs": refs, **(self._variation_meta(job, prompt, job.key) if job else {}),
                                  "tags": tags,
                                  "source_copy": str(kept) if kept else None})
                     out.with_suffix(".json").write_text(json.dumps(meta, indent=2, ensure_ascii=False),
@@ -1777,7 +1788,7 @@ class ImageEditDialog(QDialog):
 
     def _result(self, png: str, meta: dict):
         if isinstance(meta.get("variation"), dict) and meta["variation"].get("step") is not None:
-            self.variations.done(int(meta["variation"]["step"]))      # the next Generate continues after it
+            self.variations.done(int(meta["variation"]["step"]), meta["variation"].get("key"))   # continues after
         self._load_results(select=png)
         self.b_before.setChecked(False)
 
