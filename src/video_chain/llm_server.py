@@ -121,14 +121,19 @@ def parse_ideas(text: str) -> list[dict]:
     """The ideas in a model's answer: [{"title", "angle", "prompt"}] (JSON, also inside code fences or with
     text around it; a missing title / angle is filled in)."""
     import re
-    text = re.sub(r"<think>.*?</think>", "", text or "", flags=re.S | re.I)
-    start, end = text.find("["), text.rfind("]")
-    if start < 0 or end <= start:
-        raise LlmServerError("the model gave no list of ideas")
-    try:
-        data = json.loads(text[start:end + 1])
-    except ValueError as e:
-        raise LlmServerError(f"the model's list of ideas is not readable ({e})") from e
+    text = re.sub(r"<think>.*?(</think>|$)", "", text or "", flags=re.S | re.I)
+    dec, data, err = json.JSONDecoder(), None, None
+    for m in re.finditer(r"\[", text):                 # the first JSON list of ideas (text around it, "[Note]" …)
+        try:
+            cand, _end = dec.raw_decode(text, m.start())
+        except ValueError as e:
+            err = err or e
+            continue
+        if isinstance(cand, list) and cand and all(isinstance(x, (dict, str)) for x in cand):
+            data = cand
+            break
+    if data is None:
+        raise LlmServerError("the model gave no list of ideas" + (f" ({err})" if err else ""))
     out = []
     for k, d in enumerate(data if isinstance(data, list) else []):
         if isinstance(d, str):
@@ -144,19 +149,20 @@ def parse_ideas(text: str) -> list[dict]:
 
 
 def missing_bullets(bullets: str, prompt: str) -> list[str]:
-    """The bullet points a prompt seems to leave out: fewer than half of a bullet's words (4+ letters, compared by
-    their first 5 letters) appear in it; @Names must appear as written."""
+    """The bullet points a prompt seems to leave out: fewer than half of a bullet's words (3+ letters, compared by
+    their first 4 letters, so "rain" finds "raining") appear in it, or an @Name is not there as a whole word.
+    A bullet without such words is not judged."""
     import re
     low = prompt.lower()
-    stems = {w[:5] for w in re.findall(r"[^\W\d_]{4,}", low)}
+    stems = {w[:4] for w in re.findall(r"[^\W\d_]{3,}", low)}
     out = []
     for line in bullets.splitlines():
         b = re.sub(r"^\s*([-*•·]|\d+[.)])\s*", "", line).strip()
         if not b:
             continue
         names = re.findall(r"@[\w-]+", b)
-        words = [w.lower()[:5] for w in re.findall(r"[^\W\d_]{4,}", re.sub(r"@[\w-]+", "", b))]
-        lost_name = any(n.lower() not in low for n in names)
+        words = [w.lower()[:4] for w in re.findall(r"[^\W\d_]{3,}", re.sub(r"@[\w-]+", "", b))]
+        lost_name = any(not re.search(re.escape(n.lower()) + r"(?![\w-])", low) for n in names)
         if lost_name or (words and sum(w in stems for w in words) * 2 < len(words)):
             out.append(b)
     return out
@@ -184,8 +190,9 @@ class LlamaServer:
         self.server, self.model, self.port, self.cpu_moe, self.mmproj = server, model, int(port), cpu_moe, mmproj
         self.log_dir = log_dir
         self.proc: subprocess.Popen | None = None
-        self._lock = threading.Lock()
-        self._cancel = threading.Event()
+        self._lock = threading.Lock()                # around self.proc
+        self._start_lock = threading.Lock()          # one start() at a time
+        self._gen = 0                                # stop() / interrupt() count it up: a running start() ends
 
     @property
     def url(self) -> str:
@@ -234,72 +241,97 @@ class LlamaServer:
     def start(self, stop=lambda: False, timeout: float = START_TIMEOUT) -> None:
         """Start the server (if it is not answering yet) and wait until the model is loaded. A server already on
         the port must run this model (with its vision part when there is one): one this object started is
-        restarted otherwise; another one is an error (its port is taken). The lock is held only while the
-        process is started, not while the model loads: stop() (from the GUI) never waits for a load; it cancels
-        it (as does interrupt())."""
-        self._cancel.clear()
-        if self.ready():
-            why = self.mismatch()
-            if not why:
-                return
-            if not self.running():
-                raise LlmServerError(f"port {self.port} is used by another llama.cpp server ({why}). Close the "
-                                     "program that started it, or choose another port in the settings")
-            self.stop()
-            self._cancel.clear()
-        bad = self.problems()
-        if bad:
-            raise LlmServerError("; ".join(bad))
-        with self._lock:
-            if not self.running():
-                log = subprocess.DEVNULL
-                if self.log_dir is not None:
-                    self.log_dir.mkdir(parents=True, exist_ok=True)
-                    log = open(self.log_dir / "llama-server.log", "ab")    # noqa: SIM115  (kept by the process)
-                try:
-                    self.proc = subprocess.Popen(server_command(self.server, self.model, self.port, self.cpu_moe,
-                                                                self.mmproj),
-                                                 stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                                 start_new_session=True)
-                except OSError as e:
-                    raise LlmServerError(f"the llama.cpp server could not be started: {e}") from e
-                finally:
-                    if log is not subprocess.DEVNULL:
-                        log.close()                        # (the process has its own copy)
-            proc = self.proc
-        log_hint = f"; see {self.log_dir / 'llama-server.log'}" if self.log_dir else ""
-        end = time.time() + timeout
-        while time.time() < end:
-            if stop() or self._cancel.is_set():
+        restarted otherwise; another one is an error (its port is taken). One start at a time; stop() and
+        interrupt() never wait for a load: they cancel it (a generation counter, so a cancel just before the
+        start is not lost), and a cancelled start ends the server it started."""
+        gen = self._gen
+        with self._start_lock:
+            if gen != self._gen:
                 raise LlmServerError("cancelled")
-            if proc is None or proc is not self.proc:
-                raise LlmServerError("the llama.cpp server was stopped while loading")
-            if proc.poll() is not None:
-                raise LlmServerError(f"the llama.cpp server stopped while loading (exit {proc.returncode}{log_hint})")
             if self.ready():
-                return
-            time.sleep(0.5)
-        self.stop()                                        # (not left holding the RAM)
-        raise LlmServerError(f"the llama.cpp server did not load the model within {int(timeout)} s{log_hint}")
+                why = self.mismatch()
+                if not why:
+                    return
+                if not self.running():
+                    raise LlmServerError(f"port {self.port} is used by another llama.cpp server ({why}). Close "
+                                         "the program that started it, or choose another port in the settings")
+                self._kill(self._take())
+            bad = self.problems()
+            if bad:
+                raise LlmServerError("; ".join(bad))
+            with self._lock:
+                if gen != self._gen:
+                    raise LlmServerError("cancelled")
+                if not self.running():
+                    log = subprocess.DEVNULL
+                    if self.log_dir is not None:
+                        self.log_dir.mkdir(parents=True, exist_ok=True)
+                        log = open(self.log_dir / "llama-server.log", "ab")    # noqa: SIM115
+                    try:
+                        self.proc = subprocess.Popen(server_command(self.server, self.model, self.port,
+                                                                    self.cpu_moe, self.mmproj),
+                                                     stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                                     start_new_session=True)
+                    except OSError as e:
+                        raise LlmServerError(f"the llama.cpp server could not be started: {e}") from e
+                    finally:
+                        if log is not subprocess.DEVNULL:
+                            log.close()                    # (the process has its own copy)
+                proc = self.proc
+            log_hint = f"; see {self.log_dir / 'llama-server.log'}" if self.log_dir else ""
+            end = time.time() + timeout
+            while time.time() < end:
+                if stop() or gen != self._gen:
+                    if self.proc is proc:              # (cancelled: not left loading in the background)
+                        self._kill(self._take())
+                    raise LlmServerError("cancelled")
+                if proc is not self.proc:
+                    raise LlmServerError("the llama.cpp server was stopped while loading")
+                if proc.poll() is not None:
+                    raise LlmServerError(f"the llama.cpp server stopped while loading (exit {proc.returncode}"
+                                         f"{log_hint})")
+                if self.ready():
+                    return
+                time.sleep(0.5)
+            self._kill(self._take())                   # (not left holding the RAM)
+            raise LlmServerError(f"the llama.cpp server did not load the model within {int(timeout)} s{log_hint}")
 
-    def stop(self) -> bool:
-        """Stop the server this object started (frees its RAM and VRAM); a load in progress is cancelled. True if
-        one was running."""
-        self._cancel.set()
+    def _take(self) -> subprocess.Popen | None:
         with self._lock:
             p, self.proc = self.proc, None
+        return p
+
+    @staticmethod
+    def _kill(p: subprocess.Popen | None, wait: bool = True) -> bool:
+        """SIGTERM to the server's process group; wait for it (SIGKILL after 20 s), in the background when
+        wait is False (the GUI does not wait)."""
         if p is None or p.poll() is not None:
             return False
         try:
             os.killpg(p.pid, signal.SIGTERM)
-            p.wait(timeout=20)
-        except (OSError, subprocess.TimeoutExpired):
+        except OSError:
+            return False
+
+        def reap():
             try:
-                os.killpg(p.pid, signal.SIGKILL)
-                p.wait(timeout=10)                       # (the port is free before a restart)
-            except (OSError, subprocess.TimeoutExpired):
-                pass
+                p.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(p.pid, signal.SIGKILL)
+                    p.wait(timeout=10)                 # (the port is free before a restart)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+        if wait:
+            reap()
+        else:
+            threading.Thread(target=reap, daemon=True).start()
         return True
+
+    def stop(self, wait: bool = True) -> bool:
+        """Stop the server this object started (frees its RAM and VRAM); a load in progress is cancelled. True if
+        one was running. wait=False: the signal is sent now, the waiting happens in the background."""
+        self._gen += 1
+        return self._kill(self._take(), wait)
 
     def refine_prompt(self, prompt: str, kind: str, model_file: str | None = None, seed: int = 0,
                       hint: str = "", cast: list[dict] | None = None, temperature: float = 0.5,
@@ -328,8 +360,8 @@ class LlamaServer:
         return parse_ideas(raw)
 
     def interrupt(self):
-        """A load in progress stops waiting (the request of a closed window is not awaited; the server stays)."""
-        self._cancel.set()
+        """A load in progress is cancelled (the request of a closed window is not awaited)."""
+        self._gen += 1
 
     def _complete(self, messages: list[dict], seed: int, temperature: float, timeout: float,
                   max_tokens: int = MAX_TOKENS, clean: bool = True) -> str:

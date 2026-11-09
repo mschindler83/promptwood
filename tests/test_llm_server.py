@@ -189,7 +189,7 @@ def test_refine_window_conversation(tmp_path, monkeypatch):
 
     def wait_idle():
         end = __import__("time").time() + 5
-        while (dlg._busy or dlg.refiner is None) and __import__("time").time() < end:
+        while (dlg._busy or not dlg.model.isEnabled()) and __import__("time").time() < end:
             app.processEvents()
         app.processEvents()
     wait_idle()
@@ -280,7 +280,7 @@ def test_adding_pictures_keeps_the_thumbnails(tmp_path, monkeypatch):
     dlg = RefineDialog(None, "x", "image", lambda: Fake(), pictures=[("Start frame", str(a), True)])
     dlg.show()
     end = __import__("time").time() + 3
-    while dlg.refiner is None and __import__("time").time() < end:
+    while not dlg.model.isEnabled() and __import__("time").time() < end:     # (the model list is in)
         app.processEvents()
     app.processEvents()
     monkeypatch.setattr(IP, "pick_image", lambda *a_, **k: str(b))
@@ -332,7 +332,7 @@ def test_ideas_mode_in_the_refine_window(tmp_path):
         d = RefineDialog(None, "- cat\n- rain", kind, lambda: Fake())
         d.show()
         end = __import__("time").time() + 3
-        while d.refiner is None and __import__("time").time() < end:
+        while not d.model.isEnabled() and __import__("time").time() < end:     # (the model list is in)
             app.processEvents()
         app.processEvents()
         return d
@@ -352,8 +352,16 @@ def test_ideas_mode_in_the_refine_window(tmp_path):
     assert asked[-1] == ("- cat\n- rain", 3, "surreal") and len(dlg.ideas) == 3
     assert dlg.ideas[0]["missing"] == ["rain"] and "may leave out: rain" in dlg.ideas_view.toPlainText()
     assert dlg.b_all.isEnabled()
-    dlg._idea_link(QUrl("more:1"))                                     # continue from idea 2 as version 1
-    assert not dlg.ideas_mode() and dlg.turns[0][1] == "cat 1 in rain" and dlg.out.toPlainText() == "cat 1 in rain"
+    from PySide6.QtWidgets import QDialogButtonBox
+    assert not dlg.buttons.button(QDialogButtonBox.Ok).isEnabled()    # (no hidden version to accept in Ideas)
+    dlg._busy = True                                                   # while an answer is on its way: no clicks
+    dlg._idea_link(QUrl("use:0"))
+    assert dlg.result() == 0 and dlg.chosen() is None
+    dlg._busy = False
+    dlg._idea_link(QUrl("more:1"))                                     # a conversation about idea 2
+    assert not dlg.ideas_mode() and dlg.turns == [] and dlg.original.toPlainText() == "cat 1 in rain"
+    assert dlg.out.toPlainText() == "cat 1 in rain" and dlg.original.isReadOnly()
     dlg.set_ideas_mode(True)
+    assert dlg.original.toPlainText() == "- cat\n- rain"               # the bullet points stay in Ideas
     dlg._use_all()
     assert dlg.chosen_ideas() == ["cat 0", "cat 1 in rain", "cat 2 in rain"]

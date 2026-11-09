@@ -3066,14 +3066,14 @@ class MainWindow(QMainWindow):
         cur = getattr(self, "_llama", None)
         if cur is None or (cur.server, cur.model, cur.port, cur.cpu_moe, cur.mmproj) != key:
             if cur is not None:
-                cur.stop()
+                cur.stop(wait=False)
             self._llama = LlamaServer(*key, log_dir=Path.home() / ".cache" / "video-chain")
         return self._llama
 
     def stop_llama(self, why: str = "") -> bool:
         """Stop the refiner's llama.cpp server if the app started it (its RAM / VRAM back for ComfyUI)."""
         cur = getattr(self, "_llama", None)
-        stopped = bool(cur is not None and cur.stop())
+        stopped = bool(cur is not None and cur.stop(wait=False))     # (the window does not wait for it)
         if stopped and why:
             self.log.appendPlainText(f"Stopped the llama.cpp server ({why}).")
         return stopped
