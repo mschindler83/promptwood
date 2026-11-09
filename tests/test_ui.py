@@ -2267,7 +2267,8 @@ def test_replace_a_person_in_a_real_video(app, tmp_path, image, monkeypatch):
                                 str(out_video)], check=True)
             def interrupt(self):
                 pass
-        dlg.h3 = {"lora": "/loras/MiniMax H3/minimax_h3_head_swap_v1.0_r32.safetensors", "settings": {"steps": 8},
+        dlg.h3 = {"lora": "/loras/MiniMax H3/minimax_h3_head_swap_v1.0_r32.safetensors",
+                  "settings": {"steps": 6, "turbo": {"lora": "/t.safetensors"}, "pika": {"strength": 1.0}},
                   "connect": lambda progress: Gen()}
         dlg.method.setCurrentIndex(dlg.method.findData("h3"))
         dlg.prompt.setText("Male, oval face, short black hair")
@@ -2279,7 +2280,8 @@ def test_replace_a_person_in_a_real_video(app, tmp_path, image, monkeypatch):
         assert start is None and st["guides"] == [{"video": str(dlg.clip), "frame_idx": 0, "audio": True,
                                                     "at": "start"}]
         assert st["frames"] == swap.h3_length(n) >= n and st["lora"].endswith("head_swap_v1.0_r32.safetensors")
-        assert st["ref_paths"] == [str(image)] and st["steps"] == 8 and not st["ref_hint"]
+        assert st["ref_paths"] == [str(image)] and st["steps"] == 20 and not st["ref_hint"]
+        assert "turbo" not in st and "pika" not in st and "hyperflow" not in st     # the plain model, 20 steps
         assert prompt.startswith("head_swap:") and "Male, oval face, short black hair" in prompt
         h3_out = dlg.result[0]
         assert swap.probe(h3_out)[2] == n and "H3" in dlg.state.text()

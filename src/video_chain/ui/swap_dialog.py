@@ -349,7 +349,9 @@ class SwapDialog(QDialog):
                     self.animator = gen
                     length = swap.h3_length(n)
                     st = dict(self.h3["settings"] or {})
-                    st.update({"frames": length, "width": w, "height": h, "lora": self.h3["lora"], "strength": 1.0,
+                    for speed in ("turbo", "hyperflow", "pika"):   # no speed LoRA or patch: the plain model
+                        st.pop(speed, None)
+                    st.update({"steps": swap.H3_SWAP_STEPS, "frames": length, "width": w, "height": h, "lora": self.h3["lora"], "strength": 1.0,
                                "extra_loras": [], "ref_paths": [str(ref)], "ref_size": "match", "ref_hint": False,
                                "audio": True, "guides": [{"video": str(clip), "frame_idx": 0, "audio": True,
                                                           "at": "start"}]})
