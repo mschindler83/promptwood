@@ -72,6 +72,7 @@ class MaskCanvas(QWidget):
         self._stroke_erase = False
         self._cursor: QPointF | None = None
         self._before: QImage | None = None
+        self._stroke_button = Qt.NoButton
         self._shown: tuple | None = None           # (frame size, display picture) of the image
         self._tint: QImage | None = None           # the mask in red at the frame's size (redone after a change)
         self.setMouseTracking(True)
@@ -122,10 +123,11 @@ class MaskCanvas(QWidget):
         self._tint = None
 
     def mousePressEvent(self, e):
-        if e.button() not in (Qt.LeftButton, Qt.RightButton):
-            return
+        if e.button() not in (Qt.LeftButton, Qt.RightButton) or self._last is not None:
+            return                                     # (a second button during a stroke: ignored)
         self._before = self.mask.copy()
         self._stroke_erase = self.erase or e.button() == Qt.RightButton
+        self._stroke_button = e.button()
         self._last = self._to_image(e.position())
         self._dab(self._last, self._last, self._stroke_erase)
         self.update()
@@ -138,8 +140,8 @@ class MaskCanvas(QWidget):
             self._last = pt
         self.update()
 
-    def mouseReleaseEvent(self, _e):
-        if self._last is not None:
+    def mouseReleaseEvent(self, e):
+        if self._last is not None and e.button() == self._stroke_button:
             self._last = None
             if self._before is not None and self._before != self.mask:   # (a stroke that changed nothing: no undo)
                 self._undo.append(self._before)
@@ -153,8 +155,10 @@ class MaskCanvas(QWidget):
 
     def wheelEvent(self, e):
         if e.modifiers() & Qt.ControlModifier:
-            k = 1.15 if e.angleDelta().y() > 0 else 1 / 1.15
-            self.set_brush(round(self.brush * k))
+            if e.angleDelta().y() > 0:
+                self.set_brush(max(self.brush + 1, round(self.brush * 1.15)))   # (a 2 px brush grows too)
+            else:
+                self.set_brush(min(self.brush - 1, round(self.brush / 1.15)))
             e.accept()
         else:
             super().wheelEvent(e)
@@ -166,6 +170,8 @@ class MaskCanvas(QWidget):
         self.changed.emit()
 
     def clear(self):
+        if mask_area(self.mask) == 0:
+            return
         self._undo.append(self.mask.copy())
         self.mask.fill(0)
         self._tint = None

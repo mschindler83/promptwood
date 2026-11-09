@@ -83,7 +83,8 @@ class SwapDialog(QDialog):
         self._sig.found.connect(self._found)
         self._sig.progress.connect(self._progress)
         self._sig.finished.connect(self._finished)
-        self._sig.details.connect(lambda text: self.prompt.setText(text))
+        self._sig.details.connect(self._auto_details_made)
+        self._auto_details = ""                        # the face details the vision model wrote (for this picture)
 
         top = QHBoxLayout(self)
         left = QVBoxLayout()
@@ -162,7 +163,7 @@ class SwapDialog(QDialog):
             "clip's own (fast, robust in any pose); hair and head shape stay.<br><b>Head swap with H3</b>: H3's "
             "reference model with the head swap LoRA re-renders the clip with the new head; the whole clip guides "
             "it (motion, camera, light come from the clip itself, no pose estimation); up to 15 s.</p>")
-        self.method.currentIndexChanged.connect(lambda *_: self._update())
+        self.method.currentIndexChanged.connect(lambda *_: (self._forget_auto_details(), self._update()))
         form.addRow("Method", self.method)
         self.body = QCheckBox("Follow the body pose")
         self.body.setChecked(settings.value("swapBody", True, type=bool) if settings else True)
@@ -220,10 +221,27 @@ class SwapDialog(QDialog):
         self._find()
 
     # ---- the head
+    def _no_heads(self, why: str):
+        """No head boxes (no detector, no face, stopped): the clip itself still goes to Face only and H3 (which find
+        the face themselves or need none); the Animate methods need the head."""
+        try:
+            w, h, n, fps = swap.probe(self.clip)
+        except Exception as e:  # noqa: BLE001
+            self.found_text.setText(f"Cannot read the clip: {e}")
+            return
+        self.heads = {"boxes": [], "found": 0, "frames": n, "size": (w, h), "fps": fps, "track": []}
+        self.boxes = []
+        self.slider.setRange(0, max(0, n - 1))
+        self.slider.setEnabled(n > 1)
+        self.found_text.setText(why + " Face only and the H3 head swap work without it; the Animate methods need "
+                                "the head.")
+        self._show_frame(self.slider.value())
+        self._update()
+
     def _find(self):
         if self.detector is None:
-            self.found_text.setText("No face detector found (insightface's det_10g.onnx in ComfyUI's "
-                                    "models/insightface/models/buffalo_l): the head cannot be found.")
+            self._no_heads("No face detector found (insightface's det_10g.onnx in ComfyUI's "
+                           "models/insightface/models/buffalo_l): the head is not marked.")
             return
         sig, clip, det, scale = self._sig, self.clip, self.detector, self.head_size.value()
 
@@ -245,9 +263,9 @@ class SwapDialog(QDialog):
         self._busy = False
         self.bar.hide()
         if heads is None:
-            self.found_text.setText(f"Could not find the head: {error}")
-            self.view.clear_frame("No head found")
-            self._update()
+            self._cancel = False
+            self._no_heads("The head was not marked (stopped)." if error == "cancelled" else
+                           f"Could not find the head: {error}.")
             return
         self.heads = heads
         self.boxes = heads["boxes"]
@@ -307,22 +325,37 @@ class SwapDialog(QDialog):
             else:
                 from .image_picker import pick_image
                 path = pick_image(self, "Picture of the new person", self.qs)
-            if not path:
+            if not path:                                  # cancelled: the picture before stays shown
+                k = self.ref_combo.findData(self.ref) if self.ref else 0
+                self.ref_combo.setCurrentIndex(max(0, k))
                 return
         self.set_reference(path)
 
+    def _auto_details_made(self, text: str):
+        self._auto_details = text
+        self.prompt.setText(text)
+
+    def _forget_auto_details(self):
+        """Another picture (or method): the written face details belonged to the one before."""
+        if self._auto_details and self.prompt.text().strip() == self._auto_details:
+            self.prompt.clear()
+        self._auto_details = ""
+
     def set_reference(self, path: str | None):
         """The new person's picture (turned upright as a PNG; the head found for the crop)."""
+        if str(path or "") != str(self.ref or ""):
+            self._forget_auto_details()
         self.ref, self.ref_png, self.ref_crop = None, None, None
         if path:
             png = Path(self._tmp.name) / f"ref_{uuid.uuid4().hex[:6]}.png"
             try:
                 chain.to_png(Path(path), png)            # upright (EXIF), as shown and as cropped
+                upright_ok = True
             except Exception:  # noqa: BLE001
-                png = Path(path)
+                png, upright_ok = Path(path), False
             if not QImage(str(png)).isNull():
                 self.ref, self.ref_png = str(path), png
-                self.ref_crop = self._find_head(png)
+                self.ref_crop = self._find_head(png) if upright_ok else None
         self._show_reference()
         self._update()
 
@@ -408,7 +441,9 @@ class SwapDialog(QDialog):
         self.prompt.setPlaceholderText("The new person's face (empty: described automatically), e.g. “Male, oval "
                                        "face, short black hair, dark beard, brown eyes”" if m == "h3" else DEFAULT_PROMPT)
         why = ""
-        if m == "h3" and not self.h3.get("lora"):
+        if animate and self.heads is not None and not self.boxes:
+            why = "The Animate methods need the head marked in the clip (no face was found)"
+        elif m == "h3" and not self.h3.get("lora"):
             why = "The head swap LoRA (minimax_h3_head_swap_v1.0_r32) is not among the H3 LoRAs"
         elif m == "h3" and not self.h3.get("turbo"):
             why = (f"The DMD 8-step turbo LoRA ({swap.H3_SWAP_TURBO}.safetensors, drbaph/MiniMax-H3-Turbo-Lora-"
@@ -429,7 +464,6 @@ class SwapDialog(QDialog):
         if self.on_start is not None:
             self.on_start()
         self._busy, self._cancel = True, False
-        self.result = None
         out_dir = self.project / swap.SWAPS_DIR
         stem = f"swap_{self.nid}_{time.strftime('%Y%m%d-%H%M%S')}_{uuid.uuid4().hex[:6]}"
         boxes, (w, h), fps = list(self.boxes), self.heads["size"], self.heads["fps"]
@@ -450,44 +484,53 @@ class SwapDialog(QDialog):
 
         def work():
             mask = out_dir / f"{stem}_mask.mp4"
-            try:
-                out_dir.mkdir(parents=True, exist_ok=True)
-                swap.write_mask(boxes, w, h, mask, fps)
-                self.animator = connect(lambda i, s: sig.progress.emit("make", i, s))
+            out = out_dir / f"{stem}.mp4"
+            temp = [out_dir / f"{stem}_{x}" for x in ("h3.mp4", "h3.png", "head_ref.png", "pose.mkv", "face.mkv")]
+            ok = False
+
+            def check():
                 if self._cancel:
                     raise InterruptedError("cancelled")
-                out = out_dir / f"{stem}.mp4"
+            try:
+                out_dir.mkdir(parents=True, exist_ok=True)
                 if method == "h3":
                     gen = self.h3["connect"](lambda i, s: sig.progress.emit("make", i, s))
                     self.animator = gen
+                    check()
                     length = swap.h3_length(n)
-                    details = prompt
-                    if not details and self.h3.get("describe"):  # the face details, as the creator's workflow
-                        sig.progress.emit("describe", 0, 0)
-                        details = self.h3["describe"](Path(ref))
-                        sig.details.emit(details)
                     head_ref = out_dir / f"{stem}_head_ref.png"   # as the LoRA was trained: 256 px, letterboxed
                     if not letterbox(str(ref_png or ref), head_ref, swap.H3_REF_SIZE, crop):
                         raise RuntimeError(f"cannot read the picture {Path(ref).name}")
+                    details = prompt
+                    if not details and self.h3.get("describe"):  # the face details, as the creator's workflow
+                        sig.progress.emit("describe", 0, 0)
+                        details = self.h3["describe"](head_ref)  # (the head the model gets)
+                        sig.details.emit(details)
+                        check()
                     st = dict(self.h3["settings"] or {})
                     for speed in ("turbo", "hyperflow", "pika"):   # the recipe's own turbo LoRA instead
                         st.pop(speed, None)
                     st.update({"steps": swap.H3_SWAP_STEPS, "frames": length, "width": w, "height": h,
                                "lora": self.h3["turbo"], "strength": 1.0, "recipe": dict(swap.H3_SWAP_RECIPE),
-                               "extra_loras": [{"lora": self.h3["lora"], "strength": 1.0}], "ref_paths": [str(head_ref)], "ref_size": "match", "ref_hint": False,
+                               "extra_loras": [{"lora": self.h3["lora"], "strength": 1.0}],
+                               "ref_paths": [str(head_ref)], "ref_size": "match", "ref_hint": False,
                                "audio": True, "guides": [{"video": str(clip), "frame_idx": 0, "audio": True,
                                                           "at": "start"}]})
                     made_raw = out_dir / f"{stem}_h3.mp4"
                     gen.generate(swap.head_swap_prompt(details), None, made_raw, out_dir / f"{stem}_h3.png", seed,
                                  settings=st)
+                    check()
                     swap.trim_with_sound(made_raw, clip, out, n)
-                    for f in (made_raw, out_dir / f"{stem}_h3.png", head_ref):
-                        f.unlink(missing_ok=True)
                     meta = {"method": "h3", "lora": self.h3["lora"], "frames_made": length, "details": details,
                             "steps": st.get("steps"), "seed": seed}
                 elif method == "face":
+                    self.animator = connect(lambda i, s: sig.progress.emit("make", i, s))
+                    check()
                     meta = self.animator.face_only(clip, out, persons, fps, enhance)
                 else:
+                    swap.write_mask(boxes, w, h, mask, fps)
+                    self.animator = connect(lambda i, s: sig.progress.emit("make", i, s))
+                    check()
                     if self.animator.missing:
                         raise RuntimeError(self.animator.missing)
                     gen = gen_size(w, h, SIZES.get(size, 480))
@@ -497,26 +540,35 @@ class SwapDialog(QDialog):
                     if all(k in cached for k in need):
                         sig.progress.emit("cached", 0, 0)
                     keep = {k: out_dir / f"{stem}_{k}.mkv" for k in need if k not in cached}
-                    meta = self.animator.replace(clip, mask, Path(ref), out, seed, n, (w, h), size, prompt, fps,
-                                                 pose=cached, keep_pose=keep, body=body,
-                                                 lock=persons if method == "animate+lock" else None,
-                                                 enhance=enhance)
-                    made = {k: keep[k] for k in meta.get("pose_made", []) if keep[k].is_file()}
-                    if made:
-                        swap.store_pose(project, key, made, {"source": source, "size": list(gen), "frames": n,
-                                                             "clip": str(clip),
-                                                             "made": time.strftime("%Y-%m-%d %H:%M:%S")})
-                meta.update({"reference": str(ref), "head_size": scale, "mask": str(mask), "clip": str(clip),
-                             "made": time.strftime("%Y-%m-%d %H:%M:%S")})
+                    try:
+                        meta = self.animator.replace(clip, mask, Path(ref), out, seed, n, (w, h), size, prompt,
+                                                     fps, pose=cached, keep_pose=keep, body=body,
+                                                     lock=persons if method == "animate+lock" else None,
+                                                     enhance=enhance)
+                    finally:                           # DWPose's work is kept even when the rest failed
+                        made = {k: f for k, f in keep.items() if f.is_file()}
+                        if made:
+                            swap.store_pose(project, key, made, {"source": source, "size": list(gen),
+                                                                 "frames": n, "clip": str(clip),
+                                                                 "made": time.strftime("%Y-%m-%d %H:%M:%S")})
+                    meta.update({"head_size": scale, "mask": str(mask)})
+                meta.update({"reference": str(ref), "clip": str(clip), "made": time.strftime("%Y-%m-%d %H:%M:%S")})
                 got = swap.probe(out)[2]
                 if got != n:
                     raise RuntimeError(f"the made clip has {got} frames instead of {n}")
+                ok = True
                 sig.finished.emit((out, meta, n), "")
             except Exception as e:  # noqa: BLE001
                 try:
                     sig.finished.emit(None, "cancelled" if self._cancel else str(e))
                 except RuntimeError:
                     pass
+            finally:                                   # nothing of a failed or stopped try stays in swaps/
+                for f in temp + ([] if ok else [out, mask]):
+                    try:
+                        f.unlink(missing_ok=True)
+                    except OSError:
+                        pass
         threading.Thread(target=work, daemon=True).start()
 
     def stop(self):
@@ -548,7 +600,8 @@ class SwapDialog(QDialog):
         self.bar.hide()
         self.animator = None
         if res is None:
-            self.state.setText("Stopped." if error == "cancelled" else f"Could not replace the person: {error}")
+            self.state.setText(("Stopped." if error == "cancelled" else f"Could not replace the person: {error}")
+                               + (" The result before is still there." if self.result is not None else ""))
         else:
             self.result = res
             out, meta, n = res

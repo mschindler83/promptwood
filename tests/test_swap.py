@@ -187,3 +187,15 @@ def test_animate_workflow_keeps_and_reuses_the_pose(tmp_path):
             an.face_only(v, tmp_path / "o6.mp4", [ref])
     finally:
         server.close()
+
+
+def test_track_widens_and_reacquires_after_a_gap():
+    """The person is searched for wider while lost, and after LOST frames the largest face is taken again (a cut)."""
+    a = (100, 50, 140, 100, .9)
+    moved = (200, 50, 240, 100, .9)              # 100 px away: too far right after it, found again after a few frames
+    found = [[a]] + [[]] * 4 + [[moved]]
+    tr = swap.track(found)
+    assert tr[5] == moved[:4]
+    far = (600, 50, 640, 100, .9)
+    found = [[a]] + [[]] * (swap.LOST + 1) + [[far]]
+    assert swap.track(found)[-1] == far[:4]       # lost for long: the largest face again

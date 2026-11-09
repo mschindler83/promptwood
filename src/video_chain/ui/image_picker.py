@@ -105,6 +105,7 @@ class ImagePickerDialog(QDialog):
         self._chosen: str | None = None
         self._extra_places = places or []
         self.collections = [(n, [(str(p), c) for p, c in items if Path(p).is_file()]) for n, items in collections or []]
+        self.collections = [(n, items) for n, items in self.collections if items]   # (all files gone: not listed)
         self.collection: str | None = None        # the project collection shown (None: a folder)
 
         v = QVBoxLayout(self)

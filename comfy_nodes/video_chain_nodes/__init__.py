@@ -76,8 +76,12 @@ class VideoChainFaceSwap:
         import torch
         import comfy.utils
         from .faceswap import FaceSwapper
-        det = _full("insightface", "models/buffalo_l/det_10g.onnx")
-        rec = _full("insightface", "models/buffalo_l/w600k_r50.onnx")
+        try:
+            det = _full("insightface", "models/buffalo_l/det_10g.onnx")
+            rec = _full("insightface", "models/buffalo_l/w600k_r50.onnx")
+        except Exception as e:  # noqa: BLE001
+            raise ValueError("the face models det_10g.onnx and w600k_r50.onnx are needed in "
+                             "models/insightface/models/buffalo_l") from e
         enh = None if enhancer == "none" else _full("facerestore_models", enhancer)
         key = (swapper, enh)
         if key not in _SWAPPERS:
@@ -87,12 +91,24 @@ class VideoChainFaceSwap:
 
         def u8(t):
             return (t[..., :3].clamp(0, 1) * 255).round().to(torch.uint8).cpu().numpy()
-        pics = [u8(p)[0] for p in (person, person_2, person_3, person_4) if p is not None]
-        identity = fs.identity(pics)
-        frames = list(u8(images))
-        bar = comfy.utils.ProgressBar(len(frames))
-        out, done = fs.run(frames, identity, enhance if enh else 0.0, progress=lambda k, n: bar.update_absolute(k, n))
-        result = torch.from_numpy(np.stack(out)).float() / 255.0
+        try:
+            pics = [u8(p)[0] for p in (person, person_2, person_3, person_4) if p is not None]
+            identity = fs.identity(pics)
+            result = images[..., :3].clone().cpu()                 # filled frame by frame (little extra memory)
+            bar = comfy.utils.ProgressBar(images.shape[0])
+
+            def frames():
+                for k in range(images.shape[0]):
+                    yield u8(images[k:k + 1])[0]
+
+            def put(k, f):
+                result[k] = torch.from_numpy(f).float() / 255.0
+            _none, done = fs.run(frames(), identity, enhance if enh else 0.0,
+                                 progress=lambda k, n: bar.update_absolute(k, images.shape[0]), out=put)
+        finally:
+            _SWAPPERS.clear()                                    # (its models leave the GPU with the job)
+        if done == 0:
+            raise ValueError("no face was found to swap in this clip")
         return (result, done)
 
 

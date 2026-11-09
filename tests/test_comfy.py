@@ -848,7 +848,7 @@ def test_qwen21_inpaint_with_a_painted_mask(server, start, tmp_path):
     comp = wf["icompose"]["inputs"]
     assert comp["destination"] == ["pic0", 0] and comp["source"] == ["decode", 0] and comp["resize_source"] is True
     assert comp["mask"] == ["isoft", 0] and meta["inpaint"]["feather"] == C.inpaint_feather(192, 108) == 4
-    assert wf["igrow"]["inputs"]["expand"] == 2 and wf["isoft_blur"]["inputs"]["sigma"] <= 10
+    assert wf["igrow"]["inputs"]["expand"] == 4 and wf["isoft_blur"]["inputs"]["sigma"] <= 10   # the whole hole soft
     assert C.inpaint_feather(4000, 3000) == 18 and C.inpaint_feather(10000, 9000) == 20
     assert wf["edit_save"]["inputs"]["images"] == ["icompose", 0]
     ed.edit(start, "night", out, 9, "fast", model="qwen21")                 # no mask: as before
@@ -856,6 +856,10 @@ def test_qwen21_inpaint_with_a_painted_mask(server, start, tmp_path):
     assert server.edited["guider"]["inputs"]["model"] == ["cache", 0]
     with pytest.raises(C.ComfyError, match="Qwen-Image 2.1"):
         ed.edit(start, "x", out, 1, "fast", mask=mask)                       # 2511: no mask
+    other = tmp_path / "other_mask.png"
+    Image.new("L", (100, 100), 0).save(other)
+    with pytest.raises(C.ComfyError, match="paint the mask again"):         # a mask of another size
+        ed.edit(start, "x", out, 1, "fast", model="qwen21", mask=other)
     server.inpaint21 = False
     ed = C.ComfyImageEditor(server.url)
     assert "Fun ControlNet" in ed.can_inpaint("qwen21")

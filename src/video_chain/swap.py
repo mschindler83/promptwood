@@ -18,6 +18,7 @@ from . import faces
 # (hair) and below (chin, the start of the neck); scaled by the dialog's "head size"
 HEAD_SIDE, HEAD_TOP, HEAD_BOTTOM = 0.45, 0.75, 0.3
 SMOOTH = 5                                  # frames averaged for the head's position and size (no jitter)
+LOST = 12                                   # frames without the person before the largest face is taken again
 
 
 def probe(video: Path) -> tuple[int, int, int, float]:
@@ -35,9 +36,11 @@ def detect_faces(video: Path, model: Path, progress=None, cancelled=lambda: Fals
     import numpy as np
     w, h, n, _fps = probe(video)
     sw, sh = faces.fit_size(w, h)
-    proc = subprocess.Popen(["ffmpeg", "-nostdin", "-v", "error", "-i", str(video), "-vf",
-                             f"scale={sw}:{sh}:flags=bilinear", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"],
-                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    import tempfile
+    err = tempfile.TemporaryFile()
+    proc = subprocess.Popen(["ffmpeg", "-nostdin", "-v", "error", "-i", str(video), "-fps_mode", "passthrough",
+                             "-vf", f"scale={sw}:{sh}:flags=bilinear", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"],
+                            stdout=subprocess.PIPE, stderr=err)
     out, size = [], sw * sh * 3
     try:
         while True:
@@ -52,7 +55,14 @@ def detect_faces(video: Path, model: Path, progress=None, cancelled=lambda: Fals
     finally:
         if proc.poll() is None:
             proc.kill()
-        proc.wait()
+        code = proc.wait()
+        err.seek(0)
+        msg = err.read().decode(errors="replace").strip()
+        err.close()
+    if code != 0 and not out:
+        raise RuntimeError(f"cannot read the clip: {msg[-300:] or 'ffmpeg failed'}")
+    if n and len(out) != n:
+        raise RuntimeError(f"read {len(out)} frames of the clip, it has {n}")
     return out
 
 
@@ -60,7 +70,7 @@ def track(found: list[list[tuple]]) -> list[tuple | None]:
     """One person through the clip: the largest face of the first frame that has one, then in every frame the face
     nearest to where it was (None where it is not found; a face far away is someone else)."""
     path: list[tuple | None] = []
-    last = None
+    last, gap = None, 0
     for fs in found:
         pick = None
         if fs:
@@ -73,10 +83,14 @@ def track(found: list[list[tuple]]) -> list[tuple | None]:
                 def dist(f):
                     return ((f[0] + f[2]) / 2 - cx) ** 2 + ((f[1] + f[3]) / 2 - cy) ** 2
                 near = min(fs, key=dist)
-                pick = near if dist(near) <= (1.5 * lw) ** 2 else None
+                pick = near if dist(near) <= ((1.5 + 0.5 * gap) * lw) ** 2 else None
+        if fs and pick is None and gap > LOST:      # lost for long: the largest face again (after a cut)
+            pick = fs[0]
         path.append(tuple(pick[:4]) if pick else None)
         if pick:
-            last = pick
+            last, gap = pick, 0
+        else:
+            gap += 1
     return path
 
 
@@ -211,7 +225,14 @@ def store_pose(project: Path, key: str, parts: dict, info: dict) -> dict:
     for name, f in parts.items():
         if Path(f).is_file():
             Path(f).replace(d / f"{name}.mkv")
-    (d / "info.json").write_text(json.dumps(info, indent=2), encoding="utf-8")
+    try:                                        # (the info of the run that made a part first stays)
+        before = json.loads((d / "info.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        before = {}
+    tmp = d / "info.json.part"
+    tmp.write_text(json.dumps({**info, **before, "parts": sorted(set(before.get("parts", [])) | set(parts))},
+                              indent=2), encoding="utf-8")
+    tmp.replace(d / "info.json")
     return cached_pose(project, key)
 
 
@@ -223,7 +244,7 @@ H3_MAX_FRAMES = 362                         # H3's 17n+5 grid up to 15 s
 # head swap LoRA, both at strength 1; MiniMaxH3SigmaShift 12 / 3, euler, the beta scheduler, 8 steps, cfg 1
 H3_SWAP_STEPS = 8
 H3_SWAP_TURBO = "minimax_h3_dmd_ref2va_8step_turbo_pruned"
-H3_SWAP_RECIPE = {"sampler": "euler", "scheduler": "beta", "shift": (12.0, 3.0)}
+H3_SWAP_RECIPE = {"sampler": "euler", "scheduler": "beta", "shift": [12.0, 3.0]}   # (a list: as stored in JSON)
 HEAD_CROP_MARGIN = 2.2                      # the head square for the H3 head swap: 2.2 x the face box (forehead to
                                             # chin), so the hair, ears and chin are in it
 H3_REF_SIZE = 256                           # the face picture letterboxed to 256 x 256 on black (as the LoRA's creator
@@ -248,10 +269,15 @@ def trim_with_sound(made: Path, clip: Path, out: Path, frames: int) -> None:
     """The made video cut to the clip's frame count, with the clip's own sound (exactly as recorded)."""
     out = Path(out)
     tmp = out.with_name(out.stem + ".part" + out.suffix)
-    try:
+    def run(audio: list[str]):
         subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(made), "-i", str(clip), "-map", "0:v:0",
-                        "-map", "1:a:0?", "-frames:v", str(int(frames)), "-c:v", "libx264", "-crf", "12",
-                        "-pix_fmt", "yuv420p", "-c:a", "copy", str(tmp)], check=True, capture_output=True)
+                        "-map", "1:a:0?", "-frames:v", str(int(frames)), "-r", "24", "-c:v", "libx264", "-crf", "12",
+                        "-pix_fmt", "yuv420p", *audio, str(tmp)], check=True, capture_output=True)
+    try:
+        try:
+            run(["-c:a", "copy"])               # the clip's sound exactly
+        except subprocess.CalledProcessError:
+            run(["-c:a", "aac", "-b:a", "256k"])   # (a sound mp4 cannot carry as it is)
         tmp.replace(out)
     finally:
         tmp.unlink(missing_ok=True)

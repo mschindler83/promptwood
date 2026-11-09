@@ -5210,6 +5210,9 @@ class MainWindow(QMainWindow):
             if key in name.lower():
                 return p
         comfy_dir = os.path.expanduser(self.comfy_dir.text().strip()) or None
+        miss = getattr(self, "_lora_misses", {})
+        if time.monotonic() - miss.get((key, comfy_dir), -1e9) < 30:
+            return None                              # (looked for a moment ago: not there)
         try:
             from ..comfy import comfy_lora_roots
             for root in comfy_lora_roots(comfy_dir):
@@ -5218,6 +5221,7 @@ class MainWindow(QMainWindow):
                         return str(f)
         except Exception:  # noqa: BLE001  (no ComfyUI folder set, a folder offline)
             pass
+        self._lora_misses = {**miss, (key, comfy_dir): time.monotonic()}
         return None
 
     # ---- replace a person in a real video (Wan 2.2 Animate)
@@ -5243,17 +5247,18 @@ class MainWindow(QMainWindow):
         url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL)
         comfy_dir = os.path.expanduser(self.comfy_dir.text().strip()) or None
         cleanup = self.comfy_cleanup.isChecked()
-        switch = {"free": False}
+        switch = {"free": False, "loaded": False}
 
         def before():                               # GUI thread: the clip model makes room
             self._qwen_timer.stop()
-            switch["free"] = self._comfy_model in ("h3", "h3-hyperflow")
+            switch["free"] = not switch["loaded"] and self._comfy_model in ("h3", "h3-hyperflow")
             if self.worker_alive and not self.running:
                 self._quit_worker(free=False)
 
         def connect(progress):                      # worker thread
             from ..animate import ComfyAnimator
             an = ComfyAnimator(url, log=lambda _m: None, progress=progress, comfy_dir=comfy_dir, cleanup=cleanup)
+            switch["loaded"] = True                 # another model in ComfyUI now (unloaded after the window)
             if switch["free"]:
                 an.free()
                 switch["free"] = False
@@ -5261,12 +5266,17 @@ class MainWindow(QMainWindow):
 
         def describe_face(picture):                 # worker thread: the face details for the head swap
             from ..comfy import ComfyPromptRefiner
+            switch["loaded"] = True
             return ComfyPromptRefiner(url, log=lambda _m: None, comfy_dir=comfy_dir, cleanup=cleanup).describe_face(
                 picture)
 
         def connect_h3(progress):                   # worker thread: the clip generator (H3 head swap)
             from ..comfy import ComfyGenerator
             gen = ComfyGenerator(url, log=lambda _m: None, progress=progress, comfy_dir=comfy_dir, cleanup=cleanup)
+            if switch["free"]:
+                gen.free()
+                switch["free"] = False
+            switch["loaded"] = True
             return gen
 
         dlg = SwapDialog(self, self.project, nid, self.project / node.made["video"], self.face_detector(), pictures,
@@ -5279,10 +5289,14 @@ class MainWindow(QMainWindow):
                          groups=[[str(self.project / rel) for rel in c["images"]] for c in T.cast_of(self.tree)],
                          pick=lambda title: pick_image(
                              self, title, self.qs, None, self._picker_places(), self.project_images()))
+        self._edit_switch = switch                  # (as the image window: the model is unloaded after it)
         if not dialog:
             return dlg
-        if dlg.exec() == QDialog.Accepted and dlg.result is not None:
-            self.use_replacement(nid, *dlg.result)
+        try:
+            if dlg.exec() == QDialog.Accepted and dlg.result is not None:
+                self.use_replacement(nid, *dlg.result)
+        finally:
+            self.edits_closed()
         return None
 
     def use_replacement(self, nid: str, file: Path, meta: dict, frames: int) -> bool:
@@ -5291,8 +5305,12 @@ class MainWindow(QMainWindow):
         if node is None or not node.is_video or self.running:
             return False
         before = self._done_clips() - {nid}
+        if not Path(file).is_file():
+            self.status.setText(f"The made clip is gone ({Path(file).name}).")
+            return False
         swap.apply(node, file, frames, {k: v for k, v in meta.items() if k in (
-            "reference", "head_size", "size", "gen_size", "seed", "prompt", "model", "made")})
+            "reference", "head_size", "size", "gen_size", "seed", "prompt", "model", "made", "method", "details",
+            "lora")}, fps=chain.FPS)
         self._write_tree()
         self.refresh(rebuild_path=True)
         self.convert_video(nid)

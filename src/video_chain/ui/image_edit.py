@@ -928,6 +928,8 @@ class ImageEditDialog(QDialog):
         self._update_buttons()
 
         def work():
+            kept = mask_file = None
+            made = 0
             try:
                 edits.mkdir(parents=True, exist_ok=True)
                 cur = {"k": 1}
@@ -940,7 +942,6 @@ class ImageEditDialog(QDialog):
                                             f"{Path(source).suffix.lower() or '.png'}")
                 kept.parent.mkdir(exist_ok=True)
                 kept.write_bytes(Path(source).read_bytes())         # the original stays with its results
-                mask_file = None
                 if mask is not None:                                 # the mask too (white = drawn anew)
                     mask_file = kept.with_name(kept.stem.replace("source_", "mask_", 1) + ".png")
                     if not mask.save(str(mask_file), "PNG"):
@@ -954,6 +955,7 @@ class ImageEditDialog(QDialog):
                     out = edits / f"{stem}.png"
                     meta = self.editor.edit(Path(source), sent, out, seed, quality, [Path(r) for r in refs], loras,
                                             model=model, mask=mask_file)
+                    made += 1
                     if size is not None:
                         scale_to(out, out, size)
                     meta.update({"prompt": prompt, "trigger_words": words, "seed": seed, "source": source,
@@ -968,6 +970,11 @@ class ImageEditDialog(QDialog):
                     sig.finished.emit("cancelled" if self._cancel else str(e))
                 except RuntimeError:
                     pass
+            finally:
+                if not made:                     # no result refers to them: the copies of source and mask go
+                    for f in (kept, mask_file):
+                        if f is not None:
+                            Path(f).unlink(missing_ok=True)
         threading.Thread(target=work, daemon=True).start()
 
     def generate_new(self):

@@ -59,6 +59,32 @@ MOSS_UNET, MOSS_CLIP, MOSS_VAE = ("moss-image/moss_image_sft_int8_convrot.safete
 MOSS_EDIT = "moss-image/moss_image_edit_lora_rank_64_bf16.safetensors"
 
 
+# required and optional inputs (as ComfyUI's node definitions) of the nodes whose inputs the tests check
+SCHEMAS = {
+    "EmptyImage": ({"width", "height", "batch_size", "color"}, set()),
+    "ImageBlur": ({"image", "blur_radius", "sigma"}, set()),
+    "GrowMask": ({"mask", "expand", "tapered_corners"}, set()),
+    "ImageCompositeMasked": ({"destination", "source", "x", "y", "resize_source"}, {"mask"}),
+    "ImageToMask": ({"image", "channel"}, set()),
+    "MaskToImage": ({"mask"}, set()),
+    "ModelPatchLoader": ({"name"}, set()),
+    "VideoChainQwen21FunInpaint": ({"model", "model_patch", "vae", "inpaint_image", "mask", "strength"},
+                                   {"control_image"}),
+    "VideoChainFaceSwap": ({"images", "person", "swapper", "enhancer", "enhance"},
+                           {"person_2", "person_3", "person_4"}),
+    "MiniMaxH3SigmaShift": ({"model", "shift_video", "shift_audio"}, set()),
+    "WanAnimateToVideo": ({"positive", "negative", "vae", "width", "height", "length", "batch_size",
+                           "continue_motion_max_frames", "video_frame_offset"},
+                          {"clip_vision_output", "reference_image", "face_video", "pose_video", "continue_motion",
+                           "background_video", "character_mask"}),
+    "TrimVideoLatent": ({"samples", "trim_amount"}, set()),
+    "BlockifyMask": ({"masks", "block_size"}, {"device"}),
+    "DrawMaskOnImage": ({"image", "mask", "color"}, {"device"}),
+    "DWPreprocessor": ({"image"}, {"detect_hand", "detect_body", "detect_face", "resolution", "bbox_detector",
+                                   "pose_estimator", "scale_stick_for_xinsr_cn"}),
+}
+
+
 class FakeComfy:
     def __init__(self, root: Path, loras=("MiniMax H3/glow.safetensors",), fail_with: str | None = None,
                  models_missing: bool = False):
@@ -159,6 +185,12 @@ class FakeComfy:
     def render(self, wf: dict) -> dict:
         for nid, n in wf.items():
             assert n["class_type"] in KNOWN, n["class_type"]
+            spec = SCHEMAS.get(n["class_type"])
+            if spec is not None:                     # the inputs real ComfyUI takes for these nodes
+                need, may = spec
+                keys = set(n["inputs"])
+                assert need <= keys, f"{nid} ({n['class_type']}) lacks {need - keys}"
+                assert keys <= need | may, f"{nid} ({n['class_type']}) has unknown inputs {keys - need - may}"
             for v in n["inputs"].values():
                 if isinstance(v, list) and len(v) == 2 and isinstance(v[1], int):
                     assert v[0] in wf, f"{nid} links to missing node {v[0]}"

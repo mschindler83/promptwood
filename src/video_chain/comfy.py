@@ -1015,11 +1015,6 @@ def build_qwen21_workflow(*, files: dict, prompt: str, seed: int, quality: str, 
                            "inputs": {"destination": ["pic0", 0], "source": ["igrey", 0], "x": 0, "y": 0,
                                       "resize_source": True, "mask": ["imask", 0]}}
             te["images.image_1"] = ["ihole", 0]
-        elif ref == "none":                    # no picture for the text encoder: only the ControlNet sees it
-            for k in range(len(images[:10])):
-                te.pop(f"images.image_{k + 1}", None)
-            te.pop("vae", None)
-            size = size or tuple(inpaint["size"])
     if inpaint:                                # (the ControlNet's block patches turn the prefix cache off anyway)
         sampling_model = m
     else:
@@ -1052,7 +1047,7 @@ def build_qwen21_workflow(*, files: dict, prompt: str, seed: int, quality: str, 
     out = ["decode", 0]
     if inpaint:                                # laid into the source: outside the (softened) mask it stays exact
         feather = max(0, min(20, int(inpaint.get("feather", INPAINT_FEATHER))))
-        wf["igrow"] = {"class_type": "GrowMask", "inputs": {"mask": ["imask", 0], "expand": feather // 2,
+        wf["igrow"] = {"class_type": "GrowMask", "inputs": {"mask": ["imask", 0], "expand": feather,
                                                             "tapered_corners": True}}
         mask = ["igrow", 0]
         if feather:
@@ -1357,10 +1352,14 @@ class ComfyImageEditor(ComfyGenerator):
             inpaint = None
             feather = INPAINT_FEATHER
             if mask is not None:
+                from . import chain
+                mw, mh = chain.image_size(Path(mask))
+                iw, ih = chain.image_size(Path(image))
+                if (mw, mh) not in ((iw, ih), (ih, iw)):           # (a turned photo: its upright size)
+                    raise ComfyError(f"the mask is {mw}x{mh}, the picture {iw}x{ih}: paint the mask again")
                 uploads.append((self.upload(Path(mask)), Path(mask)))
                 try:
-                    from . import chain
-                    feather = inpaint_feather(*chain.image_size(Path(mask)))
+                    feather = inpaint_feather(mw, mh)
                 except (RuntimeError, ValueError, OSError):
                     pass
                 inpaint = {"patch": self.inpaint_patch, "mask": uploads[-1][0], "strength": 1.0,
@@ -1748,9 +1747,9 @@ class ComfyPromptRefiner(ComfyGenerator):
         uploads = [(self.upload(Path(picture)), Path(picture))]
         try:
             wf = build_describe_face_workflow(image=uploads[0][0], model=models[0], seed=seed)
-            self._queue(wf)
-            ws = self._connect_ws()
+            ws = self._connect_ws()                    # (before queueing: the job's messages are not missed)
             try:
+                self._queue(wf)
                 entry = self._wait(self.current, ws)
             except ComfyJobFailed:
                 raise

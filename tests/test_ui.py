@@ -2307,7 +2307,7 @@ def test_replace_a_person_in_a_real_video(app, tmp_path, image, monkeypatch):
                                                     "at": "start"}]
         assert st["frames"] == swap.h3_length(n) >= n and st["lora"].endswith("dmd_ref2va_8step_turbo_pruned.safetensors")
         assert st["extra_loras"] == [{"lora": dlg.h3["lora"], "strength": 1.0}]       # the turbo first, then the swap
-        assert st["recipe"] == {"sampler": "euler", "scheduler": "beta", "shift": (12.0, 3.0)}
+        assert st["recipe"] == {"sampler": "euler", "scheduler": "beta", "shift": [12.0, 3.0]}
         assert st["ref_paths"][0].endswith("_head_ref.png") and st["steps"] == 8 and not st["ref_hint"]
         assert seen_ref and seen_ref[-1] == (256, 256, False)              # the head square, no black bars
         assert not Path(st["ref_paths"][0]).exists()                  # (a temporary copy, removed after)
@@ -2320,6 +2320,10 @@ def test_replace_a_person_in_a_real_video(app, tmp_path, image, monkeypatch):
                                     "stream=index", "-of", "csv=p=0", str(h3_out)], capture_output=True,
                                    text=True).stdout.strip()
         assert has_sound                                               # the clip's own sound
+        dlg.set_reference(str(wide))                                   # the same picture: its description stays
+        assert dlg.prompt.text() == "Male, oval face, short black hair"
+        dlg.set_reference(str(image))                                  # another picture: its own description
+        assert dlg.prompt.text() == ""
         dlg.h3["turbo"] = None
         dlg._update()
         assert not dlg.b_gen.isEnabled() and "DMD 8-step" in dlg.b_gen.toolTip()
@@ -2327,6 +2331,16 @@ def test_replace_a_person_in_a_real_video(app, tmp_path, image, monkeypatch):
         dlg._update()
         assert not dlg.b_gen.isEnabled() and "head swap LoRA" in dlg.b_gen.toolTip()
         dlg.done(0)
+        # without a face detector: Face only and H3 still work (the clip's own frames), the Animate methods not
+        monkeypatch.setattr(w, "face_detector", lambda: None)
+        nodet = w.replace_person(v, dialog=False)
+        assert nodet.heads is not None and nodet.heads["frames"] == n and not nodet.boxes
+        nodet.set_reference(str(image))
+        nodet.method.setCurrentIndex(nodet.method.findData("face"))
+        assert nodet.b_gen.isEnabled()
+        nodet.method.setCurrentIndex(nodet.method.findData("animate"))
+        assert not nodet.b_gen.isEnabled() and "head marked" in nodet.b_gen.toolTip()
+        nodet.done(0)
         assert w.use_replacement(v, out, meta, frames)
         node = w.tree.nodes[v]
         assert swap.replaced(node)["original"]["file"] == str(src) and node.source["file"] == str(out.resolve())
