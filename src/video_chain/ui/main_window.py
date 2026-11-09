@@ -288,14 +288,22 @@ class VariantsDialog(QDialog):
 
 
 class ExportDialog(QDialog):
-    """Where to save a path, and at which size: as made (quick: the clips are joined), or re-rendered at 1080p /
-    2K by Open-H3-Regenerate-2K in ComfyUI (every clip once; the refined clips are kept for the next export)."""
+    """Where to save a path, and at which size: as made (quick: the clips are joined), or at 1080p / 2K, upscaled in
+    ComfyUI by SeedVR2 (restores the clips as made) or re-rendered by the Open-H3 refine (draws detail anew); every
+    clip once, the copies are kept for the next export. ready(size, method, strength) -> True when every clip has a
+    kept copy for that choice (a dict {size: bool} works too)."""
 
-    def __init__(self, parent, default: str, made_size: tuple[int, int] | None, refined: dict[str, bool],
-                 swapped: int = 0, strength: str = "natural"):
+    METHODS = (("seedvr2_7b", "SeedVR2 7B — restores the clips as made, clean (default)"),
+               ("seedvr2_3b", "SeedVR2 3B — crisper, a little harder"),
+               ("refine", "Open-H3 refine — draws detail anew"))
+
+    def __init__(self, parent, default: str, made_size: tuple[int, int] | None, refined,
+                 swapped: int = 0, strength: str = "natural", method: str = "seedvr2_7b"):
         super().__init__(parent)
         self.setWindowTitle("Export path")
         self.setMinimumWidth(620)
+        self.ready = refined if callable(refined) else (lambda size, _m, _s: bool(refined.get(size)))
+        self.made_size = made_size
         f = QFormLayout(self)
         row = QHBoxLayout()
         self.file = QLineEdit(default)
@@ -307,30 +315,24 @@ class ExportDialog(QDialog):
         self.size = QComboBox()
         w, h = made_size or (0, 0)
         self.size.addItem(f"As made ({w}×{h}) — quick" if made_size else "As made — quick", "made")
-        for key, text in (("1080p", "1080p, refined (Open-H3-Regenerate-2K)"),
-                          ("2k", "2K, refined (Open-H3-Regenerate-2K)")):
-            if made_size:
-                from ..comfy import refine_size
-                rw, rh = refine_size(w, h, key)
-                text += f" — {rw}×{rh}"
-            if refined.get(key):
-                text += " · already refined, quick"
-            self.size.addItem(text, key)
-        self.size.setToolTip("Refined: every clip of the path is re-rendered at the higher size in ComfyUI (3 steps "
-                             "with the refiner LoRA after a latent upscale), as it was made: its prompt, LoRAs and "
-                             "sound. Each clip starts exactly where the refined clip before it hands over, so the "
-                             "joins stay seamless. Measured on an RTX 4090: about 1.7 min (1080p) and 4-5 min (2K) "
-                             "per 3 s clip; a 10 s clip at 2K about 30 min (long clips are refined in overlapping "
-                             "time windows so they fit in the GPU memory; Sol-Attn about halves it). Refined clips are kept, so the next export of the same clips is quick. "
-                             "Real videos are converted again from their file at that size.")
+        for key in ("1080p", "2k"):
+            self.size.addItem(key, key)
+        self.size.setToolTip("As made: the clips are joined as they are. 1080p / 2K: every clip of the path is "
+                             "upscaled in ComfyUI (see Upscaler); the copies are kept, so the next export of the "
+                             "same clips is quick. Real videos are converted again from their file at that size")
         f.addRow("Size", self.size)
-        self.fast = QCheckBox("Faster refine with Sol-Attn (about 2× faster at 2K, very slightly different)")
-        self.fast.setToolTip("Block-sparse attention in the refine pass. Measured on an RTX 4090 at 2K: 120 s instead "
-                             "of 267 s per 3 s clip, PSNR 33 dB against exact attention (side by side practically the "
-                             "same; skin texture very slightly smoother). Off: exact attention")
-        self.fast.setEnabled(False)
-        self.size.currentIndexChanged.connect(lambda *_: self.fast.setEnabled(self.size.currentData() != "made"))
-        f.addRow("", self.fast)
+        self.method = QComboBox()
+        for key, text in self.METHODS:
+            self.method.addItem(text, key)
+        self.method.setCurrentIndex(max(0, self.method.findData(method)))
+        self.method.setToolTip(
+            "SeedVR2 (video restoration, ComfyUI's own nodes): sharpens and cleans every frame of the clip as it was "
+            "made — faces, eyes and colours stay. Measured on an RTX 4090 for a 1.6 s face clip at 1080p: about 33 s, "
+            "it changed the clip least of all; 7B was the cleanest, 3B crisper but harder. Long clips are split in "
+            "time to fit the GPU memory.\nOpen-H3 refine: re-renders each clip with its prompt and LoRAs after a "
+            "latent upscale (3 steps); it invents more new detail but can change faces (see Refine). About 1.7 min "
+            "(1080p) and 4-5 min (2K) per 3 s clip")
+        f.addRow("Upscaler", self.method)
         self.strength = QComboBox()
         for key, text in (("soft", "Soft — calm, little new detail"),
                           ("natural", "Natural — clean, keeps the person (default)"),
@@ -342,30 +344,53 @@ class ExportDialog(QDialog):
                                  "stays closest to the clip but is softer. (The release's own setting repainted "
                                  "faces: closed eyes drawn half open, eye and hair colour changed.) Refined copies "
                                  "are kept per strength")
-        self.strength.setEnabled(False)
-        self.size.currentIndexChanged.connect(lambda *_: self.strength.setEnabled(self.size.currentData() != "made"))
         f.addRow("Refine", self.strength)
-        self.swapped = QCheckBox(f"Refine the video{'s' if swapped != 1 else ''} with a replaced person too")
+        self.fast = QCheckBox("Faster refine with Sol-Attn (about 2× faster at 2K, very slightly different)")
+        self.fast.setToolTip("Block-sparse attention in the refine pass. Measured on an RTX 4090 at 2K: 120 s instead "
+                             "of 267 s per 3 s clip, PSNR 33 dB against exact attention (side by side practically the "
+                             "same; skin texture very slightly smoother). Off: exact attention")
+        f.addRow("", self.fast)
+        self.swapped = QCheckBox(f"Upscale the video{'s' if swapped != 1 else ''} with a replaced person too")
         self.swapped.setToolTip("A video whose person was replaced was made at the generation size. On: it is "
-                                "re-rendered by the refine like a generated clip (a sharper face at the higher "
-                                "size; its prompt is the new person's face description), its recorded sound kept. "
-                                "Off: it is only scaled up from its made size. The refine re-noises the picture, so "
-                                "small details can change. Costs the same time as a generated clip of that length")
+                                "upscaled like a generated clip (SeedVR2 restores it; the refine re-renders it with "
+                                "the new person's face description), its recorded sound kept. Off: it is only "
+                                "scaled up from its made size")
         self.swapped.setChecked(True)
         self.swapped.setVisible(bool(swapped))
-        self.swapped.setEnabled(False)
-        self.size.currentIndexChanged.connect(lambda *_: self.swapped.setEnabled(self.size.currentData() != "made"))
         f.addRow("", self.swapped)
-        note = label("Refined export needs ComfyUI with the H3 2K nodes, the latent upscaler and the refiner LoRA. "
-                     "Generating and the preview stay at the normal size.", level="tertiary")
+        note = label("Needs ComfyUI with SeedVR2 (its 7B / 3B model and VAE from Comfy-Org/SeedVR2) or, for the "
+                     "refine, the H3 2K nodes, the latent upscaler and the refiner LoRA. Generating and the preview "
+                     "stay at the normal size.", level="tertiary")
         note.setWordWrap(True)
         f.addRow("", note)
+        for w_ in (self.size, self.method, self.strength):
+            w_.currentIndexChanged.connect(lambda *_: self._update())
+        self._update()
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("Export")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         f.addRow(buttons)
         guard_wheel(self)
+
+    def _update(self):
+        up = self.size.currentData() != "made"
+        refine = self.method.currentData() == "refine"
+        self.method.setEnabled(up)
+        self.strength.setEnabled(up and refine)
+        self.fast.setEnabled(up and refine)
+        self.swapped.setEnabled(up)
+        w, h = self.made_size or (0, 0)
+        from ..comfy import refine_size
+        for i in range(1, self.size.count()):
+            key = self.size.itemData(i)
+            text = {"1080p": "1080p", "2k": "2K"}[key]
+            if self.made_size:
+                rw, rh = refine_size(w, h, key)
+                text += f" — {rw}×{rh}"
+            if self.ready(key, self.method.currentData(), self.strength.currentData()):
+                text += " · already upscaled, quick"
+            self.size.setItemText(i, text)
 
     def _choose(self):
         f, _ = QFileDialog.getSaveFileName(self, "Export path", self.file.text(), "Video (*.mp4)")
@@ -5429,27 +5454,37 @@ class MainWindow(QMainWindow):
         default = str(self.project / f"{self.project.name}-{path[-1].id}.mp4")
         base = T.Checker(self.project, self.tree).base()
         strength = self.qs.value("refineStrength", "natural", type=str)
-        refined = {size: all(n.made and T.refined_file(self.project, n, size).is_file() and
-                             (n.is_video or T.refine_record(T.refined_file(self.project, n, size)).get("strength")
-                              == strength) for n in path)
-                   for size in T.REFINED}
+        method = self.qs.value("exportUpscaler", "seedvr2_7b", type=str)
+
+        def ready(size, how, strength_):              # every generated clip has a kept copy made this way
+            def kept(n):
+                f = T.refined_file(self.project, n, size)
+                if not (n.made and f.is_file()):
+                    return False
+                if n.is_video:
+                    return True
+                rec = T.refine_record(f)
+                return rec.get("method") == how if how != "refine" else \
+                    ("method" not in rec and rec.get("strength") == strength_)
+            return all(kept(n) for n in path)
         swapped = sum(1 for n in path if T.swapped_video(n))
-        dlg = ExportDialog(self, default, (base["width"], base["height"]) if base else None, refined, swapped,
-                           strength)
+        dlg = ExportDialog(self, default, (base["width"], base["height"]) if base else None, ready, swapped,
+                           strength, method)
         try:
             if dlg.exec() != QDialog.Accepted:
                 return
             out, size, fast = dlg.target(), dlg.size.currentData(), dlg.fast.isChecked()
             refine_swapped = bool(swapped) and dlg.swapped.isChecked()
-            strength = dlg.strength.currentData()
+            strength, method = dlg.strength.currentData(), dlg.method.currentData()
         finally:
             dlg.deleteLater()
         if size != "made":
             self.qs.setValue("refineStrength", strength)
-        self.export(out, size, fast, refine_swapped, strength)
+            self.qs.setValue("exportUpscaler", method)
+        self.export(out, size, fast, refine_swapped, strength, method)
 
     def export(self, out: Path, size: str = "made", fast_attention: bool = False,
-               refine_swapped: bool = False, strength: str = "natural") -> None:
+               refine_swapped: bool = False, strength: str = "natural", method: str = "seedvr2_7b") -> None:
         """Export the selected path to out: as made (joined here), or refined at '1080p' / '2k' (a generator job)."""
         path = self.selected_path()
         if not path:
@@ -5458,7 +5493,8 @@ class MainWindow(QMainWindow):
             self.join_selected("export", out)
             return
         self._start([path[-1].id], refine={"size": size, "out": str(out), "fast_attention": bool(fast_attention),
-                                           "refine_swapped": bool(refine_swapped), "strength": strength})
+                                           "refine_swapped": bool(refine_swapped), "strength": strength,
+                                           "method": method})
 
     # ------------------------------------------------------------------ GPU
     def _poll_gpu(self):
@@ -5878,9 +5914,10 @@ class MainWindow(QMainWindow):
             self.progress.setValue(1000)
             out = Path(getattr(self, "_exported", None) or refine["out"])
             n = len(self._made_now)                # the export lists every clip, but reuses kept copies
-            self.status.setText(f"Exported {out.name} ({refine['size']}, refined"
-                                + (f"; {n} clip{'s' if n != 1 else ''} refined now" if n else
-                                   "; every clip was refined already") + ").")
+            how = {"seedvr2_7b": "SeedVR2 7B", "seedvr2_3b": "SeedVR2 3B"}.get(refine.get("method"), "refined")
+            self.status.setText(f"Exported {out.name} ({refine['size']}, {how}"
+                                + (f"; {n} clip{'s' if n != 1 else ''} upscaled now" if n else
+                                   "; every clip was upscaled already") + ").")
         elif ok:
             self.progress.setValue(1000)
             made = len(self._plan)

@@ -1560,32 +1560,45 @@ def test_export_refined_and_hyperflow_speed(app, win, tmp_path, image):
     wait(app, lambda: not win._joins, timeout=30)
     dlg = ExportDialog(None, str(tmp_path / "x.mp4"), (672, 384), {"2k": False, "1080p": True})
     texts = [dlg.size.itemText(i) for i in range(dlg.size.count())]
-    assert texts[0].startswith("As made (672×384)") and "1888×1088 · already refined" in texts[1] \
+    assert texts[0].startswith("As made (672×384)") and "1888×1088 · already upscaled" in texts[1] \
         and "2528×1440" in texts[2]
     assert dlg.swapped.isHidden()                                            # no video with a replaced person
+    assert dlg.method.currentData() == "seedvr2_7b" and not dlg.method.isEnabled()      # SeedVR2 7B by default
+    assert [dlg.method.itemData(i) for i in range(dlg.method.count())] == ["seedvr2_7b", "seedvr2_3b", "refine"]
     assert dlg.strength.currentData() == "natural" and not dlg.strength.isEnabled()
     assert [dlg.strength.itemData(i) for i in range(dlg.strength.count())] == ["soft", "natural", "crisp"]
     dlg.size.setCurrentIndex(2)
-    assert dlg.strength.isEnabled()
+    assert dlg.method.isEnabled() and not dlg.strength.isEnabled() and not dlg.fast.isEnabled()   # (refine only)
+    dlg.method.setCurrentIndex(dlg.method.findData("refine"))
+    assert dlg.strength.isEnabled() and dlg.fast.isEnabled()
     dlg.reject()
-    dlg = ExportDialog(None, str(tmp_path / "x.mp4"), (672, 384), {}, swapped=2)
+    seen = []
+    dlg = ExportDialog(None, str(tmp_path / "x.mp4"), (672, 384),
+                       lambda size, how, st: seen.append((size, how, st)) or how == "seedvr2_3b", swapped=2)
+    assert "already upscaled" not in dlg.size.itemText(2) and ("2k", "seedvr2_7b", "natural") in seen
+    dlg.method.setCurrentIndex(dlg.method.findData("seedvr2_3b"))         # kept copies are per method
+    assert "already upscaled" in dlg.size.itemText(2)
     assert not dlg.swapped.isHidden() and dlg.swapped.isChecked() and not dlg.swapped.isEnabled()
-    assert dlg.swapped.text() == "Refine the videos with a replaced person too"
+    assert dlg.swapped.text() == "Upscale the videos with a replaced person too"
     dlg.size.setCurrentIndex(2)
     assert dlg.swapped.isEnabled()
     dlg.reject()
     out = tmp_path / "export-2k.mp4"
-    win.export(out, "2k")
+    win.export(out, "2k")                                                    # SeedVR2 7B
     assert win.running
     wait(app, lambda: not win.running, timeout=120)
     info = chain.probe(out)
     base = T.Checker(win.project, win.tree).base()
     from video_chain.comfy import refine_size
     assert (info["width"], info["height"]) == refine_size(base["width"], base["height"], "2k")
-    assert win.status.text().startswith(f"Exported {out.name} (2k, refined; 2 clips refined now")
+    assert win.status.text().startswith(f"Exported {out.name} (2k, SeedVR2 7B; 2 clips upscaled now"), \
+        win.status.text()
     win.export(out, "2k")                                                    # again: the kept copies are reused
     wait(app, lambda: not win.running, timeout=120)
-    assert win.status.text() == f"Exported {out.name} (2k, refined; every clip was refined already)."
+    assert win.status.text() == f"Exported {out.name} (2k, SeedVR2 7B; every clip was upscaled already)."
+    win.export(out, "2k", method="refine")                                   # the refine: its own copies
+    wait(app, lambda: not win.running, timeout=120)
+    assert win.status.text().startswith(f"Exported {out.name} (2k, refined; 2 clips upscaled now")
     assert {win.state(n) for n in ids} == {"done"}
 
 

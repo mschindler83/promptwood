@@ -1604,6 +1604,129 @@ def _refine(self, draft: Path, prompt: str, out: Path, seed: int, size: tuple[in
 ComfyGenerator.refine = _refine
 
 
+# ----------------------------------------------------------------------------- SeedVR2 upscale (video restoration)
+# ComfyUI's core SeedVR2 nodes, as its blueprint "Upscale Video (SeedVR2 3B Int8)": the clip scaled to the export
+# size (lanczos), padded, encoded with SeedVR2's VAE, restored in one step, decoded and colour-matched to the input.
+# Unlike the refine it restores what is there instead of drawing it anew: measured on a 1.6 s face clip at 1080p
+# (RTX 4090, ~33 s each) it changed the clip least of all (7B 4.1, 3B 4.7, refine "natural" 7.0), closed eyes
+# stayed closed, 7B was the cleanest, 3B crisper but harder. Long clips are split in time (SeedVR2TemporalChunk,
+# auto: the largest chunk that fits the free GPU memory) and crossfaded back together.
+SEEDVR_NODES = ("SeedVR2Preprocess", "SeedVR2Conditioning", "SeedVR2PostProcessing", "SeedVR2TemporalChunk",
+                "SeedVR2TemporalMerge", "VAEEncodeTiled", "VAEDecodeTiled", "ImageScale", "LoadVideo",
+                "GetVideoComponents", "CreateVideo", "SaveVideo")
+SEEDVR_METHODS = {"seedvr2_7b": "7b", "seedvr2_3b": "3b"}       # export method -> model size
+SEEDVR_OVERLAP = 2                         # latent frames (8 frames) crossfaded between the chunks of a long clip
+SEEDVR_DOWNLOAD = "https://huggingface.co/Comfy-Org/SeedVR2 (diffusion_models/seedvr2_{}_int8_convrot.safetensors)"
+
+
+def pick_seedvr_files(unets: list[str], vaes: list[str], size: str) -> dict:
+    """SeedVR2's model of this size ('7b' / '3b'; not the "sharp" variant; int8 > fp8 > fp16 > any) and its VAE."""
+    cands = [u for u in unets if f"seedvr2_{size}" in Path(u).name.lower() and "sharp" not in u.lower()]
+    order = lambda u: next((i for i, k in enumerate(("int8", "fp8", "fp16")) if k in u.lower()), 9)   # noqa: E731
+    vae = next((v for v in vaes if "seedvr2" in Path(v).name.lower() and "vae" in Path(v).name.lower()), None)
+    return {"unet": min(cands, key=order) if cands else None, "vae": vae}
+
+
+def build_seedvr_workflow(*, draft: str, width: int, height: int, unet: str, vae: str, prefix: str,
+                          seed: int = 42) -> dict:
+    """Upscale the uploaded clip (with its sound) to width x height with SeedVR2 (see SEEDVR_NODES)."""
+    tiles = {"tile_size": 512, "overlap": 128, "temporal_size": 64, "temporal_overlap": 8}
+    return {
+        "load": {"class_type": "LoadVideo", "inputs": {"file": draft}},
+        "parts": {"class_type": "GetVideoComponents", "inputs": {"video": ["load", 0]}},
+        "resize": {"class_type": "ImageScale", "inputs": {"image": ["parts", 0], "upscale_method": "lanczos",
+                                                          "width": int(width), "height": int(height),
+                                                          "crop": "disabled"}},
+        "pre": {"class_type": "SeedVR2Preprocess", "inputs": {"resized_images": ["resize", 0]}},
+        "vae": {"class_type": "VAELoader", "inputs": {"vae_name": vae}},
+        "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": unet, "weight_dtype": "default"}},
+        "enc": {"class_type": "VAEEncodeTiled", "inputs": {"pixels": ["pre", 0], "vae": ["vae", 0], **tiles}},
+        "chunk": {"class_type": "SeedVR2TemporalChunk", "inputs": {"latent": ["enc", 0],
+                                                                   "temporal_overlap": SEEDVR_OVERLAP,
+                                                                   "chunking_mode": "auto"}},
+        "cond": {"class_type": "SeedVR2Conditioning", "inputs": {"model": ["unet", 0],
+                                                                 "vae_conditioning": ["chunk", 0]}},
+        "sample": {"class_type": "KSampler", "inputs": {"model": ["unet", 0], "positive": ["cond", 0],
+                                                        "negative": ["cond", 1], "latent_image": ["chunk", 0],
+                                                        "seed": int(seed), "steps": 1, "cfg": 1.0,
+                                                        "sampler_name": "euler", "scheduler": "simple",
+                                                        "denoise": 1.0}},
+        "merge": {"class_type": "SeedVR2TemporalMerge", "inputs": {"latents": ["sample", 0],
+                                                                   "temporal_overlap": ["chunk", 1]}},
+        "dec": {"class_type": "VAEDecodeTiled", "inputs": {"samples": ["merge", 0], "vae": ["vae", 0], **tiles}},
+        "post": {"class_type": "SeedVR2PostProcessing", "inputs": {"images": ["dec", 0],
+                                                                   "original_resized_images": ["resize", 0],
+                                                                   "color_correction_method": "lab"}},
+        "video": {"class_type": "CreateVideo", "inputs": {"images": ["post", 0], "fps": 24.0,
+                                                          "audio": ["parts", 1]}},
+        "seedvr_save": {"class_type": "SaveVideo", "inputs": {"video": ["video", 0], "filename_prefix": prefix,
+                                                              "format": "mp4"}},
+    }
+
+
+def _seedvr(self, draft: Path, out: Path, size: tuple[int, int], method: str = "seedvr2_7b",
+            seed: int = 42) -> None:
+    """ComfyGenerator.seedvr: upscale one finished clip (or video) to size with SeedVR2 (build_seedvr_workflow)."""
+    for node in SEEDVR_NODES:
+        if not self._object_info(node):
+            raise ComfyError(f"this ComfyUI has no {node} node (update ComfyUI: SeedVR2 is in its core nodes)")
+    if self.last_hyperflow is not False:
+        self.free()                                # (an H3 model patched by HyperFlow is not needed here)
+        self.last_hyperflow = False
+    model = SEEDVR_METHODS[method]
+    unets = _combo_options(self._object_info("UNETLoader").get("input", {}).get("required", {}).get("unet_name"))
+    vaes = _combo_options(self._object_info("VAELoader").get("input", {}).get("required", {}).get("vae_name"))
+    files = pick_seedvr_files(unets, vaes, model)
+    if not files["unet"]:
+        raise ComfyError(f"ComfyUI lists no SeedVR2 {model.upper()} model in its diffusion_models: "
+                         + SEEDVR_DOWNLOAD.format(model))
+    if not files["vae"]:
+        raise ComfyError("ComfyUI lists no SeedVR2 VAE (seedvr2_ema_vae_fp16.safetensors in models/vae, "
+                         "https://huggingface.co/Comfy-Org/SeedVR2)")
+    import tempfile
+    uploads: list[tuple[str, Path]] = []
+    with tempfile.TemporaryDirectory(prefix="video-chain-seedvr-") as tmp:
+        src = _with_audio(Path(draft), Path(tmp) / "draft.mp4")
+        try:
+            name = self.upload(src)
+            uploads.append((name, src))
+            prefix = f"{SUBFOLDER}/seedvr_{uuid.uuid4().hex[:12]}"
+            wf = build_seedvr_workflow(draft=name, width=size[0], height=size[1], unet=files["unet"],
+                                       vae=files["vae"], prefix=prefix, seed=seed)
+            ws = self._connect_ws()
+            try:
+                self._queue(wf)
+                entry = self._wait(self.current, ws)
+            except ComfyJobFailed:
+                raise
+            except Exception:
+                self.interrupt()
+                raise
+            finally:
+                if ws is not None:
+                    try:
+                        ws.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                self.current = None
+            video = self._first_file((entry.get("outputs") or {}).get("seedvr_save"))
+            if video is None:
+                raise ComfyError("ComfyUI finished without the upscaled clip")
+            part = Path(out).with_name(Path(out).stem + ".part.mp4")
+            part.write_bytes(self._download(video))
+            part.replace(out)
+            if self.cleanup:
+                self._remove(self.output_dir, video, Path(out))
+        finally:
+            if self.cleanup:
+                for up, local in uploads:
+                    self._remove(self.input_dir, {"filename": Path(up).name, "subfolder": str(Path(up).parent)},
+                                 Path(local), same_size=False)
+
+
+ComfyGenerator.seedvr = _seedvr
+
+
 # ----------------------------------------------------------------------------- prompt refiner (an LLM in ComfyUI)
 
 # Language models ComfyUI can run with its TextGenerate node, loaded as text encoders: (file name contains, loader

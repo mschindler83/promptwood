@@ -893,3 +893,30 @@ def test_describe_face_workflow():
     g = wf["gen"]["inputs"]
     assert g["image"] == ["pic", 0] and g["prompt"] == C.FACE_INSTRUCTION and "Never name" in g["prompt"]
     assert wf["llm"]["inputs"]["type"] == "krea2" and wf["show"]["inputs"]["source"] == ["gen", 0]
+
+
+def test_seedvr2_upscale(server, start, tmp_path):
+    """SeedVR2 (ComfyUI's core nodes, as its blueprint): the clip scaled, restored in one step, chunked in time,
+    colour-matched; its frames and sound kept; the 7B / 3B int8 model (never the "sharp" one) and the VAE."""
+    assert C.pick_seedvr_files(["x/seedvr2_7b_fp16.safetensors", "seedvr2_7b_sharp_int8_convrot.safetensors",
+                                "seedvr2_7b_int8_convrot.safetensors"], ["a.safetensors",
+                                "seedvr2_ema_vae_fp16.safetensors"], "7b") == {
+        "unet": "seedvr2_7b_int8_convrot.safetensors", "vae": "seedvr2_ema_vae_fp16.safetensors"}
+    assert C.pick_seedvr_files(["seedvr2_7b_fp16.safetensors"], [], "3b") == {"unet": None, "vae": None}
+    gen = C.ComfyGenerator(server.url)
+    draft, frame = tmp_path / "d.mp4", tmp_path / "d.png"
+    gen.generate("x", start, draft, frame, 1, settings())
+    out = tmp_path / "s.mp4"
+    gen.seedvr(draft, out, (1888, 1088))
+    info = chain.probe(out)
+    n = chain.probe(draft)["frames"]
+    assert (info["width"], info["height"], info["frames"], info["audio"]) == (1888, 1088, n, True)
+    wf = server.prompts[-1]
+    assert server.seedvr_jobs == ["seedvr2_7b_int8_convrot.safetensors"]
+    assert wf["post"]["inputs"]["color_correction_method"] == "lab"
+    assert wf["resize"]["inputs"]["upscale_method"] == "lanczos" and wf["vae"]["inputs"]["vae_name"].startswith("seedvr2")
+    gen.seedvr(draft, out, (1888, 1088), "seedvr2_3b")
+    assert server.seedvr_jobs[-1] == "seedvr2_3b_int8_convrot.safetensors"
+    server.seedvr = False                                                       # not installed: a clear message
+    with pytest.raises(C.ComfyError, match="SeedVR2"):
+        gen.seedvr(draft, out, (1888, 1088))

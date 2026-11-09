@@ -2280,7 +2280,7 @@ def refine_record(target: Path) -> dict:
 def refine_path(generator, project: Path, nid: str, size: str, out: Path,
                 events: Callable[[dict], None] | None = None, log: Callable[[str], None] = print,
                 pin: bool = True, fast_attention: bool = False, refine_swapped: bool = False,
-                strength: str = "natural") -> Path:
+                strength: str = "natural", method: str = "refine") -> Path:
     """Export the path start -> nid at a higher size ('1080p' / '2k'): every generated clip is re-rendered by
     generator.refine (Open-H3-Regenerate-2K) as it was made (its prompt, style text, LoRAs, seed), every real video
     is converted again from its file at that size. Refined copies are kept (nodes/<clip>_<size>.mp4) and reused.
@@ -2293,8 +2293,13 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
     copy, so another strength makes new copies.
     refine_swapped: a real video whose person was replaced (made at the generation size) is re-rendered by the
     refine like a generated clip (prompt: the new person's face details), not only converted at the higher size.
+    method: "refine" (above), or "seedvr2_7b" / "seedvr2_3b": every generated clip (and, with refine_swapped, every
+    video with a replaced person) is upscaled by generator.seedvr instead, which restores what is there rather than
+    drawing it anew (no pins needed: neighbouring clips stay as alike as they were made); recorded per copy too.
     Then the path is joined (the same frames left out as at the normal size) into out."""
-    from .comfy import refine_size
+    from .comfy import SEEDVR_METHODS, refine_size
+    if method != "refine" and method not in SEEDVR_METHODS:
+        raise ValueError(f"unknown method {method!r}")
     if size not in REFINED:
         raise ValueError(f"unknown size {size!r}")
     project = Path(project)
@@ -2313,7 +2318,7 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
         for k, node in enumerate(order, start=1):
             target = refined_file(project, node, size)
             first = last = None
-            if pin and not node.is_video:
+            if pin and not node.is_video and method == "refine":
                 i = path.index(node)
                 if i == 0:
                     start = project / START_FILE
@@ -2332,10 +2337,12 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
             regen = not node.is_video or bool(refine_swapped and swapped_video(node))
             if node.is_video:
                 pins["video"] = "refined" if regen else "converted"
-            if fast_attention and regen:
-                pins["attention"] = "sol-attn"
-            if regen:
+            if regen and method != "refine":
+                pins["method"] = method
+            elif regen:
                 pins["strength"] = strength
+                if fast_attention:
+                    pins["attention"] = "sol-attn"
             record = refine_record(target)
             if node.is_video and not regen and record.get("video", "converted") == "converted":
                 reuse = target.is_file()                 # (copies converted before the record named it)
@@ -2351,7 +2358,13 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
                     not node.is_video and not all(k_ in s for k_ in ("width", "height")):
                 raise ValueError(f"{'video' if node.is_video else 'clip'} #{node.id[1:]} has no recorded size; "
                                  "make it again, then export")
-            if node.is_video and regen:                  # a replaced person: re-rendered like a generated clip
+            if regen and method != "refine":             # SeedVR2: the clip as made, restored at the size
+                dims = node.made.get("key") if node.is_video else s
+                w, h = refine_size(int(dims["width"]), int(dims["height"]), size)
+                name = "SeedVR2 " + SEEDVR_METHODS[method].upper()
+                log(f"[{k}/{len(order)}] {node.id}: upscaling with {name} to {w}x{h}")
+                generator.seedvr(project / node.made["video"], target, (w, h), method, seed=node.seed)
+            elif node.is_video and regen:                # a replaced person: re-rendered like a generated clip
                 key = node.made.get("key") or {}
                 w, h = refine_size(int(key["width"]), int(key["height"]), size)
                 info = swapped_video(node)

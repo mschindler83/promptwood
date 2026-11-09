@@ -1049,3 +1049,25 @@ def test_refine_strength_is_used_and_recorded(project, tmp_path):
     assert [r["strength"] for r in gen.refines[2:]] == ["crisp", "crisp"]        # another strength: made again
     T.refine_path(gen, project, b1.id, "2k", tmp_path / "c2.mp4", log=lambda _m: None, strength="crisp")
     assert len(gen.refines) == 4                                                   # then reused
+
+
+def test_export_with_seedvr2(project, tmp_path):
+    """SeedVR2: every generated clip upscaled as made (no pins, no prompt); a real video converted from its file;
+    copies recorded per method, so the refine or the other model makes new ones."""
+    t, a, b1, b2, c = build(project)
+    gen = run(project, [b1.id])
+    out = tmp_path / "s.mp4"
+    T.refine_path(gen, project, b1.id, "2k", out, log=lambda _m: None, method="seedvr2_7b")
+    assert [x["method"] for x in gen.seedvrs] == ["seedvr2_7b", "seedvr2_7b"] and not getattr(gen, "refines", [])
+    t = T.load(project)
+    assert chain.probe(out)["width"] == gen.seedvrs[0]["size"][0]
+    assert T.refine_record(T.refined_file(project, t.nodes[a.id], "2k")) == {"first": None, "last": None,
+                                                                               "method": "seedvr2_7b"}
+    T.refine_path(gen, project, b1.id, "2k", tmp_path / "s2.mp4", log=lambda _m: None, method="seedvr2_7b")
+    assert len(gen.seedvrs) == 2                                                   # reused
+    T.refine_path(gen, project, b1.id, "2k", tmp_path / "s3.mp4", log=lambda _m: None, method="seedvr2_3b")
+    assert [x["method"] for x in gen.seedvrs[2:]] == ["seedvr2_3b", "seedvr2_3b"]   # another model: made again
+    T.refine_path(gen, project, b1.id, "2k", tmp_path / "r.mp4", log=lambda _m: None)
+    assert len(gen.refines) == 2                                                   # the refine: its own copies
+    with pytest.raises(ValueError, match="unknown method"):
+        T.refine_path(gen, project, b1.id, "2k", tmp_path / "x.mp4", log=lambda _m: None, method="topaz")

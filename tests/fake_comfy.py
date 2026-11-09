@@ -28,6 +28,9 @@ KNOWN = {"UNETLoader", "CLIPLoader", "VAELoader", "LoadImage", "MiniMaxH3ImageTo
          # Qwen-Image 2.1 inpaint
          "ModelPatchLoader", "VideoChainQwen21FunInpaint", "ImageToMask", "MaskToImage", "ImageBlur", "GrowMask",
          "ImageCompositeMasked", "EmptyImage",
+         # SeedVR2
+         "SeedVR2Preprocess", "SeedVR2Conditioning", "SeedVR2PostProcessing", "SeedVR2TemporalChunk",
+         "SeedVR2TemporalMerge", "VAEEncodeTiled",
          # Wan 2.2 Animate (replace a person)
          "WanAnimateToVideo", "TrimVideoLatent", "DWPreprocessor", "BlockifyMask", "DrawMaskOnImage",
          "CLIPVisionEncode", "CLIPVisionLoader", "ModelSamplingSD3", "ImageBatch", "ImageScale",
@@ -48,6 +51,9 @@ REFINER = "minimax-h3-refiner/minimax_h3_open_regenerate_2k_refiner_rank_384_bf1
 UPSCALER = "minimax_h3_latent_upscaler_3d_conv_v1_bf16.safetensors"
 HYPERFLOW = "custom_node_hyperflow_8step_v1.0_comfyui_pruned.safetensors"
 # the refine strengths: the release's 0.909, 0.857, 0.667 scaled to start at 0.6 / 0.7 / 0.8
+SEEDVR_UNETS = ["seedvr2_3b_int8_convrot.safetensors", "seedvr2_7b_int8_convrot.safetensors",
+                "seedvr2_7b_sharp_int8_convrot.safetensors", "seedvr2_7b_fp16.safetensors"]
+SEEDVR_VAE = ["seedvr2_ema_vae_fp16.safetensors"]
 C_REFINE_SIGMAS = {"0.6, 0.5657, 0.4403, 0": "soft", "0.7, 0.66, 0.5136, 0": "natural", "0.8, 0.7542, 0.587, 0": "crisp"}
 QWEN_UNET, QWEN_CLIP, QWEN_VAE = ("qwen-image/qwen_image_edit_2511_fp8mixed.safetensors",
                                   "qwen_2.5_vl_7b_fp8_scaled.safetensors", "qwen_image_vae.safetensors")
@@ -74,6 +80,13 @@ SCHEMAS = {
     "VideoChainFaceSwap": ({"images", "person", "swapper", "enhancer", "enhance"},
                            {"person_2", "person_3", "person_4"}),
     "MiniMaxH3SigmaShift": ({"model", "shift_video", "shift_audio"}, set()),
+    "SeedVR2Preprocess": ({"resized_images"}, set()),
+    "SeedVR2Conditioning": ({"model", "vae_conditioning"}, set()),
+    "SeedVR2PostProcessing": ({"images", "original_resized_images", "color_correction_method"}, set()),
+    "SeedVR2TemporalChunk": ({"latent", "temporal_overlap", "chunking_mode"}, set()),
+    "SeedVR2TemporalMerge": ({"latents", "temporal_overlap"}, set()),
+    "VAEEncodeTiled": ({"pixels", "vae", "tile_size", "overlap", "temporal_size", "temporal_overlap"}, set()),
+    "ImageScale": ({"image", "upscale_method", "width", "height", "crop"}, set()),
     "WanAnimateToVideo": ({"positive", "negative", "vae", "width", "height", "length", "batch_size",
                            "continue_motion_max_frames", "video_frame_offset"},
                           {"clip_vision_output", "reference_image", "face_video", "pose_video", "continue_motion",
@@ -103,6 +116,8 @@ class FakeComfy:
         self.hyperflow = True                      # ComfyUI-HyperFlow-H3 with its weights
         self.refine = True                         # the H3 2K nodes, the latent upscaler and the refiner LoRA
         self.refine_strengths: list[str] = []      # the strength of every refine job
+        self.seedvr = True                         # SeedVR2's 7B / 3B models and VAE
+        self.seedvr_jobs: list[str] = []           # the model of every SeedVR2 job
         self.audio_refs = True                     # MiniMaxH3ReferenceToVideo takes reference sounds
         self.fail_next: str | None = None          # the next job fails with this message (once)
         self.prompts, self.calls, self.history = [], [], {}
@@ -118,11 +133,13 @@ class FakeComfy:
         from video_chain import comfy as C
         q, q21, mo = self.qwen, self.qwen21, self.moss
         files = {"UNETLoader": ("unet_name", [C.UNET, C.UNET_REF] + ([QWEN_UNET] if q else []) + IMAGE_UNETS
-                                + (QWEN21_UNETS if q21 else []) + ([MOSS_UNET] if mo else [])),
+                                + (QWEN21_UNETS if q21 else []) + ([MOSS_UNET] if mo else [])
+                                + (SEEDVR_UNETS if self.seedvr else [])),
                  "CLIPLoader": ("clip_name", [C.TEXT_ENCODER] + ([QWEN_CLIP] if q else []) + LLM_FILES + IMAGE_CLIPS
                                 + ([QWEN21_CLIP] if q21 else []) + ([MOSS_CLIP] if mo else [])),
                  "VAELoader": ("vae_name", [C.VIDEO_VAE, C.AUDIO_VAE] + ([QWEN_VAE] if q else []) + IMAGE_VAES
-                               + ([QWEN21_VAE] if q21 else []) + ([MOSS_VAE] if mo else [])),
+                               + ([QWEN21_VAE] if q21 else []) + ([MOSS_VAE] if mo else [])
+                               + (SEEDVR_VAE if self.seedvr else [])),
                  "CheckpointLoaderSimple": ("ckpt_name", IMAGE_CKPTS),
                  "LoraLoaderModelOnly": ("lora_name", self.loras + ([QWEN_LIGHTNING] if q else [])
                                          + ([REFINER] if self.refine else []) + IMAGE_LORAS
@@ -155,6 +172,9 @@ class FakeComfy:
                     "ImageCompositeMasked"):
             return {node: {"input": {"required": {}}}} if an or node not in ("WanAnimateToVideo", "DWPreprocessor") \
                 else {}
+        if node in C.SEEDVR_NODES and node not in ("LoadVideo", "GetVideoComponents", "CreateVideo", "SaveVideo",
+                                                   "ImageScale", "VAEDecodeTiled"):
+            return {node: {"input": {"required": {}}}} if self.seedvr else {}
         if node == "VideoChainQwen21FunInpaint":
             return {node: {"input": {"required": {}}}} if self.inpaint21 else {}
         if node in C.REFINE_NODES + ("BlockSparseAttention",) and node != "LatentUpscaleModelLoader":
@@ -249,6 +269,21 @@ class FakeComfy:
                     res[f"{name}_save"] = {"images": [{"filename": f.name, "subfolder": str(Path(prefix).parent),
                                                        "type": "output"}]}
             return res
+        if "seedvr_save" in wf:                      # SeedVR2: the draft at the target size, its frames and sound
+            draft = self.root / "input" / wf["load"]["inputs"]["file"]
+            assert draft.is_file(), "draft not uploaded"
+            assert wf["sample"]["inputs"]["steps"] == 1 and wf["chunk"]["inputs"]["chunking_mode"] == "auto"
+            assert wf["merge"]["inputs"]["temporal_overlap"] == ["chunk", 1]
+            self.seedvr_jobs.append(wf["unet"]["inputs"]["unet_name"])
+            rs = wf["resize"]["inputs"]
+            prefix = wf["seedvr_save"]["inputs"]["filename_prefix"]
+            out = self.root / "output" / (prefix + "_00001_.mp4")
+            out.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(draft), "-vf",
+                            f"scale={rs['width']}:{rs['height']}", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                            "-c:a", "aac", str(out)], check=True)
+            return {"seedvr_save": {"images": [{"filename": out.name, "subfolder": str(Path(prefix).parent),
+                                                "type": "output"}]}}
         if "refine_save" in wf:                      # 2K refine: the draft at the target size, its frames and sound
             draft = self.root / "input" / wf["draft"]["inputs"]["file"]
             assert draft.is_file(), "draft not uploaded"

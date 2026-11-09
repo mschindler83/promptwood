@@ -266,6 +266,7 @@ def serve(a, emit, make_generator: Callable[[dict], object], stdin=None) -> int:
                                     fast_attention=bool(cmd.get("fast_attention")),
                                     refine_swapped=bool(cmd.get("refine_swapped")),
                                     strength=str(cmd.get("strength") or "natural"),
+                                    method=str(cmd.get("method") or "refine"),
                                     events=lambda ev: (ev.get("e") == "node" and ev.get("state") == "generating"
                                                        and current.update(id=ev["id"], k=ev.get("k", 0)),
                                                        emit(ev)))
