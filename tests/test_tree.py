@@ -1120,3 +1120,23 @@ def test_seedvr2_light_denoise_is_recorded(project, tmp_path):
     T.refine_path(gen, project, b1.id, "2k", tmp_path / "d2.mp4", log=lambda _m: None, method="seedvr2_7b",
                   denoise=True)
     assert len(gen.seedvrs) == 4                                                     # then reused
+
+
+def test_camera_move_is_recorded_and_sent_to_the_model(project):
+    t, a, b1, b2, c = build(project)
+    t.nodes[a.id].prompt = "She lifts the cup. #pan-right-slow toward the window"
+    t.nodes[a.id].overrides = {"camera": {"move": "push-in", "amplitude": "small", "speed": "slow"}}
+    T.save(project, t)
+    gen = run(project, [a.id])
+    sent = gen.calls[0]["prompt"]
+    assert "cup. The camera pans right at slow speed toward the window." in sent and "#pan" not in sent
+    assert sent.endswith("The camera pushes in with small amplitude at slow speed.")
+    t = T.load(project)
+    assert t.nodes[a.id].made["settings"]["camera"] == {"move": "push-in", "amplitude": "small", "speed": "slow"}
+    assert statuses(project)["She lifts the cup. #pan-right-slow toward the window"] == "done"
+    t.nodes[a.id].overrides = {"camera": {"move": "push-in", "speed": "fast"}}       # another move: made again
+    T.save(project, t)
+    assert statuses(project)["She lifts the cup. #pan-right-slow toward the window"] == "changed"
+    t.nodes[a.id].overrides = {}
+    T.save(project, t)
+    assert "camera" not in T.Checker(project, T.load(project)).settings(a.id)

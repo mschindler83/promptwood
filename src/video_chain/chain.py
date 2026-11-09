@@ -488,7 +488,7 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
                   style: tuple[str, str] | None = None, hyperflow: float | None = None,
                   pika: float | None = None, audio_refs: list | None = None, cast: list | None = None,
                   voice_language: str | None = None, lora_triggers: list | None = None,
-                  source_sound: dict | None = None, veda: bool = False) -> dict:
+                  source_sound: dict | None = None, veda: bool = False, camera: dict | None = None) -> dict:
     """What a clip depends on besides prompt, seed and start image; a clip is reused only if this is unchanged.
     The LoRA counts by content (lora_sha1), so a LoRA retrained into the same file makes its clips change.
     extra_loras: further LoRAs stacked after the first ([(path, strength)]), only present when there are any, so
@@ -541,6 +541,8 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
         s["lora_triggers"] = [str(w) for w in lora_triggers]
     if veda:                                    # made with Veda sparse attention (a large clip, see veda_useful)
         s["veda"] = True
+    if camera:                                  # the clip's camera move (camera.py), a sentence after its prompt
+        s["camera"] = dict(camera)
     if guide:                                   # motion guide: frames of the neighbouring clips anchored
         s["guide"] = int(guide)
     prefix, suffix = ((style[0] or "").strip(), (style[1] or "").strip()) if style else ("", "")

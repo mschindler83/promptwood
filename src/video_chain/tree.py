@@ -49,12 +49,13 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from . import camera as _camera
 from . import chain
 
 TREE_FILE = "tree.json"
 START_FILE = "start.png"
 NO_LORA = "none"                   # old override value: this node without any LoRA
-OVERRIDE_KEYS = ("loras", "frames", "steps", "guide", "source_sound", "sound_over")
+OVERRIDE_KEYS = ("loras", "frames", "steps", "guide", "source_sound", "sound_over", "camera")
 _OLD_LORA_KEYS = ("lora", "strength", "extra_loras")
 AI, VIDEO = "ai", "video"
 GUIDE_CHOICES = (5, 22, 39)        # motion guide lengths on H3's 17n+5 grid
@@ -1792,7 +1793,8 @@ def model_prompt(options: dict, node: Node, settings: dict | None) -> str:
     """What the model gets for a generated clip: the cast's prompt (clip_cast) with its LoRAs' trigger words, and
     with "Continue the video's sound" the sentence that makes the last sound reference its soundtrack."""
     from .triggers import with_triggers
-    text = with_triggers(clip_cast(options, node.prompt)["prompt"], list((settings or {}).get("lora_triggers") or []))
+    prompt = _camera.apply(node.prompt, (settings or {}).get("camera"))    # #tokens and the clip's camera move
+    text = with_triggers(clip_cast(options, prompt)["prompt"], list((settings or {}).get("lora_triggers") or []))
     ss = (settings or {}).get("source_sound")
     if ss and not (isinstance(ss, dict) and ss.get("overlay")):   # (a sound laid over is not the model's)
         k = len((settings or {}).get("audio_refs") or []) + 1
@@ -1841,7 +1843,8 @@ def node_settings(base: dict, options: dict, node: Node, audio_pool: list[dict] 
                                lora_triggers=_stack_triggers(options, node, stack),
                                source_sound=source_sound,
                                veda=veda_for(options, base["width"], base["height"],
-                                             int(ov.get("frames", options.get("frames", 73)))))
+                                             int(ov.get("frames", options.get("frames", 73)))),
+                               camera=_camera.clean(ov.get("camera")))
 
 
 def veda_for(options: dict, width: int, height: int, frames: int) -> bool:
@@ -2428,8 +2431,8 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
             else:
                 s = node.made.get("settings") or {}
                 w, h = refine_size(int(s["width"]), int(s["height"]), size)
-                prompt = " ".join(x for x in (s.get("prompt_prefix", ""), node.made.get("prompt", node.prompt),
-                                              s.get("prompt_suffix", "")) if x)
+                made_prompt = _camera.apply(node.made.get("prompt", node.prompt), s.get("camera"))
+                prompt = " ".join(x for x in (s.get("prompt_prefix", ""), made_prompt, s.get("prompt_suffix", "")) if x)
                 from .triggers import with_triggers
                 prompt = with_triggers(prompt, list(s.get("lora_triggers") or []))   # as the clip was made
                 loras = ([(s["lora"], s.get("strength", 1.0))] if s.get("lora") else []) + \

@@ -1,5 +1,5 @@
 """@mentions of the cast in prompt editors: a list of names while typing @..., known names highlighted, unknown
-ones marked."""
+ones marked. #camera tokens likewise (camera.py: #push-in-slow ...): offered while typing #, known ones highlighted."""
 from __future__ import annotations
 
 import re
@@ -9,10 +9,12 @@ from PySide6.QtCore import QEvent, QObject, QStringListModel, Qt
 from PySide6.QtGui import QFont, QSyntaxHighlighter, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import QCompleter, QPlainTextEdit
 
+from .. import camera as CAM
 from .. import tree as T
 from .theme import theme
 
 _TYPING = re.compile(r"(?<![\w@])@(\w[\w-]*)?$")      # an @mention being typed right before the cursor
+_TYPING_CAM = re.compile(r"(?<![\w#&/])#([A-Za-z][\w-]*)?$")   # a #camera token being typed
 
 
 class MentionHighlighter(QSyntaxHighlighter):
@@ -33,6 +35,12 @@ class MentionHighlighter(QSyntaxHighlighter):
                 f.setFontUnderline(True)
                 f.setUnderlineStyle(QTextCharFormat.WaveUnderline)
             self.setFormat(m.start(), m.end() - m.start(), f)
+        for m in CAM.TOKEN.finditer(text):           # known camera tokens (other #words stay plain)
+            if CAM.is_token(m.group(1)):
+                f = QTextCharFormat()
+                f.setForeground(t.accent)
+                f.setFontItalic(True)
+                self.setFormat(m.start(), m.end() - m.start(), f)
 
 
 class MentionHelper(QObject):
@@ -42,6 +50,7 @@ class MentionHelper(QObject):
     def __init__(self, edit: QPlainTextEdit, names: Callable[[], list[str]]):
         super().__init__(edit)
         self.edit, self.names = edit, names
+        self._kind = "@"                           # what is being typed: "@" a cast name, "#" a camera token
         self.highlighter = MentionHighlighter(edit.document(), names)
         self.model = QStringListModel(self)
         self.completer = QCompleter(self.model, self)
@@ -53,14 +62,20 @@ class MentionHelper(QObject):
         edit.installEventFilter(self)
 
     def _typed(self) -> re.Match | None:
+        """An @name or #camera token being typed right before the cursor (its kind in self._kind)."""
         cur = self.edit.textCursor()
         block = cur.block().text()[:cur.positionInBlock()]
-        return _TYPING.search(block)
+        m = _TYPING.search(block)
+        self._kind = "@"
+        if m is None:
+            m = _TYPING_CAM.search(block)
+            self._kind = "#"
+        return m
 
     def _update(self):
         popup = self.completer.popup()
         m = self._typed() if self.edit.hasFocus() else None
-        names = self.names()
+        names = (self.names() if self._kind == "@" else CAM.tokens()) if m is not None else []
         if m is None or not names:
             popup.hide()
             return

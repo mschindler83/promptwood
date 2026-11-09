@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
 
 from .. import chain
 from .. import film as F
+from .. import camera as CAM
 from .. import swap
 from .. import tree as T
 from ..comfy import REF_HINT
@@ -600,6 +601,28 @@ class PromptCard(QFrame):
             self.guide.addItem(text, n)
         self.guide.setToolTip(GUIDE_TIP)
         link.addRow("Carry-over", self.guide)
+        crow = QHBoxLayout()
+        crow.setSpacing(6)
+        self.cam_move = QComboBox()
+        self.cam_move.addItem("none", None)
+        for slug, (text, _w, _m) in CAM.MOVES.items():
+            self.cam_move.addItem(text, slug)
+        self.cam_move.setToolTip("A camera move for this clip, in the words of MiniMax H3's prompt guide: it is "
+                                 "added as a sentence after the prompt (\u201cThe camera pushes in with small "
+                                 "amplitude at slow speed.\u201d). For a move at a certain point, type # in the "
+                                 "prompt instead (#push-in-slow \u2026)")
+        self.cam_amp = QComboBox()
+        for text, data in (("medium", None), ("small", "small"), ("large", "large")):
+            self.cam_amp.addItem(text, data)
+        self.cam_amp.setToolTip("How far the camera moves (amplitude); medium is left out of the prompt")
+        self.cam_speed = QComboBox()
+        for text, data in (("normal", None), ("slow", "slow"), ("fast", "fast")):
+            self.cam_speed.addItem(text, data)
+        self.cam_speed.setToolTip("How fast the camera moves; normal is left out of the prompt")
+        crow.addWidget(self.cam_move, 2)
+        crow.addWidget(self.cam_amp, 1)
+        crow.addWidget(self.cam_speed, 1)
+        link.addRow("Camera", crow)
         self.sound_box = QWidget()
         sb = QVBoxLayout(self.sound_box)
         sb.setContentsMargins(0, 0, 0, 0)
@@ -666,6 +689,8 @@ class PromptCard(QFrame):
         v.addLayout(link)
         self._show_settings(PromptCard.settings_open)
         self.guide.currentIndexChanged.connect(self._ov_changed)
+        for w_ in (self.cam_move, self.cam_amp, self.cam_speed):
+            w_.currentIndexChanged.connect(self._ov_changed)
         self.src_sound.currentIndexChanged.connect(self._sound_toggled)
         self.sound_over.toggled.connect(self._sound_toggled)
         self.loras.changed.connect(self._ov_changed)
@@ -694,7 +719,8 @@ class PromptCard(QFrame):
 
     def set_choices(self, project_frames: int, project_steps: int, known: list[tuple[str, str]]):
         """Fill the setting widgets (without emitting changes). known: (path, label) of the LoRAs to offer."""
-        widgets = (self.loras, self.length, self.steps, self.guide, self.src_sound, self.sound_over)
+        widgets = (self.loras, self.length, self.steps, self.guide, self.src_sound, self.sound_over, self.cam_move,
+                   self.cam_amp, self.cam_speed)
         for w in widgets:
             w.blockSignals(True)
         try:
@@ -713,6 +739,11 @@ class PromptCard(QFrame):
             k = self.src_sound.findData(self.ov.get("source_sound") or None)
             self.src_sound.setCurrentIndex(max(k, 0))
             self.sound_over.setChecked(bool(self.ov.get("sound_over")))
+            cam = CAM.clean(self.ov.get("camera")) or {}
+            self.cam_move.setCurrentIndex(max(0, self.cam_move.findData(cam.get("move"))))
+            self.cam_amp.setCurrentIndex(max(0, self.cam_amp.findData(cam.get("amplitude"))))
+            self.cam_speed.setCurrentIndex(max(0, self.cam_speed.findData(cam.get("speed"))))
+            self._enable_camera()
             self._enable_guide()
             self.steps.setToolTip(f"Sampling steps of this clip (lowest value = the project's: {project_steps})")
             self.steps.setEnabled(not self.edit.isReadOnly() and not self.steps_locked)
@@ -738,8 +769,21 @@ class PromptCard(QFrame):
             ov["source_sound"] = self.src_sound.currentData()
             if self.sound_over.isChecked():
                 ov["sound_over"] = True
+        cam = CAM.clean({"move": self.cam_move.currentData(), "amplitude": self.cam_amp.currentData(),
+                         "speed": self.cam_speed.currentData()})
+        if cam:
+            ov["camera"] = cam
+        self._enable_camera()
         self.ov = ov
         self.overridesChanged.emit(self.nid, ov)
+
+    def _enable_camera(self):
+        """Amplitude and speed only for a move that takes them (not for none, static, shake, POV)."""
+        move = self.cam_move.currentData()
+        on = bool(move) and CAM.MOVES[move][2] and not self.edit.isReadOnly()
+        self.cam_amp.setEnabled(on)
+        self.cam_speed.setEnabled(on)
+        self.cam_move.setEnabled(not self.edit.isReadOnly())
 
     def text(self) -> str:
         return " ".join(self.edit.toPlainText().split())
@@ -780,6 +824,7 @@ class PromptCard(QFrame):
                   self.sound_over, self.b_refine, *self.buttons):
             w.setEnabled(on)
         self.steps.setEnabled(on and not self.steps_locked)
+        self._enable_camera()
         self._enable_guide()
         self._enable_end()
         self._enable_hand()
@@ -4059,6 +4104,8 @@ class MainWindow(QMainWindow):
             parts.append(f"{ov['frames'] / 24:.1f} s")
         if "steps" in ov:
             parts.append(f"{ov['steps']} steps")
+        if CAM.describe(ov.get("camera")):
+            parts.append("🎥 " + CAM.describe(ov.get("camera")))
         if ov.get("source_sound") == "previous":
             parts.append("repeats the sound before" + over)
         elif T.track_id(n) is not None:
@@ -4266,7 +4313,8 @@ class MainWindow(QMainWindow):
                     if T.source_sound_span(self.tree, n) is not None and not (n.overrides or {}).get("sound_over") \
                     else None
                 sent = T.model_prompt(self.tree.options, n, {"lora_triggers": words, "audio_refs": sounds,
-                                                             "source_sound": cont})
+                                                             "source_sound": cont,
+                                                             "camera": CAM.clean((n.overrides or {}).get("camera"))})
                 card.edit.setToolTip("Sent to the model: " + sent if sent != n.prompt.strip() else "")
                 card.set_faces(self._faces_text(use))
                 card.set_tracks([(tr["id"], tr["name"]) for tr in T.tracks(self.tree)])

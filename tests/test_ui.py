@@ -2673,3 +2673,35 @@ def test_video_view_shrinks_frames_without_aliasing(app):
     assert abs(a.mean() - 127.5) < 6 and a.std() < 8                                  # an even grey, no false pattern
     assert v.scaled_frame() is small                                                    # (once per frame and size)
     v.deleteLater()
+
+
+def test_camera_row_and_hash_tokens(app, win, tmp_path, image):
+    from PySide6.QtGui import QTextCursor
+    ids = new_project(win, tmp_path, image, ("She waits",))
+    card = next(c for c in win.cards if c.nid == ids[0])
+    assert card.cam_move.currentData() is None and not card.cam_amp.isEnabled()
+    card.cam_move.setCurrentIndex(card.cam_move.findData("push-in"))
+    assert card.cam_amp.isEnabled() and card.cam_speed.isEnabled()
+    card.cam_amp.setCurrentIndex(card.cam_amp.findData("small"))
+    card.cam_speed.setCurrentIndex(card.cam_speed.findData("slow"))
+    flush(app, win)
+    node = win.tree.nodes[ids[0]]
+    assert node.overrides["camera"] == {"move": "push-in", "amplitude": "small", "speed": "slow"}
+    assert "🎥 push in · small · slow" in win.badge(node)
+    card = next(c for c in win.cards if c.nid == ids[0])
+    assert "camera pushes in with small amplitude at slow speed" in card.edit.toolTip()   # (sent to the model)
+    card.cam_move.setCurrentIndex(card.cam_move.findData("static"))                     # no amplitude / speed
+    assert not card.cam_amp.isEnabled() and not card.cam_speed.isEnabled()
+    flush(app, win)
+    assert win.tree.nodes[ids[0]].overrides["camera"] == {"move": "static"}
+    # typing # offers the camera tokens; the chosen one goes in whole
+    card = next(c for c in win.cards if c.nid == ids[0])
+    card.edit.setFocus()
+    card.edit.setPlainText("She waits, #pan-ri")
+    card.edit.moveCursor(QTextCursor.End)
+    assert card.mentions._typed() is not None and card.mentions._kind == "#"
+    card.mentions._insert("pan-right-slow")
+    assert card.edit.toPlainText() == "She waits, #pan-right-slow "
+    card.edit.setPlainText("Hi @Ann")                                                   # (@ still the cast)
+    card.edit.moveCursor(QTextCursor.End)
+    assert card.mentions._typed() is not None and card.mentions._kind == "@"
