@@ -14,11 +14,15 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen
-from PySide6.QtWidgets import (QComboBox, QDialog, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLineEdit,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLineEdit,
                                QProgressBar, QPushButton, QSlider, QVBoxLayout)
 
 from .. import chain, swap
 from ..animate import DEFAULT_PROMPT, SIZES, gen_size, window_count
+
+METHODS = (("animate+lock", "Head + face lock (Animate, then face swap)"), ("animate", "Head only (Animate)"),
+           ("face", "Face only (face swap, the clip's own motion)"),
+           ("h3", "Head swap with H3 (head swap LoRA, the clip as guide)"))
 from .widgets import FrameTile, guard_wheel, label
 
 
@@ -35,7 +39,8 @@ class SwapDialog(QDialog):
 
     def __init__(self, parent, project: Path, nid: str, clip: Path, detector: Path | None,
                  pictures: list[tuple[str, str]], connect, settings=None, on_start=None, play=None,
-                 source: dict | None = None, pick=None):
+                 source: dict | None = None, pick=None, groups: list[list[str]] | None = None,
+                 h3: dict | None = None):
         super().__init__(parent)
         self.setWindowTitle(f"Replace a person in video #{nid[1:]}")
         self.resize(1180, 720)
@@ -43,6 +48,10 @@ class SwapDialog(QDialog):
         self.connect, self.qs, self.on_start, self.play = connect, settings, on_start, play
         self.source = dict(source or {})          # the video's file and range (the DWPose cache is bound to it)
         self.pick = pick                          # pick(title) -> an image path or None (the app's image picker)
+        self.groups = [list(g) for g in groups or []]   # the pictures of each Cast character (the face pass uses all)
+        # H3 head swap: {"lora": the head swap LoRA's path or None, "settings": the project's clip settings,
+        # "connect": progress -> a ComfyGenerator}
+        self.h3 = dict(h3 or {})
         self.heads: dict | None = None
         self.boxes: list[tuple] = []
         self.result: tuple[Path, dict, int] | None = None
@@ -104,6 +113,30 @@ class SwapDialog(QDialog):
         right.addWidget(label("One picture: the head and shoulders, the face well lit and seen from the front work "
                               "best.", level="tertiary"))
         form = QFormLayout()
+        self.method = QComboBox()
+        for key, text in METHODS:
+            self.method.addItem(text, key)
+        self.method.setCurrentIndex(max(0, self.method.findData(settings.value("swapMethod", "animate+lock", type=str)
+                                                                if settings else "animate+lock")))
+        self.method.setToolTip(
+            "<p><b>Head + face lock</b>: Wan 2.2 Animate draws the new head (face, hair, head shape), then a face "
+            "swap (HyperSwap) on every frame makes the face the new person's.<br><b>Head only</b>: Wan 2.2 Animate "
+            "alone.<br><b>Face only</b>: no Animate: only the face is swapped on every frame, so all motion is the "
+            "clip's own (fast, robust in any pose); hair and head shape stay.<br><b>Head swap with H3</b>: H3's "
+            "reference model with the head swap LoRA re-renders the clip with the new head; the whole clip guides "
+            "it (motion, camera, light come from the clip itself, no pose estimation); up to 15 s.</p>")
+        self.method.currentIndexChanged.connect(lambda *_: self._update())
+        form.addRow("Method", self.method)
+        self.body = QCheckBox("Follow the body pose")
+        self.body.setChecked(settings.value("swapBody", True, type=bool) if settings else True)
+        self.body.setToolTip("On: the body skeleton (DWPose) drives Animate too. Off: only the face motion; the "
+                             "body stays as in the clip anyway (only the head is drawn anew): better when the body "
+                             "is in unusual poses DWPose gets wrong")
+        form.addRow("", self.body)
+        self.sharpen = QCheckBox("Sharpen the face (GPEN)")
+        self.sharpen.setChecked(settings.value("swapSharpen", True, type=bool) if settings else True)
+        self.sharpen.setToolTip("Face restoration after the face swap (GPEN-BFR-512, 80 %): a sharper face")
+        form.addRow("", self.sharpen)
         self.size = QComboBox()
         for key in SIZES:
             self.size.addItem({"480p": "480p (faster)", "720p": "720p (sharper, slower)"}[key], key)
@@ -256,14 +289,32 @@ class SwapDialog(QDialog):
         self.b_stop.setEnabled(self._busy)
         self.b_play.setEnabled(self.result is not None and self.play is not None and not self._busy)
         self.b_use.setEnabled(self.result is not None and not self._busy)
-        for w in (self.head_size, self.ref_combo, self.size, self.prompt):
+        for w in (self.head_size, self.ref_combo, self.size, self.prompt, self.method, self.body, self.sharpen):
             w.setEnabled(not self._busy)
+        m = self.method.currentData()
+        animate = m in ("animate", "animate+lock")
+        for w in (self.size, self.body, self.head_size):
+            w.setEnabled(not self._busy and animate)
+        self.prompt.setEnabled(not self._busy and m != "face")
+        self.sharpen.setEnabled(not self._busy and m in ("face", "animate+lock"))
+        self.prompt.setPlaceholderText("The new person's face, e.g. “Male, oval face, short black hair, dark beard, "
+                                       "brown eyes”" if m == "h3" else DEFAULT_PROMPT)
+        why = ""
+        if m == "h3" and not self.h3.get("lora"):
+            why = "The head swap LoRA (minimax_h3_head_swap_v1.0_r32) is not among the H3 LoRAs"
+        elif m == "h3" and self.heads is not None and swap.h3_length(self.heads["frames"]) > swap.H3_MAX_FRAMES:
+            why = "H3 makes at most 15 s: use a shorter range of the video"
+        if why:
+            self.b_gen.setEnabled(False)
+            self.b_gen.setToolTip(why)
 
     def generate(self):
         if not self.b_gen.isEnabled():
             return
         if self.qs is not None:
-            self.qs.setValue("swapSize", self.size.currentData())
+            for k, v in (("swapSize", self.size.currentData()), ("swapMethod", self.method.currentData()),
+                         ("swapBody", self.body.isChecked()), ("swapSharpen", self.sharpen.isChecked())):
+                self.qs.setValue(k, v)
         if self.on_start is not None:
             self.on_start()
         self._busy, self._cancel = True, False
@@ -275,6 +326,10 @@ class SwapDialog(QDialog):
         size, prompt, seed = self.size.currentData(), self.prompt.text().strip(), random.randint(1, 2**31 - 1)
         scale, sig, connect = self.head_size.value(), self._sig, self.connect
         project, source = self.project, self.source
+        method, body = self.method.currentData(), self.body.isChecked()
+        enhance = 0.8 if self.sharpen.isChecked() else 0.0
+        persons = next(([Path(ref)] + [Path(x) for x in g if x != ref] for g in self.groups if ref in g),
+                       [Path(ref)])[:4]
         self.bar.setRange(0, 0)
         self.bar.show()
         self.state.setText("Connecting to ComfyUI … (loading Wan 2.2 Animate takes a while the first time)")
@@ -289,17 +344,44 @@ class SwapDialog(QDialog):
                 if self._cancel:
                     raise InterruptedError("cancelled")
                 out = out_dir / f"{stem}.mp4"
-                gen = gen_size(w, h, SIZES.get(size, 480))
-                key = swap.pose_key(clip, source, gen)
-                cached = swap.cached_pose(project, key)
-                if cached:
-                    sig.progress.emit("cached", 0, 0)
-                keep = None if cached else (out_dir / f"{stem}_pose.mkv", out_dir / f"{stem}_face.mkv")
-                meta = self.animator.replace(clip, mask, Path(ref), out, seed, n, (w, h), size, prompt, fps,
-                                             pose=cached, keep_pose=keep)
-                if keep is not None and all(p.is_file() for p in keep):
-                    swap.store_pose(project, key, *keep, {"source": source, "size": list(gen), "frames": n,
-                                                          "clip": str(clip), "made": time.strftime("%Y-%m-%d %H:%M:%S")})
+                if method == "h3":
+                    gen = self.h3["connect"](lambda i, s: sig.progress.emit("make", i, s))
+                    self.animator = gen
+                    length = swap.h3_length(n)
+                    st = dict(self.h3["settings"] or {})
+                    st.update({"frames": length, "width": w, "height": h, "lora": self.h3["lora"], "strength": 1.0,
+                               "extra_loras": [], "ref_paths": [str(ref)], "ref_size": "match", "ref_hint": False,
+                               "audio": True, "guides": [{"video": str(clip), "frame_idx": 0, "audio": True,
+                                                          "at": "start"}]})
+                    made_raw = out_dir / f"{stem}_h3.mp4"
+                    gen.generate(swap.head_swap_prompt(prompt), None, made_raw, out_dir / f"{stem}_h3.png", seed,
+                                 settings=st)
+                    swap.trim_with_sound(made_raw, clip, out, n)
+                    for f in (made_raw, out_dir / f"{stem}_h3.png"):
+                        f.unlink(missing_ok=True)
+                    meta = {"method": "h3", "lora": self.h3["lora"], "frames_made": length, "details": prompt,
+                            "steps": st.get("steps"), "seed": seed}
+                elif method == "face":
+                    meta = self.animator.face_only(clip, out, persons, fps, enhance)
+                else:
+                    if self.animator.missing:
+                        raise RuntimeError(self.animator.missing)
+                    gen = gen_size(w, h, SIZES.get(size, 480))
+                    key = swap.pose_key(clip, source, gen)
+                    cached = swap.cached_pose(project, key)
+                    need = ["face"] + (["pose"] if body else [])
+                    if all(k in cached for k in need):
+                        sig.progress.emit("cached", 0, 0)
+                    keep = {k: out_dir / f"{stem}_{k}.mkv" for k in need if k not in cached}
+                    meta = self.animator.replace(clip, mask, Path(ref), out, seed, n, (w, h), size, prompt, fps,
+                                                 pose=cached, keep_pose=keep, body=body,
+                                                 lock=persons if method == "animate+lock" else None,
+                                                 enhance=enhance)
+                    made = {k: keep[k] for k in meta.get("pose_made", []) if keep[k].is_file()}
+                    if made:
+                        swap.store_pose(project, key, made, {"source": source, "size": list(gen), "frames": n,
+                                                             "clip": str(clip),
+                                                             "made": time.strftime("%Y-%m-%d %H:%M:%S")})
                 meta.update({"reference": str(ref), "head_size": scale, "mask": str(mask), "clip": str(clip),
                              "made": time.strftime("%Y-%m-%d %H:%M:%S")})
                 got = swap.probe(out)[2]
@@ -343,11 +425,18 @@ class SwapDialog(QDialog):
         else:
             self.result = res
             out, meta, n = res
-            self.state.setText(f"Done: {n} frames, made at {meta['gen_size'][0]}×{meta['gen_size'][1]} in "
-                               f"{meta['windows']} part{'s' if meta['windows'] != 1 else ''}"
-                               + (" (the stored pose and face motion)" if meta.get("pose_cached") else
-                                  "; its pose and face motion are stored for the next try") +
-                               ". Play it, then “Use this” to put it into the video.")
+            if meta.get("method") == "face":
+                text = f"Done: the face swapped in {n} frames (all motion is the clip's own)."
+            elif meta.get("method") == "h3":
+                text = f"Done: {n} frames re-rendered by H3 with the head swap LoRA (the clip's own sound)."
+            else:
+                text = (f"Done: {n} frames, made at {meta['gen_size'][0]}×{meta['gen_size'][1]} in "
+                        f"{meta['windows']} part{'s' if meta['windows'] != 1 else ''}"
+                        + (f" (stored motion used: {', '.join(meta['pose_cached'])})" if meta.get("pose_cached")
+                           else "")
+                        + ("; its motion is stored for the next try" if meta.get("pose_made") else "")
+                        + (", the face locked with HyperSwap" if meta.get("lock") else "") + ".")
+            self.state.setText(text + " Play it, then “Use this” to put it into the video.")
             first = Path(self._tmp.name) / "result.png"
             try:
                 chain.frame_at(out, min(self.slider.value(), n - 1), first)

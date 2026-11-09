@@ -31,6 +31,7 @@ KNOWN = {"UNETLoader", "CLIPLoader", "VAELoader", "LoadImage", "MiniMaxH3ImageTo
          # Wan 2.2 Animate (replace a person)
          "WanAnimateToVideo", "TrimVideoLatent", "DWPreprocessor", "BlockifyMask", "DrawMaskOnImage",
          "CLIPVisionEncode", "CLIPVisionLoader", "ModelSamplingSD3", "ImageBatch", "ImageScale",
+         "VideoChainFaceSwap",
          # MOSS-Image
          "T5TokenizerOptions", "TextEncodeMOSSImageEdit", "SkipLayerGuidanceDiTSimple", "ImageScaleToTotalPixels", "GetImageSize"}
 IMAGE_UNETS = ["Chroma1-HD.safetensors", "Chroma1-HD-Flash.safetensors",
@@ -71,6 +72,7 @@ class FakeComfy:
         self.moss = True                           # MOSS-Image: its files, edit LoRA and nodes
         self.inpaint21 = True                      # the Qwen-Image 2.1 Fun ControlNet and Promptwood's node
         self.animate = True                        # Wan 2.2 Animate's files, LoRAs and nodes (controlnet_aux too)
+        self.faceswap = True                       # Promptwood's face swap node with HyperSwap and GPEN
         self.hyperflow = True                      # ComfyUI-HyperFlow-H3 with its weights
         self.refine = True                         # the H3 2K nodes, the latent upscaler and the refiner LoRA
         self.audio_refs = True                     # MiniMaxH3ReferenceToVideo takes reference sounds
@@ -112,6 +114,10 @@ class FakeComfy:
             files["LoraLoaderModelOnly"] = ("lora_name", files["LoraLoaderModelOnly"][1] + [
                 "wan2-2-Lightning/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors",
                 "WanAnimate_relight_lora_fp16.safetensors"])
+        if node == "VideoChainFaceSwap":
+            return {node: {"input": {"required": {
+                "swapper": [["hyperswap_1a_256.onnx", "hyperswap_1b_256.onnx"]],
+                "enhancer": [["none", "GPEN-BFR-1024.onnx", "GPEN-BFR-512.onnx"]]}}}} if self.faceswap else {}
         if node == "CLIPVisionLoader":
             return {node: {"input": {"required": {"clip_name": ["COMBO", {"options": ["clip_vision_h.safetensors"]
                                                                           if an else []}]}}}}
@@ -174,6 +180,16 @@ class FakeComfy:
             g = wf["gen"]["inputs"]
             self.refined = g
             return {"show": {"text": [f"<think>planning</think>Here is the refined prompt: \"REFINED {g['prompt'][:40]}\""]}}
+        if "lock" in wf and "anim0" not in wf and wf.get("save", {}).get("class_type") == "SaveVideo":
+            self.faced = wf                          # face only: the clip again (its face "swapped")
+            src = self.root / "input" / wf["src"]["inputs"]["file"]
+            prefix = wf["save"]["inputs"]["filename_prefix"]
+            out = self.root / "output" / (prefix + "_00001_.mp4")
+            out.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(src), "-vf", "hue=h=180", "-c:v", "libx264",
+                            "-pix_fmt", "yuv420p", "-c:a", "aac", str(out)], check=True)
+            return {"save": {"images": [{"filename": out.name, "subfolder": str(Path(prefix).parent),
+                                         "type": "output"}]}}
         if "anim0" in wf and wf.get("save", {}).get("class_type") == "SaveVideo":   # Wan Animate: the clip again
             self.animated = wf
             src = self.root / "input" / wf["src"]["inputs"]["file"]

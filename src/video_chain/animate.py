@@ -64,12 +64,14 @@ def pick_animate_files(unets, clips, vaes, loras, visions) -> dict:
 
 def build_animate_workflow(*, files: dict, video: str, mask: str, reference: str, frames: int,
                            src_size: tuple[int, int], gen: tuple[int, int], prompt: str, seed: int, prefix: str,
-                           fps: float = 24.0, feather: int = 12, grow: int = 10, pose: tuple[str, str] | None = None,
-                           keep_pose: bool = False) -> dict:
+                           fps: float = 24.0, feather: int = 12, grow: int = 10, pose: dict | None = None,
+                           keep_pose: bool = False, body: bool = True, lock: dict | None = None) -> dict:
     """video / mask / reference: uploaded names (the clip, its head mask, the new person's picture); frames: the
-    clip's frame count; src_size: its size; gen: the size the head is made at. pose: uploaded (pose, face) videos
-    of an earlier run (DWPose is not run again); keep_pose: the DWPose videos are saved too ("pose_save",
-    "face_save"; lossless) to be stored for the next run."""
+    clip's frame count; src_size: its size; gen: the size the head is made at. pose: uploaded DWPose videos of an
+    earlier run, {"pose": name, "face": name} (a part given is not made again); keep_pose: the DWPose videos made
+    are saved too ("pose_save", "face_save"; lossless) to be stored for the next run. body: the body skeleton
+    drives the motion too (False: only the face). lock: the face swap pass after Animate that locks the identity,
+    {"swapper", "enhancer", "enhance", "persons": [uploaded pictures]} (see face_lock_nodes)."""
     W, H = gen
     sw, sh = src_size
     wf: dict = {
@@ -120,16 +122,23 @@ def build_animate_workflow(*, files: dict, video: str, mask: str, reference: str
         "background": {"class_type": "DrawMaskOnImage", "inputs": {"image": ["small", 0], "mask": ["mask_block", 0],
                                                                    "color": "0, 0, 0"}},
     }
-    if pose is not None:                       # the motion of an earlier run of this very clip (cached)
-        del wf["dw_face"], wf["dw_pose"]
-        for name, file in (("pose", pose[0]), ("face", pose[1])):
-            wf[f"{name}_vid"] = {"class_type": "LoadVideo", "inputs": {"file": file}}
+    pose = dict(pose or {})
+    inputs = {}
+    for name in ("pose", "face"):
+        if name == "pose" and not body:        # no body skeleton: DWPose's body pass is not run at all
+            del wf["dw_pose"]
+            inputs[name] = None
+        elif pose.get(name):                   # the motion of an earlier run of this very clip (cached)
+            del wf[f"dw_{name}"]
+            wf[f"{name}_vid"] = {"class_type": "LoadVideo", "inputs": {"file": pose[name]}}
             wf[f"{name}_parts"] = {"class_type": "GetVideoComponents", "inputs": {"video": [f"{name}_vid", 0]}}
-        pose_in, face_in = ["pose_parts", 0], ["face_parts", 0]
-    else:
-        pose_in, face_in = ["dw_pose", 0], ["dw_face", 0]
-        if keep_pose:                          # lossless (H.264 at crf 0, 4:4:4): the drawings exactly as made
-            for name, src in (("pose", pose_in), ("face", face_in)):
+            inputs[name] = [f"{name}_parts", 0]
+        else:
+            inputs[name] = [f"dw_{name}", 0]
+    pose_in, face_in = inputs["pose"], inputs["face"]
+    if keep_pose:                              # lossless (H.264 at crf 0, 4:4:4): the drawings exactly as made
+        for name, src in (("pose", pose_in), ("face", face_in)):
+            if src is not None and src[0].startswith("dw_"):
                 wf[f"{name}_keep"] = {"class_type": "CreateVideo",
                                       "inputs": {"images": src, "fps": float(fps), "bit_depth": 8,
                                                  "chroma_subsampling": "444"}}
@@ -144,7 +153,9 @@ def build_animate_workflow(*, files: dict, video: str, mask: str, reference: str
              "length": WINDOW, "batch_size": 1, "continue_motion_max_frames": OVERLAP,
              "video_frame_offset": 0 if k == 0 else [f"anim{k - 1}", 5],
              "clip_vision_output": ["ref_vision", 0], "reference_image": ["ref", 0], "face_video": face_in,
-             "pose_video": pose_in, "background_video": ["background", 0], "character_mask": ["mask_block", 0]}
+             "background_video": ["background", 0], "character_mask": ["mask_block", 0]}
+        if pose_in is not None:
+            a["pose_video"] = pose_in
         if acc is not None:
             a["continue_motion"] = acc
         wf[f"anim{k}"] = {"class_type": "WanAnimateToVideo", "inputs": a}
@@ -177,8 +188,39 @@ def build_animate_workflow(*, files: dict, video: str, mask: str, reference: str
     wf["compose"] = {"class_type": "ImageCompositeMasked",
                      "inputs": {"destination": ["src_parts", 0], "source": ["made_big", 0], "x": 0, "y": 0,
                                 "resize_source": False, "mask": ["soft", 0]}}
-    wf["video"] = {"class_type": "CreateVideo", "inputs": {"images": ["compose", 0], "audio": ["src_parts", 1],
+    out = ["compose", 0]
+    if lock:                                   # the identity locked with a face swap on every frame
+        out = face_lock_nodes(wf, out, lock)
+    wf["video"] = {"class_type": "CreateVideo", "inputs": {"images": out, "audio": ["src_parts", 1],
                                                            "fps": float(fps)}}
+    wf["save"] = {"class_type": "SaveVideo", "inputs": {"video": ["video", 0], "filename_prefix": prefix,
+                                                        "format": "mp4"}}
+    return wf
+
+
+FACE_NODE = "VideoChainFaceSwap"
+FACE_HELP = ("copy video-chain's comfy_nodes/video_chain_nodes into ComfyUI/custom_nodes and restart ComfyUI; "
+             "hyperswap_1b_256.onnx in models/insightface")
+
+
+def face_lock_nodes(wf: dict, images: list, lock: dict) -> list:
+    """Promptwood's face swap node on images (the new person's identity from lock["persons"]); its output."""
+    persons = list(lock["persons"])[:4]
+    inputs = {"images": images, "swapper": lock["swapper"], "enhancer": lock.get("enhancer") or "none",
+              "enhance": float(lock.get("enhance", 0.8))}
+    for k, name in enumerate(persons):
+        wf[f"lock_person{k}"] = {"class_type": "LoadImage", "inputs": {"image": name}}
+        inputs["person" if k == 0 else f"person_{k + 1}"] = [f"lock_person{k}", 0]
+    wf["lock"] = {"class_type": FACE_NODE, "inputs": inputs}
+    return ["lock", 0]
+
+
+def build_faceswap_workflow(*, video: str, lock: dict, prefix: str, fps: float = 24.0) -> dict:
+    """Face only: the clip's face swapped frame by frame (no Animate; every motion is the clip's own)."""
+    wf = {"src": {"class_type": "LoadVideo", "inputs": {"file": video}},
+          "src_parts": {"class_type": "GetVideoComponents", "inputs": {"video": ["src", 0]}}}
+    out = face_lock_nodes(wf, ["src_parts", 0], lock)
+    wf["video"] = {"class_type": "CreateVideo", "inputs": {"images": out, "audio": ["src_parts", 1], "fps": float(fps)}}
     wf["save"] = {"class_type": "SaveVideo", "inputs": {"video": ["video", 0], "filename_prefix": prefix,
                                                         "format": "mp4"}}
     return wf
@@ -197,6 +239,19 @@ class ComfyAnimator(ComfyGenerator):
         self.missing = self.files.get("missing") or (
             f"this ComfyUI has no {lacking} node" + (f" (install {NODE_HELP[lacking]})" if lacking in NODE_HELP
                                                      else " (update ComfyUI)") if lacking else "")
+        # the face swap pass (Promptwood's node; HyperSwap, GPEN optional)
+        info = self._object_info(FACE_NODE)
+        info = info.get("input", {}).get("required", {}) if info else {}
+        swappers = [n for n in _combo_options(info.get("swapper")) if "hyperswap" in n.lower()]
+        enhancers = [n for n in _combo_options(info.get("enhancer")) if n != "none"]
+        if not self._object_info(FACE_NODE):
+            self.face_missing, self.face_files = f"this ComfyUI has no {FACE_NODE} node ({FACE_HELP})", {}
+        elif not swappers:
+            self.face_missing, self.face_files = f"no HyperSwap model ({FACE_HELP})", {}
+        else:
+            pick = next((n for n in swappers if "1b" in n), swappers[0])
+            gpen = sorted(enhancers, key=lambda n: ("512" not in n, n))
+            self.face_missing, self.face_files = "", {"swapper": pick, "enhancer": gpen[0] if gpen else None}
 
     def _run_outputs(self, wf: dict, outs: dict[str, Path], uploads: list[tuple[str, Path]]) -> None:
         """Queue a workflow, wait, download what its save nodes wrote ({node: local file}); clean up after."""
@@ -232,32 +287,70 @@ class ComfyAnimator(ComfyGenerator):
 
     def replace(self, video: Path, mask: Path, reference: Path, out: Path, seed: int, frames: int,
                 src_size: tuple[int, int], size: str = "480p", prompt: str = "", fps: float = 24.0,
-                pose: tuple[Path, Path] | None = None, keep_pose: tuple[Path, Path] | None = None) -> dict:
+                pose: dict | None = None, keep_pose: dict | None = None, body: bool = True,
+                lock: list[Path] | None = None, enhance: float = 0.8) -> dict:
         """Draw the person of `reference` into the head mask of `video`; the result (the clip's size, frames and
-        sound) goes to out. pose: (pose, face) videos stored from an earlier run of this clip at this size (DWPose
-        is skipped); keep_pose: where this run's DWPose videos go (to be stored). Returns what it was made with."""
+        sound) goes to out. pose: {"pose": file, "face": file} stored from an earlier run of this clip at this size
+        (those DWPose parts are skipped); keep_pose: {"pose": file, "face": file}, where this run's DWPose videos
+        go (to be stored); body: the body skeleton drives the motion too; lock: pictures of the new person for the
+        face swap pass that locks the identity (None: no pass). Returns what it was made with."""
         if self.missing:
             raise ComfyError(self.missing)
+        if lock and self.face_missing:
+            raise ComfyError(self.face_missing)
         gen = gen_size(*src_size, SIZES.get(size, 480))
+        pose = {k: Path(v) for k, v in (pose or {}).items() if v and (k == "face" or body)}
         uploads: list[tuple[str, Path]] = []
         try:
-            names = []
-            for p in (video, mask, reference) + (tuple(pose) if pose else ()):
+            def up(p):
                 uploads.append((self.upload(Path(p)), Path(p)))
-                names.append(uploads[-1][0])
+                return uploads[-1][0]
+            names = [up(p) for p in (video, mask, reference)]
+            pose_names = {k: up(v) for k, v in pose.items()}
+            lock_cfg = self._lock_cfg([up(p) for p in lock], enhance) if lock else None
             feather = max(4, min(20, round(min(src_size) / 90)))
             wf = build_animate_workflow(files=self.files, video=names[0], mask=names[1], reference=names[2],
                                         frames=frames, src_size=src_size, gen=gen, prompt=prompt, seed=seed,
                                         prefix=f"{SUBFOLDER}/swap_{uuid.uuid4().hex[:12]}", fps=fps,
-                                        feather=feather, pose=(names[3], names[4]) if pose else None,
-                                        keep_pose=keep_pose is not None and not pose)
+                                        feather=feather, pose=pose_names, keep_pose=keep_pose is not None,
+                                        body=body, lock=lock_cfg)
         except BaseException:
             self._drop_uploads(uploads)
             raise
         outs = {"save": Path(out)}
-        if keep_pose is not None and not pose:
-            outs.update({"pose_save": Path(keep_pose[0]), "face_save": Path(keep_pose[1])})
+        made = []
+        for name in ("pose", "face"):                  # the DWPose videos this run made (to be stored)
+            if keep_pose and keep_pose.get(name) and f"{name}_save" in wf:
+                outs[f"{name}_save"] = Path(keep_pose[name])
+                made.append(name)
         self._run_outputs(wf, outs, uploads)
-        return {"model": self.files["unet"], "size": size, "gen_size": list(gen), "windows": window_count(frames),
-                "pose_cached": bool(pose),
-                "steps": STEPS, "seed": int(seed), "prompt": prompt or DEFAULT_PROMPT, "feather": feather}
+        return {"method": "animate+lock" if lock else "animate", "model": self.files["unet"], "size": size,
+                "gen_size": list(gen), "windows": window_count(frames), "pose_cached": sorted(pose),
+                "pose_made": made, "body": bool(body), "steps": STEPS, "seed": int(seed),
+                "prompt": prompt or DEFAULT_PROMPT, "feather": feather,
+                **({"lock": {"swapper": self.face_files["swapper"], "enhancer": self.face_files.get("enhancer"),
+                             "enhance": float(enhance) if self.face_files.get("enhancer") else 0.0}} if lock else {})}
+
+    def _lock_cfg(self, persons: list[str], enhance: float) -> dict:
+        return {"swapper": self.face_files["swapper"], "enhancer": self.face_files.get("enhancer") or "none",
+                "enhance": float(enhance), "persons": persons}
+
+    def face_only(self, video: Path, out: Path, persons: list[Path], fps: float = 24.0,
+                  enhance: float = 0.8) -> dict:
+        """Face only: the clip's face swapped frame by frame with HyperSwap (all motion is the clip's own)."""
+        if self.face_missing:
+            raise ComfyError(self.face_missing)
+        uploads: list[tuple[str, Path]] = []
+        try:
+            for p in [video, *persons]:
+                uploads.append((self.upload(Path(p)), Path(p)))
+            wf = build_faceswap_workflow(video=uploads[0][0], lock=self._lock_cfg([u for u, _ in uploads[1:]],
+                                                                                    enhance),
+                                         prefix=f"{SUBFOLDER}/face_{uuid.uuid4().hex[:12]}", fps=fps)
+        except BaseException:
+            self._drop_uploads(uploads)
+            raise
+        self._run_outputs(wf, {"save": Path(out)}, uploads)
+        return {"method": "face", "lock": {"swapper": self.face_files["swapper"],
+                                           "enhancer": self.face_files.get("enhancer"),
+                                           "enhance": float(enhance) if self.face_files.get("enhancer") else 0.0}}

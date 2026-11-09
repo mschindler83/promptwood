@@ -4,6 +4,8 @@ VideoChainQwen21FunInpaint: inpainting with the Qwen-Image 2.1 Fun ControlNet Un
 QwenImageDiffsynthControlnet node drives this ControlNet but only exposes a control image and a mask; the image to
 keep (the inpaint image) is not an input there. This node hands the source image and the mask (white = draw anew)
 to ComfyUI's own QwenImage21FunControlPatch, optionally with a control image (pose, depth, ...).
+VideoChainFaceSwap: the face of one person swapped through video frames with FaceFusion's HyperSwap (see
+faceswap.py), the identity from up to four pictures of the new person; GPEN face restoration optional.
 Copy this folder into ComfyUI/custom_nodes and restart ComfyUI.
 """
 import comfy.ldm.qwen_image21.model
@@ -37,5 +39,64 @@ class VideoChainQwen21FunInpaint:
         return (patched,)
 
 
-NODE_CLASS_MAPPINGS = {"VideoChainQwen21FunInpaint": VideoChainQwen21FunInpaint}
-NODE_DISPLAY_NAME_MAPPINGS = {"VideoChainQwen21FunInpaint": "Qwen-Image 2.1 Fun Inpaint (Promptwood)"}
+def _model_files(folder: str, keyword: str) -> list[str]:
+    import folder_paths
+    try:
+        names = folder_paths.get_filename_list(folder)
+    except Exception:  # noqa: BLE001  (the folder is not registered)
+        return []
+    return sorted(n for n in names if keyword in n.lower() and n.lower().endswith(".onnx"))
+
+
+def _full(folder: str, name: str) -> str:
+    import folder_paths
+    return folder_paths.get_full_path_or_raise(folder, name)
+
+
+_SWAPPERS: dict = {}
+
+
+class VideoChainFaceSwap:
+    @classmethod
+    def INPUT_TYPES(cls):
+        swappers = _model_files("insightface", "hyperswap") or ["hyperswap_1b_256.onnx"]
+        enhancers = ["none"] + (_model_files("facerestore_models", "gpen") or [])
+        return {"required": {"images": ("IMAGE",), "person": ("IMAGE",),
+                             "swapper": (swappers,), "enhancer": (enhancers,),
+                             "enhance": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 1.0, "step": 0.05})},
+                "optional": {"person_2": ("IMAGE",), "person_3": ("IMAGE",), "person_4": ("IMAGE",)}}
+
+    RETURN_TYPES = ("IMAGE", "INT")
+    RETURN_NAMES = ("images", "swapped")
+    FUNCTION = "apply"
+    CATEGORY = "image/faceswap"
+
+    def apply(self, images, person, swapper, enhancer, enhance=0.8, person_2=None, person_3=None, person_4=None):
+        import numpy as np
+        import torch
+        import comfy.utils
+        from .faceswap import FaceSwapper
+        det = _full("insightface", "models/buffalo_l/det_10g.onnx")
+        rec = _full("insightface", "models/buffalo_l/w600k_r50.onnx")
+        enh = None if enhancer == "none" else _full("facerestore_models", enhancer)
+        key = (swapper, enh)
+        if key not in _SWAPPERS:
+            _SWAPPERS.clear()
+            _SWAPPERS[key] = FaceSwapper(det, rec, _full("insightface", swapper), enh)
+        fs = _SWAPPERS[key]
+
+        def u8(t):
+            return (t[..., :3].clamp(0, 1) * 255).round().to(torch.uint8).cpu().numpy()
+        pics = [u8(p)[0] for p in (person, person_2, person_3, person_4) if p is not None]
+        identity = fs.identity(pics)
+        frames = list(u8(images))
+        bar = comfy.utils.ProgressBar(len(frames))
+        out, done = fs.run(frames, identity, enhance if enh else 0.0, progress=lambda k, n: bar.update_absolute(k, n))
+        result = torch.from_numpy(np.stack(out)).float() / 255.0
+        return (result, done)
+
+
+NODE_CLASS_MAPPINGS = {"VideoChainQwen21FunInpaint": VideoChainQwen21FunInpaint,
+                       "VideoChainFaceSwap": VideoChainFaceSwap}
+NODE_DISPLAY_NAME_MAPPINGS = {"VideoChainQwen21FunInpaint": "Qwen-Image 2.1 Fun Inpaint (Promptwood)",
+                              "VideoChainFaceSwap": "Face Swap, HyperSwap (Promptwood)"}

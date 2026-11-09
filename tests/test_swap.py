@@ -126,12 +126,15 @@ def test_pose_cache_key_and_store(tmp_path):
     c2 = clip(tmp_path / "c2.mp4", 11)
     assert k != swap.pose_key(c2, src, (832, 480))                          # another converted clip
     project = tmp_path / "p"
-    assert swap.cached_pose(project, k) is None
-    pose, face = tmp_path / "pose.mkv", tmp_path / "face.mkv"
-    pose.write_bytes(b"p")
+    assert swap.cached_pose(project, k) == {}
+    face = tmp_path / "face.mkv"
     face.write_bytes(b"f")
-    stored = swap.store_pose(project, k, pose, face, {"source": src})
-    assert swap.cached_pose(project, k) == stored and stored[0].read_bytes() == b"p" and not pose.exists()
+    stored = swap.store_pose(project, k, {"face": face}, {"source": src})       # the face part only (no body)
+    assert set(stored) == {"face"} and swap.cached_pose(project, k) == stored and not face.exists()
+    pose = tmp_path / "pose.mkv"
+    pose.write_bytes(b"p")
+    stored = swap.store_pose(project, k, {"pose": pose}, {"source": src})       # the body part later
+    assert set(stored) == {"face", "pose"} and stored["pose"].read_bytes() == b"p"
 
 
 def test_animate_workflow_keeps_and_reuses_the_pose(tmp_path):
@@ -145,18 +148,42 @@ def test_animate_workflow_keeps_and_reuses_the_pose(tmp_path):
     server = FakeComfy(tmp_path / "comfy")
     try:
         an = A.ComfyAnimator(server.url)
-        keep = (tmp_path / "pose.mkv", tmp_path / "face.mkv")
+        keep = {"pose": tmp_path / "pose.mkv", "face": tmp_path / "face.mkv"}
         meta = an.replace(v, m, ref, tmp_path / "o1.mp4", 1, 30, (320, 180), keep_pose=keep)
         wf = server.animated
-        assert "dw_pose" in wf and "dw_face" in wf and not meta["pose_cached"]
+        assert "dw_pose" in wf and "dw_face" in wf and not meta["pose_cached"] and meta["pose_made"] == ["pose", "face"]
         assert wf["pose_save"]["inputs"]["format.codec.encoding.crf"] == 0.0
         assert wf["pose_keep"]["inputs"]["chroma_subsampling"] == "444"
-        assert all(p.is_file() for p in keep)
+        assert all(p.is_file() for p in keep.values())
         meta = an.replace(v, m, ref, tmp_path / "o2.mp4", 1, 30, (320, 180), pose=keep)
         wf = server.animated
-        assert meta["pose_cached"] and "dw_pose" not in wf and "pose_save" not in wf
+        assert meta["pose_cached"] == ["face", "pose"] and "dw_pose" not in wf and "pose_save" not in wf
         assert wf["anim0"]["inputs"]["pose_video"] == ["pose_parts", 0]
         assert wf["anim0"]["inputs"]["face_video"] == ["face_parts", 0]
         assert swap.probe(tmp_path / "o2.mp4")[2] == 30
+        # without the body skeleton: no body DWPose, no pose video; only the face
+        meta = an.replace(v, m, ref, tmp_path / "o3.mp4", 1, 30, (320, 180), keep_pose={"face": tmp_path / "f2.mkv"},
+                          body=False)
+        wf = server.animated
+        assert "dw_pose" not in wf and "pose_video" not in wf["anim0"]["inputs"] and not meta["body"]
+        assert wf["anim0"]["inputs"]["face_video"] == ["dw_face", 0] and meta["pose_made"] == ["face"]
+        # the face lock: Promptwood's face swap after the head is laid in, every picture of the person
+        meta = an.replace(v, m, ref, tmp_path / "o4.mp4", 1, 30, (320, 180), pose=keep, lock=[ref, ref], enhance=0.8)
+        wf = server.animated
+        lk = wf["lock"]["inputs"]
+        assert wf["lock"]["class_type"] == "VideoChainFaceSwap" and lk["images"] == ["compose", 0]
+        assert lk["swapper"] == "hyperswap_1b_256.onnx" and lk["enhancer"] == "GPEN-BFR-512.onnx"
+        assert lk["person"] == ["lock_person0", 0] and lk["person_2"] == ["lock_person1", 0]
+        assert wf["video"]["inputs"]["images"] == ["lock", 0] and meta["method"] == "animate+lock"
+        # face only: no Animate at all
+        meta = an.face_only(v, tmp_path / "o5.mp4", [ref], 24.0, 0.0)
+        wf = server.faced
+        assert "anim0" not in wf and wf["lock"]["inputs"]["images"] == ["src_parts", 0] and meta["method"] == "face"
+        assert swap.probe(tmp_path / "o5.mp4")[2] == 30
+        server.faceswap = False
+        an = A.ComfyAnimator(server.url)
+        assert "VideoChainFaceSwap" in an.face_missing and an.missing == ""   # Animate still works without it
+        with pytest.raises(Exception, match="VideoChainFaceSwap"):
+            an.face_only(v, tmp_path / "o6.mp4", [ref])
     finally:
         server.close()

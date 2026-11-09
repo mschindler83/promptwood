@@ -5236,16 +5236,24 @@ class MainWindow(QMainWindow):
         def connect(progress):                      # worker thread
             from ..animate import ComfyAnimator
             an = ComfyAnimator(url, log=lambda _m: None, progress=progress, comfy_dir=comfy_dir, cleanup=cleanup)
-            if an.missing:
-                raise RuntimeError(an.missing)
             if switch["free"]:
                 an.free()
                 switch["free"] = False
             return an
 
+        def connect_h3(progress):                   # worker thread: the clip generator (H3 head swap)
+            from ..comfy import ComfyGenerator
+            gen = ComfyGenerator(url, log=lambda _m: None, progress=progress, comfy_dir=comfy_dir, cleanup=cleanup)
+            return gen
+
         dlg = SwapDialog(self, self.project, nid, self.project / node.made["video"], self.face_detector(), pictures,
                          connect, self.qs, on_start=before, play=lambda p, t: self.preview.open(Path(p), t),
-                         source=node.source, pick=lambda title: pick_image(
+                         source=node.source, h3={
+                             "lora": next((pth for pth, name in self.h3_loras if "head_swap" in name.lower()), None),
+                             "settings": T.current_settings(self.project, self.tree.options, self.tree),
+                             "connect": connect_h3},
+                         groups=[[str(self.project / rel) for rel in c["images"]] for c in T.cast_of(self.tree)],
+                         pick=lambda title: pick_image(
                              self, title, self.qs, None, self._picker_places(), self.project_images()))
         if not dialog:
             return dlg

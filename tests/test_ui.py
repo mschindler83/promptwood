@@ -2246,13 +2246,50 @@ def test_replace_a_person_in_a_real_video(app, tmp_path, image, monkeypatch):
         out, meta, frames = dlg.result
         assert frames == n and out.is_file() and swap.probe(out)[2] == n and dlg.b_use.isEnabled()
         assert server.animated["ref"]["inputs"]["image"] and "dw_pose" in server.animated
-        assert "stored for the next try" in dlg.state.text()
+        assert "stored for the next try" in dlg.state.text(), dlg.state.text()
         assert len(list((w.project / swap.POSE_CACHE_DIR).glob("*/info.json"))) == 1
         dlg.generate()                                                 # again: DWPose is not run again
         wait(app, lambda: not dlg._busy, timeout=60)
         assert dlg.result is not None and "dw_pose" not in server.animated, dlg.state.text()
-        assert "stored pose and face motion" in dlg.state.text()
+        assert "stored motion used: face, pose" in dlg.state.text()
         out, meta, frames = dlg.result
+        # H3 head swap: the whole clip as the guide, the picture as <Picture 1>, the LoRA, its prompt; the result
+        # cut to the clip's frames with the clip's own sound
+        import subprocess
+        calls = []
+
+        class Gen:
+            def generate(self, prompt, start, out_video, out_last, seed, settings=None):
+                calls.append((prompt, start, settings))
+                subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                                f"color=green:s={settings['width']}x{settings['height']}:r=24",
+                                "-frames:v", str(settings["frames"]), "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                                str(out_video)], check=True)
+            def interrupt(self):
+                pass
+        dlg.h3 = {"lora": "/loras/MiniMax H3/minimax_h3_head_swap_v1.0_r32.safetensors", "settings": {"steps": 8},
+                  "connect": lambda progress: Gen()}
+        dlg.method.setCurrentIndex(dlg.method.findData("h3"))
+        dlg.prompt.setText("Male, oval face, short black hair")
+        assert dlg.b_gen.isEnabled() and "face" in dlg.prompt.placeholderText()
+        dlg.generate()
+        wait(app, lambda: not dlg._busy, timeout=60)
+        assert dlg.result is not None, dlg.state.text()
+        prompt, start, st = calls[-1]
+        assert start is None and st["guides"] == [{"video": str(dlg.clip), "frame_idx": 0, "audio": True,
+                                                    "at": "start"}]
+        assert st["frames"] == swap.h3_length(n) >= n and st["lora"].endswith("head_swap_v1.0_r32.safetensors")
+        assert st["ref_paths"] == [str(image)] and st["steps"] == 8 and not st["ref_hint"]
+        assert prompt.startswith("head_swap:") and "Male, oval face, short black hair" in prompt
+        h3_out = dlg.result[0]
+        assert swap.probe(h3_out)[2] == n and "H3" in dlg.state.text()
+        has_sound = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries",
+                                    "stream=index", "-of", "csv=p=0", str(h3_out)], capture_output=True,
+                                   text=True).stdout.strip()
+        assert has_sound                                               # the clip's own sound
+        dlg.h3["lora"] = None
+        dlg._update()
+        assert not dlg.b_gen.isEnabled() and "head swap LoRA" in dlg.b_gen.toolTip()
         dlg.done(0)
         assert w.use_replacement(v, out, meta, frames)
         node = w.tree.nodes[v]
