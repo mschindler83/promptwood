@@ -33,6 +33,7 @@ from .lora_stack import LoraStack, lora_label
 from .mask_painter import MaskPainterDialog, mask_area, overlay
 from .widgets import FrameTile, guard_wheel, icon_button, label
 
+MAX_RESULTS = 20                           # results per Generate (made one after another, Cancel stops)
 SEED_MAX = 2**31 - 1                      # (the seeds ComfyUI's image samplers take here)
 
 EDITS_DIR = "edits"
@@ -399,9 +400,11 @@ class ImageEditDialog(QDialog):
         self.quality.currentIndexChanged.connect(lambda *_: self._remember_quality())
         self.quality.currentIndexChanged.connect(lambda *_: self._sampling_defaults())
         self.tries = QSpinBox()
-        self.tries.setRange(1, 4)
+        self.tries.setRange(1, MAX_RESULTS)
         self.tries.setValue(2)
-        self.tries.setToolTip("How many results at once (each with another seed), to pick the best one")
+        self.tries.setToolTip(f"How many results at once (1 … {MAX_RESULTS}; each with the next seed), to pick the "
+                              "best one. They are made one after another and each appears when it is ready; "
+                              "Cancel stops after the current one")
         self.keep_size = QCheckBox("Keep the size of the image to edit")
         self.keep_size.setChecked(True)
         self.keep_size.setToolTip("The model works at about 1 megapixel in its own aspect steps; this scales the "

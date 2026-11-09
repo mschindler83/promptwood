@@ -1832,6 +1832,8 @@ def test_image_window_own_sampling(app, tmp_path):
     dlg._families_found(files, "")
     dlg.set_mode("create")
     assert dlg.family.currentData() == "krea2" and dlg.sampling() == {}
+    dlg.tries.setValue(25)
+    assert dlg.tries.value() == 20                                  # up to 20 results per Generate
     assert dlg.steps.specialValueText() == "auto (8)" and dlg.cfg.specialValueText() == "auto (1)"
     assert dlg.sampler.itemText(0) == "auto (euler)" and dlg.sampler.count() == 4
     assert not dlg.negative.isVisibleTo(dlg)                   # Krea-2 at CFG 1: a negative does nothing
