@@ -123,6 +123,7 @@ def parse_ideas(text: str) -> list[dict]:
     import re
     text = re.sub(r"<think>.*?(</think>|$)", "", text or "", flags=re.S | re.I)
     dec, data, err = json.JSONDecoder(), None, None
+    dec = json.JSONDecoder(strict=False)                # (a line break inside a prompt is no error)
     for m in re.finditer(r"\[", text):                 # the first JSON list of ideas (text around it, "[Note]" …)
         try:
             cand, _end = dec.raw_decode(text, m.start())
@@ -132,6 +133,19 @@ def parse_ideas(text: str) -> list[dict]:
         if isinstance(cand, list) and cand and all(isinstance(x, (dict, str)) for x in cand):
             data = cand
             break
+    if data is None:                                   # objects without the list around them: {…}, {…}
+        objs, pos = [], 0
+        while (i := text.find("{", pos)) >= 0:
+            try:
+                cand, end = dec.raw_decode(text, i)
+            except ValueError as e:
+                err = err or e
+                pos = i + 1
+                continue
+            if isinstance(cand, dict) and cand.get("prompt"):
+                objs.append(cand)
+            pos = end
+        data = objs or None
     if data is None:
         raise LlmServerError("the model gave no list of ideas" + (f" ({err})" if err else ""))
     out = []
@@ -384,8 +398,11 @@ class LlamaServer:
         """n distinct image ideas from bullet points (see IDEA_RULES): [{"title", "angle", "prompt"}]."""
         if pictures and not self.mmproj:
             raise LlmServerError("this model has no vision part (mmproj file) next to it: it cannot see pictures")
+        item = {"type": "object", "properties": {k: {"type": "string"} for k in ("title", "angle", "prompt")},
+                "required": ["title", "angle", "prompt"]}
+        shape = {"type": "array", "items": item, "minItems": int(n), "maxItems": int(n)}   # the answer's form
         raw = self._complete(idea_messages(bullets=bullets, n=n, wish=wish, pictures=pictures, cast=cast), seed,
-                             temperature, timeout, max_tokens=300 * int(n) + 300, clean=False)
+                             temperature, timeout, max_tokens=300 * int(n) + 300, clean=False, schema=shape)
         return parse_ideas(raw)
 
     def interrupt(self):
@@ -393,12 +410,14 @@ class LlamaServer:
         self._gen += 1
 
     def _complete(self, messages: list[dict], seed: int, temperature: float, timeout: float,
-                  max_tokens: int = MAX_TOKENS, clean: bool = True) -> str:
+                  max_tokens: int = MAX_TOKENS, clean: bool = True, schema: dict | None = None) -> str:
         self.start()
         body = {"messages": messages,
                 "max_tokens": int(max_tokens), "temperature": float(temperature), "top_k": 64, "top_p": 0.95,
                 "min_p": 0.05, "repeat_penalty": 1.05, "seed": int(seed), "stream": False,
                 "chat_template_kwargs": {"enable_thinking": False}}     # (a thinking model: the prompt, no essay)
+        if schema is not None:                     # llama.cpp constrains the answer to this JSON shape
+            body["response_format"] = {"type": "json_schema", "json_schema": {"name": "answer", "schema": schema}}
         req = urllib.request.Request(self.url + "/v1/chat/completions", data=json.dumps(body).encode(),
                                      headers={"Content-Type": "application/json"})
         try:

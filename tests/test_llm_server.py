@@ -433,3 +433,10 @@ def test_room_in_vram_before_the_server_starts(fake_server, tmp_path, monkeypatc
     with pytest.raises(L.LlmServerError, match="no room"):
         srv.start()
     assert srv.proc is None
+
+
+def test_ideas_without_the_list_around_them():
+    """The real model often writes {…}, {…} without [ ] (German bullets, a wish, a picture): still ideas."""
+    raw = '{"title": "A", "angle": "x", "prompt": "one\nline"}, {"title": "B", "angle": "y", "prompt": "two"}'
+    assert [d["title"] for d in L.parse_ideas(raw)] == ["A", "B"]
+    assert L.parse_ideas('[{"title": "A", "prompt": "p\nq"}]')[0]["prompt"] == "p q"   # a line break in a string
