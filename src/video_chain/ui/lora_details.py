@@ -23,7 +23,8 @@ def clean_html(text: str) -> str:
     s = re.sub(r"(?i)\son\w+\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", "", s)
     # no styles or backgrounds (they could name local files), and links only to the web
     s = re.sub(r"(?i)\s(style|background|src)\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", "", s)
-    s = re.sub(r"(?i)\shref\s*=\s*([\"']?)(?!https?://)[^\"'\s>]*\1", "", s)
+    s = re.sub(r"(?i)\shref\s*=\s*(?:\"(?!https?://)[^\"]*\"|'(?!https?://)[^']*'|(?![\"']|https?://)[^\s>]+)",
+               "", s)
     return s.strip()
 
 
