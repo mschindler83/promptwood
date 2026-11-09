@@ -1560,8 +1560,9 @@ def test_export_refined_and_hyperflow_speed(app, win, tmp_path, image):
     wait(app, lambda: not win._joins, timeout=30)
     dlg = ExportDialog(None, str(tmp_path / "x.mp4"), (672, 384), {"2k": False, "1080p": True})
     texts = [dlg.size.itemText(i) for i in range(dlg.size.count())]
-    assert texts[0].startswith("As made (672×384)") and "1888×1088 · already upscaled" in texts[1] \
-        and "2528×1440" in texts[2]
+    assert texts[0].startswith("As made (672×384)") and "1888×1088 · 2.8× the draft · already upscaled" in texts[1] \
+        and "2528×1440 · 3.8× the draft" in texts[2]
+    assert dlg.scale_note.isHidden()                                         # (as made: no enlargement)
     assert dlg.swapped.isHidden()                                            # no video with a replaced person
     assert dlg.method.currentData() == "seedvr2_7b" and not dlg.method.isEnabled()      # SeedVR2 7B by default
     assert [dlg.method.itemData(i) for i in range(dlg.method.count())] == ["seedvr2_7b", "seedvr2_3b", "refine"]
@@ -2705,3 +2706,20 @@ def test_camera_row_and_hash_tokens(app, win, tmp_path, image):
     card.edit.setPlainText("Hi @Ann")                                                   # (@ still the cast)
     card.edit.moveCursor(QTextCursor.End)
     assert card.mentions._typed() is not None and card.mentions._kind == "@"
+
+
+def test_export_shows_the_enlargement_and_size_1024(app, win, tmp_path, image):
+    from video_chain.ui.main_window import ExportDialog
+    dlg = ExportDialog(None, str(tmp_path / "x.mp4"), (672, 832), {})       # a portrait draft at size 768
+    assert "1280×1600 · 1.9× the draft" in dlg.size.itemText(1) and "1696×2112 · 2.5× the draft" in dlg.size.itemText(2)
+    dlg.size.setCurrentIndex(1)
+    assert dlg.scale_note.isHidden()                                         # 1.9×: no note
+    dlg.size.setCurrentIndex(2)
+    assert not dlg.scale_note.isHidden() and "2.5× the draft" in dlg.scale_note.text()
+    assert "1080p stays within 2× here" in dlg.scale_note.text() and "Size 1024" in dlg.scale_note.text()
+    dlg.reject()
+    win.open_project(tmp_path / "proj")
+    k = win.resolution.findData(1024)
+    assert k >= 0
+    from video_chain import chain
+    assert chain.canvas_size(1600, 2000, 1024) == (896, 1120) and chain.canvas_size(1920, 1080, 1024) == (1344, 768)

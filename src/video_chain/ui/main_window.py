@@ -340,6 +340,9 @@ class ExportDialog(QDialog):
                              "upscaled in ComfyUI (see Upscaler); the copies are kept, so the next export of the "
                              "same clips is quick. Real videos are converted again from their file at that size")
         f.addRow("Size", self.size)
+        self.scale_note = label("", level="tertiary")
+        self.scale_note.setWordWrap(True)
+        f.addRow("", self.scale_note)
         self.method = QComboBox()
         for key, text in self.METHODS:
             self.method.addItem(text, key)
@@ -418,10 +421,18 @@ class ExportDialog(QDialog):
             text = {"1080p": "1080p", "2k": "2K"}[key]
             if self.made_size:
                 rw, rh = refine_size(w, h, key)
-                text += f" — {rw}×{rh}"
+                text += f" — {rw}×{rh} · {rw / max(1, w):.1f}× the draft"
             if self._ready(key):
                 text += " · already upscaled, quick"
             self.size.setItemText(i, text)
+        size = self.size.currentData()
+        factor = refine_size(w, h, size)[0] / w if self.made_size and size != "made" else 0.0
+        calmer = self.made_size and size == "2k" and refine_size(w, h, "1080p")[0] / w <= 2.05
+        self.scale_note.setText(
+            f"{factor:.1f}× the draft: above about 2× SeedVR2 invents texture that shimmers in motion (measured: "
+            "+29 % in a pan at 2.5× against 1.9×). " + ("1080p stays within 2× here. " if calmer else "")
+            + "Larger drafts help: Clips → Size 1024." if factor > 2.05 else "")
+        self.scale_note.setVisible(factor > 2.05)
 
     def _choose(self):
         f, _ = QFileDialog.getSaveFileName(self, "Export path", self.file.text(), "Video (*.mp4)")
@@ -1583,7 +1594,8 @@ class MainWindow(QMainWindow):
                                "between clips, so the face drifts less; they take longer and need more memory")
         c.addRow("Length", self.frames)
         self.resolution = QComboBox()
-        for r, txt in ((384, "384 (fast draft)"), (512, "512 (like the training)"), (640, "640"), (768, "768")):
+        for r, txt in ((384, "384 (fast draft)"), (512, "512 (like the training)"), (640, "640"), (768, "768"),
+                       (1024, "1024 (drafts for 2K: 16:9 = 1344×768; slower, Veda helps)")):
             self.resolution.addItem(txt, r)
         self.resolution.setCurrentIndex(1)
         self.resolution.setToolTip("About this many pixels squared, in the start image's aspect ratio")
