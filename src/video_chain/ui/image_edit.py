@@ -19,7 +19,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QIcon, QImage, QKeySequence, QPixmap, QShortcut
-from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
+from PySide6.QtWidgets import (QButtonGroup, QSlider, QStackedWidget, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
                                QFrame, QGridLayout, QHBoxLayout, QInputDialog, QLineEdit, QListWidget,
                                QListWidgetItem, QMessageBox,
                                QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSpinBox, QVBoxLayout,
@@ -30,6 +30,8 @@ from ..comfy import EDIT_MODELS
 from ..triggers import stack_words, with_triggers
 from ..imagegen import FAMILIES, SAMPLERS, SCHEDULERS, default_sampling, size_for
 from .lora_stack import LoraStack, lora_label
+from .results_gallery import (InfoCard, ResultGallery, ResultView, ThumbLoader, badged, model_key, model_name,
+                              run_groups)
 from .mask_painter import MaskPainterDialog, mask_area, overlay
 from .widgets import FrameTile, guard_wheel, icon_button, label
 
@@ -205,7 +207,11 @@ class ImageEditDialog(QDialog):
         self._families_error = ""
         self._retry_families = 0                         # retries left while ComfyUI starts
         self._trash: Path | None = None                  # the result deleted last (Undo delete brings it back)
-        self._icons: dict[tuple, QIcon] = {}             # thumbnails of the results by (path, date)
+        self._thumbs: dict[str, tuple[int, QPixmap]] = {}  # result thumbnails: png -> (its mtime_ns, pixmap)
+        self._requested: set[tuple[str, int]] = set()
+        self._entries: list[tuple[str, dict, float]] = []
+        self._loader = ThumbLoader(self)
+        self._loader.ready.connect(self._thumb_ready)
         self.closed = False
         self.source: str | None = None
         self.editor = None
@@ -477,30 +483,95 @@ class ImageEditDialog(QDialog):
         right = QVBoxLayout()
         head = QHBoxLayout()
         head.addWidget(label("3  Results", type_="heading"))
+        head.addSpacing(10)
+        self.b_single = QPushButton("Single")
+        self.b_gallery = QPushButton("Gallery")
+        self.views = QButtonGroup(self)
+        for k, (b, tip) in enumerate(((self.b_single, "One result large, the others in a row below"),
+                                      (self.b_gallery, "All results as a grid, grouped by Generate run "
+                                                       "(double-click or Enter: large; Esc: back)"))):
+            b.setCheckable(True)
+            b.setToolTip(tip)
+            self.views.addButton(b, k)
+            head.addWidget(b)
+        self.b_single.setChecked(True)
+        self.views.idClicked.connect(lambda i: self.set_view("gallery" if i else "single"))
+        self.thumb_size = QSlider(Qt.Horizontal)
+        self.thumb_size.setRange(120, 360)
+        self.thumb_size.setValue(200)
+        self.thumb_size.setFixedWidth(120)
+        self.thumb_size.setToolTip("Thumbnail size")
+        self.thumb_size.valueChanged.connect(self._thumb_size_changed)
+        head.addSpacing(6)
+        head.addWidget(self.thumb_size)
         head.addStretch(1)
+        self.b_fav = QPushButton("★ Favourite")
+        self.b_fav.setCheckable(True)
+        self.b_fav.setToolTip("Mark this result as a favourite (F); the filter can show only favourites")
+        self.b_fav.clicked.connect(lambda: self.toggle_favorite())
+        head.addWidget(self.b_fav)
         self.b_before = QPushButton("Show the original")
         self.b_before.setCheckable(True)
         self.b_before.setToolTip("Switch between the result and the image it was made from (or hold B)")
         self.b_before.toggled.connect(lambda _on: self._show_selected())
         head.addWidget(self.b_before)
         right.addLayout(head)
-        self.view = FrameTile(780, 440)
+        frow = QHBoxLayout()
+        self.f_show = QComboBox()
+        for text, key in (("All results", "all"), ("★ Favourites", "fav"), ("In use", "used")):
+            self.f_show.addItem(text, key)
+        self.f_show.setToolTip("Which results are shown")
+        self.f_model = QComboBox()
+        self.f_model.addItem("All models", None)
+        self.f_model.setToolTip("Only the results of one model")
+        self.f_search = QLineEdit()
+        self.f_search.setPlaceholderText("Search the prompts …")
+        self.f_search.setClearButtonEnabled(True)
+        self.f_count = label("", level="tertiary")
+        for w in (self.f_show, self.f_model):
+            w.currentIndexChanged.connect(lambda *_: self._load_results(keep=True))
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(200)
+        self._search_timer.timeout.connect(lambda: self._load_results(keep=True))
+        self.f_search.textChanged.connect(lambda *_: self._search_timer.start())
+        frow.addWidget(self.f_show)
+        frow.addWidget(self.f_model)
+        frow.addWidget(self.f_search, 1)
+        frow.addWidget(self.f_count)
+        right.addLayout(frow)
+        self.stack = QStackedWidget()
+        single = QWidget()
+        sv = QVBoxLayout(single)
+        sv.setContentsMargins(0, 0, 0, 0)
+        self.view = ResultView()
         self.view.clear_frame("Results appear here")
-        right.addWidget(self.view, 1, Qt.AlignHCenter)
-        self.res_info = label("", level="secondary")
-        self.res_info.setWordWrap(True)
-        right.addWidget(self.res_info)
+        sv.addWidget(self.view, 1)
         self.results = QListWidget()
         self.results.setViewMode(QListWidget.IconMode)
         self.results.setFlow(QListWidget.LeftToRight)
         self.results.setWrapping(False)
         self.results.setIconSize(QSize(150, 100))
-        self.results.setGridSize(QSize(162, 112))
+        self.results.setGridSize(QSize(158, 108))
         self.results.setFixedHeight(130)
         self.results.setMovement(QListWidget.Static)
-        self.results.setToolTip("All edits kept in this project (newest first)")
+        self.results.setToolTip("The results shown (newest first); Gallery shows them all, grouped by run")
+        self.results.setStyleSheet("QListWidget { background: transparent; border: none; } "
+                                   "QListWidget::item:selected, QListWidget::item:hover { background: transparent; }")
+        self.results.currentItemChanged.connect(self._strip_selection)
         self.results.currentItemChanged.connect(lambda *_: self._show_selected())
-        right.addWidget(self.results)
+        sv.addWidget(self.results)
+        self.stack.addWidget(single)
+        self.gallery = ResultGallery()
+        self.gallery.clicked.connect(self._gallery_clicked)
+        self.gallery.opened.connect(self._gallery_opened)
+        self.gallery.starred.connect(lambda png: self.toggle_favorite(png))
+        self.gallery.back.connect(lambda: self.set_view("single"))
+        self.stack.addWidget(self.gallery)
+        right.addWidget(self.stack, 1)
+        self.res_info = InfoCard()
+        self.res_info.use_seed.connect(self._use_seed)
+        right.addWidget(self.res_info)
         arow = QHBoxLayout()
         self.b_use_start = QPushButton("Use as start image")
         self.b_use_start.setToolTip("The first frame of the chain: the clips right after the start begin with it")
@@ -540,14 +611,20 @@ class ImageEditDialog(QDialog):
         top.addLayout(right, 1)
 
         QShortcut(QKeySequence("Ctrl+Return"), self, activated=self.generate)
-        for key, fn in (("Delete", self.delete_selected), ("B", self.b_before.toggle)):
-            sc = QShortcut(QKeySequence(key), self.results, activated=fn)
-            sc.setContext(Qt.WidgetWithChildrenShortcut)     # only while the results list has the focus
+        for key, fn in (("Delete", self.delete_selected), ("B", self.b_before.toggle),
+                        ("F", lambda: self.toggle_favorite())):
+            for w in (self.results, self.gallery):
+                sc = QShortcut(QKeySequence(key), w, activated=fn)
+                sc.setContext(Qt.WidgetWithChildrenShortcut)  # only while the results have the focus
         for b in self.findChildren(QPushButton):              # Enter in a field must not press a button
             b.setAutoDefault(False)
             b.setDefault(False)
         guard_wheel(self)
+        if self.qs is not None:
+            self.thumb_size.setValue(self.qs.value("resultsThumb", 200, type=int))
         self._load_results()
+        self.set_view(self.qs.value("resultsView", "single", type=str) if self.qs is not None else "single",
+                      remember=False)
         if source:
             i = self.src_combo.findData(source)
             if i >= 0:
@@ -833,27 +910,157 @@ class ImageEditDialog(QDialog):
                                        "eyes)." if on else ""))
 
     # ---- results
-    def _load_results(self, select: str | None = None):
-        self.results.blockSignals(True)
-        self.results.clear()
+    def _load_results(self, select: str | None = None, keep: bool = False):
+        """The results with the filters applied: the strip below the large view and the gallery (grouped by
+        Generate run); thumbnails are decoded in the background (each file once)."""
+        cur = self.selected()
+        if select is None and (keep or cur is not None):
+            select = cur[0] if cur else None
+        entries = []
         for png, meta in project_edits(self.project):
             try:
-                key = (str(png), png.stat().st_mtime_ns)
+                entries.append((str(png), meta, png.stat().st_mtime, png.stat().st_mtime_ns))
             except OSError:
                 continue
-            if key not in self._icons:                 # each result is decoded once, not on every update
-                self._icons[key] = QIcon(QPixmap.fromImage(QImage(str(png)).scaled(
-                    300, 200, Qt.KeepAspectRatio, Qt.SmoothTransformation)))
-            it = QListWidgetItem(self._icons[key], "")
-            it.setData(Qt.UserRole, (str(png), meta))
-            it.setToolTip(meta.get("prompt", png.name))
+        self._entries = [(p, m, t) for p, m, t, _ns in entries]
+        used = {p for p, m, _t in self._entries if self.uses(m)}
+        self._in_use = used
+        models = sorted({model_key(m) for _p, m, _t in self._entries}, key=model_name)
+        want = self.f_model.currentData()
+        self.f_model.blockSignals(True)
+        self.f_model.clear()
+        self.f_model.addItem("All models", None)
+        for k in models:
+            self.f_model.addItem(model_name(k), k)
+        self.f_model.setCurrentIndex(max(0, self.f_model.findData(want)))
+        self.f_model.blockSignals(False)
+        show, model = self.f_show.currentData(), self.f_model.currentData()
+        words = self.f_search.text().lower().split()
+
+        def keep_it(png, meta):
+            if show == "fav" and not meta.get("favorite"):
+                return False
+            if show == "used" and png not in used:
+                return False
+            if model and model_key(meta) != model:
+                return False
+            text = " ".join(str(meta.get(k) or "") for k in ("prompt", "negative")).lower()
+            return all(w in text for w in words)
+        shown = [(p, m, t, ns) for p, m, t, ns in entries if keep_it(p, m)]
+        self.results.blockSignals(True)
+        self.results.clear()
+        for png, meta, _t, ns in shown:
+            it = QListWidgetItem(self._strip_icon(png, meta), "")
+            it.setData(Qt.UserRole, (png, meta))
+            it.setToolTip(meta.get("prompt", Path(png).name))
             self.results.addItem(it)
+            if self._thumbs.get(png, (None,))[0] != ns and (png, ns) not in self._requested:
+                self._requested.add((png, ns))
+                self._loader.request(png, ns)
         self.results.blockSignals(False)
+        self.gallery.set_groups(run_groups([(p, m, t) for p, m, t, _ns in shown]), used)
+        for png, (_ns, pix) in self._thumbs.items():
+            self.gallery.set_thumb(png, pix)
+        n, total = len(shown), len(entries)
+        self.f_count.setText(f"{n} result{'s' if n != 1 else ''}" if n == total else f"{n} of {total}")
         if self.results.count():
             k = next((i for i in range(self.results.count())
                       if self.results.item(i).data(Qt.UserRole)[0] == select), 0)
             self.results.setCurrentRow(k)
         self._show_selected()
+
+    def _strip_icon(self, png: str, meta: dict, selected: bool = False) -> QIcon:
+        pix = self._thumbs.get(png, (None, QPixmap()))[1]
+        return QIcon(badged(pix, QSize(150, 100), "", bool(meta.get("favorite")), png in self._in_use, selected))
+
+    def _strip_selection(self, cur, prev):
+        for it, on in ((prev, False), (cur, True)):
+            if it is not None:
+                png, meta = it.data(Qt.UserRole)
+                it.setIcon(self._strip_icon(png, meta, on))
+
+    def _thumb_ready(self, png: str, ns: int, img: QImage):
+        self._requested.discard((png, ns))
+        if img.isNull():
+            return
+        pix = QPixmap.fromImage(img)
+        self._thumbs[png] = (ns, pix)
+        for i in range(self.results.count()):
+            it = self.results.item(i)
+            if it.data(Qt.UserRole)[0] == png:
+                it.setIcon(self._strip_icon(png, it.data(Qt.UserRole)[1], it is self.results.currentItem()))
+                break
+        self.gallery.set_thumb(png, pix)
+
+    # ---- views, favourites
+    def set_view(self, view: str, remember: bool = True):
+        gallery = view == "gallery"
+        self.stack.setCurrentIndex(1 if gallery else 0)
+        (self.b_gallery if gallery else self.b_single).setChecked(True)
+        self.thumb_size.setVisible(gallery)
+        if remember and self.qs is not None:
+            self.qs.setValue("resultsView", "gallery" if gallery else "single")
+        sel = self.selected()
+        if gallery:
+            self.gallery.set_selected(sel[0] if sel else None)
+            self.gallery.setFocus()
+        else:
+            self.results.setFocus()
+            it = self.results.currentItem()
+            if it is not None:
+                self.results.scrollToItem(it)
+
+    def view_mode(self) -> str:
+        return "gallery" if self.stack.currentIndex() == 1 else "single"
+
+    def _thumb_size_changed(self, px: int):
+        self.gallery.set_thumb_size(px)
+        if self.qs is not None:
+            self.qs.setValue("resultsThumb", px)
+
+    def _select_png(self, png: str):
+        for i in range(self.results.count()):
+            if self.results.item(i).data(Qt.UserRole)[0] == png:
+                self.results.setCurrentRow(i)
+                return
+
+    def _gallery_clicked(self, png: str):
+        self._select_png(png)
+        self.gallery.setFocus()
+
+    def _gallery_opened(self, png: str):
+        self._select_png(png)
+        self.set_view("single")
+
+    def toggle_favorite(self, png: str | None = None) -> bool:
+        """★ a result (the selected one if none is given) or take its star away; kept in its record."""
+        sel = self.selected()
+        png = png or (sel[0] if sel else None)
+        if not png:
+            return False
+        f = Path(png).with_suffix(".json")
+        try:
+            meta = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            meta = {}
+        meta["favorite"] = not meta.get("favorite")
+        if not meta["favorite"]:
+            meta.pop("favorite")
+        try:
+            f.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+        except OSError as e:
+            self.state.setText(f"Could not mark it: {e}")
+            return False
+        self._load_results(select=png if self.f_show.currentData() != "fav" or meta.get("favorite") else None,
+                           keep=True)
+        if self.view_mode() == "gallery":
+            self.gallery.setFocus()
+        return bool(meta.get("favorite"))
+
+    def _use_seed(self, seed: int):
+        self.seed.setValue(int(seed))
+        self.fresh_seed.setChecked(False)
+        self.state.setText(f"Seed {seed} is set for the next Generate (New seed after each Generate is off).")
 
     def selected(self) -> tuple[str, dict] | None:
         """The selected result and its record, read again (a use is recorded while the window is open)."""
@@ -871,17 +1078,16 @@ class ImageEditDialog(QDialog):
         sel = self.selected()
         if sel is None:
             self.view.clear_frame("Results appear here")
-            self.res_info.setText("")
-            self.res_info.setToolTip("")
+            self.res_info.set(None)
             self.view.setToolTip("")
+            self.gallery.set_selected(None)
+            self.b_fav.setChecked(False)
         else:
             png, meta = sel
             orig = meta.get("source_copy") or meta.get("source")
             show = orig if self.b_before.isChecked() and orig and Path(orig).is_file() else png
-            self.view.set_image(QImage(show))
-            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(_mtime(Path(png))))
-            used = " · ".join(f"{lora_label(lo['path'])} ×{lo['strength']:g}" for lo in meta.get("loras") or [])
-            where = self.uses(meta)
+            img = QImage(show)
+            self.view.set_image(img)
             how = (f"{FAMILIES.get(meta.get('family'), {}).get('label', '')} "
                    f"{FAMILIES.get(meta.get('family'), {}).get('qualities', {}).get(meta.get('quality'), '')}"
                    if meta.get("mode") == "create" else
@@ -889,20 +1095,23 @@ class ImageEditDialog(QDialog):
                    if meta.get("edit_model") == "qwen21" else
                    f"{EDIT_MODELS['moss']} {MOSS_EDIT_QUALITIES['standard']}" if meta.get("edit_model") == "moss"
                    else QUALITY_TEXT.get(meta.get("quality"), ""))
-            trig = meta.get("trigger_words") or []
-            smp = " ".join(x for x in (f"{meta['steps']} steps" if meta.get("steps") else "",
-                                       f"cfg {meta['cfg']:g}" if isinstance(meta.get("cfg"), (int, float)) else "",
-                                       meta.get("sampler") or "", meta.get("scheduler") or "") if x)
-            # (not the prompt: a long one wrapped into many lines and pushed over the picture; it is the tooltip)
-            self.res_info.setText(("ORIGINAL · " if show != png else "") +
-                                  (f"IN USE: {', '.join(where)} · " if where else "") + f"{how.strip()} · "
-                                  + (f"{smp} · " if smp else "") + (f"{used} · " if used else "")
-                                  + f"seed {meta.get('seed', '?')} · {when}")
-            tip = (f"Prompt: {meta.get('prompt', '')}" + (f"\nTrigger words added: {', '.join(trig)}" if trig else "")
-                   + (f"\nNegative: {meta['negative']}" if meta.get("negative") else "")
-                   + "\n\n“Prompt again” puts it into the prompt field")
-            self.res_info.setToolTip(tip)
-            self.view.setToolTip(tip)
+            smp = " · ".join(x for x in (f"{meta['steps']} steps" if meta.get("steps") else "",
+                                         f"CFG {meta['cfg']:g}" if isinstance(meta.get("cfg"), (int, float)) else "",
+                                         meta.get("sampler") or "", meta.get("scheduler") or "") if x)
+            w, h = meta.get("width"), meta.get("height")
+            if not (w and h) and not img.isNull():
+                w, h = img.width(), img.height()
+            self.res_info.set({
+                "original": show != png, "where": self.uses(meta), "model": how.strip(), "sampling": smp,
+                "size": f"{w} × {h}" if w and h else "",
+                "loras": [f"{lora_label(lo['path'])} ×{lo['strength']:g}" for lo in meta.get("loras") or []],
+                "seed": meta.get("seed"),
+                "when": time.strftime("%Y-%m-%d %H:%M", time.localtime(_mtime(Path(png)))),
+                "prompt": meta.get("prompt", ""), "trigger_words": meta.get("trigger_words") or [],
+                "negative": meta.get("negative") or ""})
+            self.view.setToolTip(self.res_info.toolTip())
+            self.gallery.set_selected(png, scroll=self.view_mode() == "gallery")
+            self.b_fav.setChecked(bool(meta.get("favorite")))
         self._update_buttons()
 
     def _update_buttons(self):
@@ -923,7 +1132,7 @@ class ImageEditDialog(QDialog):
         if not ok:
             self.b_gen.setToolTip(why if idle else "Working …")
         self.b_cancel.setEnabled(not idle)
-        for b in (self.b_use_start, self.b_use_ref, self.b_further, self.b_again, self.b_before):
+        for b in (self.b_use_start, self.b_use_ref, self.b_further, self.b_again, self.b_before, self.b_fav):
             b.setEnabled(has)
         self.b_use_end.setEnabled(has and self.end_target is not None)
         sel = self.selected()
@@ -968,6 +1177,8 @@ class ImageEditDialog(QDialog):
                            "clip is being generated, the edit waits for it)")
         self._update_buttons()
 
+        run = uuid.uuid4().hex[:12]                  # this Generate's results belong together
+
         def work():
             kept = mask_file = None
             made = 0
@@ -999,7 +1210,7 @@ class ImageEditDialog(QDialog):
                     made += 1
                     if size is not None:
                         scale_to(out, out, size)
-                    meta.update({"prompt": prompt, "trigger_words": words, "seed": seed, "source": source,
+                    meta.update({"run": run, "prompt": prompt, "trigger_words": words, "seed": seed, "source": source,
                                  "source_copy": str(kept), **({"mask": str(mask_file)} if mask_file else {}),
                                  "refs": refs, "size": list(size) if size else None})
                     out.with_suffix(".json").write_text(json.dumps(meta, indent=2, ensure_ascii=False),
@@ -1404,6 +1615,8 @@ class ImageEditDialog(QDialog):
                            "while)")
         self._update_buttons()
 
+        run = uuid.uuid4().hex[:12]                  # this Generate's results belong together
+
         def work():
             try:
                 edits.mkdir(parents=True, exist_ok=True)
@@ -1423,7 +1636,8 @@ class ImageEditDialog(QDialog):
                     out = edits / f"new_{time.strftime('%Y%m%d-%H%M%S')}_{seed}.png"
                     meta = self.editor.create(fam, model, sent, out, seed, quality, w, h, negative, loras,
                                               [Path(r) for r in refs], strength, tags, sampling)
-                    meta.update({"prompt": prompt, "trigger_words": words, "seed": seed, "refs": refs, "tags": tags,
+                    meta.update({"run": run, "prompt": prompt, "trigger_words": words, "seed": seed, "refs": refs,
+                                 "tags": tags,
                                  "source_copy": str(kept) if kept else None})
                     out.with_suffix(".json").write_text(json.dumps(meta, indent=2, ensure_ascii=False),
                                                         encoding="utf-8")
@@ -1699,5 +1913,6 @@ class ImageEditDialog(QDialog):
         if busy:
             self.cancel()
         self._empty_trash(keep_sources=busy)       # a running job may still write its result with its source
+        self._loader.stop()
         self.closed = True
         super().done(r)

@@ -3066,3 +3066,78 @@ def test_video_view_gpu_or_cpu(app, win):
     assert win.qs.value("videoGpu", True, type=bool) is False and "CPU" in win.status.text()
     win.video_gpu.setChecked(True)
     assert win.qs.value("videoGpu", False, type=bool) is True
+
+
+def test_results_gallery_groups_filters_and_favourites(app, tmp_path):
+    """Gallery: results grouped by Generate run (old ones without a run id by prompt and time), filters (★, in
+    use, model, prompt search), ★ by key / star corner, Single <-> Gallery, the info card and its seed."""
+    import time as _t
+
+    from PySide6.QtCore import QSettings, Qt
+
+    from video_chain.ui import results_gallery as RG
+    from video_chain.ui.image_edit import ImageEditDialog
+    ed = tmp_path / "edits"
+    ed.mkdir()
+    now = _t.time()
+
+    def result(name, age, **meta):
+        png = ed / f"{name}.png"
+        Image.new("RGB", (64, 48), (90, 80, 70)).save(png)
+        png.with_suffix(".json").write_text(json.dumps(meta))
+        os.utime(png, (now - age, now - age))
+        return str(png)
+    a1 = result("a1", 10, mode="create", family="krea2", prompt="a red fox in snow", seed=11, run="r1", steps=8, cfg=1.0)
+    a2 = result("a2", 12, mode="create", family="krea2", prompt="a red fox in snow", seed=12, run="r1")
+    b1 = result("b1", 4000, mode="create", family="sdxl", prompt="1girl, neon alley", seed=21)    # no run id
+    b2 = result("b2", 4100, mode="create", family="sdxl", prompt="1girl, neon alley", seed=22)
+    c1 = result("c1", 90000, prompt="she smiles", seed=31, uses=[{"kind": "start", "sha1": "x"}])  # an edit
+    groups = RG.run_groups([(p, json.loads(Path(p).with_suffix(".json").read_text()), now - age)
+                            for p, age in ((a1, 10), (a2, 12), (b1, 4000), (b2, 4100), (c1, 90000))])
+    assert [len(g["items"]) for g in groups] == [2, 2, 1]
+    assert groups[0]["title"].startswith("Today") and "Krea-2 Turbo" in groups[0]["title"] and "2 results" in groups[0]["title"]
+    assert "Edit: " in groups[2]["title"]
+
+    q = QSettings(str(tmp_path / "g.ini"), QSettings.IniFormat)
+    dlg = ImageEditDialog(None, tmp_path, [], None, None, lambda p: None, lambda k, p: False, q,
+                          connect_create=lambda p: None)
+    dlg.uses = lambda meta: ["the start image"] if meta.get("uses") else []
+    dlg._load_results()
+    assert dlg.results.count() == 5 and dlg.f_count.text() == "5 results" and dlg.selected()[0] == a1
+    assert len(dlg.gallery.headers) == 3 and set(dlg.gallery.thumbs) == {a1, a2, b1, b2, c1}
+    assert dlg.gallery.thumbs[c1].in_use and not dlg.gallery.thumbs[a1].in_use
+    assert "Krea-2 Turbo" in dlg.res_info.text() and "seed 11" in dlg.res_info.text() and "8 steps" in dlg.res_info.text()
+    assert "Prompt: a red fox in snow" in dlg.res_info.toolTip()
+    deadline = _t.time() + 5                                         # thumbnails come from the background thread
+    while _t.time() < deadline and len(dlg._thumbs) < 5:
+        app.processEvents()
+    assert len(dlg._thumbs) == 5 and not dlg.gallery.thumbs[a1].pix.isNull()
+
+    dlg.set_view("gallery")
+    assert dlg.view_mode() == "gallery" and q.value("resultsView") == "gallery" and dlg.thumb_size.isVisibleTo(dlg)
+    dlg.gallery.clicked.emit(b2)                                     # a click selects
+    assert dlg.selected()[0] == b2 and dlg.gallery.thumbs[b2].selected
+    assert dlg.toggle_favorite() is True                             # F / the button: ★ kept in the record
+    assert json.loads(Path(b2).with_suffix(".json").read_text())["favorite"] is True
+    dlg.gallery.starred.emit(a2)                                     # the star corner of another one
+    dlg.f_show.setCurrentIndex(dlg.f_show.findData("fav"))
+    assert {dlg.results.item(i).data(Qt.UserRole)[0] for i in range(dlg.results.count())} == {b2, a2}
+    assert dlg.f_count.text() == "2 of 5"
+    dlg.f_show.setCurrentIndex(dlg.f_show.findData("used"))
+    assert dlg.results.count() == 1 and dlg.selected()[0] == c1
+    dlg.f_show.setCurrentIndex(0)
+    dlg.f_model.setCurrentIndex(dlg.f_model.findData("create:sdxl"))
+    assert dlg.results.count() == 2
+    dlg.f_model.setCurrentIndex(0)
+    dlg.f_search.setText("FOX snow")
+    dlg._search_timer.timeout.emit()
+    assert dlg.results.count() == 2 and dlg.f_count.text() == "2 of 5"
+    dlg.f_search.clear()
+    dlg._search_timer.timeout.emit()
+    dlg.gallery.opened.emit(b1)                                      # double-click: large, in Single
+    assert dlg.view_mode() == "single" and dlg.selected()[0] == b1 and dlg.view.has_image()
+    dlg.res_info.use_seed.emit(21)                                   # the seed chip
+    assert dlg.seed.value() == 21 and not dlg.fresh_seed.isChecked()
+    dlg.res_info.b_prompt.setChecked(True)
+    assert dlg.res_info.prompt_box.isVisibleTo(dlg) and "1girl, neon alley" in dlg.res_info.prompt_box.toPlainText()
+    dlg.reject()
