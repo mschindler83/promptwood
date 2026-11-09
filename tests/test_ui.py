@@ -2831,3 +2831,37 @@ def test_file_browser_for_videos_and_sounds(app, win, tmp_path, image):
     v = win.add_video(None, str(d / "clip.mp4"), 0.0, 1.0)
     cols = win.project_media("video")
     assert cols == [("Real videos of this project", [(str(d / "clip.mp4"), f"Video #{v[1:]} · clip.mp4")])]
+
+
+def test_file_browser_favorites(app, tmp_path):
+    """Folders as favorites: the star adds / removes the open folder; shared by every kind; right-click removes."""
+    from PySide6.QtCore import Qt
+
+    from video_chain.ui.image_picker import ImagePickerDialog
+    q = settings(tmp_path, "fav.ini")
+    a, b = tmp_path / "shots", tmp_path / "music"
+    a.mkdir()
+    b.mkdir()
+    dlg = ImagePickerDialog(None, "Choose", str(a), q, cache_dir=None, desktop_thumbs=None)
+
+    def places(d):
+        return [(d.places.item(i).text(), d.places.item(i).data(Qt.UserRole)) for i in range(d.places.count())]
+    assert "Favorites" not in [t for t, _d in places(dlg)] and dlg.b_fav.toolTip().startswith("Add")
+    dlg.b_fav.click()                                                          # the open folder: a favorite
+    assert dlg.favorites() == [str(a)] and dlg.b_fav.toolTip().startswith("Remove")
+    texts = [t for t, _d in places(dlg)]
+    assert texts.index("Favorites") < texts.index("shots") < texts.index("Folders")
+    dlg.open_folder(b)
+    dlg.b_fav.click()
+    assert dlg.favorites() == [str(a), str(b)]
+    dlg.deleteLater()
+    vids = ImagePickerDialog(None, "Video", str(tmp_path), q, cache_dir=None, desktop_thumbs=None, kind="video")
+    assert vids.favorites() == [str(a), str(b)]                                 # shared by every kind
+    row = next(i for i in range(vids.places.count()) if vids.places.item(i).data(Qt.UserRole) == str(a))
+    vids._place_clicked(vids.places.item(row))
+    assert vids.folder == a.resolve()
+    pos = vids.places.visualItemRect(vids.places.item(row)).center()
+    vids._exec_menu = lambda m, p: m.actions()[0]                               # right-click → Remove from favorites
+    vids._places_menu(pos)
+    assert vids.favorites() == [str(b)]
+    vids.deleteLater()

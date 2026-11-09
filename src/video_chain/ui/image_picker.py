@@ -17,9 +17,9 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QSettings, QSize, Qt, Signal
 from PySide6.QtGui import QIcon, QImage, QImageReader, QPixmap
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-                               QListWidgetItem, QSlider, QSplitter, QStyle, QVBoxLayout, QWidget)
+                               QListWidgetItem, QMenu, QSlider, QSplitter, QStyle, QVBoxLayout, QWidget)
 
-from .theme import theme
+from .theme import icon, theme
 from .widgets import icon_button, label
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
@@ -179,8 +179,11 @@ class ImagePickerDialog(QDialog):
         self.zoom.setRange(80, 260)
         self.zoom.setFixedWidth(140)
         self.zoom.setToolTip("Thumbnail size")
+        self.b_fav = icon_button("star", "Add this folder to the favorites")
+        self.b_fav.clicked.connect(self.toggle_favorite)
         top.addWidget(self.b_up)
         top.addWidget(self.path, 1)
+        top.addWidget(self.b_fav)
         top.addWidget(label("Sort", level="tertiary"))
         top.addWidget(self.sort)
         top.addWidget(label("Size", level="tertiary"))
@@ -191,6 +194,8 @@ class ImagePickerDialog(QDialog):
         self.places = QListWidget()
         self.places.setMaximumWidth(240)
         self.places.itemClicked.connect(self._place_clicked)
+        self.places.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.places.customContextMenuRequested.connect(self._places_menu)
         split.addWidget(self.places)
         self.grid = QListWidget()
         self.grid.setViewMode(QListWidget.IconMode)
@@ -247,6 +252,43 @@ class ImagePickerDialog(QDialog):
             self.open_folder(start)
 
     # ---- places
+    def favorites(self) -> list[str]:
+        """The favorite folders (shared by every kind of browser), in the order they were added."""
+        try:
+            return [d for d in json.loads(self.qs.value("pickerFavorites", "[]", type=str)) if isinstance(d, str)]
+        except ValueError:
+            return []
+
+    def _set_favorites(self, dirs: list[str]):
+        self.qs.setValue("pickerFavorites", json.dumps(dirs))
+        self._fill_places()
+        self._update_fav()
+
+    def toggle_favorite(self, folder: str | None = None):
+        """The open folder (or folder) into the favorites, or out of them when it is one already."""
+        folder = str(folder or self.folder)
+        favs = self.favorites()
+        self._set_favorites([d for d in favs if d != folder] if folder in favs else favs + [folder])
+
+    def _update_fav(self):
+        on = self.collection is None and str(self.folder) in self.favorites()
+        self.b_fav.setEnabled(self.collection is None)
+        self.b_fav.setIcon(icon("starf" if on else "star"))
+        self.b_fav.setToolTip("Remove this folder from the favorites" if on else "Add this folder to the favorites")
+
+    def _places_menu(self, pos):
+        it = self.places.itemAt(pos)
+        data = it.data(Qt.UserRole) if it is not None else None
+        if not isinstance(data, str) or data not in self.favorites():
+            return
+        m = QMenu(self)
+        act = m.addAction("Remove from favorites")
+        if self._exec_menu(m, self.places.viewport().mapToGlobal(pos)) is act:
+            self.toggle_favorite(data)
+
+    def _exec_menu(self, menu: QMenu, pos):
+        return menu.exec(pos)
+
     def _recent_dirs(self) -> list[str]:
         try:
             return [d for d in json.loads(self.qs.value("pickerRecent", "[]", type=str)) if isinstance(d, str)]
@@ -266,6 +308,20 @@ class ImagePickerDialog(QDialog):
                 it.setData(Qt.UserRole, ("col", name))
                 it.setToolTip(f"{len(items)} {self.noun if len(items) != 1 else self.noun[:-1]} of the project")
                 self.places.addItem(it)
+        favs = self.favorites()
+        if favs:
+            head = QListWidgetItem("Favorites")
+            head.setFlags(Qt.NoItemFlags)
+            self.places.addItem(head)
+            for d in favs:
+                it = QListWidgetItem(icon("starf"), Path(d).name or d)
+                it.setData(Qt.UserRole, d)
+                ok = Path(d).is_dir()
+                it.setToolTip(d + ("" if ok else " (not reachable right now)") + " · right-click to remove")
+                if not ok:
+                    it.setForeground(theme().colour("textDisabled") or theme().accent)
+                self.places.addItem(it)
+        if self.collections or favs:
             head = QListWidgetItem("Folders")
             head.setFlags(Qt.NoItemFlags)
             self.places.addItem(head)
@@ -312,6 +368,7 @@ class ImagePickerDialog(QDialog):
             return
         self.collection = name
         self.path.setText(f"This project › {name}")
+        self._update_fav()
         self._clear_grid()
         gen = self._gen
         if self.sort.currentData() == "date":
@@ -347,6 +404,7 @@ class ImagePickerDialog(QDialog):
         self.folder = folder
         self.collection = None
         self.path.setText(str(folder))
+        self._update_fav()
         self._clear_grid()
         gen = self._gen
         dirs = sorted((e for e in entries if e.is_dir() and not e.name.startswith(".")), key=lambda e: e.name.lower())
