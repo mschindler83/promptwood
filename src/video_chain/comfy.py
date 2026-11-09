@@ -50,6 +50,19 @@ class ComfyJobFailed(ComfyError):
     """ComfyUI itself ended the job with an error (or it was interrupted): nothing is left to cancel."""
 
 
+# Every video ComfyUI writes for the app: H.264 re-encoded at this quality. SaveVideo's automatic setting wrote a
+# 672x832 clip at 2 Mbit/s (0.15 bit per pixel): visible 8-px blocks (borders 29 % stronger than inside) and
+# flicker that SeedVR2 then enlarged faithfully into 2K grain (its flicker followed the draft's at r = 0.993).
+VIDEO_CRF = 12.0
+
+
+def save_video(prefix: str, video=("video", 0)) -> dict:
+    """A SaveVideo node writing an mp4 at VIDEO_CRF (never the automatic quality)."""
+    return {"class_type": "SaveVideo", "inputs": {"video": list(video), "filename_prefix": prefix, "format": "mp4",
+                                                  "format.codec": "h264", "format.codec.encoding": "re-encode",
+                                                  "format.codec.encoding.crf": VIDEO_CRF}}
+
+
 def _combo_options(spec) -> list[str]:
     """Options of a combo input in /object_info, old ([list]) or new (["COMBO", {"options": list}]) format."""
     if isinstance(spec, list) and spec:
@@ -422,8 +435,7 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
                                                                          "vae": ["audio_vae", 0]}}
         video_inputs["audio"] = ["decode_audio", 0]
     wf["video"] = {"class_type": "CreateVideo", "inputs": video_inputs}
-    wf["save_video"] = {"class_type": "SaveVideo", "inputs": {"video": ["video", 0], "filename_prefix": prefix,
-                                                              "format": "mp4"}}
+    wf["save_video"] = save_video(prefix)
     return wf
 
 
@@ -1550,8 +1562,7 @@ def build_refine_workflow(*, prompt: str, draft: str, seed: int, width: int, hei
                                "temporal_size": 64, "temporal_overlap": 8}}
     wf["video"] = {"class_type": "CreateVideo", "inputs": {"images": ["decode", 0], "fps": 24.0,
                                                           "audio": ["parts", 1]}}
-    wf["refine_save"] = {"class_type": "SaveVideo", "inputs": {"video": ["video", 0], "filename_prefix": prefix,
-                                                              "format": "mp4"}}
+    wf["refine_save"] = save_video(prefix)
     return wf
 
 
@@ -1709,8 +1720,7 @@ def build_seedvr_workflow(*, draft: str, width: int, height: int, unet: str, vae
                                                                    "color_correction_method": "lab"}},
         "video": {"class_type": "CreateVideo", "inputs": {"images": ["post", 0], "fps": 24.0,
                                                           "audio": ["parts", 1]}},
-        "seedvr_save": {"class_type": "SaveVideo", "inputs": {"video": ["video", 0], "filename_prefix": prefix,
-                                                              "format": "mp4"}},
+        "seedvr_save": save_video(prefix),
     }
 
 

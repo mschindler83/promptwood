@@ -217,6 +217,11 @@ class FakeComfy:
     def render(self, wf: dict) -> dict:
         for nid, n in wf.items():
             assert n["class_type"] in KNOWN, n["class_type"]
+            if n["class_type"] == "SaveVideo":       # never ComfyUI's automatic quality (2 Mbit/s: blocks, flicker)
+                i = n["inputs"]
+                assert i.get("format") in ("mp4", "mkv") and i.get("format.codec") == "h264" \
+                    and i.get("format.codec.encoding") == "re-encode" \
+                    and float(i.get("format.codec.encoding.crf", 99)) <= 12, f"{nid}: SaveVideo quality {i}"
             spec = SCHEMAS.get(n["class_type"])
             if spec is not None:                     # the inputs real ComfyUI takes for these nodes
                 need, may = spec

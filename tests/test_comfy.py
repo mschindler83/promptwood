@@ -1050,3 +1050,18 @@ def test_light_denoise_before_seedvr2(server, tmp_path):
     uploaded = [f for f in (server.root / "input").rglob("*.mp4") if f not in before]
     assert uploaded and change(uploaded[0]) < 0.6 * change(noisy)               # SeedVR2 got the denoised clip
     assert chain.probe(out)["frames"] == a["frames"]
+
+
+def test_every_video_is_saved_at_a_set_quality():
+    """SaveVideo's automatic quality wrote drafts at 2 Mbit/s (blocks, flicker SeedVR2 enlarged): every workflow
+    saves H.264 at VIDEO_CRF (the fake ComfyUI checks every SaveVideo too)."""
+    node = C.save_video("p")
+    assert node["inputs"]["format.codec.encoding"] == "re-encode" and node["inputs"]["format.codec.encoding.crf"] == 12.0
+    clip = C.build_workflow(prompt="x", image=None, seed=1, width=672, height=384, frames=39, steps=8, loras=[],
+                            audio=True, prefix="p")
+    up = C.build_seedvr_workflow(draft="d.mp4", width=1888, height=1088, unet="u", vae="v", prefix="p")
+    ref = C.build_refine_workflow(prompt="x", draft="d.mp4", seed=1, width=1888, height=1088, frames=39, loras=[],
+                                  refiner="r", upscaler="u", prefix="p")
+    for wf in (clip, up, ref):
+        saves = [n for n in wf.values() if n["class_type"] == "SaveVideo"]
+        assert saves and all(n["inputs"]["format.codec.encoding.crf"] == C.VIDEO_CRF for n in saves)

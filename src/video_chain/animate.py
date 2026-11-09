@@ -9,7 +9,7 @@ import math
 import uuid
 from pathlib import Path
 
-from .comfy import SUBFOLDER, ComfyError, ComfyGenerator, ComfyJobFailed, _combo_options
+from .comfy import SUBFOLDER, ComfyError, ComfyGenerator, ComfyJobFailed, _combo_options, save_video
 
 ANIMATE_NODES = ("WanAnimateToVideo", "TrimVideoLatent", "DWPreprocessor", "BlockifyMask", "DrawMaskOnImage",
                  "CLIPVisionEncode", "CLIPVisionLoader", "ModelSamplingSD3", "LoadVideo", "GetVideoComponents",
@@ -193,8 +193,7 @@ def build_animate_workflow(*, files: dict, video: str, mask: str, reference: str
         out = face_lock_nodes(wf, out, lock)
     wf["video"] = {"class_type": "CreateVideo", "inputs": {"images": out, "audio": ["src_parts", 1],
                                                            "fps": float(fps)}}
-    wf["save"] = {"class_type": "SaveVideo", "inputs": {"video": ["video", 0], "filename_prefix": prefix,
-                                                        "format": "mp4"}}
+    wf["save"] = save_video(prefix)
     return wf
 
 
@@ -221,8 +220,7 @@ def build_faceswap_workflow(*, video: str, lock: dict, prefix: str, fps: float =
           "src_parts": {"class_type": "GetVideoComponents", "inputs": {"video": ["src", 0]}}}
     out = face_lock_nodes(wf, ["src_parts", 0], lock)
     wf["video"] = {"class_type": "CreateVideo", "inputs": {"images": out, "audio": ["src_parts", 1], "fps": float(fps)}}
-    wf["save"] = {"class_type": "SaveVideo", "inputs": {"video": ["video", 0], "filename_prefix": prefix,
-                                                        "format": "mp4"}}
+    wf["save"] = save_video(prefix)
     return wf
 
 
