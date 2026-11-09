@@ -182,8 +182,34 @@ def server_command(server: str, model: str, port: int, cpu_moe: bool = True, mmp
     return cmd
 
 
+def vram_needed_mb(model: str, cpu_moe: bool = True, mmproj: str | None = None) -> int:
+    """About how much VRAM the server takes: with the experts in RAM (cpu_moe) the attention layers, KV cache and
+    buffers (~2.5-4 GB measured on a 30B-A3B), else the whole model file; plus the vision part."""
+    def mb(path):
+        try:
+            return os.path.getsize(path) // (1024 * 1024)
+        except OSError:
+            return 0
+    return (4000 if cpu_moe else mb(model) + 1500) + (mb(mmproj) if mmproj else 0)
+
+
+def free_vram_mb() -> int | None:
+    """Free VRAM of the first GPU (nvidia-smi), None when it cannot be read."""
+    smi = shutil.which("nvidia-smi")
+    if not smi:
+        return None
+    try:
+        out = subprocess.run([smi, "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, timeout=10).stdout
+        return int(out.split()[0])
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        return None
+
+
 class LlamaServer:
-    """Starts / stops one llama-server for one model file and asks it to refine prompts."""
+    """Starts / stops one llama-server for one model file and asks it to refine prompts. before_launch (optional,
+    called in start()'s thread just before a new server process starts) can make room for it, or raise
+    LlmServerError to refuse."""
 
     def __init__(self, server: str, model: str, port: int = DEFAULT_PORT, cpu_moe: bool = True,
                  mmproj: str | None = None, log_dir: Path | None = None):
@@ -193,6 +219,7 @@ class LlamaServer:
         self._lock = threading.Lock()                # around self.proc
         self._start_lock = threading.Lock()          # one start() at a time
         self._gen = 0                                # stop() / interrupt() count it up: a running start() ends
+        self.before_launch = None
 
     @property
     def url(self) -> str:
@@ -259,6 +286,8 @@ class LlamaServer:
             bad = self.problems()
             if bad:
                 raise LlmServerError("; ".join(bad))
+            if self.before_launch is not None and not self.running():
+                self.before_launch()
             with self._lock:
                 if gen != self._gen:
                     raise LlmServerError("cancelled")

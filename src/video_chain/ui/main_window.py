@@ -476,6 +476,7 @@ class _Bridge(QObject):
     triggers = Signal(dict)                    # the trigger word scan finished (its counts)
     copied = Signal(str, str)                  # Save as: target folder, error ('' = done)
     converted = Signal(str, object, str, str, str)  # video node id, record or None, error, token, project
+    llm_room = Signal(str)                     # ComfyUI's models were unloaded for the llama.cpp server (why)
 
 
 # ----------------------------------------------------------------------------- path card
@@ -1287,6 +1288,7 @@ class MainWindow(QMainWindow):
         self._trigger_scan = None
         self.bridge.copied.connect(self._copied)
         self.bridge.converted.connect(self._converted)
+        self.bridge.llm_room.connect(self._llm_room_made)
         self.h3_loras: list[tuple[str, str]] = []
         self.qwen_loras: list[tuple[str, str]] = []
         self.image_loras: dict[str, list[tuple[str, str]]] = {}
@@ -3098,7 +3100,49 @@ class MainWindow(QMainWindow):
             if cur is not None:
                 cur.stop(wait=False)
             self._llama = LlamaServer(*key, log_dir=Path.home() / ".cache" / "video-chain")
+        url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL).rstrip("/")
+        self._llama.before_launch = lambda llama=self._llama: self._room_for_llama(llama, url)
         return self._llama
+
+    def _room_for_llama(self, llama, url: str, settle: float = 15.0) -> None:
+        """(start()'s thread, just before the llama.cpp server starts) Too little free VRAM for it: ComfyUI is asked
+        to unload its models (the clip / image model loads again when it is needed). While clips are generated it
+        refuses instead (their run keeps its VRAM)."""
+        from ..llm_server import LlmServerError, free_vram_mb, vram_needed_mb
+        need = vram_needed_mb(llama.model, llama.cpu_moe, llama.mmproj)
+        free = free_vram_mb()
+        if free is None or free >= need:
+            return
+        gb = lambda mb: f"{mb / 1024:.1f} GB"   # noqa: E731
+        if self.running:
+            raise LlmServerError(f"only {gb(free)} of VRAM is free while clips are generated and the llama.cpp model "
+                                 f"needs about {gb(need)}; refine after the run, or choose a ComfyUI model")
+        try:
+            req = urllib.request.Request(url + "/free", data=b'{"unload_models": true, "free_memory": true}',
+                                         headers={"Content-Type": "application/json"}, method="POST")
+            urllib.request.urlopen(req, timeout=10).read()
+        except Exception:  # noqa: BLE001  (ComfyUI is not up: the VRAM is used by something else)
+            return
+        end = time.time() + settle
+        now = free
+        while time.time() < end:
+            time.sleep(0.5)
+            now = free_vram_mb()
+            if now is None or now >= need:
+                break
+        self.bridge.llm_room.emit(
+            f"ComfyUI's models were unloaded for the llama.cpp model (it needs about {gb(need)} of VRAM, "
+            f"{gb(free)} was free" + (f", now {gb(now)}" if now is not None else "") +
+            "); the clip model loads again before the next clips.")
+
+    def _llm_room_made(self, msg: str):
+        self._comfy_model = None                    # (nothing of this app is loaded in ComfyUI any more)
+        self._qwen_timer.stop()
+        if self.worker_alive and not self.running:
+            self._quit_worker(free=False)           # its model is gone; a new worker starts for the next clips
+        self._update_model_label()
+        self.log.appendPlainText(msg)
+        self.status.setText(msg)
 
     def stop_llama(self, why: str = "") -> bool:
         """Stop the refiner's llama.cpp server if the app started it (its RAM / VRAM back for ComfyUI)."""
@@ -4806,7 +4850,10 @@ class MainWindow(QMainWindow):
                 return                           # keep the lists found before (a folder may be offline)
             if gen != getattr(self, "_lora_scan_gen", gen):
                 return                           # a newer scan was started (e.g. another ComfyUI folder)
-            bridge.loras.emit(found, report)
+            try:
+                bridge.loras.emit(found, report)
+            except RuntimeError:                 # (the window was closed meanwhile)
+                pass
         threading.Thread(target=work, daemon=True).start()
 
     def _loras_found(self, found: list, report: bool = False):

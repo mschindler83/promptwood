@@ -365,3 +365,71 @@ def test_ideas_mode_in_the_refine_window(tmp_path):
     assert dlg.original.toPlainText() == "- cat\n- rain"               # the bullet points stay in Ideas
     dlg._use_all()
     assert dlg.chosen_ideas() == ["cat 0", "cat 1 in rain", "cat 2 in rain"]
+
+
+def test_room_in_vram_before_the_server_starts(fake_server, tmp_path, monkeypatch):
+    """Too little free VRAM: ComfyUI is asked to unload its models before the server starts (not while clips are
+    generated: then the refine is refused); enough: nothing is unloaded. The hook runs only for a new process."""
+    os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    from pathlib import Path
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from fake_comfy import FakeComfy
+    from video_chain.ui import main_window as MW
+    script, model = fake_server
+    mmproj = tmp_path / "mmproj-F16.gguf"
+    mmproj.write_bytes(b"\0" * (3 * 1024 * 1024))
+    assert L.vram_needed_mb(str(model), True, str(mmproj)) == 4003
+    assert L.vram_needed_mb(str(model), False) == 1500 and L.vram_needed_mb(str(model), True, str(tmp_path / "x")) == 4000
+
+    server = FakeComfy(tmp_path / "comfy")
+    win = MW.MainWindow(QSettings(str(tmp_path / "s.ini"), QSettings.IniFormat))
+    vram = []
+    monkeypatch.setattr(L, "free_vram_mb", lambda: vram.pop(0) if vram else 20000)
+    frees = lambda: sum(1 for c in server.calls if c[:2] == ("BODY", "/free"))   # noqa: E731
+    try:
+        win.comfy_url.setText(server.url)
+        win.llm_on.setChecked(True)
+        win.llm_server.setText(str(script))
+        win.llm_model.setEditText(str(model))
+        win.llm_port.setValue(free_port())
+        srv = win.llama_server()
+        win._comfy_model = "h3"
+        vram[:] = [9000]                                       # enough
+        srv.before_launch()
+        assert frees() == 0 and win._comfy_model == "h3"
+        vram[:] = [1000, 1500, 18000]                          # short: freed, then waits until it is free
+        srv.before_launch()
+        assert frees() == 1 and win._comfy_model is None and not vram
+        assert "unloaded for the llama.cpp model" in win.log.toPlainText() and "now 17.6 GB" in win.status.text()
+        win._job = object()                                    # clips are being generated: refused, nothing freed
+        vram[:] = [1000]
+        with pytest.raises(L.LlmServerError, match="while clips are generated"):
+            srv.before_launch()
+        assert frees() == 1
+        win._job = None
+        vram[:] = [None]                                       # no nvidia-smi: started as before
+        srv.before_launch()
+        assert frees() == 1
+    finally:
+        win._job = None
+        win.stop_llama()
+        win.deleteLater()
+        server.close()
+
+    calls = []
+    srv = L.LlamaServer(str(script), str(model), free_port())
+    srv.before_launch = lambda: calls.append(1)
+    srv.start()
+    srv.start()                                                # already running: no hook
+    assert calls == [1]
+    srv.stop()
+
+    def refuse():
+        raise L.LlmServerError("no room")
+    srv.before_launch = refuse
+    with pytest.raises(L.LlmServerError, match="no room"):
+        srv.start()
+    assert srv.proc is None
