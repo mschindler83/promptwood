@@ -425,7 +425,7 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
     if veda:                                       # Veda sparse attention (after every LoRA, before the guider)
         wf["veda"] = {"class_type": VEDA_NODE, "inputs": {"model": model, "predictor": veda, **VEDA_SETTINGS}}
         model = ["veda", 0]
-    if cfg > 1.0:                                  # real CFG: a negative without text, the same frames (keyframes stay
+    if abs(cfg - 1.0) > 1e-6:                      # real CFG: a negative without text, the same frames (keyframes stay
         wf["neg"] = {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": positive}}   # in the cond)
         wf["guider"] = {"class_type": "CFGGuider", "inputs": {"model": model, "positive": positive,
                                                               "negative": ["neg", 0], "cfg": float(cfg)}}

@@ -549,7 +549,7 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
         s["pika"] = {"strength": float(pika)}
     if turbo:                                   # (turbo LoRA, strength[, cfg]); steps are already the turbo steps
         s["turbo"] = {"lora": turbo[0], "sha1": file_signature(turbo[0]), "strength": float(turbo[1])}
-        if len(turbo) > 2 and float(turbo[2]) > 1.0:   # (only when not 1: earlier clips keep their settings)
+        if len(turbo) > 2 and abs(float(turbo[2]) - 1.0) > 1e-6:   # (only when not 1: earlier clips keep theirs)
             s["turbo"]["cfg"] = round(float(turbo[2]), 2)
     if extra_loras:
         s["extra_loras"] = [{"lora": p, "sha1": file_signature(p), "strength": float(st)} for p, st in extra_loras]

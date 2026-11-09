@@ -1686,16 +1686,16 @@ class MainWindow(QMainWindow):
         trow.addWidget(label("strength", level="tertiary"))
         trow.addWidget(self.turbo_strength)
         self.turbo_cfg = QDoubleSpinBox()
-        self.turbo_cfg.setRange(1.0, 10.0)
-        self.turbo_cfg.setSingleStep(0.1)
-        self.turbo_cfg.setDecimals(1)
+        self.turbo_cfg.setRange(0.0, 10.0)
+        self.turbo_cfg.setSingleStep(0.05)
+        self.turbo_cfg.setDecimals(2)
         self.turbo_cfg.setValue(1.0)
-        self.turbo_cfg.setSpecialValueText("1 (off)")
         self.turbo_cfg.setToolTip("CFG with the turbo LoRA. 1 (off): one pass per step, as the turbo LoRA is made for. "
                                   "Above 1: real classifier-free guidance against an empty prompt (the start / end "
                                   "frames stay): the prompt is followed more strongly, but every step runs twice "
                                   "(about twice as slow) and a step-distilled LoRA can burn colours or over-sharpen "
-                                  "from about 1.5-2; try 1.2-1.5 first")
+                                  "from about 1.5-2; try 1.2-1.5 first. Below 1 (e.g. 0.9): the prompt is followed "
+                                  "a little less (blended towards no prompt), also with two passes per step")
         trow.addWidget(label("CFG", level="tertiary"))
         trow.addWidget(self.turbo_cfg)
         trow.addStretch(1)
