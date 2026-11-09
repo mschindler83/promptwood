@@ -182,7 +182,7 @@ class ImageEditDialog(QDialog):
                  on_start=None, known_loras: list[tuple[str, str]] | None = None, lora_dir: str = "",
                  uses=None, refine=None, connect_create=None, family_loras=None,
                  start_aspect: float | None = None, mode: str = "edit", check_lora=None,
-                 use_triggers: bool = True):
+                 use_triggers: bool = True, collections=None):
         super().__init__(parent)
         self.setWindowTitle("Edit an image with AI")
         self.resize(1240, 820)
@@ -195,6 +195,7 @@ class ImageEditDialog(QDialog):
         self.start_aspect = start_aspect
         self.check_lora = check_lora                     # check_lora(path) -> False if ComfyUI cannot load it
         self.use_triggers = use_triggers                 # the LoRAs' trigger words before the prompt (project)
+        self.collections = collections                   # () -> the project's pictures by kind (image picker)
         self.families: dict = {}                         # what ComfyUI has of each family (from the creator)
         self._families_error = ""
         self._retry_families = 0                         # retries left while ComfyUI starts
@@ -728,7 +729,8 @@ class ImageEditDialog(QDialog):
 
     # ---- source and pictures
     def _pick(self, title: str) -> str | None:
-        return pick_image(self, title, self.qs, None, self.places)
+        return pick_image(self, title, self.qs, None, self.places,
+                          self.collections() if self.collections is not None else None)
 
     def _choose_source(self):
         f = self._pick("Image to edit")

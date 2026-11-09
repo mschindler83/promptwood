@@ -2264,3 +2264,44 @@ def test_replace_a_person_in_a_real_video(app, tmp_path, image, monkeypatch):
         w.close()
     finally:
         server.close()
+
+
+def test_image_picker_shows_the_projects_pictures(app, win, tmp_path, image):
+    """The picker's "This project" section: the project's pictures by kind, with captions; the collection used
+    last opens again; folders can still be browsed."""
+    from PySide6.QtCore import Qt
+
+    from video_chain.ui.image_picker import ImagePickerDialog
+    ids = new_project(win, tmp_path, image, ("one", "two"))
+    run_and_wait(app, win, win.generate_path)
+    edits = win.project / "edits"
+    edits.mkdir(exist_ok=True)
+    Image.new("RGB", (64, 64), (9, 9, 9)).save(edits / "edit_1.png")
+    (edits / "edit_1.json").write_text('{"prompt": "she smiles at the camera", "mode": "edit"}')
+    cols = win.project_images()
+    names = [n for n, _items in cols]
+    assert names[0] == "All project images" and "Start image" in names and "Clip frames" in names
+    assert "Image edits & new images" in names
+    clips = dict(cols)["Clip frames"]
+    assert [c for _p, c in clips] == [f"Clip #{ids[0][1:]} · last frame", f"Clip #{ids[1][1:]} · last frame"]
+    assert dict(cols)["Image edits & new images"] == [(str(edits / "edit_1.png"), "Edit · she smiles at the camera")]
+    q = settings(tmp_path, "pick2.ini")
+    dlg = ImagePickerDialog(None, "Start image", None, q, cache_dir=None, desktop_thumbs=None, collections=cols)
+    assert dlg.collection == "All project images" and dlg.path.text() == "This project › All project images"
+    places = [dlg.places.item(i).text() for i in range(dlg.places.count())]
+    assert places[0] == "This project" and places[1].startswith("All project images (") and "Folders" in places
+    dlg.open_collection("Clip frames")
+    texts = [dlg.grid.item(i).text() for i in range(dlg.grid.count())]
+    assert texts == [c for _p, c in clips]
+    dlg.grid.setCurrentRow(1)
+    assert dlg.info.text().startswith(f"Clip #{ids[1][1:]} · last frame")
+    dlg._activated(dlg.grid.item(1))
+    assert dlg.chosen() == clips[1][0] and q.value("pickerPlace") == "col:Clip frames"
+    again = ImagePickerDialog(None, "x", None, q, cache_dir=None, desktop_thumbs=None, collections=cols)
+    assert again.collection == "Clip frames"                                   # the collection used last
+    again.go_up()                                                              # to the folders
+    assert again.collection is None and again.grid.count() >= 0
+    again.reject()
+    plain = ImagePickerDialog(None, "x", str(tmp_path), q, cache_dir=None, desktop_thumbs=None)
+    assert plain.collection is None and plain.places.item(0).text() == "Home"   # no project: folders only
+    plain.reject()

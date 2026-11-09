@@ -45,7 +45,7 @@ from .timeline import Block, Timeline
 from .storyboard import Storyboard
 from .face_crop import FaceCropDialog
 from .prompt_refiner import RefineDialog, replace_text
-from .image_edit import EDITS_DIR, ImageEditDialog, record_use, uses_of
+from .image_edit import EDITS_DIR, ImageEditDialog, project_edits, record_use, uses_of
 from .video_editor import VideoRangeDialog, choose_video
 from .theme import icon, repolish, theme
 from .widgets import FrameTile, guard_wheel, icon_button, label, section_bar
@@ -2939,7 +2939,8 @@ class MainWindow(QMainWindow):
         if self.project is None:
             self.status.setText("Open or create a project folder first.")
             return
-        f = pick_image(self, "Reference image (best a close-up of the face)", self.qs, None, self._picker_places())
+        f = pick_image(self, "Reference image (best a close-up of the face)", self.qs, None, self._picker_places(),
+                       self.project_images())
         if f:
             self.add_reference(f)
 
@@ -3583,7 +3584,7 @@ class MainWindow(QMainWindow):
                 return
         start = str(Path(self.tree.image).parent) if self.tree and self.tree.image and \
             Path(self.tree.image).parent.is_dir() else None
-        f = pick_image(self, "Start image", self.qs, start, self._picker_places())
+        f = pick_image(self, "Start image", self.qs, start, self._picker_places(), self.project_images())
         if f:
             self.set_image(f, confirm=True)
 
@@ -3597,6 +3598,43 @@ class MainWindow(QMainWindow):
         if (self.project / EDITS_DIR).is_dir():
             out.append(("Project AI edits", str(self.project / EDITS_DIR)))
         return out
+
+    def project_images(self) -> list[tuple[str, list[tuple[str, str]]]]:
+        """The open project's pictures by kind, for the image picker: [(name, [(path, caption)])] (kinds without
+        pictures are left out; "All project images" first)."""
+        if self.project is None or self.tree is None:
+            return []
+        p = self.project
+        start = [(str(p / T.START_FILE), "Start image")] if (p / T.START_FILE).is_file() else []
+        clips, videos, ends = [], [], []
+        for n in sorted(self.tree.nodes.values(), key=lambda n: self.tree.number(n.id)):
+            m = n.made or {}
+            if n.is_video:
+                for key, what in (("first", "first frame"), ("frame", "last frame")):
+                    if m.get(key) and (p / m[key]).is_file():
+                        videos.append((str(p / m[key]), f"Video #{n.id[1:]} · {what}"))
+                continue
+            if m.get("frame") and (p / m["frame"]).is_file():
+                clips.append((str(p / m["frame"]), f"Clip #{n.id[1:]} · last frame"))
+            h = T.handover_file(p, self.tree, n) if m else None
+            if h is not None and h.is_file() and str(h) != str(p / m.get("frame", "")):
+                clips.append((str(h), f"Clip #{n.id[1:]} · hand-over frame"))
+            if n.end_image and (p / n.end_image).is_file():
+                ends.append((str(p / n.end_image), f"End image of clip #{n.id[1:]}"))
+        edits = []
+        for png, meta in project_edits(p):
+            words = " ".join(str(meta.get("prompt") or "").split())
+            what = "New image" if meta.get("mode") == "create" else "Edit"
+            edits.append((str(png), f"{what} · {words[:48]}{'…' if len(words) > 48 else ''}" if words else what))
+        faces = []
+        for c in T.cast_of(self.tree):
+            for k, rel in enumerate(c["images"], start=1):
+                faces.append((str(p / rel), f"@{c['name']}" + (f" · face {k}" if len(c["images"]) > 1 else "")))
+        kinds = [("Start image", start), ("Image edits & new images", edits), ("Cast faces", faces),
+                 ("Clip frames", clips), ("Video frames", videos), ("End images", ends)]
+        kinds = [(name, items) for name, items in kinds if items]
+        everything = [x for _n, items in kinds for x in items]
+        return ([("All project images", everything)] + kinds) if everything else []
 
     def made_from_start(self) -> list[str]:
         """Made generated clips that start (directly or along their path) from the start image."""
@@ -4684,6 +4722,7 @@ class MainWindow(QMainWindow):
                               uses=lambda meta: uses_of(self.project, self.tree, meta),
                               refine=self.refine_text, connect_create=connect_create, family_loras=family_loras,
                               start_aspect=aspect, mode=mode, check_lora=self.in_comfy_loras,
+                              collections=self.project_images,
                               use_triggers=bool(self.tree.options.get("lora_triggers", True)))
         self._edit_switch = switch
         if dialog:
@@ -4836,7 +4875,7 @@ class MainWindow(QMainWindow):
             return
         start = str(Path(self.project / node.end_image).parent) if node.end_image else None
         f = pick_image(self, f"End image of clip #{nid[1:]} (the frame it steers its end to)", self.qs, start,
-                       self._picker_places())
+                       self._picker_places(), self.project_images())
         if f:
             self.set_end_image(nid, f)
 
@@ -5206,7 +5245,8 @@ class MainWindow(QMainWindow):
 
         dlg = SwapDialog(self, self.project, nid, self.project / node.made["video"], self.face_detector(), pictures,
                          connect, self.qs, on_start=before, play=lambda p, t: self.preview.open(Path(p), t),
-                         source=node.source)
+                         source=node.source, pick=lambda title: pick_image(
+                             self, title, self.qs, None, self._picker_places(), self.project_images()))
         if not dialog:
             return dlg
         if dlg.exec() == QDialog.Accepted and dlg.result is not None:

@@ -78,9 +78,13 @@ def _thumbnail(path: str) -> QImage:
 
 
 class ImagePickerDialog(QDialog):
+    """collections: the open project's pictures by kind, [(name, [(path, caption)])], shown first under "This
+    project" (captions such as "Clip #5 · last frame"); folders can be browsed as well."""
+
     def __init__(self, parent=None, title: str = "Choose an image", start_dir: str | None = None,
                  settings: QSettings | None = None, places: list[tuple[str, str]] | None = None,
-                 cache_dir: Path | None = CACHE_DIR, desktop_thumbs: Path | None = DESKTOP_THUMBS):
+                 cache_dir: Path | None = CACHE_DIR, desktop_thumbs: Path | None = DESKTOP_THUMBS,
+                 collections: list[tuple[str, list[tuple[str, str]]]] | None = None):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.resize(1100, 700)
@@ -100,6 +104,8 @@ class ImagePickerDialog(QDialog):
         self.folder: Path = Path.home()
         self._chosen: str | None = None
         self._extra_places = places or []
+        self.collections = [(n, [(str(p), c) for p, c in items if Path(p).is_file()]) for n, items in collections or []]
+        self.collection: str | None = None        # the project collection shown (None: a folder)
 
         v = QVBoxLayout(self)
         top = QHBoxLayout()
@@ -111,7 +117,8 @@ class ImagePickerDialog(QDialog):
         self.sort = QComboBox()
         self.sort.addItem("Name", "name")
         self.sort.addItem("Newest first", "date")
-        self.sort.currentIndexChanged.connect(lambda *_: self.open_folder(self.folder))
+        self.sort.currentIndexChanged.connect(lambda *_: self.open_collection(self.collection) if self.collection
+                                              else self.open_folder(self.folder))
         self.zoom = QSlider(Qt.Horizontal)
         self.zoom.setRange(80, 260)
         self.zoom.setFixedWidth(140)
@@ -127,7 +134,7 @@ class ImagePickerDialog(QDialog):
         split = QSplitter(Qt.Horizontal)
         self.places = QListWidget()
         self.places.setMaximumWidth(240)
-        self.places.itemClicked.connect(lambda it: self.open_folder(Path(it.data(Qt.UserRole))))
+        self.places.itemClicked.connect(self._place_clicked)
         split.addWidget(self.places)
         self.grid = QListWidget()
         self.grid.setViewMode(QListWidget.IconMode)
@@ -169,7 +176,18 @@ class ImagePickerDialog(QDialog):
         if start is None or not start.is_dir():
             last = self.qs.value("pickerDir", "", type=str)
             start = Path(last) if last and Path(last).is_dir() else Path.home()
-        self.open_folder(start)
+        names = [n for n, _items in self.collections]
+        place = self.qs.value("pickerPlace", "", type=str)
+        if self.collections and (start_dir is None or place.startswith("col:")):
+            # the project's pictures first (the collection used last), unless a folder was used last and given
+            self.folder = start
+            want = place[4:] if place.startswith("col:") and place[4:] in names else names[0]
+            if place == "dir" and start_dir is None:
+                self.open_folder(start)
+            else:
+                self.open_collection(want)
+        else:
+            self.open_folder(start)
 
     # ---- places
     def _recent_dirs(self) -> list[str]:
@@ -181,6 +199,19 @@ class ImagePickerDialog(QDialog):
     def _fill_places(self):
         self.places.clear()
         dir_icon = self.style().standardIcon(QStyle.SP_DirIcon)
+        if self.collections:
+            head = QListWidgetItem("This project")
+            head.setFlags(Qt.NoItemFlags)
+            self.places.addItem(head)
+            pic_icon = self.style().standardIcon(QStyle.SP_FileDialogContentsView)
+            for name, items in self.collections:
+                it = QListWidgetItem(pic_icon, f"{name} ({len(items)})")
+                it.setData(Qt.UserRole, ("col", name))
+                it.setToolTip(f"{len(items)} picture{'s' if len(items) != 1 else ''} of the project")
+                self.places.addItem(it)
+            head = QListWidgetItem("Folders")
+            head.setFlags(Qt.NoItemFlags)
+            self.places.addItem(head)
         entries = [("Home", str(Path.home()))]
         pics = Path.home() / "Pictures"
         if pics.is_dir():
@@ -202,6 +233,51 @@ class ImagePickerDialog(QDialog):
                 it.setToolTip(d)
                 self.places.addItem(it)
 
+    def _place_clicked(self, it):
+        data = it.data(Qt.UserRole)
+        if isinstance(data, (tuple, list)) and data and data[0] == "col":
+            self.open_collection(data[1])
+        elif data:
+            self.open_folder(Path(data))
+
+    def _clear_grid(self):
+        self._gen += 1
+        self.grid.clear()
+        self._items = {}
+        self.preview.clear()
+        self.info.setText("")
+        self.buttons.button(QDialogButtonBox.Open).setEnabled(False)
+
+    def open_collection(self, name: str):
+        """Show one kind of the project's pictures (with their captions)."""
+        items = next((it for n, it in self.collections if n == name), None)
+        if items is None:
+            return
+        self.collection = name
+        self.path.setText(f"This project › {name}")
+        self._clear_grid()
+        gen = self._gen
+        if self.sort.currentData() == "date":
+            def mtime(pc):
+                try:
+                    return os.stat(pc[0]).st_mtime
+                except OSError:
+                    return 0.0
+            items = sorted(items, key=mtime, reverse=True)
+        blank = self._blank_icon()
+        for path, caption in items:
+            if path in self._items:               # (the same file in two roles: shown once)
+                continue
+            it = QListWidgetItem(blank, caption)
+            it.setData(Qt.UserRole, ("img", path))
+            it.setData(Qt.UserRole + 2, caption)
+            it.setToolTip(f"{caption}\n{path}")
+            it.setSizeHint(self._cell())
+            self.grid.addItem(it)
+            self._items[path] = it
+            self._pool.submit(self._make_thumb, gen, path)
+        self.setWindowTitle(f"{self.windowTitle().split(' — ')[0]} — {name} ({len(self._items)} images)")
+
     # ---- folder content
     def open_folder(self, folder: Path):
         try:
@@ -212,14 +288,10 @@ class ImagePickerDialog(QDialog):
             self.path.setText(str(self.folder))
             return
         self.folder = folder
+        self.collection = None
         self.path.setText(str(folder))
-        self._gen += 1
+        self._clear_grid()
         gen = self._gen
-        self.grid.clear()
-        self._items = {}
-        self.preview.clear()
-        self.info.setText("")
-        self.buttons.button(QDialogButtonBox.Open).setEnabled(False)
         dirs = sorted((e for e in entries if e.is_dir() and not e.name.startswith(".")), key=lambda e: e.name.lower())
         imgs = [e for e in entries if e.is_file() and Path(e.name).suffix.lower() in IMAGE_EXTS]
         if self.sort.currentData() == "date":
@@ -345,7 +417,8 @@ class ImagePickerDialog(QDialog):
         except OSError:
             mb, when = 0.0, ""
         dims = f"{size.width()}×{size.height()}" if size.isValid() else "?"
-        self.info.setText(f"{Path(path).name}\n{dims} px · {mb:.1f} MB · {when}")
+        caption = item.data(Qt.UserRole + 2)
+        self.info.setText((f"{caption}\n" if caption else "") + f"{Path(path).name}\n{dims} px · {mb:.1f} MB · {when}")
         self.buttons.button(QDialogButtonBox.Open).setEnabled(True)
 
     def _activated(self, item):
@@ -357,6 +430,9 @@ class ImagePickerDialog(QDialog):
             self._accept()
 
     def go_up(self):
+        if self.collection is not None:           # from the project's pictures to the folder shown before
+            self.open_folder(self.folder)
+            return
         if self.folder.parent != self.folder:
             self.open_folder(self.folder.parent)
 
@@ -374,9 +450,13 @@ class ImagePickerDialog(QDialog):
             if item is not None and item.data(Qt.UserRole)[0] == "dir":
                 self.open_folder(Path(item.data(Qt.UserRole)[1]))
             return
-        self.qs.setValue("pickerDir", str(self.folder))
-        recent = [str(self.folder)] + [d for d in self._recent_dirs() if d != str(self.folder)]
-        self.qs.setValue("pickerRecent", json.dumps(recent[:MAX_RECENT_DIRS]))
+        if self.collection is not None:
+            self.qs.setValue("pickerPlace", f"col:{self.collection}")
+        else:
+            self.qs.setValue("pickerPlace", "dir")
+            self.qs.setValue("pickerDir", str(self.folder))
+            recent = [str(self.folder)] + [d for d in self._recent_dirs() if d != str(self.folder)]
+            self.qs.setValue("pickerRecent", json.dumps(recent[:MAX_RECENT_DIRS]))
         self.accept()
 
     def chosen(self) -> str | None:
@@ -389,13 +469,14 @@ class ImagePickerDialog(QDialog):
 
 
 def pick_image(parent, title: str, settings: QSettings | None = None, start_dir: str | None = None,
-               places: list[tuple[str, str]] | None = None) -> str | None:
+               places: list[tuple[str, str]] | None = None,
+               collections: list[tuple[str, list[tuple[str, str]]]] | None = None) -> str | None:
     """Show the picker; the chosen image's path or None. The thumbnail cache can be moved with the setting
     'thumbCacheDir' (empty = no disk cache)."""
     qs = settings or QSettings()
     cache = qs.value("thumbCacheDir", None)
     cache_dir = CACHE_DIR if cache is None else (Path(cache) if cache else None)
-    dlg = ImagePickerDialog(parent, title, start_dir, qs, places, cache_dir=cache_dir)
+    dlg = ImagePickerDialog(parent, title, start_dir, qs, places, cache_dir=cache_dir, collections=collections)
     try:
         return dlg.chosen() if dlg.exec() == QDialog.Accepted else None
     finally:

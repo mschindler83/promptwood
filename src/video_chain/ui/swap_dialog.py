@@ -14,7 +14,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen
-from PySide6.QtWidgets import (QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFormLayout, QHBoxLayout, QLineEdit,
+from PySide6.QtWidgets import (QComboBox, QDialog, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLineEdit,
                                QProgressBar, QPushButton, QSlider, QVBoxLayout)
 
 from .. import chain, swap
@@ -35,13 +35,14 @@ class SwapDialog(QDialog):
 
     def __init__(self, parent, project: Path, nid: str, clip: Path, detector: Path | None,
                  pictures: list[tuple[str, str]], connect, settings=None, on_start=None, play=None,
-                 source: dict | None = None):
+                 source: dict | None = None, pick=None):
         super().__init__(parent)
         self.setWindowTitle(f"Replace a person in video #{nid[1:]}")
         self.resize(1180, 720)
         self.project, self.nid, self.clip, self.detector = Path(project), nid, Path(clip), detector
         self.connect, self.qs, self.on_start, self.play = connect, settings, on_start, play
         self.source = dict(source or {})          # the video's file and range (the DWPose cache is bound to it)
+        self.pick = pick                          # pick(title) -> an image path or None (the app's image picker)
         self.heads: dict | None = None
         self.boxes: list[tuple] = []
         self.result: tuple[Path, dict, int] | None = None
@@ -97,7 +98,7 @@ class SwapDialog(QDialog):
         self.ref_combo.addItem("Choose a picture …", None)
         for text, path in pictures:
             self.ref_combo.addItem(text, path)
-        self.ref_combo.addItem("Choose file…", "")
+        self.ref_combo.addItem("Other picture (project or file)…", "")
         self.ref_combo.activated.connect(self._ref_picked)
         right.addWidget(self.ref_combo)
         right.addWidget(label("One picture: the head and shoulders, the face well lit and seen from the front work "
@@ -229,13 +230,13 @@ class SwapDialog(QDialog):
     def _ref_picked(self, i: int):
         path = self.ref_combo.itemData(i)
         if path == "":
-            start = self.qs.value("swapRefDir", "", type=str) if self.qs is not None else ""
-            path, _ = QFileDialog.getOpenFileName(self, "Picture of the new person", start or str(Path.home()),
-                                                  "Images (*.png *.jpg *.jpeg *.webp *.bmp)")
+            if self.pick is not None:
+                path = self.pick("Picture of the new person")
+            else:
+                from .image_picker import pick_image
+                path = pick_image(self, "Picture of the new person", self.qs)
             if not path:
                 return
-            if self.qs is not None:
-                self.qs.setValue("swapRefDir", str(Path(path).parent))
         self.set_reference(path)
 
     def set_reference(self, path: str | None):
