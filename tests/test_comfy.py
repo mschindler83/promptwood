@@ -245,8 +245,13 @@ def test_find_h3_loras_in_folders_and_links(tmp_path):
     write_lora(root / "a.safetensors", H3_KEYS)
     write_lora(tmp_path / "training" / "mine.safetensors", H3_KEYS)
     (root / "MiniMax H3" / "mine_step500.safetensors").symlink_to(tmp_path / "training" / "mine.safetensors")
+    for ic in ("open_h3_regenerate_2k_ic_lora", "minimax_h3_open_regen_2k_IC_comfy_fp32"):   # (upscaler parts)
+        write_lora(root / "MiniMax H3" / f"{ic}.safetensors", H3_KEYS)
     names = [n for _p, n in C.find_h3_loras([root])]
     assert names == ["a.safetensors", "MiniMax H3/b.safetensors", "MiniMax H3/mine_step500.safetensors"]
+    assert C.is_ic_lora("open_h3_regenerate_2k_ic_lora.safetensors") and C.is_ic_lora("x_regen_2k_IC_comfy.safetensors")
+    assert not C.is_ic_lora("minimax_h3_open_regenerate_2k_refiner_rank_384_bf16.safetensors")
+    assert not C.is_ic_lora("my_icecream_style.safetensors")
 
 
 def test_reference_workflow():
@@ -528,6 +533,7 @@ def test_refine_a_clip_at_2k(server, start, tmp_path):
     assert C.pick_refine_files(["a/x_regenerate_2k_refiner_rank_16_bf16.safetensors",
                                 "a/x_regenerate_2k_refiner_rank_384_bf16.safetensors"], ["u_fp16", "minimax_h3_u_bf16"]) \
         == {"refiner": "a/x_regenerate_2k_refiner_rank_384_bf16.safetensors", "upscaler": "minimax_h3_u_bf16"}
+    assert C.pick_refine_files(["a/open_h3_regenerate_2k_ic_lora.safetensors"], [])["refiner"] is None   # (not a refiner)
     server.refine = False
     with pytest.raises(C.ComfyError, match="update ComfyUI"):
         gen.refine(draft, "smoke", out, 5, size, 39, [])

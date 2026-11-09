@@ -203,10 +203,19 @@ def find_qwen_loras(roots: list[Path]) -> list[tuple[str, str]]:
     return [(p, n) for p, n in _find_loras(roots, is_qwen_lora) if "lightning" not in n.lower()]
 
 
+def is_ic_lora(name: str) -> bool:
+    """An Open-H3-Regenerate-2K-IC LoRA (or a converted copy): an upscaler part for the Ref2VA model, never a clip's
+    LoRA nor the 2K refiner (e.g. open_h3_regenerate_2k_ic_lora, ..._regen_2k_IC_comfy_fp32)."""
+    n = Path(name).name.lower()
+    return ("regenerate_2k" in n or "regenerate-2k" in n or "regen_2k" in n) and \
+        re.search(r"(^|[_\-.])ic([_\-.]|$)", n) is not None
+
+
 def find_h3_loras(roots: list[Path]) -> list[tuple[str, str]]:
     """All H3 LoRAs in these folders (links followed) as (path, name relative to its folder), sorted by name.
-    Turbo LoRAs are included; is_turbo_lora tells them apart. Pika H3 Flex is left out: its speed mode applies it."""
-    return [(p, n) for p, n in _find_loras(roots, is_h3_lora) if "pika_h3_flex" not in n.lower()]
+    Turbo LoRAs are included; is_turbo_lora tells them apart. Pika H3 Flex is left out: its speed mode applies it;
+    so are Open-H3-Regenerate-2K-IC LoRAs (upscaler parts, is_ic_lora)."""
+    return [(p, n) for p, n in _find_loras(roots, is_h3_lora) if "pika_h3_flex" not in n.lower() and not is_ic_lora(n)]
 
 
 def _find_loras(roots: list[Path], test) -> list[tuple[str, str]]:
@@ -1462,7 +1471,7 @@ REFINE_NODES = ("LatentUpscaleModelLoader", "MiniMaxH3LatentUpscaleWithModel", "
 
 def pick_refine_files(loras: list[str], upscalers: list[str]) -> dict:
     """The Open-H3-Regenerate-2K refiner LoRA (highest rank) and the H3 latent upscaler (bf16 preferred)."""
-    ref = [lo for lo in loras if "regenerate_2k" in lo.lower() or "regenerate-2k" in lo.lower()]
+    ref = [lo for lo in loras if ("regenerate_2k" in lo.lower() or "regenerate-2k" in lo.lower()) and not is_ic_lora(lo)]
     rank = lambda n: int(m.group(1)) if (m := re.search(r"rank_?(\d+)", n.lower())) else 0   # noqa: E731
     ups = [u for u in upscalers if "minimax_h3" in u.lower() or "h3_latent" in u.lower()]
     ups.sort(key=lambda u: ("bf16" not in u.lower(), u))
