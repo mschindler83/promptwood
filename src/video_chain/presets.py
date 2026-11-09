@@ -1,5 +1,5 @@
 """Named presets of a LoRA for new images: prompt, negative prompt, quality, sampling (steps, cfg, sampler,
-scheduler) and the LoRA's strength. Several per LoRA, kept in one JSON file for the app (next to the LoRA trigger
+scheduler), prompt variations and the LoRA's strength. Several per LoRA, kept in one JSON file for the app (next to the LoRA trigger
 database), keyed by the LoRA's real path (a link and its target share them)."""
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import threading
 import time
 from pathlib import Path
 
-FIELDS = ("prompt", "negative", "quality", "sampling", "strength", "family")
+FIELDS = ("prompt", "negative", "quality", "sampling", "strength", "family", "variations")
 
 
 def default_path() -> Path:

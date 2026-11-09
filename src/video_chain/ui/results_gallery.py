@@ -528,6 +528,8 @@ class InfoCard(QFrame):
             chip("ORIGINAL", "The image this result was made from (B switches back)", accent=True)
         if info.get("where"):
             chip("IN USE: " + ", ".join(info["where"]), "It stays: the project uses it", accent=True)
+        for name, val in (info.get("values") or {}).items():           # made from variations
+            chip(f"{name}: {val if str(val).strip() else '∅'}", "The value of this variation", accent=True)
         if info.get("model"):
             chip(info["model"])
         if info.get("sampling"):

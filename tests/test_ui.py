@@ -3141,3 +3141,77 @@ def test_results_gallery_groups_filters_and_favourites(app, tmp_path):
     dlg.res_info.b_prompt.setChecked(True)
     assert dlg.res_info.prompt_box.isVisibleTo(dlg) and "1girl, neon alley" in dlg.res_info.prompt_box.toPlainText()
     dlg.reject()
+
+
+def test_prompt_variations_in_the_create_window(app, tmp_path, image, monkeypatch):
+    """Variations: {name} in the prompt gets a card; values as pills; Generate makes one image per combination
+    (the prompts substituted, negative too), the next Generate continues; values are shown with the result,
+    "Use its prompt" gives the template back; renamed in the prompt; kept in presets and the settings."""
+    from PySide6.QtCore import Qt
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from fake_comfy import FakeComfy
+
+    from video_chain import presets
+    from video_chain.ui.main_window import MainWindow
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    server = FakeComfy(tmp_path / "comfy")
+    try:
+        q = settings(tmp_path, "var.ini")
+        q.setValue("comfyUrl", server.url)
+        w = MainWindow(q, command=FAKE)
+        new_project(w, tmp_path, image, ("a",))
+        dlg = w.edit_image(start=True, dialog=False, mode="create")
+        wait(app, lambda: dlg.families, timeout=20)
+        dlg.family.setCurrentIndex(dlg.family.findData("sdxl"))
+        dlg.show()                                                           # (offscreen; the negative is sent when shown)
+        panel = dlg.variations
+        assert not panel.active() and dlg.b_gen.text() == "Generate"
+        dlg.prompt.setPlainText("a {animal} in the {place}, {?mood|{mood} light}")
+        dlg.negative.setText("blurry, {animal} toy")
+        dlg._templates_changed()
+        assert panel.names() == ["animal", "place", "mood"]                  # cards for the placeholders
+        panel.on.setChecked(True)
+        cards = [panel.cards_box.itemAt(i).widget() for i in range(panel.cards_box.count())]
+        cards[0].add.setText("cat, dog")                                     # comma list at once
+        cards[0].add.returnPressed.emit()
+        app.processEvents()
+        cards = [panel.cards_box.itemAt(i).widget() for i in range(panel.cards_box.count())]
+        cards[1].add_values(["forest"])
+        app.processEvents()
+        cards = [panel.cards_box.itemAt(i).widget() for i in range(panel.cards_box.count())]
+        cards[2].add_values(["warm", ""])
+        app.processEvents()
+        assert [len(v.values) for v in panel.vars] == [2, 1, 2]
+        assert "2 × 1 × 2 = 4 combinations" in panel.summary.text() and panel.active()
+        assert dlg.b_gen.text() == "Generate 4 images" and not dlg.tries.isEnabled()
+        assert "The next Generate makes 4 images" in panel.preview.toPlainText()
+        panel.next.setChecked(True)
+        panel.count.setValue(3)
+        dlg.generate()
+        wait(app, lambda: not dlg._busy, timeout=60)
+        assert dlg.results.count() == 3
+        made = sorted((m["variation"]["step"], m["prompt"]) for _p, m in (dlg.results.item(i).data(Qt.UserRole)
+                                                                          for i in range(3)))
+        assert made == [(0, "a cat in the forest, warm light"), (1, "a dog in the forest, warm light"),
+                        (2, "a cat in the forest")]
+        assert server.created["neg"]["inputs"]["text"] == "blurry, cat toy"     # the negative varies too
+        assert "Next: #4 of 4" in panel.position.text()                        # continues where it stopped
+        dlg.results.setCurrentRow(0)
+        meta = dlg.selected()[1]
+        assert meta["template"].startswith("a {animal}") and "animal: cat" in dlg.res_info.text()
+        dlg.prompt.setPlainText("something else")
+        dlg._prompt_again()
+        assert dlg.prompt.toPlainText() == "a {animal} in the {place}, {?mood|{mood} light}"
+        panel._remove("rename:place:where")                                   # renamed in the prompt too
+        assert "{where}" in dlg.prompt.toPlainText() and panel.variable("where") is not None
+        lora = tmp_path / "w.safetensors"
+        lora.write_bytes(b"x")
+        dlg.loras.set_items([], [{"path": str(lora), "strength": 1.0}])
+        assert dlg.save_preset_as("Animals", lora=str(lora))
+        assert presets.store().get(str(lora), "Animals")["variations"]["vars"][0]["name"] == "animal"
+        st = json.loads(q.value("promptVariations"))
+        assert st["on"] and st["vars"][0]["values"][1]["text"] == "dog"
+        dlg.reject()
+        w.close()
+    finally:
+        server.close()

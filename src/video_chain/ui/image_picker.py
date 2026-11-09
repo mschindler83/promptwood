@@ -26,8 +26,9 @@ IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mts", ".m2ts", ".wmv", ".flv", ".mpg", ".mpeg"}
 SOUND_EXTS = {".mp3", ".wav", ".ogg", ".oga", ".opus", ".flac", ".m4a", ".aac", ".wma", ".aiff", ".aif"}
 # what each kind of picker lists: image (pictures), video (videos), media (sounds and videos: voices, tracks)
+TEXT_EXTS = {".txt", ".json"}
 KINDS = {"image": (IMAGE_EXTS, "images", "pickerDir"), "video": (VIDEO_EXTS, "videos", "videoDir"),
-         "media": (SOUND_EXTS | VIDEO_EXTS, "files", "soundDir")}
+         "media": (SOUND_EXTS | VIDEO_EXTS, "files", "soundDir"), "text": (TEXT_EXTS, "lists", "textDir")}
 MAX_RECENT_DIRS = 8
 THUMB_MAX = 320                    # thumbnails are made at this size once and scaled for the grid
 THREADS = 8                        # parallel reads: on a network share every file costs round trips
@@ -118,7 +119,7 @@ def _thumbnail(path: str) -> QImage:
     """A small QImage of an image file (or a frame of a video), read at reduced size (any thread)."""
     if Path(path).suffix.lower() in VIDEO_EXTS:
         return _video_frame(path)
-    if Path(path).suffix.lower() in SOUND_EXTS:
+    if Path(path).suffix.lower() in SOUND_EXTS | TEXT_EXTS:
         return QImage()
     r = QImageReader(path)
     r.setAutoTransform(True)
@@ -487,6 +488,8 @@ class ImagePickerDialog(QDialog):
             item.setData(Qt.UserRole + 1, f"{img.width()}×{img.height()}")
         elif Path(item.data(Qt.UserRole)[1]).suffix.lower() in SOUND_EXTS:     # a sound: its icon
             item.setIcon(self.style().standardIcon(QStyle.SP_MediaVolume))
+        elif Path(item.data(Qt.UserRole)[1]).suffix.lower() in TEXT_EXTS:      # a list: a file icon
+            item.setIcon(self.style().standardIcon(QStyle.SP_FileIcon))
 
     def _blank_icon(self) -> QIcon:
         pm = QPixmap(THUMB_MAX, THUMB_MAX)
@@ -519,6 +522,15 @@ class ImagePickerDialog(QDialog):
             self.buttons.button(QDialogButtonBox.Open).setEnabled(False)
             return
         ext = Path(path).suffix.lower()
+        if ext in TEXT_EXTS:                                     # a list: its first lines
+            try:
+                head = Path(path).read_text(encoding="utf-8", errors="replace")[:4000].splitlines()[:14]
+            except OSError:
+                head = []
+            self.preview.setPixmap(self.style().standardIcon(QStyle.SP_FileIcon).pixmap(64, 64))
+            self.info.setText(f"{Path(path).name}\n" + "\n".join(line[:80] for line in head))
+            self.buttons.button(QDialogButtonBox.Open).setEnabled(True)
+            return
         if ext in VIDEO_EXTS or ext in SOUND_EXTS:              # a frame of the video / the sound's icon, its details
             box = self.preview.size()
             img = _video_frame(path, max(box.width(), box.height())) if ext in VIDEO_EXTS else QImage()

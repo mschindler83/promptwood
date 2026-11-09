@@ -30,6 +30,7 @@ from ..comfy import EDIT_MODELS
 from ..triggers import stack_words, with_triggers
 from ..imagegen import FAMILIES, SAMPLERS, SCHEDULERS, default_sampling, size_for
 from .lora_stack import LoraStack, lora_label
+from .variations_panel import PlaceholderHighlighter, VariationsPanel
 from .results_gallery import (InfoCard, ResultGallery, ResultView, ThumbLoader, badged, model_key, model_name,
                               run_groups)
 from .mask_painter import MaskPainterDialog, mask_area, overlay
@@ -371,6 +372,18 @@ class ImageEditDialog(QDialog):
         self.negative = QLineEdit()
         self.negative.setPlaceholderText("Avoid (optional negative prompt; empty: the model's usual one)")
         left.addWidget(self.negative)
+        self.variations = VariationsPanel(self, pick_file=lambda: self._pick_list())
+        left.addWidget(self.variations)
+        self._highlight = PlaceholderHighlighter(self.prompt.document(), self.variations)
+        self._var_timer = QTimer(self)
+        self._var_timer.setSingleShot(True)
+        self._var_timer.setInterval(150)
+        self._var_timer.timeout.connect(self._templates_changed)
+        self.prompt.textChanged.connect(self._var_timer.start)
+        self.negative.textChanged.connect(lambda *_: self._var_timer.start())
+        self.variations.changed.connect(self._variations_changed)
+        self.variations.insert.connect(self._insert_placeholder)
+        self.variations.rename.connect(self._rename_placeholder)
         self.edit_pics = QWidget()
         epv = QVBoxLayout(self.edit_pics)
         epv.setContentsMargins(0, 0, 0, 0)
@@ -622,6 +635,10 @@ class ImageEditDialog(QDialog):
         guard_wheel(self)
         if self.qs is not None:
             self.thumb_size.setValue(self.qs.value("resultsThumb", 200, type=int))
+            try:
+                self.variations.set_state(json.loads(self.qs.value("promptVariations", "{}", type=str) or "{}"))
+            except ValueError:
+                pass
         self._load_results()
         self.set_view(self.qs.value("resultsView", "single", type=str) if self.qs is not None else "single",
                       remember=False)
@@ -1107,6 +1124,7 @@ class ImageEditDialog(QDialog):
                 "loras": [f"{lora_label(lo['path'])} ×{lo['strength']:g}" for lo in meta.get("loras") or []],
                 "seed": meta.get("seed"),
                 "when": time.strftime("%Y-%m-%d %H:%M", time.localtime(_mtime(Path(png)))),
+                "values": (meta.get("variation") or {}).get("values") or {},
                 "prompt": meta.get("prompt", ""), "trigger_words": meta.get("trigger_words") or [],
                 "negative": meta.get("negative") or ""})
             self.view.setToolTip(self.res_info.toolTip())
@@ -1151,6 +1169,12 @@ class ImageEditDialog(QDialog):
         prompt = " ".join(self.prompt.toPlainText().split())
         source, quality, n = self.source, self.quality.currentData(), self.tries.value()
         model = self.edit_model.currentData()
+        jobs = self._variation_jobs()
+        if jobs is not None:
+            if not jobs:
+                self._busy = False
+                return
+            n = len(jobs)
         if self._mask_problem():
             self._busy = False
             self.state.setText(self._mask_problem())
@@ -1205,14 +1229,17 @@ class ImageEditDialog(QDialog):
                     seed = seeds[k - 1]
                     stem = f"edit_{time.strftime('%Y%m%d-%H%M%S')}_{seed}"
                     out = edits / f"{stem}.png"
-                    meta = self.editor.edit(Path(source), sent, out, seed, quality, [Path(r) for r in refs], loras,
-                                            model=model, mask=mask_file)
+                    job = jobs[k - 1] if jobs else None
+                    meta = self.editor.edit(Path(source), with_triggers(job.prompt, words) if job else sent, out, seed,
+                                            quality, [Path(r) for r in refs], loras, model=model, mask=mask_file)
                     made += 1
                     if size is not None:
                         scale_to(out, out, size)
-                    meta.update({"run": run, "prompt": prompt, "trigger_words": words, "seed": seed, "source": source,
+                    meta.update({"run": run, "prompt": job.prompt if job else prompt, "trigger_words": words,
+                                 "seed": seed, "source": source,
                                  "source_copy": str(kept), **({"mask": str(mask_file)} if mask_file else {}),
-                                 "refs": refs, "size": list(size) if size else None})
+                                 "refs": refs, "size": list(size) if size else None,
+                                 **(self._variation_meta(job, prompt) if job else {})})
                     out.with_suffix(".json").write_text(json.dumps(meta, indent=2, ensure_ascii=False),
                                                         encoding="utf-8")
                     sig.result.emit(str(out), meta)
@@ -1454,7 +1481,8 @@ class ImageEditDialog(QDialog):
     def _preset_values(self, lora: str) -> dict:
         strength = next((it["strength"] for it in self.loras.items()
                          if os.path.realpath(it["path"]) == os.path.realpath(lora)), 1.0)
-        return {"prompt": self.prompt.toPlainText().strip(), "negative": self.negative.text().strip(),
+        var = {k: v for k, v in self.variations.state().items() if k != "positions"}
+        return {"variations": var, "prompt": self.prompt.toPlainText().strip(), "negative": self.negative.text().strip(),
                 "quality": self.quality.currentData(), "sampling": self.sampling(), "strength": strength,
                 "family": self.family.currentData()}
 
@@ -1472,6 +1500,8 @@ class ImageEditDialog(QDialog):
             self.prompt.setPlainText(p["prompt"])
         if p.get("negative") is not None:
             self.negative.setText(p["negative"])
+        if p.get("variations") is not None:
+            self.variations.set_state(p["variations"])
         q = self.quality.findData(p.get("quality"))
         if q >= 0:
             self.quality.setCurrentIndex(q)
@@ -1574,6 +1604,63 @@ class ImageEditDialog(QDialog):
         self.state.setText(f"Deleted the preset “{data[1]}”.")
         return True
 
+    # ---- prompt variations (variations_panel.py)
+    def _templates_changed(self):
+        self.variations.set_templates(self.prompt.toPlainText(), self.negative.text())
+
+    def _variations_changed(self):
+        if self.qs is not None:
+            st = self.variations.state()
+            self.qs.setValue("promptVariations", json.dumps(st, ensure_ascii=False))
+        if not getattr(self, "_rehighlighting", False):
+            self._rehighlighting = True
+            try:
+                self._highlight.rehighlight()
+            finally:
+                self._rehighlighting = False
+        active = self.variations.active()
+        if hasattr(self, "tries"):
+            self.tries.setEnabled(not active)
+            self.tries.setToolTip("Variations decide how many images are made (Make … below the prompt)" if active
+                                  else f"How many results at once (1 … {MAX_RESULTS}; each with the next seed), to "
+                                       "pick the best one. They are made one after another and each appears when it "
+                                       "is ready; Cancel stops after the current one")
+        if hasattr(self, "b_gen"):
+            n = len(self.variations.jobs()) if active else 0
+            self.b_gen.setText(f"Generate {n} image{'s' if n != 1 else ''}" if active else "Generate")
+
+    def _insert_placeholder(self, name: str):
+        cur = self.prompt.textCursor()
+        before = self.prompt.toPlainText()[:cur.position()]
+        cur.insertText(("" if not before or before[-1].isspace() else " ") + "{" + name + "}")
+        self.prompt.setTextCursor(cur)
+        self.prompt.setFocus()
+
+    def _rename_placeholder(self, old: str, new: str):
+        import re as _re
+        pat = _re.compile(r"\{(\??)" + _re.escape(old) + r"([|}])")
+        from .prompt_refiner import replace_text
+        replace_text(self.prompt, pat.sub(lambda m: "{" + m.group(1) + new + m.group(2), self.prompt.toPlainText()))
+        self.negative.setText(pat.sub(lambda m: "{" + m.group(1) + new + m.group(2), self.negative.text()))
+
+    def _pick_list(self) -> str | None:
+        return pick_image(self, "Choose a wildcard list (.txt, one value per line)", self.qs, kind="text")
+
+    def _variation_jobs(self) -> list | None:
+        """The next Generate's prompts when variations are active (None: not active; [] after a refusal)."""
+        if not self.variations.active():
+            return None
+        self._templates_changed()
+        many = self.variations.too_many()
+        if many and QMessageBox.question(self, "Variations", f"Every combination makes {many} images. Make them "
+                                         "all?") != QMessageBox.Yes:
+            return []
+        return self.variations.jobs()
+
+    @staticmethod
+    def _variation_meta(job, prompt: str) -> dict:
+        return {"template": prompt, "variation": {"values": job.combo, "step": job.step, "index": job.index}}
+
     def new_seed(self):
         """A fresh random seed in the field."""
         self.seed.setValue(random.randint(1, SEED_MAX))
@@ -1595,6 +1682,12 @@ class ImageEditDialog(QDialog):
         prompt = " ".join(self.prompt.toPlainText().split())
         negative = " ".join(self.negative.text().split()) if self.negative.isVisible() else ""
         quality, n = self.quality.currentData(), self.tries.value()
+        jobs = self._variation_jobs()
+        if jobs is not None:
+            if not jobs:
+                self._busy = False
+                return
+            n = len(jobs)
         words = self._trigger_words()
         sent = with_triggers(prompt, words)
         refs = [s.path for s in self.cpics[:FAMILIES[fam]["refs"]] if s.path] if self.use_refs.isChecked() else []
@@ -1634,9 +1727,13 @@ class ImageEditDialog(QDialog):
                     cur["k"] = k
                     seed = seeds[k - 1]
                     out = edits / f"new_{time.strftime('%Y%m%d-%H%M%S')}_{seed}.png"
-                    meta = self.editor.create(fam, model, sent, out, seed, quality, w, h, negative, loras,
-                                              [Path(r) for r in refs], strength, tags, sampling)
-                    meta.update({"run": run, "prompt": prompt, "trigger_words": words, "seed": seed, "refs": refs,
+                    job = jobs[k - 1] if jobs else None
+                    neg_k = (" ".join(job.negative.split()) if negative else "") if job else negative
+                    meta = self.editor.create(fam, model, with_triggers(job.prompt, words) if job else sent, out, seed,
+                                              quality, w, h, neg_k, loras, [Path(r) for r in refs], strength, tags,
+                                              sampling)
+                    meta.update({"run": run, "prompt": job.prompt if job else prompt, "trigger_words": words,
+                                 "seed": seed, "refs": refs, **(self._variation_meta(job, prompt) if job else {}),
                                  "tags": tags,
                                  "source_copy": str(kept) if kept else None})
                     out.with_suffix(".json").write_text(json.dumps(meta, indent=2, ensure_ascii=False),
@@ -1679,6 +1776,8 @@ class ImageEditDialog(QDialog):
         self.state.setText(f"Result {k} of {n}: step {i} / {steps}")
 
     def _result(self, png: str, meta: dict):
+        if isinstance(meta.get("variation"), dict) and meta["variation"].get("step") is not None:
+            self.variations.done(int(meta["variation"]["step"]))      # the next Generate continues after it
         self._load_results(select=png)
         self.b_before.setChecked(False)
 
@@ -1835,7 +1934,11 @@ class ImageEditDialog(QDialog):
                 img = QImage(m).convertToFormat(QImage.Format_Grayscale8)
                 if not img.isNull() and img.size() == upright(self.source).size():
                     self.set_mask(img)
-        self.prompt.setPlainText(meta.get("prompt", ""))
+        if meta.get("template"):                  # made from variations: the prompt with its placeholders
+            self.prompt.setPlainText(meta["template"])
+            self.variations.on.setChecked(True)
+        else:
+            self.prompt.setPlainText(meta.get("prompt", ""))
         self.loras.set_items(self._known(), meta.get("loras") or [])
         self._remember_loras()
 
