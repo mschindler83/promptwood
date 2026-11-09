@@ -260,7 +260,7 @@ def test_step_progress_and_export(app, win, tmp_path, image, monkeypatch):
     seen = []
     card = win.cards[0]
     orig = card.set_progress
-    card.set_progress = lambda i, n: (seen.append((i, n)), orig(i, n))
+    card.set_progress = lambda i, n, text=None: (seen.append((i, n)), orig(i, n, text))
     run_and_wait(app, win, win.generate_path)
     assert seen[-1] == (4, 4)
     target = tmp_path / "export.mp4"
@@ -2621,3 +2621,25 @@ def test_export_one_clip(app, win, tmp_path, image, monkeypatch):
     win._context(ids[1], QPoint(0, 0))
     wait(app, lambda: called, timeout=5)
     assert called == [ids[1]]
+
+
+def test_progress_says_what_runs_and_how_long_it_still_takes(app, win, tmp_path, image, monkeypatch):
+    from video_chain.ui.main_window import fmt_left, time_left
+    assert fmt_left(4) == "a few seconds" and fmt_left(42) == "about 40 s" and fmt_left(185) == "about 3 min"
+    assert fmt_left(3900) == "about 1 h 05 min"
+    assert time_left(100, 0.01) is None and time_left(1, 0.5) is None and time_left(60, 0.25) == 180
+    ids = new_project(win, tmp_path, image, ("a", "b"))
+    clock = [1000.0]
+    monkeypatch.setattr("video_chain.ui.main_window.time.monotonic", lambda: clock[0])
+    win._job, win._plan = {"refine": {"size": "2k"}}, list(ids)            # (an export of 2 clips)
+    win._run_started = clock[0]
+    win._event({"e": "node", "id": ids[0], "state": "generating"})
+    win._event({"e": "note", "id": ids[0], "text": "SeedVR2 piece 2 of 5"})
+    clock[0] += 60
+    win._event({"e": "step", "id": ids[0], "i": 250, "n": 1000})          # a quarter of clip 1 after 60 s
+    text = win.status.text()
+    assert text.startswith(f"Clip #{ids[0][1:]} (1 of 2): SeedVR2 piece 2 of 5 · 25 %"), text
+    assert "about 3 min left" in text and "(all clips: about 7 min)" in text, text
+    card = next(c for c in win.cards if c.nid == ids[0])
+    assert card.step.text() == "25 % · about 3 min left"
+    win._job = None

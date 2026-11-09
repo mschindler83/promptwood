@@ -95,6 +95,7 @@ def _generator(a, emit, current):
     except ComfyUnavailable as e:
         emit({"e": "error", "msg": str(e), "comfy_down": True})
         raise SystemExit(COMFY_DOWN)
+    gen.note = lambda text: emit({"e": "note", "id": current.get("id"), "text": str(text)})
     emit({"e": "loaded", "what": "comfyui"})
     return gen
 

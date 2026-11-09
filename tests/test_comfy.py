@@ -963,7 +963,11 @@ def test_seedvr2_long_clip_in_pieces_within_ram(server, tmp_path, monkeypatch):
     ComfyUI's other models are unloaded before the first SeedVR2 job, its cached frames after every piece."""
     import subprocess
 
-    assert C.seedvr_piece_frames(2560, 1440) == 33 and C.seedvr_piece_frames(1920, 1088) == 61
+    assert C.seedvr_piece_frames(2560, 1440) == 41 and C.seedvr_piece_frames(1920, 1088) == 73   # (12 GiB fallback)
+    budget = C.seedvr_budget(55 * 2**30)                                              # 55 GiB free: 45 GiB for frames
+    assert budget == 45 * 2**30 and C.seedvr_budget(None) == C.SEEDVR_RAM_BUDGET and C.seedvr_budget(2**30) == 4 * 2**30
+    assert C.seedvr_piece_frames(2560, 1440, budget) == 153                           # about 6.4 s at 2K per piece
+    assert C.seedvr_piece_frames(1920, 1088, budget) == 273                           # about 11.4 s at 1080p
     assert C.seedvr_pieces(30, 45) == [(0, 30)]
     assert C.seedvr_pieces(100, 45) == [(0, 45), (37, 45), (55, 45)]                  # the last one ends at the end
     assert C.seedvr_pieces(82, 45) == [(0, 45), (37, 45)]
@@ -972,7 +976,7 @@ def test_seedvr2_long_clip_in_pieces_within_ram(server, tmp_path, monkeypatch):
                     "-i", "color=white:s=64x36:r=24:d=2", "-f", "lavfi", "-i", "sine=frequency=440:duration=4",
                     "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]", "-map", "[v]", "-map", "2:a",
                     "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(draft)], check=True)
-    monkeypatch.setattr(C, "SEEDVR_RAM_BUDGET", 8 * 128 * 72 * 3 * 4 * 33)          # 33 frames at 128x72
+    monkeypatch.setattr(C, "SEEDVR_RAM_BUDGET", C.SEEDVR_FRAME_COPIES * 128 * 72 * 3 * 4 * 33)   # 33 at 128x72
     gen = C.ComfyGenerator(server.url)
     gen.generate("x", None, tmp_path / "c.mp4", tmp_path / "c.png", 1, settings())    # an H3 clip before
     server.calls.clear()
@@ -987,7 +991,35 @@ def test_seedvr2_long_clip_in_pieces_within_ram(server, tmp_path, monkeypatch):
     r = subprocess.run(["ffmpeg", "-v", "error", "-i", str(out), "-vf", "scale=1:1", "-f", "rawvideo", "-pix_fmt",
                         "gray", "-"], capture_output=True, check=True).stdout
     assert r[0] < 160 and r[-1] > 230 and all(b >= a - 3 for a, b in zip(r, r[1:]))  # gray -> white, no jumps back
+    monkeypatch.setattr(C, "SEEDVR_RAM_MIN", 0)
+    server.ram_free = C.SEEDVR_RAM_RESERVE + C.SEEDVR_FRAME_COPIES * 128 * 72 * 3 * 4 * 65   # measured: 65 frames
+    server.seedvr_jobs.clear()
+    gen.seedvr(draft, out, (128, 72))
+    assert len(server.seedvr_jobs) == 2 and chain.probe(out)["frames"] == 96          # pieces from the free RAM
+    server.ram_free = 0
     server.calls.clear()
     gen.seedvr(draft, out, (128, 72))                                                 # SeedVR2 again: no unload
     assert [c[2] for c in server.calls if c[:2] == ("BODY", "/free")][0] == {"unload_models": False,
                                                                              "free_memory": True}
+
+
+def test_seedvr2_progress_is_one_steady_bar():
+    """ComfyUI's counters restart for every node of every piece; the clip's progress only goes forward."""
+    seen, notes = [], []
+    tr = C.SeedvrProgress(2, lambda i, n: seen.append((i, n)))
+    tr.piece(0, notes.append)
+    for i in range(1, 5):                  # tiled encode: 4 tiles
+        tr.step(i, 4)
+    tr.step(1, 1)                          # the one sampling step (a new total: next phase)
+    for i in range(1, 9):                  # tiled decode: 8 tiles
+        tr.step(i, 8)
+    tr.piece(1, notes.append)
+    tr.step(1, 4)
+    tr.step(0, 4)                          # a counter going back: next phase, never back on the bar
+    tr.finish()
+    values = [i for i, _n in seen]
+    assert all(n == 1000 for _i, n in seen) and values == sorted(values) and values[-1] == 1000
+    assert max(v for v in values[:14]) <= 500 and notes == ["SeedVR2 piece 1 of 2", "SeedVR2 piece 2 of 2"]
+    one = []
+    C.SeedvrProgress(1, lambda i, n: None).piece(0, one.append)
+    assert one == ["SeedVR2"]

@@ -122,6 +122,7 @@ class FakeComfy:
         self.refine = True                         # the H3 2K nodes, the latent upscaler and the refiner LoRA
         self.refine_strengths: list[str] = []      # the strength of every refine job
         self.seedvr = True                         # SeedVR2's 7B / 3B models and VAE
+        self.ram_free = 0                          # /system_stats ram_free (0: not reported)
         self.veda = True                           # the Veda node and its two predictors
         self.seedvr_jobs: list[str] = []           # the model of every SeedVR2 job
         self.audio_refs = True                     # MiniMaxH3ReferenceToVideo takes reference sounds
@@ -379,7 +380,8 @@ class FakeComfy:
                 u = urllib.parse.urlparse(self.path)
                 fake.calls.append(("GET", u.path))
                 if u.path == "/system_stats":
-                    return self._send(200, {"system": {"comfyui_version": "fake"}})
+                    return self._send(200, {"system": {"comfyui_version": "fake",
+                                                       **({"ram_free": fake.ram_free} if fake.ram_free else {})}})
                 if u.path.startswith("/object_info/"):
                     return self._send(200, fake.object_info(u.path.rsplit("/", 1)[1]))
                 if u.path.startswith("/history/"):

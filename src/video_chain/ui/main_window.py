@@ -93,6 +93,24 @@ def fmt_time(seconds: float) -> str:
     return f"{int(m)}:{s:04.1f}"
 
 
+def fmt_left(seconds: float) -> str:
+    """A remaining time in words: 'a few seconds', 'about 40 s', 'about 3 min', 'about 1 h 05 min'."""
+    s = max(0.0, float(seconds))
+    if s < 10:
+        return "a few seconds"
+    if s < 90:
+        return f"about {int(round(s / 5) * 5)} s"
+    m = int(round(s / 60))
+    return f"about {m} min" if m < 60 else f"about {m // 60} h {m % 60:02d} min"
+
+
+def time_left(elapsed: float, frac: float) -> float | None:
+    """The time still needed at this progress (None while too early to say)."""
+    if frac < 0.03 or elapsed < 3:
+        return None
+    return elapsed * (1 - min(frac, 1.0)) / frac
+
+
 MAX_RECENT = 10
 
 
@@ -739,10 +757,10 @@ class PromptCard(QFrame):
         self.bar.setVisible(state == "generating")
         self._restyle()
 
-    def set_progress(self, i: int, n: int):
+    def set_progress(self, i: int, n: int, text: str | None = None):
         if n:
             self.bar.setValue(round(100 * i / n))
-            self.step.setText(f"step {i} / {n}")
+            self.step.setText(text if text is not None else f"step {i} / {n}")
 
     def set_editable(self, on: bool):
         self.edit.setReadOnly(not on)
@@ -999,7 +1017,7 @@ class VideoCard(QFrame):
         self.bar.setVisible(state in ("generating", "converting"))
         self._restyle()
 
-    def set_progress(self, i: int, n: int):
+    def set_progress(self, i: int, n: int, text: str | None = None):
         pass
 
     def set_editable(self, on: bool):
@@ -5712,6 +5730,7 @@ class MainWindow(QMainWindow):
             return
         self.save_settings()
         self._job = {"targets": targets, "sent": False, "refine": refine}
+        self._run_started, self._clip_started, self._clip_note = time.monotonic(), time.monotonic(), ""
         self._exported = None
         self._error, self._stopping, self._phase = "", False, "starting"
         self._targets, self._plan = targets, []
@@ -5943,6 +5962,7 @@ class MainWindow(QMainWindow):
                 self._made_now.add(nid)
                 self.live[nid] = "generating"
                 self.progress_of[nid] = 0.0
+                self._clip_started, self._clip_note = time.monotonic(), ""
                 k = self._plan.index(nid) + 1 if nid in self._plan else 1
                 self._overall(k, 0)
                 node = self.tree.nodes.get(nid) if self.tree else None
@@ -5965,14 +5985,27 @@ class MainWindow(QMainWindow):
                 self.progress_of[nid] = frac
                 k = self._plan.index(nid) + 1 if nid in self._plan else 1
                 self._overall(k, frac)
-                self.status.setText(f"Clip #{nid[1:]} ({k} of {len(self._plan)}): step {ev['i']} / {ev['n']}")
+                upscaling = bool((self._job or {}).get("refine"))
+                now = time.monotonic()
+                left = time_left(now - getattr(self, "_clip_started", now), frac)
+                n_plan = max(1, len(self._plan))
+                left_all = time_left(now - getattr(self, "_run_started", now), ((k - 1) + frac) / n_plan)
+                what = (getattr(self, "_clip_note", "") or "upscaling") if upscaling else \
+                    f"step {ev['i']} / {ev['n']}"
+                self.status.setText(f"Clip #{nid[1:]} ({k} of {len(self._plan)}): {what} · {round(100 * frac)} %"
+                                    + (f" · {fmt_left(left)} left" if left is not None else "")
+                                    + (f" (all clips: {fmt_left(left_all)})" if left_all is not None and n_plan > 1
+                                       and k < n_plan else ""))
                 item = self.graph.items_by_id.get(nid)
                 if item is not None:
                     item.info.progress = frac
                     item.update()
                 card = next((c for c in self.cards if c.nid == nid), None)
                 if card is not None:
-                    card.set_progress(ev["i"], ev["n"])
+                    card.set_progress(ev["i"], ev["n"], f"{round(100 * frac)} %" + (
+                        f" · {fmt_left(left)} left" if left is not None else "") if upscaling else None)
+        elif e == "note":                              # what the generator is doing now (e.g. a SeedVR2 piece)
+            self._clip_note = str(ev.get("text") or "")
         elif e == "done":
             self._phase = "done"
         elif e == "exported":
