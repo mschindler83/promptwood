@@ -1990,6 +1990,65 @@ def test_lora_trigger_words_in_the_image_window(app, tmp_path, image, monkeypatc
         server.close()
 
 
+def test_one_image_per_lora_in_the_image_window(app, tmp_path, image, monkeypatch):
+    """One image per LoRA: each result is made with every LoRA alone in turn, same seed, prompt and settings;
+    each image gets only its own LoRA's trigger words."""
+    import numpy as np
+    from safetensors.numpy import save_file
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from fake_comfy import FakeComfy
+
+    from video_chain import triggers as TR
+    from video_chain.ui.main_window import MainWindow
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    server = FakeComfy(tmp_path / "comfy", loras=("MiniMax H3/glow.safetensors", "MiniMax H3/rain.safetensors"))
+    try:
+        q = settings(tmp_path, "each.ini")
+        q.setValue("comfyUrl", server.url)
+        w = MainWindow(q, command=FAKE)
+        new_project(w, tmp_path, image, ("a",))
+        files = []
+        for name in ("glow", "rain"):
+            f = tmp_path / "loras" / "MiniMax H3" / f"{name}.safetensors"
+            f.parent.mkdir(parents=True, exist_ok=True)
+            save_file({"a.lora_A.weight": np.zeros((2, 2), np.float16)}, str(f),
+                      metadata={"modelspec.trigger_phrase": f"{name}x"})
+            files.append(str(f))
+        TR.db().scan(files, online=False)
+        dlg = w.edit_image(start=True, dialog=False)
+        dlg.add_lora_file(files[0], 0.7)
+        dlg.add_lora_file(files[1], 1.2)
+        dlg.prompt.setPlainText("she smiles")
+        dlg.tries.setValue(2)
+        assert dlg.b_gen.text() == "Generate"
+        dlg.lora_each.setChecked(True)
+        assert dlg.b_gen.text() == "Generate 4 images"                 # 2 results × 2 LoRAs
+        dlg.fresh_seed.setChecked(False)
+        dlg.seed.setValue(500)
+        n0 = len(server.prompts)
+        dlg.generate()
+        wait(app, lambda: not dlg._busy, timeout=90)
+        assert dlg.state.text().startswith("Done"), dlg.state.text()
+        sent = [wf["pos"]["inputs"]["prompt"] for wf in server.prompts[n0:]]
+        assert sent == ["glowx, she smiles", "rainx, she smiles", "glowx, she smiles", "rainx, she smiles"]
+        metas = sorted((json.loads(f.read_text()) for f in (w.project / "edits").glob("edit_*.json")),
+                       key=lambda m: (m["seed"], m["loras"][0]["path"]))
+        assert len(metas) == 4
+        got = [(m["seed"], Path(m["loras"][0]["path"]).stem, m["loras"][0]["strength"], len(m["loras"]),
+                m["trigger_words"], m["prompt"]) for m in metas]
+        assert got == [(500, "rain", 1.2, 1, ["rainx"], "she smiles"), (500, "glow", 0.7, 1, ["glowx"], "she smiles"),
+                       (501, "rain", 1.2, 1, ["rainx"], "she smiles"), (501, "glow", 0.7, 1, ["glowx"], "she smiles")]
+        dlg.done(0)
+        dlg = w.edit_image(start=True, dialog=False)                   # remembered
+        assert dlg.lora_each.isChecked()
+        dlg.lora_each.setChecked(False)
+        assert len(dlg._lora_runs()) == 1 and len(dlg._lora_runs()[0]) == 2   # off: all LoRAs together
+        dlg.done(0)
+        w.close()
+    finally:
+        server.close()
+
+
 def test_continue_the_real_videos_sound_on_the_card(app, win, tmp_path):
     """The card's sound choice appears only after a real video; switching it on also carries the picture over."""
     from video_chain.ui.main_window import PromptCard

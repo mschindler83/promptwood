@@ -429,6 +429,18 @@ class ImageEditDialog(QDialog):
         self.loras.changed.connect(lambda: self._fill_presets())
         self.loras.filled.connect(lambda: self._fill_presets())      # (also the LoRAs remembered for this family)
         left.addWidget(self.loras)
+        self.lora_each = QCheckBox("One image per LoRA (each alone, in turn)")
+        self.lora_each.setToolTip(
+            "<p>On: Generate makes one image for each LoRA in the list, with only that LoRA (at its strength) and "
+            "its trigger words. The seed, prompt and every other setting stay the same, so the LoRAs can be "
+            "compared side by side.<br>With more results (or variations), each one is made with every LoRA in "
+            "turn.</p>")
+        self.lora_each.setChecked(self.qs is not None and self.qs.value("loraEach", False, type=bool))
+        self.lora_each.toggled.connect(lambda on: self.qs is not None and self.qs.setValue("loraEach", on))
+        self.lora_each.toggled.connect(lambda _on: self._variations_changed())
+        self.loras.changed.connect(lambda: self._variations_changed())
+        self.loras.filled.connect(lambda: self._variations_changed())
+        left.addWidget(self.lora_each)
 
         opts = QGridLayout()
         self.quality = QComboBox()
@@ -439,6 +451,7 @@ class ImageEditDialog(QDialog):
         self.tries = QSpinBox()
         self.tries.setRange(1, MAX_RESULTS)
         self.tries.setValue(2)
+        self.tries.valueChanged.connect(lambda _v: self._variations_changed())
         self.tries.setToolTip(f"How many results at once (1 … {MAX_RESULTS}; each with the next seed), to pick the "
                               "best one. They are made one after another and each appears when it is ready; "
                               "Cancel stops after the current one")
@@ -1220,10 +1233,10 @@ class ImageEditDialog(QDialog):
             self.state.setText(self._mask_problem())
             return
         mask = self.mask.copy() if self.mask is not None else None
-        words = self._trigger_words()
-        sent = with_triggers(prompt, words)
+        runs = self._lora_runs()                     # (One image per LoRA: each result with every LoRA in turn)
+        base_n, n = n, n * len(runs)
+        run_words = [self._trigger_words(r) for r in runs]
         refs = [p for p in (self.pic2.path, self.pic3.path) if p]
-        loras = [(it["path"], it["strength"]) for it in self.loras.items()]
         self._remember_loras()
         size = None
         if self.keep_size.isChecked() and mask is None:     # (an inpaint comes back at the source's own size)
@@ -1233,7 +1246,7 @@ class ImageEditDialog(QDialog):
         sig, connect = self._sig, self.connect_editor
         if not self._run_on_start():
             return
-        seeds = self._seeds(n)                         # (after the checks: a refused Generate keeps the seed)
+        seeds = self._seeds(base_n)                    # (after the checks: a refused Generate keeps the seed)
         self.bar.setValue(0)
         self.bar.show()
         self.b_start_comfy.hide()
@@ -1266,12 +1279,16 @@ class ImageEditDialog(QDialog):
                     if self._cancel:
                         break
                     cur["k"] = k
-                    seed = seeds[k - 1]
+                    b, r = divmod(k - 1, len(runs))
+                    loras, words = runs[r], run_words[r]
+                    seed = seeds[b]
                     stem = f"edit_{time.strftime('%Y%m%d-%H%M%S')}_{seed}"
                     out = edits / f"{stem}.png"
-                    job = jobs[k - 1] if jobs else None
-                    meta = self.editor.edit(Path(source), with_triggers(job.prompt, words) if job else sent, out, seed,
-                                            quality, [Path(r) for r in refs], loras, model=model, mask=mask_file)
+                    if out.exists() or out.with_suffix(".json").exists():
+                        out = edits / f"{stem}_{k}.png"   # (the same seed again within a second: one per LoRA)
+                    job = jobs[b] if jobs else None
+                    meta = self.editor.edit(Path(source), with_triggers(job.prompt if job else prompt, words), out,
+                                            seed, quality, [Path(r) for r in refs], loras, model=model, mask=mask_file)
                     made += 1
                     if size is not None:
                         scale_to(out, out, size)
@@ -1681,8 +1698,9 @@ class ImageEditDialog(QDialog):
                                        "pick the best one. They are made one after another and each appears when it "
                                        "is ready; Cancel stops after the current one")
         if hasattr(self, "b_gen"):
-            n = self.variations.amount() if active else 0
-            self.b_gen.setText(f"Generate {n} image{'s' if n != 1 else ''}" if active else "Generate")
+            per = len(self._lora_runs()) if hasattr(self, "lora_each") else 1
+            n = (self.variations.amount() if active else self.tries.value() if hasattr(self, "tries") else 1) * per
+            self.b_gen.setText(f"Generate {n} image{'s' if n != 1 else ''}" if active or per > 1 else "Generate")
 
     def _insert_placeholder(self, name: str):
         cur = self.prompt.textCursor()
@@ -1749,10 +1767,10 @@ class ImageEditDialog(QDialog):
                 self._busy = False
                 return
             n = len(jobs)
-        words = self._trigger_words()
-        sent = with_triggers(prompt, words)
+        runs = self._lora_runs()                     # (One image per LoRA: each result with every LoRA in turn)
+        base_n, n = n, n * len(runs)
+        run_words = [self._trigger_words(r) for r in runs]
         refs = [s.path for s in self.cpics[:FAMILIES[fam]["refs"]] if s.path] if self.use_refs.isChecked() else []
-        loras = [(it["path"], it["strength"]) for it in self.loras.items()]
         self._remember_loras()                    # what it was made with is offered next time
         w, h = size_for(fam, self.aspect.currentData() or 1.0)
         strength, tags = self.ref_strength.value(), self.tags.isChecked()
@@ -1761,7 +1779,7 @@ class ImageEditDialog(QDialog):
         sig, connect = self._sig, self.connect_create
         if not self._run_on_start():
             return
-        seeds = self._seeds(n)                         # (after the checks: a refused Generate keeps the seed)
+        seeds = self._seeds(base_n)                    # (after the checks: a refused Generate keeps the seed)
         self.bar.setValue(0)
         self.bar.show()
         self.b_start_comfy.hide()
@@ -1786,11 +1804,15 @@ class ImageEditDialog(QDialog):
                     if self._cancel:
                         break
                     cur["k"] = k
-                    seed = seeds[k - 1]
+                    b, r = divmod(k - 1, len(runs))
+                    loras, words = runs[r], run_words[r]
+                    seed = seeds[b]
                     out = edits / f"new_{time.strftime('%Y%m%d-%H%M%S')}_{seed}.png"
-                    job = jobs[k - 1] if jobs else None
+                    if out.exists() or out.with_suffix(".json").exists():
+                        out = out.with_name(f"{out.stem}_{k}.png")   # (the same seed again within a second)
+                    job = jobs[b] if jobs else None
                     neg_k = (" ".join(job.negative.split()) if negative else "") if job else negative
-                    meta = self.editor.create(fam, model, with_triggers(job.prompt, words) if job else sent, out, seed,
+                    meta = self.editor.create(fam, model, with_triggers(job.prompt if job else prompt, words), out, seed,
                                               quality, w, h, neg_k, loras, [Path(r) for r in refs], strength, tags,
                                               sampling)
                     meta.update({"run": run, "prompt": job.prompt if job else prompt, "trigger_words": words,
@@ -2051,11 +2073,19 @@ class ImageEditDialog(QDialog):
         self._remember_loras()
 
     # ---- LoRAs
-    def _trigger_words(self) -> list[str]:
-        """The trigger words of the chosen LoRAs (put before the prompt when the project wants them)."""
+    def _trigger_words(self, loras: list | None = None) -> list[str]:
+        """The trigger words of the chosen LoRAs, or of `loras` [(path, strength)] (put before the prompt when the
+        project wants them)."""
         if not self.use_triggers:
             return []
-        return stack_words([it["path"] for it in self.loras.items()])
+        return stack_words([it["path"] for it in self.loras.items()] if loras is None else [p for p, _s in loras])
+
+    def _lora_runs(self) -> list[list[tuple[str, float]]]:
+        """The LoRAs of each image in turn: one list with all of them, or (One image per LoRA) each alone."""
+        loras = [(it["path"], it["strength"]) for it in self.loras.items()]
+        if self.lora_each.isChecked() and loras:
+            return [[lo] for lo in loras]
+        return [loras]
 
     def _lora_key(self) -> str:
         if self.mode() == "create":
