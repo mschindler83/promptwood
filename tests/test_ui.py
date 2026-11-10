@@ -1991,12 +1991,13 @@ def test_lora_trigger_words_in_the_image_window(app, tmp_path, image, monkeypatc
 
 
 def test_continue_the_real_videos_sound_on_the_card(app, win, tmp_path):
-    """The card's 'Sound' row appears only after a real video; switching it on also carries the picture over."""
+    """The card's sound choice appears only after a real video; switching it on also carries the picture over."""
     from video_chain.ui.main_window import PromptCard
     src = make_real_video(tmp_path / "real.mp4", secs=8.0)
     win.open_project(tmp_path / "proj")
     first = win.cards[0]
-    assert isinstance(first, PromptCard) and not first.sound_box.isVisibleTo(first)   # no real video before it
+    assert isinstance(first, PromptCard) and not first.src_sound.isVisibleTo(first)   # no real video before it
+    assert first.b_speak.isVisibleTo(first)                  # (the row itself stays: Speak the lines)
     v = win.add_video(first.nid, str(src), 0.0, 1.5)
     wait(app, lambda: not win._converts)
     win.node_action("continue", v)
@@ -3430,11 +3431,13 @@ def test_text_to_speech_in_the_app(app, win, tmp_path, image, monkeypatch):
     T.add_character(win.project, win.tree, "Anna", desc="young woman")
     win.refresh(rebuild_path=True)
     card = next(c for c in win.cards if c.nid == nid)
-    assert not card.b_speak.isVisibleTo(card)                # no spoken line yet
+    assert card.b_speak.isVisibleTo(card) and not card.b_speak.isEnabled()   # always there; no spoken line yet
+    assert "in quotes first" in card.b_speak.toolTip()
     type_prompt(win, nid, '@Anna waves and says "Hallo, schön dich zu sehen."')
+    assert card.b_speak.isEnabled()                          # as soon as a line is typed
     win.refresh(rebuild_path=True)
     card = next(c for c in win.cards if c.nid == nid)
-    assert card.b_speak.isVisibleTo(card)
+    assert card.b_speak.isVisibleTo(card) and card.b_speak.isEnabled()
     monkeypatch.setattr(win, "_tts_engine", lambda: fake)
     win.node_action("speak", nid)
     assert "no voice sample" in win.status.text()            # Anna has no voice yet

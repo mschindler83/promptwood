@@ -109,6 +109,10 @@ STATE_TIP = {"done": "Made, and nothing it depends on changed: it is reused, not
              "failed": "Making it failed (see the status bar)", "stopped": "Stopped before it was finished"}
 STATE_STYLE = {"done": "done", "reused": "done", "generating": "target", "failed": "failed", "stopped": "missing",
                "changed": "missing", "new": "", "converting": "target"}
+SPEAK_TIP = ("<p>Speak this clip's lines (\"...\" after @Name, e.g. @Anna says \"Hello.\") with text to speech, "
+             "each in its speaker's voice, and make them the clip's sound: the picture is made to it, lips in sync."
+             "<br>Who speaks (Qwen3-TTS on this computer, or ElevenLabs with your API key) is set in the Cast tab, "
+             "under Text to speech; the API key in Settings.</p>")
 FREEZE_TIP = ("Freeze: keep this clip as it is made, and every clip before it. They count as done whatever "
               "the project's settings say (size, speed LoRA, steps …), are not made again and cannot be "
               "edited; the clips after it follow the settings as before. Click again to unfreeze")
@@ -696,16 +700,14 @@ class PromptCard(QFrame):
             "the picture to it (lips in sync), which often keeps the body still.</p>")
         sb.addWidget(self.src_sound)
         self.b_speak = QPushButton("Speak the lines (text to speech)")
-        self.b_speak.setToolTip("Speak this clip's lines (\"...\" after @Name) with text to speech, each in its "
-                                "speaker's voice, and make them the clip's sound: the picture is made to it, lips "
-                                "in sync. The provider (Qwen3-TTS local / ElevenLabs) is set in the Cast tab")
+        self.b_speak.setToolTip(SPEAK_TIP)
         self.b_speak.clicked.connect(lambda: self.action.emit("speak", self.nid))
         sb.addWidget(self.b_speak)
         sb.addWidget(self.sound_over)
         sb.addWidget(self.src_sound_info)
         link.addRow("Sound", self.sound_box)
         self._link = link
-        link.setRowVisible(self.sound_box, False)          # only for clips after a real video
+        link.setRowVisible(self.sound_box, True)           # (the sound choice in it only when there is one)
         self._max_guide = 0
         erow = QHBoxLayout()
         erow.setSpacing(6)
@@ -873,7 +875,16 @@ class PromptCard(QFrame):
 
     def _text(self):
         self._words()
+        self._enable_speak()
         self.edited.emit(self.nid)
+
+    def _enable_speak(self):
+        """"Speak the lines" is always on the card; it can be used once the prompt has a line in quotes."""
+        self.has_lines = bool(T.spoken_lines(self.text()))
+        self.b_speak.setEnabled(not self.edit.isReadOnly() and self.has_lines)
+        self.b_speak.setToolTip(SPEAK_TIP if self.has_lines else
+                                "Write what is said in quotes first, e.g. @Anna says \"Hello, nice to see you.\" "
+                                "Then this speaks it with text to speech and makes it the clip's sound.")
 
     def _words(self):
         n = len(self.text().split())
@@ -905,6 +916,7 @@ class PromptCard(QFrame):
         for w in (self.seed, self.b_seed, self.length, self.steps, self.loras, self.guide, self.src_sound,
                   self.sound_over, self.b_refine, self.b_speak):
             w.setEnabled(edit)
+        self._enable_speak()
         for w in self.buttons:
             w.setEnabled(self._on)
         self.steps.setEnabled(edit and not self.steps_locked)
@@ -1036,9 +1048,11 @@ class PromptCard(QFrame):
             track = isinstance(d, str) and d.startswith(T.TRACK_PREFIX)
             ok = d is None or d == cur or track or (available if d is True else repeat)
             model.item(k).setEnabled(ok)
-        some = available or repeat or bool(cur) or self.src_sound.count() > len(SOUND_MODES) or self.has_lines
-        self._link.setRowVisible(self.sound_box, some)
+        some = available or repeat or bool(cur) or self.src_sound.count() > len(SOUND_MODES)
+        self._link.setRowVisible(self.sound_box, True)   # (always: Speak the lines)
+        self.src_sound.setVisible(some)
         self.src_sound.setEnabled(not self.edit.isReadOnly() and some)
+        self._enable_speak()
         self.src_sound_info.setText(info if cur else "")
         self.src_sound_info.setVisible(bool(cur) and bool(info))
         self.sound_over.setVisible(bool(cur))
@@ -5010,8 +5024,6 @@ class MainWindow(QMainWindow):
                                                                                             " exactly as recorded,")
                             + " Laid over: the clip is made without it (full motion, no lip sync) and gets it "
                               "afterwards; it may be shorter than 2 s.")
-                card.has_lines = bool(T.spoken_lines(n.prompt))
-                card.b_speak.setVisible(card.has_lines)
                 card.set_source_sound(avail, info, max_guide, rep_ok)
                 card.set_summary(" · ".join(self._own_parts(n)))
                 card.set_veda(self.veda_used(n))
@@ -6329,10 +6341,10 @@ class MainWindow(QMainWindow):
                 acts[hand] = "handover"
                 if T.handover_index(self.tree, node) is not None:
                     acts[m.addAction("Hand over at the last frame")] = "handover_clear"
-                if T.spoken_lines(node.prompt):
-                    sp = m.addAction("Speak the lines with text to speech")
-                    sp.setEnabled(not self._tts_busy)
-                    acts[sp] = "speak"
+                sp = m.addAction("Speak the lines with text to speech" if T.spoken_lines(node.prompt) else
+                                 "Speak the lines with text to speech (write a line in quotes first)")
+                sp.setEnabled(not self._tts_busy and bool(T.spoken_lines(node.prompt)))
+                acts[sp] = "speak"
                 ai = m.addAction("Edit an image with AI…")
                 acts[ai] = "edit_ai"
                 cmp_ = m.addAction("Compare with its variants…")
