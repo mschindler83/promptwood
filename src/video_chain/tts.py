@@ -153,8 +153,15 @@ class LocalTTS:
         with self._lock:
             if not self.running():
                 self._start()
-            self.proc.stdin.write(json.dumps(r) + "\n")
-            self.proc.stdin.flush()
+            p = self.proc                       # (stop() from the GUI thread may clear self.proc meanwhile)
+            if p is None:
+                raise TtsError("the TTS worker was stopped")
+            try:
+                p.stdin.write(json.dumps(r) + "\n")
+                p.stdin.flush()
+            except (OSError, ValueError):       # (it died, or was stopped, before it read the request)
+                self.stop()
+                raise TtsError("the TTS worker stopped before it got the request") from None
             a = self._wait(timeout)
         if not a.get("ok"):
             raise TtsError(a.get("error") or "the TTS worker failed")
@@ -337,6 +344,12 @@ def clip_lines(tree: T.Tree, node: T.Node) -> list[dict]:
             for d in T.dialogue(tree.options, node.prompt, default=None if found else T.lead_of(tree.options))]
 
 
+def needs_transcript(tree: T.Tree, node: T.Node) -> bool:
+    """A local speaker's voice sample has not been transcribed yet (Whisper is needed once)."""
+    return any(d["speaker"] is not None and (d["speaker"].get("voice") or {}).get("file")
+               and not d["speaker"]["voice"].get("text") for d in clip_lines(tree, node))
+
+
 def line_problems(tree: T.Tree, node: T.Node, provider: str) -> list[str]:
     """Why the clip's lines cannot be spoken (empty: they can)."""
     lines = clip_lines(tree, node)
@@ -435,6 +448,8 @@ def render_lines(project: Path, tree: T.Tree, nid: str, eng, log=lambda _m: None
     refs = project / T.REFS_DIR
     refs.mkdir(parents=True, exist_ok=True)
     texts: dict[str, str] = {}
+    voice_files = {d["speaker"]["name"]: d["speaker"]["voice"]["file"] for d in lines
+                   if eng.name != "elevenlabs" and d["speaker"].get("voice")}
     with tempfile.TemporaryDirectory(prefix="video-chain-tts-") as tmp:
         parts = []
         for k, d in enumerate(lines):
@@ -457,7 +472,7 @@ def render_lines(project: Path, tree: T.Tree, nid: str, eng, log=lambda _m: None
         secs = join_lines(parts, project / rel)
     return {"file": rel, "secs": round(secs, 3), "lines": [{"name": d["speaker"]["name"], "line": d["line"]}
                                                            for d in lines],
-            "texts": texts, "provider": eng.name, "language": lang, "prompt": node.prompt}
+            "texts": texts, "voice_files": voice_files, "provider": eng.name, "language": lang, "prompt": node.prompt}
 
 
 def apply_lines(project: Path, tree: T.Tree, nid: str, r: dict) -> dict:
@@ -465,9 +480,15 @@ def apply_lines(project: Path, tree: T.Tree, nid: str, r: dict) -> dict:
     in sync); the clip is made longer when the lines need it; its earlier spoken-lines track goes when no other clip
     plays it; the voice transcripts are kept. Returns {"track", "secs", "frames": new length or None, "lines": n}."""
     node = tree.nodes[nid]
+    ov = dict(node.overrides or {})
+    ov.pop("sound_over", None)                      # the picture is made to it (lips in sync)
+    # (before anything is changed: lines longer than a clip can be refuse the whole thing)
+    frames = frames_for(r["secs"], int(ov.get("frames", tree.options.get("frames", 73))))
     for name, text in (r.get("texts") or {}).items():
-        if T.character(tree, name) is not None:
-            _set_voice_fields(tree, name, text=text)
+        c = T.character(tree, name)
+        files = r.get("voice_files") or {}
+        if c is not None and c.get("voice") and (name not in files or files[name] == c["voice"]["file"]):
+            _set_voice_fields(tree, name, text=text)   # (not for a voice replaced while the lines were made)
     old = T.track_id(node)
     old_tr = T.track_of(tree, old) if old else None
     have = {t["id"] for t in T.tracks(tree)}
@@ -478,10 +499,7 @@ def apply_lines(project: Path, tree: T.Tree, nid: str, r: dict) -> dict:
              "source": str(Path(project) / r["file"]), "start": 0.0, "end": r["secs"],
              "tts": {"clip": nid, "provider": r["provider"], "language": r["language"], "lines": r["lines"]}}
     tree.options["tracks"] = T.tracks(tree) + [entry]
-    ov = dict(node.overrides or {})
     ov["source_sound"] = T.TRACK_PREFIX + tid
-    ov.pop("sound_over", None)                      # the picture is made to it (lips in sync)
-    frames = frames_for(r["secs"], int(ov.get("frames", tree.options.get("frames", 73))))
     if frames:
         ov["frames"] = frames
     node.overrides = ov

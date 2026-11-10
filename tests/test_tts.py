@@ -349,3 +349,28 @@ def test_qwen3_tts_speaks_german_and_english(tmp_path):
             assert got == line.lower().strip(" .!"), got
     finally:
         loc.stop()
+
+
+def test_lines_too_long_for_a_clip_change_nothing(project, tmp_path):
+    t = T.load(project)
+    give_voice(project, t, "Anna", tmp_path)
+    n = t.add(None, '@Anna says "Hallo."')
+    r = tts.render_lines(project, t, n.id, FakeLocal())
+    r["secs"] = 16.0                                          # (more than the 15 s a clip can be)
+    before = (json.dumps(t.options, sort_keys=True), dict(n.overrides))
+    with pytest.raises(tts.TtsError, match="at most 15 s"):
+        tts.apply_lines(project, t, n.id, r)
+    assert (json.dumps(t.options, sort_keys=True), n.overrides) == before     # no track, no transcript, no frames
+
+
+def test_a_transcript_does_not_go_to_a_voice_replaced_meanwhile(project, tmp_path):
+    t = T.load(project)
+    give_voice(project, t, "Anna", tmp_path)
+    n = t.add(None, '@Anna says "Hallo."')
+    r = tts.render_lines(project, t, n.id, FakeLocal())
+    assert r["texts"] and r["voice_files"]["Anna"] == T.character(t, "Anna")["voice"]["file"]
+    other = tmp_path / "other.wav"
+    tone(other, 3.0, 330)
+    T.set_voice(project, t, "Anna", other)                    # replaced while the lines were made
+    tts.apply_lines(project, t, n.id, r)
+    assert "text" not in T.character(t, "Anna")["voice"]

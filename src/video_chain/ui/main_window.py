@@ -3414,8 +3414,12 @@ class MainWindow(QMainWindow):
             self.status.setText("Text to speech is busy; wait until it is done.")
             return False
         node = self.tree.nodes[nid]
+        if node.frozen:
+            self._frozen_block(node, "speak")
+            return False
         eng = self._tts_engine()
-        bad = TTS.line_problems(self.tree, node, eng.name) + eng.problems()
+        bad = TTS.line_problems(self.tree, node, eng.name) + eng.problems(
+            transcribe=eng.name == "local" and TTS.needs_transcript(self.tree, node))
         if bad:
             self.status.setText(f"Cannot speak the lines of clip #{nid[1:]}: " + "; ".join(bad) + ".")
             return False
@@ -3453,7 +3457,7 @@ class MainWindow(QMainWindow):
             return
         try:
             done = TTS.apply_lines(self.project, self.tree, nid, r)
-        except TTS.TtsError as e:
+        except (TTS.TtsError, OSError) as e:
             (self.project / r["file"]).unlink(missing_ok=True)
             self.status.setText(f"Could not use the spoken lines of clip #{nid[1:]}: {e}")
             return
