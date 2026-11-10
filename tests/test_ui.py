@@ -3355,3 +3355,37 @@ def test_middle_keyframes_on_the_card(app, win, tmp_path, image, monkeypatch):
     win.node_action("revert", nid)
     assert node.keyframes == node.made["keyframes"]
 
+
+
+def test_freeze_a_clip_on_its_card(app, win, tmp_path, image):
+    """The lock button freezes a made clip and the ones before it: FROZEN, locked inputs, done after a size change;
+    the edit actions are refused; the start image stays; clicking again unfreezes it (and the ones after it)."""
+    ids = new_project(win, tmp_path, image, ("a", "b"))
+    a, b = ids
+    card = next(c for c in win.cards if c.nid == b)
+    assert not card.b_freeze.isEnabled()                    # not made yet
+    win.node_action("freeze_toggle", b)
+    assert "not made yet" in win.status.text() and not win.tree.nodes[b].frozen
+    run_and_wait(app, win, win.generate_path)
+    card = next(c for c in win.cards if c.nid == b)
+    assert card.b_freeze.isEnabled()
+    card.b_freeze.click()
+    assert win.tree.nodes[a].frozen and win.tree.nodes[b].frozen and "frozen, with 1 before it" in win.status.text()
+    card = next(c for c in win.cards if c.nid == b)
+    assert card.frozen and card.b_freeze.isChecked() and card.tag.text() == "FROZEN"
+    assert card.edit.isReadOnly() and not card.seed.isEnabled() and not card.keys.isEnabled()
+    assert not card.b_end.isEnabled() and card.buttons[0].isEnabled()          # a variant can still be made
+    assert "🔒 frozen" in win.badge(win.tree.nodes[b])
+    win.resolution.setCurrentIndex(win.resolution.findData(384))   # another size: still done
+    win.refresh()
+    assert win.state(a) == win.state(b) == "done"
+    win.node_action("handover", b)
+    assert "is frozen" in win.status.text() and win.tree.nodes[b].end_at is None
+    win.keyframe_action("add", b, {"at": 1.0})
+    assert win.tree.nodes[b].keyframes == []
+    assert not win.set_image(str(image)) and "unfreeze it first" in win.status.text()
+    win.node_action("freeze_toggle", a)                     # unfreezing a takes b along
+    assert not win.tree.nodes[a].frozen and not win.tree.nodes[b].frozen
+    card = next(c for c in win.cards if c.nid == b)
+    assert not card.frozen and not card.edit.isReadOnly()
+    assert win.state(a) == "changed" and "CHANGED" in win.status.text()

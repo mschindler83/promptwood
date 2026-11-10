@@ -107,6 +107,9 @@ STATE_TIP = {"done": "Made, and nothing it depends on changed: it is reused, not
              "failed": "Making it failed (see the status bar)", "stopped": "Stopped before it was finished"}
 STATE_STYLE = {"done": "done", "reused": "done", "generating": "target", "failed": "failed", "stopped": "missing",
                "changed": "missing", "new": "", "converting": "target"}
+FREEZE_TIP = ("Freeze: keep this clip as it is made, and every clip before it. They count as done whatever "
+              "the project's settings say (size, speed LoRA, steps …), are not made again and cannot be "
+              "edited; the clips after it follow the settings as before. Click again to unfreeze")
 GUIDE_TIP = ("How much this clip takes over from the clip before it (and from a real video after it). Last frame "
              "only: it starts at that frame. 5-39 frames: those frames, with their sound, are put into this clip, so "
              "motion and voice carry over; they are left out when the path is played or exported")
@@ -555,6 +558,10 @@ class PromptCard(QFrame):
             if act == "compare":
                 self.b_compare = b
         self._can_compare = False
+        self.frozen, self._on = False, True
+        self.b_freeze = icon_button("lock", FREEZE_TIP, checkable=True)
+        self.b_freeze.clicked.connect(lambda _=False: self.action.emit("freeze_toggle", self.nid))
+        head.insertWidget(head.count() - 1, self.b_freeze)
         v.addLayout(head)
         self.span = label("", level="tertiary")
         v.addWidget(self.span)
@@ -879,17 +886,32 @@ class PromptCard(QFrame):
             self.step.setText(text if text is not None else f"step {i} / {n}")
 
     def set_editable(self, on: bool):
-        self.edit.setReadOnly(not on)
+        """on: nothing runs (the card can be used); a frozen clip's own inputs stay locked anyway."""
+        self._on = bool(on)
+        edit = self._on and not self.frozen
+        self.edit.setReadOnly(not edit)
         for w in (self.seed, self.b_seed, self.length, self.steps, self.loras, self.guide, self.src_sound,
-                  self.sound_over, self.b_refine, *self.buttons):
-            w.setEnabled(on)
-        self.steps.setEnabled(on and not self.steps_locked)
+                  self.sound_over, self.b_refine):
+            w.setEnabled(edit)
+        for w in self.buttons:
+            w.setEnabled(self._on)
+        self.steps.setEnabled(edit and not self.steps_locked)
         self._enable_camera()
         self._enable_guide()
         self._enable_end()
         self._enable_hand()
-        self.b_compare.setEnabled(on and self._can_compare)
-        self.b_revert.setEnabled(on)
+        self.b_compare.setEnabled(self._on and self._can_compare)
+        self.b_revert.setEnabled(edit)
+        self.b_freeze.setEnabled(self._on and (self.frozen or self.state == "done"))
+
+    def set_frozen(self, frozen: bool):
+        """A frozen clip: its prompt, seed, settings, end, keyframes and hand-over are locked."""
+        self.frozen = bool(frozen)
+        self.b_freeze.setChecked(self.frozen)
+        self.b_freeze.setToolTip(FREEZE_TIP if not self.frozen else
+                                 "Frozen: kept as made, whatever the project's settings say. Click to unfreeze it "
+                                 "(and the frozen clips after it): it can be edited and follows the settings again")
+        self.set_editable(self._on)
 
     def _show_settings(self, on: bool):
         PromptCard.settings_open = bool(on)
@@ -934,7 +956,7 @@ class PromptCard(QFrame):
     def set_compare(self, n: int):
         """n: made clips next to this one (its variants / branches) that can be compared with it."""
         self._can_compare = n > 0
-        self.b_compare.setEnabled(self._can_compare and not self.edit.isReadOnly())
+        self.b_compare.setEnabled(self._can_compare and self._on)
         self.b_compare.setToolTip(f"Compare: play this clip and its {n} made variant{'s' if n != 1 else ''} side by "
                                   "side, keep one" if n else
                                   "Compare: needs this clip and at least one other made clip from the same point "
@@ -1114,6 +1136,10 @@ class VideoCard(QFrame):
             b.clicked.connect(lambda _=False, a=act: self.action.emit(a, self.nid))
             head.addWidget(b)
             self.buttons.append(b)
+        self.frozen, self._on = False, True
+        self.b_freeze = icon_button("lock", FREEZE_TIP.replace("this clip", "this video"), checkable=True)
+        self.b_freeze.clicked.connect(lambda _=False: self.action.emit("freeze_toggle", self.nid))
+        head.insertWidget(head.count() - 3, self.b_freeze)
         v.addLayout(head)
         self.span = label("", level="tertiary")
         v.addWidget(self.span)
@@ -1166,8 +1192,19 @@ class VideoCard(QFrame):
         pass
 
     def set_editable(self, on: bool):
-        for w in (self.b_edit, *self.buttons):
-            w.setEnabled(on)
+        self._on = bool(on)
+        for w in self.buttons:
+            w.setEnabled(self._on)
+        self.b_edit.setEnabled(self._on and not self.frozen)
+        self.buttons[0].setEnabled(self._on and not self.frozen)       # (edit range)
+        self.b_freeze.setEnabled(self._on and (self.frozen or self.state == "done"))
+
+    def set_frozen(self, frozen: bool):
+        self.frozen = bool(frozen)
+        self.b_freeze.setChecked(self.frozen)
+        self.b_freeze.setToolTip(FREEZE_TIP.replace("this clip", "this video") if not self.frozen else
+                                 "Frozen: kept as converted, whatever the project's size says. Click to unfreeze it")
+        self.set_editable(self._on)
 
     def _restyle(self):
         t = theme()
@@ -4150,9 +4187,20 @@ class MainWindow(QMainWindow):
         ids = [r.id for r in roots] + [d.id for r in roots for d in self.tree.descendants(r.id)]
         return [i for i in ids if self.status_of.get(i) == "done"]
 
+    def _start_frozen(self) -> bool:
+        """A frozen first clip starts from the start image: it stays (with a word in the status bar)."""
+        roots = [n for n in (self.tree.nodes.values() if self.tree else []) if n.frozen and n.parent is None
+                 and not n.is_video]
+        if roots:
+            self.status.setText(f"Clip #{roots[0].id[1:]} is frozen and starts from the start image: unfreeze it "
+                                "first to change the start image.")
+        return bool(roots)
+
     def clear_image(self, confirm: bool = False) -> bool:
         """No start image any more. confirm: ask first when made clips depend on it."""
         if self.running or self.project is None or not (self.project / T.START_FILE).is_file():
+            return False
+        if self._start_frozen():
             return False
         made = [i for i, st in self.status_of.items() if st == "done"] if self.made_from_start() else []
         if confirm and made and QMessageBox.question(
@@ -4180,6 +4228,8 @@ class MainWindow(QMainWindow):
             return False
         if QImage(path).isNull():
             self.status.setText(f"Not an image: {Path(path).name}")
+            return False
+        if self._start_frozen():
             return False
         made = self.made_from_start()
         try:                                        # another aspect ratio: another video size for every clip
@@ -4371,10 +4421,16 @@ class MainWindow(QMainWindow):
         self._update_scene_card()
         self._update_buttons()
 
+    def _frozen_note(self, n: T.Node) -> str:
+        try:
+            return T.frozen_note(self.tree, n, T.Checker(self.project, self.tree).base())
+        except Exception:  # noqa: BLE001  (an unreadable start image: no note)
+            return ""
+
     def badge(self, n: T.Node) -> str:
         """Short text for a clip's own settings, shown on its node ('' = all project defaults)."""
         if n.is_video:
-            return f"real video · {T.clip_length(self.tree, n) / 24:.1f} s"
+            return ("🔒 frozen · " if n.frozen else "") + f"real video · {T.clip_length(self.tree, n) / 24:.1f} s"
         ov, parts = n.overrides or {}, self._own_parts(n)
         if ov.get("guide"):
             parts.append(f"carry-over {ov['guide']}")
@@ -4384,6 +4440,8 @@ class MainWindow(QMainWindow):
             parts.append(f"{len(n.keyframes)} keyframe{'s' if len(n.keyframes) != 1 else ''}")
         if (n.made or {}).get("cuts"):
             parts.append("⚠ cuts")
+        if n.frozen:
+            parts.insert(0, "🔒 frozen")
         k = T.handover_index(self.tree, n)
         if k is not None:
             parts.append(f"hands over at {k / 24:.1f} s")
@@ -4718,6 +4776,14 @@ class MainWindow(QMainWindow):
             card.set_state(st, self._pixmap(self._node_frame(n)), step)
             why = self.why_of.get(n.id) if st == "changed" else ""
             card.tag.setToolTip(f"Changed: {why}. It is made again with the path." if why else STATE_TIP.get(st, ""))
+            frozen = n.frozen and st == "done"
+            if frozen:
+                note = self._frozen_note(n)
+                card.tag.setText("FROZEN")
+                card.tag.setToolTip("Kept as made, whatever the project's settings say; not made again")
+                card.step.setText("Frozen: kept as made" + (f" ({note})" if note else "") +
+                                  ". Unfreeze it (lock button) to edit it or make it again.")
+            card.set_frozen(frozen)
             if st == "generating" and n.id in self.progress_of and not n.is_video:
                 card.bar.setValue(round(100 * self.progress_of[n.id]))
         path = self.selected_path()
@@ -4808,6 +4874,8 @@ class MainWindow(QMainWindow):
     def _card_edited(self, nid: str):
         card = next((c for c in self.cards if c.nid == nid and isinstance(c, PromptCard)), None)
         if card is None or self.tree is None or nid not in self.tree.nodes:
+            return
+        if self.tree.nodes[nid].frozen:
             return
         node, text = self.tree.nodes[nid], card.text()
         made = (node.made or {}).get("prompt")
@@ -4959,7 +5027,7 @@ class MainWindow(QMainWindow):
         self.qs.setValue("recentLoras", json.dumps(recent[:12]))
 
     def _overrides_changed(self, nid: str, ov: dict):
-        if self.tree and nid in self.tree.nodes:
+        if self.tree and nid in self.tree.nodes and not self.tree.nodes[nid].frozen:
             self.tree.nodes[nid].overrides = dict(ov)
             self._changed()
 
@@ -4985,7 +5053,7 @@ class MainWindow(QMainWindow):
 
     def add_node_lora(self, nid: str, path: str, strength: float = 1.0):
         """Put a LoRA file at the end of a clip's stack."""
-        if self.tree is None or self.running or nid not in self.tree.nodes:
+        if self.tree is None or self.running or nid not in self.tree.nodes or self.tree.nodes[nid].frozen:
             return
         ov = dict(self.tree.nodes[nid].overrides)
         p = lora_path(path)
@@ -5019,7 +5087,7 @@ class MainWindow(QMainWindow):
         return any(os.path.realpath(q) == real for q, _n in self.h3_loras + self.turbo_loras)
 
     def _seed_changed(self, nid: str, seed: int):
-        if self.tree and nid in self.tree.nodes:
+        if self.tree and nid in self.tree.nodes and not self.tree.nodes[nid].frozen:
             self.tree.nodes[nid].seed = int(seed)
             self._changed()
 
@@ -5043,6 +5111,14 @@ class MainWindow(QMainWindow):
                                     else f"The film plays “{cur.title}” up to its selected clip.")
             return
         node = self.tree.nodes.get(nid) if nid and nid != START else None
+        if action in ("freeze_toggle", "freeze", "unfreeze") and node is not None:
+            if action == "unfreeze" or action == "freeze_toggle" and node.frozen:
+                self.unfreeze_clip(node.id)
+            else:
+                self.freeze_clip(node.id)
+            return
+        if node is not None and self._frozen_block(node, action):
+            return
         if action in ("variant", "variants") and node is not None and node.is_video:
             self.status.setText("Variants are for generated clips; a real video stays as it is.")
             return
@@ -5145,6 +5221,67 @@ class MainWindow(QMainWindow):
         self.graph.reveal(new.id)
         if self.cards and self.cards[-1].nid == new.id and isinstance(self.cards[-1], PromptCard):
             self.cards[-1].edit.setFocus()
+
+    # what a frozen clip / video cannot do: it would change the clip as made (or what it ends at)
+    FROZEN_LOCKED = {"end_image", "end_video", "end_ai", "end_clear", "revert", "refine", "handover",
+                     "handover_clear", "edit", "split", "swap", "swap_undo", "video"}
+
+    def _frozen_block(self, node: T.Node, action: str) -> bool:
+        """True (with a word in the status bar) when the action would change a frozen clip."""
+        if not node.frozen or action not in self.FROZEN_LOCKED or action == "video" and node.is_video:
+            return False                           # (a video may follow a frozen video: nothing of it changes)
+        what = "Video" if node.is_video else "Clip"
+        self.status.setText(f"{what} #{node.id[1:]} is frozen (kept as made): unfreeze it first (the lock button on "
+                            "its card, or right-click → Unfreeze).")
+        return True
+
+    def freeze_clip(self, nid: str, confirm: bool = True) -> list[str]:
+        """Keep a made clip as it is, with every clip before it (tree.freeze). Returns the ids frozen now."""
+        if self.tree is None or self.running or nid not in self.tree.nodes:
+            return []
+        what = "video" if self.tree.nodes[nid].is_video else "clip"
+        why = T.freeze_problem(self.project, self.tree, nid)
+        if why:
+            self.status.setText(f"Cannot freeze {what} #{nid[1:]}: {why}.")
+            return []
+        edits = T.freeze_edits(self.tree, nid)
+        if confirm and edits and QMessageBox.question(
+                self, "Freeze",
+                f"Freeze {what} #{nid[1:]} and the clips before it?\n\nThese edits are not made yet and are undone "
+                "(back to what the clips were made with):\n" +
+                "\n".join(f"#{i[1:]}: {', '.join(e)}" for i, e in edits.items())) != QMessageBox.Yes:
+            return []
+        try:
+            ids = T.freeze(self.project, self.tree, nid)
+        except (ValueError, OSError) as e:
+            self.status.setText(f"Cannot freeze {what} #{nid[1:]}: {e}.")
+            return []
+        self._pix.clear()
+        self._write_tree()
+        self.refresh(rebuild_path=True)
+        more = [i for i in ids if i != nid]
+        self.status.setText(f"{what.capitalize()} #{nid[1:]} frozen" +
+                            (f", with {len(more)} before it" if more else "") +
+                            ": kept as made whatever the project's settings say; the clips after it follow them.")
+        return ids
+
+    def unfreeze_clip(self, nid: str) -> list[str]:
+        """A frozen clip (and the frozen clips after it) follows the settings again. Returns the ids."""
+        if self.tree is None or self.running or nid not in self.tree.nodes:
+            return []
+        ids = T.unfreeze(self.tree, nid)
+        if not ids:
+            return []
+        self._write_tree()
+        self.refresh(rebuild_path=True)
+        changed = [i for i in ids if self.status_of.get(i) == "changed"]
+        more = [i for i in ids if i != nid]
+        text = (f"#{nid[1:]} unfrozen" + (f", with {', '.join('#' + i[1:] for i in more)}" if more else ""))
+        if changed:
+            text += (f"; {len(changed)} of them count{'s' if len(changed) == 1 else ''} as CHANGED now (the settings "
+                     "differ): Generate makes them again. Freeze again to keep them.")
+        self.status.setText(text + ".")
+        return ids
 
     def _busy_files(self, what: str = "delete") -> bool:
         """A path is being joined or a video converted (they read / write clip files): no deleting (or changing
@@ -5390,6 +5527,7 @@ class MainWindow(QMainWindow):
     def set_handover(self, nid: str, frame: int | None) -> bool:
         """The clips after a made clip start from this frame of it (None: its last frame, as usual)."""
         if self.tree is None or self.running or nid not in self.tree.nodes or \
+                self._frozen_block(self.tree.nodes[nid], "handover") or \
                 self._busy_files("change the hand-over frame"):
             return False
         node = self.tree.nodes[nid]
@@ -5539,7 +5677,8 @@ class MainWindow(QMainWindow):
 
     def set_end_image(self, nid: str, image: str | None) -> bool:
         """Give a generated clip its own end image (None: remove it); the clip then counts as changed."""
-        if self.tree is None or self.running or nid not in self.tree.nodes:
+        if self.tree is None or self.running or nid not in self.tree.nodes or \
+                self._frozen_block(self.tree.nodes[nid], "end_image"):
             return False
         try:
             if image is None:
@@ -5564,6 +5703,9 @@ class MainWindow(QMainWindow):
     def keyframe_action(self, act: str, nid: str, data: dict | None = None) -> None:
         """A keyframe action of a clip card: add / add_video / add_moment (data "at"), move (data "index", "at"),
         change / video / moment / note / remove (data "index")."""
+        if self.tree is not None and nid in self.tree.nodes and self.tree.nodes[nid].frozen:
+            self._frozen_block(self.tree.nodes[nid], "end_image")
+            return
         node = self.tree.nodes.get(nid) if self.tree else None
         if node is None or node.is_video or self.running:
             return
@@ -5725,7 +5867,7 @@ class MainWindow(QMainWindow):
 
     def edit_video(self, nid: str):
         node = self.tree.nodes.get(nid) if self.tree else None
-        if node is None or not node.is_video or self.running:
+        if node is None or not node.is_video or self.running or self._frozen_block(node, "edit"):
             return
         src = node.source
         f = src["file"]
@@ -5936,6 +6078,17 @@ class MainWindow(QMainWindow):
                 cmp_ = m.addAction("Compare with its variants…")
                 cmp_.setEnabled(len(self.compare_candidates(nid)) > 1)
                 acts[cmp_] = "compare"
+            if node is not None:
+                if node.frozen:
+                    acts[m.addAction("Unfreeze (edit it, follow the settings again)")] = "unfreeze"
+                else:
+                    fr = m.addAction("Freeze (keep it and the clips before it as made)")
+                    fr.setEnabled(self.state(nid) == "done")
+                    fr.setToolTip(FREEZE_TIP)
+                    acts[fr] = "freeze"
+                for a_, what in acts.items():
+                    if node.frozen and what in self.FROZEN_LOCKED and not (what == "video" and node.is_video):
+                        a_.setEnabled(False)
             m.addSeparator()
             play = m.addAction("Play this video" if node is not None and node.is_video else "Play this clip")
             play.setEnabled(bool(self.tree.nodes[nid].made))

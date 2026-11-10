@@ -121,6 +121,7 @@ class Node:
     end_image: str | None = None   # AI: its own end image (ends/..., project-relative); a video after it wins
     end_at: int | None = None      # AI: hand over at this frame instead of the last one (see handover_index)
     keyframes: list = field(default_factory=list)   # AI: [{"image": ends/..., "at": s, "note": str}], by time
+    frozen: bool = False           # kept as made: done whatever the settings say (see freeze)
 
     @property
     def is_video(self) -> bool:
@@ -247,6 +248,7 @@ class Tree:
                     _unlink(Path(project) / "paths" / f"{g}{ext}")
         if self.selected in gone:
             self.selected = parent
+        heal_frozen(self)
         return gone
 
     def siblings(self, nid: str) -> list["Node"]:
@@ -309,7 +311,8 @@ class Tree:
                 else None
             n = Node(nd["id"], nd.get("parent"), nd.get("prompt", ""), int(nd.get("seed", 42)), nd.get("made"), ov,
                      kind, dict(src) if kind == VIDEO else None, end, at,
-                     clean_keyframes(nd.get("keyframes")) if kind == AI else [])
+                     clean_keyframes(nd.get("keyframes")) if kind == AI else [],
+                     bool(nd.get("frozen")) and isinstance(nd.get("made"), dict))
             t.nodes[n.id] = n
         for n in t.nodes.values():
             if n.parent is not None and n.parent not in t.nodes:
@@ -322,6 +325,7 @@ class Tree:
                 seen.add(cur)
                 cur = t.nodes[cur].parent
         t.next_num = max([t.next_num] + [t.number(i) + 1 for i in t.nodes])
+        heal_frozen(t)
         if t.selected not in t.nodes:
             t.selected = None
         return t
@@ -1214,6 +1218,130 @@ def revert(project: Path, tree: Tree, nid: str) -> list[str]:
     return done
 
 
+def _revert_fields(tree: Tree, nid: str) -> None:
+    """Undo the edits of a made clip in the tree only (no files touched): for trying out what freezing finds."""
+    node, done = tree.nodes[nid], changed_inputs(tree, nid)
+    m = node.made
+    if "prompt" in done:
+        node.prompt = m["prompt"]
+    if "seed" in done:
+        node.seed = int(m["seed"])
+    if "settings" in done:
+        node.overrides = copy.deepcopy(m["overrides"])
+    if "end image" in done:
+        node.end_image = m["end_image"]
+    if "keyframes" in done:
+        node.keyframes = clean_keyframes(m["keyframes"])
+
+
+def freeze_set(tree: Tree, nid: str) -> list[Node]:
+    """What freezing nid freezes: it and every clip / video before it (so every seam up to it stays as made), and
+    the real video each of those generated clips leads into (the clip ends at its first frame)."""
+    out = tree.path_to(nid)
+    for n in list(out):
+        vc = tree.video_child(n.id)
+        if vc is not None and vc not in out:
+            out.append(vc)
+    return out
+
+
+def freeze_edits(tree: Tree, nid: str) -> dict[str, list[str]]:
+    """The not yet made edits freezing nid undoes: {clip id: ["prompt", ...]}."""
+    return {n.id: e for n in freeze_set(tree, nid) if (e := changed_inputs(tree, n.id))}
+
+
+def freeze_problem(project: Path, tree: Tree, nid: str) -> str | None:
+    """Why nid cannot be frozen (None: it can): a clip or video of it is not made, or one no longer joins the one
+    before it as it was made (then it has to be made again first, else the frozen path would jump there)."""
+    trial = copy.deepcopy(tree)
+    nodes = freeze_set(trial, nid)
+    ck = Checker(project, trial)
+    for n in nodes:
+        if not ck._files_there(n):
+            return f"{'video' if n.is_video else 'clip'} #{n.id[1:]} is not made yet (or its files are missing)"
+    for n in nodes:
+        if not n.is_video:
+            _revert_fields(trial, n.id)
+        n.frozen = True
+    ck = Checker(project, trial)
+    for n in nodes:
+        why = ck.seam_problem(n)
+        if why:
+            return f"clip #{n.id[1:]}: {why}; make it again first"
+    return None
+
+
+def freeze(project: Path, tree: Tree, nid: str) -> list[str]:
+    """Keep nid as it is made, and with it every clip before it: they count as done whatever the project's
+    settings (size, speed LoRA, steps ...) say, are not made again and cannot be edited until unfrozen. Their not
+    yet made edits are undone first. Returns the ids frozen now. Raises ValueError (freeze_problem)."""
+    why = freeze_problem(project, tree, nid)
+    if why:
+        raise ValueError(why)
+    out = []
+    for n in freeze_set(tree, nid):
+        if not n.is_video:
+            revert(project, tree, n.id)
+        if not n.frozen:
+            n.frozen = True
+            out.append(n.id)
+    return out
+
+
+def unfreeze(tree: Tree, nid: str) -> list[str]:
+    """nid follows the settings again, and so does every frozen clip after it (a frozen clip needs the ones before
+    it frozen) and a frozen clip that ends at it (a video). Returns the ids unfrozen."""
+    node = tree.nodes[nid]
+    if not node.frozen:
+        return []
+    node.frozen = False
+    return [nid] + heal_frozen(tree)
+
+
+def heal_frozen(tree: Tree) -> list[str]:
+    """Unfreeze what may not stay frozen: a clip after one that is not frozen, a generated clip whose video after it
+    is not frozen, one that was never made. Returns those ids."""
+    out, again = [], True
+    while again:
+        again = False
+        for n in tree.nodes.values():
+            if not n.frozen:
+                continue
+            p = tree.nodes.get(n.parent) if n.parent is not None else None
+            vc = tree.video_child(n.id)
+            if not isinstance(n.made, dict) or (p is not None and not p.frozen) or (vc is not None and not vc.frozen):
+                n.frozen = False
+                out.append(n.id)
+                again = True
+    return out
+
+
+def frozen_note(tree: Tree, node: Node, base: dict | None) -> str:
+    """How a frozen clip differs from what the settings would make now, in a few words ('' when it does not, or
+    the record does not say)."""
+    if base is None or not node.made:
+        return ""
+    if node.is_video:
+        k = node.made.get("key") or {}
+        same = (k.get("width"), k.get("height")) == (base.get("width"), base.get("height"))
+        return "" if same or not k.get("width") else f"made at {k['width']}×{k['height']}"
+    s = node.made.get("settings") or {}
+    parts = []
+    if s.get("width") and (s.get("width"), s.get("height")) != (base.get("width"), base.get("height")):
+        parts.append(f"{s['width']}×{s['height']}")
+
+    def speed(d: dict) -> str:
+        if d.get("hyperflow"):
+            return "HyperFlow"
+        if d.get("pika"):
+            return "Pika"
+        return "Turbo" if d.get("turbo") else "no speed LoRA"
+    now = {"turbo": base.get("turbo"), "hyperflow": base.get("hyperflow"), "pika": base.get("pika")}
+    if speed(s) != speed(now):
+        parts.append(speed(s))
+    return ("made at " + ", ".join(parts)) if parts else ""
+
+
 def copy_end_image(project: Path, tree: Tree, src: str, dst: str) -> None:
     """A variant gets its own copy of the end image (deleting one never touches the other's)."""
     rel = tree.nodes[src].end_image
@@ -1552,6 +1680,8 @@ class Checker:
         m = node.made
         if not self._files_there(node):
             st = "new"
+        elif node.frozen:                          # kept as made, whatever the settings say now
+            st = "done"
         elif node.is_video:                        # a real video depends only on its file, range and the size
             base = self.base()
             st = "done" if base is not None and _same_key(m.get("key"), video_key(node, base)) else "changed"
@@ -1568,6 +1698,20 @@ class Checker:
         self._status[nid] = st
         return st
 
+
+    def seam_problem(self, node: Node) -> str | None:
+        """Why a made generated clip no longer joins the clips around it as made (None: it does): what it starts
+        from, its motion guide's source or its end changed. Its own edits are not seams (Undo changes fixes them)."""
+        if node.is_video or not node.made:
+            return None
+        m = node.made
+        if m.get("start_sha1") != self.sha(self.start_frame(node)):
+            return "it no longer starts at the frame it was made from"
+        if m.get("guide_from") != self.guide_from(node):
+            return "the clip its motion guide comes from was made again"
+        if m.get("end_key") != self.end_key(node):
+            return "the video it ends at changed"
+        return None
 
     def why(self, nid: str) -> str:
         """Why a clip counts as changed, in words ('' if it does not)."""
@@ -2715,11 +2859,18 @@ def join_path(project: Path, tree: Tree, nid: str, out: Path | None = None) -> P
     cuts = path_cuts(tree, path, bool(tree.options.get("keep_repeated")))
     target = Path(out) if out else project / "paths" / f"{nid}.mp4"
     target.parent.mkdir(parents=True, exist_ok=True)
-    key = json.dumps([[str(v), v.stat().st_mtime_ns] for v in videos] + [[list(c) for c in cuts]])
+    size = None                    # frozen clips of an older size: every clip scaled to the size clips have now
+    if any(n.frozen for n in path):
+        base = checker.base()
+        sizes = {(i["width"], i["height"]) for i in (chain.probe_source(v) for v in videos)}
+        if base is not None and len(sizes) > 1:
+            size = (int(base["width"]), int(base["height"]))
+    key = json.dumps([[str(v), v.stat().st_mtime_ns] for v in videos] + [[list(c) for c in cuts]] +
+                     ([list(size)] if size else []))
     stamp = target.with_suffix(".json")
     if out is None and target.exists() and stamp.exists() and stamp.read_text() == key:
         return target
-    chain.concat(videos, target, cuts=cuts)
+    chain.concat(videos, target, cuts=cuts, size=size, fill=True)
     if out is None:
         stamp.write_text(key)
     return target

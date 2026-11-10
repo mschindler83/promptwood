@@ -1315,3 +1315,71 @@ def test_hard_cuts(tmp_path):
     assert chain.hard_cuts(smooth) == []
     assert chain.hard_cuts(cut) == [24]
     assert chain.hard_cuts(tmp_path / "missing.mp4") == []
+
+
+def test_freeze_keeps_clips_as_made(project, tmp_path):
+    """Freezing a clip keeps it and every clip before it done whatever the settings say; the clips after it follow
+    the settings; a frozen path of older-size clips joins at the size clips have now; a seam that no longer fits
+    and an unmade clip are refused; unfreezing takes the frozen clips after it along; edits are undone."""
+    t, a, b1, b2, c = build(project)
+    run(project, [c.id], FakeGenerator(frames=17, size=None))
+    t = T.load(project)
+    old = T.Checker(project, t).base()
+    assert T.freeze_problem(project, t, b2.id) == f"clip #{b2.id[1:]} is not made yet (or its files are missing)"
+    assert T.freeze(project, t, b1.id) == [a.id, b1.id]
+    t.options["resolution"] = 256                          # another size: frozen ones stay done, c is made again
+    T.save(project, t)
+    t = T.load(project)
+    assert t.nodes[b1.id].frozen and t.nodes[a.id].frozen and not t.nodes[c.id].frozen       # kept in tree.json
+    st = statuses(project)
+    assert st["a"] == st["b1"] == "done" and st["c"] == "changed"
+    base = T.Checker(project, t).base()
+    assert T.frozen_note(t, t.nodes[a.id], base) == f"made at {old['width']}×{old['height']}"
+    gen = run(project, [c.id], FakeGenerator(frames=17, size=None))
+    assert len(gen.calls) == 1 and gen.calls[0]["prompt"].startswith("c")
+    assert gen.calls[0]["settings"]["width"] == base["width"]
+    t = T.load(project)
+    out = T.join_path(project, t, c.id)                    # two sizes: every clip at the size of now
+    info = chain.probe(out)
+    assert (info["width"], info["height"]) == (base["width"], base["height"]) and info["frames"] == 17 + 16 + 16
+    mixed = project.parent / "mixed.mp4"                  # (the export's join: no size given, the largest one)
+    chain.concat([project / t.nodes[c.id].made["video"], project / t.nodes[a.id].made["video"]], mixed)
+    assert (chain.probe(mixed)["width"], chain.probe(mixed)["height"]) == (old["width"], old["height"])
+    # unfreezing a takes b1 along (a frozen clip needs the ones before it frozen); both follow the settings again
+    assert T.unfreeze(t, a.id) == [a.id, b1.id]
+    T.save(project, t)
+    assert statuses(project)["a"] == "changed"
+    # an edit is undone by freezing
+    t.nodes[b1.id].prompt = "b1 edited"
+    assert T.freeze_edits(t, b1.id) == {b1.id: ["prompt"]}
+    T.freeze(project, t, b1.id)
+    assert t.nodes[b1.id].prompt == "b1" and T.Checker(project, t).status(b1.id) == "done"
+    # a made again: b1 no longer starts where a ends, so it cannot be frozen with it
+    T.unfreeze(t, a.id)
+    t.nodes[a.id].prompt = "a again"
+    T.save(project, t)
+    run(project, [a.id], FakeGenerator(frames=17, size=None))
+    t = T.load(project)
+    assert "no longer starts at the frame it was made from" in T.freeze_problem(project, t, b1.id)
+    assert T.freeze_problem(project, t, a.id) is None
+
+
+def test_frozen_clips_stay_consistent(project):
+    """A frozen clip needs every clip before it frozen and the video it ends at: a tree file that says otherwise is
+    healed; unfreezing a video unfreezes the clip that ends at it; freezing a clip takes its video along."""
+    t = T.load(project)
+    a = t.add(None, "a")
+    v = t.add_video(a.id, "/nowhere/x.mp4", 0.0, 1.0)
+    b = t.add(v.id, "b")
+    for n in (a, v, b):
+        n.made = {"video": "x"}
+    assert [n.id for n in T.freeze_set(t, a.id)] == [a.id, v.id]          # a ends at v's first frame
+    assert [n.id for n in T.freeze_set(t, b.id)] == [a.id, v.id, b.id]
+    a.frozen = v.frozen = b.frozen = True
+    assert T.unfreeze(t, v.id) == [v.id, a.id, b.id] and not (a.frozen or b.frozen)
+    b.frozen = True                                         # b frozen, the ones before it not: healed on load
+    T.save(project, t)
+    assert not T.load(project).nodes[b.id].frozen
+    a.made, a.frozen = None, True                           # never made: not frozen
+    T.save(project, t)
+    assert not T.load(project).nodes[a.id].frozen

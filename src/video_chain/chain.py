@@ -379,14 +379,20 @@ def cut_frames(video: Path, out: Path, first: int, count: int, fps: int = FPS) -
 
 
 def concat(videos: list[Path], out: Path, drop_first: bool = True, fps: int = FPS,
-           cuts: list[tuple[int, int]] | None = None, size: tuple[int, int] | None = None) -> None:
+           cuts: list[tuple[int, int]] | None = None, size: tuple[int, int] | None = None,
+           fill: bool = False) -> None:
     """Join clips into one video. With drop_first, clips 2..n lose their first frame (and its 1/24 s of sound),
     which repeats the last frame of the clip before. cuts instead gives (frames cut at the start, frames cut at
     the end) per clip. Clips without sound get silence, so sound stays in sync. size: fit every clip into this
-    frame (aspect kept, black bars), for parts of different sizes (a film's scenes)."""
+    frame (aspect kept, black bars), for parts of different sizes (a film's scenes); fill: cover the frame instead
+    (a few pixels cut off rather than thin bars, for clips of about the same shape). Clips of different sizes
+    without a size (e.g. a frozen clip made at an older resolution) are scaled to the largest of them, filled."""
     if not videos:
         raise ValueError("nothing to join")
     infos = [probe(v) for v in videos]
+    if size is None and len({(i["width"], i["height"]) for i in infos}) > 1:
+        big = max(infos, key=lambda i: i["width"] * i["height"])
+        size, fill = (big["width"], big["height"]), True
     if cuts is None:
         cuts = [(1 if (drop_first and k > 0) else 0, 0) for k in range(len(videos))]
     any_audio = any(i["audio"] for i in infos)
@@ -400,8 +406,11 @@ def concat(videos: list[Path], out: Path, drop_first: bool = True, fps: int = FP
         if info["frames"] - skip - cut_end < 1:              # never cut a clip away completely
             skip, cut_end = 0, 0
         stop = info["frames"] - cut_end
-        fit = (f",scale={size[0]}:{size[1]}:force_original_aspect_ratio=decrease:flags=lanczos,"
-               f"pad={size[0]}:{size[1]}:(ow-iw)/2:(oh-ih)/2,setsar=1") if size else ""
+        fit = "" if not size else (
+            f",scale={size[0]}:{size[1]}:force_original_aspect_ratio=increase:flags=lanczos,"
+            f"crop={size[0]}:{size[1]},setsar=1" if fill else
+            f",scale={size[0]}:{size[1]}:force_original_aspect_ratio=decrease:flags=lanczos,"
+            f"pad={size[0]}:{size[1]}:(ow-iw)/2:(oh-ih)/2,setsar=1")
         filters.append(f"[{k}:v]trim=start_frame={skip}:end_frame={stop},setpts=PTS-STARTPTS,fps={fps}{fit}[v{k}]")
         labels.append(f"[v{k}]")
         if any_audio:
