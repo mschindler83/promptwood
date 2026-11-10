@@ -34,6 +34,7 @@ from .. import film as F
 from .. import camera as CAM
 from .. import swap
 from .. import tree as T
+from .. import tts as TTS
 from ..comfy import REF_HINT
 from .graph import START, GraphView, NodeInfo
 from .image_picker import pick_image
@@ -47,6 +48,7 @@ from .timeline import Block, Timeline
 from .storyboard import Storyboard
 from .face_crop import FaceCropDialog
 from .prompt_refiner import RefineDialog, replace_text
+from .tts_dialog import VoiceTtsDialog, run_dialog as run_voice_dialog
 from .image_edit import EDITS_DIR, ImageEditDialog, project_edits, record_use, uses_of
 from .video_editor import VideoRangeDialog, choose_video
 from .theme import icon, repolish, theme
@@ -481,6 +483,9 @@ class _Bridge(QObject):
     copied = Signal(str, str)                  # Save as: target folder, error ('' = done)
     converted = Signal(str, object, str, str, str)  # video node id, record or None, error, token, project
     llm_room = Signal(str)                     # ComfyUI's models were unloaded for the llama.cpp server (why)
+    spoken = Signal(str, object, str, str)     # clip id, rendered lines (tts.render_lines) or None, error, project
+    tts_log = Signal(str)                      # a step of text to speech
+    eleven_models = Signal(object, str)        # ElevenLabs' TTS models or None, error
 
 
 # ----------------------------------------------------------------------------- path card
@@ -559,6 +564,7 @@ class PromptCard(QFrame):
                 self.b_compare = b
         self._can_compare = False
         self.frozen, self._on = False, True
+        self.has_lines = False                   # its prompt has a spoken line (text to speech can speak it)
         self.b_freeze = icon_button("lock", FREEZE_TIP, checkable=True)
         self.b_freeze.clicked.connect(lambda _=False: self.action.emit("freeze_toggle", self.nid))
         head.insertWidget(head.count() - 1, self.b_freeze)
@@ -689,6 +695,12 @@ class PromptCard(QFrame):
             "for music, a background or a voice-over.<br><b>Off</b>: the reference model hears the sound and makes "
             "the picture to it (lips in sync), which often keeps the body still.</p>")
         sb.addWidget(self.src_sound)
+        self.b_speak = QPushButton("Speak the lines (text to speech)")
+        self.b_speak.setToolTip("Speak this clip's lines (\"...\" after @Name) with text to speech, each in its "
+                                "speaker's voice, and make them the clip's sound: the picture is made to it, lips "
+                                "in sync. The provider (Qwen3-TTS local / ElevenLabs) is set in the Cast tab")
+        self.b_speak.clicked.connect(lambda: self.action.emit("speak", self.nid))
+        sb.addWidget(self.b_speak)
         sb.addWidget(self.sound_over)
         sb.addWidget(self.src_sound_info)
         link.addRow("Sound", self.sound_box)
@@ -891,7 +903,7 @@ class PromptCard(QFrame):
         edit = self._on and not self.frozen
         self.edit.setReadOnly(not edit)
         for w in (self.seed, self.b_seed, self.length, self.steps, self.loras, self.guide, self.src_sound,
-                  self.sound_over, self.b_refine):
+                  self.sound_over, self.b_refine, self.b_speak):
             w.setEnabled(edit)
         for w in self.buttons:
             w.setEnabled(self._on)
@@ -1024,7 +1036,7 @@ class PromptCard(QFrame):
             track = isinstance(d, str) and d.startswith(T.TRACK_PREFIX)
             ok = d is None or d == cur or track or (available if d is True else repeat)
             model.item(k).setEnabled(ok)
-        some = available or repeat or bool(cur) or self.src_sound.count() > len(SOUND_MODES)
+        some = available or repeat or bool(cur) or self.src_sound.count() > len(SOUND_MODES) or self.has_lines
         self._link.setRowVisible(self.sound_box, some)
         self.src_sound.setEnabled(not self.edit.isReadOnly() and some)
         self.src_sound_info.setText(info if cur else "")
@@ -1374,6 +1386,12 @@ class MainWindow(QMainWindow):
         self.bridge.copied.connect(self._copied)
         self.bridge.converted.connect(self._converted)
         self.bridge.llm_room.connect(self._llm_room_made)
+        self.bridge.spoken.connect(self._lines_spoken)
+        self.bridge.eleven_models.connect(self._fill_eleven_models)
+        self.bridge.tts_log.connect(lambda m: (self.log.appendPlainText("TTS: " + m), self.status.setText(m + "…")))
+        self._tts_local: TTS.LocalTTS | None = None
+        self._tts_busy = False
+        self._eleven_voices: list | None = None
         self.h3_loras: list[tuple[str, str]] = []
         self.qwen_loras: list[tuple[str, str]] = []
         self.image_loras: dict[str, list[tuple[str, str]]] = {}
@@ -1549,12 +1567,17 @@ class MainWindow(QMainWindow):
         self.b_voice_file.clicked.connect(self._voice_from_file)
         self.b_voice_clip = QPushButton("From clip")
         self.b_voice_clip.clicked.connect(self._voice_from_selected)
+        self.b_voice_tts = QPushButton("TTS…")
+        self.b_voice_tts.setToolTip("Make the voice with text to speech: designed from a description (Qwen3-TTS, "
+                                    "local) or one of your ElevenLabs voices. Its lines can then be spoken with it "
+                                    "(Speak the lines on a clip)")
+        self.b_voice_tts.clicked.connect(self._voice_with_tts)
         self.b_voice_play = icon_button("play", "Listen to the voice")
         self.b_voice_play.clicked.connect(self._play_voice)
         self.b_voice_del = icon_button("x", "Remove the voice")
         self.b_voice_del.clicked.connect(self._remove_voice)
         vrow.addWidget(self.char_voice, 1)
-        for b in (self.b_voice_file, self.b_voice_clip, self.b_voice_play, self.b_voice_del):
+        for b in (self.b_voice_file, self.b_voice_clip, self.b_voice_tts, self.b_voice_play, self.b_voice_del):
             vrow.addWidget(b)
         iv.addLayout(vrow)
         self.refs = QListWidget()
@@ -1606,6 +1629,26 @@ class MainWindow(QMainWindow):
         self.dialogue_lang.setToolTip("The language of the spoken lines (\"...\" in a prompt); the model gets each "
                                       "line as <d>[Language] ...</d> when a character speaks with its voice")
         irow.addRow("Speech", self.dialogue_lang)
+        self.tts_provider = QComboBox()
+        for k, text in TTS.PROVIDERS.items():
+            self.tts_provider.addItem(text, k)
+        self.tts_provider.setToolTip("Who speaks the lines with text to speech (Speak the lines on a clip, TTS… for a "
+                                     "voice): Qwen3-TTS on this computer, cloning each character's voice sample, or "
+                                     "ElevenLabs with your API key (Settings), in each character's ElevenLabs voice")
+        irow.addRow("Text to speech", self.tts_provider)
+        mrow = QHBoxLayout()
+        self.eleven_model = QComboBox()
+        self.eleven_model.setToolTip("The ElevenLabs model the lines are spoken with")
+        self.eleven_model.addItem(TTS.DEFAULT_OPTIONS["eleven_model"], TTS.DEFAULT_OPTIONS["eleven_model"])
+        self.b_eleven_models = icon_button("rotate", "Ask ElevenLabs for its models")
+        self.b_eleven_models.clicked.connect(self._load_eleven_models)
+        mrow.addWidget(self.eleven_model, 1)
+        mrow.addWidget(self.b_eleven_models)
+        self._eleven_row = QWidget()
+        self._eleven_row.setLayout(mrow)
+        mrow.setContentsMargins(0, 0, 0, 0)
+        irow.addRow("ElevenLabs model", self._eleven_row)
+        self._tts_form = irow
         iv.addLayout(irow)
         self.ref_hint = QCheckBox("Tie each person to their face in the prompt")
         self.ref_hint.setChecked(True)
@@ -1620,6 +1663,8 @@ class MainWindow(QMainWindow):
         self.ref_size.currentIndexChanged.connect(self._identity_changed)
         self.ref_hint.toggled.connect(self._identity_changed)
         self.dialogue_lang.activated.connect(self._identity_changed)          # a finished choice, not each key
+        self.tts_provider.currentIndexChanged.connect(self._tts_changed)
+        self.eleven_model.currentIndexChanged.connect(self._tts_changed)
         self.dialogue_lang.lineEdit().editingFinished.connect(self._identity_changed)
 
         bar, _ = section_bar("Audio tracks", left)
@@ -1924,6 +1969,19 @@ class MainWindow(QMainWindow):
         crow.addWidget(b_key)
         a.addRow("CivitAI API key", crow)
         self._show_civitai_key()
+        erow = QHBoxLayout()
+        self.eleven_key = QLineEdit()
+        self.eleven_key.setEchoMode(QLineEdit.Password)
+        self.eleven_key.setToolTip("Your ElevenLabs API key (elevenlabs.io → Developers → API keys), for text to "
+                                   "speech with ElevenLabs. Kept in the system keyring, never in a settings file or "
+                                   "a project; sent only to ElevenLabs. ($ELEVENLABS_API_KEY wins when it is set.)")
+        b_ekey = QPushButton("Save key")
+        b_ekey.setAutoDefault(False)
+        b_ekey.clicked.connect(lambda: self._save_eleven_key())
+        erow.addWidget(self.eleven_key, 1)
+        erow.addWidget(b_ekey)
+        a.addRow("ElevenLabs API key", erow)
+        self._show_eleven_key()
         krow = QHBoxLayout()
         self.keep_loaded = QCheckBox("Keep the model loaded for")
         self.keep_loaded.setChecked(True)
@@ -3037,6 +3095,12 @@ class MainWindow(QMainWindow):
             self.ref_size.setCurrentIndex(max(0, self.ref_size.findData(ident.get("size", "match"))))
             self.ref_hint.setChecked(bool(ident.get("hint", True)))
             self.dialogue_lang.setCurrentText(ident.get("language") or "English")
+            topt = TTS.options(o)
+            self.tts_provider.setCurrentIndex(max(0, self.tts_provider.findData(topt["provider"])))
+            if self.eleven_model.findData(topt["eleven_model"]) < 0:
+                self.eleven_model.addItem(topt["eleven_model"], topt["eleven_model"])
+            self.eleven_model.setCurrentIndex(self.eleven_model.findData(topt["eleven_model"]))
+            self._tts_form.setRowVisible(self._eleven_row, topt["provider"] == "elevenlabs")
             turbo = o.get("turbo") or {}
             self.speed.setCurrentIndex(self.speed.findData(
                 "turbo" if turbo.get("on") else "hyperflow" if (o.get("hyperflow") or {}).get("on")
@@ -3193,15 +3257,22 @@ class MainWindow(QMainWindow):
         """(start()'s thread, just before the llama.cpp server starts) Too little free VRAM for it: ComfyUI is asked
         to unload its models (the clip / image model loads again when it is needed). While clips are generated it
         refuses instead (their run keeps its VRAM)."""
-        from ..llm_server import LlmServerError, free_vram_mb, vram_needed_mb
-        need = vram_needed_mb(llama.model, llama.cpu_moe, llama.mmproj)
+        from ..llm_server import LlmServerError, vram_needed_mb
+        self._make_room(vram_needed_mb(llama.model, llama.cpu_moe, llama.mmproj), url, "the llama.cpp model",
+                        LlmServerError, "refine after the run, or choose a ComfyUI model", settle)
+
+    def _make_room(self, need: int, url: str, what: str, error=RuntimeError, later: str = "try again after the run",
+                   settle: float = 15.0) -> None:
+        """(a worker thread, before a model of this app starts) Too little free VRAM for need MB: ComfyUI is asked to
+        unload its models; while clips are generated: error instead (their run keeps its VRAM)."""
+        from ..llm_server import free_vram_mb
         free = free_vram_mb()
         if free is None or free >= need:
             return
         gb = lambda mb: f"{mb / 1024:.1f} GB"   # noqa: E731
         if self.running:
-            raise LlmServerError(f"only {gb(free)} of VRAM is free while clips are generated and the llama.cpp model "
-                                 f"needs about {gb(need)}; refine after the run, or choose a ComfyUI model")
+            raise error(f"only {gb(free)} of VRAM is free while clips are generated and {what} needs about "
+                        f"{gb(need)}; {later}")
         try:
             req = urllib.request.Request(url + "/free", data=b'{"unload_models": true, "free_memory": true}',
                                          headers={"Content-Type": "application/json"}, method="POST")
@@ -3216,7 +3287,7 @@ class MainWindow(QMainWindow):
             if now is None or now >= need:
                 break
         self.bridge.llm_room.emit(
-            f"ComfyUI's models were unloaded for the llama.cpp model (it needs about {gb(need)} of VRAM, "
+            f"ComfyUI's models were unloaded for {what} (it needs about {gb(need)} of VRAM, "
             f"{gb(free)} was free" + (f", now {gb(now)}" if now is not None else "") +
             "); the clip model loads again before the next clips.")
 
@@ -3259,6 +3330,181 @@ class MainWindow(QMainWindow):
                 self._scan_triggers()
         else:
             self.status.setText("CivitAI API key removed.")
+
+    def _show_eleven_key(self):
+        has = bool(TTS.eleven_key())
+        self.eleven_key.clear()
+        self.eleven_key.setPlaceholderText("a key is kept (type a new one, or save empty to remove it)" if has else
+                                           "none: paste your key for text to speech with ElevenLabs")
+
+    def _save_eleven_key(self):
+        key = self.eleven_key.text().strip()
+        try:
+            TTS.set_eleven_key(key)
+        except RuntimeError as e:
+            QMessageBox.warning(self, "ElevenLabs API key", f"Could not keep the key: {e}")
+            return
+        self._eleven_voices = None
+        self._show_eleven_key()
+        self.status.setText("ElevenLabs API key kept in the system keyring." if key else "ElevenLabs API key removed.")
+
+    def _tts_changed(self, *_):
+        if self._loading or self.tree is None:
+            return
+        provider = self.tts_provider.currentData()
+        self._tts_form.setRowVisible(self._eleven_row, provider == "elevenlabs")
+        new = {"provider": provider, "eleven_model": self.eleven_model.currentData() or
+               TTS.DEFAULT_OPTIONS["eleven_model"]}
+        if TTS.options(self.tree) != new:
+            self.tree.options["tts"] = new
+            self._changed()                         # (a spoken track is made with it; clips do not depend on it)
+        if provider == "elevenlabs" and not TTS.eleven_key():
+            self.status.setText("ElevenLabs needs your API key: Settings → ElevenLabs API key.")
+
+    def _load_eleven_models(self):
+        def work():
+            try:
+                self.bridge.eleven_models.emit(TTS.ElevenLabs().models(), "")
+            except Exception as e:  # noqa: BLE001
+                self.bridge.eleven_models.emit(None, str(e))
+        self.status.setText("Asking ElevenLabs for its models…")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _fill_eleven_models(self, models, err: str):
+        if models is None:
+            self.status.setText(f"Could not ask ElevenLabs: {err}")
+            return
+        cur = self.eleven_model.currentData()
+        self.eleven_model.blockSignals(True)
+        self.eleven_model.clear()
+        for m in models:
+            self.eleven_model.addItem(f"{m['name']} ({m['id']})", m["id"])
+        if self.eleven_model.findData(cur) < 0:
+            self.eleven_model.addItem(cur, cur)
+        self.eleven_model.setCurrentIndex(self.eleven_model.findData(cur))
+        self.eleven_model.blockSignals(False)
+        self.status.setText(f"ElevenLabs offers {len(models)} text to speech models.")
+
+    # ---- text to speech
+    def local_tts(self) -> "TTS.LocalTTS":
+        """The app's Qwen3-TTS worker (started on demand; stop_tts unloads it)."""
+        if self._tts_local is None:
+            d = Path.home() / ".cache" / "video-chain"
+            d.mkdir(parents=True, exist_ok=True)
+            self._tts_local = TTS.LocalTTS(log=d / "tts-worker.log")
+        url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL).rstrip("/")
+        self._tts_local.before_launch = lambda _w: self._make_room(TTS.LOCAL_VRAM_MB, url, "Qwen3-TTS",
+                                                                   TTS.TtsError, "speak the lines after the run")
+        return self._tts_local
+
+    def stop_tts(self, why: str = "") -> bool:
+        stopped = bool(self._tts_local is not None and self._tts_local.stop())
+        if stopped and why:
+            self.log.appendPlainText(f"Stopped Qwen3-TTS ({why}).")
+        return stopped
+
+    def _tts_engine(self):
+        return TTS.engine(self.tree, self.local_tts())
+
+    def speak_clip(self, nid: str) -> bool:
+        """Speak a clip's lines with text to speech (in a thread); _lines_spoken makes them its sound."""
+        if self.tree is None or self.running or nid not in self.tree.nodes:
+            return False
+        if self._tts_busy:
+            self.status.setText("Text to speech is busy; wait until it is done.")
+            return False
+        node = self.tree.nodes[nid]
+        eng = self._tts_engine()
+        bad = TTS.line_problems(self.tree, node, eng.name) + eng.problems()
+        if bad:
+            self.status.setText(f"Cannot speak the lines of clip #{nid[1:]}: " + "; ".join(bad) + ".")
+            return False
+        snap, project = copy.deepcopy(self.tree), self.project
+        self._tts_busy = True
+        self._update_buttons()
+        self.status.setText(f"Speaking the lines of clip #{nid[1:]} ({TTS.PROVIDERS[eng.name]})…")
+
+        def work():
+            try:
+                r = TTS.render_lines(project, snap, nid, eng, log=self.bridge.tts_log.emit)
+                self.bridge.spoken.emit(nid, r, "", str(project))
+            except Exception as e:  # noqa: BLE001
+                self.bridge.spoken.emit(nid, None, str(e), str(project))
+            finally:
+                if eng.name == "local":
+                    eng.stop()                      # (unloaded right after: its VRAM back for ComfyUI)
+        threading.Thread(target=work, daemon=True).start()
+        return True
+
+    def _lines_spoken(self, nid: str, r, err: str, project: str):
+        self._tts_busy = False
+        self._update_buttons()
+        if self.project is None or str(self.project) != project or self.tree is None or nid not in self.tree.nodes:
+            if r:                                   # (another project now, or the clip is gone: not used)
+                (Path(project) / r["file"]).unlink(missing_ok=True)
+            return
+        if r is None:
+            self.status.setText(f"Could not speak the lines of clip #{nid[1:]}: {err}")
+            return
+        node = self.tree.nodes[nid]
+        if node.frozen:
+            (self.project / r["file"]).unlink(missing_ok=True)
+            self._frozen_block(node, "speak")
+            return
+        try:
+            done = TTS.apply_lines(self.project, self.tree, nid, r)
+        except TTS.TtsError as e:
+            (self.project / r["file"]).unlink(missing_ok=True)
+            self.status.setText(f"Could not use the spoken lines of clip #{nid[1:]}: {e}")
+            return
+        self._write_tree()
+        self.refresh(rebuild_path=True)
+        msg = (f"Clip #{nid[1:]}: {done['lines']} line{'s' if done['lines'] != 1 else ''} spoken ({done['secs']:.1f} s)"
+               f" and made its sound (track “{T.track_of(self.tree, done['track'])['name']}”); the picture is made "
+               "to it, lips in sync.")
+        if done["frames"]:
+            msg += f" The clip is now {done['frames'] / 24:.1f} s long, so the lines fit."
+        if r.get("prompt") != node.prompt:
+            msg += " (The prompt was changed meanwhile: speak again if its lines changed.)"
+        self.status.setText(msg)
+
+    def _voice_with_tts(self):
+        c = self._selected_character()
+        if c is None or not self._cast_edit_ok():
+            return
+        if self._tts_busy:
+            self.status.setText("Text to speech is busy; wait until it is done.")
+            return
+        opts = TTS.options(self.tree)
+        desc = c.get("desc") or ""
+        dlg = VoiceTtsDialog(self, c["name"], desc, TTS.language(self.tree), opts["provider"], opts["eleven_model"],
+                             play=lambda path, title: self.preview.open(Path(path), title),
+                             local=lambda w=self.local_tts(): w, eleven=TTS.ElevenLabs,
+                             voices_cache=self._eleven_voices)
+        self._tts_busy = True
+        try:
+            ok = run_voice_dialog(dlg)
+            self._eleven_voices = getattr(dlg, "voices", None) or self._eleven_voices
+            if ok and dlg.made is not None and dlg.wav.is_file():
+                before = self._done_clips()
+                try:
+                    entry = TTS.use_sample(self.project, self.tree, c["name"], dlg.wav, dlg.made["label"],
+                                           dlg.made["text"], dlg.made["eleven"])
+                except (ValueError, OSError, RuntimeError) as e:
+                    self.status.setText(f"Could not set the voice: {e}")
+                    return
+                self._show_references(select=c["name"])
+                self._write_tree()
+                self._changed()
+                msg = f"Voice of @{c['name']} set with text to speech ({entry['secs']:.1f} s)."
+                self.status.setText(msg)
+                if self._report_remade(before, f"Voice of @{c['name']} set"):
+                    self.status.setText(msg + " " + self.status.text())
+        finally:
+            self._tts_busy = False
+            self.preview.stop()                     # (it may still play the sample, whose folder goes now)
+            dlg.cleanup()
+            self.stop_tts("the voice window was closed")
 
     def _triggers_found(self, counts: dict):
         self._trigger_scan = None
@@ -3666,7 +3912,8 @@ class MainWindow(QMainWindow):
         c = self._selected_character()
         idle = self.project is not None and not self.running
         v = bool(c and c.get("voice"))
-        for w in (self.b_char_rename, self.b_char_del, self.char_desc, self.char_lead, self.b_voice_file):
+        for w in (self.b_char_rename, self.b_char_del, self.char_desc, self.char_lead, self.b_voice_file,
+                  self.b_voice_tts):
             w.setEnabled(idle and c is not None)
         self.b_voice_del.setEnabled(idle and v)
         self.b_voice_play.setEnabled(v)
@@ -4759,6 +5006,8 @@ class MainWindow(QMainWindow):
                                                                                             " exactly as recorded,")
                             + " Laid over: the clip is made without it (full motion, no lip sync) and gets it "
                               "afterwards; it may be shorter than 2 s.")
+                card.has_lines = bool(T.spoken_lines(n.prompt))
+                card.b_speak.setVisible(card.has_lines)
                 card.set_source_sound(avail, info, max_guide, rep_ok)
                 card.set_summary(" · ".join(self._own_parts(n)))
                 card.set_veda(self.veda_used(n))
@@ -5155,6 +5404,9 @@ class MainWindow(QMainWindow):
         if action == "revert" and node is not None and not node.is_video:
             self.revert_clip(node.id)
             return
+        if action == "speak" and node is not None and not node.is_video:
+            self.speak_clip(node.id)
+            return
         if action == "refine" and node is not None and not node.is_video:
             card = next((c for c in self.cards if c.nid == node.id and isinstance(c, PromptCard)), None)
             if card is not None:
@@ -5223,7 +5475,7 @@ class MainWindow(QMainWindow):
             self.cards[-1].edit.setFocus()
 
     # what a frozen clip / video cannot do: it would change the clip as made (or what it ends at)
-    FROZEN_LOCKED = {"end_image", "end_video", "end_ai", "end_clear", "revert", "refine", "handover",
+    FROZEN_LOCKED = {"end_image", "end_video", "end_ai", "end_clear", "revert", "refine", "speak", "handover",
                      "handover_clear", "edit", "split", "swap", "swap_undo", "video"}
 
     def _frozen_block(self, node: T.Node, action: str) -> bool:
@@ -6073,6 +6325,10 @@ class MainWindow(QMainWindow):
                 acts[hand] = "handover"
                 if T.handover_index(self.tree, node) is not None:
                     acts[m.addAction("Hand over at the last frame")] = "handover_clear"
+                if T.spoken_lines(node.prompt):
+                    sp = m.addAction("Speak the lines with text to speech")
+                    sp.setEnabled(not self._tts_busy)
+                    acts[sp] = "speak"
                 ai = m.addAction("Edit an image with AI…")
                 acts[ai] = "edit_ai"
                 cmp_ = m.addAction("Compare with its variants…")
@@ -6510,6 +6766,9 @@ class MainWindow(QMainWindow):
             return
         if self._converts:
             self.status.setText("Wait until the video is converted.")
+            return
+        if self._tts_busy:
+            self.status.setText("Wait until text to speech is done.")
             return
         problems = []
         turbo = self.tree.options.get("turbo") or {}
@@ -7073,6 +7332,7 @@ class MainWindow(QMainWindow):
         if getattr(self, "_trigger_scan", None) is not None:
             self._trigger_scan.set()                  # the trigger word lookup stops at the next file
         self.stop_llama()                             # never leave the language model server behind
+        self.stop_tts()
         if self.proc is not None:                    # never leave the generator (and the model) behind
             p, self.proc = self.proc, None
             p.finished.disconnect()

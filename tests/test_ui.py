@@ -3389,3 +3389,90 @@ def test_freeze_a_clip_on_its_card(app, win, tmp_path, image):
     card = next(c for c in win.cards if c.nid == b)
     assert not card.frozen and not card.edit.isReadOnly()
     assert win.state(a) == "changed" and "CHANGED" in win.status.text()
+
+
+def test_text_to_speech_in_the_app(app, win, tmp_path, image, monkeypatch):
+    """Speak the lines on a card (a fake engine) makes them the clip's sound; a voice made in the TTS window becomes
+    the character's voice; the provider and the ElevenLabs key are kept (the key in the keyring only)."""
+    import subprocess
+
+    from video_chain import tree as T
+    from video_chain import tts as TTS
+    from video_chain.ui import main_window as M
+    monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+
+    def tone(path, secs):
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"sine=frequency=300:duration={secs}",
+                        str(path)], check=True)
+
+    class Fake:
+        name = "local"
+        stopped = 0
+
+        def problems(self, **_k):
+            return []
+
+        def transcribe(self, audio, lang=None):
+            return "sample words"
+
+        def clone(self, text, lang, ref, ref_text, out, seed=None):
+            tone(out, 1.5)
+
+        def design(self, text, lang, instruct, out, seed=None):
+            tone(out, 4.0)
+
+        def stop(self):
+            Fake.stopped += 1
+            return True
+    fake = Fake()
+    ids = new_project(win, tmp_path, image, ("@Anna waves.",))
+    nid = ids[0]
+    T.add_character(win.project, win.tree, "Anna", desc="young woman")
+    win.refresh(rebuild_path=True)
+    card = next(c for c in win.cards if c.nid == nid)
+    assert not card.b_speak.isVisibleTo(card)                # no spoken line yet
+    type_prompt(win, nid, '@Anna waves and says "Hallo, schön dich zu sehen."')
+    win.refresh(rebuild_path=True)
+    card = next(c for c in win.cards if c.nid == nid)
+    assert card.b_speak.isVisibleTo(card)
+    monkeypatch.setattr(win, "_tts_engine", lambda: fake)
+    win.node_action("speak", nid)
+    assert "no voice sample" in win.status.text()            # Anna has no voice yet
+    # a voice from the TTS window (its sample made by the fake engine)
+    win._show_references(select="Anna")
+    assert win._selected_character()["name"] == "Anna" and win.b_voice_tts.isEnabled()
+    win._tts_local = fake                                    # the app's worker (local_tts gives it its room check)
+
+    def accept(dlg):
+        dlg.desc.setPlainText("warm young voice")
+        dlg._make()
+        wait(app, lambda: dlg.made is not None or "Could not" in dlg.info.text(), timeout=30)
+        return dlg.made is not None
+    monkeypatch.setattr(M, "run_voice_dialog", accept)
+    win._voice_with_tts()
+    c = T.character(win.tree, "Anna")
+    assert c["voice"]["name"].startswith("designed: warm young voice") and c["voice"]["text"]
+    assert "set with text to speech" in win.status.text() and Fake.stopped >= 1
+    assert win.played and win.played[-1].name == "sample.wav"           # the sample was played
+    # now the lines
+    assert win.speak_clip(nid)
+    wait(app, lambda: not win._tts_busy, timeout=30)
+    node = win.tree.nodes[nid]
+    tr = T.track_of(win.tree, T.track_id(node))
+    assert tr and tr["tts"]["clip"] == nid and "spoken" in win.status.text()
+    assert T.load(win.project).nodes[nid].overrides["source_sound"] == T.TRACK_PREFIX + tr["id"]   # saved
+    # a frozen clip's lines are not spoken
+    win.tree.nodes[nid].frozen = True
+    win.node_action("speak", nid)
+    assert "is frozen" in win.status.text()
+    win.tree.nodes[nid].frozen = False
+    # provider + key
+    win.tts_provider.setCurrentIndex(win.tts_provider.findData("elevenlabs"))
+    assert TTS.options(win.tree)["provider"] == "elevenlabs" and "API key" in win.status.text()
+    assert win._tts_form.isRowVisible(win._eleven_row)
+    win.eleven_key.setText(" sk_abc ")
+    win._save_eleven_key()
+    assert TTS.eleven_key() == "sk_abc" and win.eleven_key.text() == "" and "kept" in win.eleven_key.placeholderText()
+    win.eleven_key.setText("")
+    win._save_eleven_key()
+    assert TTS.eleven_key() == ""

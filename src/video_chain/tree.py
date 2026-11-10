@@ -76,7 +76,8 @@ DEFAULT_OPTIONS = {"model": "Comfy-Org/MiniMax-H3", "frames": 73, "steps": 28,
                    "veda": {"on": True},
                    # the cast: characters with face pictures (copies in refs/); a prompt mentions them as @Name and
                    # the clip is made with exactly their pictures. A clip that mentions nobody gets the lead's.
-                   # [{"name", "images": [rel], "desc", "lead": bool, "voice": {"file", "name", "secs"} (optional)}]
+                   # [{"name", "images": [rel], "desc", "lead": bool, "voice": {"file", "name", "secs", "text"}
+                   #   (optional), "tts": {"eleven": {"id", "name"}} (optional: its ElevenLabs voice)}]
                    "cast": [],
                    # how the face pictures are used: their size for the model, and the sentence tying a person to
                    # their picture, the language of spoken lines (dialogue tags for voices)
@@ -471,6 +472,11 @@ def _migrate_cast(options: dict, has_cast: bool) -> None:
             if isinstance(v, dict) and isinstance(v.get("file"), str) and v["file"]:
                 entry["voice"] = {"file": v["file"], "name": str(v.get("name") or ""),
                                   "secs": float(v.get("secs") or 0)}
+                if isinstance(v.get("text"), str) and v["text"].strip():
+                    entry["voice"]["text"] = v["text"].strip()      # what it says (text to speech clones it)
+            el = (c.get("tts") or {}).get("eleven") if isinstance(c.get("tts"), dict) else None
+            if isinstance(el, dict) and isinstance(el.get("id"), str) and el["id"]:
+                entry["tts"] = {"eleven": {"id": el["id"], "name": str(el.get("name") or el["id"])}}
             cast.append(entry)
     options["cast"] = cast
 
