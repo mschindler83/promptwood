@@ -21,11 +21,11 @@ from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QIcon, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (QButtonGroup, QSlider, QStackedWidget, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
                                QFrame, QGridLayout, QHBoxLayout, QInputDialog, QLineEdit, QListWidget,
-                               QListWidgetItem, QMessageBox,
+                               QFileDialog, QListWidgetItem, QMessageBox,
                                QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSpinBox, QVBoxLayout,
                                QWidget)
 
-from .image_picker import pick_image
+from .image_picker import IMAGE_EXTS, pick_image
 from ..comfy import EDIT_MODELS
 from ..triggers import stack_words, with_triggers
 from ..imagegen import FAMILIES, SAMPLERS, SCHEDULERS, default_sampling, size_for
@@ -40,6 +40,8 @@ MAX_RESULTS = 20                           # results per Generate (made one afte
 SEED_MAX = 2**31 - 1                      # (the seeds ComfyUI's image samplers take here)
 
 EDITS_DIR = "edits"
+FOLDER_ITEM, FOLDER_PREFIX = "\x00choose-folder", "\x00folder:"   # the source list's folder entries
+ASK_ABOVE = 40                             # a folder Generate of more images than this asks first
 MOSS_EDIT_QUALITIES = {"standard": "Standard (30 steps)"}
 LORA_FAMILY = {"chroma": "flux1"}         # Chroma LoRAs have FLUX.1's layer names (and FLUX.1 LoRAs often work)
 QUALITY_TEXT = {"fast": "Fast (Lightning, 4 steps)", "standard": "Standard (20 steps)", "best": "Best (40 steps, slow)"}
@@ -233,6 +235,11 @@ class ImageEditDialog(QDialog):
         self._loader.ready.connect(self._thumb_ready)
         self.closed = False
         self.source: str | None = None
+        self.batch: list[str] = []                       # a folder chosen: its images (each edited in turn)
+        self._batch_dir = ""
+        self._batch_names: list[str] = []                # (the images of the running Generate, for its progress)
+        self._per_image = 1
+        self._skipped: list[str] = []
         self.editor = None
         self._busy = False
         self._cancel = False
@@ -272,10 +279,12 @@ class ImageEditDialog(QDialog):
         self.src_tile.clicked.connect(lambda _t: self._choose_source())
         ev.addWidget(self.src_tile)
         self.src_combo = QComboBox()
-        self.src_combo.setToolTip("Images of this project; or Choose file… for any image")
+        self.src_combo.setToolTip("Images of this project; Choose file… for any image; Choose folder… to edit "
+                                  "every image of a folder in turn with the same settings")
         for text, path in sources:
             self.src_combo.addItem(text, path)
         self.src_combo.addItem("Choose file…", None)
+        self.src_combo.addItem("Choose folder…", FOLDER_ITEM)
         self.src_combo.activated.connect(self._source_picked)
         ev.addWidget(self.src_combo)
         self.src_info = label("", level="tertiary")
@@ -735,6 +744,7 @@ class ImageEditDialog(QDialog):
         self.quality.blockSignals(False)
         self.loras.set_items(self._known(), self._remembered_loras())
         self._create_widgets()
+        self._variations_changed()
         if create and self._families_error:
             self.state.setText(f"Cannot list the models: {self._families_error}")
             self.b_start_comfy.setVisible("not reachable" in self._families_error and self.start_comfy is not None)
@@ -897,14 +907,80 @@ class ImageEditDialog(QDialog):
         path = self.src_combo.itemData(i)
         if path is None:
             self._choose_source()
+        elif path == FOLDER_ITEM:
+            self._choose_folder()
+        elif path.startswith(FOLDER_PREFIX):
+            self.set_folder(path[len(FOLDER_PREFIX):])
         else:
             self.set_source(path)
+
+    def _choose_folder(self):
+        start = self.qs.value("editFolder", "", type=str) if self.qs is not None else ""
+        d = QFileDialog.getExistingDirectory(self, "Folder of images to edit (each one in turn)", start)
+        if d:
+            self.set_folder(d)
+        else:
+            self._select_source_item()
+
+    def _select_source_item(self):
+        """The source list shows what is chosen: the folder, the image or (any other file) Choose file…"""
+        key = (FOLDER_PREFIX + self._batch_dir) if self.batch else self.source
+        i = self.src_combo.findData(key) if key else -1
+        self.src_combo.setCurrentIndex(i if i >= 0 else self.src_combo.findData(None))
+
+    @staticmethod
+    def folder_images(folder: str | Path) -> list[str]:
+        """The images directly in a folder (not its subfolders), by name (img2 before img10)."""
+        import re as _re
+        try:
+            files = [f for f in Path(folder).iterdir() if f.is_file() and f.suffix.lower() in IMAGE_EXTS
+                     and not f.name.startswith(".")]
+        except OSError:
+            return []
+        return [str(f) for f in sorted(files, key=lambda f: [int(t) if t.isdigit() else t for t in
+                                                             _re.split(r"(\d+)", f.name.lower())])]
+
+    def set_folder(self, folder: str) -> bool:
+        """Edit every image of a folder in turn (shown: the first). False if it has none."""
+        imgs = self.folder_images(folder)
+        if not imgs:
+            self.state.setText(f"No images in {Path(folder).name or folder} (PNG, JPG, WEBP …; subfolders are "
+                               "not looked in).")
+            self._select_source_item()
+            return False
+        first = next((f for f in imgs if not upright(f).isNull()), None)
+        if first is None:
+            self.state.setText(f"None of the files in {Path(folder).name} could be read as an image.")
+            self._select_source_item()
+            return False
+        if self.qs is not None:
+            self.qs.setValue("editFolder", str(folder))
+        self.set_source(first)
+        self.batch, self._batch_dir = imgs, str(folder)
+        self.set_mask(None)                           # (a mask belongs to one picture)
+        key, text = FOLDER_PREFIX + str(folder), f"Folder: {Path(folder).name} ({len(imgs)} images)"
+        i = self.src_combo.findData(key)
+        if i < 0:
+            i = self.src_combo.findData(None)          # (before Choose file…)
+            self.src_combo.insertItem(i, text, key)
+        else:
+            self.src_combo.setItemText(i, text)
+        self.src_combo.setCurrentIndex(i)
+        self.src_tile.setToolTip(f"{folder}\nShown: the first image, {Path(first).name}")
+        self.src_info.setText(f"Folder {Path(folder).name}: {len(imgs)} image{'s' if len(imgs) != 1 else ''}, "
+                              "each edited in turn with the same prompt and settings (shown: the first, "
+                              f"{Path(first).name}).")
+        self._show_mask()
+        self._update_buttons()
+        self._variations_changed()
+        return True
 
     def set_source(self, path: str):
         img = upright(path)
         if img.isNull():
             self.state.setText(f"Not an image: {Path(path).name}")
             return
+        was_batch, self.batch = bool(self.batch), []    # (one image again: not the folder)
         changed = str(path) != self.source
         self.source = str(path)
         if changed or (self.mask is not None and self.mask.size() != img.size()):
@@ -915,6 +991,9 @@ class ImageEditDialog(QDialog):
         i = self.src_combo.findData(str(path))
         self.src_info.setText(f"{self.src_combo.itemText(i) + ' · ' if i >= 0 else ''}{Path(path).name} · "
                               f"{img.width()}×{img.height()}")
+        if was_batch:
+            self._select_source_item()
+            self._variations_changed()
         self._update_buttons()
 
     # ---- mask (inpainting)
@@ -949,7 +1028,9 @@ class ImageEditDialog(QDialog):
     def _show_mask(self):
         on = self.mask is not None
         self.b_mask.setText("Change mask…" if on else "Paint mask…")
-        self.b_mask.setEnabled(bool(self.source) and not self._busy)
+        self.b_mask.setEnabled(bool(self.source) and not self._busy and not self.batch)
+        self.b_mask.setToolTip("A mask belongs to one picture: choose a single image to paint one" if self.batch
+                               else "")
         self.b_mask_clear.setVisible(on)
         why = self._mask_problem()
         a = mask_area(self.mask) if on else 0.0
@@ -1199,7 +1280,7 @@ class ImageEditDialog(QDialog):
             ok = idle and bool(self.source) and text and not self._mask_problem()
             why = self._mask_problem() or "Choose the image to edit and write what should change"
         self.b_gen.setEnabled(ok)
-        self.b_mask.setEnabled(bool(self.source) and idle)
+        self.b_mask.setEnabled(bool(self.source) and idle and not self.batch)
         if not ok:
             self.b_gen.setToolTip(why if idle else "Working …")
         self.b_cancel.setEnabled(not idle)
@@ -1232,16 +1313,23 @@ class ImageEditDialog(QDialog):
             self._busy = False
             self.state.setText(self._mask_problem())
             return
-        mask = self.mask.copy() if self.mask is not None else None
+        mask = self.mask.copy() if self.mask is not None and not self.batch else None
         runs = self._lora_runs()                     # (One image per LoRA: each result with every LoRA in turn)
-        base_n, n = n, n * len(runs)
+        sources = list(self.batch) or [source]       # (a folder: each of its images in turn, with all of it)
+        base_n, per = n, n * len(runs)
+        n = per * len(sources)
+        if len(sources) > 1 and n > ASK_ABOVE and QMessageBox.question(
+                self, "Edit a folder", f"This makes {n:,} images: {len(sources)} pictures × {per} each. "
+                "They are made one after another (Cancel stops after the current one). Start?") != QMessageBox.Yes:
+            self._busy = False
+            return
         run_words = [self._trigger_words(r) for r in runs]
         refs = [p for p in (self.pic2.path, self.pic3.path) if p]
         self._remember_loras()
-        size = None
-        if self.keep_size.isChecked() and mask is None:     # (an inpaint comes back at the source's own size)
-            img = upright(source)                 # the size the edit comes back at (a phone photo turned)
-            size = (img.width() // 2 * 2, img.height() // 2 * 2)
+        keep_size = self.keep_size.isChecked() and mask is None   # (an inpaint comes back at the source's own size)
+        self._batch_names = [Path(f).name for f in sources] if len(sources) > 1 else []
+        self._per_image, self._skipped = per, []
+        skipped = self._skipped
         edits = self.project / EDITS_DIR
         sig, connect = self._sig, self.connect_editor
         if not self._run_on_start():
@@ -1257,8 +1345,7 @@ class ImageEditDialog(QDialog):
         run = uuid.uuid4().hex[:12]                  # this Generate's results belong together
 
         def work():
-            kept = mask_file = None
-            made = 0
+            copies = []                               # [kept source, mask file, results made from it]
             try:
                 edits.mkdir(parents=True, exist_ok=True)
                 cur = {"k": 1}
@@ -1267,39 +1354,56 @@ class ImageEditDialog(QDialog):
                     raise RuntimeError(f"{EDIT_MODELS[model]} is not available in ComfyUI")
                 if quality == "fast" and "fast" not in self.editor.qualities(model):
                     sig.progress.emit(0, n, 0, 0)
-                kept = edits / "sources" / (f"source_{time.strftime('%Y%m%d-%H%M%S')}_{uuid.uuid4().hex[:6]}"
-                                            f"{Path(source).suffix.lower() or '.png'}")
-                kept.parent.mkdir(exist_ok=True)
-                kept.write_bytes(Path(source).read_bytes())         # the original stays with its results
-                if mask is not None:                                 # the mask too (white = drawn anew)
-                    mask_file = kept.with_name(kept.stem.replace("source_", "mask_", 1) + ".png")
-                    if not mask.save(str(mask_file), "PNG"):
-                        raise RuntimeError("could not save the mask")
-                for k in range(1, n + 1):
+                for si, src in enumerate(sources):
                     if self._cancel:
                         break
-                    cur["k"] = k
-                    b, r = divmod(k - 1, len(runs))
-                    loras, words = runs[r], run_words[r]
-                    seed = seeds[b]
-                    stem = f"edit_{time.strftime('%Y%m%d-%H%M%S')}_{seed}"
-                    out = edits / f"{stem}.png"
-                    if out.exists() or out.with_suffix(".json").exists():
-                        out = edits / f"{stem}_{k}.png"   # (the same seed again within a second: one per LoRA)
-                    job = jobs[b] if jobs else None
-                    meta = self.editor.edit(Path(source), with_triggers(job.prompt if job else prompt, words), out,
-                                            seed, quality, [Path(r) for r in refs], loras, model=model, mask=mask_file)
-                    made += 1
-                    if size is not None:
-                        scale_to(out, out, size)
-                    meta.update({"run": run, "prompt": job.prompt if job else prompt, "trigger_words": words,
-                                 "seed": seed, "source": source,
-                                 "source_copy": str(kept), **({"mask": str(mask_file)} if mask_file else {}),
-                                 "refs": refs, "size": list(size) if size else None,
-                                 **(self._variation_meta(job, prompt, job.key) if job else {})})
-                    out.with_suffix(".json").write_text(json.dumps(meta, indent=2, ensure_ascii=False),
-                                                        encoding="utf-8")
-                    sig.result.emit(str(out), meta)
+                    size = None
+                    if len(sources) > 1 or keep_size:
+                        img = upright(src)            # the size the edit comes back at (a phone photo turned)
+                        if img.isNull():
+                            skipped.append(Path(src).name)   # (a folder's unreadable file: the next one)
+                            continue
+                        if keep_size:
+                            size = (img.width() // 2 * 2, img.height() // 2 * 2)
+                    kept = edits / "sources" / (f"source_{time.strftime('%Y%m%d-%H%M%S')}_{uuid.uuid4().hex[:6]}"
+                                                f"{Path(src).suffix.lower() or '.png'}")
+                    kept.parent.mkdir(exist_ok=True)
+                    kept.write_bytes(Path(src).read_bytes())         # the original stays with its results
+                    entry = [kept, None, 0]
+                    copies.append(entry)
+                    if mask is not None:                             # the mask too (white = drawn anew)
+                        entry[1] = kept.with_name(kept.stem.replace("source_", "mask_", 1) + ".png")
+                        if not mask.save(str(entry[1]), "PNG"):
+                            raise RuntimeError("could not save the mask")
+                    mask_file = entry[1]
+                    for j in range(per):
+                        if self._cancel:
+                            break
+                        k = si * per + j + 1
+                        cur["k"] = k
+                        b, r = divmod(j, len(runs))
+                        loras, words = runs[r], run_words[r]
+                        seed = seeds[b]
+                        stem = f"edit_{time.strftime('%Y%m%d-%H%M%S')}_{seed}"
+                        out = edits / f"{stem}.png"
+                        if out.exists() or out.with_suffix(".json").exists():
+                            out = edits / f"{stem}_{k}.png"   # (the same seed again within a second)
+                        job = jobs[b] if jobs else None
+                        meta = self.editor.edit(Path(src), with_triggers(job.prompt if job else prompt, words), out,
+                                                seed, quality, [Path(x) for x in refs], loras, model=model,
+                                                mask=mask_file)
+                        entry[2] += 1
+                        if size is not None:
+                            scale_to(out, out, size)
+                        meta.update({"run": run, "prompt": job.prompt if job else prompt, "trigger_words": words,
+                                     "seed": seed, "source": src,
+                                     "source_copy": str(kept), **({"mask": str(mask_file)} if mask_file else {}),
+                                     "refs": refs, "size": list(size) if size else None,
+                                     **({"folder": str(Path(src).parent)} if len(sources) > 1 else {}),
+                                     **(self._variation_meta(job, prompt, job.key) if job else {})})
+                        out.with_suffix(".json").write_text(json.dumps(meta, indent=2, ensure_ascii=False),
+                                                            encoding="utf-8")
+                        sig.result.emit(str(out), meta)
                 sig.finished.emit("")
             except Exception as e:  # noqa: BLE001
                 try:
@@ -1307,10 +1411,11 @@ class ImageEditDialog(QDialog):
                 except RuntimeError:
                     pass
             finally:
-                if not made:                     # no result refers to them: the copies of source and mask go
-                    for f in (kept, mask_file):
-                        if f is not None:
-                            Path(f).unlink(missing_ok=True)
+                for kept, mask_file, made in copies:
+                    if not made:                 # no result refers to them: the copies of source and mask go
+                        for f in (kept, mask_file):
+                            if f is not None:
+                                Path(f).unlink(missing_ok=True)
         threading.Thread(target=work, daemon=True).start()
 
     # ---- sampling (Create): steps, cfg, sampler, scheduler; each "auto" = what the model uses by itself
@@ -1699,8 +1804,11 @@ class ImageEditDialog(QDialog):
                                        "is ready; Cancel stops after the current one")
         if hasattr(self, "b_gen"):
             per = len(self._lora_runs()) if hasattr(self, "lora_each") else 1
+            if self.batch and self.mode() == "edit":
+                per *= len(self.batch)
             n = (self.variations.amount() if active else self.tries.value() if hasattr(self, "tries") else 1) * per
-            self.b_gen.setText(f"Generate {n} image{'s' if n != 1 else ''}" if active or per > 1 else "Generate")
+            self.b_gen.setText(f"Generate {n} image{'s' if n != 1 else ''}" if active or per > 1 or self.batch
+                               else "Generate")
 
     def _insert_placeholder(self, name: str):
         cur = self.prompt.textCursor()
@@ -1856,7 +1964,10 @@ class ImageEditDialog(QDialog):
             return
         frac = (k - 1 + (i / steps if steps else 0)) / max(1, n)
         self.bar.setValue(round(1000 * frac))
-        self.state.setText(f"Result {k} of {n}: step {i} / {steps}")
+        names = self._batch_names if self._busy else []
+        pic = (f" · picture {(k - 1) // self._per_image + 1} of {len(names)} "
+               f"({names[(k - 1) // self._per_image]})" if names and (k - 1) // self._per_image < len(names) else "")
+        self.state.setText(f"Result {k} of {n}{pic}: step {i} / {steps}")
 
     def _result(self, png: str, meta: dict):
         if isinstance(meta.get("variation"), dict) and meta["variation"].get("step") is not None:
@@ -1875,6 +1986,11 @@ class ImageEditDialog(QDialog):
             self.b_start_comfy.setVisible(down and self.start_comfy is not None)
         else:
             self.state.setText("Done. Pick a result below, compare it with the original (B), then use it.")
+        if self._skipped:
+            sk = self._skipped
+            self.state.setText(self.state.text() + f" Skipped (not readable as an image): {', '.join(sk[:5])}"
+                               + (f" and {len(sk) - 5} more" if len(sk) > 5 else "") + ".")
+        self._batch_names = []
         self._update_buttons()
 
     def _start_comfy(self):
@@ -2019,7 +2135,7 @@ class ImageEditDialog(QDialog):
             if self.mode() != "edit":
                 self.set_mode("edit")
             if self.src_combo.findData(sel[0]) < 0:
-                self.src_combo.insertItem(self.src_combo.count() - 1, f"Result: {sel[1].get('prompt', '')[:40]}",
+                self.src_combo.insertItem(self.src_combo.findData(None), f"Result: {sel[1].get('prompt', '')[:40]}",
                                           sel[0])
             self.src_combo.setCurrentIndex(self.src_combo.findData(sel[0]))
             self.set_source(sel[0])

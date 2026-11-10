@@ -1430,7 +1430,7 @@ def test_ai_image_edit_for_start_and_end_images(app, tmp_path, image, monkeypatc
         flush(app, w)
         dlg = w.edit_image(ids[1], dialog=False)
         texts = [dlg.src_combo.itemText(i) for i in range(dlg.src_combo.count())]
-        assert texts[0] == f"Last frame of clip #{ids[1][1:]}" and "Start image" in texts and texts[-1] == "Choose file…"
+        assert texts[0] == f"Last frame of clip #{ids[1][1:]}" and "Start image" in texts and texts[-2:] == ["Choose file…", "Choose folder…"]
         assert dlg.source.endswith(".png") and not dlg.b_gen.isEnabled()          # no prompt yet
         assert dlg.b_use_end.text() == f"Use as end image of clip #{ids[1][1:]}"
         dlg.prompt.setPlainText("she smiles at the camera")
@@ -2043,6 +2043,79 @@ def test_one_image_per_lora_in_the_image_window(app, tmp_path, image, monkeypatc
         assert dlg.lora_each.isChecked()
         dlg.lora_each.setChecked(False)
         assert len(dlg._lora_runs()) == 1 and len(dlg._lora_runs()[0]) == 2   # off: all LoRAs together
+        dlg.done(0)
+        w.close()
+    finally:
+        server.close()
+
+
+def test_edit_every_image_of_a_folder(app, tmp_path, image, monkeypatch):
+    """A folder as the image to edit: each of its images is edited in turn with the same prompt, seed and settings
+    (here also one image per LoRA), at its own size; an unreadable file is skipped; no mask with a folder."""
+    import subprocess
+
+    import numpy as np
+    from safetensors.numpy import save_file
+    from PySide6.QtGui import QImage
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from fake_comfy import FakeComfy
+
+    from video_chain.ui.main_window import MainWindow
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    server = FakeComfy(tmp_path / "comfy", loras=("MiniMax H3/glow.safetensors", "MiniMax H3/rain.safetensors"))
+    try:
+        q = settings(tmp_path, "folder.ini")
+        q.setValue("comfyUrl", server.url)
+        w = MainWindow(q, command=FAKE)
+        new_project(w, tmp_path, image, ("a",))
+        folder = tmp_path / "pics"
+        (folder / "sub").mkdir(parents=True)
+        for name, size in (("img10.png", "320x240"), ("img2.jpg", "240x320"), ("img1.png", "256x256"),
+                           ("sub/deep.png", "64x64")):
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"testsrc=s={size}", "-frames:v", "1",
+                            str(folder / name)], check=True)
+        (folder / "broken.png").write_bytes(b"not a picture")
+        (folder / "notes.txt").write_text("x")
+        files = []
+        for name in ("glow", "rain"):
+            f = tmp_path / "loras" / "MiniMax H3" / f"{name}.safetensors"
+            f.parent.mkdir(parents=True, exist_ok=True)
+            save_file({"a.lora_A.weight": np.zeros((2, 2), np.float16)}, str(f))
+            files.append(str(f))
+        dlg = w.edit_image(start=True, dialog=False)
+        assert [Path(f).name for f in dlg.folder_images(folder)] == ["broken.png", "img1.png", "img2.jpg", "img10.png"]
+        assert dlg.set_folder(str(folder))
+        assert dlg.batch and Path(dlg.source).name == "img1.png"        # (broken.png is not shown)
+        assert dlg.src_combo.currentData() == "\x00folder:" + str(folder) and "4 images" in dlg.src_combo.currentText()
+        assert not dlg.b_mask.isEnabled()                              # a mask belongs to one picture
+        dlg.add_lora_file(files[0], 1.0)
+        dlg.add_lora_file(files[1], 1.0)
+        dlg.lora_each.setChecked(True)
+        dlg.prompt.setPlainText("she smiles")
+        dlg.tries.setValue(1)
+        dlg.fresh_seed.setChecked(False)
+        dlg.seed.setValue(77)
+        assert dlg.b_gen.text() == "Generate 8 images"                 # 4 files × 2 LoRAs
+        dlg.keep_size.setChecked(True)
+        dlg.generate()
+        wait(app, lambda: not dlg._busy, timeout=120)
+        assert dlg.state.text().startswith("Done") and "Skipped (not readable as an image): broken.png" in dlg.state.text()
+        metas = [json.loads(f.read_text()) for f in (w.project / "edits").glob("edit_*.json")]
+        got = sorted((Path(m["source"]).name, Path(m["loras"][0]["path"]).stem, m["seed"], tuple(m["size"]))
+                     for m in metas)
+        assert got == [("img1.png", "rain", 77, (256, 256)), ("img1.png", "glow", 77, (256, 256)),
+                       ("img10.png", "rain", 77, (320, 240)), ("img10.png", "glow", 77, (320, 240)),
+                       ("img2.jpg", "rain", 77, (240, 320)), ("img2.jpg", "glow", 77, (240, 320))]
+        for m in metas:                                                # each result: its own original, its size
+            assert Path(m["source_copy"]).is_file() and m["folder"] == str(folder)
+        pngs = sorted((w.project / "edits").glob("edit_*.png"))
+        assert len(pngs) == 6 and len(list((w.project / "edits" / "sources").iterdir())) == 3
+        assert {(QImage(str(f)).width(), QImage(str(f)).height()) for f in pngs} == {(256, 256), (320, 240), (240, 320)}
+        dlg.set_source(str(folder / "img2.jpg"))                       # one image again: no folder
+        assert not dlg.batch and dlg.b_mask.isEnabled() and dlg.b_gen.text() == "Generate 2 images"
+        dlg.lora_each.setChecked(False)
+        assert dlg.b_gen.text() == "Generate"
+        assert not dlg.set_folder(str(folder / "sub" / "missing")) and "No images" in dlg.state.text()
         dlg.done(0)
         w.close()
     finally:
