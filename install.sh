@@ -28,7 +28,9 @@ mkdir -p "$HOME_DIR/tools/bin" || die "cannot create $HOME_DIR"
 fetch() {   # fetch URL  -> stdout
     if command -v curl >/dev/null 2>&1; then curl -LsSf "$1"
     elif command -v wget >/dev/null 2>&1; then wget -qO- "$1"
-    else die "curl or wget is needed to download (e.g. sudo apt install curl / sudo dnf install curl)"; fi
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import sys, shutil, urllib.request as u; shutil.copyfileobj(u.urlopen(u.Request(sys.argv[1], headers={"User-Agent": "video-chain-setup"}), timeout=60), sys.stdout.buffer)' "$1"
+    else die "curl, wget or python3 is needed to download (e.g. sudo apt install curl / sudo dnf install curl)"; fi
 }
 
 # ---- the app's source: this folder, or (when the script was piped into a shell) a download
