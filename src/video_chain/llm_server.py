@@ -208,11 +208,23 @@ def vram_needed_mb(model: str, cpu_moe: bool = True, mmproj: str | None = None) 
     return (4000 if cpu_moe else mb(model) + 1500) + (mb(mmproj) if mmproj else 0)
 
 
-def free_vram_mb() -> int | None:
-    """Free VRAM of the first GPU (nvidia-smi), None when it cannot be read."""
+def comfy_vram_mb(url: str, timeout: float = 5) -> tuple[int, int] | None:
+    """(free, total) graphics memory in MB as the running ComfyUI reports it; None when it does not answer."""
+    try:
+        with urllib.request.urlopen(url.rstrip("/") + "/system_stats", timeout=timeout) as r:
+            dev = (json.loads(r.read()).get("devices") or [])[0]
+        return int(dev["vram_free"]) // 2**20, int(dev["vram_total"]) // 2**20
+    except (urllib.error.URLError, OSError, ValueError, KeyError, IndexError, TypeError):
+        return None
+
+
+def free_vram_mb(url: str | None = None) -> int | None:
+    """Free VRAM of the first GPU: from nvidia-smi; without that tool, from the running ComfyUI at url. None when
+    neither can tell (callers then start without making room, as before)."""
     smi = shutil.which("nvidia-smi")
     if not smi:
-        return None
+        got = comfy_vram_mb(url) if url else None
+        return got[0] if got else None
     try:
         out = subprocess.run([smi, "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
                              capture_output=True, text=True, timeout=10).stdout

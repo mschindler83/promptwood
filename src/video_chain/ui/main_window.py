@@ -20,7 +20,8 @@ import time
 import urllib.request
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QSettings, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import (QObject, QProcess, QProcessEnvironment, QSettings, QSize, Qt, QThread, QTimer, QUrl,
+                            Signal)
 from PySide6.QtGui import QCursor, QDesktopServices, QIcon, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QInputDialog, QLabel,
@@ -61,6 +62,20 @@ LLM_MODEL_DIRS = tuple(paths.model_cache_dirs())
 
 
 CHAT_HINTS = ("instruct", "chat", "-it-", "-it.", "_it_", "abliterated", "uncensored")
+
+
+class _GpuAsk(QThread):
+    """Asks ComfyUI for the graphics card's memory (told: free MB, total MB; 0, 0 when it does not answer)."""
+    told = Signal(int, int)
+
+    def __init__(self, url: str, parent=None):
+        super().__init__(parent)
+        self.url = url
+
+    def run(self):
+        from ..llm_server import comfy_vram_mb
+        got = comfy_vram_mb(self.url, timeout=4)
+        self.told.emit(*(got or (0, 0)))
 
 
 def find_gguf_models(roots=LLM_MODEL_DIRS) -> list[Path]:
@@ -1430,6 +1445,7 @@ class MainWindow(QMainWindow):
         self._build()
         self._load_settings()
         self._gpu_proc: QProcess | None = None
+        self._gpu_ask: _GpuAsk | None = None
         self._gpu_timer = QTimer(self, interval=4000, timeout=self._poll_gpu)
         self._gpu_timer.start()
         self._comfy_timer = QTimer(self, interval=4000, timeout=self._poll_comfy)
@@ -3300,7 +3316,7 @@ class MainWindow(QMainWindow):
         """(a worker thread, before a model of this app starts) Too little free VRAM for need MB: ComfyUI is asked to
         unload its models; while clips are generated: error instead (their run keeps its VRAM)."""
         from ..llm_server import free_vram_mb
-        free = free_vram_mb()
+        free = free_vram_mb(url)
         if free is None or free >= need:
             return
         gb = lambda mb: f"{mb / 1024:.1f} GB"   # noqa: E731
@@ -3317,7 +3333,7 @@ class MainWindow(QMainWindow):
         now = free
         while time.time() < end:
             time.sleep(0.5)
-            now = free_vram_mb()
+            now = free_vram_mb(url)
             if now is None or now >= need:
                 break
         self.bridge.llm_room.emit(
@@ -6806,7 +6822,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ GPU
     def _poll_gpu(self):
         if not shutil.which("nvidia-smi"):
-            self.gpu.setText("GPU: nvidia-smi not found")
+            self._poll_gpu_comfy()
             return
         if self._gpu_proc is not None:
             return
@@ -6834,6 +6850,28 @@ class MainWindow(QMainWindow):
 
         p.finished.connect(done)
         p.start("nvidia-smi", ["--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"])
+
+    def _poll_gpu_comfy(self):
+        """Without nvidia-smi: the running ComfyUI tells the card's free memory (asked in a thread)."""
+        if self._gpu_ask is not None and self._gpu_ask.isRunning():
+            return
+        url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL).rstrip("/")
+        ask = _GpuAsk(url, self)
+        self._gpu_ask = ask
+
+        def done(free: int, total: int):
+            if self._gpu_ask is not ask:           # window closing
+                return
+            if total <= 0:
+                self.gpu.setText("GPU: shown while ComfyUI runs")
+                self.gpu.setToolTip("nvidia-smi is not installed, so the free graphics memory comes from ComfyUI")
+                self.gpu.setProperty("severity", "")
+            else:
+                self.gpu.setText(f"GPU {free / 1024:.1f} GB free of {total / 1024:.0f}")
+                self.gpu.setProperty("severity", "warning" if free < 4096 else "")
+            repolish(self.gpu)
+        ask.told.connect(done)
+        ask.start()
 
     # ------------------------------------------------------------------ running
     # The generator runs as a worker process: it loads the model once and then takes jobs (JSON lines on stdin).
@@ -7469,6 +7507,9 @@ class MainWindow(QMainWindow):
         self._model_timer.stop()
         self._gpu_timer.stop()
         self._comfy_timer.stop()
+        if self._gpu_ask is not None:
+            ga, self._gpu_ask = self._gpu_ask, None
+            ga.wait(6000)
         if self._gpu_proc is not None:
             gp, self._gpu_proc = self._gpu_proc, None
             gp.finished.disconnect()

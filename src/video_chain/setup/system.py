@@ -77,18 +77,59 @@ def install_hint(what: str, osi: dict | None = None) -> str:
     return f"{INSTALL[osi['manager']]} {pk}"
 
 
+NVIDIA_PROC = Path("/proc/driver/nvidia")
+
+
 def gpu() -> dict | None:
-    """The first NVIDIA card: {"name", "vram_mb", "free_mb", "driver"}; None without nvidia-smi / a card."""
+    """The first NVIDIA card: {"name", "vram_mb", "free_mb", "driver"}; None when there is none (or no driver).
+    nvidia-smi is asked when it is installed. Without it the driver itself tells the card and its version
+    (Linux: /proc/driver/nvidia); the memory is then not known yet (vram_mb and free_mb are None) until PyTorch is
+    installed and can be asked (torch_memory)."""
     smi = shutil.which("nvidia-smi")
-    if not smi:
+    if smi:
+        r = run([smi, "--query-gpu=name,memory.total,memory.free,driver_version", "--format=csv,noheader,nounits"],
+                15)
+        if r is not None and r.returncode == 0 and r.stdout.strip():
+            try:
+                name, total, free, driver = [x.strip() for x in r.stdout.strip().splitlines()[0].split(",")]
+                return {"name": name, "vram_mb": int(float(total)), "free_mb": int(float(free)), "driver": driver}
+            except ValueError:
+                pass
+    return gpu_from_driver()
+
+
+def gpu_from_driver(root: Path | None = None) -> dict | None:
+    """The card and driver version from the loaded NVIDIA kernel driver, without nvidia-smi."""
+    root = Path(root or NVIDIA_PROC)
+    try:
+        version = (root / "version").read_text(encoding="utf-8", errors="replace")
+    except OSError:
         return None
-    r = run([smi, "--query-gpu=name,memory.total,memory.free,driver_version", "--format=csv,noheader,nounits"], 15)
-    if r is None or r.returncode != 0 or not r.stdout.strip():
+    m = re.search(r"\b(\d{3}\.\d+(?:\.\d+)?)\b", version)
+    if not m:
+        return None
+    name = "NVIDIA graphics card"
+    try:
+        for info in sorted((root / "gpus").glob("*/information")):
+            model = re.search(r"^Model:\s*(.+)$", info.read_text(encoding="utf-8", errors="replace"), re.M)
+            if model:
+                name = model.group(1).strip()
+                break
+    except OSError:
+        pass
+    return {"name": name, "vram_mb": None, "free_mb": None, "driver": m.group(1)}
+
+
+def torch_memory(python: Path) -> tuple[int, int] | None:
+    """(free MB, total MB) of the first card as PyTorch in this environment sees it; None when it sees none."""
+    r = run([str(python), "-c", "import torch\nf, t = torch.cuda.mem_get_info(0)\nprint(f // 2**20, t // 2**20)"],
+            180)
+    if r is None or r.returncode != 0:
         return None
     try:
-        name, total, free, driver = [x.strip() for x in r.stdout.strip().splitlines()[0].split(",")]
-        return {"name": name, "vram_mb": int(float(total)), "free_mb": int(float(free)), "driver": driver}
-    except ValueError:
+        free, total = r.stdout.strip().splitlines()[-1].split()
+        return int(free), int(total)
+    except (ValueError, IndexError):
         return None
 
 

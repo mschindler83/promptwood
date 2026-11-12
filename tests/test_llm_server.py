@@ -405,7 +405,7 @@ def test_room_in_vram_before_the_server_starts(fake_server, tmp_path, monkeypatc
     server = FakeComfy(tmp_path / "comfy")
     win = MW.MainWindow(QSettings(str(tmp_path / "s.ini"), QSettings.IniFormat))
     vram = []
-    monkeypatch.setattr(L, "free_vram_mb", lambda: vram.pop(0) if vram else 20000)
+    monkeypatch.setattr(L, "free_vram_mb", lambda url=None: vram.pop(0) if vram else 20000)
     frees = lambda: sum(1 for c in server.calls if c[:2] == ("BODY", "/free"))   # noqa: E731
     try:
         win.comfy_url.setText(server.url)

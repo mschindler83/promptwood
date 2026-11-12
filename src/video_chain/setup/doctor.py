@@ -186,9 +186,17 @@ def check_system() -> list[Check]:
     else:
         out.append(Check(g, "ffmpeg", OK, f"{ff['ffmpeg']} {ff['version']}"))
     gpu = S.gpu()
+    if gpu is not None and gpu["vram_mb"] is None:           # no nvidia-smi: PyTorch can tell the memory
+        py = comfy_python()
+        mem = S.torch_memory(py) if py is not None else None
+        if mem:
+            gpu = {**gpu, "free_mb": mem[0], "vram_mb": mem[1]}
     if gpu is None:
-        out.append(Check(g, "Graphics card", FAIL, "no NVIDIA card found (nvidia-smi is missing or reports none)",
+        out.append(Check(g, "Graphics card", FAIL, "no NVIDIA card with a loaded driver was found",
                          S.install_hint("nvidia", osi)))
+    elif gpu["vram_mb"] is None:
+        out.append(Check(g, "Graphics card", OK, f"{gpu['name']}, driver {gpu['driver']} (its memory is checked "
+                                                 "once PyTorch is installed: nvidia-smi is not on this computer)"))
     else:
         text = f"{gpu['name']}, {gpu['vram_mb'] / 1024:.0f} GB, driver {gpu['driver']}"
         if gpu["vram_mb"] < S.MIN_VRAM_MB:

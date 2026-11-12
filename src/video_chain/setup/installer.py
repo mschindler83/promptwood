@@ -356,7 +356,7 @@ class Installer:
         if self.uv is None and self.o.phase != "ask":
             problems.append("uv was not found (install.sh installs it; or: https://docs.astral.sh/uv/)")
         gpu = S.gpu()
-        if (gpu is None or gpu["vram_mb"] < S.MIN_VRAM_MB) and not self.o.force:
+        if (gpu is None or (gpu["vram_mb"] is not None and gpu["vram_mb"] < S.MIN_VRAM_MB)) and not self.o.force:
             problems.append(("no NVIDIA graphics card with a working driver was found: " + S.install_hint("nvidia")
                              if gpu is None else
                              f"the graphics card has {gpu['vram_mb'] / 1024:.0f} GB; the video model needs "
@@ -520,6 +520,7 @@ class Installer:
                     kind = index.rsplit("/", 1)[-1] if index else "standard build"
                     self.pip(py, ["torch", "torchvision", "torchaudio", *(["--index-url", index] if index else [])],
                              f"Installing PyTorch ({kind})", "about 3 GB, the longest step here")
+                    self.card_memory(py)
                     self.pip(py, ["-r", d / "requirements.txt",
                                   *(["--extra-index-url", index] if index else [])], "Installing ComfyUI's packages")
                     done.write_text(spec["rev"] + "\n")
@@ -544,6 +545,23 @@ class Installer:
                                 f'exec "{py}" main.py --port {port} --base-directory "{d}" "$@"\n')
                 ours.chmod(0o755)
         paths.save_config(comfy_dir=d, comfy_python=py, comfy_launcher=launcher, comfy_url=url)
+
+    def card_memory(self, py: Path) -> None:
+        """Without nvidia-smi the card's memory could not be checked before: PyTorch tells it now."""
+        gpu = S.gpu()
+        if gpu is None or gpu["vram_mb"] is not None:
+            return
+        mem = S.torch_memory(py)
+        if mem is None:
+            if not self.o.force:
+                raise SetupError("PyTorch is installed but does not see the graphics card. Update the NVIDIA "
+                                 f"driver ({S.install_hint('nvidia')}), then run setup again   (--force goes on "
+                                 "anyway)")
+            return
+        say(f"    The graphics card has {mem[1] / 1024:.0f} GB (PyTorch reports it; nvidia-smi is not installed).")
+        if mem[1] < S.MIN_VRAM_MB and not self.o.force:
+            raise SetupError(f"the graphics card has {mem[1] / 1024:.0f} GB; the video model needs "
+                             f"{S.MIN_VRAM_MB // 1000} GB or more   (--force installs anyway)")
 
     def nodes(self) -> None:
         d = self.comfy_dir
@@ -726,6 +744,9 @@ class Installer:
         with working("Looking at what is installed", quiet_end=True):
             checks = D.check_all(installed)
         gpu = S.gpu()
+        if gpu is not None and gpu["free_mb"] is None:       # no nvidia-smi: PyTorch tells the free memory
+            mem = S.torch_memory(self.comfy_py()) if not D.failed(checks) else None
+            gpu = {**gpu, "free_mb": mem[0]} if mem else None
         busy = gpu is not None and gpu["free_mb"] < TEST_FREE_MB
         if self.o.test and busy and not D.failed(checks):
             checks.append(D.Check(D.TESTS, "Test clip, test line, language model", D.WARN,

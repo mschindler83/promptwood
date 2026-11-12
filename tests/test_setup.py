@@ -806,3 +806,66 @@ def test_the_port_choice_survives_a_run_that_stops(server, home, monkeypatch):
     with pytest.raises(I.DownloadError):
         again.comfyui()
     assert paths.comfy_url() == "http://127.0.0.1:8189"             # the first choice stands
+
+
+def test_nvidia_smi_is_optional(home, tmp_path, monkeypatch, server):
+    """Without nvidia-smi the driver tells card and version; the memory is checked once PyTorch can be asked."""
+    monkeypatch.setattr(S.shutil, "which", lambda name: None)
+    proc = tmp_path / "nvidia"
+    assert S.gpu_from_driver(proc) is None                                    # no driver loaded: no card
+    (proc / "gpus" / "0000:01:00.0").mkdir(parents=True)
+    (proc / "version").write_text("NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  615.78.08  Release "
+                                  "Build  (builder)  Tue Oct  6 2026\nGCC version:  gcc version 16.2.1\n")
+    (proc / "gpus" / "0000:01:00.0" / "information").write_text("Model: \t\t NVIDIA GeForce RTX 4090\nIRQ:   181\n")
+    monkeypatch.setattr(S, "NVIDIA_PROC", proc)
+    card = S.gpu()
+    assert card == {"name": "NVIDIA GeForce RTX 4090", "vram_mb": None, "free_mb": None, "driver": "615.78.08"}
+    assert S.driver_major(card) == 615
+    # the installer goes on (right PyTorch and llama.cpp builds), instead of stopping or falling back to the CPU
+    monkeypatch.setattr(M, "load", lambda: _mini_manifest(server))
+    monkeypatch.setattr(S, "qt_missing_libs", lambda: None)
+    monkeypatch.setattr(I.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(I.platform, "machine", lambda: "x86_64")
+    inst = I.Installer(I.Options(yes=True))
+    inst.uv = "uv"
+    inst.preflight(1000)
+    assert inst.torch_index().endswith("/cu130")
+    assert inst.llama_asset([{"name": "llama-b1-bin-ubuntu-cuda-13.5-x64.tar.gz"},
+                             {"name": "llama-b1-bin-ubuntu-x64.tar.gz"}])[0]["name"].endswith("cuda-13.5-x64.tar.gz")
+    # ... and checks the memory as soon as PyTorch is there
+    monkeypatch.setattr(S, "torch_memory", lambda py: (7000, 8000))
+    with pytest.raises(I.SetupError, match="8 GB"):
+        inst.card_memory(tmp_path / "python")
+    monkeypatch.setattr(S, "torch_memory", lambda py: None)
+    with pytest.raises(I.SetupError, match="does not see the graphics card"):
+        inst.card_memory(tmp_path / "python")
+    monkeypatch.setattr(S, "torch_memory", lambda py: (23000, 24000))
+    inst.card_memory(tmp_path / "python")
+    # the doctor says what it knows
+    check = next(c for c in D.check_system() if c.name == "Graphics card")
+    assert check.status == D.OK and "615.78.08" in check.detail and "nvidia-smi is not on this computer" in check.detail
+
+
+def test_app_reads_free_memory_from_comfyui_without_nvidia_smi(monkeypatch):
+    from video_chain import llm_server as L
+    monkeypatch.setattr(L.shutil, "which", lambda name: None)
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            body = json.dumps({"devices": [{"vram_free": 6 * 2**30, "vram_total": 24 * 2**30}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{httpd.server_port}"
+        assert L.comfy_vram_mb(url) == (6144, 24576) and L.free_vram_mb(url) == 6144
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+    assert L.free_vram_mb() is None and L.free_vram_mb("http://127.0.0.1:9") is None      # nobody to ask
