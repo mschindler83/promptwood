@@ -132,7 +132,7 @@
      "path": "loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
      "dir": "loras",
      "name": "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
-     "alt": "minimax_h3_fl2v.*turbo.*\\.safetensors$",
+     "alt": "minimax_h3.*turbo.*\\.safetensors$",
      "rev": "54472221d27c695fca9621b0c3ed52f06c4af707",
      "size": 1956193000,
      "sha256": "2339acdf19bfe123f46b971ea35d367a84adb85de43627e1eceafa5a5b2b111e"
@@ -142,7 +142,7 @@
      "path": "loras/minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
      "dir": "loras",
      "name": "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
-     "alt": "minimax_h3_ref2v.*turbo.*\\.safetensors$",
+     "alt": "minimax_h3.*turbo.*\\.safetensors$",
      "rev": "54472221d27c695fca9621b0c3ed52f06c4af707",
      "size": 1956193000,
      "sha256": "5b9ab5ade15d0775676d01a907268a69a1468dc6033b3b0d3ded5502f3ebb84c"
@@ -217,7 +217,7 @@
      "path": "diffusion_models/qwen_image_2.1_int8_convrot.safetensors",
      "dir": "diffusion_models",
      "name": "qwen_image_2.1_int8_convrot.safetensors",
-     "alt": "^(?!.*turbo)qwen[_-]?image[_-]?2\\\\.?1.*\\\\.safetensors$",
+     "alt": "^(?!.*turbo)qwen[_-]?image[_-]?2\\.?1.*\\.safetensors$",
      "rev": "aacf31a6d48e707f352ecba714cee0680da3479b",
      "size": 7256783064,
      "sha256": "cb74113cb03faecd79611b01fd7fd642f0aa60d6f0b95086abee214d75eaa57d"
@@ -227,7 +227,7 @@
      "path": "diffusion_models/qwen_image_2.1_turbo_int8_convrot.safetensors",
      "dir": "diffusion_models",
      "name": "qwen_image_2.1_turbo_int8_convrot.safetensors",
-     "alt": "qwen[_-]?image[_-]?2\\\\.?1.*turbo.*\\\\.safetensors$",
+     "alt": "qwen[_-]?image[_-]?2\\.?1.*turbo.*\\.safetensors$",
      "rev": "aacf31a6d48e707f352ecba714cee0680da3479b",
      "size": 7256787829,
      "sha256": "8144a0182964aa8403ad6dbc011db837304167d235161b9aabaa8532e967314c"
@@ -257,7 +257,7 @@
      "path": "model_patches/qwen_image_2.1_fun_controlnet_union_int8_convrot.safetensors",
      "dir": "model_patches",
      "name": "qwen_image_2.1_fun_controlnet_union_int8_convrot.safetensors",
-     "alt": "qwen[_-]?image[_-]?2\\\\.?1.*controlnet.*\\\\.safetensors$",
+     "alt": "qwen[_-]?image[_-]?2\\.?1.*controlnet.*\\.safetensors$",
      "rev": "aacf31a6d48e707f352ecba714cee0680da3479b",
      "size": 3779298944,
      "sha256": "07aa961570ac0e03d4ca936aecd76854d077a33cde69b5092399afba01b3715d"

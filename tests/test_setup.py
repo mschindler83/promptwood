@@ -442,3 +442,41 @@ def test_setup_check_dialog_shows_the_report(home, monkeypatch):
     assert "1 problem" in dlg.head.text()
     dlg.close()
     dlg.deleteLater()
+
+
+def test_another_build_of_a_model_counts(home, tmp_path):
+    """What the app's pickers accept is not downloaded again: other precisions, names, subfolders."""
+    man = M.load()
+    comfy = home / "ComfyUI"
+    have = {"model_patches/Qwen-Image-2.1-Fun-Controlnet-Union.safetensors": "image",
+            "loras/h3/minimax_h3_turbo_v4_step600.safetensors": "video-turbo",
+            "loras/minimax_h3_open_regenerate_2k_refiner_rank_384_bf16.safetensors": "video-2k",
+            "diffusion_models/qwen_image_2.1_bf16.safetensors": "image",
+            "diffusion_models/qwen_image_2.1_turbo_bf16.safetensors": "image",
+            "facerestore_models/GPEN-BFR-1024.onnx": "faces"}
+    for rel in have:
+        (comfy / "models" / rel).parent.mkdir(parents=True, exist_ok=True)
+        (comfy / "models" / rel).write_bytes(b"x")
+    D.forget_listings()
+    found = {}
+    for cid in set(have.values()):
+        for f in man["components"][cid]["files"]:
+            hit = D.find_file(f, comfy, paths.hf_cache())
+            if hit:
+                found[f.get("name")] = hit[0].name
+    assert found["qwen_image_2.1_int8_convrot.safetensors"] == "qwen_image_2.1_bf16.safetensors"      # not the turbo
+    assert found["qwen_image_2.1_turbo_int8_convrot.safetensors"] == "qwen_image_2.1_turbo_bf16.safetensors"
+    assert found["qwen_image_2.1_fun_controlnet_union_int8_convrot.safetensors"].startswith("Qwen-Image-2.1-Fun")
+    assert found["GPEN-BFR-512.onnx"] == "GPEN-BFR-1024.onnx"
+    assert len([n for n in found if "turbo" in n and "minimax" in n]) == 2
+    assert "open_h3_regenerate_2k_refiner_lora.safetensors" in found
+    assert "qwen3vl_8b_int8_convrot.safetensors" not in found            # (nothing like it is there)
+    # a language model with its vision part in any Hugging Face cache does for the prompt refiner
+    snap = tmp_path / "cache" / "models--me--llm" / "snapshots" / "abc"
+    snap.mkdir(parents=True)
+    (snap / "my-model-Q6.gguf").write_bytes(b"m")
+    llm = man["components"]["llm"]["files"]
+    assert all(D.find_file(f, comfy, tmp_path / "cache") is None for f in llm)        # no projector: cannot see
+    (snap / "mmproj-F16.gguf").write_bytes(b"p")
+    assert sorted(D.find_file(f, comfy, tmp_path / "cache")[0].name for f in llm) == ["mmproj-F16.gguf",
+                                                                                      "my-model-Q6.gguf"]
