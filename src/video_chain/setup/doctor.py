@@ -27,6 +27,7 @@ from .download import human
 OK, WARN, FAIL, INFO = "ok", "warn", "fail", "info"
 MARK = {OK: "[ ok ]", WARN: "[warn]", FAIL: "[FAIL]", INFO: "[ -- ]"}
 SETUP = "video-chain setup"
+LIVE, TESTS = "What the running ComfyUI offers", "Tests with the real models"
 
 
 @dataclass
@@ -177,11 +178,11 @@ def check_system() -> list[Check]:
     ff = S.ffmpeg_state()
     if not ff["ffmpeg"] or not ff["ffprobe"]:
         out.append(Check(g, "ffmpeg", FAIL, "ffmpeg / ffprobe not found",
-                         f"{SETUP} --only system   (downloads one), or: {S.install_hint('ffmpeg', osi)}"))
+                         f"{SETUP} --steps system   (downloads one), or: {S.install_hint('ffmpeg', osi)}"))
     elif not ff["x264"] or not ff["aac"]:
         lack = " and ".join(n for n, ok in (("libx264 (H.264)", ff["x264"]), ("aac", ff["aac"])) if not ok)
         out.append(Check(g, "ffmpeg", FAIL, f"{ff['ffmpeg']} {ff['version']} cannot encode {lack}",
-                         f"{SETUP} --only system   (downloads a full ffmpeg), or: {S.install_hint('ffmpeg', osi)}"))
+                         f"{SETUP} --steps system   (downloads a full ffmpeg), or: {S.install_hint('ffmpeg', osi)}"))
     else:
         out.append(Check(g, "ffmpeg", OK, f"{ff['ffmpeg']} {ff['version']}"))
     gpu = S.gpu()
@@ -243,19 +244,19 @@ def check_comfy(man: dict, components: list[str]) -> list[Check]:
     else:
         r = S.run([str(py), "-c", "import torch;print(torch.__version__, torch.cuda.is_available())"], 120)
         if r is None or r.returncode != 0:
-            out.append(Check(g, "PyTorch", FAIL, f"{py} cannot import torch", f"{SETUP} --only comfyui"))
+            out.append(Check(g, "PyTorch", FAIL, f"{py} cannot import torch", f"{SETUP} --steps comfyui"))
         elif r.stdout.strip().endswith("False"):
             out.append(Check(g, "PyTorch", FAIL, f"torch {r.stdout.split()[0]} does not see the graphics card",
-                             f"update the NVIDIA driver ({S.install_hint('nvidia')}), then {SETUP} --only comfyui"))
+                             f"update the NVIDIA driver ({S.install_hint('nvidia')}), then {SETUP} --steps comfyui"))
         else:
             out.append(Check(g, "PyTorch", OK, f"torch {r.stdout.split()[0]} with CUDA"))
     launcher = paths.comfy_launcher()
     out.append(Check(g, "Launcher", OK if launcher.is_file() else FAIL, str(launcher),
-                     "" if launcher.is_file() else f"{SETUP} --only comfyui"))
+                     "" if launcher.is_file() else f"{SETUP} --steps comfyui"))
     for node in M.nodes_for(man, components):
         ok = node_installed(man, node, d)
         out.append(Check(g, f"Custom node {node_dir(man, node, d).name}", OK if ok else FAIL,
-                         "" if ok else "not in ComfyUI's custom_nodes", "" if ok else f"{SETUP} --only nodes"))
+                         "" if ok else "not in ComfyUI's custom_nodes", "" if ok else f"{SETUP} --steps nodes"))
     return out
 
 
@@ -266,7 +267,7 @@ def check_components(man: dict, components: list[str]) -> list[Check]:
         have, total, left = component_state(man, cid, d, cache)
         size = human(c["bytes"])
         if have == total:
-            out.append(Check(g, c["title"], OK, f"{cid}, {size}"))
+            out.append(Check(g, c["title"], OK, f"{cid}"))
         elif cid in components:
             out.append(Check(g, c["title"], FAIL, f"{cid}: {total - have} of {total} files missing "
                                                   f"({human(left)} to download)", f"{SETUP} --only {cid}"))
@@ -281,19 +282,18 @@ def check_software(man: dict, components: list[str]) -> list[Check]:
     if "tts" in soft:
         py = paths.tts_python()
         if not py.is_file():
-            out.append(Check(g, "Text to speech environment", FAIL, f"{py} is missing", f"{SETUP} --only tts"))
+            out.append(Check(g, "Text to speech (Qwen3-TTS)", FAIL, f"{py} is missing", f"{SETUP} --only tts"))
         else:
             r = S.run([str(py), "-c", "import qwen_tts, soundfile, torch; print(torch.__version__)"], 180)
             ok = r is not None and r.returncode == 0
-            out.append(Check(g, "Text to speech environment", OK if ok else FAIL,
-                             f"torch {r.stdout.strip().splitlines()[-1]}" if ok else f"{py} cannot import qwen_tts",
+            out.append(Check(g, "Text to speech (Qwen3-TTS)", OK if ok else FAIL,
+                             "ready" if ok else f"{py} cannot import qwen_tts",
                              "" if ok else f"{SETUP} --only tts"))
     if "llama" in soft:
         server = paths.llama_server()
         r = S.run([server, "--version"], 30) if Path(server).is_file() or S.shutil.which(server) else None
         ok = r is not None and r.returncode == 0
-        ver = ((r.stderr or r.stdout).strip().splitlines() or [""])[0] if ok else ""
-        out.append(Check(g, "llama.cpp server", OK if ok else FAIL, f"{server} ({ver})" if ok else
+        out.append(Check(g, "llama.cpp (language model server)", OK if ok else FAIL, "ready" if ok else
                          f"{server} is missing or does not start", "" if ok else f"{SETUP} --only llm"))
     return out
 
@@ -403,7 +403,7 @@ def _component_nodes() -> dict[str, tuple[str, ...]]:
 
 def deep_checks(url: str, components: list[str]) -> list[Check]:
     """Ask the running ComfyUI: are the nodes there, does it list every model file of the installed components."""
-    man, g, out = M.load(), "ComfyUI (running)", []
+    man, g, out = M.load(), LIVE, []
     nodes = _component_nodes()
     lists: dict[str, list[str]] = {}
     for cid in components:
@@ -438,7 +438,7 @@ def deep_checks(url: str, components: list[str]) -> list[Check]:
 
 def render_test(url: str, log=print, steps: int = 20) -> Check:
     """One short real clip from a generated picture, through the app's own command line."""
-    g, name = "Proof", "A real clip (39 frames, with sound)"
+    g, name = TESTS, "A real clip (39 frames, with sound)"
     paths.use_private_tools()
     with tempfile.TemporaryDirectory(prefix="video-chain-test-") as tmp:
         tmp = Path(tmp)
@@ -475,7 +475,7 @@ def render_test(url: str, log=print, steps: int = 20) -> Check:
 
 def speech_test(log=print) -> Check:
     """One sentence spoken by the local text to speech (a designed voice), through the app's own TTS client."""
-    g, name = "Proof", "A spoken line (Qwen3-TTS voice design)"
+    g, name = TESTS, "A spoken line (Qwen3-TTS voice design)"
     from .. import tts
     paths.use_private_tools()
     local = tts.LocalTTS(start_timeout=600)
@@ -500,7 +500,7 @@ def speech_test(log=print) -> Check:
 
 def llm_test(log=print) -> Check:
     """llama.cpp's server answers with the installed language model."""
-    g, name = "Proof", "The prompt refiner's language model (llama.cpp)"
+    g, name = TESTS, "The prompt refiner's language model (llama.cpp)"
     from ..llm_server import LlamaServer, find_mmproj
     man = M.load()
     f = next(f for f in man["components"]["llm"]["files"] if "mmproj" not in f["path"])
@@ -540,17 +540,18 @@ def llm_test(log=print) -> Check:
 
 
 # ----------------------------------------------------------------------------- report
-def report(checks: list[Check], colour: bool = False) -> str:
+def report(checks: list[Check], colour: bool = False, headings: bool = True) -> str:
+    from .console import short
     lines, group = [], None
     tint = {OK: "\033[32m", WARN: "\033[33m", FAIL: "\033[31m", INFO: "\033[2m"}
     for c in checks:
-        if c.group != group:
+        if c.group != group and headings:
             group = c.group
             lines.append(f"\n{group}")
         mark = f"{tint[c.status]}{MARK[c.status]}\033[0m" if colour else MARK[c.status]
-        lines.append(f"  {mark} {c.name}" + (f": {c.detail}" if c.detail else ""))
+        lines.append(f"  {mark} {c.name}" + (f": {short(c.detail)}" if c.detail else ""))
         if c.fix and c.status != OK:
-            lines.append(f"         -> {c.fix}")
+            lines.append(f"         -> {short(c.fix)}")
     return "\n".join(lines).lstrip("\n")
 
 

@@ -284,9 +284,10 @@ def _mini_manifest(server) -> dict:
     sha = lambda p: hashlib.sha256(files[p]).hexdigest()   # noqa: E731
     rev = "a" * 40
     comps = {
-        "video": {"title": "Video", "profile": "core", "licence": "Test Licence", "files": [
+        "video": {"title": "Video", "profile": "core", "files": [
             {"url": server.url + "/m/unet.safetensors", "dir": "diffusion_models", "name": "unet.safetensors",
-             "size": 4000, "sha256": sha("/m/unet.safetensors")}]},
+             "size": 4000, "sha256": sha("/m/unet.safetensors"),
+             "licence": {"id": "other", "name": "Test Licence", "link": "https://example.org/terms", "open": False}}]},
         "extra": {"title": "Extra", "profile": "standard", "needs": ["video"], "files": [
             {"url": server.url + "/m/lora.safetensors", "dir": "loras", "name": "lora.safetensors", "size": 3000,
              "sha256": sha("/m/lora.safetensors")},
@@ -299,6 +300,8 @@ def _mini_manifest(server) -> dict:
     }
     for c in comps.values():
         c["bytes"] = sum(f["size"] for f in c["files"])
+        for f in c["files"]:
+            f.setdefault("licence", {"id": "mit", "name": "mit", "link": "https://example.org/mit", "open": True})
     return {"comfy": {"git": "x", "rev": "r", "python": "3.12"}, "software": {}, "nodes": {}, "components": comps}
 
 
@@ -315,7 +318,8 @@ def test_installer_downloads_models_and_doctor_sees_them(server, home, monkeypat
     need = inst.show_plan()
     assert need >= sum(c["bytes"] for c in man["components"].values())
     inst.licences()
-    assert "Test Licence" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Test Licence" in out and "https://example.org/terms" in out and "extra: Apache-2.0 / MIT" in out
     inst.model_files()
     assert (comfy / "models" / "diffusion_models" / "unet.safetensors").stat().st_size == 4000
     assert (comfy / "models" / "insightface" / "models" / "buffalo_l" / "det_10g.onnx").read_bytes() == b"detector"
@@ -356,8 +360,12 @@ def test_doctor_finds_models_in_extra_model_paths(server, home, tmp_path, monkey
 def test_only_steps_keep_the_installed_parts(server, home, monkeypatch):
     monkeypatch.setattr(M, "load", lambda: _mini_manifest(server))
     paths.save_config(components="video")
-    inst = I.Installer(I.Options(only=["nodes"]))
+    inst = I.Installer(I.Options(steps=["nodes"]))
     assert inst.components == ["video"] and not inst.models and inst.wants("nodes") and not inst.wants("system")
+    with pytest.raises(ValueError, match="unknown step"):
+        I.Installer(I.Options(steps=["video"]))
+    with pytest.raises(ValueError, match="unknown component"):
+        I.Installer(I.Options(only=["nodes"]))
     inst = I.Installer(I.Options(only=["extra"]))
     assert inst.components == ["video", "extra"] and inst.models and inst.wants("nodes")
 
@@ -426,7 +434,8 @@ def test_cli_dispatches_setup_and_doctor(home, monkeypatch, capsys):
     monkeypatch.setattr(setup_cli, "main", lambda argv: seen.setdefault("argv", argv) and 0)
     assert cli.main(["setup", "--dry-run"]) == 0 and seen["argv"] == ["setup", "--dry-run"]
     a = setup_cli.build_parser().parse_args(["setup", "--only", "tts, llm", "--with", "image-krea2", "--no-test"])
-    assert a.only == ["tts", "llm"] and a.add == ["image-krea2"] and a.test is False and a.profile == "standard"
+    assert a.only == ["tts", "llm"] and a.add == ["image-krea2"] and a.test is False and a.profile is None
+    assert setup_cli.build_parser().parse_args(["setup", "--steps", "comfyui,nodes"]).steps == ["comfyui", "nodes"]
 
 
 def test_setup_check_dialog_shows_the_report(home, monkeypatch):
@@ -610,3 +619,107 @@ def test_plan_suggests_a_token_only_when_it_helps(home, monkeypatch, capsys, tmp
     inst.show_plan()
     out = capsys.readouterr().out
     assert "your token is used" in out and "hf_abc123" not in out
+
+
+def test_every_download_carries_its_publishers_licence(home, capsys):
+    """The licence shown is the publisher's own statement, for every part; setup claims nothing itself."""
+    man = M.load()
+    assert re.fullmatch(r"\d{4}-\d\d-\d\d", man["checked"])
+    for cid, c in man["components"].items():
+        for f in c["files"]:
+            lic = f["licence"]
+            assert lic["name"] and lic["link"].startswith("https://") and isinstance(lic["open"], bool), (cid, f)
+    lics = lambda cid: {f["licence"]["name"]: f["licence"]["open"] for f in man["components"][cid]["files"]}   # noqa: E731
+    assert not any(lics("video").values()) and not any(lics("image").values())        # research / community terms
+    assert any("non-commercial" in n for n in lics("faces")) and any("no licence stated" in n for n in lics("faces"))
+    assert all(lics("upscale").values()) and all(lics("tts").values())
+    inst = I.Installer(I.Options(accept_licenses=True))
+    inst.licences()
+    out = capsys.readouterr().out
+    assert "Most are" not in out and "setup cannot judge" in out and man["checked"] in out
+    assert "non-commercial research purposes only" in out and "no licence stated by the publisher" in out
+    assert "qwen-research" in out and "upscale, tts, llm: Apache-2.0 / MIT" in out
+    inst = I.Installer(I.Options())                               # nobody to ask, not accepted: nothing happens
+    inst.interactive = False
+    with pytest.raises(I.SetupError, match="not accepted"):
+        inst.licences()
+
+
+def test_setup_asks_how_much_to_install(server, home, monkeypatch, capsys):
+    man = _mini_manifest(server)
+    monkeypatch.setattr(M, "load", lambda: man)
+    comfy = home / "ComfyUI" / "models" / "diffusion_models"
+    comfy.mkdir(parents=True)
+    (comfy / "unet.safetensors").write_bytes(b"0" * 4000)
+    inst = I.Installer(I.Options())
+    inst.interactive = True
+    _answers(monkeypatch, "1")
+    inst.ask_profile()
+    out = capsys.readouterr().out
+    assert inst.o.profile == "core" and inst.components == ["video"]
+    assert "all already on this computer" in out and "to download" in out and "--with NAME" in out
+    inst = I.Installer(I.Options())
+    inst.interactive = True
+    _answers(monkeypatch, "")                                     # Enter: the recommended one
+    inst.ask_profile()
+    assert inst.o.profile == "standard" and inst.components == ["video", "extra"]
+    for opts in (I.Options(profile="standard"), I.Options(only=["video"]), I.Options(yes=True)):
+        inst = I.Installer(opts)
+        inst.interactive = not opts.yes
+        _answers(monkeypatch)                                     # (nothing may be asked)
+        inst.ask_profile()
+
+
+def test_answers_travel_from_the_asking_phase_to_the_install(server, home, monkeypatch, tmp_path):
+    monkeypatch.setattr(M, "load", lambda: _mini_manifest(server))
+    first = I.Installer(I.Options(phase="ask"))
+    first.o.profile, first.o.models_from = "core", [str(tmp_path)]
+    first.save_answers()
+    second = I.Installer(I.Options(answers=True))
+    second.interactive = True
+    assert second.load_answers() and second.o.profile == "core" and second.components == ["video"]
+    assert second.o.models_from == [str(tmp_path)] and second.o.accept_licenses and not second.interactive
+    assert not second.answers_file().exists() and not second.load_answers()        # read once
+
+
+def test_steps_are_counted_before_they_start(server, home, monkeypatch):
+    monkeypatch.setattr(M, "load", lambda: _mini_manifest(server))
+    monkeypatch.setattr(S, "ffmpeg_ok", lambda st=None: False)
+    inst = I.Installer(I.Options(yes=True))
+    names = [n for n, _ in inst.pending()]
+    assert names == ["ffmpeg", "comfyui", "models", "desktop", "verify"] and inst._headed == 4
+    monkeypatch.setattr(S, "ffmpeg_ok", lambda st=None: True)
+    (home / "ComfyUI").mkdir(parents=True)
+    (home / "ComfyUI" / "main.py").write_text("")
+    paths.save_config(components="video")
+    inst = I.Installer(I.Options(steps=["nodes"]))
+    assert [n for n, _ in inst.pending()] == ["comfyui", "desktop", "verify"] and inst._headed == 1
+
+
+def test_tools_run_quietly_into_the_log_and_show_why_they_failed(home, capsys):
+    from video_chain.setup import console as C
+    import sys as _sys
+    log = C.open_log()
+    C.plan_steps(2)
+    C.step("First")
+    C.run([_sys.executable, "-c", "print('chatter ' * 3)"], "Doing a thing", expect="quick")
+    out = capsys.readouterr().out
+    assert "[1/2] First" in out and "Doing a thing … (quick)" in out and "Doing a thing: done in" in out
+    assert "chatter" not in out and "chatter chatter" in log.read_text()
+    with pytest.raises(C.CommandFailed) as e:
+        C.run([_sys.executable, "-c", "import sys; print('the real reason'); sys.exit(3)"], "Breaking")
+    assert "exit code 3" in str(e.value) and "the real reason" in str(e.value)
+    assert "Breaking: failed after" in capsys.readouterr().out
+    assert C.short(str(Path.home() / "x")) == "~/x" and C.clock(75) == "1m15s" and C.clock(3700) == "1h01m"
+
+
+def test_plan_wording(server, home, monkeypatch, capsys):
+    man = _mini_manifest(server)
+    monkeypatch.setattr(M, "load", lambda: man)
+    (home / "ComfyUI" / "models" / "diffusion_models").mkdir(parents=True)
+    (home / "ComfyUI" / "models" / "diffusion_models" / "unet.safetensors").write_bytes(b"0" * 4000)
+    inst = I.Installer(I.Options(yes=True))
+    inst.show_plan()
+    out = capsys.readouterr().out
+    assert "already on this computer" in out and "(there)" not in out and "to download" in out
+    assert "a new one will be installed" in out and "programs: about" in out

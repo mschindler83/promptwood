@@ -41,7 +41,6 @@ WAN = "Comfy-Org/Wan-Animate-2"
 SPEC = {
     "video": {
         "title": "Video clips (MiniMax H3, image to video with sound)", "profile": "core",
-        "licence": "MiniMax H3 Community License", "licence_url": f"https://huggingface.co/{H3}",
         "files": [m(H3, "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors", "diffusion_models"),
                   m(H3, "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", "text_encoders"),
                   m(H3, "vae/minimax_h3_video_vae_fp16.safetensors", "vae"),
@@ -49,7 +48,7 @@ SPEC = {
     },
     "video-refs": {
         "title": "Face and sound references in clips (H3 reference-to-video)", "profile": "standard",
-        "needs": ["video"], "licence": "MiniMax H3 Community License",
+        "needs": ["video"],
         "files": [m(H3, "diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors", "diffusion_models")],
     },
     "video-turbo": {
@@ -90,7 +89,10 @@ SPEC = {
         "title": "Faces: crop to face, face swap (SCRFD, ArcFace, HyperSwap, GPEN)", "profile": "standard",
         "nodes": ["video-chain"], "app_extra": "faces",
         "files": [{"url": "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip",
-                   "dir": "insightface/models/buffalo_l", "extract": ["det_10g.onnx", "w600k_r50.onnx"]},
+                   "dir": "insightface/models/buffalo_l", "extract": ["det_10g.onnx", "w600k_r50.onnx"],
+                   # (InsightFace's README, section License: the code is MIT, the models are not)
+                   "licence": {"id": "other", "name": "InsightFace models: non-commercial research purposes only",
+                               "link": "https://github.com/deepinsight/insightface#license", "open": False}},
                   m("facefusion/models-3.3.0", "hyperswap_1b_256.onnx", "insightface", alt=r"hyperswap.*\.onnx$"),
                   m("facefusion/models-3.0.0", "gpen_bfr_512.onnx", "facerestore_models", "GPEN-BFR-512.onnx",
                     alt=r"gpen.*\.onnx$")],
@@ -151,20 +153,21 @@ SPEC = {
 NODES = {
     "video-chain": {"bundled": "comfy_nodes/video_chain_nodes", "pip": ["onnxruntime-gpu", "opencv-python-headless"]},
     "h3-turbo": {"git": "https://github.com/Larryvrh/ComfyUI-MiniMax-H3-Turbo", "rev": "4274783",
-                 "dir": "ComfyUI-MiniMax-H3-Turbo"},
+                 "dir": "ComfyUI-MiniMax-H3-Turbo", "licence": "Apache-2.0"},
     "hyperflow": {"git": "https://github.com/Adudeguyman/ComfyUI-HyperFlow-H3", "rev": "9977890",
-                  "dir": "ComfyUI-HyperFlow-H3"},
-    "veda": {"git": "https://github.com/veda-sparse/Veda-on-ComfyUI", "rev": "67e4eb5", "dir": "Veda-on-ComfyUI"},
+                  "dir": "ComfyUI-HyperFlow-H3", "licence": "Apache-2.0"},
+    "veda": {"git": "https://github.com/veda-sparse/Veda-on-ComfyUI", "rev": "67e4eb5", "dir": "Veda-on-ComfyUI", "licence": "MIT"},
     "controlnet-aux": {"git": "https://github.com/Fannovel16/comfyui_controlnet_aux", "rev": "a587a4c",
-                       "dir": "comfyui_controlnet_aux"},
-    "kjnodes": {"git": "https://github.com/kijai/ComfyUI-KJNodes", "rev": "d3cfe21", "dir": "comfyui-kjnodes"},
+                       "dir": "comfyui_controlnet_aux", "licence": "Apache-2.0"},
+    "kjnodes": {"git": "https://github.com/kijai/ComfyUI-KJNodes", "rev": "d3cfe21", "dir": "comfyui-kjnodes", "licence": "GPL-3.0"},
 }
 
-COMFY = {"git": "https://github.com/comfyanonymous/ComfyUI", "rev": "1332fabf", "python": "3.12"}
+COMFY = {"git": "https://github.com/comfyanonymous/ComfyUI", "rev": "1332fabf", "python": "3.12",
+         "licence": "GPL-3.0"}
 # Programs next to the app: the TTS environment and llama.cpp's server (a release build, no compiler needed)
 SOFTWARE = {
-    "tts": {"python": "3.12", "pip": ["qwen-tts==0.1.1", "soundfile"]},
-    "llama": {"repo": "ggml-org/llama.cpp", "tag": "b12317"},
+    "tts": {"python": "3.12", "pip": ["qwen-tts==0.1.1", "soundfile"], "licence": "Apache-2.0"},
+    "llama": {"repo": "ggml-org/llama.cpp", "tag": "b12317", "licence": "MIT"},
 }
 
 
@@ -181,6 +184,31 @@ def _get(url: str, tries: int = 5):
 
 
 _TREES: dict = {}
+_LICENCES: dict = {}
+OPEN = ("apache-2.0", "mit", "bsd-2-clause", "bsd-3-clause", "bsd", "cc0-1.0", "unlicense")
+TODAY = time.strftime("%Y-%m-%d")
+
+
+def repo_licence(repo: str) -> dict:
+    """The licence a repo states on its Hugging Face page (its model card): {"id", "name", "link", "open"}.
+    Recorded as stated there, not judged: "open" only marks the well-known permissive ones."""
+    if repo not in _LICENCES:
+        card = _get(f"https://huggingface.co/api/models/{repo}").get("cardData") or {}
+        lid = card.get("license")
+        lid = lid[0] if isinstance(lid, list) and lid else lid
+        link = card.get("license_link") or ""
+        if link and not link.startswith("http"):
+            link = f"https://huggingface.co/{repo}/blob/main/{link}"
+        if not lid:
+            name = "no licence stated by the publisher"
+        elif lid == "other":
+            name = str(card.get("license_name") or "its own licence")
+        else:
+            name = str(lid)
+        _LICENCES[repo] = {"id": lid or "none", "name": name, "link": link or f"https://huggingface.co/{repo}",
+                           "open": bool(lid) and str(lid).lower() in OPEN}
+        time.sleep(0.4)
+    return _LICENCES[repo]
 
 
 def repo_info(repo: str) -> tuple[str, dict]:
@@ -210,6 +238,7 @@ def resolve(entry: dict) -> list[dict]:
             if entry["patterns"] and not any(p in path for p in entry["patterns"]):
                 continue
             out.append({"repo": entry["hf_repo"], "rev": sha, "path": path, "hf": True, **info,
+                        "licence": repo_licence(entry["hf_repo"]),
                         **({"alt": entry["alt"]} if entry.get("alt") else {})})
         if not out:
             raise SystemExit(f"{entry['hf_repo']}: nothing matches {entry['patterns']}")
@@ -217,16 +246,24 @@ def resolve(entry: dict) -> list[dict]:
     sha, files = repo_info(entry["repo"])
     if entry["path"] not in files:
         raise SystemExit(f"{entry['repo']} has no {entry['path']}")
-    return [{**entry, "rev": sha, **files[entry["path"]]}]
+    return [{**entry, "rev": sha, **files[entry["path"]], "licence": repo_licence(entry["repo"])}]
+
+
+def licence_text(f: dict) -> str:
+    lic = f.get("licence") or {}
+    return f"[{lic.get('name', '?')}]({lic.get('link', '')})" if lic.get("link") else lic.get("name", "?")
 
 
 def models_doc(comps: dict) -> str:
-    """docs/MODELS.md: every download with its source, so the licences can be read before installing."""
+    """docs/MODELS.md: every download with its source and the licence its publisher states."""
     gb = lambda n: f"{n / 2**30:.1f} GB" if n >= 2**28 else f"{n / 2**20:.0f} MB"   # noqa: E731
     out = ["# What setup downloads", "",
            "Written by `tools/build_manifest.py` from the installer's list (`src/video_chain/setup/manifest.json`). "
-           "Every file is fetched from the address below at a fixed revision and checked by size and SHA-256. "
-           "Each model comes under its own licence, shown on its page; you accept it by downloading the model.", "",
+           "Every file is fetched from the address below at a fixed revision and checked by size and SHA-256.", "",
+           f"**Licences.** The licence column is what each publisher states on its own page, read on {TODAY}. "
+           "It is recorded here, not judged: several models are for research or non-commercial use only, and some "
+           "publishers state no licence at all. Whether your use is allowed is for you to check on the linked "
+           "page. You accept a model's licence by downloading it.", "",
            "| Profile | Parts | Download |", "|---|---|---|"]
     order = ("core", "standard", "full")
     for i, prof in enumerate(order):
@@ -236,29 +273,35 @@ def models_doc(comps: dict) -> str:
         out += ["", f"## {cid}: {c['title']}", "",
                 f"Profile `{c['profile']}`, {gb(c['bytes'])}."
                 + (f" Needs: {', '.join(c['needs'])}." if c.get("needs") else "")
-                + (f" Custom nodes: {', '.join(NODES[n].get('git', 'bundled with Promptwood') for n in c['nodes'])}."
-                   if c.get("nodes") else "")
-                + (f" Licence with its own terms: {c['licence']}." if c.get("licence") else ""), "",
-                "| File | Size | Source |", "|---|---|---|"]
+                + (" Custom nodes: " + ", ".join(
+                    f"{NODES[n]['git']} ({NODES[n]['licence']})" if "git" in NODES[n] else "bundled with Promptwood"
+                    for n in c["nodes"]) + "." if c.get("nodes") else ""), "",
+                "| File | Size | Source | Licence stated there |", "|---|---|---|---|"]
         repos: dict = {}
         for f in c["files"]:
             if f.get("hf"):
-                r = repos.setdefault(f["repo"], [0, 0])
+                r = repos.setdefault(f["repo"], [0, 0, f])
                 r[0] += 1
                 r[1] += f["size"]
             elif "url" in f:
-                out.append(f"| {', '.join(f['extract'])} | {gb(f['size'])} | {f['url']} |")
+                out.append(f"| {', '.join(f['extract'])} | {gb(f['size'])} | {f['url']} | {licence_text(f)} |")
             else:
-                out.append(f"| `{f['name']}` | {gb(f['size'])} | https://huggingface.co/{f['repo']} |")
-        for repo, (n, size) in repos.items():
-            out.append(f"| {n} files (Hugging Face cache) | {gb(size)} | https://huggingface.co/{repo} |")
-    out += ["", "## Programs", "", "| Program | Source |", "|---|---|",
-            f"| ComfyUI at `{COMFY['rev']}` | {COMFY['git']} |",
-            "| PyTorch (CUDA build chosen from the graphics driver) | https://download.pytorch.org/whl/ |",
-            f"| llama.cpp `{SOFTWARE['llama']['tag']}` (release build) | https://github.com/{SOFTWARE['llama']['repo']} |",
-            f"| Qwen3-TTS (`{SOFTWARE['tts']['pip'][0]}`) | https://pypi.org/project/qwen-tts/ |",
-            "| ffmpeg (only when the system has none with libx264) | https://github.com/BtbN/FFmpeg-Builds |",
-            "| uv (only when the system has none) | https://docs.astral.sh/uv/ |", ""]
+                out.append(f"| `{f['name']}` | {gb(f['size'])} | https://huggingface.co/{f['repo']} | "
+                           f"{licence_text(f)} |")
+        for repo, (n, size, f) in repos.items():
+            out.append(f"| {n} files (Hugging Face cache) | {gb(size)} | https://huggingface.co/{repo} | "
+                       f"{licence_text(f)} |")
+    out += ["", "## Programs", "", "| Program | Source | Licence |", "|---|---|---|",
+            f"| ComfyUI at `{COMFY['rev']}` | {COMFY['git']} | {COMFY['licence']} |",
+            "| PyTorch (CUDA build chosen from the graphics driver) | https://download.pytorch.org/whl/ | "
+            "BSD-3-Clause; NVIDIA's CUDA libraries under NVIDIA's own terms |",
+            f"| llama.cpp `{SOFTWARE['llama']['tag']}` (release build) | "
+            f"https://github.com/{SOFTWARE['llama']['repo']} | {SOFTWARE['llama']['licence']} |",
+            f"| Qwen3-TTS (`{SOFTWARE['tts']['pip'][0]}`) | https://pypi.org/project/qwen-tts/ | "
+            f"{SOFTWARE['tts']['licence']} |",
+            "| ffmpeg (only when the system has none with libx264) | https://github.com/BtbN/FFmpeg-Builds | "
+            "GPL build of ffmpeg |",
+            "| uv (only when the system has none) | https://docs.astral.sh/uv/ | Apache-2.0 / MIT |", ""]
     return "\n".join(out)
 
 
@@ -274,7 +317,8 @@ def main() -> int:
     for cid, c in comps.items():
         for n in c.get("needs", []) + c.get("nodes", []):
             assert n in comps or n in NODES, (cid, n)
-    OUT.write_text(json.dumps({"comfy": COMFY, "software": SOFTWARE, "nodes": NODES, "components": comps}, indent=1) + "\n")
+    OUT.write_text(json.dumps({"checked": TODAY, "comfy": COMFY, "software": SOFTWARE, "nodes": NODES,
+                               "components": comps}, indent=1) + "\n")
     print("wrote", OUT)
     DOC.write_text(models_doc(comps))
     print("wrote", DOC)

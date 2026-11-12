@@ -19,17 +19,21 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="video-chain", formatter_class=argparse.RawDescriptionHelpFormatter,
                                 description="Install and check everything Promptwood needs.",
                                 epilog=f"Parts (for --only / --with / --without):\n{parts}\n\n"
-                                       "Steps for --only: system (ffmpeg), comfyui, nodes\n"
+                                       "Steps (for --steps, to repair one): system (ffmpeg), comfyui, nodes\n"
                                        f"Everything goes into {paths.home()} (set VIDEO_CHAIN_HOME for another "
                                        "place).\nA Hugging Face token (optional: smoother downloads) is read from HF_TOKEN or "
                                        "from `hf auth login`.")
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("setup", help="install what is missing (safe to run again)",
                        formatter_class=argparse.RawDescriptionHelpFormatter, epilog=p.epilog)
-    s.add_argument("--profile", choices=M.PROFILES, default="standard",
+    s.add_argument("--profile", choices=M.PROFILES, default=None,
                    help="core: " + M.PROFILE_TEXT["core"] + "; standard: " + M.PROFILE_TEXT["standard"]
-                        + "; full: " + M.PROFILE_TEXT["full"])
-    s.add_argument("--only", type=_list, default=[], metavar="NAMES", help="only these parts / steps (comma list)")
+                        + "; full: " + M.PROFILE_TEXT["full"] + " (default: standard; asked at a terminal)")
+    s.add_argument("--only", type=_list, default=[], metavar="NAMES", help="only these parts (comma list)")
+    s.add_argument("--steps", type=_list, default=[], metavar="STEPS",
+                   help="only repeat these install steps: system, comfyui, nodes (comma list)")
+    s.add_argument("--phase", choices=["ask"], help=argparse.SUPPRESS)
+    s.add_argument("--answers", action="store_true", help=argparse.SUPPRESS)
     s.add_argument("--with", dest="add", type=_list, default=[], metavar="NAMES", help="also these parts")
     s.add_argument("--without", type=_list, default=[], metavar="NAMES", help="leave these parts out")
     s.add_argument("--comfy-dir", help="use the ComfyUI in this folder instead of installing one")
@@ -64,7 +68,8 @@ def main(argv: list[str] | None = None) -> int:
     paths.use_private_tools()
     if a.cmd == "setup":
         from .installer import Options, main_setup
-        return main_setup(Options(profile=a.profile, only=a.only, add=a.add, without=a.without,
+        return main_setup(Options(profile=a.profile, only=a.only, steps=a.steps, phase=a.phase,
+                                  answers=a.answers, add=a.add, without=a.without,
                                   comfy_dir=a.comfy_dir, comfy_python=a.comfy_python,
                                   comfy_launcher=a.comfy_launcher, comfy_port=a.comfy_port, models_from=a.models_from,
                                   hf_cache=a.hf_cache,
@@ -72,22 +77,33 @@ def main(argv: list[str] | None = None) -> int:
                                   force=a.force, test=a.test, desktop=a.desktop, workers=a.workers,
                                   dry_run=a.dry_run))
     from . import doctor as D
-    checks = D.check_all()
+    from .console import working
+    with working("Looking at what is installed", quiet_end=True):
+        checks = D.check_all()
     parts = D.installed_components() or M.select(M.load(), "standard")
-    say = lambda t: print("  " + t, flush=True)      # noqa: E731
+    quiet = lambda _t: None      # noqa: E731
     if (a.deep or a.render) and not D.failed(checks):
         url = paths.comfy_url()
         try:
-            with D.ComfySession(url, log=say):
-                checks += D.deep_checks(url, parts)
+            with working("Starting ComfyUI", "up to a minute") as w:
+                session = D.ComfySession(url, log=w.note)
+                session.__enter__()
+            try:
+                with working("Asking ComfyUI for its nodes and models", quiet_end=True):
+                    checks += D.deep_checks(url, parts)
                 if a.render and not D.failed(checks):
-                    checks.append(D.render_test(url, log=say))
+                    with working("Rendering a test clip", "loads about 35 GB of models: 1 to 5 minutes"):
+                        checks.append(D.render_test(url, log=quiet))
+            finally:
+                session.__exit__(None, None, None)
         except Exception as e:  # noqa: BLE001
-            checks.append(D.Check("ComfyUI (running)", "Start ComfyUI and ask it", D.FAIL, str(e)))
+            checks.append(D.Check(D.LIVE, "Start ComfyUI and ask it", D.FAIL, str(e)))
     if a.speech and not D.failed(checks):
-        checks.append(D.speech_test(log=say))
+        with working("Speaking a test line", "loads the voice model: about a minute"):
+            checks.append(D.speech_test(log=quiet))
     if a.llm and not D.failed(checks):
-        checks.append(D.llm_test(log=say))
+        with working("Asking the language model a question", "loads the model: about a minute"):
+            checks.append(D.llm_test(log=quiet))
     print(D.report(checks, colour=sys.stdout.isatty()))
     print()
     print(D.summary(checks))
