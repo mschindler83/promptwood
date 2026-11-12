@@ -331,6 +331,18 @@ def test_a_voice_sample_cloned_at_elevenlabs(eleven_server, project, tmp_path):
     assert "tts" not in T.character(t, "Anna")                                # (clone_sample only reads)
     assert tts.set_eleven(t, "Anna", v)
     assert T.character(t, "Anna")["tts"]["eleven"] == {"id": "new1", "name": "Anna (video-chain)"}
+    # a voice from a longer source: its clone reference is what is uploaded, and what local TTS clones
+    give_voice(project, t, "Ben", tmp_path, secs=12.0)
+    assert tts.clone_sample(project, t, "Ben", el)["file"] == T.character(t, "Ben")["voice"]["file"]
+    body = [s for s in _Fake.seen if s[1] == "/v1/voices/add"][-1][2]
+    assert b'filename="voice2_ref.wav"' in body and len(body) > 12 * 48000 * 4
+    n = t.add(None, '@Ben says "Hallo du."')
+    loc = FakeLocal()
+    r = tts.render_lines(project, t, n.id, loc)
+    assert loc.calls[0] == ("transcribe", "voice2_ref.wav", "de")
+    assert loc.calls[1][:5] == ("clone", "Hallo du.", "German", "voice2_ref.wav", "what the sample says")
+    tts.apply_lines(project, t, n.id, r)
+    assert T.character(t, "Ben")["voice"]["text"] == "what the sample says"
     # the sample was replaced while the clone was made: the clone is not used
     give_voice(project, t, "Anna", tmp_path)
     assert not tts.set_eleven(t, "Anna", {**v, "id": "new2"})
@@ -365,6 +377,24 @@ def test_qwen3_tts_speaks_german_and_english(tmp_path):
                                  ("English", "See you tomorrow in the park.", "en")):
             out = tmp_path / f"{code}.wav"
             assert loc.clone(line, lang, ref, tts.SAMPLE_TEXT["German"], out, seed=1) > 1.0
+            got = loc.transcribe(out, code).lower().strip(" .!")
+            assert got == line.lower().strip(" .!"), got
+        # a long clone reference (a voice set from a longer source: up to 30 s, transcribed by Whisper)
+        text = ("Guten Morgen, schön dich zu sehen. Ich wollte dir schon lange erzählen, was letzte Woche passiert "
+                "ist. Wir sind früh am Morgen losgefahren, die Straßen waren noch ganz leer, und über den Feldern "
+                "lag dichter Nebel. Nach einer Stunde kam endlich die Sonne heraus, und wir haben am See "
+                "angehalten, um in aller Ruhe zu frühstücken.")
+        long = tmp_path / "long.wav"
+        secs = loc.design(text, "German", "A man, about forty, deep calm voice.", long, seed=3)
+        cut = tmp_path / "long30.wav"
+        chain.to_wav(long, cut, 0.0, T.VOICE_REF_MAX_SECS if secs > T.VOICE_REF_MAX_SECS else None)
+        assert chain.audio_seconds(cut) > 15, secs
+        said = loc.transcribe(cut, "de")
+        assert "nebel" in said.lower(), said
+        for lang, line, code in (("German", "Wir sehen uns morgen im Park.", "de"),
+                                 ("English", "See you tomorrow in the park.", "en")):
+            out = tmp_path / f"long_{code}.wav"
+            assert 1.0 < loc.clone(line, lang, cut, said, out, seed=1) < 8.0
             got = loc.transcribe(out, code).lower().strip(" .!")
             assert got == line.lower().strip(" .!"), got
     finally:

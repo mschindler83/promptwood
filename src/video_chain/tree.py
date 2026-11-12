@@ -76,7 +76,8 @@ DEFAULT_OPTIONS = {"model": "Comfy-Org/MiniMax-H3", "frames": 73, "steps": 28,
                    "veda": {"on": True},
                    # the cast: characters with face pictures (copies in refs/); a prompt mentions them as @Name and
                    # the clip is made with exactly their pictures. A clip that mentions nobody gets the lead's.
-                   # [{"name", "images": [rel], "desc", "lead": bool, "voice": {"file", "name", "secs", "text"}
+                   # [{"name", "images": [rel], "desc", "lead": bool, "voice": {"file", "name", "secs", "text",
+                   #   "ref": {"file", "secs"} (a longer part of the source, for text to speech to clone)}
                    #   (optional), "tts": {"eleven": {"id", "name"}} (optional: its ElevenLabs voice)}]
                    "cast": [],
                    # how the face pictures are used: their size for the model, and the sentence tying a person to
@@ -106,6 +107,7 @@ SAID_BY = re.compile(r"[ \t]*,?[ \t]*(says|said|asks|asked|answers|answered|repl
                      r"shouts|shouted|calls|called|adds|added|cries|cried|murmurs|murmured|mutters|muttered|laughs|"
                      r"laughed|sagt|fragt|antwortet|ruft|flüstert)[ \t]+@(\w[\w-]*)", re.IGNORECASE)   # "...", says @Anna
 VOICE_MAX_SECS = 7.5               # a character's voice is cut to this (two voices fit the 15 s a clip may have)
+VOICE_REF_MAX_SECS = 30.0          # ... and text to speech clones this much of a longer source (voice["ref"])
 WRONG_TAG = re.compile(r"<(Image|Img|Face|Person|Photo|Pic|Ref|Reference)\s*(\d+)>", re.IGNORECASE)
 
 
@@ -473,7 +475,10 @@ def _migrate_cast(options: dict, has_cast: bool) -> None:
                 entry["voice"] = {"file": v["file"], "name": str(v.get("name") or ""),
                                   "secs": float(v.get("secs") or 0)}
                 if isinstance(v.get("text"), str) and v["text"].strip():
-                    entry["voice"]["text"] = v["text"].strip()      # what it says (text to speech clones it)
+                    entry["voice"]["text"] = v["text"].strip()      # what clone_file says (text to speech clones it)
+                r = v.get("ref")
+                if isinstance(r, dict) and isinstance(r.get("file"), str) and r["file"]:
+                    entry["voice"]["ref"] = {"file": r["file"], "secs": float(r.get("secs") or 0)}
             el = (c.get("tts") or {}).get("eleven") if isinstance(c.get("tts"), dict) else None
             if isinstance(el, dict) and isinstance(el.get("id"), str) and el["id"]:
                 entry["tts"] = {"eleven": {"id": el["id"], "name": str(el.get("name") or el["id"])}}
@@ -642,36 +647,52 @@ def remove_character(project: Path, tree: Tree, name: str) -> None:
     for rel in c["images"]:
         _drop_file(project, rel, tree)
     if c.get("voice"):
-        _drop_voice_file(project, c["voice"]["file"], tree)
+        _drop_voice(project, c["voice"], tree)
 
 
 def voices_in_use(tree_or_options) -> list[str]:
     return [c["voice"]["file"] for c in cast_of(tree_or_options) if c.get("voice")]
 
 
-def _drop_voice_file(project: Path, rel: str, tree: Tree) -> None:
-    if rel in voices_in_use(tree) or rel in {a["file"] for a in audio_refs(tree)}:
-        return
-    target = (Path(project) / rel).resolve()
-    if (Path(project) / REFS_DIR).resolve() in target.parents:
-        target.unlink(missing_ok=True)
+def clone_file(voice: dict) -> str:
+    """The file text to speech clones a voice from: its longer clone reference when it has one, else the voice."""
+    return (voice.get("ref") or {}).get("file") or voice["file"]
+
+
+def clone_secs(voice: dict) -> float:
+    return float((voice.get("ref") or voice).get("secs") or 0)
+
+
+def _drop_voice(project: Path, voice: dict, tree: Tree) -> None:
+    """Delete a voice's files (the voice and its clone reference) that nothing uses any more."""
+    kept = {a["file"] for a in audio_refs(tree)}
+    for c in cast_of(tree):
+        if c.get("voice"):
+            kept |= {c["voice"]["file"], clone_file(c["voice"])}
+    for rel in {voice["file"], clone_file(voice)} - kept:
+        target = (Path(project) / rel).resolve()
+        if (Path(project) / REFS_DIR).resolve() in target.parents:
+            target.unlink(missing_ok=True)
 
 
 def set_voice(project: Path, tree: Tree, name: str, source: Path, start: float = 0.0,
-              label: str | None = None) -> dict:
+              label: str | None = None, end: float | None = None) -> dict:
     """Copy the sound of an audio or video file into refs/ as the voice of a character (from start, at most
-    VOICE_MAX_SECS); it replaces the character's old voice. Returns the entry, with "cut": the source was longer.
-    A clip uses the voice when the character says a line in it ("..." after @Name)."""
+    VOICE_MAX_SECS, not past end); it replaces the character's old voice. Returns the entry, with "cut": the source was longer.
+    A clip uses the voice when the character says a line in it ("..." after @Name). Of a longer source, up to
+    VOICE_REF_MAX_SECS (from the same start) are kept next to it as the clone reference ("ref"): text to speech
+    clones the voice from that, the clip model still hears the short voice."""
     c = character(tree, name)
     if c is None:
         raise ValueError(f"no character called {name}")
     length = chain.audio_seconds(Path(source))
     if length is None:
         raise ValueError(f"{Path(source).name} has no sound")
-    have = length - float(start)
+    cut_end = end is not None and float(end) < length - 0.01
+    have = (float(end) if cut_end else length) - float(start)
     if have < AUDIO_REF_MIN:
         raise ValueError(f"a voice needs at least {AUDIO_REF_MIN:.0f} s of speech ({Path(source).name} has "
-                         f"{max(have, 0):.1f} s)")
+                         f"{max(have, 0):.1f} s" + (" in the chosen part)" if cut_end or start else ")"))
     secs = min(have, VOICE_MAX_SECS)
     d = Path(project) / REFS_DIR
     d.mkdir(parents=True, exist_ok=True)
@@ -680,13 +701,18 @@ def set_voice(project: Path, tree: Tree, name: str, source: Path, start: float =
     while (d / f"voice{k}.wav").exists() or f"{REFS_DIR}/voice{k}.wav" in used:
         k += 1
     rel = f"{REFS_DIR}/voice{k}.wav"
-    chain.to_wav(Path(source), Path(project) / rel, start, secs if have > secs else None)
+    chain.to_wav(Path(source), Path(project) / rel, start, secs if have > secs or cut_end else None)
     real = chain.audio_seconds(Path(project) / rel) or secs
     entry = {"file": rel, "name": label or Path(source).name, "secs": round(real, 2)}
-    old = (c.get("voice") or {}).get("file")
+    if have >= secs + 1.0:                          # (worth it: at least a second more to clone from)
+        long = min(have, VOICE_REF_MAX_SECS)
+        ref = f"{REFS_DIR}/voice{k}_ref.wav"
+        chain.to_wav(Path(source), Path(project) / ref, start, long if have > long or cut_end else None)
+        entry["ref"] = {"file": ref, "secs": round(chain.audio_seconds(Path(project) / ref) or long, 2)}
+    old = c.get("voice")
     _set_cast(tree, [{**x, "voice": entry} if x is c else x for x in cast_of(tree)])
     if old:
-        _drop_voice_file(project, old, tree)
+        _drop_voice(project, old, tree)
     return {**entry, "cut": have > secs + 0.01}
 
 
@@ -695,7 +721,7 @@ def remove_voice(project: Path, tree: Tree, name: str) -> None:
     if c is None or not c.get("voice"):
         return
     _set_cast(tree, [{k: v for k, v in x.items() if k != "voice"} if x is c else x for x in cast_of(tree)])
-    _drop_voice_file(project, c["voice"]["file"], tree)
+    _drop_voice(project, c["voice"], tree)
 
 
 def update_character(tree: Tree, name: str, *, desc: str | None = None, lead: bool | None = None) -> None:

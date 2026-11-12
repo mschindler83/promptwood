@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QDoubleSpinBox, QFormL
                                QLineEdit, QPushButton, QVBoxLayout)
 
 from .. import chain
-from ..tree import AUDIO_REF_MIN
+from ..tree import AUDIO_REF_MIN, VOICE_MAX_SECS, VOICE_REF_MAX_SECS
 from .theme import icon, theme, with_alpha
 from .video_editor import RangeBar, fmt
 from .widgets import guard_wheel, icon_button, label
@@ -105,14 +105,18 @@ class _Peaks(QObject):
 
 
 class AudioRangeDialog(QDialog):
-    """Choose a sound file and the part of it that becomes an audio track. file / start / end / name: the result."""
+    """Choose a sound file and the part of it that becomes an audio track. file / start / end / name: the result.
+    voice: the part becomes a character's voice instead (no name; a video's picture is shown while it plays, to
+    see who speaks; a new file starts with its first VOICE_REF_MAX_SECS chosen)."""
 
     def __init__(self, parent=None, file: str = "", start: float | None = None, end: float | None = None,
-                 name: str = "", settings: QSettings | None = None, player: bool = True, title: str = "Audio track"):
+                 name: str = "", settings: QSettings | None = None, player: bool = True, title: str = "Audio track",
+                 voice: bool = False):
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.resize(920, 420)
-        self.settings, self.want_player = settings, player
+        self.resize(920, 640 if voice else 420)
+        self.settings, self.want_player, self.voice = settings, player, voice
+        self.video = None
         self.file, self.duration = "", 0.0
         self.start, self.end = 0.0, 0.0
         self.player = None
@@ -139,8 +143,16 @@ class AudioRangeDialog(QDialog):
         self.name.textEdited.connect(lambda _t: setattr(self, "_named", True))
         form.addRow("Name", self.name)
         v.addLayout(form)
+        if voice:
+            form.setRowVisible(0, False)
         self.info_label = label("", level="tertiary")
         v.addWidget(self.info_label)
+        if voice and player:
+            from .widgets import VideoView
+            self.video = VideoView()                # (a video's picture: who speaks when)
+            self.video.setMinimumHeight(220)
+            self.video.hide()
+            v.addWidget(self.video, 3)
 
         self.bar = WaveBar()
         self.bar.seek.connect(self.seek)
@@ -167,8 +179,9 @@ class AudioRangeDialog(QDialog):
         v.addLayout(crow)
 
         rrow = QHBoxLayout()
-        self.start_spin, self.end_spin = self._spin("Where the track starts (seconds in the file)"), \
-            self._spin("Where the track ends (seconds in the file)")
+        what = "voice" if voice else "track"
+        self.start_spin, self.end_spin = self._spin(f"Where the {what} starts (seconds in the file)"), \
+            self._spin(f"Where the {what} ends (seconds in the file)")
         b_s = QPushButton("Start here")
         b_s.setToolTip("Set the start at the playhead ([)")
         b_s.clicked.connect(lambda: self.set_range(self.position(), self.end))
@@ -217,7 +230,8 @@ class AudioRangeDialog(QDialog):
         folder = str(Path(self.file).parent) if self.file else (
             self.settings.value("soundDir", "", type=str) if self.settings is not None else "")
         from .image_picker import pick_image
-        f = pick_image(self, "Sound for an audio track", self.settings, folder or None, kind="media")
+        f = pick_image(self, "A recording of the voice (audio or video)" if self.voice else "Sound for an audio track",
+                       self.settings, folder or None, kind="media")
         if f:
             self.load(f)
 
@@ -243,7 +257,8 @@ class AudioRangeDialog(QDialog):
             start = end = None                         # the range does not fit this file: all of it
         self.bar.set_peaks([])
         self._open_player()
-        self.set_range(0.0 if start is None else float(start), dur if end is None else float(end))
+        whole = min(dur, VOICE_REF_MAX_SECS) if self.voice else dur
+        self.set_range(0.0 if start is None else float(start), whole if end is None else float(end))
         self.seek(self.start)
         self._gen += 1
         gen, sig, f, dur = self._gen, self._peaks, self.file, self.duration
@@ -275,6 +290,9 @@ class AudioRangeDialog(QDialog):
             self.audio = QAudioOutput(self)
             self.player = QMediaPlayer(self)
             self.player.setAudioOutput(self.audio)
+            if self.video is not None:
+                self.player.setVideoOutput(self.video.sink)
+                self.player.hasVideoChanged.connect(self.video.setVisible)
             self.player.positionChanged.connect(self._player_pos)
             self.player.playbackStateChanged.connect(self._player_state)
         self.player.setSource(QUrl.fromLocalFile(self.file))
@@ -302,7 +320,13 @@ class AudioRangeDialog(QDialog):
             else:
                 end = min(dur, start + 0.1)
                 start = end - 0.1
+        was = (self.start, self.end)
         self.start, self.end = round(start, 3), round(end, 3)
+        if self.video is not None and not self._playing():      # the picture at the edge that was moved
+            if abs(self.start - was[0]) > 5e-4:
+                self.seek(self.start)
+            elif abs(self.end - was[1]) > 5e-4:
+                self.seek(self.end)
         if not from_bar:
             self.bar.set_values(dur, self.start, self.end)
         else:
@@ -314,8 +338,16 @@ class AudioRangeDialog(QDialog):
                 spin.blockSignals(False)
         secs = self.end - self.start
         short = f" At least {AUDIO_REF_MIN:.0f} s are needed." if secs < AUDIO_REF_MIN else ""
-        self.summary.setText(f"Track {fmt(self.start)} – {fmt(self.end)}: {secs:.2f} s.{short} Clips that play it "
-                             "carry it on one after another; past its end they are silent.")
+        if self.voice:
+            first = min(secs, VOICE_MAX_SECS)
+            cloned = "all of it" if secs <= VOICE_REF_MAX_SECS else f"its first {VOICE_REF_MAX_SECS:g} s"
+            self.summary.setText(
+                f"Voice {fmt(self.start)} – {fmt(self.end)}: {secs:.2f} s.{short} Choose a part where only this "
+                f"speaker talks, without music or echo. The clip model hears its first {first:.1f} s; text to speech "
+                f"clones the voice from {cloned}.")
+        else:
+            self.summary.setText(f"Track {fmt(self.start)} – {fmt(self.end)}: {secs:.2f} s.{short} Clips that play "
+                                 "it carry it on one after another; past its end they are silent.")
         self._update_enabled()
 
     # ---- playback
@@ -330,6 +362,16 @@ class AudioRangeDialog(QDialog):
         self.time.setText(f"{fmt(self._pos)} / {fmt(self.duration)}")
         if self.player is not None:
             self.player.setPosition(round(self._pos * 1000))
+            if self.video is not None:
+                from PySide6.QtMultimedia import QMediaPlayer
+                if self.player.playbackState() == QMediaPlayer.StoppedState:
+                    self.player.pause()             # (a stopped player shows no picture: paused, it shows the frame)
+
+    def _playing(self) -> bool:
+        if self.player is None:
+            return False
+        from PySide6.QtMultimedia import QMediaPlayer
+        return self.player.playbackState() == QMediaPlayer.PlayingState
 
     def toggle(self):
         if self.player is None:

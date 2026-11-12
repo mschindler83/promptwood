@@ -846,6 +846,12 @@ def test_cast_voices(project, tmp_path):
     T.add_character(project, t, "Ben", face(tmp_path / "b.jpg", (90, 70, 60)))
     v = T.set_voice(project, t, "Anna", sound(tmp_path / "anna.mp4", 10, video=True))
     assert v["file"] == "refs/voice1.wav" and v["cut"] and abs(v["secs"] - T.VOICE_MAX_SECS) < 0.1
+    # the longer source is kept as the clone reference (for text to speech); the clip model hears the short voice
+    assert v["ref"]["file"] == "refs/voice1_ref.wav" and abs(v["ref"]["secs"] - 10) < 0.1
+    assert abs(chain.audio_seconds(project / "refs/voice1_ref.wav") - 10) < 0.1
+    assert T.clone_file(v) == "refs/voice1_ref.wav" and T.clone_secs(v) == v["ref"]["secs"]
+    T.save(project, t)
+    assert T.character(T.load(project), "Anna")["voice"]["ref"] == v["ref"]              # kept in tree.json
     with pytest.raises(ValueError, match="at least 2 s"):
         T.set_voice(project, t, "Ben", sound(tmp_path / "short.wav", 1))
     talk = t.add(None, '@Ben walks in. @Anna looks up and says "Good morning."')
@@ -880,6 +886,23 @@ def test_cast_voices(project, tmp_path):
     t.options["identity"]["language"] = "English"
     T.set_voice(project, t, "Anna", sound(tmp_path / "other.wav", 4))         # a new voice: those clips again
     assert not (project / "refs/voice1.wav").exists() and T.character(t, "Anna")["voice"]["file"] == "refs/voice2.wav"
+    assert not (project / "refs/voice1_ref.wav").exists()                     # its clone reference went with it
+    assert "ref" not in T.character(t, "Anna")["voice"]                       # 4 s: the voice is all there is
+    assert T.clone_file(T.character(t, "Anna")["voice"]) == "refs/voice2.wav"
+    long = T.set_voice(project, t, "Ben", sound(tmp_path / "long.wav", 40), start=5.0)
+    assert abs(long["ref"]["secs"] - T.VOICE_REF_MAX_SECS) < 0.1 and abs(long["secs"] - T.VOICE_MAX_SECS) < 0.1
+    T.remove_voice(project, t, "Ben")
+    assert not list((project / "refs").glob("voice1*"))
+    # a chosen part of the source: nothing past its end, neither in the voice nor in the clone reference
+    part = T.set_voice(project, t, "Ben", tmp_path / "long.wav", start=5.0, end=17.0)
+    assert abs(part["secs"] - T.VOICE_MAX_SECS) < 0.1 and abs(part["ref"]["secs"] - 12) < 0.1 and part["cut"]
+    part = T.set_voice(project, t, "Ben", tmp_path / "long.wav", start=5.0, end=9.0)
+    assert abs(part["secs"] - 4) < 0.1 and "ref" not in part and not part["cut"]
+    assert abs(chain.audio_seconds(project / part["file"]) - 4) < 0.1
+    with pytest.raises(ValueError, match="at least 2 s.*in the chosen part"):
+        T.set_voice(project, t, "Ben", tmp_path / "long.wav", start=5.0, end=6.0)
+    T.remove_voice(project, t, "Ben")
+    assert not list((project / "refs").glob("voice1*"))
     T.save(project, t)
     st = statuses(project)
     assert st[talk.prompt] == "changed" and st[quiet.prompt] == "done"

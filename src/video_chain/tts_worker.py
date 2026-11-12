@@ -90,6 +90,8 @@ def handle(r: dict) -> dict:
                             wav16], check=True, capture_output=True)
             audio, sr = sf.read(wav16, dtype="float32")
         kw = {"generate_kwargs": {"language": r["language"].lower()}} if r.get("language") else {}
+        if len(audio) > 30 * sr:                      # (more than Whisper's 30 s window: its long-form mode)
+            kw["return_timestamps"] = True
         text = p({"raw": audio, "sampling_rate": sr}, **kw)["text"].strip()
         _free()                                       # (only needed once per voice sample)
         return {"ok": True, "text": text}

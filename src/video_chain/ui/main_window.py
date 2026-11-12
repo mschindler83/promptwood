@@ -1578,8 +1578,10 @@ class MainWindow(QMainWindow):
                                    "the sentence of its @Name, e.g. @Anna looks up and says \"Good morning.\" "
                                    "Use a voice only with the speaker's consent.")
         self.b_voice_file = QPushButton("Voice…")
-        self.b_voice_file.setToolTip("Set the voice from an audio or video file: one speaker, little music or echo "
-                                     f"(the first {T.VOICE_MAX_SECS:g} s are used)")
+        self.b_voice_file.setToolTip("Set the voice from an audio or video file: choose the part of it where only "
+                                     "this speaker talks, with little music or echo (the clip model hears the first "
+                                     f"{T.VOICE_MAX_SECS:g} s of the part; text to speech clones the voice from up "
+                                     f"to {T.VOICE_REF_MAX_SECS:g} s of it)")
         self.b_voice_file.clicked.connect(self._voice_from_file)
         self.b_voice_clip = QPushButton("From clip")
         self.b_voice_clip.clicked.connect(self._voice_from_selected)
@@ -3923,7 +3925,9 @@ class MainWindow(QMainWindow):
             self._loading = was
         v = (c or {}).get("voice")
         el = ((c or {}).get("tts") or {}).get("eleven")
-        self.char_voice.setText((f"Voice: {v.get('name') or Path(v['file']).name} ({float(v.get('secs') or 0):.1f} s)"
+        long = f"; cloned from {T.clone_secs(v):.1f} s" if v and v.get("ref") else ""
+        self.char_voice.setText((f"Voice: {v.get('name') or Path(v['file']).name} "
+                                 f"({float(v.get('secs') or 0):.1f} s{long})"
                                  if v else "Voice: none") + (f" · ElevenLabs: {el['name']}" if el else ""))
         self.refs.clear()
         for k, rel in enumerate(c["images"] if c else [], start=1):
@@ -3964,7 +3968,7 @@ class MainWindow(QMainWindow):
             self.status.setText("ElevenLabs needs your API key: Settings → ElevenLabs API key.")
             return
         name, old = c["name"], (c.get("tts") or {}).get("eleven")
-        text = (f"Upload the voice sample of @{name} ({float(c['voice'].get('secs') or 0):.1f} s) to your ElevenLabs "
+        text = (f"Upload the voice sample of @{name} ({T.clone_secs(c['voice']):.1f} s) to your ElevenLabs "
                 "account and make an instant voice clone of it?\n\nThe sample leaves this computer and the new voice "
                 "takes a voice slot of your plan (instant voice cloning needs a paid plan). Use a voice only with "
                 "the speaker's consent.")
@@ -4011,8 +4015,23 @@ class MainWindow(QMainWindow):
             return
         f = pick_image(self, f"Voice of @{c['name']} (one speaker, 2-{T.VOICE_MAX_SECS:g} s are used)", self.qs,
                        places=self._picker_places(), collections=self.project_media("media"), kind="media")
-        if f:
-            self.set_character_voice(f)
+        if not f:
+            return
+        dlg = self._voice_dialog(f, c["name"])
+        try:
+            if not dlg.file:
+                self.status.setText(f"Could not set the voice: {dlg.info_label.text()}")
+                return
+            if dlg.exec() == QDialog.Accepted and dlg.file:
+                self.set_character_voice(dlg.file, start=dlg.start, end=dlg.end)
+        finally:
+            dlg.deleteLater()
+
+    def _voice_dialog(self, file: str, name: str):
+        """The window the part of a file is chosen in that becomes a character's voice."""
+        from .audio_editor import AudioRangeDialog
+        return AudioRangeDialog(self, file=file, settings=self.qs, title=f"Voice of @{name}: choose the part",
+                                voice=True, player=os.environ.get("QT_QPA_PLATFORM") != "offscreen")
 
     def _voice_from_selected(self):
         nid = self.tree.selected if self.tree else None
@@ -4023,14 +4042,15 @@ class MainWindow(QMainWindow):
         what = f"{'video' if node.is_video else 'clip'} #{nid[1:]}"
         self.set_character_voice(str(self.project / node.made["video"]), label=f"sound of {what}")
 
-    def set_character_voice(self, path: str, label: str | None = None) -> bool:
-        """The voice of the selected character, from an audio or video file."""
+    def set_character_voice(self, path: str, label: str | None = None, start: float = 0.0,
+                            end: float | None = None) -> bool:
+        """The voice of the selected character, from an audio or video file (the part from start to end)."""
         c = self._selected_character()
         if c is None or not self._cast_edit_ok():
             return False
         before = self._done_clips()
         try:
-            entry = T.set_voice(self.project, self.tree, c["name"], Path(path), label=label)
+            entry = T.set_voice(self.project, self.tree, c["name"], Path(path), start, label=label, end=end)
         except (ValueError, OSError, RuntimeError) as e:
             self.status.setText(f"Could not set the voice: {e}")
             return False
@@ -4039,7 +4059,8 @@ class MainWindow(QMainWindow):
         self._changed()
         msg = (f"Voice of @{c['name']} set ({entry['secs']:.1f} s"
                + (f", the first {T.VOICE_MAX_SECS:g} s" if entry.get("cut") else "")
-               + f"). Clips use it where @{c['name']} says a line in quotes.")
+               + f"). Clips use it where @{c['name']} says a line in quotes."
+               + (f" Text to speech clones it from {entry['ref']['secs']:.1f} s." if entry.get("ref") else ""))
         self.status.setText(msg)
         if self._report_remade(before, f"Voice of @{c['name']} set"):
             self.status.setText(msg + " " + self.status.text())

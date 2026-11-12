@@ -616,7 +616,43 @@ def test_identity_references_in_the_window(app, win, tmp_path, image, monkeypatc
     assert not win.b_voice_play.isEnabled() and win.char_voice.text() == "Voice: none"
     assert win.set_character_voice(str(speech))
     assert win.status.text().startswith("Voice of @Tom set (7.5 s, the first 7.5 s)")
-    assert win.char_voice.text() == "Voice: tom.wav (7.5 s)" and "· voice" in win.cast_list.currentItem().text()
+    assert "Text to speech clones it from 9.0 s." in win.status.text()
+    # Voice…: the file is chosen, then the part of it (a video here: 40 s, the first 30 s chosen to begin with)
+    from PySide6.QtWidgets import QDialog, QDialogButtonBox
+    from video_chain.ui import main_window as M
+    from video_chain.ui.audio_editor import AudioRangeDialog
+    film = tmp_path / "talk.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=200:duration=40", "-f", "lavfi",
+                    "-i", "color=gray:s=64x48:d=40", "-shortest", str(film)], check=True)
+    monkeypatch.setattr(M, "pick_image", lambda *a, **k: str(film))
+    seen = {}
+
+    def choose(dlg):
+        ok = dlg.buttons.button(QDialogButtonBox.Ok)
+        seen.update(title=dlg.windowTitle(), first=(dlg.start, dlg.end), name=dlg.name.isVisibleTo(dlg),
+                    text=dlg.summary.text())
+        dlg.set_range(12.0, 13.0)
+        seen["short"] = ok.isEnabled()
+        dlg.set_range(12.0, 24.5)
+        seen["text2"] = dlg.summary.text()
+        return QDialog.Accepted if ok.isEnabled() else QDialog.Rejected
+    monkeypatch.setattr(AudioRangeDialog, "exec", choose)
+    win._voice_from_file()
+    assert seen["title"] == "Voice of @Tom: choose the part" and seen["first"] == (0.0, 30.0) and not seen["name"]
+    assert "clones the voice from all of it" in seen["text"] and not seen["short"]
+    assert "Voice 0:12.000 – 0:24.500: 12.50 s." in seen["text2"] and "first 7.5 s" in seen["text2"]
+    assert win.char_voice.text() == "Voice: talk.mp4 (7.5 s; cloned from 12.5 s)"
+    monkeypatch.setattr(AudioRangeDialog, "exec", lambda dlg: QDialog.Rejected)       # cancelled: nothing changes
+    win._voice_from_file()
+    assert win.char_voice.text() == "Voice: talk.mp4 (7.5 s; cloned from 12.5 s)"
+    mute = tmp_path / "mute.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=gray:s=64x48:d=3", str(mute)], check=True)
+    monkeypatch.setattr(M, "pick_image", lambda *a, **k: str(mute))
+    win._voice_from_file()
+    assert "has no sound" in win.status.text()
+    assert win.set_character_voice(str(speech))
+    assert win.char_voice.text() == "Voice: tom.wav (7.5 s; cloned from 9.0 s)"
+    assert "· voice" in win.cast_list.currentItem().text()
     type_prompt(win, ids[1], '@Tom waves and says "Hello there."')
     flush(app, win)
     card = next(c for c in win.cards if c.nid == ids[1])

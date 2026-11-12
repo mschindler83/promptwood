@@ -3,8 +3,9 @@ for characters. Two providers:
 
 - local: Qwen3-TTS (Apache 2.0; German, English and 8 more languages) in its own environment (.venv-tts next to the
   app), run by tts_worker.py, started when needed and stopped right after. A character speaks in the voice of its
-  voice sample (Base model: cloned from the sample and what it says, transcribed once with Whisper); a new voice is
-  made from a description (VoiceDesign model).
+  voice sample (Base model: cloned from the sample and what it says, transcribed once with Whisper; from its longer
+  clone reference, tree.clone_file, when the voice was set from a longer source); a new voice is made from a
+  description (VoiceDesign model).
 - elevenlabs: the ElevenLabs API with the user's key (system keyring or $ELEVENLABS_API_KEY); each character is
   given one of the account's voices, or an instant voice clone of its voice sample (made in the account).
 
@@ -345,7 +346,7 @@ def clip_lines(tree: T.Tree, node: T.Node) -> list[dict]:
 
 
 def needs_transcript(tree: T.Tree, node: T.Node) -> bool:
-    """A local speaker's voice sample has not been transcribed yet (Whisper is needed once)."""
+    """A local speaker's voice sample (its clone reference) has not been transcribed yet (Whisper is needed once)."""
     return any(d["speaker"] is not None and (d["speaker"].get("voice") or {}).get("file")
                and not d["speaker"]["voice"].get("text") for d in clip_lines(tree, node))
 
@@ -463,8 +464,9 @@ def render_lines(project: Path, tree: T.Tree, nid: str, eng, log=lambda _m: None
                 text = c["voice"].get("text") or texts.get(c["name"])
                 if not text:
                     log(f"transcribing the voice sample of @{c['name']} (once)")
-                    text = texts[c["name"]] = eng.transcribe(project / c["voice"]["file"], LANGUAGES.get(lang))
-                eng.clone(d["line"], lang, project / c["voice"]["file"], text, raw, seed)
+                    text = texts[c["name"]] = eng.transcribe(project / T.clone_file(c["voice"]),
+                                                             LANGUAGES.get(lang))
+                eng.clone(d["line"], lang, project / T.clone_file(c["voice"]), text, raw, seed)
             part = Path(tmp) / f"line{k}.wav"
             chain.to_wav(raw, part)
             parts.append(part)
@@ -540,14 +542,15 @@ def use_sample(project: Path, tree: T.Tree, name: str, wav: Path, label: str, te
 
 
 def clone_sample(project: Path, tree: T.Tree, name: str, eng) -> dict:
-    """An instant ElevenLabs voice clone of a character's voice sample, made in the user's account (eng: ElevenLabs).
+    """An instant ElevenLabs voice clone of a character's voice sample (its longer clone reference when it has
+    one), made in the user's account (eng: ElevenLabs).
     Reads the tree only (call it from a worker thread; set_eleven puts the result in). Returns {"id", "name",
     "file": the sample it was made from}."""
     c = T.character(tree, name)
     if c is None or not c.get("voice"):
         raise TtsError(f"@{name} has no voice sample to clone (Cast → Voice…)")
     label = f"{name} (video-chain)"
-    vid = eng.clone(label, Path(project) / c["voice"]["file"],
+    vid = eng.clone(label, Path(project) / T.clone_file(c["voice"]),
                     f"made by video-chain from the voice sample of {name}")
     return {"id": vid, "name": label, "file": c["voice"]["file"]}
 
