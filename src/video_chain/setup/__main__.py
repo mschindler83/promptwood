@@ -65,6 +65,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     a = build_parser().parse_args(argv)
+    if paths.WINDOWS:                                # (text files as UTF-8, also in the programs started from here)
+        import os
+        os.environ.setdefault("PYTHONUTF8", "1")
     paths.use_private_tools()
     if a.cmd == "setup":
         from .installer import Options, main_setup

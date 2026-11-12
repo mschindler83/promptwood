@@ -869,3 +869,98 @@ def test_app_reads_free_memory_from_comfyui_without_nvidia_smi(monkeypatch):
         httpd.shutdown()
         httpd.server_close()
     assert L.free_vram_mb() is None and L.free_vram_mb("http://127.0.0.1:9") is None      # nobody to ask
+
+
+# ----------------------------------------------------------------------------- Windows preparation (run on Linux)
+def test_windows_code_stays_out_of_the_way_on_linux(monkeypatch):
+    """On Linux the Windows module does nothing: no patched Popen, no relaunch, no extra arguments."""
+    import subprocess
+    from video_chain import win
+    assert not win.WINDOWS
+    before = subprocess.Popen.__init__
+    win.hide_consoles()
+    assert subprocess.Popen.__init__ is before and not hasattr(subprocess.Popen, "_video_chain_quiet")
+    assert win.ensure_utf8("video_chain") is None and win.python_args() == [] and win.popen_group() == {}
+    from video_chain import llm_server, tts
+    assert llm_server._group() == {} and tts._utf8() == []
+    # every use of the module in the app sits behind a Windows check
+    for f in SRC.joinpath("src", "video_chain").rglob("*.py"):
+        if f.name == "win.py":
+            continue
+        lines = f.read_text(encoding="utf-8").splitlines()
+        for n, line in enumerate(lines):
+            if re.search(r"\bwin\.\w+\(", line) and "win.WINDOWS" not in line:
+                near = "\n".join(lines[max(0, n - 6):n + 1])
+                assert any(k in near for k in ('os.name == "nt"', 'os.name != "nt"', "win.WINDOWS", "paths.WINDOWS")), \
+                    f"{f.name}:{n + 1}"
+
+
+def test_linux_folders_are_what_they_were(monkeypatch, tmp_path):
+    from video_chain import presets, triggers
+    for name in ("VIDEO_CHAIN_TRIGGERS", "VIDEO_CHAIN_PRESETS", "XDG_DATA_HOME"):
+        monkeypatch.delenv(name, raising=False)
+    assert triggers.default_path() == Path.home() / ".local" / "share" / "video-chain" / "lora_triggers.json"
+    assert presets.default_path() == Path.home() / ".local" / "share" / "video-chain" / "lora_presets.json"
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    assert triggers.default_path() == tmp_path / "video-chain" / "lora_triggers.json"
+
+
+def test_scene_links_are_relative_symlinks_on_linux(tmp_path):
+    from video_chain import film
+    refs, scene = tmp_path / "refs", tmp_path / "scenes" / "s2"
+    refs.mkdir()
+    scene.mkdir(parents=True)
+    film.link_refs(refs, scene / "refs")
+    assert os.readlink(scene / "refs") == "../../refs" and film._is_link(scene / "refs")
+    film._unlink(scene / "refs")
+    assert not (scene / "refs").exists() and refs.is_dir()
+
+
+def test_windows_line_reader_hands_over_lines_and_acts_on_stop():
+    from video_chain import win
+    r, w = os.pipe()
+    stops = []
+    reader = win.LineReader(os.fdopen(r, "rb"), on_stop=lambda: stops.append(1))
+    assert not reader.ready(0.05)                                   # nothing yet: the idle timeout can pass
+    os.write(w, b'{"cmd": "run", "tree": "x"}\n{"cmd": "stop"}\n{"cmd": "quit"}\n')
+    assert reader.ready(5) and json.loads(reader.readline()) == {"cmd": "run", "tree": "x"}
+    assert json.loads(reader.readline()) == {"cmd": "quit"} and stops == [1]     # stop never reaches the job loop
+    os.close(w)
+    assert reader.readline() == ""                                  # end of input, as the Linux reader reports it
+
+
+def test_windows_install_choices(server, home, monkeypatch):
+    monkeypatch.setattr(M, "load", lambda: _mini_manifest(server))
+    monkeypatch.setattr(I.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(I.platform, "machine", lambda: "AMD64")
+    card = {"name": "Card", "vram_mb": 24000, "free_mb": 23000, "driver": "581.42"}
+    monkeypatch.setattr(S, "gpu", lambda: card)
+    names = ["llama-b1-bin-win-cpu-x64.zip", "llama-b1-bin-win-vulkan-x64.zip", "llama-b1-bin-win-cuda-12.4-x64.zip",
+             "llama-b1-bin-win-cuda-13.5-x64.zip", "llama-b1-bin-win-cuda-13.5-arm64.zip",
+             "cudart-llama-bin-win-cuda-13.5-x64.zip", "cudart-llama-bin-win-cuda-12.4-x64.zip",
+             "llama-b1-bin-ubuntu-cuda-13.5-x64.tar.gz"]
+    assets = [{"name": n} for n in names]
+    inst = I.Installer(I.Options())
+    assert [a["name"] for a in inst.llama_asset(assets)] == ["llama-b1-bin-win-cuda-13.5-x64.zip",
+                                                             "cudart-llama-bin-win-cuda-13.5-x64.zip"]
+    card["driver"] = "566.03"
+    assert [a["name"] for a in inst.llama_asset(assets)] == ["llama-b1-bin-win-cuda-12.4-x64.zip",
+                                                             "cudart-llama-bin-win-cuda-12.4-x64.zip"]
+    monkeypatch.setattr(S, "gpu", lambda: None)
+    assert [a["name"] for a in inst.llama_asset(assets)] == ["llama-b1-bin-win-vulkan-x64.zip"]
+    # the launchers written for Windows
+    monkeypatch.setattr(I.subprocess, "run", lambda *a, **k: None)
+    monkeypatch.setenv("APPDATA", str(home / "roaming"))
+    home.mkdir(parents=True, exist_ok=True)
+    inst.desktop_windows(home, Path(r"C:\app\.venv\Scripts\python.exe"))
+    cmd = (home / "video-chain-gui.cmd").read_text()
+    assert "set PYTHONUTF8=1" in cmd and "-X utf8 -m video_chain.app %*" in cmd and "\r\n" in cmd
+    assert 'VIDEO_CHAIN_HOME=' in (home / "video-chain.cmd").read_text()
+
+
+def test_install_ps1_mirrors_install_sh():
+    sh, ps = (SRC / "install.sh").read_text(), (SRC / "install.ps1").read_text()
+    for needle in ("--phase ask", "--answers", "sync --locked --extra faces --python 3.12", "UV_UNMANAGED_INSTALL",
+                   "--with pyyaml"):
+        assert needle in sh and needle in ps, needle
+    assert "not yet run on a Windows computer" in ps

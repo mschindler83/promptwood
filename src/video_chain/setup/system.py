@@ -69,6 +69,8 @@ def install_hint(what: str, osi: dict | None = None) -> str:
     osi = osi or os_info()
     pk = PACKAGES.get(what, {}).get(osi.get("manager") or "")
     if not pk:
+        if paths.WINDOWS and what == "ffmpeg":
+            return "winget install Gyan.FFmpeg   (or: video-chain setup --steps system)"
         return {"ffmpeg": "install ffmpeg (https://ffmpeg.org/download.html)",
                 "nvidia": "install the NVIDIA driver (https://www.nvidia.com/drivers)",
                 "qt": "install the libraries Qt needs (https://doc.qt.io/qt-6/linux-requirements.html)"}[what]
@@ -159,8 +161,9 @@ def ffmpeg_ok(st: dict | None = None) -> bool:
 
 
 def find_uv() -> str | None:
-    for cand in (shutil.which("uv"), paths.tools_bin() / "uv", Path.home() / ".local" / "bin" / "uv",
-                 Path.home() / ".cargo" / "bin" / "uv"):
+    exe = "uv.exe" if paths.WINDOWS else "uv"
+    for cand in (shutil.which("uv"), paths.tools_bin() / exe, Path.home() / ".local" / "bin" / exe,
+                 Path.home() / ".cargo" / "bin" / exe):
         if cand and Path(cand).is_file() and os.access(cand, os.X_OK):
             return str(cand)
     return None

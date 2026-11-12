@@ -22,6 +22,10 @@ trigger words at CivitAI (both optional, both with your own key).
 You do **not** need Python, ComfyUI, ffmpeg, git or a compiler beforehand: the installer brings what is missing.
 The one thing it cannot install is the NVIDIA driver; it tells you the command for your system.
 
+**Windows:** prepared but not yet tested. The app has Windows branches for everything that differs there (they
+are in `src/video_chain/win.py`), and `install.ps1` is the counterpart of `install.sh`; neither has run on a
+Windows computer yet. Linux behaves exactly as before: none of that code runs there.
+
 ## Install
 
 ```bash

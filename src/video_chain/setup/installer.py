@@ -35,6 +35,7 @@ NETWORK_ERRORS = ("failed to download", "failed to fetch", "timed out", "error s
 TEST_FREE_MB = 14000                            # free graphics memory the tests at the end need to be meaningful
 FFMPEG_BUILDS = {"x86_64": "linux64", "amd64": "linux64", "aarch64": "linuxarm64", "arm64": "linuxarm64"}
 FFMPEG_URL = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-{}-gpl.tar.xz"
+FFMPEG_URL_WINDOWS = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
 
 
 class SetupError(RuntimeError):
@@ -442,6 +443,16 @@ class Installer:
         say("    " + ("This system has no ffmpeg." if not st["ffmpeg"] else
                       f"The system's ffmpeg ({st['ffmpeg']}) cannot write H.264 with libx264."))
         build = FFMPEG_BUILDS.get(platform.machine().lower()) if platform.system() == "Linux" else None
+        if paths.WINDOWS and platform.machine().lower() in ("amd64", "x86_64"):
+            say(f"    Downloading a complete one into {short(paths.tools_bin())} …")
+            archive = self.home / "downloads" / "ffmpeg.zip"
+            fetch(FFMPEG_URL_WINDOWS, archive)
+            extract(archive, paths.tools_bin(), members=["ffmpeg.exe", "ffprobe.exe"])
+            archive.unlink(missing_ok=True)
+            if not S.ffmpeg_ok():
+                raise SetupError("The downloaded ffmpeg does not run here. Please install one: "
+                                 + S.install_hint("ffmpeg"))
+            return
         if build is None:
             raise SetupError("Please install ffmpeg with libx264: " + S.install_hint("ffmpeg"))
         say(f"    Downloading a complete one into {short(paths.tools_bin())} (the system's stays untouched) …")
@@ -538,9 +549,15 @@ class Installer:
         launcher = Path(self.o.comfy_launcher).expanduser() if self.o.comfy_launcher else None
         if launcher is None:
             cfg = paths.load_config().get("comfy_launcher")
-            ours = self.home / "bin" / "comfyui"
+            ours = self.home / "bin" / ("comfyui.bat" if paths.WINDOWS else "comfyui")
             launcher = Path(cfg) if cfg and Path(cfg).is_file() and Path(cfg) != ours else ours
-            if launcher == ours:
+            if launcher == ours and paths.WINDOWS:
+                ours.parent.mkdir(parents=True, exist_ok=True)
+                ours.write_text("@echo off\r\nrem Starts ComfyUI for Promptwood (written by video-chain setup). "
+                                "Extra arguments go to ComfyUI.\r\n"
+                                f'cd /d "{d}" || exit /b 1\r\n'
+                                f'"{py}" main.py --port {port} --base-directory "{d}" %*\r\n', encoding="utf-8")
+            elif launcher == ours:
                 ours.parent.mkdir(parents=True, exist_ok=True)
                 ours.write_text("#!/usr/bin/env bash\n# Starts ComfyUI for Promptwood (written by video-chain "
                                 "setup). Extra arguments go to ComfyUI.\n"
@@ -687,6 +704,10 @@ class Installer:
         gpu = S.gpu()
         if sysname == "Darwin":
             wants = [rf"-bin-macos-{arch}\."]
+        elif sysname == "Windows":
+            cuda = r"cuda-13[\d.]*" if S.driver_major(gpu) >= S.MIN_DRIVER_CU13 else r"cuda-12[\d.]*"
+            wants = ([rf"^llama-.*-bin-win-{cuda}-{arch}\."] if gpu is not None else []) + \
+                [rf"^llama-.*-bin-win-vulkan-{arch}\.", rf"^llama-.*-bin-win-cpu-{arch}\."]
         elif gpu is not None:
             cuda = r"cuda-13[\d.]*" if S.driver_major(gpu) >= S.MIN_DRIVER_CU13 else r"cuda-12[\d.]*"
             wants = [rf"^llama-.*-bin-ubuntu-{cuda}-{arch}\.", rf"^llama-.*-bin-ubuntu-vulkan-{arch}\."]
@@ -696,6 +717,10 @@ class Installer:
             hit = next((a for a in assets if re.search(pat, a["name"])), None)
             if hit:
                 extra = next((a for a in assets if a["name"] == "cudart-" + hit["name"]), None)
+                if extra is None and sysname == "Windows":       # (named without the release there)
+                    m = re.search(r"-bin-(win-cuda-[\d.]+-\w+)\.", hit["name"])
+                    extra = next((a for a in assets if m and a["name"].startswith(f"cudart-llama-bin-{m.group(1)}.")),
+                                 None)
                 return [hit] + ([extra] if extra else [])
         raise SetupError(f"llama.cpp has no ready-made build for {sysname} {machine}; install llama-server yourself "
                          "and put it on PATH (https://github.com/ggml-org/llama.cpp)")
@@ -723,7 +748,11 @@ class Installer:
                        if p.is_file() and os.access(p, os.X_OK)), None)
         if server is None:
             raise SetupError("llama.cpp's download has no llama-server in it")
-        for lib in target.rglob("*.so*"):                # NVIDIA's libraries next to the server, where it looks
+        if paths.WINDOWS:                                # NVIDIA's libraries next to the server, where it looks
+            for lib in list(target.rglob("*.dll")):
+                if lib.parent != server.parent and not (server.parent / lib.name).exists():
+                    shutil.copy2(lib, server.parent / lib.name)
+        for lib in target.rglob("*.so*"):                # (Linux: the same, as links)
             if lib.parent != server.parent and not (server.parent / lib.name).exists():
                 os.symlink(os.path.relpath(lib, server.parent), server.parent / lib.name)
         paths.save_config(llama_server=server)
@@ -738,6 +767,9 @@ class Installer:
         bin_dir = self.home / "bin"
         bin_dir.mkdir(parents=True, exist_ok=True)
         py = Path(sys.executable)
+        if paths.WINDOWS:
+            self.desktop_windows(bin_dir, py)
+            return
         for name, module in (("video-chain", "video_chain"), ("video-chain-gui", "video_chain.app")):
             script = bin_dir / name
             script.write_text(f'#!/usr/bin/env bash\n# Promptwood (written by video-chain setup)\n'
@@ -764,6 +796,32 @@ class Installer:
                 + "Terminal=false\nCategories=AudioVideo;Video;\nStartupWMClass=video-chain\n")
         except OSError:
             pass
+
+    def desktop_windows(self, bin_dir: Path, py: Path) -> None:
+        """(Windows) video-chain.cmd and video-chain-gui.cmd in <home>\\bin and a Start menu entry."""
+        pyw = py.with_name("pythonw.exe")
+        for name, module, exe, start in (("video-chain", "video_chain", py, ""),
+                                         ("video-chain-gui", "video_chain.app", pyw if pyw.is_file() else py,
+                                          'start "" ')):
+            (bin_dir / f"{name}.cmd").write_text(
+                "@echo off\r\nrem Promptwood (written by video-chain setup)\r\n"
+                f'set "VIDEO_CHAIN_HOME={self.home}"\r\nset PYTHONUTF8=1\r\n'
+                f'{start}"{exe}" -X utf8 -m {module} %*\r\n', encoding="utf-8")
+        if not self.o.desktop:
+            return
+        menu = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "Microsoft" / "Windows" \
+            / "Start Menu" / "Programs"
+        script = ("$s = (New-Object -ComObject WScript.Shell).CreateShortcut($env:VC_LNK); "
+                  "$s.TargetPath = $env:VC_TARGET; $s.WorkingDirectory = $env:VC_DIR; $s.WindowStyle = 7; "
+                  "$s.Description = 'Chain image-to-video clips into one film'; $s.Save()")
+        try:
+            menu.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], timeout=60,
+                           capture_output=True,
+                           env={**os.environ, "VC_LNK": str(menu / "Promptwood.lnk"),
+                                "VC_TARGET": str(bin_dir / "video-chain-gui.cmd"), "VC_DIR": str(self.home)})
+        except (OSError, subprocess.SubprocessError):
+            pass                                         # (no menu entry: the .cmd file starts the app as well)
 
     # ---- the end: check, and prove it
     def verify(self) -> bool:
@@ -852,7 +910,7 @@ class Installer:
         shutil.rmtree(self.home / "downloads", ignore_errors=True)
         if ok:
             say(f"\nPromptwood is ready. Start it from your applications menu, or with:\n"
-                f"    {short(self.home / 'bin' / 'video-chain-gui')}\n"
+                f"    {short(self.home / 'bin' / ('video-chain-gui.cmd' if paths.WINDOWS else 'video-chain-gui'))}\n"
                 "ComfyUI is started by the app when it is needed (the Start button next to its status).")
         else:
             say(f"\nThe full output of this run is in {short(log)}")

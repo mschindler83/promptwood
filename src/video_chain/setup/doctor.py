@@ -383,8 +383,12 @@ class ComfySession:
         self.logfile = paths.cache_dir() / "comfyui-setup.log"
         self.log(f"Starting ComfyUI ({self.launcher}; its output goes to {self.logfile}) …")
         with open(self.logfile, "wb") as f:
+            extra = {}
+            if os.name == "nt":                       # (its own process group, no console window)
+                from .. import win
+                extra = win.popen_group()
             self.proc = subprocess.Popen([str(self.launcher)], stdout=f, stderr=subprocess.STDOUT,
-                                         stdin=subprocess.DEVNULL, start_new_session=True)
+                                         stdin=subprocess.DEVNULL, start_new_session=True, **extra)
         end = time.monotonic() + self.wait
         while time.monotonic() < end:
             if comfy_up(self.url, 3):
@@ -400,7 +404,15 @@ class ComfySession:
 
     def __exit__(self, *exc):
         p, self.proc = self.proc, None
-        if p is not None and p.poll() is None:
+        if p is not None and p.poll() is None and os.name == "nt":
+            from .. import win
+            win.kill_tree(p.pid)                      # (the launcher's command shell and ComfyUI under it)
+            try:
+                p.wait(30)
+            except subprocess.TimeoutExpired:
+                p.kill()
+            self.log("ComfyUI stopped again")
+        elif p is not None and p.poll() is None:
             import signal
             try:
                 os.killpg(p.pid, signal.SIGTERM)

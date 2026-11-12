@@ -15,6 +15,8 @@ from pathlib import Path
 
 from .. import paths
 
+if os.name == "nt":
+    os.system("")                # (switches the Windows console to understand the cursor codes used below)
 _log = None
 _log_path: Path | None = None
 _steps = {"n": 0, "total": 0}
