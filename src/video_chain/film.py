@@ -16,6 +16,7 @@ import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from . import chain
 from . import tree as T
 
 FILM_FILE = "film.json"
@@ -340,8 +341,8 @@ class Film:
         self.save()
         link = d / T.REFS_DIR
         if link.is_symlink():
-            link.unlink()                          # the shared refs are never deleted with a scene
-        shutil.rmtree(d, ignore_errors=True)
+            link.unlink()                          # (only the link to the shared refs)
+        chain.keep_aside(self.root, d)             # the scene's clips are never deleted: its folder goes to old/
 
     # ---- shared settings
     def shared(self, options: dict) -> dict:

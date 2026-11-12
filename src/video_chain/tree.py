@@ -236,17 +236,18 @@ class Tree:
         return clip, rest
 
     def remove(self, nid: str, project: Path | None = None) -> list[str]:
-        """Remove a node and everything below it (and their files). Returns the removed ids."""
+        """Remove a node and everything below it. Their clips and pictures are not deleted: they are moved to
+        old/ in the project (chain.keep_aside). Returns the removed ids."""
         gone = [nid] + [n.id for n in self.descendants(nid)]
         parent = self.nodes[nid].parent
         for g in gone:
             node = self.nodes.pop(g)
             if project is not None:
                 for f in list(node_files(project, g)) + clip_files(project, node):
-                    _unlink(f)
+                    chain.keep_aside(project, f)        # (never deleted: moved to old/)
                 for rel in ({node.end_image, (node.made or {}).get("end_image")} | keyframe_files(node)) - {None}:
                     if _in_ends(project, rel):
-                        _unlink(Path(project) / rel)
+                        chain.keep_aside(project, Path(project) / rel)
                 for ext in (".mp4", ".json"):
                     _unlink(Path(project) / "paths" / f"{g}{ext}")
         if self.selected in gone:
@@ -387,8 +388,9 @@ def new_clip_files(project: Path, nid: str) -> tuple[Path, Path]:
 
 
 def remove_stale_files(project: Path, tree: "Tree") -> list[Path]:
-    """Delete clip files of this app that no record points to any more (old versions that could not be deleted
-    while they were open, leftovers of a stopped run). Returns what could not be deleted."""
+    """Clip files of this app that no record points to any more: finished ones (old versions that could not be
+    moved while they were open) go to old/ (chain.keep_aside), half-written ones of a stopped run are deleted.
+    Returns what could not be moved."""
     d = Path(project) / "nodes"
     if not d.is_dir():
         return []
@@ -399,9 +401,12 @@ def remove_stale_files(project: Path, tree: "Tree") -> list[Path]:
              for f in (refined_file(project, n, size), refined_file(project, n, size).with_suffix(".json"))}
     stuck = []
     for f in d.iterdir():
-        if f.is_file() and (_CLIP_NAME.match(f.name) or ".new." in f.name or ".part." in f.name) and f not in used:
-            if not _unlink(f):
-                stuck.append(f)
+        if not f.is_file() or f in used:
+            continue
+        if ".new." in f.name or ".part." in f.name:
+            _unlink(f)                              # (never finished)
+        elif _CLIP_NAME.match(f.name) and not chain.keep_aside(project, f):
+            stuck.append(f)
     return stuck
 
 
@@ -545,7 +550,7 @@ def _write_picture(project: Path, image: Path, rel: str, crop: tuple[int, int, i
             raise
     else:
         chain.to_png(Path(image), Path(project) / rel)
-        full.unlink(missing_ok=True)
+        chain.keep_aside(project, full)
 
 
 def recrop_picture(project: Path, tree: Tree, rel: str, crop: tuple[int, int, int] | None) -> None:
@@ -627,7 +632,7 @@ def _drop_file(project: Path, rel: str, tree: Tree) -> None:
     for f in (rel, source_of(rel)):
         target = (Path(project) / f).resolve()
         if (Path(project) / REFS_DIR).resolve() in target.parents:
-            target.unlink(missing_ok=True)
+            chain.keep_aside(project, target)       # (never deleted: moved to old/)
 
 
 def remove_picture(project: Path, tree: Tree, rel: str) -> None:
@@ -664,7 +669,7 @@ def clone_secs(voice: dict) -> float:
 
 
 def _drop_voice(project: Path, voice: dict, tree: Tree) -> None:
-    """Delete a voice's files (the voice and its clone reference) that nothing uses any more."""
+    """A voice's files (the voice and its clone reference) that nothing uses any more go to old/ (never deleted)."""
     kept = {a["file"] for a in audio_refs(tree)}
     for c in cast_of(tree):
         if c.get("voice"):
@@ -672,7 +677,7 @@ def _drop_voice(project: Path, voice: dict, tree: Tree) -> None:
     for rel in {voice["file"], clone_file(voice)} - kept:
         target = (Path(project) / rel).resolve()
         if (Path(project) / REFS_DIR).resolve() in target.parents:
-            target.unlink(missing_ok=True)
+            chain.keep_aside(project, target)
 
 
 def set_voice(project: Path, tree: Tree, name: str, source: Path, start: float = 0.0,
@@ -1180,7 +1185,7 @@ def remove_audio_reference(project: Path, rel: str, tree: Tree) -> None:
     tree.options["audio_refs"] = [a for a in audio_refs(tree) if a["file"] != rel]
     target = (Path(project) / rel).resolve()
     if (Path(project) / REFS_DIR).resolve() in target.parents:
-        target.unlink(missing_ok=True)
+        chain.keep_aside(project, target)           # (never deleted: moved to old/)
 
 
 def audio_mentioned(prompt: str) -> int:
@@ -1233,7 +1238,7 @@ def clear_end_image(project: Path, tree: Tree, nid: str) -> None:
     (Undo changes can go back to it)."""
     node = tree.nodes[nid]
     if node.end_image and node.end_image != (node.made or {}).get("end_image") and _in_ends(project, node.end_image):
-        _unlink(Path(project) / node.end_image)
+        chain.keep_aside(project, Path(project) / node.end_image)
     node.end_image = None
 
 
@@ -1433,10 +1438,10 @@ def keyframe_files(node: Node) -> set[str]:
 
 
 def _drop_keyframe_file(project: Path, node: Node, rel: str) -> None:
-    """Delete a keyframe picture no longer used (the made clip's stay until it is made again: Undo)."""
+    """A keyframe picture no longer used goes to old/ (the made clip's stay until it is made again: Undo)."""
     made = {k.get("image") for k in (node.made or {}).get("keyframes") or [] if isinstance(k, dict)}
     if rel not in made and rel not in {k["image"] for k in node.keyframes} and _in_ends(project, rel):
-        _unlink(Path(project) / rel)
+        chain.keep_aside(project, Path(project) / rel)
 
 
 def set_keyframe(project: Path, tree: Tree, nid: str, image: Path | None, at: float, note: str | None = None,
@@ -1549,9 +1554,9 @@ def prepared_start(project: Path, width: int, height: int) -> Path | None:
 
 
 def clear_start_image(project: Path, tree: Tree) -> None:
-    """No start image any more: start.png and its prepared copies go (the first clip then starts from its text, the
-    size follows the first video or the Aspect setting)."""
-    _unlink(Path(project) / START_FILE)
+    """No start image any more: start.png goes to old/ (never deleted), its prepared copies (scaled from it) are
+    removed (the first clip then starts from its text, the size follows the first video or the Aspect setting)."""
+    chain.keep_aside(project, Path(project) / START_FILE)
     for f in Path(project).glob("start_*x*.png"):
         _unlink(f)
         _unlink(f.with_suffix(".json"))
@@ -1559,7 +1564,17 @@ def clear_start_image(project: Path, tree: Tree) -> None:
 
 
 def set_start_image(project: Path, image: Path, tree: Tree) -> None:
-    chain.to_png(Path(image), Path(project) / START_FILE)
+    start = Path(project) / START_FILE
+    if start.is_file() and Path(image).resolve() != start.resolve():
+        new = start.with_name("start.new.part.png")     # (converted first: a picture that cannot be read changes nothing)
+        try:
+            chain.to_png(Path(image), new)
+            chain.keep_aside(project, start)        # the start image before: never deleted, moved to old/
+            new.replace(start)
+        finally:
+            new.unlink(missing_ok=True)
+    else:
+        chain.to_png(Path(image), start)
     tree.image = str(Path(image).resolve())
 
 
@@ -2666,9 +2681,9 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
                 log(f"{nid}: made again, it hands over at its last frame again (choose a frame of the new take)")
                 node.end_at = None
         save(project, tree)
-        for f in old:                              # the previous version; left for later if it is open somewhere
-            if f not in new_files and not _unlink(f):
-                log(f"{f.name} is still in use; it is removed on a later run")
+        for f in old:                              # the previous version is never deleted: it goes to old/
+            if f not in new_files and not chain.keep_aside(project, f):
+                log(f"{f.name} is still in use; it is moved to {chain.OLD_DIR}/ on a later run")
         checker = Checker(project, tree)          # the new frame changes what depends on it
         emit({"e": "node", "id": nid, "state": "done"})
     emit({"e": "done", "made": todo})

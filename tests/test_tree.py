@@ -522,32 +522,46 @@ def test_single_lora_record_unchanged(project, tmp_path):
                                                  "width", "height", "audio", "backend"}
 
 
-def test_regenerating_never_overwrites_and_tolerates_open_files(project, monkeypatch):
-    """SMB shares refuse to replace or delete a file that is open somewhere: a new clip gets new names, the old
-    file is removed if possible, else on a later run."""
+def test_regenerating_never_deletes_and_tolerates_open_files(project, monkeypatch):
+    """A clip made again gets new names; the version before is never deleted: it is moved to old/ in the project. A
+    file that is open somewhere (SMB shares refuse to move it) stays where it is and is moved on a later run."""
+    import os
     t, a, b1, b2, c = build(project)
     run(project, [a.id])
     first = T.clip_files(project, T.load(project).nodes[a.id])
+    content = [f.read_bytes() for f in first]
     t = T.load(project)
     t.nodes[a.id].prompt = "a again"
     T.save(project, t)
-    real_unlink = Path.unlink
+    real = os.replace
     busy = {first[0]}
 
-    def unlink(self, missing_ok=False):
-        if self in busy:
-            raise PermissionError(13, "Permission denied", str(self))     # open in a player on the share
-        return real_unlink(self, missing_ok=missing_ok)
-    monkeypatch.setattr(Path, "unlink", unlink)
+    def replace(src, dst):
+        if Path(src) in busy:
+            raise PermissionError(13, "Permission denied", str(src))      # open in a player on the share
+        return real(src, dst)
+    monkeypatch.setattr(chain.os, "replace", replace)
     gen = FakeGenerator(frames=17)
     gen.calls = [{}]                                                      # other frames than the first version
     run(project, [a.id], gen)
     now = T.clip_files(project, T.load(project).nodes[a.id])
+    old = [project / chain.OLD_DIR / "nodes" / f.name for f in first]
     assert now != first and all(f.exists() for f in now)
-    assert first[0].exists() and not first[1].exists()                   # the open one stays, the other is gone
+    assert first[0].exists() and not first[1].exists()                   # the open one stays, the other was moved
+    assert not old[0].exists() and old[1].read_bytes() == content[1]
     assert statuses(project)["a again"] == "done"
-    busy.clear()                                                          # closed again: the next run cleans up
+    busy.clear()                                                          # closed again: the next run moves it too
     assert T.remove_stale_files(project, T.load(project)) == [] and not first[0].exists()
+    assert [f.read_bytes() for f in old] == content                       # nothing was lost
+    # a name that is taken in old/ gets a number; what is in old/ stays there
+    (project / "nodes" / first[0].name).write_bytes(b"another")
+    assert chain.keep_aside(project, project / "nodes" / first[0].name)
+    assert (old[0].with_name(old[0].stem + "_2.mp4")).read_bytes() == b"another" and old[0].read_bytes() == content[0]
+    assert chain.keep_aside(project, old[0]) and old[0].exists()
+    # deleting the clip in the app: its files go to old/ as well
+    t = T.load(project)
+    t.remove(a.id, project)
+    assert all(not f.exists() and (project / chain.OLD_DIR / "nodes" / f.name).is_file() for f in now)
 
 
 def test_stale_cleanup_also_takes_old_fixed_names(project):
@@ -561,6 +575,32 @@ def test_stale_cleanup_also_takes_old_fixed_names(project):
     T.remove_stale_files(project, T.load(project))
     assert sorted(f.name for f in d.iterdir()) == sorted([f.name for f in T.clip_files(project,
                                                           T.load(project).nodes[a.id])] + ["notes.txt"])
+    old = project / chain.OLD_DIR / "nodes"                # finished ones are kept in old/, a half-written one is not
+    assert sorted(f.name for f in old.iterdir()) == ["n1.mp4", "n1.png", "n7_0123abcd.mp4"]
+
+
+def test_nothing_the_app_removes_is_deleted(project, tmp_path):
+    """Pictures and sounds the app stops using (a start image, face picture, voice, sound reference, end image that
+    is replaced or removed) are moved to old/ in the project, never deleted."""
+    old = project / chain.OLD_DIR
+    t = T.load(project)
+    before = (project / T.START_FILE).read_bytes()
+    T.set_start_image(project, face(tmp_path / "s2.jpg", (10, 200, 10)), t)
+    assert (old / T.START_FILE).read_bytes() == before and (project / T.START_FILE).read_bytes() != before
+    second = (project / T.START_FILE).read_bytes()
+    T.clear_start_image(project, t)
+    assert not (project / T.START_FILE).exists() and (old / "start_2.png").read_bytes() == second
+    T.add_character(project, t, "Anna", face(tmp_path / "a.jpg", (200, 150, 130)))
+    pic = T.character(t, "Anna")["images"][0]
+    T.set_voice(project, t, "Anna", sound(tmp_path / "long.wav", 12))
+    v = T.character(t, "Anna")["voice"]
+    T.set_voice(project, t, "Anna", sound(tmp_path / "other.wav", 4))       # replaced: the voice and its reference
+    assert (old / v["file"]).is_file() and (old / v["ref"]["file"]).is_file() and not (project / v["file"]).exists()
+    v2 = T.character(t, "Anna")["voice"]["file"]
+    ref = T.add_audio_reference(project, sound(tmp_path / "s1.wav", 3), t)["file"]
+    T.remove_audio_reference(project, ref, t)
+    T.remove_character(project, t, "Anna")
+    assert all((old / r).is_file() and not (project / r).exists() for r in (pic, v2, ref))
 
 
 def test_turbo_mode(project, tmp_path):

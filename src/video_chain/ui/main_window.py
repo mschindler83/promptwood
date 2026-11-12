@@ -2718,7 +2718,8 @@ class MainWindow(QMainWindow):
             return
         n = F.summary(self.film, sid)["clips"]
         if QMessageBox.question(self, "Delete scene", f"Delete the scene “{sc.title}” with its {n} clip"
-                                f"{'s' if n != 1 else ''} and their files? This cannot be undone.") != QMessageBox.Yes:
+                                f"{'s' if n != 1 else ''} from the film? Its folder with their files is not deleted: it is moved to "
+                                "old/ in the film's folder.") != QMessageBox.Yes:
             return
         if self.film.path(sid) == self.project:    # leave it first
             other = next(s for s in self.film.scenes if s.id != sid)
@@ -3497,8 +3498,8 @@ class MainWindow(QMainWindow):
                 self.tree.options["tts"] = {**(self.tree.options.get("tts") or {}), "speak": how}
                 self._changed()
             self.preview.stop()                         # (it may still play a take that goes now)
-            for r in dlg.unused():
-                (project / r["file"]).unlink(missing_ok=True)
+            for r in dlg.unused():                      # the other takes are never deleted: they go to old/
+                chain.keep_aside(project, project / r["file"])
             if ok and dlg.chosen is not None:
                 texts = {}                              # (every take's transcripts: each was made once only)
                 for r in dlg.takes:
@@ -3562,20 +3563,20 @@ class MainWindow(QMainWindow):
         self._update_buttons()
         if self.project is None or str(self.project) != project or self.tree is None or nid not in self.tree.nodes:
             if r:                                   # (another project now, or the clip is gone: not used)
-                (Path(project) / r["file"]).unlink(missing_ok=True)
+                chain.keep_aside(Path(project), Path(project) / r["file"])
             return
         if r is None:
             self.status.setText(f"Could not speak the lines of clip #{nid[1:]}: {err}")
             return
         node = self.tree.nodes[nid]
         if node.frozen:
-            (self.project / r["file"]).unlink(missing_ok=True)
+            chain.keep_aside(self.project, self.project / r["file"])
             self._frozen_block(node, "speak")
             return
         try:
             done = TTS.apply_lines(self.project, self.tree, nid, r)
         except (TTS.TtsError, OSError) as e:
-            (self.project / r["file"]).unlink(missing_ok=True)
+            chain.keep_aside(self.project, self.project / r["file"])
             self.status.setText(f"Could not use the spoken lines of clip #{nid[1:]}: {e}")
             return
         self._write_tree()
@@ -4407,14 +4408,12 @@ class MainWindow(QMainWindow):
         return n
 
     def _drop_unused_tracks(self):
-        """Delete cut track files no scene lists any more (after the project is saved: never one still in use)."""
+        """Cut track files no scene lists any more go to old/ (never deleted; after the project is saved: never one
+        still in use)."""
         if self.project is None:
             return
         for f in T.unused_track_files(self.project, self._scene_dirs(), self.tree):
-            try:
-                f.unlink()
-            except OSError:
-                pass
+            chain.keep_aside(self.project, f)
 
     def _play_track(self):
         tr = self._selected_track()
@@ -5676,7 +5675,7 @@ class MainWindow(QMainWindow):
             msg = f"Delete {'video' if node.is_video else 'clip'} #{node.id[1:]}" + (f" and the {below} clip{'s' if below != 1 else ''} after it"
                                                    if below else "") + "?"
             if made:
-                msg += "\nTheir video files are deleted too."
+                msg += "\nTheir video files are not deleted: they are moved to old/ in the project folder."
             if QMessageBox.question(self, "Delete", msg) != QMessageBox.Yes:
                 return
             self.tree.remove(node.id, self.project)
@@ -6080,7 +6079,8 @@ class MainWindow(QMainWindow):
                    f"({', '.join('#' + o[1:] for o in others)}" + (" and what follows them" if len(doomed) >
                                                                   len(others) else "") + ")?")
             if made:
-                msg += f"\n{made} of them are made; their video files are deleted too."
+                msg += (f"\n{made} of them are made; their video files are not deleted: they are moved to old/ in the "
+                        "project folder.")
             if QMessageBox.question(self, "Keep this one", msg) != QMessageBox.Yes:
                 return []
         gone = []
@@ -6406,7 +6406,7 @@ class MainWindow(QMainWindow):
         def discard():
             for k in ("video", "frame", "first"):
                 if made and made.get(k):
-                    T._unlink(Path(project) / made[k])
+                    chain.keep_aside(Path(project), Path(project) / made[k])
         if self._converts.get(nid) != token:         # a newer conversion of this node is running
             discard()
             return
@@ -6431,8 +6431,8 @@ class MainWindow(QMainWindow):
         old = T.clip_files(self.project, node)
         node.made = made
         if self._write_tree() and not self._joins:  # a running join may still read them; else the next run does
-            for f in old:
-                T._unlink(f)
+            for f in old:                           # (never deleted: moved to old/)
+                chain.keep_aside(self.project, f)
         self._pix.clear()
         self.status.setText(f"Video #{nid[1:]} is ready ({made['frames']} frames).")
         self.refresh()
@@ -6459,7 +6459,8 @@ class MainWindow(QMainWindow):
             msg = (f"Delete {len(doomed)} clip{'s' if len(doomed) != 1 else ''} in "
                    f"{len(roots)} other branch{'es' if len(roots) != 1 else ''} {where} clip #{nid[1:]}?")
             if made:
-                msg += f"\n{made} of them are made; their video files are deleted too."
+                msg += (f"\n{made} of them are made; their video files are not deleted: they are moved to old/ in the "
+                        "project folder.")
             if QMessageBox.question(self, "Keep this branch", msg) != QMessageBox.Yes:
                 return []
         gone = []

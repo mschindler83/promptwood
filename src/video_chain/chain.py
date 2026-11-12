@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import shutil
 import subprocess
 from dataclasses import asdict, dataclass, field
@@ -637,6 +638,39 @@ def _write_record(out_dir: Path, settings: dict, clips: list[Clip], done: bool, 
     tmp.replace(out_dir / "chain.json")
 
 
+OLD_DIR = "old"                     # in a project: what the app no longer uses (see keep_aside)
+
+
+def keep_aside(root: Path, f: Path) -> bool:
+    """The app never deletes a video, picture or sound it made or was given: a file (or folder) it no longer uses is
+    moved to old/ in its project, under the path it had there (a number is added when that name is taken), and only
+    the user deletes it, by hand. root: the project folder; a file that lies elsewhere (a scene's refs/ are the
+    film's) goes to old/ next to its own folder. Returns False when it cannot be moved now (open in a player on a
+    network share ...): it stays where it is."""
+    f = Path(f)
+    if f.is_symlink() or not f.exists():
+        return True
+    real = f.resolve()
+    try:
+        rel = real.relative_to(Path(root).resolve())
+        base = Path(root).resolve()
+    except ValueError:
+        base, rel = real.parent.parent, Path(real.parent.name) / real.name
+    if rel.parts and rel.parts[0] == OLD_DIR:
+        return True                                 # (it is there already)
+    target = base / OLD_DIR / rel
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        k = 2
+        while target.exists():
+            target = target.with_name(f"{Path(rel.name).stem}_{k}{Path(rel.name).suffix}")
+            k += 1
+        os.replace(real, target)
+        return True
+    except OSError:
+        return False
+
+
 def run_chain(generator: Generator, image: Path, prompts: list[str], out_dir: Path, *, seed: int = 42,
               same_seed: bool = False, settings: dict | None = None, resume: bool = True,
               drop_first: bool = True, log: Callable[[str], None] = print,
@@ -681,7 +715,9 @@ def run_chain(generator: Generator, image: Path, prompts: list[str], out_dir: Pa
             generator.generate(prompt, current, new_video, new_last, s, settings=settings or None)
             if not new_video.exists() or not new_last.exists():
                 raise RuntimeError(f"the generator did not write {video.name} and {last.name}")
-            new_video.replace(video)              # the old clip is replaced only once the new one exists
+            for f in (video, last):               # the old clip is never deleted: it goes to old/
+                keep_aside(out_dir, f)
+            new_video.replace(video)              # ... once the new one exists
             new_last.replace(last)
             emit({"e": "clip", "k": k, "n": len(prompts), "state": "done", "video": str(video), "frame": str(last)})
         clips.append(clip)
@@ -691,7 +727,7 @@ def run_chain(generator: Generator, image: Path, prompts: list[str], out_dir: Pa
     for old_num in sorted(n for n in previous if n > len(prompts)):      # clips of a longer earlier chain
         for key in ("video", "last_frame"):
             if previous[old_num].get(key):
-                (out_dir / previous[old_num][key]).unlink(missing_ok=True)
+                keep_aside(out_dir, out_dir / previous[old_num][key])
 
     chain = out_dir / "chain.mp4"
     log(f"joining {len(clips)} clips into {chain.name}")

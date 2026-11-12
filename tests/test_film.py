@@ -5,6 +5,7 @@ import pytest
 from fakes import FakeGenerator
 from PIL import Image
 
+from video_chain import chain
 from video_chain import film as F
 from video_chain import tree as T
 
@@ -52,6 +53,8 @@ def test_scenes_add_rename_move_remove(project, tmp_path):
     (project / T.REFS_DIR / "keep.png").write_bytes(b"x")
     g.remove("s2")
     assert not d2.exists() and (project / T.REFS_DIR / "keep.png").is_file()   # shared refs stay
+    kept = project / chain.OLD_DIR / "scenes" / "s2"                  # the scene's folder is never deleted: moved
+    assert (kept / T.START_FILE).is_file() and (kept / T.TREE_FILE).is_file() and not (kept / T.REFS_DIR).exists()
     assert [s.id for s in F.Film.load(project).scenes] == ["s1", "s3"]
 
 

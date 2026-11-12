@@ -3774,6 +3774,7 @@ def test_text_to_speech_in_the_app(app, win, tmp_path, image, monkeypatch):
     assert seen["start"] == TTS.SPEAK_DEFAULTS and seen["busy"] == (True, False)
     assert 1 <= len(seen["rows"]) <= 3 and seen["rows"][0].startswith("Take 1   ·   ")
     assert [f.is_file() for f in seen["files"]] == [False] * (len(seen["files"]) - 1) + [True]   # the others went
+    assert all((win.project / chain.OLD_DIR / "refs" / f.name).is_file() for f in seen["files"][:-1])   # ... to old/
     tr = T.track_of(win.tree, T.track_id(win.tree.nodes[nid]))
     assert tr["id"] != old_track and win.project / tr["file"] == seen["files"][-1] and "spoken" in win.status.text()
     assert T.load(win.project).options["tts"]["speak"] == {"takes": 1, "delivery": "lively", "speed": 0.8}
