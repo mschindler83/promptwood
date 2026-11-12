@@ -953,8 +953,9 @@ def test_windows_install_choices(server, home, monkeypatch):
     monkeypatch.setenv("APPDATA", str(home / "roaming"))
     home.mkdir(parents=True, exist_ok=True)
     inst.desktop_windows(home, Path(r"C:\app\.venv\Scripts\python.exe"))
-    cmd = (home / "video-chain-gui.cmd").read_text()
-    assert "set PYTHONUTF8=1" in cmd and "-X utf8 -m video_chain.app %*" in cmd and "\r\n" in cmd
+    cmd = (home / "video-chain-gui.cmd").read_bytes().decode()
+    assert "set PYTHONUTF8=1" in cmd and "-X utf8 -m video_chain.app %*" in cmd
+    assert cmd.count("\r\n") == cmd.count("\n") == 5                # Windows line ends, written as they are
     assert 'VIDEO_CHAIN_HOME=' in (home / "video-chain.cmd").read_text()
 
 

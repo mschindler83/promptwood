@@ -556,7 +556,8 @@ class Installer:
                 ours.write_text("@echo off\r\nrem Starts ComfyUI for Promptwood (written by video-chain setup). "
                                 "Extra arguments go to ComfyUI.\r\n"
                                 f'cd /d "{d}" || exit /b 1\r\n'
-                                f'"{py}" main.py --port {port} --base-directory "{d}" %*\r\n', encoding="utf-8")
+                                f'"{py}" main.py --port {port} --base-directory "{d}" %*\r\n', encoding="utf-8",
+                                newline="")
             elif launcher == ours:
                 ours.parent.mkdir(parents=True, exist_ok=True)
                 ours.write_text("#!/usr/bin/env bash\n# Starts ComfyUI for Promptwood (written by video-chain "
@@ -806,7 +807,7 @@ class Installer:
             (bin_dir / f"{name}.cmd").write_text(
                 "@echo off\r\nrem Promptwood (written by video-chain setup)\r\n"
                 f'set "VIDEO_CHAIN_HOME={self.home}"\r\nset PYTHONUTF8=1\r\n'
-                f'{start}"{exe}" -X utf8 -m {module} %*\r\n', encoding="utf-8")
+                f'{start}"{exe}" -X utf8 -m {module} %*\r\n', encoding="utf-8", newline="")
         if not self.o.desktop:
             return
         menu = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "Microsoft" / "Windows" \
