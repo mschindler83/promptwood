@@ -286,7 +286,7 @@ def check_software(man: dict, components: list[str]) -> list[Check]:
             r = S.run([str(py), "-c", "import qwen_tts, soundfile, torch; print(torch.__version__)"], 180)
             ok = r is not None and r.returncode == 0
             out.append(Check(g, "Text to speech environment", OK if ok else FAIL,
-                             f"torch {r.stdout.strip()}" if ok else f"{py} cannot import qwen_tts",
+                             f"torch {r.stdout.strip().splitlines()[-1]}" if ok else f"{py} cannot import qwen_tts",
                              "" if ok else f"{SETUP} --only tts"))
     if "llama" in soft:
         server = paths.llama_server()
@@ -519,7 +519,8 @@ def llm_test(log=print) -> Check:
             if s.connect_ex(("127.0.0.1", port)) != 0:
                 break
         port += 1
-    server = LlamaServer(paths.llama_server(), str(model), port, False, find_mmproj(str(model)),
+    # (as the app starts it by default: a mixture-of-experts model keeps its experts in main memory)
+    server = LlamaServer(paths.llama_server(), str(model), port, True, find_mmproj(str(model)),
                          log_dir=paths.cache_dir())
     log("Starting llama.cpp with the language model …")
     try:
@@ -531,7 +532,7 @@ def llm_test(log=print) -> Check:
         with urllib.request.urlopen(req, timeout=300) as r:
             msg = json.loads(r.read())["choices"][0]["message"]
         text = (msg.get("content") or msg.get("reasoning_content") or "").strip()
-        return Check(g, name, OK if text else FAIL, f"it answered: {text[:60]!r}")
+        return Check(g, name, OK if text else FAIL, f"{model.name} answered: {text[:60]!r}")
     except Exception as e:  # noqa: BLE001
         return Check(g, name, FAIL, str(e))
     finally:
