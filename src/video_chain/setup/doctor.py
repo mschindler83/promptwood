@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 import tempfile
@@ -65,8 +66,42 @@ def model_roots(comfy_dir: Path, folder: str) -> list[Path]:
     return [r / rest if rest else r for r in roots]
 
 
+def gguf_chat_models(caches: list[Path] | None = None) -> list[Path]:
+    """GGUF language models with a vision projector next to them, in the Hugging Face caches (what the app's
+    prompt refiner offers and can show pictures to)."""
+    out = []
+    for root in caches or paths.model_cache_dirs():
+        try:
+            for f in sorted(Path(root).glob("models--*/snapshots/*/*.gguf")):
+                low = f.name.lower()
+                if "mmproj" not in low and "imatrix" not in low and f.exists() and any(f.parent.glob("*mmproj*.gguf")):
+                    out.append(f)
+        except OSError:
+            continue
+    return out
+
+
+_LISTED: dict[str, list[Path]] = {}
+
+
+def _files_under(root: Path) -> list[Path]:
+    """Every file below a model folder (subfolders too, as ComfyUI lists them); remembered for this run."""
+    key = str(root)
+    if key not in _LISTED:
+        try:
+            _LISTED[key] = [p for p in root.rglob("*") if p.is_file()] if root.is_dir() else []
+        except OSError:
+            _LISTED[key] = []
+    return _LISTED[key]
+
+
+def forget_listings() -> None:
+    _LISTED.clear()
+
+
 def find_file(f: dict, comfy_dir: Path, hf_cache: Path) -> list[Path] | None:
-    """Where the file(s) of a manifest entry are on this computer, or None when one is missing or incomplete."""
+    """Where the file(s) of a manifest entry are on this computer, or None when one is missing or incomplete.
+    A file the app uses just as well (the entry's "alt") counts too."""
     if f.get("hf"):
         own = M.hf_snapshot(f, hf_cache)             # ours first, then any other snapshot with the same file
         others = sorted(own.parent.glob("*")) if own.parent.is_dir() else []
@@ -74,16 +109,31 @@ def find_file(f: dict, comfy_dir: Path, hf_cache: Path) -> list[Path] | None:
             p = snap / f["path"]
             if p.is_file() and p.stat().st_size == f["size"]:
                 return [p]
+        if f.get("alt") == "gguf-chat":
+            models = gguf_chat_models([hf_cache, *paths.model_cache_dirs()])
+            if models:
+                return [models[0] if "mmproj" not in f["path"].lower() else
+                        sorted(models[0].parent.glob("*mmproj*.gguf"))[0]]
         return None
     names = f.get("extract") or [f["name"]]
+    roots = model_roots(comfy_dir, f["dir"])
     out = []
     for name in names:
         hit = None
-        for root in model_roots(comfy_dir, f["dir"]):
+        for root in roots:
             p = root / name
             if p.is_file() and ("extract" in f or p.stat().st_size == f["size"]):
                 hit = p
                 break
+        if hit is None:
+            for root in roots:                           # in a subfolder, or another build of the same model
+                for p in _files_under(root):
+                    if (p.name == name and ("extract" in f or p.stat().st_size == f["size"])) or \
+                            (f.get("alt") and re.search(f["alt"], p.name.lower())):
+                        hit = p
+                        break
+                if hit is not None:
+                    break
         if hit is None:
             return None
         out.append(hit)
@@ -364,7 +414,8 @@ def deep_checks(url: str, components: list[str]) -> list[Check]:
                 continue
             if f["dir"] not in lists:
                 lists[f["dir"]] = _listed(url, *LOADERS[f["dir"]])
-            if not any(Path(n.replace("\\", "/")).name == f["name"] for n in lists[f["dir"]]):
+            base = [Path(n.replace("\\", "/")).name for n in lists[f["dir"]]]
+            if f["name"] not in base and not (f.get("alt") and any(re.search(f["alt"], n.lower()) for n in base)):
                 problems.append(f"{f['name']} is not listed")
         if cid == "faces" and not problems:
             from ..animate import FACE_NODE

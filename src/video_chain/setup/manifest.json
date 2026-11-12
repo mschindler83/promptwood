@@ -132,6 +132,7 @@
      "path": "loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
      "dir": "loras",
      "name": "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
+     "alt": "minimax_h3_fl2v.*turbo.*\\.safetensors$",
      "rev": "54472221d27c695fca9621b0c3ed52f06c4af707",
      "size": 1956193000,
      "sha256": "2339acdf19bfe123f46b971ea35d367a84adb85de43627e1eceafa5a5b2b111e"
@@ -141,6 +142,7 @@
      "path": "loras/minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
      "dir": "loras",
      "name": "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+     "alt": "minimax_h3_ref2v.*turbo.*\\.safetensors$",
      "rev": "54472221d27c695fca9621b0c3ed52f06c4af707",
      "size": 1956193000,
      "sha256": "5b9ab5ade15d0775676d01a907268a69a1468dc6033b3b0d3ded5502f3ebb84c"
@@ -160,6 +162,7 @@
      "path": "open_h3_regenerate_2k_refiner_lora.safetensors",
      "dir": "loras",
      "name": "open_h3_regenerate_2k_refiner_lora.safetensors",
+     "alt": "regenerate[_-]2k.*refiner.*\\.safetensors$",
      "rev": "aa972e8da0c94a73918b48df74bb8da5ec1d9e16",
      "size": 8301660712,
      "sha256": "44a24cb8244d6f4aa1748785dcaa6f95c04f38036bd047a41621c155278691a6"
@@ -169,6 +172,7 @@
      "path": "latent_upsampler/minimax_h3_latent_upscaler_3d_conv_v1_bf16.safetensors",
      "dir": "latent_upscale_models",
      "name": "minimax_h3_latent_upscaler_3d_conv_v1_bf16.safetensors",
+     "alt": "(minimax_h3|h3_latent).*upscal.*\\.safetensors$",
      "rev": "50c09cf1df5f9262b9279868c1c666bd5fe3476b",
      "size": 690592992,
      "sha256": "4f57821f5837f32f7142b67d815606dbd7550f194e5c769f7d6c3f83b146a5e6"
@@ -213,6 +217,7 @@
      "path": "diffusion_models/qwen_image_2.1_int8_convrot.safetensors",
      "dir": "diffusion_models",
      "name": "qwen_image_2.1_int8_convrot.safetensors",
+     "alt": "^(?!.*turbo)qwen[_-]?image[_-]?2\\\\.?1.*\\\\.safetensors$",
      "rev": "aacf31a6d48e707f352ecba714cee0680da3479b",
      "size": 7256783064,
      "sha256": "cb74113cb03faecd79611b01fd7fd642f0aa60d6f0b95086abee214d75eaa57d"
@@ -222,6 +227,7 @@
      "path": "diffusion_models/qwen_image_2.1_turbo_int8_convrot.safetensors",
      "dir": "diffusion_models",
      "name": "qwen_image_2.1_turbo_int8_convrot.safetensors",
+     "alt": "qwen[_-]?image[_-]?2\\\\.?1.*turbo.*\\\\.safetensors$",
      "rev": "aacf31a6d48e707f352ecba714cee0680da3479b",
      "size": 7256787829,
      "sha256": "8144a0182964aa8403ad6dbc011db837304167d235161b9aabaa8532e967314c"
@@ -231,6 +237,7 @@
      "path": "text_encoders/qwen3vl_8b_int8_convrot.safetensors",
      "dir": "text_encoders",
      "name": "qwen3vl_8b_int8_convrot.safetensors",
+     "alt": "qwen3vl_8b(?!.*joyimage).*\\.safetensors$",
      "rev": "aacf31a6d48e707f352ecba714cee0680da3479b",
      "size": 9350798360,
      "sha256": "8bfd0f6e12abf2d2d697ecc888e5e90b0d6741d6708f05799f53afa560452e8f"
@@ -240,6 +247,7 @@
      "path": "vae/qwen_image_2.1_vae_bf16.safetensors",
      "dir": "vae",
      "name": "qwen_image_2.1_vae_bf16.safetensors",
+     "alt": "qwen_image_2\\.?1_vae.*\\.safetensors$",
      "rev": "aacf31a6d48e707f352ecba714cee0680da3479b",
      "size": 675509688,
      "sha256": "bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9"
@@ -249,6 +257,7 @@
      "path": "model_patches/qwen_image_2.1_fun_controlnet_union_int8_convrot.safetensors",
      "dir": "model_patches",
      "name": "qwen_image_2.1_fun_controlnet_union_int8_convrot.safetensors",
+     "alt": "qwen[_-]?image[_-]?2\\\\.?1.*controlnet.*\\\\.safetensors$",
      "rev": "aacf31a6d48e707f352ecba714cee0680da3479b",
      "size": 3779298944,
      "sha256": "07aa961570ac0e03d4ca936aecd76854d077a33cde69b5092399afba01b3715d"
@@ -278,6 +287,7 @@
      "path": "hyperswap_1b_256.onnx",
      "dir": "insightface",
      "name": "hyperswap_1b_256.onnx",
+     "alt": "hyperswap.*\\.onnx$",
      "rev": "6271ab1c4619ceb2e534d65e0ec973f22a9aec38",
      "size": 402742682,
      "sha256": "5124031789c42f71b9558fb71954ef7aedb6da7ed9fac79293e23c61a792a73e"
@@ -287,6 +297,7 @@
      "path": "gpen_bfr_512.onnx",
      "dir": "facerestore_models",
      "name": "GPEN-BFR-512.onnx",
+     "alt": "gpen.*\\.onnx$",
      "rev": "728b9659bd9691bf32cbf7f61af478d94b7ba81e",
      "size": 284340240,
      "sha256": "d5f066b9068a8b74217f9712e28e875a6144629b108a6f7355acbdb3a2832c54"
@@ -553,7 +564,8 @@
      "path": "Qwen3-VL-8B-Instruct-Q8_0.gguf",
      "hf": true,
      "size": 8709520224,
-     "sha256": "cb8616bf6ed228982d9e47d7b72b42195342efa26044b0ee1873e61d9e78d3d7"
+     "sha256": "cb8616bf6ed228982d9e47d7b72b42195342efa26044b0ee1873e61d9e78d3d7",
+     "alt": "gguf-chat"
     },
     {
      "repo": "unsloth/Qwen3-VL-8B-Instruct-GGUF",
@@ -561,7 +573,8 @@
      "path": "mmproj-BF16.gguf",
      "hf": true,
      "size": 1162569280,
-     "sha256": "6516bb64bae1503a0fcd7ec9fa39655f8c481580be0a0a066397941d9761c9f4"
+     "sha256": "6516bb64bae1503a0fcd7ec9fa39655f8c481580be0a0a066397941d9761c9f4",
+     "alt": "gguf-chat"
     }
    ],
    "bytes": 9872089504

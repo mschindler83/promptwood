@@ -465,6 +465,7 @@ class Installer:
                     if not ref.is_file() and M.hf_snapshot(f, cache).is_dir():
                         ref.parent.mkdir(parents=True, exist_ok=True)
                         ref.write_text(f["rev"])
+        D.forget_listings()
         for cid in self.components:
             have, total, _ = D.component_state(self.man, cid, self.comfy_dir, cache)
             if have != total:

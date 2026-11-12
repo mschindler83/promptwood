@@ -19,14 +19,17 @@ OUT = Path(__file__).resolve().parents[1] / "src" / "video_chain" / "setup" / "m
 DOC = Path(__file__).resolve().parents[1] / "docs" / "MODELS.md"
 
 
-def m(repo, path, folder, name=None):
-    """A file for ComfyUI's models/<folder>."""
-    return {"repo": repo, "path": path, "dir": folder, "name": name or path.rsplit("/", 1)[-1]}
+def m(repo, path, folder, name=None, alt=None):
+    """A file for ComfyUI's models/<folder>. alt: a pattern (lower-case file name) of files the app uses just as
+    well (another precision or build of the same model): one of those on the computer and nothing is downloaded."""
+    return {"repo": repo, "path": path, "dir": folder, "name": name or path.rsplit("/", 1)[-1],
+            **({"alt": alt} if alt else {})}
 
 
-def hf(repo, *patterns):
-    """Files of a repo for the Hugging Face cache (all of them, or those whose name contains a pattern)."""
-    return {"hf_repo": repo, "patterns": list(patterns)}
+def hf(repo, *patterns, alt=None):
+    """Files of a repo for the Hugging Face cache (all of them, or those whose name contains a pattern).
+    alt "gguf-chat": any GGUF chat model with a vision projector in a Hugging Face cache does as well."""
+    return {"hf_repo": repo, "patterns": list(patterns), **({"alt": alt} if alt else {})}
 
 
 H3 = "Comfy-Org/MiniMax-H3"
@@ -52,16 +55,18 @@ SPEC = {
     "video-turbo": {
         "title": "Turbo clips (8 / 4 steps)", "profile": "standard", "needs": ["video"],
         "nodes": ["h3-turbo"],
-        "files": [m(H3, "loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors", "loras"),
-                  m(H3, "loras/minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors", "loras")],
+        "files": [m(H3, "loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors", "loras",
+                    alt=r"minimax_h3_fl2v.*turbo.*\.safetensors$"),
+                  m(H3, "loras/minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors", "loras",
+                    alt=r"minimax_h3_ref2v.*turbo.*\.safetensors$")],
     },
     "video-2k": {
         "title": "2K refine pass (Open-H3-Regenerate-2K)", "profile": "standard", "needs": ["video"],
         "files": [m("Efficient-Large-Model/Open-H3-Regenerate-2K-LoRA", "open_h3_regenerate_2k_refiner_lora.safetensors",
-                    "loras"),
+                    "loras", alt=r"regenerate[_-]2k.*refiner.*\.safetensors$"),
                   m("Efficient-Large-Model/Open-H3-Regenerate-2K",
                     "latent_upsampler/minimax_h3_latent_upscaler_3d_conv_v1_bf16.safetensors",
-                    "latent_upscale_models")],
+                    "latent_upscale_models", alt=r"(minimax_h3|h3_latent).*upscal.*\.safetensors$")],
     },
     "upscale": {
         "title": "Export upscaling (SeedVR2 7B)", "profile": "standard",
@@ -71,20 +76,24 @@ SPEC = {
     "image": {
         "title": "Pictures: create, edit and inpaint (Qwen-Image 2.1)", "profile": "standard",
         "nodes": ["video-chain"],
-        "files": [m(Q21, "diffusion_models/qwen_image_2.1_int8_convrot.safetensors", "diffusion_models"),
-                  m(Q21, "diffusion_models/qwen_image_2.1_turbo_int8_convrot.safetensors", "diffusion_models"),
-                  m(Q21, "text_encoders/qwen3vl_8b_int8_convrot.safetensors", "text_encoders"),
-                  m(Q21, "vae/qwen_image_2.1_vae_bf16.safetensors", "vae"),
+        "files": [m(Q21, "diffusion_models/qwen_image_2.1_int8_convrot.safetensors", "diffusion_models",
+                    alt=r"^(?!.*turbo)qwen[_-]?image[_-]?2\\.?1.*\\.safetensors$"),
+                  m(Q21, "diffusion_models/qwen_image_2.1_turbo_int8_convrot.safetensors", "diffusion_models",
+                    alt=r"qwen[_-]?image[_-]?2\\.?1.*turbo.*\\.safetensors$"),
+                  m(Q21, "text_encoders/qwen3vl_8b_int8_convrot.safetensors", "text_encoders",
+                    alt=r"qwen3vl_8b(?!.*joyimage).*\.safetensors$"),
+                  m(Q21, "vae/qwen_image_2.1_vae_bf16.safetensors", "vae", alt=r"qwen_image_2\.?1_vae.*\.safetensors$"),
                   m(Q21, "model_patches/qwen_image_2.1_fun_controlnet_union_int8_convrot.safetensors",
-                    "model_patches")],
+                    "model_patches", alt=r"qwen[_-]?image[_-]?2\\.?1.*controlnet.*\\.safetensors$")],
     },
     "faces": {
         "title": "Faces: crop to face, face swap (SCRFD, ArcFace, HyperSwap, GPEN)", "profile": "standard",
         "nodes": ["video-chain"], "app_extra": "faces",
         "files": [{"url": "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip",
                    "dir": "insightface/models/buffalo_l", "extract": ["det_10g.onnx", "w600k_r50.onnx"]},
-                  m("facefusion/models-3.3.0", "hyperswap_1b_256.onnx", "insightface"),
-                  m("facefusion/models-3.0.0", "gpen_bfr_512.onnx", "facerestore_models", "GPEN-BFR-512.onnx")],
+                  m("facefusion/models-3.3.0", "hyperswap_1b_256.onnx", "insightface", alt=r"hyperswap.*\.onnx$"),
+                  m("facefusion/models-3.0.0", "gpen_bfr_512.onnx", "facerestore_models", "GPEN-BFR-512.onnx",
+                    alt=r"gpen.*\.onnx$")],
     },
     "tts": {
         "title": "Spoken lines and voices (Qwen3-TTS, Whisper)", "profile": "standard", "software": ["tts"],
@@ -94,7 +103,8 @@ SPEC = {
     "llm": {
         "title": "Prompt refiner (llama.cpp with Qwen3-VL 8B, sees pictures)", "profile": "standard",
         "software": ["llama"],
-        "files": [hf("unsloth/Qwen3-VL-8B-Instruct-GGUF", "Qwen3-VL-8B-Instruct-Q8_0.gguf", "mmproj-BF16.gguf")],
+        "files": [hf("unsloth/Qwen3-VL-8B-Instruct-GGUF", "Qwen3-VL-8B-Instruct-Q8_0.gguf", "mmproj-BF16.gguf",
+                     alt="gguf-chat")],
     },
     "video-speed": {
         "title": "More speed modes (HyperFlow, Pika H3 Flex, Veda sparse attention)", "profile": "full",
@@ -199,7 +209,8 @@ def resolve(entry: dict) -> list[dict]:
                 continue
             if entry["patterns"] and not any(p in path for p in entry["patterns"]):
                 continue
-            out.append({"repo": entry["hf_repo"], "rev": sha, "path": path, "hf": True, **info})
+            out.append({"repo": entry["hf_repo"], "rev": sha, "path": path, "hf": True, **info,
+                        **({"alt": entry["alt"]} if entry.get("alt") else {})})
         if not out:
             raise SystemExit(f"{entry['hf_repo']}: nothing matches {entry['patterns']}")
         return out
