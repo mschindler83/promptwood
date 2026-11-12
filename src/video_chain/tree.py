@@ -853,6 +853,21 @@ def dialogue(options: dict, text: str, default: dict | None = None) -> list[dict
     return out
 
 
+def replace_lines(text: str, lines: list[str]) -> str:
+    """A prompt with its spoken lines (those dialogue() gives, in order) replaced by `lines`; everything around
+    them, the quotes too, stays. ValueError: another number of lines."""
+    spans = []
+    for m in DIALOGUE.finditer(text or ""):
+        g = next(k for k in range(1, (m.lastindex or 0) + 1) if m.group(k) is not None)
+        if m.group(g).strip():
+            spans.append(m.span(g))
+    if len(spans) != len(lines):
+        raise ValueError(f"the prompt has {len(spans)} spoken lines, not {len(lines)}")
+    for (a, b), line in reversed(list(zip(spans, lines))):
+        text = text[:a] + line + text[b:]
+    return text
+
+
 def spoken_lines(text: str) -> list[str]:
     """The quoted lines of a prompt, as written (normalised spaces, no trailing , ; :)."""
     return [" ".join(next(g for g in m.groups() if g is not None).split()).rstrip(",;: ")

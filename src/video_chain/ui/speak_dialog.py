@@ -1,12 +1,13 @@
 """Speak a clip's lines with text to speech: several takes to choose from, and how they are spoken (steady or lively,
-slower or faster). The takes are listened to; "Use this take" makes one the clip's sound."""
+slower or faster). The words of the lines can be changed to try other sentences. The takes are listened to; "Use this
+take" makes one the clip's sound (and its words the clip's lines)."""
 from __future__ import annotations
 
 import threading
 
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QHBoxLayout,
-                               QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton, QSpinBox, QVBoxLayout)
+                               QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSpinBox, QVBoxLayout)
 
 from .. import tts
 from .widgets import guard_wheel, label
@@ -19,8 +20,9 @@ class _Signals(QObject):
 
 class SpeakLinesDialog(QDialog):
     """lines: [{"name", "line"}]; speak: the settings to start with (tts.speak_options); play(path, title): how a
-    take is listened to; render(take number, speak) -> a take (tts.render_lines; called in a thread), file(take) ->
-    its path. chosen: the take to use (after "Use this take"); unused(): the takes to delete."""
+    take is listened to; render(take number, speak, line texts) -> a take (tts.render_lines; called in a thread),
+    file(take) -> its path. chosen: the take to use (after "Use this take"; its "prompt" has the words it speaks);
+    unused(): the takes to delete."""
 
     def __init__(self, parent, clip: str, lines: list[dict], provider: str, speak: dict, play, render, file):
         super().__init__(parent)
@@ -37,11 +39,17 @@ class SpeakLinesDialog(QDialog):
         self._sig.take.connect(self._take_done)
         self._sig.done.connect(self._all_done)
         v = QVBoxLayout(self)
-        self.lines = QPlainTextEdit("\n".join(f"{d['name']}: “{d['line']}”" for d in lines))
-        self.lines.setReadOnly(True)
-        self.lines.setFixedHeight(min(120, 30 + 22 * len(lines)))
-        self.lines.setToolTip("The lines as the clip's prompt has them (change them there)")
-        v.addWidget(self.lines)
+        self.original = [d["line"] for d in lines]
+        self.line_edits: list[QLineEdit] = []
+        lform = QFormLayout()
+        for d in lines:
+            e = QLineEdit(d["line"])
+            e.setToolTip(f"What {d['name']} says. Change it to try another sentence: the take you use writes its "
+                         "words into the clip's prompt.")
+            e.textChanged.connect(lambda _t: self._enable())
+            self.line_edits.append(e)
+            lform.addRow(d["name"], e)
+        v.addLayout(lform)
         form = QFormLayout()
         self.n = QSpinBox()
         self.n.setRange(1, 8)
@@ -104,14 +112,18 @@ class SpeakLinesDialog(QDialog):
         return tts.speak_options(given={"takes": self.n.value(), "delivery": self.delivery.currentData(),
                                         "speed": self.speed.value()})
 
+    def line_texts(self) -> list[str]:
+        """The lines as they are typed now."""
+        return [tts.clean_line(e.text()) for e in self.line_edits]
+
     def selected(self) -> dict | None:
         row = self.list.currentRow()
         return self.takes[row] if 0 <= row < len(self.takes) else None
 
     def _enable(self):
-        self.b_make.setEnabled(not self.busy)
+        self.b_make.setEnabled(not self.busy and all(self.line_texts()))
         self.b_make.setText("Make more takes" if self.takes else "Make the takes")
-        for w in (self.n, self.delivery, self.speed):
+        for w in (self.n, self.delivery, self.speed, *self.line_edits):
             w.setEnabled(not self.busy)
         self.b_play.setEnabled(self.selected() is not None)
         self.b_use.setEnabled(not self.busy and self.selected() is not None)
@@ -119,7 +131,9 @@ class SpeakLinesDialog(QDialog):
     def make(self):
         if self.busy:
             return
-        how, n, first = self.speak_values(), self.n.value(), self._next
+        if not all(self.line_texts()):
+            return
+        how, n, first, said = self.speak_values(), self.n.value(), self._next, self.line_texts()
         self._next += n
         self.busy, self._stop = True, False
         self._enable()
@@ -133,7 +147,7 @@ class SpeakLinesDialog(QDialog):
                     if self._stop:
                         break
                     try:
-                        self._sig.take.emit(self._render(first + k, how), "")
+                        self._sig.take.emit(self._render(first + k, how, said), "")
                     except Exception as e:  # noqa: BLE001
                         self._sig.take.emit(None, str(e))
                         break
@@ -151,7 +165,13 @@ class SpeakLinesDialog(QDialog):
         text = f"Take {len(self.takes)}   ·   {r['secs']:.1f} s   ·   {how.get('delivery', 'natural')}"
         if abs(float(how.get("speed", 1.0)) - 1.0) >= 0.005:
             text += f", {how['speed']:g} ×"
-        self.list.addItem(QListWidgetItem(text))
+        said = [d["line"] for d in r.get("lines") or []]
+        if said != self.original:                   # other words than the prompt has: shown with the take
+            words = " / ".join(said)
+            text += f"   ·   “{words[:48]}{'…' if len(words) > 48 else ''}”"
+        item = QListWidgetItem(text)
+        item.setToolTip("\n".join(f"{d['name']}: “{d['line']}”" for d in r.get("lines") or []))
+        self.list.addItem(item)
         self._left -= 1
         if self._left > 0 and not self._stop:
             self.info.setText(f"Speaking take {self.n.value() - self._left + 1} of {self.n.value()}…")
@@ -168,7 +188,7 @@ class SpeakLinesDialog(QDialog):
         if not getattr(self, "_failed", False):
             n = len(self.takes)
             self.info.setText(f"{n} take{'s' if n != 1 else ''}. Listen (double-click), then use the best one, or "
-                              "change the settings and make more.")
+                              "change the words or settings and make more.")
         self._failed = False
         self._enable()
 

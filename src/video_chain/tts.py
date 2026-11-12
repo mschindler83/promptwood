@@ -15,6 +15,7 @@ Spoken lines are the quoted lines of a prompt ("..." after @Name, see tree.dialo
 other, with a short pause before the first and between them, and become an audio track of the clip."""
 from __future__ import annotations
 
+import copy
 import json
 import os
 import queue
@@ -481,6 +482,15 @@ def frames_for(secs: float, have: int) -> int | None:
     raise TtsError(f"the lines take {secs:.1f} s; a clip is at most 15 s: split them over two clips")
 
 
+def clean_line(text: str) -> str:
+    """A spoken line as typed in the Speak the lines window, fit to stand in quotes in a prompt: one line, no
+    quotation marks or angle brackets of its own."""
+    text = " ".join(str(text or "").split())
+    for ch in '"“”„«»':
+        text = text.replace(ch, "'")
+    return text.replace("<", "").replace(">", "").strip()
+
+
 def _tempo(wav: Path, speed: float) -> None:
     """Make a WAV slower or faster without changing its pitch."""
     tmp = wav.with_name(wav.stem + ".tempo.wav")
@@ -495,17 +505,29 @@ def _tempo(wav: Path, speed: float) -> None:
 
 
 def render_lines(project: Path, tree: T.Tree, nid: str, eng, log=lambda _m: None, take: int = 0,
-                 speak: dict | None = None) -> dict:
+                 speak: dict | None = None, lines: list[str] | None = None) -> dict:
     """Speak the clip's lines, each in its speaker's voice, into one new WAV in refs/ (see join_lines). Reads the
     tree only (call it with a copy from a worker thread; apply_lines puts the result in). Returns {"file", "secs",
     "lines": [{"name", "line"}], "texts": {name: what its voice sample says, transcribed now}, "provider",
     "language", "prompt": the prompt the lines are from, "take", "speak"}.
     take: another number, another version of the same lines (other seeds). speak: how they are spoken
-    (speak_options; None: the project's)."""
+    (speak_options; None: the project's). lines: other words for the prompt's lines (one text per line, in order);
+    "prompt" is then the clip's prompt with these lines, "base_prompt" the prompt it was made from."""
     project = Path(project)
     node = tree.nodes[nid]
     if node.is_video:
         raise TtsError("a real video keeps its own sound")
+    base = node.prompt
+    if lines is not None:
+        said = [clean_line(x) for x in lines]
+        if not all(said):
+            raise TtsError("a line is empty")
+        try:
+            new = T.replace_lines(base, said)
+        except ValueError as e:
+            raise TtsError(str(e)) from None
+        node = copy.copy(node)                      # (the tree is only read: the changed prompt is the take's)
+        node.prompt = new
     bad = line_problems(tree, node, eng.name)
     if bad:
         raise TtsError("; ".join(bad))
@@ -553,7 +575,7 @@ def render_lines(project: Path, tree: T.Tree, nid: str, eng, log=lambda _m: None
     return {"file": rel, "secs": round(secs, 3), "lines": [{"name": d["speaker"]["name"], "line": d["line"]}
                                                            for d in lines],
             "texts": texts, "voice_files": voice_files, "provider": eng.name, "language": lang, "prompt": node.prompt,
-            "take": int(take), "speak": how}
+            "base_prompt": base, "take": int(take), "speak": how}
 
 
 def apply_lines(project: Path, tree: T.Tree, nid: str, r: dict) -> dict:

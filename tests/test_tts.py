@@ -202,6 +202,17 @@ def test_takes_and_how_lines_are_spoken(project, tmp_path):
     assert el.calls[-1][6] == {"settings": {"stability": 0.0}}
     tts.render_lines(project, t, n.id, el, speak={})
     assert len(el.calls[-1]) == 6
+    # other words for the lines (the Speak the lines window): spoken, and in the take's prompt; the tree is not changed
+    r = tts.render_lines(project, t, n.id, loc, lines=['  Na, "du"  da! ', "Schlecht."])
+    assert [c[1] for c in loc.calls[-2:]] == ["Na, 'du' da!", "Schlecht."]
+    assert r["prompt"] == """@Anna says "Na, 'du' da!" Then she says "Schlecht.\"""" and r["base_prompt"] == n.prompt
+    assert [d["line"] for d in r["lines"]] == ["Na, 'du' da!", "Schlecht."] and "Hallo, wie" in n.prompt
+    with pytest.raises(tts.TtsError, match="a line is empty"):
+        tts.render_lines(project, t, n.id, loc, lines=["Hallo.", " "])
+    with pytest.raises(tts.TtsError, match="2 spoken lines, not 1"):
+        tts.render_lines(project, t, n.id, loc, lines=["Hallo."])
+    assert T.replace_lines('„Hi“, says @Anna. <d>[German] Ja.</d> «Oui»', ["A", "B", "C"]) == \
+        '„A“, says @Anna. <d>[German] B</d> «C»'
 
 
 def test_a_shared_track_stays_and_short_lines_are_filled(project, tmp_path):

@@ -113,7 +113,7 @@ STATE_STYLE = {"done": "done", "reused": "done", "generating": "target", "failed
 SPEAK_TIP = ("<p>Speak this clip's lines (\"...\" after @Name, e.g. @Anna says \"Hello.\") with text to speech, "
              "each in its speaker's voice, and make them the clip's sound: the picture is made to it, lips in sync."
              "<br>A window opens: make a few takes, set how steady or lively and how fast the lines are spoken, "
-             "listen, and use the best take."
+             "listen, and use the best take. The words can be changed there too, to try other sentences."
              "<br>Who speaks (Qwen3-TTS on this computer, or ElevenLabs with your API key) is set in the Cast tab, "
              "under Text to speech; the API key in Settings.</p>")
 FREEZE_TIP = ("Freeze: keep this clip as it is made, and every clip before it. They count as done whatever "
@@ -3462,8 +3462,8 @@ class MainWindow(QMainWindow):
             return False
         snap, project = copy.deepcopy(self.tree), self.project
 
-        def render(take: int, how: dict) -> dict:
-            r = TTS.render_lines(project, snap, nid, eng, take=take, speak=how)
+        def render(take: int, how: dict, lines: list[str]) -> dict:
+            r = TTS.render_lines(project, snap, nid, eng, take=take, speak=how, lines=lines)
             for name, text in (r.get("texts") or {}).items():     # (transcribed once, not for every take)
                 TTS._set_voice_fields(snap, name, text=text)
             return r
@@ -3490,6 +3490,11 @@ class MainWindow(QMainWindow):
                 texts = {}                              # (every take's transcripts: each was made once only)
                 for r in dlg.takes:
                     texts.update(r.get("texts") or {})
+                node = self.tree.nodes.get(nid)
+                if node is not None and not node.frozen and dlg.chosen["prompt"] != node.prompt \
+                        and dlg.chosen.get("base_prompt") == node.prompt:
+                    node.prompt = dlg.chosen["prompt"]  # the words the take speaks become the clip's lines
+                    self._changed()
                 self._lines_spoken(nid, {**dlg.chosen, "texts": texts}, "", str(project))
                 used = True
             elif dlg.takes:                             # nothing used: the transcripts are still kept

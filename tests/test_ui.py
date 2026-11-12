@@ -3644,6 +3644,12 @@ def test_freeze_a_clip_on_its_card(app, win, tmp_path, image):
     assert win.state(a) == "changed" and "CHANGED" in win.status.text()
 
 
+def tr_lines(win, nid):
+    """The lines the clip's spoken track was made of."""
+    from video_chain import tree as T
+    return [d["line"] for d in T.track_of(win.tree, T.track_id(win.tree.nodes[nid]))["tts"]["lines"]]
+
+
 def test_text_to_speech_in_the_app(app, win, tmp_path, image, monkeypatch):
     """Speak the lines on a card (a fake engine) makes them the clip's sound; a voice made in the TTS window becomes
     the character's voice; the provider and the ElevenLabs key are kept (the key in the keyring only)."""
@@ -3720,7 +3726,7 @@ def test_text_to_speech_in_the_app(app, win, tmp_path, image, monkeypatch):
     seen = {}
 
     def choose(dlg):
-        seen.update(lines=dlg.lines.toPlainText(), start=dlg.speak_values(), use=dlg.b_use.isEnabled())
+        seen.update(lines=dlg.line_texts(), start=dlg.speak_values(), use=dlg.b_use.isEnabled())
         dlg.n.setValue(2)
         dlg.delivery.setCurrentIndex(dlg.delivery.findData("lively"))
         dlg.speed.setValue(0.8)
@@ -3730,6 +3736,9 @@ def test_text_to_speech_in_the_app(app, win, tmp_path, image, monkeypatch):
         dlg._close_when_done = False
         wait(app, lambda: not dlg.busy, timeout=30)
         dlg.n.setValue(1)
+        dlg.line_edits[0].setText("")
+        seen["empty"] = dlg.b_make.isEnabled()               # an empty line cannot be spoken
+        dlg.line_edits[0].setText('Hallo, "Welt"!')          # other words: tried, and used
         dlg.make()
         wait(app, lambda: not dlg.busy, timeout=30)
         seen.update(rows=[dlg.list.item(k).text() for k in range(dlg.list.count())], info=dlg.info.text(),
@@ -3740,10 +3749,13 @@ def test_text_to_speech_in_the_app(app, win, tmp_path, image, monkeypatch):
     monkeypatch.setattr(M, "run_speak_dialog", choose)
     old_track = T.track_id(win.tree.nodes[nid])
     win.node_action("speak", nid)
-    assert seen["lines"] == "Anna: “Hallo, schön dich zu sehen.”" and not seen["use"]
+    assert seen["lines"] == ["Hallo, schön dich zu sehen."] and not seen["use"] and not seen["empty"]
+    assert seen["rows"][-1].endswith("lively, 0.8 ×   ·   “Hallo, 'Welt'!”") and "“" not in seen["rows"][0]
+    assert win.tree.nodes[nid].prompt == """@Anna waves and says "Hallo, 'Welt'!\"""" # the take's words: the prompt's
+    assert T.load(win.project).nodes[nid].prompt == win.tree.nodes[nid].prompt and tr_lines(win, nid) == ["Hallo, 'Welt'!"]
+    assert next(c for c in win.cards if c.nid == nid).text() == win.tree.nodes[nid].prompt
     assert seen["start"] == TTS.SPEAK_DEFAULTS and seen["busy"] == (True, False)
     assert 1 <= len(seen["rows"]) <= 3 and seen["rows"][0].startswith("Take 1   ·   ")
-    assert seen["rows"][-1].endswith("lively, 0.8 ×")
     assert [f.is_file() for f in seen["files"]] == [False] * (len(seen["files"]) - 1) + [True]   # the others went
     tr = T.track_of(win.tree, T.track_id(win.tree.nodes[nid]))
     assert tr["id"] != old_track and win.project / tr["file"] == seen["files"][-1] and "spoken" in win.status.text()
