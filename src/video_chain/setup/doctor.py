@@ -508,6 +508,8 @@ def llm_test(log=print) -> Check:
     if found is None:
         return Check(g, name, FAIL, f"{f['path']} is missing", f"{SETUP} --only llm")
     model = found[0]
+    if model.name != Path(f["path"]).name:           # the user's own models: the smallest one answers soonest
+        model = min(gguf_chat_models(), key=lambda m: m.stat().st_size, default=model)
     paths.cache_dir().mkdir(parents=True, exist_ok=True)
     import socket
     port = 8191                                      # (not the app's own port: its server may be running)
