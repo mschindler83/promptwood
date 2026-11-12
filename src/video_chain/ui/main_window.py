@@ -2383,6 +2383,14 @@ class MainWindow(QMainWindow):
         v.addAction("Reset layout", lambda: self.apply_layout("edit"))
         st = self.menuBar().addMenu("&Settings")
         st.addAction("ComfyUI and preferences…", self.show_prefs).setShortcut(QKeySequence("Ctrl+,"))
+        hp = self.menuBar().addMenu("&Help")
+        hp.addAction("Setup check…", self.show_setup_check)
+
+    def show_setup_check(self):
+        """What the app needs on this computer and what is missing (the report of `video-chain doctor`)."""
+        from .setup_check import SetupCheckDialog
+        self._setup_check = SetupCheckDialog(self)
+        self._setup_check.show()
 
     def apply_layout(self, name: str):
         """A layout preset, as shares of the window: 'edit' (the default: a big viewer), 'write' (a wide inspector

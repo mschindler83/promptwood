@@ -16,6 +16,7 @@ import urllib.request
 from pathlib import Path
 
 OUT = Path(__file__).resolve().parents[1] / "src" / "video_chain" / "setup" / "manifest.json"
+DOC = Path(__file__).resolve().parents[1] / "docs" / "MODELS.md"
 
 
 def m(repo, path, folder, name=None):
@@ -208,6 +209,48 @@ def resolve(entry: dict) -> list[dict]:
     return [{**entry, "rev": sha, **files[entry["path"]]}]
 
 
+def models_doc(comps: dict) -> str:
+    """docs/MODELS.md: every download with its source, so the licences can be read before installing."""
+    gb = lambda n: f"{n / 2**30:.1f} GB" if n >= 2**28 else f"{n / 2**20:.0f} MB"   # noqa: E731
+    out = ["# What setup downloads", "",
+           "Written by `tools/build_manifest.py` from the installer's list (`src/video_chain/setup/manifest.json`). "
+           "Every file is fetched from the address below at a fixed revision and checked by size and SHA-256. "
+           "Each model comes under its own licence, shown on its page; you accept it by downloading the model.", "",
+           "| Profile | Parts | Download |", "|---|---|---|"]
+    order = ("core", "standard", "full")
+    for i, prof in enumerate(order):
+        ids = [c for c, v in comps.items() if order.index(v["profile"]) <= i]
+        out.append(f"| `{prof}` | {', '.join(ids)} | {gb(sum(comps[c]['bytes'] for c in ids))} |")
+    for cid, c in comps.items():
+        out += ["", f"## {cid}: {c['title']}", "",
+                f"Profile `{c['profile']}`, {gb(c['bytes'])}."
+                + (f" Needs: {', '.join(c['needs'])}." if c.get("needs") else "")
+                + (f" Custom nodes: {', '.join(NODES[n].get('git', 'bundled with Promptwood') for n in c['nodes'])}."
+                   if c.get("nodes") else "")
+                + (f" Licence with its own terms: {c['licence']}." if c.get("licence") else ""), "",
+                "| File | Size | Source |", "|---|---|---|"]
+        repos: dict = {}
+        for f in c["files"]:
+            if f.get("hf"):
+                r = repos.setdefault(f["repo"], [0, 0])
+                r[0] += 1
+                r[1] += f["size"]
+            elif "url" in f:
+                out.append(f"| {', '.join(f['extract'])} | {gb(f['size'])} | {f['url']} |")
+            else:
+                out.append(f"| `{f['name']}` | {gb(f['size'])} | https://huggingface.co/{f['repo']} |")
+        for repo, (n, size) in repos.items():
+            out.append(f"| {n} files (Hugging Face cache) | {gb(size)} | https://huggingface.co/{repo} |")
+    out += ["", "## Programs", "", "| Program | Source |", "|---|---|",
+            f"| ComfyUI at `{COMFY['rev']}` | {COMFY['git']} |",
+            "| PyTorch (CUDA build chosen from the graphics driver) | https://download.pytorch.org/whl/ |",
+            f"| llama.cpp `{SOFTWARE['llama']['tag']}` (release build) | https://github.com/{SOFTWARE['llama']['repo']} |",
+            f"| Qwen3-TTS (`{SOFTWARE['tts']['pip'][0]}`) | https://pypi.org/project/qwen-tts/ |",
+            "| ffmpeg (only when the system has none with libx264) | https://github.com/BtbN/FFmpeg-Builds |",
+            "| uv (only when the system has none) | https://docs.astral.sh/uv/ |", ""]
+    return "\n".join(out)
+
+
 def main() -> int:
     comps = {}
     for cid, c in SPEC.items():
@@ -222,6 +265,8 @@ def main() -> int:
             assert n in comps or n in NODES, (cid, n)
     OUT.write_text(json.dumps({"comfy": COMFY, "software": SOFTWARE, "nodes": NODES, "components": comps}, indent=1) + "\n")
     print("wrote", OUT)
+    DOC.write_text(models_doc(comps))
+    print("wrote", DOC)
     return 0
 
 

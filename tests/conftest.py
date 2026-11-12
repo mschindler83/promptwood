@@ -1,6 +1,19 @@
 """Every test gets its own LoRA trigger database and LoRA presets (never the app's real one in ~/.local/share) and an in-memory
 keyring (never the system keyring with the user's CivitAI key)."""
+import atexit
+import os
+import shutil
+import tempfile
+
 import pytest
+
+# The app's home folder (ComfyUI, model cache, config.json of an installed app) is never the real one in tests: an
+# empty temporary folder, set before the app's modules read their defaults from it.
+_HOME = tempfile.mkdtemp(prefix="video-chain-test-home-")
+os.environ["VIDEO_CHAIN_HOME"] = _HOME
+for _name in ("COMFY_DIR", "COMFY_LAUNCHER", "COMFY_URL", "HF_CACHE", "LLAMA_SERVER", "TTS_PYTHON"):
+    os.environ.pop("VIDEO_CHAIN_" + _name, None)
+atexit.register(shutil.rmtree, _HOME, True)
 
 
 class _MemoryKeyring:
