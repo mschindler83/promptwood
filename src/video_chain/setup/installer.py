@@ -26,6 +26,7 @@ from .download import AGENT, DownloadError, extract, fetch, fetch_all, human
 
 STEPS = ("system", "comfyui", "nodes")          # what --only accepts besides component names
 SOFTWARE_BYTES = 16 * 2**30                     # room for ComfyUI's and the TTS environment's Python packages
+TEST_FREE_MB = 14000                            # free graphics memory the tests at the end need to be meaningful
 FFMPEG_BUILDS = {"x86_64": "linux64", "amd64": "linux64", "aarch64": "linuxarm64", "arm64": "linuxarm64"}
 FFMPEG_URL = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-{}-gpl.tar.xz"
 
@@ -526,7 +527,13 @@ class Installer:
         installed = sorted(set(self.before) | set(self.components), key=list(self.man["components"]).index)
         paths.save_config(components=",".join(installed))
         checks = D.check_all(installed)
-        if self.o.test and not D.failed(checks):
+        gpu = S.gpu()
+        busy = gpu is not None and gpu["free_mb"] < TEST_FREE_MB
+        if self.o.test and busy and not D.failed(checks):
+            checks.append(D.Check("Proof", "Test clip, test line, language model", D.WARN,
+                                  f"skipped: other programs use the graphics card ({gpu['free_mb'] / 1024:.0f} GB "
+                                  "free)", "close them, then: video-chain doctor --render --speech --llm"))
+        if self.o.test and not busy and not D.failed(checks):
             url = paths.comfy_url()
             comfy_parts = [c for c in installed]
             try:
