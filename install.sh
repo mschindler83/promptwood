@@ -4,6 +4,7 @@
 #   ./install.sh                      everything the app needs (profile "standard", about 126 GB of models)
 #   ./install.sh --profile core       video clips only (about 40 GB)
 #   ./install.sh --yes --accept-licenses        without questions
+#   ./install.sh --models-from ~/ComfyUI        a new ComfyUI that reads the models you already have, in place
 #   ./install.sh --comfy-dir ~/ComfyUI          use a ComfyUI you already have
 #   ./install.sh --help               every option
 #

@@ -57,14 +57,19 @@ To remove everything, delete these two folders (and `~/.local/share/applications
 ./install.sh --profile full           # also extra speed modes, Krea-2 and both head swaps (184 GB)
 ./install.sh --with image-krea2       # the standard set plus one part
 ./install.sh --without tts,llm        # the standard set minus parts
+./install.sh --models-from ~/ComfyUI  # a new ComfyUI that reads the models of the one you have, in place
+./install.sh --hf-cache ~/.cache/huggingface/hub       # text to speech / language models you already have
 ./install.sh --comfy-dir ~/ComfyUI    # use the ComfyUI you already have (add --comfy-python if it has no .venv)
 ./install.sh --yes --accept-licenses  # no questions (for scripts)
 VIDEO_CHAIN_HOME=/big/disk/video-chain ./install.sh    # everything on another disk
 ./install.sh --help                   # all options and all parts with their sizes
 ```
 
-Models that are already in your ComfyUI (also in folders from its `extra_model_paths.yaml`) are found and not
-downloaded again. [docs/MODELS.md](docs/MODELS.md) lists every download with its source and licence.
+**Nothing you already have is downloaded again.** Setup looks into ComfyUI's model folders (also the ones from
+its `extra_model_paths.yaml`, and the ones you name with `--models-from`) and into your Hugging Face cache; another
+build of the same model (bf16 instead of int8, another turbo LoRA, your own GGUF language model with its vision
+part) counts as well, exactly as the app itself would accept it. `./install.sh --dry-run` shows what would be
+downloaded without changing anything. [docs/MODELS.md](docs/MODELS.md) lists every download with its source and licence.
 
 ### Later
 
