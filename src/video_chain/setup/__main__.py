@@ -21,7 +21,8 @@ def build_parser() -> argparse.ArgumentParser:
                                 epilog=f"Parts (for --only / --with / --without):\n{parts}\n\n"
                                        "Steps for --only: system (ffmpeg), comfyui, nodes\n"
                                        f"Everything goes into {paths.home()} (set VIDEO_CHAIN_HOME for another "
-                                       "place).\nA token for licence-gated downloads is read from HF_TOKEN.")
+                                       "place).\nA Hugging Face token (optional: smoother downloads) is read from HF_TOKEN or "
+                                       "from `hf auth login`.")
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("setup", help="install what is missing (safe to run again)",
                        formatter_class=argparse.RawDescriptionHelpFormatter, epilog=p.epilog)

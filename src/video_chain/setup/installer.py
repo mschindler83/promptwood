@@ -22,7 +22,7 @@ from .. import paths
 from . import doctor as D
 from . import manifest as M
 from . import system as S
-from .download import AGENT, DownloadError, extract, fetch, fetch_all, human
+from .download import AGENT, DownloadError, extract, fetch, fetch_all, hf_token, human
 
 STEPS = ("system", "comfyui", "nodes")          # what --only accepts besides component names
 SOFTWARE_BYTES = 16 * 2**30                     # room for ComfyUI's and the TTS environment's Python packages
@@ -121,7 +121,7 @@ class Installer:
         if opts.hf_cache:                             # an existing Hugging Face cache: used (and added to) as it is
             self.home.mkdir(parents=True, exist_ok=True)
             paths.save_config(hf_cache=Path(opts.hf_cache).expanduser().resolve())
-        self.token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or None
+        self.token = hf_token()
 
     def wants(self, name: str) -> bool:
         """Whether a step runs: all of them, unless --only named steps / components."""
@@ -288,6 +288,14 @@ class Installer:
         free = S.free_bytes(self.comfy_dir)
         say(f"    Download      {human(need)} of models, plus about {human(software)} of programs")
         say(f"    Free space    {human(free)} on the disk of {self.comfy_dir}")
+        if any("huggingface.co" in j["url"] for j in jobs):
+            say("    Hugging Face  " + ("your token is used for the downloads (sent to huggingface.co only)"
+                                        if self.token else
+                                        "no token found: downloads work without one, but Hugging Face may slow or "
+                                        "limit them.\n                  For smoother downloads create a free read "
+                                        "token (https://huggingface.co/settings/tokens)\n                  and "
+                                        "start setup as  HF_TOKEN=hf_… ./install.sh  (or log in once: hf auth "
+                                        "login).\n                  Setup reads it, never stores or prints it."))
         return need + software
 
     # ---- before anything is changed

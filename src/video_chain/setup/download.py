@@ -13,6 +13,7 @@ import tarfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -84,13 +85,55 @@ class Progress:
                 self._show(time.monotonic(), end="\n")
 
 
+TOKEN_HOSTS = ("huggingface.co",)       # the only hosts a Hugging Face token is ever sent to
+TOKEN_HINT = ("Hugging Face limits downloads without an account. Create a free token (read access) at "
+              "https://huggingface.co/settings/tokens and run setup again with it: HF_TOKEN=hf_… ./install.sh "
+              "(or log in once with: hf auth login). Setup only sends it to huggingface.co and never stores it.")
+
+
+def hf_token() -> str | None:
+    """The user's Hugging Face token from the usual places: $HF_TOKEN, else the file `hf auth login` writes
+    ($HF_TOKEN_PATH, $HF_HOME/token, ~/.cache/huggingface/token). Read only; setup never writes or prints it."""
+    for name in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
+        if os.environ.get(name, "").strip():
+            return os.environ[name].strip()
+    home = Path(os.environ.get("HF_HOME") or Path.home() / ".cache" / "huggingface").expanduser()
+    for f in (os.environ.get("HF_TOKEN_PATH"), home / "token"):
+        try:
+            if f and Path(f).is_file():
+                return Path(f).read_text(encoding="utf-8").strip() or None
+        except OSError:
+            pass
+    return None
+
+
+def _token_host(url: str) -> bool:
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    return any(host == h or host.endswith("." + h) for h in TOKEN_HOSTS)
+
+
+class _Redirects(urllib.request.HTTPRedirectHandler):
+    """Follow redirects, but the token stays with the host it is for (downloads are redirected to storage
+    servers, which need no token and must not get one)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and not _token_host(newurl):
+            new.headers.pop("Authorization", None)
+            new.unredirected_hdrs.pop("Authorization", None)
+        return new
+
+
+_OPENER = urllib.request.build_opener(_Redirects)
+
+
 def _open(url: str, start: int = 0, timeout: float = 60, token: str | None = None):
     headers = {"User-Agent": AGENT}
     if start:
         headers["Range"] = f"bytes={start}-"
-    if token and "huggingface.co" in url:
+    if token and _token_host(url):
         headers["Authorization"] = f"Bearer {token}"
-    return urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=timeout)
+    return _OPENER.open(urllib.request.Request(url, headers=headers), timeout=timeout)
 
 
 def fetch(url: str, dest: Path, size: int | None = None, sha256: str | None = None, progress: Progress | None = None,
@@ -111,6 +154,7 @@ def fetch(url: str, dest: Path, size: int | None = None, sha256: str | None = No
     if progress and have:
         progress.add(have, resumed=True)
     error: Exception | None = None
+    limited = False
     for attempt in range(tries):
         if size is not None and have == size:
             break
@@ -137,8 +181,12 @@ def fetch(url: str, dest: Path, size: int | None = None, sha256: str | None = No
                 break
             if e.code in (401, 403):
                 raise DownloadError(
-                    f"{url}: access denied (HTTP {e.code}). This file needs a Hugging Face account that accepted "
-                    "its licence: open the page in a browser, accept, then run setup again with HF_TOKEN set.") from e
+                    f"{url}: access denied (HTTP {e.code}). " + ("The token was refused or its account has not "
+                    "accepted this model's licence: open the model's page in a browser, accept, then run setup "
+                    "again." if token else "This file needs a Hugging Face account that accepted its licence. "
+                    + TOKEN_HINT)) from e
+            if e.code == 429:
+                limited = True
             if e.code == 404:
                 raise DownloadError(f"{url}: not found (HTTP 404); the file was moved or removed upstream") from e
             error = e
@@ -146,7 +194,8 @@ def fetch(url: str, dest: Path, size: int | None = None, sha256: str | None = No
             error = e
         time.sleep(min(60, 3 * (attempt + 1)))
     else:
-        raise DownloadError(f"{url}: gave up after {tries} tries ({error})")
+        raise DownloadError(f"{url}: gave up after {tries} tries ({error})"
+                            + (". " + TOKEN_HINT if limited and not token and _token_host(url) else ""))
     if size is not None and part.stat().st_size != size:
         raise DownloadError(f"{dest.name}: {part.stat().st_size} bytes instead of {size}")
     if sha256:

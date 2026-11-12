@@ -548,3 +548,65 @@ def test_setup_offers_the_users_hugging_face_cache(server, home, tmp_path, monke
     inst.ask_existing()
     assert "Hugging Face cache" not in asked[0] and inst.o.hf_cache == str(cache) and paths.hf_cache() == cache
     assert "model.gguf" not in [j["file"].get("path") for j in inst.downloads()]
+
+
+def test_hugging_face_token_is_found_and_stays_with_its_host(server, tmp_path, monkeypatch):
+    for name in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HF_TOKEN_PATH"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))
+    assert DL.hf_token() is None
+    (tmp_path / "hf").mkdir()
+    (tmp_path / "hf" / "token").write_text("hf_from_login\n")            # what `hf auth login` writes
+    assert DL.hf_token() == "hf_from_login"
+    monkeypatch.setenv("HF_TOKEN", "hf_env")
+    assert DL.hf_token() == "hf_env"
+    assert DL._token_host("https://huggingface.co/a/b") and not DL._token_host("https://huggingface.co.evil.org/x")
+    assert not DL._token_host("https://cdn.example.com/huggingface.co/x")
+    # sent to its own host, dropped when the download is redirected to another one
+    seen = []
+    other = _Server({"/blob": b"data"})
+    handler = server.httpd.RequestHandlerClass
+    plain_get = handler.do_GET
+
+    def do_get(self):
+        seen.append(("first", self.headers.get("Authorization")))
+        if self.path == "/file":
+            self.send_response(302)
+            self.send_header("Location", other.url.replace("127.0.0.1", "localhost") + "/blob")
+            self.end_headers()
+        else:
+            plain_get(self)
+    other_get = other.httpd.RequestHandlerClass.do_GET
+
+    def other_do_get(self):
+        seen.append(("storage", self.headers.get("Authorization")))
+        other_get(self)
+    monkeypatch.setattr(handler, "do_GET", do_get)
+    monkeypatch.setattr(other.httpd.RequestHandlerClass, "do_GET", other_do_get)
+    monkeypatch.setattr(DL, "TOKEN_HOSTS", ("127.0.0.1",))
+    try:
+        DL.fetch(server.url + "/file", tmp_path / "f.bin", 4, token="hf_secret")
+    finally:
+        other.close()
+    assert (tmp_path / "f.bin").read_bytes() == b"data"
+    assert seen == [("first", "Bearer hf_secret"), ("storage", None)]
+    seen.clear()
+    monkeypatch.setattr(DL, "TOKEN_HOSTS", ("huggingface.co",))
+    server.files["/plain"] = b"abcd"
+    DL.fetch(server.url + "/plain", tmp_path / "g.bin", 4, token="hf_secret")     # another site: no token at all
+    assert seen == [("first", None)]
+
+
+def test_plan_suggests_a_token_only_when_it_helps(home, monkeypatch, capsys, tmp_path):
+    for name in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HF_TOKEN_PATH"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "none"))
+    inst = I.Installer(I.Options(profile="core"))
+    inst.show_plan()
+    out = capsys.readouterr().out
+    assert "no token found" in out and "huggingface.co/settings/tokens" in out
+    monkeypatch.setenv("HF_TOKEN", "hf_abc123")
+    inst = I.Installer(I.Options(profile="core"))
+    inst.show_plan()
+    out = capsys.readouterr().out
+    assert "your token is used" in out and "hf_abc123" not in out

@@ -71,6 +71,11 @@ build of the same model (bf16 instead of int8, another turbo LoRA, your own GGUF
 part) counts as well, exactly as the app itself would accept it. `./install.sh --dry-run` shows what would be
 downloaded without changing anything. [docs/MODELS.md](docs/MODELS.md) lists every download with its source and licence.
 
+A Hugging Face token is optional. Every model in the standard set downloads without one, but Hugging Face may slow
+or limit anonymous downloads. With a free read token (https://huggingface.co/settings/tokens) they run smoother:
+`HF_TOKEN=hf_… ./install.sh`, or log in once with `hf auth login`. Setup reads the token, sends it to
+huggingface.co only (not to the storage servers downloads are redirected to) and never stores or prints it.
+
 ### Later
 
 ```bash
