@@ -645,6 +645,68 @@ def test_identity_references_in_the_window(app, win, tmp_path, image, monkeypatc
     monkeypatch.setattr(AudioRangeDialog, "exec", lambda dlg: QDialog.Rejected)       # cancelled: nothing changes
     win._voice_from_file()
     assert win.char_voice.text() == "Voice: talk.mp4 (7.5 s; cloned from 12.5 s)"
+    # Remove music: the chosen part is cleaned by the text to speech worker (a fake here) and used instead
+    import shutil
+
+    class Sep:
+        calls, stopped = [], 0
+
+        def problems(self, **_k):
+            return []
+
+        def isolate(self, audio, out):
+            Sep.calls.append(round(chain.audio_seconds(Path(audio)), 1))
+            shutil.copy(audio, out)
+            return 1.0
+
+        def stop(self):
+            Sep.stopped += 1
+            return True
+    win._tts_local = Sep()
+
+    def clean(dlg):
+        ok = dlg.buttons.button(QDialogButtonBox.Ok)
+        seen.update(can=dlg.b_clean.isEnabled(), before=dlg.cleaned, use=dlg.use_clean.isEnabled())
+        dlg.set_range(3.0, 38.0)
+        dlg.remove_music()
+        seen["busy"] = (dlg.clean_busy, ok.isEnabled(), dlg.b_clean.isEnabled())
+        dlg.done(0)                                          # (closing waits for it)
+        seen["open"] = dlg.clean_busy
+        wait(app, lambda: not dlg.clean_busy, timeout=30)
+        seen.update(info=dlg.clean_info.text(), checked=dlg.use_clean.isChecked(), file=dlg.cleaned)
+        dlg.set_range(4.0, 38.0)                             # another part: the cleaned sound is not of it
+        seen.update(stale=dlg.cleaned, info2=dlg.clean_info.text())
+        dlg.set_range(3.0, 20.0)
+        dlg.remove_music()
+        wait(app, lambda: not dlg.clean_busy, timeout=30)
+        seen["exists"] = dlg.cleaned is not None and dlg.cleaned.is_file()
+        seen["dlg"] = dlg
+        return QDialog.Accepted
+    monkeypatch.setattr(AudioRangeDialog, "exec", clean)
+    win._voice_from_file()
+    assert seen["can"] and seen["before"] is None and not seen["use"]
+    assert seen["busy"] == (True, False, False) and seen["open"]
+    assert "Music removed from 0:03.000 – 0:33.000" in seen["info"] and seen["checked"] and seen["file"] is not None
+    assert seen["stale"] is None and "remove the music again" in seen["info2"] and seen["exists"]
+    assert Sep.calls == [30.0, 17.0] and Sep.stopped == 1    # (30 s at most; the worker is stopped afterwards)
+    assert win.char_voice.text() == "Voice: talk.mp4 (music removed) (7.5 s; cloned from 17.0 s)"
+    assert seen.pop("dlg")._tmp is None and not win._tts_busy             # its files are gone
+    # unticked: the sound as it is; without the package or model the button says why
+    def as_it_is(dlg):
+        dlg.set_range(3.0, 20.0)
+        dlg.remove_music()
+        wait(app, lambda: not dlg.clean_busy, timeout=30)
+        dlg.use_clean.setChecked(False)
+        return QDialog.Accepted
+    monkeypatch.setattr(AudioRangeDialog, "exec", as_it_is)
+    win._voice_from_file()
+    assert win.char_voice.text() == "Voice: talk.mp4 (7.5 s; cloned from 17.0 s)"
+    Sep.problems = lambda self, **_k: ["removing music needs the audio-separator package"]
+    monkeypatch.setattr(AudioRangeDialog, "exec", lambda dlg: (seen.update(
+        can=dlg.b_clean.isEnabled(), tip=dlg.b_clean.toolTip()), QDialog.Rejected)[1])
+    win._voice_from_file()
+    assert not seen["can"] and seen["tip"].startswith("Not set up: removing music needs")
+    win._tts_local = None
     mute = tmp_path / "mute.mp4"
     subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=gray:s=64x48:d=3", str(mute)], check=True)
     monkeypatch.setattr(M, "pick_image", lambda *a, **k: str(mute))

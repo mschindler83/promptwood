@@ -4017,21 +4017,37 @@ class MainWindow(QMainWindow):
                        places=self._picker_places(), collections=self.project_media("media"), kind="media")
         if not f:
             return
-        dlg = self._voice_dialog(f, c["name"])
+        mine = not self._tts_busy                   # (the worker that removes music is the text to speech one)
+        dlg = self._voice_dialog(f, c["name"], isolate=mine)
+        self._tts_busy = self._tts_busy or mine
         try:
             if not dlg.file:
                 self.status.setText(f"Could not set the voice: {dlg.info_label.text()}")
                 return
             if dlg.exec() == QDialog.Accepted and dlg.file:
-                self.set_character_voice(dlg.file, start=dlg.start, end=dlg.end)
+                if dlg.cleaned is not None:
+                    self.set_character_voice(str(dlg.cleaned), label=f"{Path(dlg.file).name} (music removed)")
+                else:
+                    self.set_character_voice(dlg.file, start=dlg.start, end=dlg.end)
         finally:
+            dlg.cleanup()
             dlg.deleteLater()
+            if mine:
+                self._tts_busy = False
+                self.stop_tts("the voice window was closed")
 
-    def _voice_dialog(self, file: str, name: str):
-        """The window the part of a file is chosen in that becomes a character's voice."""
+    def _voice_dialog(self, file: str, name: str, isolate: bool = True):
+        """The window the part of a file is chosen in that becomes a character's voice (isolate: it can take the
+        background music out with the app's text to speech worker)."""
         from .audio_editor import AudioRangeDialog
+        fn, why = None, "Text to speech is busy; choose the voice again when it is done to remove music."
+        if isolate:
+            w = self.local_tts()
+            bad = w.problems(isolate=True)
+            fn, why = (None, "Not set up: " + "; ".join(bad)) if bad else (w.isolate, "")
         return AudioRangeDialog(self, file=file, settings=self.qs, title=f"Voice of @{name}: choose the part",
-                                voice=True, player=os.environ.get("QT_QPA_PLATFORM") != "offscreen")
+                                voice=True, player=os.environ.get("QT_QPA_PLATFORM") != "offscreen",
+                                isolate=fn, no_isolate=why)
 
     def _voice_from_selected(self):
         nid = self.tree.selected if self.tree else None

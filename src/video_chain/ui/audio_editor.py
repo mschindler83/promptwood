@@ -7,12 +7,13 @@ from __future__ import annotations
 
 import array
 import subprocess
+import tempfile
 import threading
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QPointF, QRectF, QSettings, Qt, QUrl, Signal
 from PySide6.QtGui import QKeySequence, QPainter, QPen, QShortcut
-from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QHBoxLayout,
+from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QHBoxLayout,
                                QLineEdit, QPushButton, QVBoxLayout)
 
 from .. import chain
@@ -104,19 +105,33 @@ class _Peaks(QObject):
     ready = Signal(int, list)
 
 
+class _Clean(QObject):
+    ready = Signal(object, str, float, float)       # the cleaned file or None, error, the part it is of (start, end)
+
+
 class AudioRangeDialog(QDialog):
     """Choose a sound file and the part of it that becomes an audio track. file / start / end / name: the result.
     voice: the part becomes a character's voice instead (no name; a video's picture is shown while it plays, to
-    see who speaks; a new file starts with its first VOICE_REF_MAX_SECS chosen)."""
+    see who speaks; a new file starts with its first VOICE_REF_MAX_SECS chosen). isolate(source wav, target wav),
+    with voice: "Remove music" takes the background music out of the chosen part with it (in a thread); `cleaned`
+    is then the file to use instead of file / start / end. Call cleanup() when the result has been used."""
 
     def __init__(self, parent=None, file: str = "", start: float | None = None, end: float | None = None,
                  name: str = "", settings: QSettings | None = None, player: bool = True, title: str = "Audio track",
-                 voice: bool = False):
+                 voice: bool = False, isolate=None, no_isolate: str = ""):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.resize(920, 640 if voice else 420)
         self.settings, self.want_player, self.voice = settings, player, voice
         self.video = None
+        self._isolate = isolate if voice else None
+        self.clean: dict | None = None                 # {"file", "start", "end"}: the chosen part without its music
+        self.clean_busy = False
+        self.clean_player = None
+        self._clean_n = 0
+        self._tmp: tempfile.TemporaryDirectory | None = None
+        self._clean_sig = _Clean()
+        self._clean_sig.ready.connect(self._cleaned)
         self.file, self.duration = "", 0.0
         self.start, self.end = 0.0, 0.0
         self.player = None
@@ -203,6 +218,25 @@ class AudioRangeDialog(QDialog):
         self.summary = label("", level="secondary")
         self.summary.setWordWrap(True)
         v.addWidget(self.summary)
+        self.b_clean = QPushButton("Remove music")
+        self.b_clean.setToolTip(no_isolate or
+                                "Take background music and noise out of the chosen part (on this computer, about "
+                                "2 GB of GPU memory for a few seconds). A cloned voice copies everything in its "
+                                "sample, music too. Echo stays, and so does a singer or a second speaker.")
+        self.b_clean.clicked.connect(self.remove_music)
+        self.b_clean_play = QPushButton("Play cleaned")
+        self.b_clean_play.setToolTip("Listen to the chosen part without its music")
+        self.b_clean_play.clicked.connect(self.play_cleaned)
+        self.use_clean = QCheckBox("Use the cleaned sound")
+        self.use_clean.setToolTip("Unticked: the voice is taken from the file as it is")
+        self.clean_info = label("", level="tertiary")
+        self.clean_info.setWordWrap(True)
+        if voice:
+            mrow = QHBoxLayout()
+            for w in (self.b_clean, self.b_clean_play, self.use_clean):
+                mrow.addWidget(w)
+            mrow.addWidget(self.clean_info, 1)
+            v.addLayout(mrow)
 
         self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         self.buttons.button(QDialogButtonBox.Ok).setText("Use this part")
@@ -303,7 +337,11 @@ class AudioRangeDialog(QDialog):
             w.setEnabled(on)
         self.b_play.setEnabled(on and self.player is not None)
         self.b_play_sel.setEnabled(on and self.player is not None)
-        self.buttons.button(QDialogButtonBox.Ok).setEnabled(on and self.end - self.start >= AUDIO_REF_MIN - 1e-6)
+        long = self.end - self.start >= AUDIO_REF_MIN - 1e-6
+        self.buttons.button(QDialogButtonBox.Ok).setEnabled(on and long and not self.clean_busy)
+        self.b_clean.setEnabled(on and long and not self.clean_busy and self._isolate is not None)
+        self.b_clean_play.setEnabled(self.clean is not None and self.want_player and not self.clean_busy)
+        self.use_clean.setEnabled(self.clean is not None and not self.clean_busy)
 
     # ---- range
     def set_range(self, start: float, end: float, from_bar: bool = False, moved: str = "start"):
@@ -348,7 +386,102 @@ class AudioRangeDialog(QDialog):
         else:
             self.summary.setText(f"Track {fmt(self.start)} – {fmt(self.end)}: {secs:.2f} s.{short} Clips that play "
                                  "it carry it on one after another; past its end they are silent.")
+        if self.clean is not None and self._clean_part() != (self.clean["start"], self.clean["end"]):
+            self._stop_cleaned()
+            self.clean = None                           # (the cleaned sound is of another part)
+            self.use_clean.setChecked(False)
+            self.clean_info.setText("The part changed: remove the music again.")
         self._update_enabled()
+
+    # ---- the chosen part without its music (voice)
+    def _clean_part(self) -> tuple[float, float]:
+        """The part the music is taken out of: the chosen one, as much of it as a voice uses."""
+        return self.start, round(min(self.end, self.start + VOICE_REF_MAX_SECS), 3)
+
+    @property
+    def cleaned(self) -> Path | None:
+        """The chosen part without its music, if it was made and is to be used."""
+        return self.clean["file"] if self.clean is not None and self.use_clean.isChecked() else None
+
+    def remove_music(self):
+        if self._isolate is None or self.clean_busy or self.duration <= 0:
+            return
+        if self.player is not None:
+            self.player.pause()
+        self._stop_cleaned()
+        if self._tmp is None:
+            self._tmp = tempfile.TemporaryDirectory(prefix="video-chain-voice-")
+        self._clean_n += 1
+        raw = Path(self._tmp.name) / f"part{self._clean_n}.wav"
+        out = Path(self._tmp.name) / f"cleaned{self._clean_n}.wav"
+        (start, end), f, isolate, sig = self._clean_part(), self.file, self._isolate, self._clean_sig
+        self.clean_busy = True
+        self.clean_info.setText("Removing the music… (the model loads first)")
+        self._update_enabled()
+
+        def work():
+            try:
+                chain.to_wav(Path(f), raw, start, end - start)
+                isolate(raw, out)
+                sig.ready.emit(out, "", start, end)
+            except Exception as e:  # noqa: BLE001
+                try:
+                    sig.ready.emit(None, str(e), start, end)
+                except RuntimeError:                    # the dialog was closed
+                    pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def _cleaned(self, out, err: str, start: float, end: float):
+        self.clean_busy = False
+        if out is None:
+            self.clean_info.setText(f"Could not remove the music: {err}")
+        elif (start, end) != self._clean_part():
+            self.clean_info.setText("The part changed meanwhile: remove the music again.")
+        else:
+            self.clean = {"file": Path(out), "start": start, "end": end}
+            self.use_clean.setChecked(True)
+            self.clean_info.setText(f"Music removed from {fmt(start)} – {fmt(end)}. Listen to it; untick to use the "
+                                    "sound as it is.")
+            self._update_enabled()
+            self.play_cleaned()
+        self._update_enabled()
+
+    def play_cleaned(self):
+        """Play the cleaned part (again: stop it)."""
+        if self.clean is None or not self.want_player:
+            return
+        try:
+            from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+        except ImportError:
+            return
+        if self.clean_player is None:
+            self.clean_audio = QAudioOutput(self)
+            self.clean_player = QMediaPlayer(self)
+            self.clean_player.setAudioOutput(self.clean_audio)
+            self.clean_player.playbackStateChanged.connect(
+                lambda st: self.b_clean_play.setText("Stop" if st == QMediaPlayer.PlayingState else "Play cleaned"))
+        if self.clean_player.playbackState() == QMediaPlayer.PlayingState:
+            self.clean_player.stop()
+            return
+        if self.player is not None:
+            self.player.pause()
+        url = QUrl.fromLocalFile(str(self.clean["file"]))
+        if self.clean_player.source() != url:
+            self.clean_player.setSource(url)
+        self.clean_player.setPosition(0)
+        self.clean_player.play()
+
+    def _stop_cleaned(self):
+        if self.clean_player is not None:
+            self.clean_player.stop()
+            self.clean_player.setSource(QUrl())
+
+    def cleanup(self):
+        """Delete the cleaned sound (after it was used)."""
+        self._stop_cleaned()
+        if self._tmp is not None:
+            self._tmp.cleanup()
+            self._tmp = None
 
     # ---- playback
     def position(self) -> float:
@@ -376,6 +509,7 @@ class AudioRangeDialog(QDialog):
     def toggle(self):
         if self.player is None:
             return
+        self._stop_cleaned_playback()
         from PySide6.QtMultimedia import QMediaPlayer
         if self.player.playbackState() == QMediaPlayer.PlayingState:
             self.player.pause()
@@ -402,8 +536,16 @@ class AudioRangeDialog(QDialog):
         from PySide6.QtMultimedia import QMediaPlayer
         self.b_play.setIcon(icon("pause" if st == QMediaPlayer.PlayingState else "play"))
 
+    def _stop_cleaned_playback(self):
+        if self.clean_player is not None:
+            self.clean_player.stop()
+
     def done(self, r):                                  # stop playback and the file handle with the dialog
+        if self.clean_busy:                             # (its thread still writes the cleaned file)
+            self.clean_info.setText("Removing the music… wait until it is done.")
+            return
         self._gen += 1
+        self._stop_cleaned()
         if self.player is not None:
             self.player.stop()
             self.player.setSource(QUrl())

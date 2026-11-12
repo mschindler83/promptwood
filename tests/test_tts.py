@@ -236,6 +236,32 @@ def test_local_worker_protocol(tmp_path):
         loc.request({"cmd": "x"})
 
 
+def test_removing_music_needs_its_package_and_model(tmp_path):
+    w = tmp_path / "worker.py"
+    w.write_text(FAKE_WORKER)
+    env = tmp_path / "env"
+    (env / "bin").mkdir(parents=True)
+    (env / "bin" / "python").symlink_to(sys.executable)
+    cache = fake_cache(tmp_path)
+    loc = tts.LocalTTS(python=env / "bin" / "python", cache=cache, worker=w, start_timeout=20)
+    assert loc.problems() == [] and "audio-separator" in loc.problems(isolate=True)[0]
+    with pytest.raises(tts.TtsError, match="uv pip install audio-separator"):
+        loc.isolate(tmp_path / "in.wav", tmp_path / "out.wav")
+    assert not loc.running()                                # (not even started)
+    (env / "lib" / "python3.12" / "site-packages" / "audio_separator").mkdir(parents=True)
+    assert tts.SEPARATOR_MODEL in loc.problems(isolate=True)[0]          # the package is there, the model is not
+    (cache / tts.SEPARATOR_DIR).mkdir()
+    for f in (tts.SEPARATOR_MODEL, Path(tts.SEPARATOR_MODEL).stem + ".yaml"):
+        (cache / tts.SEPARATOR_DIR / f).write_text("x")
+    assert loc.problems(isolate=True) == []
+    try:
+        assert loc.isolate(tmp_path / "in.wav", tmp_path / "out.wav") == 1.5
+        echo = loc.request({"cmd": "x"})["echo"]
+    finally:
+        loc.stop()
+    assert echo == {"cmd": "x"}
+
+
 def test_local_problems(tmp_path):
     loc = tts.LocalTTS(python=tmp_path / "nope" / "python", cache=tmp_path)
     bad = loc.problems(design=True)
@@ -379,6 +405,23 @@ def test_qwen3_tts_speaks_german_and_english(tmp_path):
             assert loc.clone(line, lang, ref, tts.SAMPLE_TEXT["German"], out, seed=1) > 1.0
             got = loc.transcribe(out, code).lower().strip(" .!")
             assert got == line.lower().strip(" .!"), got
+        # music under the voice is taken out: the tones are gone, the words are still there
+        mixed, clean = tmp_path / "mixed.wav", tmp_path / "clean.wav"
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(ref), "-f", "lavfi", "-i",
+                        "sine=frequency=262:duration=30,volume=2", "-f", "lavfi", "-i",
+                        "sine=frequency=392:duration=30,volume=2", "-filter_complex",
+                        "[0:a][1:a][2:a]amix=inputs=3:duration=first:normalize=0", "-ar", "48000", "-ac", "2",
+                        str(mixed)], check=True)
+
+        def tone_db(path):                              # how loud the 262 Hz tone of the "music" is
+            out = subprocess.run(["ffmpeg", "-v", "info", "-i", str(path), "-af",
+                                  "bandpass=f=262:width_type=h:w=10,volumedetect", "-f", "null", "-"],
+                                 capture_output=True, text=True).stderr
+            return float(out.split("mean_volume:")[1].split("dB")[0])
+        secs = loc.isolate(mixed, clean)
+        assert abs(secs - chain.audio_seconds(mixed)) < 0.1
+        assert tone_db(clean) < tone_db(mixed) - 20, (tone_db(mixed), tone_db(clean))
+        assert "schön dich zu sehen" in loc.transcribe(clean, "de").lower()
         # a long clone reference (a voice set from a longer source: up to 30 s, transcribed by Whisper)
         text = ("Guten Morgen, schön dich zu sehen. Ich wollte dir schon lange erzählen, was letzte Woche passiert "
                 "ist. Wir sind früh am Morgen losgefahren, die Straßen waren noch ganz leer, und über den Feldern "

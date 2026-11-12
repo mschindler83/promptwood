@@ -6,6 +6,8 @@ for characters. Two providers:
   voice sample (Base model: cloned from the sample and what it says, transcribed once with Whisper; from its longer
   clone reference, tree.clone_file, when the voice was set from a longer source); a new voice is made from a
   description (VoiceDesign model).
+  The same worker removes background music from a voice recording before it becomes a voice (vocal separation with
+  a Mel-Band RoFormer model through the audio-separator package; a cloned voice copies whatever is in its sample).
 - elevenlabs: the ElevenLabs API with the user's key (system keyring or $ELEVENLABS_API_KEY); each character is
   given one of the account's voices, or an instant voice clone of its voice sample (made in the account).
 
@@ -37,9 +39,14 @@ HF_CACHE = Path("/path/to/ai/hf-models")
 QWEN_BASE = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
 QWEN_DESIGN = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
 WHISPER = "openai/whisper-large-v3-turbo"
+SEPARATOR_DIR = "audio-separator"        # in the model cache: audio-separator's own (flat) model folder
+SEPARATOR_MODEL = "vocals_mel_band_roformer.ckpt"    # Mel-Band RoFormer, vocals (Kimberley Jensen): 2 GB of VRAM
 LOCAL_VRAM_MB = 5500                     # measured: 4.5 GB peak for the 1.7B models (bf16), Whisper turbo less
 SETUP_HINT = ("in the app folder: uv venv -p 3.12 .venv-tts && VIRTUAL_ENV=.venv-tts uv pip install qwen-tts "
               "soundfile; the models: Qwen/Qwen3-TTS-12Hz-1.7B-Base and -VoiceDesign in " + str(HF_CACHE))
+SEPARATOR_HINT = ("in the app folder: VIRTUAL_ENV=.venv-tts uv pip install audio-separator audioread && "
+                  f".venv-tts/bin/audio-separator --model_file_dir {HF_CACHE / SEPARATOR_DIR} "
+                  f"--download_model_only -m {SEPARATOR_MODEL}")
 
 # the dialogue language (project setting) -> Qwen3-TTS's name / ISO 639-1 for ElevenLabs
 LANGUAGES = {"English": "en", "German": "de", "French": "fr", "Spanish": "es", "Italian": "it", "Portuguese": "pt",
@@ -99,13 +106,20 @@ class LocalTTS:
         self._lock = threading.Lock()
         self.before_launch = None
 
-    def problems(self, design: bool = False, transcribe: bool = False) -> list[str]:
+    def problems(self, design: bool = False, transcribe: bool = False, isolate: bool = False) -> list[str]:
         out = []
         if not self.python.is_file():
             out.append(f"the TTS environment is missing ({self.python}); set it up {SETUP_HINT}")
         for repo, need in ((QWEN_BASE, True), (QWEN_DESIGN, design), (WHISPER, transcribe)):
             if need and snapshot(repo, self.cache) is None:
                 out.append(f"the model {repo} is not in {self.cache}")
+        if isolate and self.python.is_file():
+            d = self.cache / SEPARATOR_DIR
+            env = self.python.parent.parent
+            if not (list(env.glob("lib/python*/site-packages/audio_separator"))
+                    and all((d / f).is_file() for f in (SEPARATOR_MODEL, Path(SEPARATOR_MODEL).stem + ".yaml"))):
+                out.append(f"removing music needs the audio-separator package and its model {SEPARATOR_MODEL} in "
+                           f"{d}; set it up {SEPARATOR_HINT}")
         return out
 
     def running(self) -> bool:
@@ -196,6 +210,14 @@ class LocalTTS:
               seed: int | None = None) -> float:
         return self.request({"cmd": "clone", "model": self._path(QWEN_BASE), "text": text, "language": lang,
                              "ref_audio": str(ref_audio), "ref_text": ref_text, "out": str(out), "seed": seed})["secs"]
+
+    def isolate(self, audio: Path, out: Path) -> float:
+        """The voice of a recording without its background music or noise (a WAV at out); returns its length."""
+        bad = self.problems(isolate=True)
+        if bad:
+            raise TtsError("; ".join(bad))
+        return self.request({"cmd": "isolate", "dir": str(self.cache / SEPARATOR_DIR), "model": SEPARATOR_MODEL,
+                             "audio": str(audio), "out": str(out)})["secs"]
 
     def transcribe(self, audio: Path, lang: str | None = None) -> str:
         return self.request({"cmd": "transcribe", "model": self._path(WHISPER), "audio": str(audio),
