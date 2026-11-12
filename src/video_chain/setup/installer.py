@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,6 +29,9 @@ from .download import AGENT, DownloadError, extract, fetch, fetch_all, hf_token,
 STEPS = ("system", "comfyui", "nodes")          # what --steps accepts
 # what the programs take on disk (measured on a fresh install; mostly PyTorch with NVIDIA's libraries)
 PROGRAM_BYTES = {"app": 0.8 * 2**30, "comfyui": 7.5 * 2**30, "tts": 6 * 2**30, "llama": 0.6 * 2**30}
+PIP_TRIES = 4
+NETWORK_ERRORS = ("failed to download", "failed to fetch", "timed out", "error sending request", "connection reset",
+                  "temporary failure in name resolution", "connection refused", "readtimeout", "connectionerror")
 TEST_FREE_MB = 14000                            # free graphics memory the tests at the end need to be meaningful
 FFMPEG_BUILDS = {"x86_64": "linux64", "amd64": "linux64", "aarch64": "linuxarm64", "arm64": "linuxarm64"}
 FFMPEG_URL = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-{}-gpl.tar.xz"
@@ -446,10 +450,22 @@ class Installer:
 
     # ---- Python packages
     def pip(self, py: Path, args: list[str], what: str, expect: str = "") -> None:
+        """Install Python packages; a download that fails on the network is tried again (what arrived is kept in
+        uv's cache, so a retry only fetches the rest)."""
         if (Path(py).parent.parent / "pyvenv.cfg").is_file():
-            run([self.uv, "pip", "install", "--python", py, *args], what, expect=expect)
+            cmd = [self.uv, "pip", "install", "--python", py, *args]
         else:                                          # a ComfyUI running on a system Python: its own pip
-            run([py, "-m", "pip", "install", *args], what, expect=expect)
+            cmd = [py, "-m", "pip", "install", *args]
+        for attempt in range(1, PIP_TRIES + 1):
+            try:
+                run(cmd, what, env={"UV_HTTP_TIMEOUT": "300"}, expect=expect)
+                return
+            except CommandFailed as e:
+                if attempt == PIP_TRIES or not any(k in str(e).lower() for k in NETWORK_ERRORS):
+                    raise
+                say(f"    A download did not get through (the network, not this computer). Trying again "
+                    f"({attempt + 1} of {PIP_TRIES}); what arrived is kept.")
+                time.sleep(10 * attempt)
 
     def torch_index(self) -> str | None:
         if self.o.torch_index:

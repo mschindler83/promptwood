@@ -723,3 +723,28 @@ def test_plan_wording(server, home, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "already on this computer" in out and "(there)" not in out and "to download" in out
     assert "a new one will be installed" in out and "programs: about" in out
+
+
+def test_package_installs_survive_a_network_hiccup(server, home, monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(M, "load", lambda: _mini_manifest(server))
+    monkeypatch.setattr(I.time, "sleep", lambda s: None)
+    calls = []
+
+    def fake_run(cmd, what, env=None, cwd=None, expect=""):
+        calls.append(what)
+        if len(calls) < 3:
+            raise I.CommandFailed("x failed. Its last lines:\n error: Failed to download `pkg`\n operation timed out")
+    monkeypatch.setattr(I, "run", fake_run)
+    inst = I.Installer(I.Options(yes=True))
+    inst.uv = "uv"
+    inst.pip(tmp_path / "bin" / "python", ["torch"], "Installing PyTorch")
+    assert len(calls) == 3 and "Trying again (3 of 4)" in capsys.readouterr().out
+    calls.clear()
+
+    def broken(cmd, what, env=None, cwd=None, expect=""):
+        calls.append(what)
+        raise I.CommandFailed("x failed. Its last lines:\n error: No solution found when resolving dependencies")
+    monkeypatch.setattr(I, "run", broken)
+    with pytest.raises(I.CommandFailed):                       # not the network: no point in trying again
+        inst.pip(tmp_path / "bin" / "python", ["torch"], "Installing PyTorch")
+    assert len(calls) == 1

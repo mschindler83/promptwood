@@ -80,7 +80,11 @@ ask "$@" || exit $?
 mkdir -p "$HOME_DIR/logs"
 say ""
 say "Installing Promptwood itself into $SRC/.venv (about 1 minute; details in $HOME_DIR/logs/app.log) …"
-( cd "$SRC" && "$UV" sync --locked --extra faces --python 3.12 ) >"$HOME_DIR/logs/app.log" 2>&1 \
+export UV_HTTP_TIMEOUT="${UV_HTTP_TIMEOUT:-300}"
+sync_app() { ( cd "$SRC" && "$UV" sync --locked --extra faces --python 3.12 ) >>"$HOME_DIR/logs/app.log" 2>&1; }
+: >"$HOME_DIR/logs/app.log"
+sync_app || { say "A download did not get through; trying again …"; sleep 10; sync_app; } \
+    || { say "Trying once more …"; sleep 30; sync_app; } \
     || { tail -n 25 "$HOME_DIR/logs/app.log" >&2; die "could not install the app's Python packages (see above; all of it is in $HOME_DIR/logs/app.log)"; }
 
 # ---- everything else: ComfyUI, models, text to speech, llama.cpp, ffmpeg; then the checks and the tests
