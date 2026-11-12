@@ -3611,3 +3611,62 @@ def test_text_to_speech_in_the_app(app, win, tmp_path, image, monkeypatch):
     win.eleven_key.setText("")
     win._save_eleven_key()
     assert TTS.eleven_key() == ""
+
+
+def test_clone_a_voice_at_elevenlabs(app, win, tmp_path, image, monkeypatch):
+    """Clone uploads the character's voice sample (a fake ElevenLabs) and makes the new voice its ElevenLabs voice;
+    nothing is uploaded without a key or when the question is answered with No."""
+    import subprocess
+
+    from video_chain import tree as T
+    from video_chain import tts as TTS
+    monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+    calls = []
+
+    class Fake:
+        fail = ""
+
+        def clone(self, name, sample, description=""):
+            calls.append((name, Path(sample).name, Path(sample).is_file()))
+            if Fake.fail:
+                raise TTS.TtsError(Fake.fail)
+            return f"clone{len(calls)}"
+    monkeypatch.setattr(TTS, "ElevenLabs", Fake)
+    new_project(win, tmp_path, image, ('@Anna says "Hallo."',))
+    T.add_character(win.project, win.tree, "Anna")
+    win._show_references(select="Anna")
+    assert not win.b_voice_clone.isEnabled()                 # no voice sample yet
+    speech = tmp_path / "anna.wav"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=300:duration=3", str(speech)],
+                   check=True)
+    assert win.set_character_voice(str(speech)) and win.b_voice_clone.isEnabled()
+    asked = []
+    answer = [QMessageBox.No]
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: (asked.append(a[2]), answer[0])[1])
+    win._clone_voice_at_eleven()
+    assert "API key" in win.status.text() and not asked and not calls      # no key: nothing asked or sent
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "k")
+    win._clone_voice_at_eleven()
+    assert "leaves this computer" in asked[-1] and "consent" in asked[-1] and not calls and not win._tts_busy
+    answer[0] = QMessageBox.Yes
+    Fake.fail = "instant voice cloning needs a paid plan"
+    win._clone_voice_at_eleven()
+    wait(app, lambda: not win._tts_busy, timeout=30)
+    assert "Could not clone" in win.status.text() and "paid plan" in win.status.text()
+    assert "tts" not in T.character(win.tree, "Anna")
+    Fake.fail = ""
+    win._eleven_voices = [{"id": "x", "name": "old list"}]
+    win._clone_voice_at_eleven()
+    wait(app, lambda: not win._tts_busy, timeout=30)
+    assert calls[-1] == ("Anna (video-chain)", "voice1.wav", True)
+    assert T.character(win.tree, "Anna")["tts"]["eleven"] == {"id": "clone2", "name": "Anna (video-chain)"}
+    assert T.character(T.load(win.project), "Anna")["tts"]["eleven"]["id"] == "clone2"          # saved
+    assert win.char_voice.text() == "Voice: anna.wav (3.0 s) · ElevenLabs: Anna (video-chain)"
+    assert "cloned from its voice sample" in win.status.text() and "provider" in win.status.text()
+    assert win._eleven_voices is None                        # (the account's voices are asked again)
+    assert not TTS.line_problems(win.tree, next(iter(win.tree.nodes.values())), "elevenlabs")
+    # again: the question names the voice it replaces
+    win._clone_voice_at_eleven()
+    wait(app, lambda: not win._tts_busy, timeout=30)
+    assert "Anna (video-chain)" in asked[-1] and "replaces it" in asked[-1]
+    assert T.character(win.tree, "Anna")["tts"]["eleven"]["id"] == "clone3"

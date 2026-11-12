@@ -490,6 +490,7 @@ class _Bridge(QObject):
     spoken = Signal(str, object, str, str)     # clip id, rendered lines (tts.render_lines) or None, error, project
     tts_log = Signal(str)                      # a step of text to speech
     eleven_models = Signal(object, str)        # ElevenLabs' TTS models or None, error
+    eleven_cloned = Signal(str, object, str, str)   # character, cloned voice (tts.clone_sample) or None, error, project
 
 
 # ----------------------------------------------------------------------------- path card
@@ -1402,6 +1403,7 @@ class MainWindow(QMainWindow):
         self.bridge.llm_room.connect(self._llm_room_made)
         self.bridge.spoken.connect(self._lines_spoken)
         self.bridge.eleven_models.connect(self._fill_eleven_models)
+        self.bridge.eleven_cloned.connect(self._eleven_cloned)
         self.bridge.tts_log.connect(lambda m: (self.log.appendPlainText("TTS: " + m), self.status.setText(m + "…")))
         self._tts_local: TTS.LocalTTS | None = None
         self._tts_busy = False
@@ -1586,12 +1588,19 @@ class MainWindow(QMainWindow):
                                     "local) or one of your ElevenLabs voices. Its lines can then be spoken with it "
                                     "(Speak the lines on a clip)")
         self.b_voice_tts.clicked.connect(self._voice_with_tts)
+        self.b_voice_clone = QPushButton("Clone")
+        self.b_voice_clone.setToolTip("Clone the voice at ElevenLabs: the voice sample is uploaded to your ElevenLabs "
+                                      "account and becomes a voice there (an instant voice clone; needs a paid "
+                                      "plan). The character's lines are then spoken with it when ElevenLabs is the "
+                                      "text to speech provider. Only with the speaker's consent.")
+        self.b_voice_clone.clicked.connect(self._clone_voice_at_eleven)
         self.b_voice_play = icon_button("play", "Listen to the voice")
         self.b_voice_play.clicked.connect(self._play_voice)
         self.b_voice_del = icon_button("x", "Remove the voice")
         self.b_voice_del.clicked.connect(self._remove_voice)
         vrow.addWidget(self.char_voice, 1)
-        for b in (self.b_voice_file, self.b_voice_clip, self.b_voice_tts, self.b_voice_play, self.b_voice_del):
+        for b in (self.b_voice_file, self.b_voice_clip, self.b_voice_tts, self.b_voice_clone, self.b_voice_play,
+                  self.b_voice_del):
             vrow.addWidget(b)
         iv.addLayout(vrow)
         self.refs = QListWidget()
@@ -3913,8 +3922,9 @@ class MainWindow(QMainWindow):
         finally:
             self._loading = was
         v = (c or {}).get("voice")
-        self.char_voice.setText(f"Voice: {v.get('name') or Path(v['file']).name} ({float(v.get('secs') or 0):.1f} s)"
-                                if v else "Voice: none")
+        el = ((c or {}).get("tts") or {}).get("eleven")
+        self.char_voice.setText((f"Voice: {v.get('name') or Path(v['file']).name} ({float(v.get('secs') or 0):.1f} s)"
+                                 if v else "Voice: none") + (f" · ElevenLabs: {el['name']}" if el else ""))
         self.refs.clear()
         for k, rel in enumerate(c["images"] if c else [], start=1):
             pm = self._pixmap(self.project / rel) if self.project else None
@@ -3934,12 +3944,67 @@ class MainWindow(QMainWindow):
                   self.b_voice_tts):
             w.setEnabled(idle and c is not None)
         self.b_voice_del.setEnabled(idle and v)
+        self.b_voice_clone.setEnabled(idle and v)
         self.b_voice_play.setEnabled(v)
         pic = self.refs.currentItem() is not None
         self.b_ref_crop.setEnabled(idle and pic)
         self.b_ref_del.setEnabled(idle and pic)
 
     # ---- a character's voice
+    def _clone_voice_at_eleven(self):
+        """Make an instant ElevenLabs voice clone of the selected character's voice sample (in a thread);
+        _eleven_cloned makes it the character's ElevenLabs voice."""
+        c = self._selected_character()
+        if c is None or not c.get("voice") or not self._cast_edit_ok():
+            return
+        if self._tts_busy:
+            self.status.setText("Text to speech is busy; wait until it is done.")
+            return
+        if not TTS.eleven_key():
+            self.status.setText("ElevenLabs needs your API key: Settings → ElevenLabs API key.")
+            return
+        name, old = c["name"], (c.get("tts") or {}).get("eleven")
+        text = (f"Upload the voice sample of @{name} ({float(c['voice'].get('secs') or 0):.1f} s) to your ElevenLabs "
+                "account and make an instant voice clone of it?\n\nThe sample leaves this computer and the new voice "
+                "takes a voice slot of your plan (instant voice cloning needs a paid plan). Use a voice only with "
+                "the speaker's consent.")
+        if old:
+            text += (f"\n\n@{name} speaks with the ElevenLabs voice “{old['name']}” now; the clone replaces it for "
+                     "this character (the old voice stays in your account).")
+        if QMessageBox.question(self, "Clone the voice at ElevenLabs", text) != QMessageBox.Yes:
+            return
+        snap, project = copy.deepcopy(self.tree), self.project
+        self._tts_busy = True
+        self._update_buttons()
+        self.status.setText(f"Cloning the voice of @{name} at ElevenLabs…")
+
+        def work():
+            try:
+                self.bridge.eleven_cloned.emit(name, TTS.clone_sample(project, snap, name, TTS.ElevenLabs()), "",
+                                               str(project))
+            except Exception as e:  # noqa: BLE001
+                self.bridge.eleven_cloned.emit(name, None, str(e), str(project))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _eleven_cloned(self, name: str, voice, err: str, project: str):
+        self._tts_busy = False
+        self._update_buttons()
+        if voice is None:
+            self.status.setText(f"Could not clone the voice of @{name} at ElevenLabs: {err}")
+            return
+        self._eleven_voices = None                  # (the account has one more voice now)
+        if (self.project is None or str(self.project) != project or self.tree is None
+                or not TTS.set_eleven(self.tree, name, voice)):
+            self.status.setText(f"The voice “{voice['name']}” was made in your ElevenLabs account, but @{name} or its "
+                                "voice sample changed meanwhile, so it is not used (TTS… can pick it).")
+            return
+        self._show_character()
+        self._write_tree()
+        msg = f"@{name} has the ElevenLabs voice “{voice['name']}” now, cloned from its voice sample."
+        if TTS.options(self.tree)["provider"] != "elevenlabs":
+            msg += " Its lines are spoken with it when ElevenLabs is the text to speech provider."
+        self.status.setText(msg)
+
     def _voice_from_file(self):
         c = self._selected_character()
         if c is None or not self._cast_edit_ok():

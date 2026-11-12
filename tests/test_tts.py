@@ -316,6 +316,26 @@ def test_elevenlabs_api(eleven_server, tmp_path):
     assert b'name="name"\r\n\r\nAnna' in body and b'filename="s.wav"' in body
     with pytest.raises(tts.TtsError, match="rejected the API key.*Invalid API key"):
         tts.ElevenLabs(key="bad", url=eleven_server).voices()
+
+
+def test_a_voice_sample_cloned_at_elevenlabs(eleven_server, project, tmp_path):
+    t = T.load(project)
+    el = tts.ElevenLabs(key="good", url=eleven_server)
+    with pytest.raises(tts.TtsError, match="no voice sample"):
+        tts.clone_sample(project, t, "Anna", el)
+    give_voice(project, t, "Anna", tmp_path)
+    v = tts.clone_sample(project, t, "Anna", el)
+    assert v == {"id": "new1", "name": "Anna (video-chain)", "file": T.character(t, "Anna")["voice"]["file"]}
+    body = [s for s in _Fake.seen if s[1] == "/v1/voices/add"][-1][2]
+    assert b"Anna (video-chain)" in body and b'filename="voice1.wav"' in body and b"RIFF" in body
+    assert "tts" not in T.character(t, "Anna")                                # (clone_sample only reads)
+    assert tts.set_eleven(t, "Anna", v)
+    assert T.character(t, "Anna")["tts"]["eleven"] == {"id": "new1", "name": "Anna (video-chain)"}
+    # the sample was replaced while the clone was made: the clone is not used
+    give_voice(project, t, "Anna", tmp_path)
+    assert not tts.set_eleven(t, "Anna", {**v, "id": "new2"})
+    assert T.character(t, "Anna")["tts"]["eleven"]["id"] == "new1"
+    assert not tts.set_eleven(t, "Nobody", v)
     assert tts.ElevenLabs(key="").problems() and tts.ElevenLabs(key="x").problems() == []
 
 

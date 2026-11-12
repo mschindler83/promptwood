@@ -6,7 +6,7 @@ for characters. Two providers:
   voice sample (Base model: cloned from the sample and what it says, transcribed once with Whisper); a new voice is
   made from a description (VoiceDesign model).
 - elevenlabs: the ElevenLabs API with the user's key (system keyring or $ELEVENLABS_API_KEY); each character is
-  given one of the account's voices.
+  given one of the account's voices, or an instant voice clone of its voice sample (made in the account).
 
 Spoken lines are the quoted lines of a prompt ("..." after @Name, see tree.dialogue); they are spoken one after the
 other, with a short pause before the first and between them, and become an audio track of the clip."""
@@ -537,3 +537,26 @@ def use_sample(project: Path, tree: T.Tree, name: str, wav: Path, label: str, te
         _set_voice_fields(tree, name, text=text)
     _set_voice_fields(tree, name, eleven=eleven)
     return entry
+
+
+def clone_sample(project: Path, tree: T.Tree, name: str, eng) -> dict:
+    """An instant ElevenLabs voice clone of a character's voice sample, made in the user's account (eng: ElevenLabs).
+    Reads the tree only (call it from a worker thread; set_eleven puts the result in). Returns {"id", "name",
+    "file": the sample it was made from}."""
+    c = T.character(tree, name)
+    if c is None or not c.get("voice"):
+        raise TtsError(f"@{name} has no voice sample to clone (Cast → Voice…)")
+    label = f"{name} (video-chain)"
+    vid = eng.clone(label, Path(project) / c["voice"]["file"],
+                    f"made by video-chain from the voice sample of {name}")
+    return {"id": vid, "name": label, "file": c["voice"]["file"]}
+
+
+def set_eleven(tree: T.Tree, name: str, voice: dict) -> bool:
+    """A cloned voice (clone_sample) becomes the character's ElevenLabs voice. False (nothing changed): the
+    character is gone or its voice sample was replaced while the clone was made."""
+    c = T.character(tree, name)
+    if c is None or (c.get("voice") or {}).get("file") != voice.get("file"):
+        return False
+    _set_voice_fields(tree, name, eleven={"id": voice["id"], "name": voice["name"]})
+    return True
