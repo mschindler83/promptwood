@@ -45,6 +45,8 @@ class Options:
     comfy_python: str | None = None
     comfy_launcher: str | None = None
     comfy_port: int | None = None
+    models_from: list[str] = field(default_factory=list)
+    hf_cache: str | None = None
     torch_index: str | None = None
     yes: bool = False
     accept_licenses: bool = False
@@ -108,6 +110,9 @@ class Installer:
         self.before = before
         self.own_comfy = True
         self.uv = S.find_uv()
+        if opts.hf_cache:                             # an existing Hugging Face cache: used (and added to) as it is
+            self.home.mkdir(parents=True, exist_ok=True)
+            paths.save_config(hf_cache=Path(opts.hf_cache).expanduser().resolve())
         self.token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or None
 
     def wants(self, name: str) -> bool:
@@ -159,7 +164,53 @@ class Installer:
                              "file": f})
         return jobs
 
+    def share_models(self) -> None:
+        """--models-from: the new ComfyUI reads the model folders of another ComfyUI (or a plain models folder) in
+        place, through its extra_model_paths.yaml. Nothing is copied and nothing there is changed."""
+        if not self.o.models_from:
+            return
+        d = self.comfy_dir
+        target = d / "extra_model_paths.yaml"
+        if target.is_file() and "written by video-chain setup" not in target.read_text(encoding="utf-8"):
+            raise SetupError(f"{target} exists and was not written by setup: add your model folders there yourself")
+        sections: dict = {}
+        for i, src in enumerate(self.o.models_from):
+            src = Path(src).expanduser().resolve()
+            models = src / "models" if (src / "models").is_dir() else src
+            if not models.is_dir():
+                raise SetupError(f"--models-from: {src} is not a folder")
+            kinds = sorted(p.name for p in models.iterdir() if p.is_dir() and not p.name.startswith("."))
+            sections[f"shared_{i}"] = {"base_path": str(models) + "/", **{k: k + "/" for k in kinds}}
+            extra = src / "extra_model_paths.yaml"
+            if extra.is_file():
+                try:
+                    import yaml
+                    data = yaml.safe_load(extra.read_text(encoding="utf-8")) or {}
+                except Exception as e:  # noqa: BLE001
+                    say(f"    Note: {extra} could not be read ({e}); only {models} is shared")
+                    data = {}
+                for name, sec in (data.items() if isinstance(data, dict) else ()):
+                    if not isinstance(sec, dict):
+                        continue
+                    sec = {k: v for k, v in sec.items() if k != "is_default"}
+                    base = Path(os.path.expanduser(str(sec.get("base_path", ""))))
+                    sec["base_path"] = str(base if base.is_absolute() else src / base) + "/"
+                    sections[f"shared_{i}_{name}"] = sec
+        lines = ["# written by video-chain setup (--models-from): model folders used in place, never changed"]
+        for name, sec in sections.items():
+            lines.append(f"{name}:")
+            for k, v in sec.items():
+                v = str(v)
+                if "\n" in v.strip():
+                    lines.append(f"    {k}: |")
+                    lines += [f"        {x.strip()}" for x in v.splitlines() if x.strip()]
+                else:
+                    lines.append(f"    {k}: {v.strip()}")
+        d.mkdir(parents=True, exist_ok=True)
+        target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
     def show_plan(self) -> int:
+        self.share_models()
         step("The plan")
         say(f"    Home folder   {self.home}")
         new = not (self.comfy_dir / "main.py").is_file()
@@ -411,7 +462,7 @@ class Installer:
             for f in self.man["components"][cid]["files"]:
                 if f.get("hf"):
                     ref = M.hf_snapshot(f, cache).parent.parent / "refs" / "main"
-                    if not ref.is_file() or ref.read_text().strip() != f["rev"]:
+                    if not ref.is_file() and M.hf_snapshot(f, cache).is_dir():
                         ref.parent.mkdir(parents=True, exist_ok=True)
                         ref.write_text(f["rev"])
         for cid in self.components:

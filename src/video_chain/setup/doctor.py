@@ -68,8 +68,13 @@ def model_roots(comfy_dir: Path, folder: str) -> list[Path]:
 def find_file(f: dict, comfy_dir: Path, hf_cache: Path) -> list[Path] | None:
     """Where the file(s) of a manifest entry are on this computer, or None when one is missing or incomplete."""
     if f.get("hf"):
-        p = M.hf_snapshot(f, hf_cache) / f["path"]
-        return [p] if p.is_file() and p.stat().st_size == f["size"] else None
+        own = M.hf_snapshot(f, hf_cache)             # ours first, then any other snapshot with the same file
+        others = sorted(own.parent.glob("*")) if own.parent.is_dir() else []
+        for snap in [own] + [s for s in others if s != own]:
+            p = snap / f["path"]
+            if p.is_file() and p.stat().st_size == f["size"]:
+                return [p]
+        return None
     names = f.get("extract") or [f["name"]]
     out = []
     for name in names:
@@ -448,9 +453,10 @@ def llm_test(log=print) -> Check:
     from ..llm_server import LlamaServer, find_mmproj
     man = M.load()
     f = next(f for f in man["components"]["llm"]["files"] if "mmproj" not in f["path"])
-    model = M.hf_snapshot(f, paths.hf_cache()) / f["path"]
-    if not model.is_file():
-        return Check(g, name, FAIL, f"{model} is missing", f"{SETUP} --only llm")
+    found = find_file(f, paths.comfy_dir(), paths.hf_cache())
+    if found is None:
+        return Check(g, name, FAIL, f"{f['path']} is missing", f"{SETUP} --only llm")
+    model = found[0]
     paths.cache_dir().mkdir(parents=True, exist_ok=True)
     import socket
     port = 8191                                      # (not the app's own port: its server may be running)

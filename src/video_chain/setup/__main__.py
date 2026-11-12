@@ -34,6 +34,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--comfy-dir", help="use the ComfyUI in this folder instead of installing one")
     s.add_argument("--comfy-python", help="the Python that runs that ComfyUI (when it has no .venv)")
     s.add_argument("--comfy-launcher", help="the command that starts that ComfyUI (default: one is written)")
+    s.add_argument("--models-from", action="append", default=[], metavar="DIR",
+                   help="models you already have: another ComfyUI's folder (or a models folder). The new ComfyUI "
+                        "reads them in place; only what is missing there is downloaded. Can be given several times")
+    s.add_argument("--hf-cache", metavar="DIR", help="use this Hugging Face cache (text to speech and language "
+                                                     "models you already have) instead of a new one")
     s.add_argument("--comfy-port", type=int, help="ComfyUI's port (default 8188)")
     s.add_argument("--torch-index", help="PyTorch package index (default: chosen from the graphics driver; "
                                          "'pypi' for the standard one)")
@@ -60,7 +65,8 @@ def main(argv: list[str] | None = None) -> int:
         from .installer import Options, main_setup
         return main_setup(Options(profile=a.profile, only=a.only, add=a.add, without=a.without,
                                   comfy_dir=a.comfy_dir, comfy_python=a.comfy_python,
-                                  comfy_launcher=a.comfy_launcher, comfy_port=a.comfy_port,
+                                  comfy_launcher=a.comfy_launcher, comfy_port=a.comfy_port, models_from=a.models_from,
+                                  hf_cache=a.hf_cache,
                                   torch_index=a.torch_index, yes=a.yes, accept_licenses=a.accept_licenses,
                                   force=a.force, test=a.test, desktop=a.desktop, workers=a.workers,
                                   dry_run=a.dry_run))
