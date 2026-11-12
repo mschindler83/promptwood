@@ -32,16 +32,20 @@ cd video-chain
 
 That is the whole installation. The script
 
-1. gets [uv](https://docs.astral.sh/uv/) (if you have none) and installs the app into `.venv` with the tested
-   package versions (`uv.lock`),
-2. checks the computer (graphics card, driver, disk space, ffmpeg, the libraries the window needs) and names
-   anything it cannot fix itself, with the command for your system,
-3. shows the plan and the licences and asks once,
-4. installs ComfyUI (at the revision the app was tested with) with PyTorch for your driver, the custom nodes, the
-   model files (resumed after an interruption, each checked by SHA-256), the text to speech environment and
-   llama.cpp,
-5. checks the result and **proves it**: it starts ComfyUI, asks it for every node and model the app uses, renders a
-   short real clip with sound, speaks a test line and asks the language model a question.
+1. asks first, before anything big is installed: whether you already have a ComfyUI (its models are then used in
+   place), and how much you want (video clips only, the recommended set, or everything), with what each choice
+   still has to download on your computer,
+2. shows the plan, checks the computer (graphics card, driver, disk space, ffmpeg) and names anything it cannot
+   fix itself, with the command for your system,
+3. shows the licence every publisher states for its models and asks whether you accept them,
+4. installs, in numbered steps with one line each: the app (with the package versions it was tested with),
+   ComfyUI at the tested revision with PyTorch for your driver, the custom nodes, the model files (resumed after an
+   interruption, each checked by SHA-256), text to speech and llama.cpp,
+5. checks the result and **tests it with the real models**: it starts ComfyUI, asks it for every node and model
+   the app uses, renders a short clip with sound, speaks a test line and asks the language model a question.
+
+The screen stays short; everything the tools print goes to a log in `<home>/logs/`, and when a step fails its last
+lines and the log's path are shown.
 
 When it ends with `Promptwood is ready`, every part of the app works. Start it from the applications menu or with
 `video-chain-gui`.
@@ -53,6 +57,7 @@ To remove everything, delete these two folders (and `~/.local/share/applications
 ### Options
 
 ```bash
+./install.sh --dry-run                # only show what would be installed and downloaded
 ./install.sh --profile core           # video clips only (40 GB)
 ./install.sh --profile full           # also extra speed modes, Krea-2 and both head swaps (184 GB)
 ./install.sh --with image-krea2       # the standard set plus one part
@@ -83,6 +88,7 @@ video-chain doctor                    # what is installed, what is missing, and 
 video-chain doctor --render           # also render a real test clip
 video-chain setup                     # install whatever is missing (safe to run again at any time)
 video-chain setup --with headswap-wan # add a part
+video-chain setup --steps comfyui     # repeat one install step (system, comfyui, nodes)
 ```
 
 The same report is in the app under **Help > Setup check**.
@@ -111,6 +117,9 @@ The installer lives in `src/video_chain/setup/` (standard library only): `manife
 
 ## Licences of what gets installed
 
-Promptwood installs programs and models made by others. Each keeps its own licence; the installer shows the ones
-with special terms before it downloads anything (the MiniMax H3 models come under the MiniMax H3 Community
-License). See [docs/MODELS.md](docs/MODELS.md).
+Promptwood installs programs and models made by others, and each keeps its own licence. **Many of the models are
+not free for every use:** the MiniMax H3 video models come under MiniMax's community licence, Qwen-Image 2.1 under
+a research licence, the InsightFace face models are for non-commercial research only, and for some files (the
+HyperSwap and GPEN face models) the publisher states no licence at all. The installer shows, per part, what each
+publisher states and asks before it downloads; [docs/MODELS.md](docs/MODELS.md) has the full list with links.
+Whether your use is allowed is yours to check; parts you do not want can be left out (`--without faces`).
