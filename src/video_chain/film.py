@@ -26,6 +26,30 @@ JOINS = {"cut": "Cut", "fade": "Crossfade", "continue": "Continue"}   # how a sc
 FADE_SECS = 0.5
 
 
+def link_refs(refs: Path, link: Path) -> None:
+    """A scene's link to the film's refs/ folder: a relative symlink (Windows: see win.link_dir)."""
+    if os.name == "nt":
+        from . import win
+        win.link_dir(refs, link)
+    else:
+        os.symlink(os.path.relpath(refs, Path(link).parent), link, target_is_directory=True)
+
+
+def _is_link(link: Path) -> bool:
+    if os.name == "nt":
+        from . import win
+        return win.is_link(link)
+    return link.is_symlink()
+
+
+def _unlink(link: Path) -> None:
+    if os.name == "nt":
+        from . import win
+        win.remove_link(link)
+    else:
+        link.unlink()
+
+
 @dataclass
 class Scene:
     id: str
@@ -162,7 +186,7 @@ class Film:
             refs = self.root / T.REFS_DIR
             refs.mkdir(exist_ok=True)
             try:
-                os.symlink(os.path.relpath(refs, d), d / T.REFS_DIR, target_is_directory=True)
+                link_refs(refs, d / T.REFS_DIR)
             except OSError as e:
                 raise OSError(f"the scene's link to the film's refs/ cannot be made here ({e}); scenes need a "
                               "file system with links") from e
@@ -175,8 +199,8 @@ class Film:
             T.save(d, t)
         except BaseException:
             link = d / T.REFS_DIR
-            if link.is_symlink():
-                link.unlink()
+            if _is_link(link):
+                _unlink(link)
             shutil.rmtree(d, ignore_errors=True)                       # no half scene blocking the next add
             raise
         scene = Scene(sid, (title or "").strip() or f"Scene {len(self.scenes) + 1}", rel)
@@ -222,12 +246,12 @@ class Film:
             shutil.copytree(self.path(sid), d, ignore=ign)
             refs = self.root / T.REFS_DIR
             refs.mkdir(exist_ok=True)
-            os.symlink(os.path.relpath(refs, d), d / T.REFS_DIR, target_is_directory=True)
+            link_refs(refs, d / T.REFS_DIR)
             T.save(d, T.load(d))
         except BaseException:
             link = d / T.REFS_DIR
-            if link.is_symlink():
-                link.unlink()
+            if _is_link(link):
+                _unlink(link)
             shutil.rmtree(d, ignore_errors=True)
             raise
         base = re.sub(r" \(copy( \d+)?\)$", "", src.title)
@@ -248,8 +272,8 @@ class Film:
         except BaseException:
             self.scenes.remove(scene)
             link = d / T.REFS_DIR
-            if link.is_symlink():
-                link.unlink()
+            if _is_link(link):
+                _unlink(link)
             shutil.rmtree(d, ignore_errors=True)
             raise
         return scene
@@ -340,8 +364,8 @@ class Film:
             self.current = self.scenes[0].id
         self.save()
         link = d / T.REFS_DIR
-        if link.is_symlink():
-            link.unlink()                          # (only the link to the shared refs)
+        if _is_link(link):
+            _unlink(link)                          # (only the link to the shared refs)
         chain.keep_aside(self.root, d)             # the scene's clips are never deleted: its folder goes to old/
 
     # ---- shared settings

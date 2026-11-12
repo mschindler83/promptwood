@@ -3002,7 +3002,7 @@ class MainWindow(QMainWindow):
                     d = (target / sc.dir).resolve()
                     if sc.dir != "." and not (d / T.REFS_DIR).exists():
                         (target / T.REFS_DIR).mkdir(exist_ok=True)
-                        os.symlink(os.path.relpath(target / T.REFS_DIR, d), d / T.REFS_DIR, target_is_directory=True)
+                        F.link_refs(target / T.REFS_DIR, d / T.REFS_DIR)
                     if (d / T.TREE_FILE).is_file():
                         T.save(d, T.load(d))
                 bridge.copied.emit(str(target), "")
@@ -7242,7 +7242,10 @@ class MainWindow(QMainWindow):
             return
         self._stopping = True
         self.status.setText("Stopping …")
-        self.proc.terminate()
+        if os.name == "nt":                           # (no SIGTERM there: the worker reads "stop" from its input)
+            self.proc.write(b'{"cmd": "stop"}\n')
+        else:
+            self.proc.terminate()
         self._kill_timer.start()
 
     def _kill(self):
@@ -7569,7 +7572,10 @@ class MainWindow(QMainWindow):
         if not Path(cmd).is_file():
             self.status.setText(f"ComfyUI launcher not found: {cmd}")
             return False
-        ok = QProcess.startDetached(cmd, [])
+        if os.name == "nt":                           # (a .bat / .cmd launcher runs through the command shell)
+            ok = QProcess.startDetached("cmd.exe", ["/c", cmd])
+        else:
+            ok = QProcess.startDetached(cmd, [])
         ok = ok[0] if isinstance(ok, tuple) else ok
         if not ok:
             self.status.setText(f"Could not start {cmd}")

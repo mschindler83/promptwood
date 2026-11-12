@@ -68,7 +68,11 @@ def _printer(enabled: bool):
 
 
 def main(argv: list[str] | None = None) -> int:
-    from . import paths
+    from . import paths, win
+    if win.WINDOWS:                                 # (Linux and macOS: nothing here runs)
+        again = win.ensure_utf8("video_chain", argv)
+        if again is not None:
+            return again
     paths.use_private_tools()
     args = sys.argv[1:] if argv is None else list(argv)
     if args and args[0] in ("setup", "doctor"):          # install / check what the app needs (setup/__main__.py)
@@ -192,6 +196,9 @@ def _main_tree(a, emit) -> int:
     return 0
 
 
+_STOP: dict = {}                                    # Windows: what a "stop" line does (set by the worker mode)
+
+
 class _LineReader:
     """Lines from stdin without Python's buffering, so select() sees every waiting line (two jobs in one read
     would otherwise leave the second one in the buffer until the idle timeout)."""
@@ -241,7 +248,11 @@ def serve(a, emit, make_generator: Callable[[dict], object], stdin=None) -> int:
     make_generator(current) connects to ComfyUI; ComfyUI keeps the model loaded between jobs, and the worker asks
     it to unload after the idle time (or on quit with free)."""
     stdin = stdin or sys.stdin
-    lines = _LineReader(stdin)
+    if os.name == "nt":                             # (no select() on pipes there; "stop" replaces SIGTERM)
+        from . import win
+        lines = win.LineReader(stdin, on_stop=_STOP.get("fn"))
+    else:
+        lines = _LineReader(stdin)
     current = {"id": None, "k": 0}
     gen = make_generator(current)
     idle = a.idle_minutes * 60 if a.idle_minutes and a.idle_minutes > 0 else None
@@ -335,6 +346,16 @@ def _main_serve(a, emit) -> int:
         finally:
             raise SystemExit(143)
     signal.signal(signal.SIGTERM, on_term)
+    if os.name == "nt":                             # the GUI's Stop arrives as a line on stdin there (win.LineReader)
+        def on_stop():
+            try:
+                gen = holder.get("gen")
+                if gen is not None and hasattr(gen, "interrupt"):
+                    gen.interrupt()
+            except Exception:  # noqa: BLE001
+                pass
+            os._exit(143)
+        _STOP["fn"] = on_stop
 
     def make(current: dict):
         holder["gen"] = _generator(a, emit, current)

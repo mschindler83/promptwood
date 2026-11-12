@@ -648,7 +648,7 @@ def keep_aside(root: Path, f: Path) -> bool:
     film's) goes to old/ next to its own folder. Returns False when it cannot be moved now (open in a player on a
     network share ...): it stays where it is."""
     f = Path(f)
-    if f.is_symlink() or not f.exists():
+    if f.is_symlink() or not f.exists() or (os.name == "nt" and os.path.isjunction(f)):
         return True
     real = f.resolve()
     try:

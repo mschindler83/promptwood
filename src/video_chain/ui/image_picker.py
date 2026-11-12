@@ -33,6 +33,9 @@ MAX_RECENT_DIRS = 8
 THUMB_MAX = 320                    # thumbnails are made at this size once and scaled for the grid
 THREADS = 8                        # parallel reads: on a network share every file costs round trips
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "video-chain" / "thumbs"
+if os.name == "nt":                                # (%LOCALAPPDATA%\\video-chain\\cache\\thumbs)
+    from .. import paths as _paths
+    CACHE_DIR = _paths.cache_dir() / "thumbs"
 DESKTOP_THUMBS = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "thumbnails"
 MAX_CACHED = 20000                 # beyond this many cached thumbnails the oldest are removed
 

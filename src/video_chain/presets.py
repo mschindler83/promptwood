@@ -17,6 +17,9 @@ def default_path() -> Path:
     env = os.environ.get("VIDEO_CHAIN_PRESETS")
     if env:
         return Path(env)
+    if os.name == "nt":                               # (%LOCALAPPDATA%\\video-chain)
+        from . import win
+        return win.data_dir() / "lora_presets.json"
     base = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
     return base / "video-chain" / "lora_presets.json"
 

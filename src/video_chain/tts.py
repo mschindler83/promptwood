@@ -110,6 +110,11 @@ def snapshot(repo: str, cache: Path | None = None) -> Path | None:
 # ----------------------------------------------------------------------------- local: Qwen3-TTS
 
 
+def _utf8() -> list[str]:
+    """(Windows) the worker's Python in UTF-8 mode; nothing on Linux."""
+    return ["-X", "utf8"] if os.name == "nt" else []
+
+
 class LocalTTS:
     """The Qwen3-TTS worker process: started on the first request, stopped with stop(). before_launch (optional,
     called just before the process starts) can make room in VRAM or raise TtsError to refuse."""
@@ -156,7 +161,7 @@ class LocalTTS:
                "PYTHONUNBUFFERED": "1", "TOKENIZERS_PARALLELISM": "false"}
         err = open(self.log, "ab") if self.log else subprocess.DEVNULL
         try:
-            self.proc = subprocess.Popen([str(self.python), "-I", str(self.worker)], stdin=subprocess.PIPE,
+            self.proc = subprocess.Popen([str(self.python), "-I", *_utf8(), str(self.worker)], stdin=subprocess.PIPE,
                                          stdout=subprocess.PIPE, stderr=err, env=env, cwd=tempfile.gettempdir(),
                                          text=True, bufsize=1)
         finally:

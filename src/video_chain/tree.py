@@ -441,7 +441,8 @@ def load(project: Path) -> Tree:
             video, frame = project / c.get("video", ""), project / c.get("last_frame", "")
             if video.is_file() and frame.is_file():
                 n.made = {"prompt": n.prompt, "seed": n.seed, "settings": s, "start_sha1": c.get("start_sha1"),
-                          "video": os.path.relpath(video, project), "frame": os.path.relpath(frame, project)}
+                          "video": os.path.relpath(video, project).replace(os.sep, "/"),      # ("/" in project files on
+                          "frame": os.path.relpath(frame, project).replace(os.sep, "/")}      # every system)
             parent = n.id
         t.selected = parent
     return t

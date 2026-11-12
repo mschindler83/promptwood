@@ -218,6 +218,14 @@ def comfy_vram_mb(url: str, timeout: float = 5) -> tuple[int, int] | None:
         return None
 
 
+def _group() -> dict:
+    """(Windows) the server in its own process group, without a console window; nothing on Linux."""
+    if os.name != "nt":
+        return {}
+    from . import win
+    return win.popen_group()
+
+
 def free_vram_mb(url: str | None = None) -> int | None:
     """Free VRAM of the first GPU: from nvidia-smi; without that tool, from the running ComfyUI at url. None when
     neither can tell (callers then start without making room, as before)."""
@@ -327,7 +335,7 @@ class LlamaServer:
                         self.proc = subprocess.Popen(server_command(self.server, self.model, self.port,
                                                                     self.cpu_moe, self.mmproj),
                                                      stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                                     start_new_session=True)
+                                                     start_new_session=True, **_group())
                     except OSError as e:
                         raise LlmServerError(f"the llama.cpp server could not be started: {e}") from e
                     finally:
@@ -363,17 +371,24 @@ class LlamaServer:
         wait is False (the GUI does not wait)."""
         if p is None or p.poll() is not None:
             return False
-        try:
-            os.killpg(p.pid, signal.SIGTERM)
-        except OSError:
-            return False
+        if os.name == "nt":                           # (no process groups to signal there)
+            from . import win
+            win.kill_tree(p.pid)
+        else:
+            try:
+                os.killpg(p.pid, signal.SIGTERM)
+            except OSError:
+                return False
 
         def reap():
             try:
                 p.wait(timeout=20)
             except subprocess.TimeoutExpired:
                 try:
-                    os.killpg(p.pid, signal.SIGKILL)
+                    if os.name == "nt":
+                        p.kill()
+                    else:
+                        os.killpg(p.pid, signal.SIGKILL)
                     p.wait(timeout=10)                 # (the port is free before a restart)
                 except (OSError, subprocess.TimeoutExpired):
                     pass
