@@ -73,6 +73,14 @@ def ask(question: str, default: bool = True) -> bool:
     return default if not a else a in ("y", "yes", "j", "ja")
 
 
+def ask_text(question: str, default: str = "") -> str:
+    try:
+        a = input(f"{question}{f' [{default}]' if default else ''}: ").strip()
+    except EOFError:
+        return default
+    return a or default
+
+
 def run(cmd: list[str], what: str, env: dict | None = None, cwd: Path | None = None) -> None:
     """Run a command with its output shown; SetupError names the step when it fails."""
     say("    $ " + " ".join(str(c) for c in cmd))
@@ -143,6 +151,48 @@ class Installer:
             raise SetupError(f"{self.comfy_dir} is a ComfyUI that setup did not install and it has no .venv: say "
                              "which Python runs it with --comfy-python /path/to/python")
         return paths.venv_python(self.comfy_dir / ".venv")
+
+    # ---- questions (only when someone is there to answer)
+    def ask_existing(self) -> None:
+        """Ask for a ComfyUI and a Hugging Face cache that are already on the computer, so their models are used
+        instead of downloaded. Skipped when the command line said it, or setup has run here before."""
+        o = self.o
+        if not self.interactive:
+            return
+        known = paths.load_config()
+        if not (o.comfy_dir or o.models_from or known.get("comfy_dir") or (self.comfy_dir / "main.py").is_file()):
+            guess = next((str(p) for p in (Path.home() / "ComfyUI", Path.home() / "comfy" / "ComfyUI",
+                                           Path.home() / "Documents" / "ComfyUI") if (p / "main.py").is_file()), "")
+            say("\nDo you already have ComfyUI on this computer?\n"
+                "  1) No: install a new one for Promptwood\n"
+                "  2) Yes: install a new one, but use the models of mine in place (nothing there is copied or "
+                "changed)\n"
+                "  3) Yes: use mine as it is (Promptwood's custom nodes and Python packages are installed into it)")
+            choice = ask_text("Your choice", "2" if guess else "1")
+            while choice in ("2", "3"):
+                where = ask_text("Its folder (the one with main.py; for 2 a models folder works too)", guess)
+                d = Path(where).expanduser() if where else None
+                if d is not None and ((d / "main.py").is_file() or (choice == "2" and d.is_dir())):
+                    if choice == "2":
+                        o.models_from = [str(d)]
+                    else:
+                        o.comfy_dir = str(d)
+                        if not any(paths.venv_python(d / v).is_file() for v in (".venv", "venv")):
+                            o.comfy_python = ask_text("It has no .venv: which Python runs it (full path)") or None
+                    break
+                say(f"    {where or 'That'} is not a ComfyUI folder.")
+                if not ask("    Try another folder?"):
+                    break
+        if not (o.hf_cache or known.get("hf_cache")) and M.software_for(self.man, self.components):
+            mine = next((c for c in paths.model_cache_dirs()[1:] if c.is_dir()), None)
+            files = [f for cid in self.components for f in self.man["components"][cid]["files"] if f.get("hf")]
+            if mine is not None and any(D.find_file(f, self.comfy_dir, mine) for f in files):
+                say(f"\nYour Hugging Face cache ({mine}) already has text to speech or language models that "
+                    "Promptwood uses.")
+                if ask("Use that cache (what is missing is downloaded into it) instead of a new one?"):
+                    o.hf_cache = str(mine)
+                    self.home.mkdir(parents=True, exist_ok=True)
+                    paths.save_config(hf_cache=mine)
 
     # ---- the plan
     def downloads(self) -> list[dict]:
@@ -617,6 +667,7 @@ class Installer:
 
     def run(self) -> int:
         say(f"Promptwood setup  (home: {self.home})")
+        self.ask_existing()
         need = self.show_plan()
         if self.o.dry_run:
             return 0

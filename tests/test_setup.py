@@ -480,3 +480,71 @@ def test_another_build_of_a_model_counts(home, tmp_path):
     (snap / "mmproj-F16.gguf").write_bytes(b"p")
     assert sorted(D.find_file(f, comfy, tmp_path / "cache")[0].name for f in llm) == ["mmproj-F16.gguf",
                                                                                       "my-model-Q6.gguf"]
+
+
+def _answers(monkeypatch, *replies):
+    left = list(replies)
+    asked = []
+
+    def fake(question=""):
+        asked.append(question)
+        return left.pop(0)
+    monkeypatch.setattr("builtins.input", fake)
+    return asked
+
+
+def test_setup_asks_for_a_comfyui_that_is_already_there(server, home, tmp_path, monkeypatch, capsys):
+    man = _mini_manifest(server)
+    monkeypatch.setattr(M, "load", lambda: man)
+    monkeypatch.setenv("HOME", str(tmp_path / "userhome"))
+    mine = tmp_path / "MyComfy"
+    (mine / "models" / "diffusion_models").mkdir(parents=True)
+    (mine / "main.py").write_text("")
+    (mine / "models" / "diffusion_models" / "unet.safetensors").write_bytes(b"0" * 4000)
+    # 2: a new ComfyUI that reads the models of the old one (a wrong folder first)
+    inst = I.Installer(I.Options())
+    inst.interactive = True
+    asked = _answers(monkeypatch, "2", str(tmp_path / "nothing"), "y", str(mine))
+    inst.ask_existing()
+    assert inst.o.models_from == [str(mine)] and inst.o.comfy_dir is None and len(asked) == 4
+    assert "not a ComfyUI folder" in capsys.readouterr().out
+    inst.share_models()
+    assert [j["file"]["name"] for j in inst.downloads() if "name" in j["file"]] == ["lora.safetensors"]
+    assert not list((mine / "models").rglob("*.yaml")) and sorted(p.name for p in mine.iterdir()) == ["main.py",
+                                                                                                      "models"]
+    # 3: the old one itself; it has no .venv, so its Python is asked for
+    inst = I.Installer(I.Options())
+    inst.interactive = True
+    _answers(monkeypatch, "3", str(mine), "/usr/bin/python3")
+    inst.ask_existing()
+    assert inst.comfy_dir == mine and inst.o.comfy_python == "/usr/bin/python3" and inst.o.models_from == []
+    # 1 (the default, by Enter): a new one; and nothing is asked without a terminal or when the options said it
+    inst = I.Installer(I.Options())
+    inst.interactive = True
+    _answers(monkeypatch, "")
+    inst.ask_existing()
+    assert inst.o.comfy_dir is None and inst.o.models_from == []
+    for opts in (I.Options(yes=True), I.Options(models_from=[str(mine)])):
+        inst = I.Installer(opts)
+        inst.interactive = not opts.yes
+        _answers(monkeypatch)                                # (any question would fail: no answers left)
+        inst.ask_existing()
+
+
+def test_setup_offers_the_users_hugging_face_cache(server, home, tmp_path, monkeypatch):
+    man = _mini_manifest(server)
+    man["components"]["extra"]["software"] = ["llama"]
+    man["software"] = {"llama": {}}
+    monkeypatch.setattr(M, "load", lambda: man)
+    monkeypatch.setenv("HOME", str(tmp_path / "userhome"))
+    cache = tmp_path / "hub"
+    snap = cache / "models--org--llm" / "snapshots" / "other-rev"
+    snap.mkdir(parents=True)
+    (snap / "model.gguf").write_bytes(b"0" * 2000)
+    monkeypatch.setenv("HF_HUB_CACHE", str(cache))
+    inst = I.Installer(I.Options())
+    inst.interactive = True
+    asked = _answers(monkeypatch, "1", "y")
+    inst.ask_existing()
+    assert "Hugging Face cache" not in asked[0] and inst.o.hf_cache == str(cache) and paths.hf_cache() == cache
+    assert "model.gguf" not in [j["file"].get("path") for j in inst.downloads()]
