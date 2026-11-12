@@ -1266,7 +1266,10 @@ class StartTile(FrameTile):
 
 
 class Preview(QWidget):
-    """Video player for clips and paths. The media player is created on first use."""
+    """Video player for clips and paths. The media player is created on first use.
+    opened: a file is played now (its path); moved: where it is (seconds), -1 when it stopped or was closed."""
+    opened = Signal(str)
+    moved = Signal(float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1321,6 +1324,7 @@ class Preview(QWidget):
             return
         self.player.stop()
         self.player.setSource(QUrl())
+        self.opened.emit(str(path))
         self.player.setSource(QUrl.fromLocalFile(str(path)))
         self.stack.setCurrentWidget(self.video)
         self.name.setText(title)
@@ -1343,8 +1347,12 @@ class Preview(QWidget):
             self.player.stop()
             self.player.setSource(QUrl())
             self.video.clear()
+            self.moved.emit(-1.0)
 
     def _pos(self, ms):
+        if self.player.source().isEmpty():
+            return
+        self.moved.emit(ms / 1000)
         if not self.slider.isSliderDown():
             self.slider.setValue(int(ms))
         self.time.setText(f"{fmt_time(ms / 1000)} / {fmt_time(self.player.duration() / 1000)}")
@@ -1352,6 +1360,8 @@ class Preview(QWidget):
     def _state(self, st):
         from PySide6.QtMultimedia import QMediaPlayer
         self.b_play.setIcon(icon("pause" if st == QMediaPlayer.PlayingState else "play"))
+        if st == QMediaPlayer.StoppedState:
+            self.moved.emit(-1.0)                   # (played to its end, or stopped)
 
 
 # ----------------------------------------------------------------------------- main window
@@ -2168,6 +2178,9 @@ class MainWindow(QMainWindow):
         rv = QVBoxLayout(rp)
         rv.setContentsMargins(0, 0, 0, 0)
         self.preview = Preview()
+        self._played_path: tuple[str, list] | None = None   # the joined path in the preview, its clips' spans
+        self.preview.opened.connect(self._preview_opened)
+        self.preview.moved.connect(self._preview_moved)
         rv.addWidget(self.preview, 1)
         prow = QHBoxLayout()
         prow.setContentsMargins(8, 0, 8, 8)
@@ -6797,7 +6810,7 @@ class MainWindow(QMainWindow):
                 try:
                     joined = T.join_path(project, tree, nid, out)
                     secs = chain.probe(joined)["frames"] / 24           # not in the GUI thread (network shares)
-                    bridge.joined.emit((joined, secs), None, purpose, pre, str(project))
+                    bridge.joined.emit((joined, secs, T.path_spans(tree, nid)), None, purpose, pre, str(project))
                 except Exception as e:  # noqa: BLE001
                     bridge.joined.emit(None, str(e), purpose, pre, str(project))
         threading.Thread(target=work, daemon=True).start()
@@ -6810,12 +6823,33 @@ class MainWindow(QMainWindow):
         if error:
             self.status.setText(f"{pre}Could not join the path: {error}")
             return
-        path, secs = path
+        path, secs, spans = path
         if purpose == "play":
+            self._played_path = (str(path), spans)  # (before it opens: the clip it is at is marked while it plays)
             self.preview.open(path, f"Path to clip #{Path(path).stem[1:]} · {fmt_time(secs)}")
             self.status.setText(f"{pre}Path joined: {fmt_time(secs)}.")
         else:
             self.status.setText(f"{pre}Exported {Path(path).name} ({fmt_time(secs)}).")
+
+    def _preview_opened(self, path: str):
+        if self._played_path is not None and self._played_path[0] != path:
+            self._played_path = None                # something else is played now
+            self._mark_playing(None)
+
+    def _preview_moved(self, secs: float):
+        """The played path is at `secs` (-1: it stopped): its clip there is marked in the graph and timeline."""
+        if self._played_path is None:
+            return
+        if secs < 0:
+            self._mark_playing(None)
+            return
+        spans = self._played_path[1]
+        nid = next((n for n, a, b in spans if a <= secs < b), spans[-1][0] if spans else None)
+        self._mark_playing(nid)
+
+    def _mark_playing(self, nid: str | None):
+        self.graph.set_playing(nid)
+        self.timeline.set_playing(nid)
 
     def export_path(self, single: str | None = None):
         """The export dialog for the selected path, or (single: a clip id) for that clip on its own."""

@@ -2710,6 +2710,18 @@ def path_cuts(tree: Tree, path: list[Node], keep_repeated: bool = False,
     return [(s, e) for s, e in cuts]
 
 
+def path_spans(tree: Tree, nid: str) -> list[tuple[str, float, float]]:
+    """Where each clip of the path to nid is in the joined video (join_path): (clip id, from, to) in seconds."""
+    path = tree.path_to(nid)
+    cuts = path_cuts(tree, path, bool(tree.options.get("keep_repeated")))
+    out, at = [], 0
+    for n, (a, b) in zip(path, cuts):
+        frames = max(1, (made_frames(n) or clip_length(tree, n)) - a - b)
+        out.append((n.id, at / chain.FPS, (at + frames) / chain.FPS))
+        at += frames
+    return out
+
+
 def refined_file(project: Path, node: Node, size: str) -> Path:
     """The refined copy of a node's current clip at an export size (named after its clip version)."""
     v = Path(node.made["video"])

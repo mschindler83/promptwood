@@ -44,6 +44,8 @@ class _Lane(QWidget):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setMinimumHeight(RULER + 64)
 
+    playing: str | None = None
+
     def set_blocks(self, blocks: list[Block], focus: str | None, view_width: int):
         self.blocks, self.focus = blocks, focus
         total = sum(b.secs for b in blocks) or 1.0
@@ -120,6 +122,13 @@ class _Lane(QWidget):
                 p.setBrush(Qt.NoBrush)
                 p.setPen(QPen(t.accent, 2))
                 p.drawRoundedRect(r.adjusted(-1, -1, 1, 1), 5, 5)
+            if b.nid == self.playing:               # the played path is at this clip
+                p.setPen(Qt.NoPen)
+                p.setBrush(with_alpha(t.accent, 0.3))
+                p.drawRoundedRect(r, 4, 4)
+                p.setBrush(Qt.NoBrush)
+                p.setPen(QPen(t.accent, 3))
+                p.drawRoundedRect(r.adjusted(-1, -1, 1, 1), 5, 5)
 
     def _at(self, pos: QPointF) -> Block | None:
         return next((b for r, b in self._rects if r.contains(pos)), None)
@@ -171,6 +180,12 @@ class Timeline(QScrollArea):
         self._focus = nid
         self.lane.focus = nid
         self.lane.update()
+
+    def set_playing(self, nid: str | None):
+        """Mark the clip the played path is at (None: nothing is played)."""
+        if self.lane.playing != nid:
+            self.lane.playing = nid
+            self.lane.update()
 
     def resizeEvent(self, e):
         super().resizeEvent(e)

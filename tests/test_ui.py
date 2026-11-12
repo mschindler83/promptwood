@@ -155,6 +155,23 @@ def test_generate_path_then_branch_reuses(app, win, tmp_path, image):
     assert [win.state(i) for i in ids] == ["done"] * 3
     assert win.played[-1] == tmp_path / "proj" / "paths" / f"{ids[-1]}.mp4"
     assert chain.probe(win.played[-1])["frames"] == 17 + 16 + 16
+    # while the path plays, the clip it is at is marked in the graph and the timeline
+    file, spans = win._played_path
+    assert file == str(win.played[-1]) and [n for n, _a, _b in spans] == ids
+    assert [(round(a * 24), round(b * 24)) for _n, a, b in spans] == [(0, 17), (17, 33), (33, 49)]
+    marked = lambda: ([k for k, it in win.graph.items_by_id.items() if it.playing], win.timeline.lane.playing)  # noqa: E731
+    assert marked() == ([], None)
+    for secs, nid in ((0.0, ids[0]), (0.7, ids[0]), (17 / 24, ids[1]), (1.5, ids[2]), (99.0, ids[2])):
+        win.preview.moved.emit(secs)
+        assert marked() == ([nid], nid), secs
+    win.refresh(rebuild_path=True)                                     # (the mark stays when the graph is redrawn)
+    assert marked() == ([ids[2]], ids[2])
+    win.preview.moved.emit(-1.0)                                       # stopped, or played to its end
+    assert marked() == ([], None)
+    win.preview.moved.emit(0.2)
+    win.preview.opened.emit(str(tmp_path / "other.mp4"))               # something else is played: no mark
+    win.preview.moved.emit(0.5)
+    assert marked() == ([], None) and win._played_path is None
     # branch after clip 1: only the new clip is made
     win.node_action("branch", ids[1])
     b = win.selected_id()
