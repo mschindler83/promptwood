@@ -5116,7 +5116,7 @@ class MainWindow(QMainWindow):
                 card.set_compare(len(self.compare_candidates(n.id)) - 1 if n.made else 0)
                 card.words.setText(card.words.text().split(" + ")[0] +
                                    (" + style" if T.full_prompt(self.tree.options, "x") != "x" else ""))
-                use = T.clip_cast(self.tree.options, n.prompt)
+                use = T.node_cast(self.tree.options, n)
                 words = T.lora_trigger_words([p for p, _s in T.node_loras(n)]) \
                     if self.tree.options.get("lora_triggers", True) and T.node_loras(n) else []
                 sounds = [None] * (T.audio_mentioned(T.full_prompt(self.tree.options, n.prompt))

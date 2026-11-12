@@ -498,7 +498,7 @@ def cast_by_scene(film: Film) -> tuple[list[str], list[tuple[str, dict[str, str]
         for n in t.path_to(take) if take else []:
             if n.is_video:
                 continue
-            use = T.clip_cast(t.options, n.prompt)
+            use = T.node_cast(t.options, n)
             for c in use["characters"]:
                 if c["images"]:
                     marks.setdefault(c["name"], set()).add("face")

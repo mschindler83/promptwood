@@ -983,8 +983,24 @@ def _voiced_prompt(options: dict, text: str, found: list[dict], lines: list[dict
     return prompt, images, [character(options, n)["voice"]["file"] for n in voiced]
 
 
-def clip_cast(options: dict, prompt: str) -> dict:
+def sound_given(node: Node) -> bool:
+    """The clip's whole sound is given (its Sound setting plays a track, a video's or the clip before's sound, and
+    the picture is made to it): the model speaks nothing itself, so it gets no voices (see clip_cast)."""
+    ov = node.overrides or {}
+    return not node.is_video and bool(ov.get("source_sound")) and not ov.get("sound_over")
+
+
+def node_cast(options: dict, node: Node) -> dict:
+    """clip_cast for a clip as it is set up: without the voices when its sound is given."""
+    return clip_cast(options, node.prompt, voices=not sound_given(node))
+
+
+def clip_cast(options: dict, prompt: str, voices: bool = True) -> dict:
     """How a clip uses the cast. The prompt is the clip's own (the style text is put around it here).
+    voices=False: the clip's sound is given (sound_given), its spoken lines are in that sound already, so no voice
+    is sent and the characters are used as if they had none (the lines stay in the prompt as written; the
+    soundtrack sentence of model_prompt ties the lips to the sound). The voices would only use up the 15 s of
+    sound the model takes, which the soundtrack needs.
     {"mode": "voices" | "mention" | "tags" | "lead" | None, "characters": [...], "images": [rel], "voices": [rel],
     "language": the dialogue language and "lines": [{"name": speaker or None, "line"}] (voices only), "prompt": what
     the model gets, "record": [{"name", "desc"}]
@@ -1004,8 +1020,8 @@ def clip_cast(options: dict, prompt: str) -> dict:
     lines = dialogue(options, text, default=lead if implicit else None)
     talking = [c for c in ([lead] if implicit else found)
                if (c["images"] or c.get("voice"))]
-    if any(d["speaker"] is not None and d["speaker"].get("voice")
-           and any(d["speaker"]["name"] == c["name"] for c in talking) for d in lines):
+    if voices and any(d["speaker"] is not None and d["speaker"].get("voice")
+                      and any(d["speaker"]["name"] == c["name"] for c in talking) for d in lines):
         out, images, voices = _voiced_prompt(options, text, talking, lines, audio_mentioned(text), implicit)
         lang = ((options.get("identity") or {}).get("language") or "English").strip() or "English"
         said = [{"name": d["speaker"]["name"] if d["speaker"] else None, "line": d["line"]} for d in lines]
@@ -1066,7 +1082,7 @@ def cast_problems(project: Path, tree: Tree, todo: list[str]) -> list[str]:
         for m in WRONG_TAG.finditer(text):
             out.append(f"clip #{nid[1:]} writes <{m.group(1)} {m.group(2)}>; the model only knows <Picture "
                        f"{m.group(2)}> (or mention the character as @Name)")
-        use = clip_cast(tree.options, node.prompt)
+        use = node_cast(tree.options, node)
         if use["mode"] in ("mention", "voices") and PICTURE_TAG.search(text):
             out.append(f"clip #{nid[1:]} writes <Picture N> and mentions @Names; with @Names the app numbers the "
                        "pictures itself, so write the people only as @Name")
@@ -2137,7 +2153,7 @@ def _sound_room(tree: Tree, node: Node, span: dict) -> list[str]:
     """The model's limits on sound references, with the clip's soundtrack as one more."""
     nid = node.id
     n_sounds = audio_mentioned(full_prompt(tree.options, node.prompt))
-    voices = clip_cast(tree.options, node.prompt).get("voices") or []
+    voices = node_cast(tree.options, node).get("voices") or []
     secs = sum(float(a.get("secs") or 0) for a in audio_refs(tree)[:n_sounds]) + span["secs"] + \
         sum(float(c["voice"].get("secs") or 0) for c in cast_of(tree) if c.get("voice")
             and c["voice"]["file"] in voices)
@@ -2174,8 +2190,10 @@ def model_prompt(options: dict, node: Node, settings: dict | None) -> str:
     with "Continue the video's sound" the sentence that makes the last sound reference its soundtrack."""
     from .triggers import with_triggers
     prompt = _camera.apply(node.prompt, (settings or {}).get("camera"))    # #tokens and the clip's camera move
-    text = with_triggers(clip_cast(options, prompt)["prompt"], list((settings or {}).get("lora_triggers") or []))
     ss = (settings or {}).get("source_sound")
+    given = bool(ss) and not (isinstance(ss, dict) and ss.get("overlay"))      # (then without the voices)
+    text = with_triggers(clip_cast(options, prompt, voices=not given)["prompt"],
+                         list((settings or {}).get("lora_triggers") or []))
     if ss and not (isinstance(ss, dict) and ss.get("overlay")):   # (a sound laid over is not the model's)
         k = len((settings or {}).get("audio_refs") or []) + 1
         mode = ss.get("mode") if isinstance(ss, dict) else ss
@@ -2200,7 +2218,9 @@ def node_settings(base: dict, options: dict, node: Node, audio_pool: list[dict] 
     made with (see clip_cast), and with @mentions what the model prompt says about the characters."""
     ov = node.overrides or {}
     n_audio = 0 if node.is_video else audio_mentioned(full_prompt(options, node.prompt))
-    use = clip_cast(options, node.prompt) if not node.is_video else {"images": [], "record": None, "voices": []}
+    given = source_sound is not None and not source_sound.get("overlay")       # (then without the voices)
+    use = clip_cast(options, node.prompt, voices=not given) if not node.is_video \
+        else {"images": [], "record": None, "voices": []}
     sha = picture_sha or (lambda rel: None)
     refs = [{"file": r, "sha1": sha(r)} for r in use["images"]]
     sounds = (audio_pool or [])[:n_audio] if n_audio else []

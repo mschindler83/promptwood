@@ -139,6 +139,36 @@ def test_speak_lines_makes_the_clips_sound(project, tmp_path):
     assert T.Checker(project, t).status(n.id) == "new"
 
 
+def test_a_long_clip_speaks_its_lines(project, tmp_path):
+    """A 10 s clip whose line was spoken: its soundtrack (10 s) is all the sound the model gets. The speaker's voice
+    (7.5 s) is not sent with it (the two would be more than the 15 s the model takes, and the track has the voice
+    already); the line stays in the prompt and the soundtrack sentence ties the lips to the sound. Laid over
+    instead, the model speaks itself again, with the voice."""
+    t = T.load(project)
+    give_voice(project, t, "Anna", tmp_path, secs=9.0)
+    give_voice(project, t, "Ben", tmp_path, secs=9.0)
+    assert T.character(t, "Anna")["voice"]["secs"] == pytest.approx(T.VOICE_MAX_SECS, abs=0.1)
+    n = t.add(None, '@Anna looks up and says "Guten Morgen." @Ben answers "Hallo."')
+    n.overrides["frames"] = 243                                              # 10.1 s
+    ch = T.Checker(project, t)
+    before = ch.settings(n.id)
+    assert len(before["audio_refs"]) == 2 and "voice timbre" in T.model_prompt(t.options, n, before)
+    tts.speak_lines(project, t, n.id, FakeLocal())
+    assert n.overrides["frames"] == 243 and T.sound_given(n)
+    assert T.source_sound_problems(t, [n.id], project) == [] and T.cast_problems(project, t, [n.id]) == []
+    s = T.Checker(project, t).settings(n.id)
+    assert not s.get("audio_refs") and s["source_sound"]["mode"] == "track"
+    prompt = T.model_prompt(t.options, n, s)
+    assert "voice timbre" not in prompt and '"Guten Morgen."' in prompt and '"Hallo."' in prompt
+    assert prompt.count("<Audio") == 2 and T.TRACK_SOUND_TEXT.format(k=1) in prompt
+    assert T.node_cast(t.options, n)["voices"] == [] and len(T.clip_cast(t.options, n.prompt)["voices"]) == 2
+    n.overrides["sound_over"] = True                                         # laid over: the model's own speech
+    assert not T.sound_given(n)
+    s = T.Checker(project, t).settings(n.id)
+    assert len(s["audio_refs"]) == 2 and "voice timbre" in T.model_prompt(t.options, n, s)
+    assert T.source_sound_problems(t, [n.id], project) == []
+
+
 def test_a_shared_track_stays_and_short_lines_are_filled(project, tmp_path):
     t = T.load(project)
     give_voice(project, t, "Anna", tmp_path)
