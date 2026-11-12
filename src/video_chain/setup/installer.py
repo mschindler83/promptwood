@@ -420,10 +420,15 @@ class Installer:
                 say(f"    {cid if i == 0 else '':13} {lic['name']}\n                  {lic['link']}")
         if plain:
             say(f"    {', '.join(plain)}: Apache-2.0 / MIT")
-        say("    Several of these allow research or non-commercial use only, and where no licence is stated you have\n"
-            "    no stated permission at all. Whether your use is allowed is for you to check on the pages above;\n"
-            "    setup cannot judge it. You accept a model's licence by downloading it. Parts you do not want can\n"
-            "    be left out (--without NAME). docs/MODELS.md lists every file with its source and licence.")
+        if len(plain) < len(self.components):
+            say("    Several of these allow research or non-commercial use only, and where no licence is stated you "
+                "have\n    no stated permission at all. Whether your use is allowed is for you to check on the "
+                "pages above;\n    setup cannot judge it. You accept a model's licence by downloading it. Parts "
+                "you do not want can\n    be left out (--without NAME). docs/MODELS.md lists every file with its "
+                "source and licence.")
+        else:
+            say("    You accept a model's licence by downloading it. docs/MODELS.md lists every file with its "
+                "source and licence.")
         if self.o.accept_licenses:
             return
         if not self.interactive or not ask("    Do you accept these licences?"):
