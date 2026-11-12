@@ -3,7 +3,8 @@ line on stdin with one line "@@TTS {json}" on stdout. Everything else the librar
 
 Requests ({"cmd": ...}):
   design     {"model", "text", "language", "instruct", "out", "seed"}   a new voice from a description (VoiceDesign)
-  clone      {"model", "text", "language", "ref_audio", "ref_text", "out", "seed"}   a line in a voice sample's voice
+  clone      {"model", "text", "language", "ref_audio", "ref_text", "out", "seed", "temperature"}   a line in a
+             voice sample's voice
   transcribe {"model", "audio", "language"}                             what a voice sample says (Whisper)
   isolate    {"dir", "model", "audio", "out"}                           a recording's voice without its music
   quit
@@ -76,8 +77,9 @@ def handle(r: dict) -> dict:
             _prompts[key] = m.create_voice_clone_prompt(ref_audio=r["ref_audio"], ref_text=text,
                                                         x_vector_only_mode=text is None)
         _seed(r.get("seed"))
+        kw = {"temperature": float(r["temperature"])} if r.get("temperature") else {}     # (else the model's own)
         wavs, sr = m.generate_voice_clone(text=r["text"], language=r.get("language") or "Auto",
-                                          voice_clone_prompt=_prompts[key])
+                                          voice_clone_prompt=_prompts[key], **kw)
         return _write(r["out"], wavs[0], sr)
     if cmd == "transcribe":
         import subprocess

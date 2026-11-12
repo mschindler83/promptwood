@@ -34,8 +34,8 @@ class FakeLocal:
     def problems(self, **_k):
         return []
 
-    def clone(self, text, lang, ref_audio, ref_text, out, seed=None):
-        self.calls.append(("clone", text, lang, Path(ref_audio).name, ref_text, seed))
+    def clone(self, text, lang, ref_audio, ref_text, out, seed=None, **how):
+        self.calls.append(("clone", text, lang, Path(ref_audio).name, ref_text, seed, *([how] if how else [])))
         tone(Path(out), round(0.08 * len(text), 2))
         return 0.08 * len(text)
 
@@ -55,8 +55,8 @@ class FakeLocal:
 class FakeEleven(FakeLocal):
     name = "elevenlabs"
 
-    def speak(self, text, voice_id, out, model="eleven_multilingual_v2", lang=None, seed=None):
-        self.calls.append(("speak", text, voice_id, model, lang, seed))
+    def speak(self, text, voice_id, out, model="eleven_multilingual_v2", lang=None, seed=None, **how):
+        self.calls.append(("speak", text, voice_id, model, lang, seed, *([how] if how else [])))
         raw = Path(out).with_suffix(".src.wav")
         tone(raw, round(0.08 * len(text), 2), 500)
         chain.to_wav(raw, Path(out))
@@ -167,6 +167,41 @@ def test_a_long_clip_speaks_its_lines(project, tmp_path):
     s = T.Checker(project, t).settings(n.id)
     assert len(s["audio_refs"]) == 2 and "voice timbre" in T.model_prompt(t.options, n, s)
     assert T.source_sound_problems(t, [n.id], project) == []
+
+
+def test_takes_and_how_lines_are_spoken(project, tmp_path):
+    """Another take: other seeds, another file. Delivery and speed: the temperature and a tempo change (local), the
+    voice's stability and speed (ElevenLabs; eleven_v3 takes 0 / 0.5 / 1 only). The defaults change nothing."""
+    t = T.load(project)
+    give_voice(project, t, "Anna", tmp_path)
+    n = t.add(None, '@Anna says "Hallo, wie geht es dir heute so?" Then she says "Gut."')
+    assert tts.speak_options(t) == tts.SPEAK_DEFAULTS == {"takes": 3, "delivery": "natural", "speed": 1.0}
+    assert tts.speak_options(given={"takes": 99, "delivery": "odd", "speed": 5}) == {
+        "takes": 8, "delivery": "natural", "speed": 1.2}
+    loc = FakeLocal()
+    a = tts.render_lines(project, t, n.id, loc)
+    b = tts.render_lines(project, t, n.id, loc, take=1)
+    clones = [c for c in loc.calls if c[0] == "clone"]
+    assert all(len(c) == 6 for c in clones)                                   # nothing extra by default
+    assert [c[5] for c in clones] == [n.seed, n.seed + 1, n.seed + 7919, n.seed + 7920]
+    assert a["file"] != b["file"] and (a["take"], b["take"]) == (0, 1) and a["secs"] == pytest.approx(b["secs"])
+    slow = tts.render_lines(project, t, n.id, loc, take=2, speak={"delivery": "lively", "speed": 0.8})
+    assert loc.calls[-1][6] == {"temperature": 1.1} and slow["speak"] == {"takes": 3, "delivery": "lively",
+                                                                          "speed": 0.8}
+    spoken = 0.08 * (32 + 4)
+    assert slow["secs"] - a["secs"] == pytest.approx(spoken / 0.8 - spoken, abs=0.1)     # the lines, not the pauses
+    tts.render_lines(project, t, n.id, loc, speak={"delivery": "steady"})
+    assert loc.calls[-1][6] == {"temperature": 0.7}
+    t.options["tts"] = {"provider": "elevenlabs", "speak": {"delivery": "steady", "speed": 1.1}}     # the project's
+    tts._set_voice_fields(t, "Anna", eleven={"id": "v1", "name": "Rachel"})
+    el = FakeEleven()
+    r = tts.render_lines(project, t, n.id, el)
+    assert el.calls[-1][6] == {"settings": {"stability": 0.8, "speed": 1.1}} and r["speak"]["speed"] == 1.1
+    t.options["tts"]["eleven_model"] = "eleven_v3"
+    tts.render_lines(project, t, n.id, el, speak={"delivery": "lively"})
+    assert el.calls[-1][6] == {"settings": {"stability": 0.0}}
+    tts.render_lines(project, t, n.id, el, speak={})
+    assert len(el.calls[-1]) == 6
 
 
 def test_a_shared_track_stays_and_short_lines_are_filled(project, tmp_path):
@@ -365,6 +400,10 @@ def test_elevenlabs_api(eleven_server, tmp_path):
     assert json.loads(post[2]) == {"text": "Hallo du.", "model_id": "eleven_v3", "seed": 7, "language_code": "de"}
     el.speak("Hi.", "v1", out, "eleven_multilingual_v2", "German")
     assert "language_code" not in json.loads([s for s in _Fake.seen if s[0] == "POST"][-1][2])   # (not taken)
+    assert "voice_settings" not in json.loads([s for s in _Fake.seen if s[0] == "POST"][-1][2])
+    el.speak("Hi.", "v1", out, settings={"stability": 0.8, "speed": 1.1})
+    assert json.loads([s for s in _Fake.seen if s[0] == "POST"][-1][2])["voice_settings"] == {"stability": 0.8,
+                                                                                               "speed": 1.1}
     sample = tmp_path / "s.wav"
     tone(sample, 2.0)
     assert el.clone("Anna", sample) == "new1"
@@ -435,6 +474,12 @@ def test_qwen3_tts_speaks_german_and_english(tmp_path):
             assert loc.clone(line, lang, ref, tts.SAMPLE_TEXT["German"], out, seed=1) > 1.0
             got = loc.transcribe(out, code).lower().strip(" .!")
             assert got == line.lower().strip(" .!"), got
+        # steady / lively (the sampling temperature): still the same words
+        for temp in (0.7, 1.1):
+            out = tmp_path / f"t{temp}.wav"
+            assert loc.clone("Wir sehen uns morgen im Park.", "German", ref, tts.SAMPLE_TEXT["German"], out, seed=1,
+                             temperature=temp) > 1.0
+            assert loc.transcribe(out, "de").lower().strip(" .!") == "wir sehen uns morgen im park"
         # music under the voice is taken out: the tones are gone, the words are still there
         mixed, clean = tmp_path / "mixed.wav", tmp_path / "clean.wav"
         subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(ref), "-f", "lavfi", "-i",

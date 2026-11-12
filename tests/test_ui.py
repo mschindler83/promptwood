@@ -3668,7 +3668,7 @@ def test_text_to_speech_in_the_app(app, win, tmp_path, image, monkeypatch):
         def transcribe(self, audio, lang=None):
             return "sample words"
 
-        def clone(self, text, lang, ref, ref_text, out, seed=None):
+        def clone(self, text, lang, ref, ref_text, out, seed=None, temperature=None):
             tone(out, 1.5)
 
         def design(self, text, lang, instruct, out, seed=None):
@@ -3716,6 +3716,42 @@ def test_text_to_speech_in_the_app(app, win, tmp_path, image, monkeypatch):
     tr = T.track_of(win.tree, T.track_id(node))
     assert tr and tr["tts"]["clip"] == nid and "spoken" in win.status.text()
     assert T.load(win.project).nodes[nid].overrides["source_sound"] == T.TRACK_PREFIX + tr["id"]   # saved
+    # the Speak the lines window: takes to choose from, how they are spoken; the one used becomes the sound
+    seen = {}
+
+    def choose(dlg):
+        seen.update(lines=dlg.lines.toPlainText(), start=dlg.speak_values(), use=dlg.b_use.isEnabled())
+        dlg.n.setValue(2)
+        dlg.delivery.setCurrentIndex(dlg.delivery.findData("lively"))
+        dlg.speed.setValue(0.8)
+        dlg.make()
+        seen["busy"] = (dlg.busy, dlg.b_make.isEnabled())
+        dlg.reject()                                         # (while takes are made: it would close afterwards)
+        dlg._close_when_done = False
+        wait(app, lambda: not dlg.busy, timeout=30)
+        dlg.n.setValue(1)
+        dlg.make()
+        wait(app, lambda: not dlg.busy, timeout=30)
+        seen.update(rows=[dlg.list.item(k).text() for k in range(dlg.list.count())], info=dlg.info.text(),
+                    files=[win.project / r["file"] for r in dlg.takes])
+        dlg.list.setCurrentRow(dlg.list.count() - 1)
+        dlg.accept()
+        return dlg.chosen is not None
+    monkeypatch.setattr(M, "run_speak_dialog", choose)
+    old_track = T.track_id(win.tree.nodes[nid])
+    win.node_action("speak", nid)
+    assert seen["lines"] == "Anna: “Hallo, schön dich zu sehen.”" and not seen["use"]
+    assert seen["start"] == TTS.SPEAK_DEFAULTS and seen["busy"] == (True, False)
+    assert 1 <= len(seen["rows"]) <= 3 and seen["rows"][0].startswith("Take 1   ·   ")
+    assert seen["rows"][-1].endswith("lively, 0.8 ×")
+    assert [f.is_file() for f in seen["files"]] == [False] * (len(seen["files"]) - 1) + [True]   # the others went
+    tr = T.track_of(win.tree, T.track_id(win.tree.nodes[nid]))
+    assert tr["id"] != old_track and win.project / tr["file"] == seen["files"][-1] and "spoken" in win.status.text()
+    assert T.load(win.project).options["tts"]["speak"] == {"takes": 1, "delivery": "lively", "speed": 0.8}
+    assert win.played[-1] == seen["files"][0] and not win._tts_busy
+    monkeypatch.setattr(M, "run_speak_dialog", lambda dlg: (seen.update(again=dlg.speak_values()), False)[1])
+    win.node_action("speak", nid)                            # cancelled: nothing changes; the settings were kept
+    assert seen["again"]["delivery"] == "lively" and T.track_id(win.tree.nodes[nid]) == tr["id"]
     # a frozen clip's lines are not spoken
     win.tree.nodes[nid].frozen = True
     win.node_action("speak", nid)
@@ -3724,6 +3760,7 @@ def test_text_to_speech_in_the_app(app, win, tmp_path, image, monkeypatch):
     # provider + key
     win.tts_provider.setCurrentIndex(win.tts_provider.findData("elevenlabs"))
     assert TTS.options(win.tree)["provider"] == "elevenlabs" and "API key" in win.status.text()
+    assert TTS.speak_options(win.tree)["delivery"] == "lively"               # (kept when the provider changes)
     assert win._tts_form.isRowVisible(win._eleven_row)
     win.eleven_key.setText(" sk_abc ")
     win._save_eleven_key()

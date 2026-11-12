@@ -48,6 +48,7 @@ from .timeline import Block, Timeline
 from .storyboard import Storyboard
 from .face_crop import FaceCropDialog
 from .prompt_refiner import RefineDialog, replace_text
+from .speak_dialog import SpeakLinesDialog, run_dialog as run_speak_dialog
 from .tts_dialog import VoiceTtsDialog, run_dialog as run_voice_dialog
 from .image_edit import EDITS_DIR, ImageEditDialog, project_edits, record_use, uses_of
 from .video_editor import VideoRangeDialog, choose_video
@@ -111,6 +112,8 @@ STATE_STYLE = {"done": "done", "reused": "done", "generating": "target", "failed
                "changed": "missing", "new": "", "converting": "target"}
 SPEAK_TIP = ("<p>Speak this clip's lines (\"...\" after @Name, e.g. @Anna says \"Hello.\") with text to speech, "
              "each in its speaker's voice, and make them the clip's sound: the picture is made to it, lips in sync."
+             "<br>A window opens: make a few takes, set how steady or lively and how fast the lines are spoken, "
+             "listen, and use the best take."
              "<br>Who speaks (Qwen3-TTS on this computer, or ElevenLabs with your API key) is set in the Cast tab, "
              "under Text to speech; the API key in Settings.</p>")
 FREEZE_TIP = ("Freeze: keep this clip as it is made, and every clip before it. They count as done whatever "
@@ -3380,8 +3383,9 @@ class MainWindow(QMainWindow):
         self._tts_form.setRowVisible(self._eleven_row, provider == "elevenlabs")
         new = {"provider": provider, "eleven_model": self.eleven_model.currentData() or
                TTS.DEFAULT_OPTIONS["eleven_model"]}
-        if TTS.options(self.tree) != new:
-            self.tree.options["tts"] = new
+        old = TTS.options(self.tree)
+        if {k: old[k] for k in new} != new:
+            self.tree.options["tts"] = {**(self.tree.options.get("tts") or {}), **new}
             self._changed()                         # (a spoken track is made with it; clips do not depend on it)
         if provider == "elevenlabs" and not TTS.eleven_key():
             self.status.setText("ElevenLabs needs your API key: Settings → ElevenLabs API key.")
@@ -3431,22 +3435,92 @@ class MainWindow(QMainWindow):
     def _tts_engine(self):
         return TTS.engine(self.tree, self.local_tts())
 
-    def speak_clip(self, nid: str) -> bool:
-        """Speak a clip's lines with text to speech (in a thread); _lines_spoken makes them its sound."""
+    def _speak_engine(self, nid: str):
+        """The engine a clip's lines can be spoken with now, or None (the status line says why not)."""
         if self.tree is None or self.running or nid not in self.tree.nodes:
-            return False
+            return None
         if self._tts_busy:
             self.status.setText("Text to speech is busy; wait until it is done.")
-            return False
+            return None
         node = self.tree.nodes[nid]
         if node.frozen:
             self._frozen_block(node, "speak")
-            return False
+            return None
         eng = self._tts_engine()
         bad = TTS.line_problems(self.tree, node, eng.name) + eng.problems(
             transcribe=eng.name == "local" and TTS.needs_transcript(self.tree, node))
         if bad:
             self.status.setText(f"Cannot speak the lines of clip #{nid[1:]}: " + "; ".join(bad) + ".")
+            return None
+        return eng
+
+    def speak_clip_window(self, nid: str) -> bool:
+        """The Speak the lines window for a clip: takes are made and listened to, how they are spoken is set; the
+        take that is used becomes the clip's sound (_lines_spoken). True: a take was used."""
+        eng = self._speak_engine(nid)
+        if eng is None:
+            return False
+        snap, project = copy.deepcopy(self.tree), self.project
+
+        def render(take: int, how: dict) -> dict:
+            r = TTS.render_lines(project, snap, nid, eng, take=take, speak=how)
+            for name, text in (r.get("texts") or {}).items():     # (transcribed once, not for every take)
+                TTS._set_voice_fields(snap, name, text=text)
+            return r
+        dlg = SpeakLinesDialog(
+            self, f"#{nid[1:]}", [{"name": d["speaker"]["name"], "line": d["line"]}
+                                  for d in TTS.clip_lines(self.tree, self.tree.nodes[nid])],
+            eng.name, TTS.speak_options(self.tree),
+            play=lambda path, title: self.preview.open(Path(path), title),
+            render=render,
+            file=lambda r: project / r["file"])
+        self._tts_busy = True
+        self._update_buttons()
+        used = False
+        try:
+            ok = run_speak_dialog(dlg)
+            how = dlg.speak_values()
+            if TTS.speak_options(self.tree) != how:     # how lines are spoken is kept with the project
+                self.tree.options["tts"] = {**(self.tree.options.get("tts") or {}), "speak": how}
+                self._changed()
+            self.preview.stop()                         # (it may still play a take that goes now)
+            for r in dlg.unused():
+                (project / r["file"]).unlink(missing_ok=True)
+            if ok and dlg.chosen is not None:
+                texts = {}                              # (every take's transcripts: each was made once only)
+                for r in dlg.takes:
+                    texts.update(r.get("texts") or {})
+                self._lines_spoken(nid, {**dlg.chosen, "texts": texts}, "", str(project))
+                used = True
+            elif dlg.takes:                             # nothing used: the transcripts are still kept
+                self._keep_transcripts(dlg.takes)
+        finally:
+            self._tts_busy = False
+            self._update_buttons()
+            dlg.deleteLater()
+            if eng.name == "local":
+                self.stop_tts("the lines window was closed")
+        return used
+
+    def _keep_transcripts(self, takes: list[dict]) -> None:
+        """What the voice samples say (transcribed while takes were made) is kept, also when no take is used."""
+        changed = False
+        for r in takes:
+            files = r.get("voice_files") or {}
+            for name, text in (r.get("texts") or {}).items():
+                c = T.character(self.tree, name)
+                if c is not None and c.get("voice") and files.get(name) == c["voice"]["file"] \
+                        and not c["voice"].get("text"):
+                    TTS._set_voice_fields(self.tree, name, text=text)
+                    changed = True
+        if changed:
+            self._write_tree()
+
+    def speak_clip(self, nid: str) -> bool:
+        """Speak a clip's lines with text to speech right away (one take, in a thread); _lines_spoken makes them
+        its sound."""
+        eng = self._speak_engine(nid)
+        if eng is None:
             return False
         snap, project = copy.deepcopy(self.tree), self.project
         self._tts_busy = True
@@ -5533,7 +5607,7 @@ class MainWindow(QMainWindow):
             self.revert_clip(node.id)
             return
         if action == "speak" and node is not None and not node.is_video:
-            self.speak_clip(node.id)
+            self.speak_clip_window(node.id)
             return
         if action == "refine" and node is not None and not node.is_video:
             card = next((c for c in self.cards if c.nid == node.id and isinstance(c, PromptCard)), None)
