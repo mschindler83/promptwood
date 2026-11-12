@@ -701,6 +701,28 @@ def test_identity_references_in_the_window(app, win, tmp_path, image, monkeypatc
     monkeypatch.setattr(AudioRangeDialog, "exec", as_it_is)
     win._voice_from_file()
     assert win.char_voice.text() == "Voice: talk.mp4 (7.5 s; cloned from 17.0 s)"
+    # From clip: the same window on the selected clip's video
+    shutil.copy(film, win.project / "made.mp4")
+    node = win.tree.nodes[ids[1]]
+    was_made, was_sel = node.made, win.tree.selected
+    node.made, win.tree.selected = {**(node.made or {}), "video": "made.mp4"}, ids[1]
+
+    def from_clip(dlg):
+        seen.update(file=Path(dlg.file).name, can=dlg.b_clean.isEnabled())
+        dlg.set_range(1.0, 11.0)
+        if seen["remove"]:
+            dlg.remove_music()
+            wait(app, lambda: not dlg.clean_busy, timeout=30)
+        return QDialog.Accepted
+    monkeypatch.setattr(AudioRangeDialog, "exec", from_clip)
+    for seen["remove"], name in ((False, f"sound of clip #{ids[1][1:]}"),
+                                 (True, f"sound of clip #{ids[1][1:]} (music removed)")):
+        win._voice_from_selected()
+        assert seen["file"] == "made.mp4" and seen["can"]
+        assert win.char_voice.text() == f"Voice: {name} (7.5 s; cloned from 10.0 s)"
+    assert Sep.calls[-1] == 10.0 and not win._tts_busy
+    node.made, win.tree.selected = was_made, was_sel
+    (win.project / "made.mp4").unlink()
     Sep.problems = lambda self, **_k: ["removing music needs the audio-separator package"]
     monkeypatch.setattr(AudioRangeDialog, "exec", lambda dlg: (seen.update(
         can=dlg.b_clean.isEnabled(), tip=dlg.b_clean.toolTip()), QDialog.Rejected)[1])

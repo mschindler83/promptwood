@@ -4015,7 +4015,14 @@ class MainWindow(QMainWindow):
             return
         f = pick_image(self, f"Voice of @{c['name']} (one speaker, 2-{T.VOICE_MAX_SECS:g} s are used)", self.qs,
                        places=self._picker_places(), collections=self.project_media("media"), kind="media")
-        if not f:
+        if f:
+            self._choose_voice_part(f)
+
+    def _choose_voice_part(self, f: str, label: str | None = None) -> None:
+        """The voice of the selected character from a part of the file f, chosen in the voice window (with or
+        without its background music). label: what the voice is called (else the file's name)."""
+        c = self._selected_character()
+        if c is None or not self._cast_edit_ok():
             return
         mine = not self._tts_busy                   # (the worker that removes music is the text to speech one)
         dlg = self._voice_dialog(f, c["name"], isolate=mine)
@@ -4025,10 +4032,12 @@ class MainWindow(QMainWindow):
                 self.status.setText(f"Could not set the voice: {dlg.info_label.text()}")
                 return
             if dlg.exec() == QDialog.Accepted and dlg.file:
+                name = label if label and dlg.file == str(f) else None     # (another file chosen in the window)
                 if dlg.cleaned is not None:
-                    self.set_character_voice(str(dlg.cleaned), label=f"{Path(dlg.file).name} (music removed)")
+                    self.set_character_voice(str(dlg.cleaned),
+                                             label=f"{name or Path(dlg.file).name} (music removed)")
                 else:
-                    self.set_character_voice(dlg.file, start=dlg.start, end=dlg.end)
+                    self.set_character_voice(dlg.file, label=name, start=dlg.start, end=dlg.end)
         finally:
             dlg.cleanup()
             dlg.deleteLater()
@@ -4056,7 +4065,7 @@ class MainWindow(QMainWindow):
             self.status.setText("Select a made clip or a converted video first.")
             return
         what = f"{'video' if node.is_video else 'clip'} #{nid[1:]}"
-        self.set_character_voice(str(self.project / node.made["video"]), label=f"sound of {what}")
+        self._choose_voice_part(str(self.project / node.made["video"]), label=f"sound of {what}")
 
     def set_character_voice(self, path: str, label: str | None = None, start: float = 0.0,
                             end: float | None = None) -> bool:
@@ -4647,8 +4656,9 @@ class MainWindow(QMainWindow):
         has_sound = node is not None and bool((node.made or {}).get("video"))
         self.b_voice_clip.setEnabled(has_sound and self._selected_character() is not None and not self.running)
         self.b_voice_clip.setToolTip(
-            f"Set the voice from the sound of {'video' if node.is_video else 'clip'} #{nid[1:]} (its first "
-            f"{T.VOICE_MAX_SECS:g} s)" if has_sound else "Select a made clip or a converted video with the voice")
+            f"Set the voice from the sound of {'video' if node.is_video else 'clip'} #{nid[1:]}: choose the part "
+            "of it, with or without its background music" if has_sound
+            else "Select a made clip or a converted video with the voice")
 
     def _show_start_image(self):
         self._update_ref_start_button()
