@@ -319,11 +319,32 @@ def comfy_up(url: str, timeout: float = 5) -> bool:
         return False
 
 
+def own_comfy_dir() -> Path | None:
+    """The ComfyUI folder when setup installed it itself (then only that very ComfyUI may be tested or stopped);
+    None for a ComfyUI the user brought."""
+    d = paths.comfy_dir()
+    return d if (d / ".video-chain-setup").is_file() else None
+
+
+def running_comfy_is(url: str, folder: Path) -> bool:
+    """Whether the ComfyUI answering at url was started from this folder (its launcher names it)."""
+    try:
+        with urllib.request.urlopen(url.rstrip("/") + "/system_stats", timeout=10) as r:
+            argv = (json.loads(r.read()).get("system") or {}).get("argv") or []
+    except (urllib.error.URLError, ConnectionError, TimeoutError, OSError, ValueError):
+        return False
+    return any(os.path.realpath(str(a)) == os.path.realpath(str(folder)) for a in argv)
+
+
 class ComfySession:
     """ComfyUI for the checks: the running one is used as it is; else it is started with the launcher and stopped
     again afterwards (only the process started here is ever stopped)."""
 
-    def __init__(self, url: str | None = None, launcher: Path | None = None, wait: float = 900, log=print):
+    def __init__(self, url: str | None = None, launcher: Path | None = None, wait: float = 900, log=print,
+                 expect_dir: Path | None = None):
+        """expect_dir: the folder of the ComfyUI setup installed. A ComfyUI that already answers at the address
+        but runs from somewhere else belongs to someone else and is left completely alone (RuntimeError)."""
+        self.expect_dir = expect_dir
         self.url, self.launcher = (url or paths.comfy_url()).rstrip("/"), Path(launcher or paths.comfy_launcher())
         self.wait, self.log = wait, log
         self.proc: subprocess.Popen | None = None
@@ -331,6 +352,10 @@ class ComfySession:
 
     def __enter__(self):
         if comfy_up(self.url):
+            if self.expect_dir is not None and not running_comfy_is(self.url, self.expect_dir):
+                raise RuntimeError(f"another ComfyUI (not the one in {self.expect_dir}) is running at {self.url}; "
+                                   "it was left alone and nothing was tested. Give Promptwood's ComfyUI its own "
+                                   "port: video-chain setup --steps comfyui --comfy-port 8189")
             self.log(f"ComfyUI is running at {self.url}")
             return self
         if not self.launcher.is_file():

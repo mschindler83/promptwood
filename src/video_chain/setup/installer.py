@@ -488,12 +488,15 @@ class Installer:
         if port is None:
             m = re.search(r":(\d+)$", paths.load_config().get("comfy_url", ""))
             port = int(m.group(1)) if m else 8188
-            if not m and self.own_comfy and not there:
-                # a fresh ComfyUI next to another program on 8188 (often: another ComfyUI) takes the next free port
+            if not m and self.own_comfy:
+                # our own ComfyUI next to another program on 8188 (often: another ComfyUI) takes the next free
+                # port; the choice is written down at once, so a run that stops later comes back to it
                 first = port
                 while port < first + 20 and _port_busy(port):
                     port += 1
                 moved = first if port != first else None
+        if self.own_comfy:
+            paths.save_config(comfy_url=f"http://127.0.0.1:{port}")
         url = f"http://127.0.0.1:{port}"
         if self.wants("comfyui") or not there:
             if self.own_comfy:
@@ -535,7 +538,10 @@ class Installer:
                 ours.parent.mkdir(parents=True, exist_ok=True)
                 ours.write_text("#!/usr/bin/env bash\n# Starts ComfyUI for Promptwood (written by video-chain "
                                 "setup). Extra arguments go to ComfyUI.\n"
-                                f'cd "{d}" || exit 1\nexec "{py}" main.py --port {port} "$@"\n')
+                                f'cd "{d}" || exit 1\n'
+                                # (--base-directory is ComfyUI's own folder, its default: named so that a running
+                                # ComfyUI can be told apart from another one on the same port)
+                                f'exec "{py}" main.py --port {port} --base-directory "{d}" "$@"\n')
                 ours.chmod(0o755)
         paths.save_config(comfy_dir=d, comfy_python=py, comfy_launcher=launcher, comfy_url=url)
 
@@ -810,7 +816,7 @@ def run_tests(man: dict, installed: list[str]) -> list:
     quiet = lambda _t: None                                  # noqa: E731
     try:
         with working("Starting ComfyUI", "up to a minute") as w:
-            session = D.ComfySession(url, log=w.note)
+            session = D.ComfySession(url, log=w.note, expect_dir=D.own_comfy_dir())
             session.__enter__()
         try:
             with working("Asking ComfyUI for its nodes and models", quiet_end=True):

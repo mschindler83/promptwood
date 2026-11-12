@@ -748,3 +748,61 @@ def test_package_installs_survive_a_network_hiccup(server, home, monkeypatch, ca
     with pytest.raises(I.CommandFailed):                       # not the network: no point in trying again
         inst.pip(tmp_path / "bin" / "python", ["torch"], "Installing PyTorch")
     assert len(calls) == 1
+
+
+def test_a_foreign_comfyui_on_the_port_is_left_alone(home, tmp_path):
+    """A ComfyUI that answers at the address but was not started from setup's folder is never used for tests."""
+    ours = home / "ComfyUI"
+    ours.mkdir(parents=True)
+    (ours / ".video-chain-setup").write_text("rev\n")
+    assert D.own_comfy_dir() == ours
+    hits = []
+
+    class H(BaseHTTPRequestHandler):
+        argv: list = []
+
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            hits.append(self.path)
+            body = json.dumps({"system": {"argv": self.argv}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        do_POST = do_GET
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{httpd.server_port}"
+    try:
+        H.argv = ["main.py", "--port", "8188"]                       # somebody else's
+        with pytest.raises(RuntimeError, match="left alone"):
+            D.ComfySession(url, expect_dir=ours, log=lambda t: None).__enter__()
+        assert set(hits) == {"/system_stats"}                        # asked who it is, nothing else
+        H.argv = ["main.py", "--port", "8189", "--base-directory", str(ours)]
+        with D.ComfySession(url, expect_dir=ours, log=lambda t: None) as s:
+            assert s.proc is None
+        (ours / ".video-chain-setup").unlink()
+        assert D.own_comfy_dir() is None                             # a ComfyUI the user brought: theirs to use
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_the_port_choice_survives_a_run_that_stops(server, home, monkeypatch):
+    monkeypatch.setattr(M, "load", lambda: _mini_manifest(server))
+    monkeypatch.setattr(I, "_port_busy", lambda port: port == 8188)
+    inst = I.Installer(I.Options(yes=True))
+    inst.uv = "uv"
+    monkeypatch.setattr(I, "fetch", lambda *a, **k: (_ for _ in ()).throw(I.DownloadError("network down")))
+    with pytest.raises(I.DownloadError):
+        inst.comfyui()                                               # stops while fetching ComfyUI
+    assert paths.comfy_url() == "http://127.0.0.1:8189"
+    monkeypatch.setattr(I, "_port_busy", lambda port: False)        # (later the other program is gone)
+    again = I.Installer(I.Options(yes=True))
+    again.uv = "uv"
+    with pytest.raises(I.DownloadError):
+        again.comfyui()
+    assert paths.comfy_url() == "http://127.0.0.1:8189"             # the first choice stands

@@ -86,7 +86,7 @@ def main(argv: list[str] | None = None) -> int:
         url = paths.comfy_url()
         try:
             with working("Starting ComfyUI", "up to a minute") as w:
-                session = D.ComfySession(url, log=w.note)
+                session = D.ComfySession(url, log=w.note, expect_dir=D.own_comfy_dir())
                 session.__enter__()
             try:
                 with working("Asking ComfyUI for its nodes and models", quiet_end=True):
