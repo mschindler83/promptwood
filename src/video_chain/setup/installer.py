@@ -525,7 +525,8 @@ class Installer:
     def verify(self) -> bool:
         step("Checking the result")
         installed = sorted(set(self.before) | set(self.components), key=list(self.man["components"]).index)
-        paths.save_config(components=",".join(installed))
+        if self.models:                                  # (a run of single steps installs no parts)
+            paths.save_config(components=",".join(installed))
         checks = D.check_all(installed)
         gpu = S.gpu()
         busy = gpu is not None and gpu["free_mb"] < TEST_FREE_MB

@@ -380,7 +380,7 @@ def deep_checks(url: str, components: list[str]) -> list[Check]:
     return out
 
 
-def render_test(url: str, log=print, steps: int = 8) -> Check:
+def render_test(url: str, log=print, steps: int = 20) -> Check:
     """One short real clip from a generated picture, through the app's own command line."""
     g, name = "Proof", "A real clip (39 frames, with sound)"
     paths.use_private_tools()
@@ -452,7 +452,14 @@ def llm_test(log=print) -> Check:
     if not model.is_file():
         return Check(g, name, FAIL, f"{model} is missing", f"{SETUP} --only llm")
     paths.cache_dir().mkdir(parents=True, exist_ok=True)
-    port = 8091
+    import socket
+    port = 8191                                      # (not the app's own port: its server may be running)
+    while port < 8291:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(1)
+            if s.connect_ex(("127.0.0.1", port)) != 0:
+                break
+        port += 1
     server = LlamaServer(paths.llama_server(), str(model), port, False, find_mmproj(str(model)),
                          log_dir=paths.cache_dir())
     log("Starting llama.cpp with the language model …")
