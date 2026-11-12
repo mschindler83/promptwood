@@ -2512,7 +2512,7 @@ class MainWindow(QMainWindow):
 
         def work():
             try:
-                bridge.film.emit((F.join_film(film, target), root), None, purpose)
+                bridge.film.emit((F.join_film(film, target, keep=out is None), root), None, purpose)
             except Exception as e:  # noqa: BLE001
                 bridge.film.emit((None, root), str(e), purpose)
         threading.Thread(target=work, daemon=True).start()

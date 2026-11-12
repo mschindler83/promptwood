@@ -579,6 +579,29 @@ def test_stale_cleanup_also_takes_old_fixed_names(project):
     assert sorted(f.name for f in old.iterdir()) == ["n1.mp4", "n1.png", "n7_0123abcd.mp4"]
 
 
+def test_a_joined_path_made_again_keeps_the_one_before(project):
+    """paths/<id>.mp4 is joined again when a clip of it changed: the join before goes to old/paths/, never deleted;
+    an unchanged path is not joined again (and nothing is moved)."""
+    t, a, b1, b2, c = build(project)
+    run(project, [b1.id])
+    joined = T.join_path(project, T.load(project), b1.id)
+    first = joined.read_bytes()
+    old = project / chain.OLD_DIR / "paths" / joined.name
+    assert T.join_path(project, T.load(project), b1.id) == joined and not old.exists()
+    t = T.load(project)
+    t.nodes[b1.id].prompt = "b1 again"
+    T.save(project, t)
+    gen = FakeGenerator(frames=17)
+    gen.calls = [{}, {}]
+    run(project, [b1.id], gen)
+    assert T.join_path(project, T.load(project), b1.id) == joined
+    assert old.read_bytes() == first and joined.read_bytes() != first
+    assert not list(joined.parent.glob("*.new.*"))
+    t = T.load(project)
+    t.remove(b1.id, project)                                              # the clip deleted: its join is kept too
+    assert not joined.exists() and (old.with_name(old.stem + "_2.mp4")).is_file()
+
+
 def test_nothing_the_app_removes_is_deleted(project, tmp_path):
     """Pictures and sounds the app stops using (a start image, face picture, voice, sound reference, end image that
     is replaced or removed) are moved to old/ in the project, never deleted."""

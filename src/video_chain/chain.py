@@ -671,6 +671,25 @@ def keep_aside(root: Path, f: Path) -> bool:
         return False
 
 
+def replace_kept(root: Path, target: Path, write: Callable[[Path], None]) -> None:
+    """Write a video the app keeps under a fixed name (a joined path, the joined film) again: write(file) makes the
+    new one next to it, the one before goes to old/ (keep_aside: never deleted), then the new one takes its name.
+    RuntimeError when the one before cannot be moved (it is open somewhere): nothing is changed then."""
+    target = Path(target)
+    if not target.exists():
+        write(target)
+        return
+    new = target.with_name(target.stem + ".new" + target.suffix)
+    try:
+        write(new)
+        if not keep_aside(root, target):
+            raise RuntimeError(f"{target.name} is open somewhere and cannot be moved to {OLD_DIR}/; close it and "
+                               "try again")
+        new.replace(target)
+    finally:
+        new.unlink(missing_ok=True)
+
+
 def run_chain(generator: Generator, image: Path, prompts: list[str], out_dir: Path, *, seed: int = 42,
               same_seed: bool = False, settings: dict | None = None, resume: bool = True,
               drop_first: bool = True, log: Callable[[str], None] = print,

@@ -455,10 +455,11 @@ def film_problems(film: Film) -> list[str]:
     return out
 
 
-def join_film(film: Film, out: Path) -> Path:
+def join_film(film: Film, out: Path, keep: bool = False) -> Path:
     """The film as one video: every scene's path up to its ending, joined as each scene says (cut, crossfade, or
     continuing: its repeated first frame left out). Scenes of another size than the first are fitted into its frame
-    (black bars)."""
+    (black bars). keep: out is the app's own file of the film (played again and again): it is joined again only
+    when something changed, and the join before is then moved to old/ in the film's folder, never deleted."""
     problems = film_problems(film)
     if problems:
         raise ValueError(problems[0])
@@ -475,7 +476,19 @@ def join_film(film: Film, out: Path) -> Path:
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
     size = (first["width"] // 2 * 2, first["height"] // 2 * 2)     # even (the video codec needs it)
-    chain.join_parts(parts, out, size, [s.join for s in film.scenes], fade=FADE_SECS)
+    joins = [s.join for s in film.scenes]
+
+    def write(f: Path) -> None:
+        chain.join_parts(parts, f, size, joins, fade=FADE_SECS)
+    if not keep:
+        write(out)
+        return out
+    key = json.dumps([[str(p), p.stat().st_mtime_ns] for p in parts] + [joins, list(size)])
+    stamp = out.with_suffix(".json")
+    if out.exists() and stamp.exists() and stamp.read_text() == key:
+        return out
+    chain.replace_kept(film.root, out, write)
+    stamp.write_text(key)
     return out
 
 

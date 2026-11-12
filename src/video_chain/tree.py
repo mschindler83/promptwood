@@ -248,8 +248,8 @@ class Tree:
                 for rel in ({node.end_image, (node.made or {}).get("end_image")} | keyframe_files(node)) - {None}:
                     if _in_ends(project, rel):
                         chain.keep_aside(project, Path(project) / rel)
-                for ext in (".mp4", ".json"):
-                    _unlink(Path(project) / "paths" / f"{g}{ext}")
+                chain.keep_aside(project, Path(project) / "paths" / f"{g}.mp4")     # its joined path too
+                _unlink(Path(project) / "paths" / f"{g}.json")
         if self.selected in gone:
             self.selected = parent
         heal_frozen(self)
@@ -2964,7 +2964,11 @@ def join_path(project: Path, tree: Tree, nid: str, out: Path | None = None) -> P
     stamp = target.with_suffix(".json")
     if out is None and target.exists() and stamp.exists() and stamp.read_text() == key:
         return target
-    chain.concat(videos, target, cuts=cuts, size=size, fill=True)
-    if out is None:
+    def write(f: Path) -> None:
+        chain.concat(videos, f, cuts=cuts, size=size, fill=True)
+    if out is None:                                # the join before is never deleted: it goes to old/
+        chain.replace_kept(project, target, write)
         stamp.write_text(key)
+    else:
+        write(target)
     return target
