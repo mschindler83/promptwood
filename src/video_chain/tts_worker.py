@@ -78,7 +78,12 @@ def handle(r: dict) -> dict:
                                                         x_vector_only_mode=text is None)
         _seed(r.get("seed"))
         kw = {"temperature": float(r["temperature"])} if r.get("temperature") else {}     # (else the model's own)
-        wavs, sr = m.generate_voice_clone(text=r["text"], language=r.get("language") or "Auto",
+        # " ..." after the line: the model stops speaking where its text ends, and without it that is often before
+        # the last consonant is out (German most of all: "Par" for "Park."). Measured with a designed voice, 30
+        # German lines: 17 without their last consonant as they are, 2 with " ..."; the same words are heard, the
+        # line ends with about 0.1 s more silence.
+        text = r["text"].rstrip() + " ..."
+        wavs, sr = m.generate_voice_clone(text=text, language=r.get("language") or "Auto",
                                           voice_clone_prompt=_prompts[key], **kw)
         return _write(r["out"], wavs[0], sr)
     if cmd == "transcribe":
