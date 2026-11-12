@@ -3,8 +3,10 @@ line on stdin with one line "@@TTS {json}" on stdout. Everything else the librar
 
 Requests ({"cmd": ...}):
   design     {"model", "text", "language", "instruct", "out", "seed"}   a new voice from a description (VoiceDesign)
-  clone      {"model", "text", "language", "ref_audio", "ref_text", "out", "seed"}   a line in a voice sample's voice
+  clone      {"model", "text", "language", "ref_audio", "ref_text", "out", "seed", "temperature"}   a line in a
+             voice sample's voice
   transcribe {"model", "audio", "language"}                             what a voice sample says (Whisper)
+  isolate    {"dir", "model", "audio", "out"}                           a recording's voice without its music
   quit
 Answers: {"ok": true, "secs": ..., "sr": ...} / {"ok": true, "text": ...} / {"ok": false, "error": "..."}.
 One model is kept loaded at a time (the next kind unloads it), so the GPU holds one 1.7B model at most."""
@@ -75,8 +77,14 @@ def handle(r: dict) -> dict:
             _prompts[key] = m.create_voice_clone_prompt(ref_audio=r["ref_audio"], ref_text=text,
                                                         x_vector_only_mode=text is None)
         _seed(r.get("seed"))
-        wavs, sr = m.generate_voice_clone(text=r["text"], language=r.get("language") or "Auto",
-                                          voice_clone_prompt=_prompts[key])
+        kw = {"temperature": float(r["temperature"])} if r.get("temperature") else {}     # (else the model's own)
+        # " ..." after the line: the model stops speaking where its text ends, and without it that is often before
+        # the last consonant is out (German most of all: "Par" for "Park."). Measured with a designed voice, 30
+        # German lines: 17 without their last consonant as they are, 2 with " ..."; the same words are heard, the
+        # line ends with about 0.1 s more silence.
+        text = r["text"].rstrip() + " ..."
+        wavs, sr = m.generate_voice_clone(text=text, language=r.get("language") or "Auto",
+                                          voice_clone_prompt=_prompts[key], **kw)
         return _write(r["out"], wavs[0], sr)
     if cmd == "transcribe":
         import subprocess
@@ -95,6 +103,35 @@ def handle(r: dict) -> dict:
         text = p({"raw": audio, "sampling_rate": sr}, **kw)["text"].strip()
         _free()                                       # (only needed once per voice sample)
         return {"ok": True, "text": text}
+    if cmd == "isolate":
+        import gc
+        import logging
+        import shutil
+        import tempfile
+
+        import soundfile as sf
+        stem = os.path.splitext(r["model"])[0]
+        for f in (r["model"], stem + ".yaml"):        # (never downloaded from here: the app says how to get it)
+            if not os.path.isfile(os.path.join(r["dir"], f)):
+                return {"ok": False, "error": f"the model file {f} is not in {r['dir']}"}
+        _free()
+        from audio_separator.separator import Separator
+        with tempfile.TemporaryDirectory() as tmp:
+            sep = Separator(model_file_dir=r["dir"], output_dir=tmp, output_format="WAV",
+                            output_single_stem="Vocals", log_level=logging.WARNING)
+            sep.load_model(r["model"])
+            made = sep.separate(r["audio"], {"Vocals": "vocals"})
+            if not made:
+                return {"ok": False, "error": "the separation made no file"}
+            src = made[0] if os.path.isabs(made[0]) else os.path.join(tmp, made[0])
+            info = sf.info(src)
+            part = r["out"] + ".part.wav"
+            shutil.move(src, part)
+            os.replace(part, r["out"])
+        del sep
+        gc.collect()
+        _free()                                       # (only needed once per voice)
+        return {"ok": True, "secs": round(info.frames / info.samplerate, 3), "sr": info.samplerate}
     return {"ok": False, "error": f"unknown request {cmd!r}"}
 
 

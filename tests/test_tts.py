@@ -34,8 +34,8 @@ class FakeLocal:
     def problems(self, **_k):
         return []
 
-    def clone(self, text, lang, ref_audio, ref_text, out, seed=None):
-        self.calls.append(("clone", text, lang, Path(ref_audio).name, ref_text, seed))
+    def clone(self, text, lang, ref_audio, ref_text, out, seed=None, **how):
+        self.calls.append(("clone", text, lang, Path(ref_audio).name, ref_text, seed, *([how] if how else [])))
         tone(Path(out), round(0.08 * len(text), 2))
         return 0.08 * len(text)
 
@@ -55,8 +55,8 @@ class FakeLocal:
 class FakeEleven(FakeLocal):
     name = "elevenlabs"
 
-    def speak(self, text, voice_id, out, model="eleven_multilingual_v2", lang=None, seed=None):
-        self.calls.append(("speak", text, voice_id, model, lang, seed))
+    def speak(self, text, voice_id, out, model="eleven_multilingual_v2", lang=None, seed=None, **how):
+        self.calls.append(("speak", text, voice_id, model, lang, seed, *([how] if how else [])))
         raw = Path(out).with_suffix(".src.wav")
         tone(raw, round(0.08 * len(text), 2), 500)
         chain.to_wav(raw, Path(out))
@@ -137,6 +137,82 @@ def test_speak_lines_makes_the_clips_sound(project, tmp_path):
     assert not any(c[0] == "transcribe" for c in eng2.calls)                 # (the transcripts are kept)
     assert T.track_of(t, r["track"]) is None and T.track_of(t, r2["track"]) is not None
     assert T.Checker(project, t).status(n.id) == "new"
+
+
+def test_a_long_clip_speaks_its_lines(project, tmp_path):
+    """A 10 s clip whose line was spoken: its soundtrack (10 s) is all the sound the model gets. The speaker's voice
+    (7.5 s) is not sent with it (the two would be more than the 15 s the model takes, and the track has the voice
+    already); the line stays in the prompt and the soundtrack sentence ties the lips to the sound. Laid over
+    instead, the model speaks itself again, with the voice."""
+    t = T.load(project)
+    give_voice(project, t, "Anna", tmp_path, secs=9.0)
+    give_voice(project, t, "Ben", tmp_path, secs=9.0)
+    assert T.character(t, "Anna")["voice"]["secs"] == pytest.approx(T.VOICE_MAX_SECS, abs=0.1)
+    n = t.add(None, '@Anna looks up and says "Guten Morgen." @Ben answers "Hallo."')
+    n.overrides["frames"] = 243                                              # 10.1 s
+    ch = T.Checker(project, t)
+    before = ch.settings(n.id)
+    assert len(before["audio_refs"]) == 2 and "voice timbre" in T.model_prompt(t.options, n, before)
+    tts.speak_lines(project, t, n.id, FakeLocal())
+    assert n.overrides["frames"] == 243 and T.sound_given(n)
+    assert T.source_sound_problems(t, [n.id], project) == [] and T.cast_problems(project, t, [n.id]) == []
+    s = T.Checker(project, t).settings(n.id)
+    assert not s.get("audio_refs") and s["source_sound"]["mode"] == "track"
+    prompt = T.model_prompt(t.options, n, s)
+    assert "voice timbre" not in prompt and '"Guten Morgen."' in prompt and '"Hallo."' in prompt
+    assert prompt.count("<Audio") == 2 and T.TRACK_SOUND_TEXT.format(k=1) in prompt
+    assert T.node_cast(t.options, n)["voices"] == [] and len(T.clip_cast(t.options, n.prompt)["voices"]) == 2
+    n.overrides["sound_over"] = True                                         # laid over: the model's own speech
+    assert not T.sound_given(n)
+    s = T.Checker(project, t).settings(n.id)
+    assert len(s["audio_refs"]) == 2 and "voice timbre" in T.model_prompt(t.options, n, s)
+    assert T.source_sound_problems(t, [n.id], project) == []
+
+
+def test_takes_and_how_lines_are_spoken(project, tmp_path):
+    """Another take: other seeds, another file. Delivery and speed: the temperature and a tempo change (local), the
+    voice's stability and speed (ElevenLabs; eleven_v3 takes 0 / 0.5 / 1 only). The defaults change nothing."""
+    t = T.load(project)
+    give_voice(project, t, "Anna", tmp_path)
+    n = t.add(None, '@Anna says "Hallo, wie geht es dir heute so?" Then she says "Gut."')
+    assert tts.speak_options(t) == tts.SPEAK_DEFAULTS == {"takes": 3, "delivery": "natural", "speed": 1.0}
+    assert tts.speak_options(given={"takes": 99, "delivery": "odd", "speed": 5}) == {
+        "takes": 8, "delivery": "natural", "speed": 1.2}
+    loc = FakeLocal()
+    a = tts.render_lines(project, t, n.id, loc)
+    b = tts.render_lines(project, t, n.id, loc, take=1)
+    clones = [c for c in loc.calls if c[0] == "clone"]
+    assert all(len(c) == 6 for c in clones)                                   # nothing extra by default
+    assert [c[5] for c in clones] == [n.seed, n.seed + 1, n.seed + 7919, n.seed + 7920]
+    assert a["file"] != b["file"] and (a["take"], b["take"]) == (0, 1) and a["secs"] == pytest.approx(b["secs"])
+    slow = tts.render_lines(project, t, n.id, loc, take=2, speak={"delivery": "lively", "speed": 0.8})
+    assert loc.calls[-1][6] == {"temperature": 1.1} and slow["speak"] == {"takes": 3, "delivery": "lively",
+                                                                          "speed": 0.8}
+    spoken = 0.08 * (32 + 4)
+    assert slow["secs"] - a["secs"] == pytest.approx(spoken / 0.8 - spoken, abs=0.1)     # the lines, not the pauses
+    tts.render_lines(project, t, n.id, loc, speak={"delivery": "steady"})
+    assert loc.calls[-1][6] == {"temperature": 0.7}
+    t.options["tts"] = {"provider": "elevenlabs", "speak": {"delivery": "steady", "speed": 1.1}}     # the project's
+    tts._set_voice_fields(t, "Anna", eleven={"id": "v1", "name": "Rachel"})
+    el = FakeEleven()
+    r = tts.render_lines(project, t, n.id, el)
+    assert el.calls[-1][6] == {"settings": {"stability": 0.8, "speed": 1.1}} and r["speak"]["speed"] == 1.1
+    t.options["tts"]["eleven_model"] = "eleven_v3"
+    tts.render_lines(project, t, n.id, el, speak={"delivery": "lively"})
+    assert el.calls[-1][6] == {"settings": {"stability": 0.0}}
+    tts.render_lines(project, t, n.id, el, speak={})
+    assert len(el.calls[-1]) == 6
+    # other words for the lines (the Speak the lines window): spoken, and in the take's prompt; the tree is not changed
+    r = tts.render_lines(project, t, n.id, loc, lines=['  Na, "du"  da! ', "Schlecht."])
+    assert [c[1] for c in loc.calls[-2:]] == ["Na, 'du' da!", "Schlecht."]
+    assert r["prompt"] == """@Anna says "Na, 'du' da!" Then she says "Schlecht.\"""" and r["base_prompt"] == n.prompt
+    assert [d["line"] for d in r["lines"]] == ["Na, 'du' da!", "Schlecht."] and "Hallo, wie" in n.prompt
+    with pytest.raises(tts.TtsError, match="a line is empty"):
+        tts.render_lines(project, t, n.id, loc, lines=["Hallo.", " "])
+    with pytest.raises(tts.TtsError, match="2 spoken lines, not 1"):
+        tts.render_lines(project, t, n.id, loc, lines=["Hallo."])
+    assert T.replace_lines('„Hi“, says @Anna. <d>[German] Ja.</d> «Oui»', ["A", "B", "C"]) == \
+        '„A“, says @Anna. <d>[German] B</d> «C»'
 
 
 def test_a_shared_track_stays_and_short_lines_are_filled(project, tmp_path):
@@ -236,6 +312,32 @@ def test_local_worker_protocol(tmp_path):
         loc.request({"cmd": "x"})
 
 
+def test_removing_music_needs_its_package_and_model(tmp_path):
+    w = tmp_path / "worker.py"
+    w.write_text(FAKE_WORKER)
+    env = tmp_path / "env"
+    (env / "bin").mkdir(parents=True)
+    (env / "bin" / "python").symlink_to(sys.executable)
+    cache = fake_cache(tmp_path)
+    loc = tts.LocalTTS(python=env / "bin" / "python", cache=cache, worker=w, start_timeout=20)
+    assert loc.problems() == [] and "audio-separator" in loc.problems(isolate=True)[0]
+    with pytest.raises(tts.TtsError, match="video-chain setup --only tts"):
+        loc.isolate(tmp_path / "in.wav", tmp_path / "out.wav")
+    assert not loc.running()                                # (not even started)
+    (env / "lib" / "python3.12" / "site-packages" / "audio_separator").mkdir(parents=True)
+    assert tts.SEPARATOR_MODEL in loc.problems(isolate=True)[0]          # the package is there, the model is not
+    (cache / tts.SEPARATOR_DIR).mkdir()
+    for f in (tts.SEPARATOR_MODEL, Path(tts.SEPARATOR_MODEL).stem + ".yaml"):
+        (cache / tts.SEPARATOR_DIR / f).write_text("x")
+    assert loc.problems(isolate=True) == []
+    try:
+        assert loc.isolate(tmp_path / "in.wav", tmp_path / "out.wav") == 1.5
+        echo = loc.request({"cmd": "x"})["echo"]
+    finally:
+        loc.stop()
+    assert echo == {"cmd": "x"}
+
+
 def test_local_problems(tmp_path):
     loc = tts.LocalTTS(python=tmp_path / "nope" / "python", cache=tmp_path)
     bad = loc.problems(design=True)
@@ -309,6 +411,10 @@ def test_elevenlabs_api(eleven_server, tmp_path):
     assert json.loads(post[2]) == {"text": "Hallo du.", "model_id": "eleven_v3", "seed": 7, "language_code": "de"}
     el.speak("Hi.", "v1", out, "eleven_multilingual_v2", "German")
     assert "language_code" not in json.loads([s for s in _Fake.seen if s[0] == "POST"][-1][2])   # (not taken)
+    assert "voice_settings" not in json.loads([s for s in _Fake.seen if s[0] == "POST"][-1][2])
+    el.speak("Hi.", "v1", out, settings={"stability": 0.8, "speed": 1.1})
+    assert json.loads([s for s in _Fake.seen if s[0] == "POST"][-1][2])["voice_settings"] == {"stability": 0.8,
+                                                                                               "speed": 1.1}
     sample = tmp_path / "s.wav"
     tone(sample, 2.0)
     assert el.clone("Anna", sample) == "new1"
@@ -379,6 +485,29 @@ def test_qwen3_tts_speaks_german_and_english(tmp_path):
             assert loc.clone(line, lang, ref, tts.SAMPLE_TEXT["German"], out, seed=1) > 1.0
             got = loc.transcribe(out, code).lower().strip(" .!")
             assert got == line.lower().strip(" .!"), got
+        # steady / lively (the sampling temperature): still the same words
+        for temp in (0.7, 1.1):
+            out = tmp_path / f"t{temp}.wav"
+            assert loc.clone("Wir sehen uns morgen im Park.", "German", ref, tts.SAMPLE_TEXT["German"], out, seed=1,
+                             temperature=temp) > 1.0
+            assert loc.transcribe(out, "de").lower().strip(" .!") == "wir sehen uns morgen im park"
+        # music under the voice is taken out: the tones are gone, the words are still there
+        mixed, clean = tmp_path / "mixed.wav", tmp_path / "clean.wav"
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(ref), "-f", "lavfi", "-i",
+                        "sine=frequency=262:duration=30,volume=2", "-f", "lavfi", "-i",
+                        "sine=frequency=392:duration=30,volume=2", "-filter_complex",
+                        "[0:a][1:a][2:a]amix=inputs=3:duration=first:normalize=0", "-ar", "48000", "-ac", "2",
+                        str(mixed)], check=True)
+
+        def tone_db(path):                              # how loud the 262 Hz tone of the "music" is
+            out = subprocess.run(["ffmpeg", "-v", "info", "-i", str(path), "-af",
+                                  "bandpass=f=262:width_type=h:w=10,volumedetect", "-f", "null", "-"],
+                                 capture_output=True, text=True).stderr
+            return float(out.split("mean_volume:")[1].split("dB")[0])
+        secs = loc.isolate(mixed, clean)
+        assert abs(secs - chain.audio_seconds(mixed)) < 0.1
+        assert tone_db(clean) < tone_db(mixed) - 20, (tone_db(mixed), tone_db(clean))
+        assert "schön dich zu sehen" in loc.transcribe(clean, "de").lower()
         # a long clone reference (a voice set from a longer source: up to 30 s, transcribed by Whisper)
         text = ("Guten Morgen, schön dich zu sehen. Ich wollte dir schon lange erzählen, was letzte Woche passiert "
                 "ist. Wir sind früh am Morgen losgefahren, die Straßen waren noch ganz leer, und über den Feldern "

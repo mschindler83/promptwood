@@ -49,6 +49,7 @@ from .timeline import Block, Timeline
 from .storyboard import Storyboard
 from .face_crop import FaceCropDialog
 from .prompt_refiner import RefineDialog, replace_text
+from .speak_dialog import SpeakLinesDialog, run_dialog as run_speak_dialog
 from .tts_dialog import VoiceTtsDialog, run_dialog as run_voice_dialog
 from .image_edit import EDITS_DIR, ImageEditDialog, project_edits, record_use, uses_of
 from .video_editor import VideoRangeDialog, choose_video
@@ -127,6 +128,8 @@ STATE_STYLE = {"done": "done", "reused": "done", "generating": "target", "failed
                "changed": "missing", "new": "", "converting": "target"}
 SPEAK_TIP = ("<p>Speak this clip's lines (\"...\" after @Name, e.g. @Anna says \"Hello.\") with text to speech, "
              "each in its speaker's voice, and make them the clip's sound: the picture is made to it, lips in sync."
+             "<br>A window opens: make a few takes, set how steady or lively and how fast the lines are spoken, "
+             "listen, and use the best take. The words can be changed there too, to try other sentences."
              "<br>Who speaks (Qwen3-TTS on this computer, or ElevenLabs with your API key) is set in the Cast tab, "
              "under Text to speech; the API key in Settings.</p>")
 FREEZE_TIP = ("Freeze: keep this clip as it is made, and every clip before it. They count as done whatever "
@@ -1279,7 +1282,10 @@ class StartTile(FrameTile):
 
 
 class Preview(QWidget):
-    """Video player for clips and paths. The media player is created on first use."""
+    """Video player for clips and paths. The media player is created on first use.
+    opened: a file is played now (its path); moved: where it is (seconds), -1 when it stopped or was closed."""
+    opened = Signal(str)
+    moved = Signal(float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1334,6 +1340,7 @@ class Preview(QWidget):
             return
         self.player.stop()
         self.player.setSource(QUrl())
+        self.opened.emit(str(path))
         self.player.setSource(QUrl.fromLocalFile(str(path)))
         self.stack.setCurrentWidget(self.video)
         self.name.setText(title)
@@ -1356,8 +1363,12 @@ class Preview(QWidget):
             self.player.stop()
             self.player.setSource(QUrl())
             self.video.clear()
+            self.moved.emit(-1.0)
 
     def _pos(self, ms):
+        if self.player.source().isEmpty():
+            return
+        self.moved.emit(ms / 1000)
         if not self.slider.isSliderDown():
             self.slider.setValue(int(ms))
         self.time.setText(f"{fmt_time(ms / 1000)} / {fmt_time(self.player.duration() / 1000)}")
@@ -1365,6 +1376,8 @@ class Preview(QWidget):
     def _state(self, st):
         from PySide6.QtMultimedia import QMediaPlayer
         self.b_play.setIcon(icon("pause" if st == QMediaPlayer.PlayingState else "play"))
+        if st == QMediaPlayer.StoppedState:
+            self.moved.emit(-1.0)                   # (played to its end, or stopped)
 
 
 # ----------------------------------------------------------------------------- main window
@@ -2182,6 +2195,9 @@ class MainWindow(QMainWindow):
         rv = QVBoxLayout(rp)
         rv.setContentsMargins(0, 0, 0, 0)
         self.preview = Preview()
+        self._played_path: tuple[str, list] | None = None   # the joined path in the preview, its clips' spans
+        self.preview.opened.connect(self._preview_opened)
+        self.preview.moved.connect(self._preview_moved)
         rv.addWidget(self.preview, 1)
         prow = QHBoxLayout()
         prow.setContentsMargins(8, 0, 8, 8)
@@ -2521,7 +2537,7 @@ class MainWindow(QMainWindow):
 
         def work():
             try:
-                bridge.film.emit((F.join_film(film, target), root), None, purpose)
+                bridge.film.emit((F.join_film(film, target, keep=out is None), root), None, purpose)
             except Exception as e:  # noqa: BLE001
                 bridge.film.emit((None, root), str(e), purpose)
         threading.Thread(target=work, daemon=True).start()
@@ -2727,7 +2743,8 @@ class MainWindow(QMainWindow):
             return
         n = F.summary(self.film, sid)["clips"]
         if QMessageBox.question(self, "Delete scene", f"Delete the scene “{sc.title}” with its {n} clip"
-                                f"{'s' if n != 1 else ''} and their files? This cannot be undone.") != QMessageBox.Yes:
+                                f"{'s' if n != 1 else ''} from the film? Its folder with their files is not deleted: it is moved to "
+                                "old/ in the film's folder.") != QMessageBox.Yes:
             return
         if self.film.path(sid) == self.project:    # leave it first
             other = next(s for s in self.film.scenes if s.id != sid)
@@ -3405,8 +3422,9 @@ class MainWindow(QMainWindow):
         self._tts_form.setRowVisible(self._eleven_row, provider == "elevenlabs")
         new = {"provider": provider, "eleven_model": self.eleven_model.currentData() or
                TTS.DEFAULT_OPTIONS["eleven_model"]}
-        if TTS.options(self.tree) != new:
-            self.tree.options["tts"] = new
+        old = TTS.options(self.tree)
+        if {k: old[k] for k in new} != new:
+            self.tree.options["tts"] = {**(self.tree.options.get("tts") or {}), **new}
             self._changed()                         # (a spoken track is made with it; clips do not depend on it)
         if provider == "elevenlabs" and not TTS.eleven_key():
             self.status.setText("ElevenLabs needs your API key: Settings → ElevenLabs API key.")
@@ -3456,22 +3474,97 @@ class MainWindow(QMainWindow):
     def _tts_engine(self):
         return TTS.engine(self.tree, self.local_tts())
 
-    def speak_clip(self, nid: str) -> bool:
-        """Speak a clip's lines with text to speech (in a thread); _lines_spoken makes them its sound."""
+    def _speak_engine(self, nid: str):
+        """The engine a clip's lines can be spoken with now, or None (the status line says why not)."""
         if self.tree is None or self.running or nid not in self.tree.nodes:
-            return False
+            return None
         if self._tts_busy:
             self.status.setText("Text to speech is busy; wait until it is done.")
-            return False
+            return None
         node = self.tree.nodes[nid]
         if node.frozen:
             self._frozen_block(node, "speak")
-            return False
+            return None
         eng = self._tts_engine()
         bad = TTS.line_problems(self.tree, node, eng.name) + eng.problems(
             transcribe=eng.name == "local" and TTS.needs_transcript(self.tree, node))
         if bad:
             self.status.setText(f"Cannot speak the lines of clip #{nid[1:]}: " + "; ".join(bad) + ".")
+            return None
+        return eng
+
+    def speak_clip_window(self, nid: str) -> bool:
+        """The Speak the lines window for a clip: takes are made and listened to, how they are spoken is set; the
+        take that is used becomes the clip's sound (_lines_spoken). True: a take was used."""
+        eng = self._speak_engine(nid)
+        if eng is None:
+            return False
+        snap, project = copy.deepcopy(self.tree), self.project
+
+        def render(take: int, how: dict, lines: list[str]) -> dict:
+            r = TTS.render_lines(project, snap, nid, eng, take=take, speak=how, lines=lines)
+            for name, text in (r.get("texts") or {}).items():     # (transcribed once, not for every take)
+                TTS._set_voice_fields(snap, name, text=text)
+            return r
+        dlg = SpeakLinesDialog(
+            self, f"#{nid[1:]}", [{"name": d["speaker"]["name"], "line": d["line"]}
+                                  for d in TTS.clip_lines(self.tree, self.tree.nodes[nid])],
+            eng.name, TTS.speak_options(self.tree),
+            play=lambda path, title: self.preview.open(Path(path), title),
+            render=render,
+            file=lambda r: project / r["file"])
+        self._tts_busy = True
+        self._update_buttons()
+        used = False
+        try:
+            ok = run_speak_dialog(dlg)
+            how = dlg.speak_values()
+            if TTS.speak_options(self.tree) != how:     # how lines are spoken is kept with the project
+                self.tree.options["tts"] = {**(self.tree.options.get("tts") or {}), "speak": how}
+                self._changed()
+            self.preview.stop()                         # (it may still play a take that goes now)
+            for r in dlg.unused():                      # the other takes are never deleted: they go to old/
+                chain.keep_aside(project, project / r["file"])
+            if ok and dlg.chosen is not None:
+                texts = {}                              # (every take's transcripts: each was made once only)
+                for r in dlg.takes:
+                    texts.update(r.get("texts") or {})
+                node = self.tree.nodes.get(nid)
+                if node is not None and not node.frozen and dlg.chosen["prompt"] != node.prompt \
+                        and dlg.chosen.get("base_prompt") == node.prompt:
+                    node.prompt = dlg.chosen["prompt"]  # the words the take speaks become the clip's lines
+                    self._changed()
+                self._lines_spoken(nid, {**dlg.chosen, "texts": texts}, "", str(project))
+                used = True
+            elif dlg.takes:                             # nothing used: the transcripts are still kept
+                self._keep_transcripts(dlg.takes)
+        finally:
+            self._tts_busy = False
+            self._update_buttons()
+            dlg.deleteLater()
+            if eng.name == "local":
+                self.stop_tts("the lines window was closed")
+        return used
+
+    def _keep_transcripts(self, takes: list[dict]) -> None:
+        """What the voice samples say (transcribed while takes were made) is kept, also when no take is used."""
+        changed = False
+        for r in takes:
+            files = r.get("voice_files") or {}
+            for name, text in (r.get("texts") or {}).items():
+                c = T.character(self.tree, name)
+                if c is not None and c.get("voice") and files.get(name) == c["voice"]["file"] \
+                        and not c["voice"].get("text"):
+                    TTS._set_voice_fields(self.tree, name, text=text)
+                    changed = True
+        if changed:
+            self._write_tree()
+
+    def speak_clip(self, nid: str) -> bool:
+        """Speak a clip's lines with text to speech right away (one take, in a thread); _lines_spoken makes them
+        its sound."""
+        eng = self._speak_engine(nid)
+        if eng is None:
             return False
         snap, project = copy.deepcopy(self.tree), self.project
         self._tts_busy = True
@@ -3495,20 +3588,20 @@ class MainWindow(QMainWindow):
         self._update_buttons()
         if self.project is None or str(self.project) != project or self.tree is None or nid not in self.tree.nodes:
             if r:                                   # (another project now, or the clip is gone: not used)
-                (Path(project) / r["file"]).unlink(missing_ok=True)
+                chain.keep_aside(Path(project), Path(project) / r["file"])
             return
         if r is None:
             self.status.setText(f"Could not speak the lines of clip #{nid[1:]}: {err}")
             return
         node = self.tree.nodes[nid]
         if node.frozen:
-            (self.project / r["file"]).unlink(missing_ok=True)
+            chain.keep_aside(self.project, self.project / r["file"])
             self._frozen_block(node, "speak")
             return
         try:
             done = TTS.apply_lines(self.project, self.tree, nid, r)
         except (TTS.TtsError, OSError) as e:
-            (self.project / r["file"]).unlink(missing_ok=True)
+            chain.keep_aside(self.project, self.project / r["file"])
             self.status.setText(f"Could not use the spoken lines of clip #{nid[1:]}: {e}")
             return
         self._write_tree()
@@ -4040,23 +4133,48 @@ class MainWindow(QMainWindow):
             return
         f = pick_image(self, f"Voice of @{c['name']} (one speaker, 2-{T.VOICE_MAX_SECS:g} s are used)", self.qs,
                        places=self._picker_places(), collections=self.project_media("media"), kind="media")
-        if not f:
+        if f:
+            self._choose_voice_part(f)
+
+    def _choose_voice_part(self, f: str, label: str | None = None) -> None:
+        """The voice of the selected character from a part of the file f, chosen in the voice window (with or
+        without its background music). label: what the voice is called (else the file's name)."""
+        c = self._selected_character()
+        if c is None or not self._cast_edit_ok():
             return
-        dlg = self._voice_dialog(f, c["name"])
+        mine = not self._tts_busy                   # (the worker that removes music is the text to speech one)
+        dlg = self._voice_dialog(f, c["name"], isolate=mine)
+        self._tts_busy = self._tts_busy or mine
         try:
             if not dlg.file:
                 self.status.setText(f"Could not set the voice: {dlg.info_label.text()}")
                 return
             if dlg.exec() == QDialog.Accepted and dlg.file:
-                self.set_character_voice(dlg.file, start=dlg.start, end=dlg.end)
+                name = label if label and dlg.file == str(f) else None     # (another file chosen in the window)
+                if dlg.cleaned is not None:
+                    self.set_character_voice(str(dlg.cleaned),
+                                             label=f"{name or Path(dlg.file).name} (music removed)")
+                else:
+                    self.set_character_voice(dlg.file, label=name, start=dlg.start, end=dlg.end)
         finally:
+            dlg.cleanup()
             dlg.deleteLater()
+            if mine:
+                self._tts_busy = False
+                self.stop_tts("the voice window was closed")
 
-    def _voice_dialog(self, file: str, name: str):
-        """The window the part of a file is chosen in that becomes a character's voice."""
+    def _voice_dialog(self, file: str, name: str, isolate: bool = True):
+        """The window the part of a file is chosen in that becomes a character's voice (isolate: it can take the
+        background music out with the app's text to speech worker)."""
         from .audio_editor import AudioRangeDialog
+        fn, why = None, "Text to speech is busy; choose the voice again when it is done to remove music."
+        if isolate:
+            w = self.local_tts()
+            bad = w.problems(isolate=True)
+            fn, why = (None, "Not set up: " + "; ".join(bad)) if bad else (w.isolate, "")
         return AudioRangeDialog(self, file=file, settings=self.qs, title=f"Voice of @{name}: choose the part",
-                                voice=True, player=os.environ.get("QT_QPA_PLATFORM") != "offscreen")
+                                voice=True, player=os.environ.get("QT_QPA_PLATFORM") != "offscreen",
+                                isolate=fn, no_isolate=why)
 
     def _voice_from_selected(self):
         nid = self.tree.selected if self.tree else None
@@ -4065,7 +4183,7 @@ class MainWindow(QMainWindow):
             self.status.setText("Select a made clip or a converted video first.")
             return
         what = f"{'video' if node.is_video else 'clip'} #{nid[1:]}"
-        self.set_character_voice(str(self.project / node.made["video"]), label=f"sound of {what}")
+        self._choose_voice_part(str(self.project / node.made["video"]), label=f"sound of {what}")
 
     def set_character_voice(self, path: str, label: str | None = None, start: float = 0.0,
                             end: float | None = None) -> bool:
@@ -4315,14 +4433,12 @@ class MainWindow(QMainWindow):
         return n
 
     def _drop_unused_tracks(self):
-        """Delete cut track files no scene lists any more (after the project is saved: never one still in use)."""
+        """Cut track files no scene lists any more go to old/ (never deleted; after the project is saved: never one
+        still in use)."""
         if self.project is None:
             return
         for f in T.unused_track_files(self.project, self._scene_dirs(), self.tree):
-            try:
-                f.unlink()
-            except OSError:
-                pass
+            chain.keep_aside(self.project, f)
 
     def _play_track(self):
         tr = self._selected_track()
@@ -4656,8 +4772,9 @@ class MainWindow(QMainWindow):
         has_sound = node is not None and bool((node.made or {}).get("video"))
         self.b_voice_clip.setEnabled(has_sound and self._selected_character() is not None and not self.running)
         self.b_voice_clip.setToolTip(
-            f"Set the voice from the sound of {'video' if node.is_video else 'clip'} #{nid[1:]} (its first "
-            f"{T.VOICE_MAX_SECS:g} s)" if has_sound else "Select a made clip or a converted video with the voice")
+            f"Set the voice from the sound of {'video' if node.is_video else 'clip'} #{nid[1:]}: choose the part "
+            "of it, with or without its background music" if has_sound
+            else "Select a made clip or a converted video with the voice")
 
     def _show_start_image(self):
         self._update_ref_start_button()
@@ -5115,7 +5232,7 @@ class MainWindow(QMainWindow):
                 card.set_compare(len(self.compare_candidates(n.id)) - 1 if n.made else 0)
                 card.words.setText(card.words.text().split(" + ")[0] +
                                    (" + style" if T.full_prompt(self.tree.options, "x") != "x" else ""))
-                use = T.clip_cast(self.tree.options, n.prompt)
+                use = T.node_cast(self.tree.options, n)
                 words = T.lora_trigger_words([p for p, _s in T.node_loras(n)]) \
                     if self.tree.options.get("lora_triggers", True) and T.node_loras(n) else []
                 sounds = [None] * (T.audio_mentioned(T.full_prompt(self.tree.options, n.prompt))
@@ -5532,7 +5649,7 @@ class MainWindow(QMainWindow):
             self.revert_clip(node.id)
             return
         if action == "speak" and node is not None and not node.is_video:
-            self.speak_clip(node.id)
+            self.speak_clip_window(node.id)
             return
         if action == "refine" and node is not None and not node.is_video:
             card = next((c for c in self.cards if c.nid == node.id and isinstance(c, PromptCard)), None)
@@ -5583,7 +5700,7 @@ class MainWindow(QMainWindow):
             msg = f"Delete {'video' if node.is_video else 'clip'} #{node.id[1:]}" + (f" and the {below} clip{'s' if below != 1 else ''} after it"
                                                    if below else "") + "?"
             if made:
-                msg += "\nTheir video files are deleted too."
+                msg += "\nTheir video files are not deleted: they are moved to old/ in the project folder."
             if QMessageBox.question(self, "Delete", msg) != QMessageBox.Yes:
                 return
             self.tree.remove(node.id, self.project)
@@ -5987,7 +6104,8 @@ class MainWindow(QMainWindow):
                    f"({', '.join('#' + o[1:] for o in others)}" + (" and what follows them" if len(doomed) >
                                                                   len(others) else "") + ")?")
             if made:
-                msg += f"\n{made} of them are made; their video files are deleted too."
+                msg += (f"\n{made} of them are made; their video files are not deleted: they are moved to old/ in the "
+                        "project folder.")
             if QMessageBox.question(self, "Keep this one", msg) != QMessageBox.Yes:
                 return []
         gone = []
@@ -6313,7 +6431,7 @@ class MainWindow(QMainWindow):
         def discard():
             for k in ("video", "frame", "first"):
                 if made and made.get(k):
-                    T._unlink(Path(project) / made[k])
+                    chain.keep_aside(Path(project), Path(project) / made[k])
         if self._converts.get(nid) != token:         # a newer conversion of this node is running
             discard()
             return
@@ -6338,8 +6456,8 @@ class MainWindow(QMainWindow):
         old = T.clip_files(self.project, node)
         node.made = made
         if self._write_tree() and not self._joins:  # a running join may still read them; else the next run does
-            for f in old:
-                T._unlink(f)
+            for f in old:                           # (never deleted: moved to old/)
+                chain.keep_aside(self.project, f)
         self._pix.clear()
         self.status.setText(f"Video #{nid[1:]} is ready ({made['frames']} frames).")
         self.refresh()
@@ -6366,7 +6484,8 @@ class MainWindow(QMainWindow):
             msg = (f"Delete {len(doomed)} clip{'s' if len(doomed) != 1 else ''} in "
                    f"{len(roots)} other branch{'es' if len(roots) != 1 else ''} {where} clip #{nid[1:]}?")
             if made:
-                msg += f"\n{made} of them are made; their video files are deleted too."
+                msg += (f"\n{made} of them are made; their video files are not deleted: they are moved to old/ in the "
+                        "project folder.")
             if QMessageBox.question(self, "Keep this branch", msg) != QMessageBox.Yes:
                 return []
         gone = []
@@ -6717,7 +6836,7 @@ class MainWindow(QMainWindow):
                 try:
                     joined = T.join_path(project, tree, nid, out)
                     secs = chain.probe(joined)["frames"] / 24           # not in the GUI thread (network shares)
-                    bridge.joined.emit((joined, secs), None, purpose, pre, str(project))
+                    bridge.joined.emit((joined, secs, T.path_spans(tree, nid)), None, purpose, pre, str(project))
                 except Exception as e:  # noqa: BLE001
                     bridge.joined.emit(None, str(e), purpose, pre, str(project))
         threading.Thread(target=work, daemon=True).start()
@@ -6730,12 +6849,33 @@ class MainWindow(QMainWindow):
         if error:
             self.status.setText(f"{pre}Could not join the path: {error}")
             return
-        path, secs = path
+        path, secs, spans = path
         if purpose == "play":
+            self._played_path = (str(path), spans)  # (before it opens: the clip it is at is marked while it plays)
             self.preview.open(path, f"Path to clip #{Path(path).stem[1:]} · {fmt_time(secs)}")
             self.status.setText(f"{pre}Path joined: {fmt_time(secs)}.")
         else:
             self.status.setText(f"{pre}Exported {Path(path).name} ({fmt_time(secs)}).")
+
+    def _preview_opened(self, path: str):
+        if self._played_path is not None and self._played_path[0] != path:
+            self._played_path = None                # something else is played now
+            self._mark_playing(None)
+
+    def _preview_moved(self, secs: float):
+        """The played path is at `secs` (-1: it stopped): its clip there is marked in the graph and timeline."""
+        if self._played_path is None:
+            return
+        if secs < 0:
+            self._mark_playing(None)
+            return
+        spans = self._played_path[1]
+        nid = next((n for n, a, b in spans if a <= secs < b), spans[-1][0] if spans else None)
+        self._mark_playing(nid)
+
+    def _mark_playing(self, nid: str | None):
+        self.graph.set_playing(nid)
+        self.timeline.set_playing(nid)
 
     def export_path(self, single: str | None = None):
         """The export dialog for the selected path, or (single: a clip id) for that clip on its own."""

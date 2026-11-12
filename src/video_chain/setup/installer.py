@@ -631,7 +631,8 @@ class Installer:
     def tts_done(self) -> bool:
         py = paths.tts_python()
         done = py.parent.parent / ".video-chain-packages"
-        return py.is_file() and done.is_file() and done.read_text() == ",".join(self.man["software"]["tts"]["pip"])
+        return py.is_file() and done.is_file() and \
+            done.read_text() == ",".join(self.man["software"]["tts"]["pip"]) and D.separator_ready()
 
     def llama_done(self) -> bool:
         done = self.home / "tools" / "llama.cpp" / ".video-chain-version"
@@ -646,9 +647,33 @@ class Installer:
         step("Text to speech (Qwen3-TTS)")
         if not py.is_file():
             run([self.uv, "venv", "--python", spec["python"], py.parent.parent], "Creating the TTS environment")
-        self.pip(py, list(spec["pip"]), "Installing Qwen3-TTS with its own PyTorch", "about 3 GB")
-        done.write_text(want)
+        if not (done.is_file() and done.read_text() == want):
+            self.pip(py, list(spec["pip"]), "Installing Qwen3-TTS with its own PyTorch", "about 3 GB")
+            done.write_text(want)
         paths.save_config(tts_python=py)
+        self.separator(py)
+
+    def separator(self, py: Path) -> None:
+        """The model that takes the music out of a voice sample: fetched by audio-separator itself (its own
+        source and checks), into the model cache where the app looks for it. Kept when it is there."""
+        from .. import tts
+        if D.separator_ready():
+            return
+        tool = py.parent / ("audio-separator" + (".exe" if paths.WINDOWS else ""))
+        target = paths.hf_cache() / tts.SEPARATOR_DIR
+        target.mkdir(parents=True, exist_ok=True)
+        for attempt in range(1, PIP_TRIES + 1):
+            try:
+                run([tool, "--model_file_dir", target, "--download_model_only", "-m", tts.SEPARATOR_MODEL],
+                    "Downloading the model that removes music from voice samples", expect="about 1 GB")
+                break
+            except CommandFailed:
+                if attempt == PIP_TRIES:
+                    raise
+                say(f"    The download did not get through. Trying again ({attempt + 1} of {PIP_TRIES}).")
+                time.sleep(10 * attempt)
+        if not D.separator_ready():
+            raise SetupError(f"audio-separator did not leave {tts.SEPARATOR_MODEL} in {target}")
 
     def llama_asset(self, assets: list[dict]) -> list[dict]:
         """The release files for this computer: the server build, and NVIDIA's runtime libraries with a CUDA one."""

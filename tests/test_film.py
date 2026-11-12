@@ -5,6 +5,7 @@ import pytest
 from fakes import FakeGenerator
 from PIL import Image
 
+from video_chain import chain
 from video_chain import film as F
 from video_chain import tree as T
 
@@ -52,6 +53,8 @@ def test_scenes_add_rename_move_remove(project, tmp_path):
     (project / T.REFS_DIR / "keep.png").write_bytes(b"x")
     g.remove("s2")
     assert not d2.exists() and (project / T.REFS_DIR / "keep.png").is_file()   # shared refs stay
+    kept = project / chain.OLD_DIR / "scenes" / "s2"                  # the scene's folder is never deleted: moved
+    assert (kept / T.START_FILE).is_file() and (kept / T.TREE_FILE).is_file() and not (kept / T.REFS_DIR).exists()
     assert [s.id for s in F.Film.load(project).scenes] == ["s1", "s3"]
 
 
@@ -109,7 +112,16 @@ def test_scene_endings_and_the_joined_film(project, tmp_path):
     T.run_tree(FakeGenerator(frames=17, size=None), d2, [b.id], log=lambda _m: None)
     assert F.film_problems(f) == []
     out = F.join_film(f, tmp_path / "film.mp4")
-    from video_chain import chain
+    # the app's own file of the film: joined again only when something changed, the one before goes to old/
+    own = project / "paths" / "film.mp4"
+    assert F.join_film(f, own, keep=True) == own
+    first, stamp = own.read_bytes(), own.stat().st_mtime_ns
+    assert F.join_film(f, own, keep=True) == own and own.stat().st_mtime_ns == stamp
+    assert not (project / chain.OLD_DIR / "paths").exists()
+    f.scenes[1].join = "fade" if f.scenes[1].join != "fade" else "cut"
+    F.join_film(f, own, keep=True)
+    assert (project / chain.OLD_DIR / "paths" / "film.mp4").read_bytes() == first and own.read_bytes() != first
+    f.scenes[1].join = "fade" if f.scenes[1].join != "fade" else "cut"
     info, one = chain.probe(out), chain.probe(T.join_path(project, T.load(project), t1.selected))
     two = chain.probe(T.join_path(d2, T.load(d2), b.id))
     assert info["frames"] == one["frames"] + two["frames"]            # hard cuts: nothing left out

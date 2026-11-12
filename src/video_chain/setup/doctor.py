@@ -284,6 +284,13 @@ def check_components(man: dict, components: list[str]) -> list[Check]:
     return out
 
 
+def separator_ready() -> bool:
+    """The music-removal model (and its settings file) is in the model cache."""
+    from .. import tts
+    d = paths.hf_cache() / tts.SEPARATOR_DIR
+    return all((d / f).is_file() for f in (tts.SEPARATOR_MODEL, Path(tts.SEPARATOR_MODEL).stem + ".yaml"))
+
+
 def check_software(man: dict, components: list[str]) -> list[Check]:
     g, out = "Programs", []
     soft = M.software_for(man, components)
@@ -292,11 +299,15 @@ def check_software(man: dict, components: list[str]) -> list[Check]:
         if not py.is_file():
             out.append(Check(g, "Text to speech (Qwen3-TTS)", FAIL, f"{py} is missing", f"{SETUP} --only tts"))
         else:
-            r = S.run([str(py), "-c", "import qwen_tts, soundfile, torch; print(torch.__version__)"], 180)
+            r = S.run([str(py), "-c", "import qwen_tts, soundfile, torch, audio_separator"], 180)
             ok = r is not None and r.returncode == 0
             out.append(Check(g, "Text to speech (Qwen3-TTS)", OK if ok else FAIL,
-                             "ready" if ok else f"{py} cannot import qwen_tts",
+                             "ready" if ok else f"{py} lacks qwen_tts or audio_separator",
                              "" if ok else f"{SETUP} --only tts"))
+            sep = separator_ready()
+            out.append(Check(g, "Removing music from voice samples", OK if sep else FAIL,
+                             "ready" if sep else "its model is not in the model cache",
+                             "" if sep else f"{SETUP} --only tts"))
     if "llama" in soft:
         server = paths.llama_server()
         r = S.run([server, "--version"], 30) if Path(server).is_file() or S.shutil.which(server) else None

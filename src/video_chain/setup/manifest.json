@@ -11,7 +11,9 @@
    "python": "3.12",
    "pip": [
     "qwen-tts==0.1.1",
-    "soundfile"
+    "soundfile",
+    "audio-separator==0.48.0",
+    "audioread"
    ],
    "licence": "Apache-2.0"
   },

@@ -236,19 +236,20 @@ class Tree:
         return clip, rest
 
     def remove(self, nid: str, project: Path | None = None) -> list[str]:
-        """Remove a node and everything below it (and their files). Returns the removed ids."""
+        """Remove a node and everything below it. Their clips and pictures are not deleted: they are moved to
+        old/ in the project (chain.keep_aside). Returns the removed ids."""
         gone = [nid] + [n.id for n in self.descendants(nid)]
         parent = self.nodes[nid].parent
         for g in gone:
             node = self.nodes.pop(g)
             if project is not None:
                 for f in list(node_files(project, g)) + clip_files(project, node):
-                    _unlink(f)
+                    chain.keep_aside(project, f)        # (never deleted: moved to old/)
                 for rel in ({node.end_image, (node.made or {}).get("end_image")} | keyframe_files(node)) - {None}:
                     if _in_ends(project, rel):
-                        _unlink(Path(project) / rel)
-                for ext in (".mp4", ".json"):
-                    _unlink(Path(project) / "paths" / f"{g}{ext}")
+                        chain.keep_aside(project, Path(project) / rel)
+                chain.keep_aside(project, Path(project) / "paths" / f"{g}.mp4")     # its joined path too
+                _unlink(Path(project) / "paths" / f"{g}.json")
         if self.selected in gone:
             self.selected = parent
         heal_frozen(self)
@@ -387,8 +388,9 @@ def new_clip_files(project: Path, nid: str) -> tuple[Path, Path]:
 
 
 def remove_stale_files(project: Path, tree: "Tree") -> list[Path]:
-    """Delete clip files of this app that no record points to any more (old versions that could not be deleted
-    while they were open, leftovers of a stopped run). Returns what could not be deleted."""
+    """Clip files of this app that no record points to any more: finished ones (old versions that could not be
+    moved while they were open) go to old/ (chain.keep_aside), half-written ones of a stopped run are deleted.
+    Returns what could not be moved."""
     d = Path(project) / "nodes"
     if not d.is_dir():
         return []
@@ -399,9 +401,12 @@ def remove_stale_files(project: Path, tree: "Tree") -> list[Path]:
              for f in (refined_file(project, n, size), refined_file(project, n, size).with_suffix(".json"))}
     stuck = []
     for f in d.iterdir():
-        if f.is_file() and (_CLIP_NAME.match(f.name) or ".new." in f.name or ".part." in f.name) and f not in used:
-            if not _unlink(f):
-                stuck.append(f)
+        if not f.is_file() or f in used:
+            continue
+        if ".new." in f.name or ".part." in f.name:
+            _unlink(f)                              # (never finished)
+        elif _CLIP_NAME.match(f.name) and not chain.keep_aside(project, f):
+            stuck.append(f)
     return stuck
 
 
@@ -545,7 +550,7 @@ def _write_picture(project: Path, image: Path, rel: str, crop: tuple[int, int, i
             raise
     else:
         chain.to_png(Path(image), Path(project) / rel)
-        full.unlink(missing_ok=True)
+        chain.keep_aside(project, full)
 
 
 def recrop_picture(project: Path, tree: Tree, rel: str, crop: tuple[int, int, int] | None) -> None:
@@ -627,7 +632,7 @@ def _drop_file(project: Path, rel: str, tree: Tree) -> None:
     for f in (rel, source_of(rel)):
         target = (Path(project) / f).resolve()
         if (Path(project) / REFS_DIR).resolve() in target.parents:
-            target.unlink(missing_ok=True)
+            chain.keep_aside(project, target)       # (never deleted: moved to old/)
 
 
 def remove_picture(project: Path, tree: Tree, rel: str) -> None:
@@ -664,7 +669,7 @@ def clone_secs(voice: dict) -> float:
 
 
 def _drop_voice(project: Path, voice: dict, tree: Tree) -> None:
-    """Delete a voice's files (the voice and its clone reference) that nothing uses any more."""
+    """A voice's files (the voice and its clone reference) that nothing uses any more go to old/ (never deleted)."""
     kept = {a["file"] for a in audio_refs(tree)}
     for c in cast_of(tree):
         if c.get("voice"):
@@ -672,7 +677,7 @@ def _drop_voice(project: Path, voice: dict, tree: Tree) -> None:
     for rel in {voice["file"], clone_file(voice)} - kept:
         target = (Path(project) / rel).resolve()
         if (Path(project) / REFS_DIR).resolve() in target.parents:
-            target.unlink(missing_ok=True)
+            chain.keep_aside(project, target)
 
 
 def set_voice(project: Path, tree: Tree, name: str, source: Path, start: float = 0.0,
@@ -853,6 +858,21 @@ def dialogue(options: dict, text: str, default: dict | None = None) -> list[dict
     return out
 
 
+def replace_lines(text: str, lines: list[str]) -> str:
+    """A prompt with its spoken lines (those dialogue() gives, in order) replaced by `lines`; everything around
+    them, the quotes too, stays. ValueError: another number of lines."""
+    spans = []
+    for m in DIALOGUE.finditer(text or ""):
+        g = next(k for k in range(1, (m.lastindex or 0) + 1) if m.group(k) is not None)
+        if m.group(g).strip():
+            spans.append(m.span(g))
+    if len(spans) != len(lines):
+        raise ValueError(f"the prompt has {len(spans)} spoken lines, not {len(lines)}")
+    for (a, b), line in reversed(list(zip(spans, lines))):
+        text = text[:a] + line + text[b:]
+    return text
+
+
 def spoken_lines(text: str) -> list[str]:
     """The quoted lines of a prompt, as written (normalised spaces, no trailing , ; :)."""
     return [" ".join(next(g for g in m.groups() if g is not None).split()).rstrip(",;: ")
@@ -983,8 +1003,24 @@ def _voiced_prompt(options: dict, text: str, found: list[dict], lines: list[dict
     return prompt, images, [character(options, n)["voice"]["file"] for n in voiced]
 
 
-def clip_cast(options: dict, prompt: str) -> dict:
+def sound_given(node: Node) -> bool:
+    """The clip's whole sound is given (its Sound setting plays a track, a video's or the clip before's sound, and
+    the picture is made to it): the model speaks nothing itself, so it gets no voices (see clip_cast)."""
+    ov = node.overrides or {}
+    return not node.is_video and bool(ov.get("source_sound")) and not ov.get("sound_over")
+
+
+def node_cast(options: dict, node: Node) -> dict:
+    """clip_cast for a clip as it is set up: without the voices when its sound is given."""
+    return clip_cast(options, node.prompt, voices=not sound_given(node))
+
+
+def clip_cast(options: dict, prompt: str, voices: bool = True) -> dict:
     """How a clip uses the cast. The prompt is the clip's own (the style text is put around it here).
+    voices=False: the clip's sound is given (sound_given), its spoken lines are in that sound already, so no voice
+    is sent and the characters are used as if they had none (the lines stay in the prompt as written; the
+    soundtrack sentence of model_prompt ties the lips to the sound). The voices would only use up the 15 s of
+    sound the model takes, which the soundtrack needs.
     {"mode": "voices" | "mention" | "tags" | "lead" | None, "characters": [...], "images": [rel], "voices": [rel],
     "language": the dialogue language and "lines": [{"name": speaker or None, "line"}] (voices only), "prompt": what
     the model gets, "record": [{"name", "desc"}]
@@ -1004,8 +1040,8 @@ def clip_cast(options: dict, prompt: str) -> dict:
     lines = dialogue(options, text, default=lead if implicit else None)
     talking = [c for c in ([lead] if implicit else found)
                if (c["images"] or c.get("voice"))]
-    if any(d["speaker"] is not None and d["speaker"].get("voice")
-           and any(d["speaker"]["name"] == c["name"] for c in talking) for d in lines):
+    if voices and any(d["speaker"] is not None and d["speaker"].get("voice")
+                      and any(d["speaker"]["name"] == c["name"] for c in talking) for d in lines):
         out, images, voices = _voiced_prompt(options, text, talking, lines, audio_mentioned(text), implicit)
         lang = ((options.get("identity") or {}).get("language") or "English").strip() or "English"
         said = [{"name": d["speaker"]["name"] if d["speaker"] else None, "line": d["line"]} for d in lines]
@@ -1066,7 +1102,7 @@ def cast_problems(project: Path, tree: Tree, todo: list[str]) -> list[str]:
         for m in WRONG_TAG.finditer(text):
             out.append(f"clip #{nid[1:]} writes <{m.group(1)} {m.group(2)}>; the model only knows <Picture "
                        f"{m.group(2)}> (or mention the character as @Name)")
-        use = clip_cast(tree.options, node.prompt)
+        use = node_cast(tree.options, node)
         if use["mode"] in ("mention", "voices") and PICTURE_TAG.search(text):
             out.append(f"clip #{nid[1:]} writes <Picture N> and mentions @Names; with @Names the app numbers the "
                        "pictures itself, so write the people only as @Name")
@@ -1149,7 +1185,7 @@ def remove_audio_reference(project: Path, rel: str, tree: Tree) -> None:
     tree.options["audio_refs"] = [a for a in audio_refs(tree) if a["file"] != rel]
     target = (Path(project) / rel).resolve()
     if (Path(project) / REFS_DIR).resolve() in target.parents:
-        target.unlink(missing_ok=True)
+        chain.keep_aside(project, target)           # (never deleted: moved to old/)
 
 
 def audio_mentioned(prompt: str) -> int:
@@ -1202,7 +1238,7 @@ def clear_end_image(project: Path, tree: Tree, nid: str) -> None:
     (Undo changes can go back to it)."""
     node = tree.nodes[nid]
     if node.end_image and node.end_image != (node.made or {}).get("end_image") and _in_ends(project, node.end_image):
-        _unlink(Path(project) / node.end_image)
+        chain.keep_aside(project, Path(project) / node.end_image)
     node.end_image = None
 
 
@@ -1402,10 +1438,10 @@ def keyframe_files(node: Node) -> set[str]:
 
 
 def _drop_keyframe_file(project: Path, node: Node, rel: str) -> None:
-    """Delete a keyframe picture no longer used (the made clip's stay until it is made again: Undo)."""
+    """A keyframe picture no longer used goes to old/ (the made clip's stay until it is made again: Undo)."""
     made = {k.get("image") for k in (node.made or {}).get("keyframes") or [] if isinstance(k, dict)}
     if rel not in made and rel not in {k["image"] for k in node.keyframes} and _in_ends(project, rel):
-        _unlink(Path(project) / rel)
+        chain.keep_aside(project, Path(project) / rel)
 
 
 def set_keyframe(project: Path, tree: Tree, nid: str, image: Path | None, at: float, note: str | None = None,
@@ -1518,9 +1554,9 @@ def prepared_start(project: Path, width: int, height: int) -> Path | None:
 
 
 def clear_start_image(project: Path, tree: Tree) -> None:
-    """No start image any more: start.png and its prepared copies go (the first clip then starts from its text, the
-    size follows the first video or the Aspect setting)."""
-    _unlink(Path(project) / START_FILE)
+    """No start image any more: start.png goes to old/ (never deleted), its prepared copies (scaled from it) are
+    removed (the first clip then starts from its text, the size follows the first video or the Aspect setting)."""
+    chain.keep_aside(project, Path(project) / START_FILE)
     for f in Path(project).glob("start_*x*.png"):
         _unlink(f)
         _unlink(f.with_suffix(".json"))
@@ -1528,7 +1564,17 @@ def clear_start_image(project: Path, tree: Tree) -> None:
 
 
 def set_start_image(project: Path, image: Path, tree: Tree) -> None:
-    chain.to_png(Path(image), Path(project) / START_FILE)
+    start = Path(project) / START_FILE
+    if start.is_file() and Path(image).resolve() != start.resolve():
+        new = start.with_name("start.new.part.png")     # (converted first: a picture that cannot be read changes nothing)
+        try:
+            chain.to_png(Path(image), new)
+            chain.keep_aside(project, start)        # the start image before: never deleted, moved to old/
+            new.replace(start)
+        finally:
+            new.unlink(missing_ok=True)
+    else:
+        chain.to_png(Path(image), start)
     tree.image = str(Path(image).resolve())
 
 
@@ -2137,7 +2183,7 @@ def _sound_room(tree: Tree, node: Node, span: dict) -> list[str]:
     """The model's limits on sound references, with the clip's soundtrack as one more."""
     nid = node.id
     n_sounds = audio_mentioned(full_prompt(tree.options, node.prompt))
-    voices = clip_cast(tree.options, node.prompt).get("voices") or []
+    voices = node_cast(tree.options, node).get("voices") or []
     secs = sum(float(a.get("secs") or 0) for a in audio_refs(tree)[:n_sounds]) + span["secs"] + \
         sum(float(c["voice"].get("secs") or 0) for c in cast_of(tree) if c.get("voice")
             and c["voice"]["file"] in voices)
@@ -2174,8 +2220,10 @@ def model_prompt(options: dict, node: Node, settings: dict | None) -> str:
     with "Continue the video's sound" the sentence that makes the last sound reference its soundtrack."""
     from .triggers import with_triggers
     prompt = _camera.apply(node.prompt, (settings or {}).get("camera"))    # #tokens and the clip's camera move
-    text = with_triggers(clip_cast(options, prompt)["prompt"], list((settings or {}).get("lora_triggers") or []))
     ss = (settings or {}).get("source_sound")
+    given = bool(ss) and not (isinstance(ss, dict) and ss.get("overlay"))      # (then without the voices)
+    text = with_triggers(clip_cast(options, prompt, voices=not given)["prompt"],
+                         list((settings or {}).get("lora_triggers") or []))
     if ss and not (isinstance(ss, dict) and ss.get("overlay")):   # (a sound laid over is not the model's)
         k = len((settings or {}).get("audio_refs") or []) + 1
         mode = ss.get("mode") if isinstance(ss, dict) else ss
@@ -2200,7 +2248,9 @@ def node_settings(base: dict, options: dict, node: Node, audio_pool: list[dict] 
     made with (see clip_cast), and with @mentions what the model prompt says about the characters."""
     ov = node.overrides or {}
     n_audio = 0 if node.is_video else audio_mentioned(full_prompt(options, node.prompt))
-    use = clip_cast(options, node.prompt) if not node.is_video else {"images": [], "record": None, "voices": []}
+    given = source_sound is not None and not source_sound.get("overlay")       # (then without the voices)
+    use = clip_cast(options, node.prompt, voices=not given) if not node.is_video \
+        else {"images": [], "record": None, "voices": []}
     sha = picture_sha or (lambda rel: None)
     refs = [{"file": r, "sha1": sha(r)} for r in use["images"]]
     sounds = (audio_pool or [])[:n_audio] if n_audio else []
@@ -2631,9 +2681,9 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
                 log(f"{nid}: made again, it hands over at its last frame again (choose a frame of the new take)")
                 node.end_at = None
         save(project, tree)
-        for f in old:                              # the previous version; left for later if it is open somewhere
-            if f not in new_files and not _unlink(f):
-                log(f"{f.name} is still in use; it is removed on a later run")
+        for f in old:                              # the previous version is never deleted: it goes to old/
+            if f not in new_files and not chain.keep_aside(project, f):
+                log(f"{f.name} is still in use; it is moved to {chain.OLD_DIR}/ on a later run")
         checker = Checker(project, tree)          # the new frame changes what depends on it
         emit({"e": "node", "id": nid, "state": "done"})
     emit({"e": "done", "made": todo})
@@ -2673,6 +2723,18 @@ def path_cuts(tree: Tree, path: list[Node], keep_repeated: bool = False,
             cuts[k][1] = max(0, n - 1 - cuts[k][0])
             cuts[k][0] = min(cuts[k][0], max(0, n - 1))
     return [(s, e) for s, e in cuts]
+
+
+def path_spans(tree: Tree, nid: str) -> list[tuple[str, float, float]]:
+    """Where each clip of the path to nid is in the joined video (join_path): (clip id, from, to) in seconds."""
+    path = tree.path_to(nid)
+    cuts = path_cuts(tree, path, bool(tree.options.get("keep_repeated")))
+    out, at = [], 0
+    for n, (a, b) in zip(path, cuts):
+        frames = max(1, (made_frames(n) or clip_length(tree, n)) - a - b)
+        out.append((n.id, at / chain.FPS, (at + frames) / chain.FPS))
+        at += frames
+    return out
 
 
 def refined_file(project: Path, node: Node, size: str) -> Path:
@@ -2902,7 +2964,11 @@ def join_path(project: Path, tree: Tree, nid: str, out: Path | None = None) -> P
     stamp = target.with_suffix(".json")
     if out is None and target.exists() and stamp.exists() and stamp.read_text() == key:
         return target
-    chain.concat(videos, target, cuts=cuts, size=size, fill=True)
-    if out is None:
+    def write(f: Path) -> None:
+        chain.concat(videos, f, cuts=cuts, size=size, fill=True)
+    if out is None:                                # the join before is never deleted: it goes to old/
+        chain.replace_kept(project, target, write)
         stamp.write_text(key)
+    else:
+        write(target)
     return target

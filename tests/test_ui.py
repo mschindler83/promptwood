@@ -155,6 +155,23 @@ def test_generate_path_then_branch_reuses(app, win, tmp_path, image):
     assert [win.state(i) for i in ids] == ["done"] * 3
     assert win.played[-1] == tmp_path / "proj" / "paths" / f"{ids[-1]}.mp4"
     assert chain.probe(win.played[-1])["frames"] == 17 + 16 + 16
+    # while the path plays, the clip it is at is marked in the graph and the timeline
+    file, spans = win._played_path
+    assert file == str(win.played[-1]) and [n for n, _a, _b in spans] == ids
+    assert [(round(a * 24), round(b * 24)) for _n, a, b in spans] == [(0, 17), (17, 33), (33, 49)]
+    marked = lambda: ([k for k, it in win.graph.items_by_id.items() if it.playing], win.timeline.lane.playing)  # noqa: E731
+    assert marked() == ([], None)
+    for secs, nid in ((0.0, ids[0]), (0.7, ids[0]), (17 / 24, ids[1]), (1.5, ids[2]), (99.0, ids[2])):
+        win.preview.moved.emit(secs)
+        assert marked() == ([nid], nid), secs
+    win.refresh(rebuild_path=True)                                     # (the mark stays when the graph is redrawn)
+    assert marked() == ([ids[2]], ids[2])
+    win.preview.moved.emit(-1.0)                                       # stopped, or played to its end
+    assert marked() == ([], None)
+    win.preview.moved.emit(0.2)
+    win.preview.opened.emit(str(tmp_path / "other.mp4"))               # something else is played: no mark
+    win.preview.moved.emit(0.5)
+    assert marked() == ([], None) and win._played_path is None
     # branch after clip 1: only the new clip is made
     win.node_action("branch", ids[1])
     b = win.selected_id()
@@ -645,6 +662,90 @@ def test_identity_references_in_the_window(app, win, tmp_path, image, monkeypatc
     monkeypatch.setattr(AudioRangeDialog, "exec", lambda dlg: QDialog.Rejected)       # cancelled: nothing changes
     win._voice_from_file()
     assert win.char_voice.text() == "Voice: talk.mp4 (7.5 s; cloned from 12.5 s)"
+    # Remove music: the chosen part is cleaned by the text to speech worker (a fake here) and used instead
+    import shutil
+
+    class Sep:
+        calls, stopped = [], 0
+
+        def problems(self, **_k):
+            return []
+
+        def isolate(self, audio, out):
+            Sep.calls.append(round(chain.audio_seconds(Path(audio)), 1))
+            shutil.copy(audio, out)
+            return 1.0
+
+        def stop(self):
+            Sep.stopped += 1
+            return True
+    win._tts_local = Sep()
+
+    def clean(dlg):
+        ok = dlg.buttons.button(QDialogButtonBox.Ok)
+        seen.update(can=dlg.b_clean.isEnabled(), before=dlg.cleaned, use=dlg.use_clean.isEnabled())
+        dlg.set_range(3.0, 38.0)
+        dlg.remove_music()
+        seen["busy"] = (dlg.clean_busy, ok.isEnabled(), dlg.b_clean.isEnabled())
+        dlg.done(0)                                          # (closing waits for it)
+        seen["open"] = dlg.clean_busy
+        wait(app, lambda: not dlg.clean_busy, timeout=30)
+        seen.update(info=dlg.clean_info.text(), checked=dlg.use_clean.isChecked(), file=dlg.cleaned)
+        dlg.set_range(4.0, 38.0)                             # another part: the cleaned sound is not of it
+        seen.update(stale=dlg.cleaned, info2=dlg.clean_info.text())
+        dlg.set_range(3.0, 20.0)
+        dlg.remove_music()
+        wait(app, lambda: not dlg.clean_busy, timeout=30)
+        seen["exists"] = dlg.cleaned is not None and dlg.cleaned.is_file()
+        seen["dlg"] = dlg
+        return QDialog.Accepted
+    monkeypatch.setattr(AudioRangeDialog, "exec", clean)
+    win._voice_from_file()
+    assert seen["can"] and seen["before"] is None and not seen["use"]
+    assert seen["busy"] == (True, False, False) and seen["open"]
+    assert "Music removed from 0:03.000 – 0:33.000" in seen["info"] and seen["checked"] and seen["file"] is not None
+    assert seen["stale"] is None and "remove the music again" in seen["info2"] and seen["exists"]
+    assert Sep.calls == [30.0, 17.0] and Sep.stopped == 1    # (30 s at most; the worker is stopped afterwards)
+    assert win.char_voice.text() == "Voice: talk.mp4 (music removed) (7.5 s; cloned from 17.0 s)"
+    assert seen.pop("dlg")._tmp is None and not win._tts_busy             # its files are gone
+    # unticked: the sound as it is; without the package or model the button says why
+    def as_it_is(dlg):
+        dlg.set_range(3.0, 20.0)
+        dlg.remove_music()
+        wait(app, lambda: not dlg.clean_busy, timeout=30)
+        dlg.use_clean.setChecked(False)
+        return QDialog.Accepted
+    monkeypatch.setattr(AudioRangeDialog, "exec", as_it_is)
+    win._voice_from_file()
+    assert win.char_voice.text() == "Voice: talk.mp4 (7.5 s; cloned from 17.0 s)"
+    # From clip: the same window on the selected clip's video
+    shutil.copy(film, win.project / "made.mp4")
+    node = win.tree.nodes[ids[1]]
+    was_made, was_sel = node.made, win.tree.selected
+    node.made, win.tree.selected = {**(node.made or {}), "video": "made.mp4"}, ids[1]
+
+    def from_clip(dlg):
+        seen.update(file=Path(dlg.file).name, can=dlg.b_clean.isEnabled())
+        dlg.set_range(1.0, 11.0)
+        if seen["remove"]:
+            dlg.remove_music()
+            wait(app, lambda: not dlg.clean_busy, timeout=30)
+        return QDialog.Accepted
+    monkeypatch.setattr(AudioRangeDialog, "exec", from_clip)
+    for seen["remove"], name in ((False, f"sound of clip #{ids[1][1:]}"),
+                                 (True, f"sound of clip #{ids[1][1:]} (music removed)")):
+        win._voice_from_selected()
+        assert seen["file"] == "made.mp4" and seen["can"]
+        assert win.char_voice.text() == f"Voice: {name} (7.5 s; cloned from 10.0 s)"
+    assert Sep.calls[-1] == 10.0 and not win._tts_busy
+    node.made, win.tree.selected = was_made, was_sel
+    (win.project / "made.mp4").unlink()
+    Sep.problems = lambda self, **_k: ["removing music needs the audio-separator package"]
+    monkeypatch.setattr(AudioRangeDialog, "exec", lambda dlg: (seen.update(
+        can=dlg.b_clean.isEnabled(), tip=dlg.b_clean.toolTip()), QDialog.Rejected)[1])
+    win._voice_from_file()
+    assert not seen["can"] and seen["tip"].startswith("Not set up: removing music needs")
+    win._tts_local = None
     mute = tmp_path / "mute.mp4"
     subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=gray:s=64x48:d=3", str(mute)], check=True)
     monkeypatch.setattr(M, "pick_image", lambda *a, **k: str(mute))
@@ -3560,6 +3661,12 @@ def test_freeze_a_clip_on_its_card(app, win, tmp_path, image):
     assert win.state(a) == "changed" and "CHANGED" in win.status.text()
 
 
+def tr_lines(win, nid):
+    """The lines the clip's spoken track was made of."""
+    from video_chain import tree as T
+    return [d["line"] for d in T.track_of(win.tree, T.track_id(win.tree.nodes[nid]))["tts"]["lines"]]
+
+
 def test_text_to_speech_in_the_app(app, win, tmp_path, image, monkeypatch):
     """Speak the lines on a card (a fake engine) makes them the clip's sound; a voice made in the TTS window becomes
     the character's voice; the provider and the ElevenLabs key are kept (the key in the keyring only)."""
@@ -3584,7 +3691,7 @@ def test_text_to_speech_in_the_app(app, win, tmp_path, image, monkeypatch):
         def transcribe(self, audio, lang=None):
             return "sample words"
 
-        def clone(self, text, lang, ref, ref_text, out, seed=None):
+        def clone(self, text, lang, ref, ref_text, out, seed=None, temperature=None):
             tone(out, 1.5)
 
         def design(self, text, lang, instruct, out, seed=None):
@@ -3632,6 +3739,49 @@ def test_text_to_speech_in_the_app(app, win, tmp_path, image, monkeypatch):
     tr = T.track_of(win.tree, T.track_id(node))
     assert tr and tr["tts"]["clip"] == nid and "spoken" in win.status.text()
     assert T.load(win.project).nodes[nid].overrides["source_sound"] == T.TRACK_PREFIX + tr["id"]   # saved
+    # the Speak the lines window: takes to choose from, how they are spoken; the one used becomes the sound
+    seen = {}
+
+    def choose(dlg):
+        seen.update(lines=dlg.line_texts(), start=dlg.speak_values(), use=dlg.b_use.isEnabled())
+        dlg.n.setValue(2)
+        dlg.delivery.setCurrentIndex(dlg.delivery.findData("lively"))
+        dlg.speed.setValue(0.8)
+        dlg.make()
+        seen["busy"] = (dlg.busy, dlg.b_make.isEnabled())
+        dlg.reject()                                         # (while takes are made: it would close afterwards)
+        dlg._close_when_done = False
+        wait(app, lambda: not dlg.busy, timeout=30)
+        dlg.n.setValue(1)
+        dlg.line_edits[0].setText("")
+        seen["empty"] = dlg.b_make.isEnabled()               # an empty line cannot be spoken
+        dlg.line_edits[0].setText('Hallo, "Welt"!')          # other words: tried, and used
+        dlg.make()
+        wait(app, lambda: not dlg.busy, timeout=30)
+        seen.update(rows=[dlg.list.item(k).text() for k in range(dlg.list.count())], info=dlg.info.text(),
+                    files=[win.project / r["file"] for r in dlg.takes])
+        dlg.list.setCurrentRow(dlg.list.count() - 1)
+        dlg.accept()
+        return dlg.chosen is not None
+    monkeypatch.setattr(M, "run_speak_dialog", choose)
+    old_track = T.track_id(win.tree.nodes[nid])
+    win.node_action("speak", nid)
+    assert seen["lines"] == ["Hallo, schön dich zu sehen."] and not seen["use"] and not seen["empty"]
+    assert seen["rows"][-1].endswith("lively, 0.8 ×   ·   “Hallo, 'Welt'!”") and "“" not in seen["rows"][0]
+    assert win.tree.nodes[nid].prompt == """@Anna waves and says "Hallo, 'Welt'!\"""" # the take's words: the prompt's
+    assert T.load(win.project).nodes[nid].prompt == win.tree.nodes[nid].prompt and tr_lines(win, nid) == ["Hallo, 'Welt'!"]
+    assert next(c for c in win.cards if c.nid == nid).text() == win.tree.nodes[nid].prompt
+    assert seen["start"] == TTS.SPEAK_DEFAULTS and seen["busy"] == (True, False)
+    assert 1 <= len(seen["rows"]) <= 3 and seen["rows"][0].startswith("Take 1   ·   ")
+    assert [f.is_file() for f in seen["files"]] == [False] * (len(seen["files"]) - 1) + [True]   # the others went
+    assert all((win.project / chain.OLD_DIR / "refs" / f.name).is_file() for f in seen["files"][:-1])   # ... to old/
+    tr = T.track_of(win.tree, T.track_id(win.tree.nodes[nid]))
+    assert tr["id"] != old_track and win.project / tr["file"] == seen["files"][-1] and "spoken" in win.status.text()
+    assert T.load(win.project).options["tts"]["speak"] == {"takes": 1, "delivery": "lively", "speed": 0.8}
+    assert win.played[-1] == seen["files"][0] and not win._tts_busy
+    monkeypatch.setattr(M, "run_speak_dialog", lambda dlg: (seen.update(again=dlg.speak_values()), False)[1])
+    win.node_action("speak", nid)                            # cancelled: nothing changes; the settings were kept
+    assert seen["again"]["delivery"] == "lively" and T.track_id(win.tree.nodes[nid]) == tr["id"]
     # a frozen clip's lines are not spoken
     win.tree.nodes[nid].frozen = True
     win.node_action("speak", nid)
@@ -3640,6 +3790,7 @@ def test_text_to_speech_in_the_app(app, win, tmp_path, image, monkeypatch):
     # provider + key
     win.tts_provider.setCurrentIndex(win.tts_provider.findData("elevenlabs"))
     assert TTS.options(win.tree)["provider"] == "elevenlabs" and "API key" in win.status.text()
+    assert TTS.speak_options(win.tree)["delivery"] == "lively"               # (kept when the provider changes)
     assert win._tts_form.isRowVisible(win._eleven_row)
     win.eleven_key.setText(" sk_abc ")
     win._save_eleven_key()

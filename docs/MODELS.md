@@ -156,5 +156,6 @@ Profile `full`, 3.2 GB. Needs: upscale.
 | PyTorch (CUDA build chosen from the graphics driver) | https://download.pytorch.org/whl/ | BSD-3-Clause; NVIDIA's CUDA libraries under NVIDIA's own terms |
 | llama.cpp `b12317` (release build) | https://github.com/ggml-org/llama.cpp | MIT |
 | Qwen3-TTS (`qwen-tts==0.1.1`) | https://pypi.org/project/qwen-tts/ | Apache-2.0 |
+| audio-separator with its model `vocals_mel_band_roformer.ckpt` (removes music from voice samples; the tool downloads the model itself) | https://github.com/karaokenerds/python-audio-separator | MIT (the tool, per PyPI); the model's author states MIT at https://huggingface.co/KimberleyJSN/melbandroformer |
 | ffmpeg (only when the system has none with libx264) | https://github.com/BtbN/FFmpeg-Builds | GPL build of ffmpeg |
 | uv (only when the system has none) | https://docs.astral.sh/uv/ | Apache-2.0 / MIT |

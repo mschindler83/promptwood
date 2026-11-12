@@ -6,6 +6,8 @@ for characters. Two providers:
   voice sample (Base model: cloned from the sample and what it says, transcribed once with Whisper; from its longer
   clone reference, tree.clone_file, when the voice was set from a longer source); a new voice is made from a
   description (VoiceDesign model).
+  The same worker removes background music from a voice recording before it becomes a voice (vocal separation with
+  a Mel-Band RoFormer model through the audio-separator package; a cloned voice copies whatever is in its sample).
 - elevenlabs: the ElevenLabs API with the user's key (system keyring or $ELEVENLABS_API_KEY); each character is
   given one of the account's voices, or an instant voice clone of its voice sample (made in the account).
 
@@ -13,6 +15,7 @@ Spoken lines are the quoted lines of a prompt ("..." after @Name, see tree.dialo
 other, with a short pause before the first and between them, and become an audio track of the clip."""
 from __future__ import annotations
 
+import copy
 import json
 import os
 import queue
@@ -34,8 +37,11 @@ WORKER = Path(__file__).resolve().with_name("tts_worker.py")
 QWEN_BASE = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
 QWEN_DESIGN = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
 WHISPER = "openai/whisper-large-v3-turbo"
+SEPARATOR_DIR = "audio-separator"        # in the model cache: audio-separator's own (flat) model folder
+SEPARATOR_MODEL = "vocals_mel_band_roformer.ckpt"    # Mel-Band RoFormer, vocals (Kimberley Jensen): 2 GB of VRAM
 LOCAL_VRAM_MB = 5500                     # measured: 4.5 GB peak for the 1.7B models (bf16), Whisper turbo less
 SETUP_HINT = "run: video-chain setup --only tts   (Help > Setup check shows what is missing)"
+SEPARATOR_HINT = SETUP_HINT
 
 # the dialogue language (project setting) -> Qwen3-TTS's name / ISO 639-1 for ElevenLabs
 LANGUAGES = {"English": "en", "German": "de", "French": "fr", "Spanish": "es", "Italian": "it", "Portuguese": "pt",
@@ -45,6 +51,17 @@ SAMPLE_TEXT = {"German": "Hallo, schön dich zu sehen. Heute ist ein wirklich gu
 LEAD_IN, GAP, TAIL = 0.25, 0.35, 0.3     # seconds of silence before the first line, between lines, after the last
 PROVIDERS = {"local": "Qwen3-TTS (local)", "elevenlabs": "ElevenLabs (API key)"}
 DEFAULT_OPTIONS = {"provider": "local", "eleven_model": "eleven_multilingual_v2"}
+# How lines are spoken (the Speak the lines window; kept in the project as options["tts"]["speak"]):
+# takes: how many versions are made to choose from; delivery: how steady or lively; speed: how fast.
+SPEAK_DEFAULTS = {"takes": 3, "delivery": "natural", "speed": 1.0}
+DELIVERIES = {"steady": "Steady (even, fewest slips)", "natural": "Natural",
+              "lively": "Lively (more varied, more slips)"}
+# local: the sampling temperature (None: the model's own, 0.9). ElevenLabs: the voice's stability (None: the
+# voice's own setting); eleven_v3 only takes 0, 0.5 and 1.
+_LOCAL_TEMPERATURE = {"steady": 0.7, "natural": None, "lively": 1.1}
+_ELEVEN_STABILITY = {"steady": 0.8, "natural": None, "lively": 0.3}
+_ELEVEN_V3_STABILITY = {"steady": 1.0, "natural": None, "lively": 0.0}
+SPEED_RANGE = (0.7, 1.2)                 # (what ElevenLabs takes; local lines are made slower / faster afterwards)
 
 KEYRING_SERVICE, KEYRING_USER = "video-chain", "elevenlabs-api-key"
 ELEVEN_URL = "https://api.elevenlabs.io"
@@ -57,6 +74,19 @@ class TtsError(RuntimeError):
 def options(tree_or_options) -> dict:
     o = tree_or_options.options if hasattr(tree_or_options, "options") else tree_or_options
     return {**DEFAULT_OPTIONS, **(o.get("tts") or {})}
+
+
+def speak_options(tree_or_options=None, given: dict | None = None) -> dict:
+    """How lines are spoken: the project's settings (or `given`), cleaned up."""
+    o = given if given is not None else (options(tree_or_options).get("speak") or {})
+    o = {**SPEAK_DEFAULTS, **(o if isinstance(o, dict) else {})}
+    try:
+        takes, speed = int(o["takes"]), float(o["speed"])
+    except (TypeError, ValueError):
+        takes, speed = SPEAK_DEFAULTS["takes"], 1.0
+    return {"takes": min(max(takes, 1), 8),
+            "delivery": o["delivery"] if o["delivery"] in DELIVERIES else "natural",
+            "speed": round(min(max(speed, SPEED_RANGE[0]), SPEED_RANGE[1]), 2)}
 
 
 def language(tree_or_options) -> str:
@@ -96,13 +126,21 @@ class LocalTTS:
         self._lock = threading.Lock()
         self.before_launch = None
 
-    def problems(self, design: bool = False, transcribe: bool = False) -> list[str]:
+    def problems(self, design: bool = False, transcribe: bool = False, isolate: bool = False) -> list[str]:
         out = []
         if not self.python.is_file():
             out.append(f"the TTS environment is missing ({self.python}); {SETUP_HINT}")
         for repo, need in ((QWEN_BASE, True), (QWEN_DESIGN, design), (WHISPER, transcribe)):
             if need and snapshot(repo, self.cache) is None:
                 out.append(f"the model {repo} is not in {self.cache}; {SETUP_HINT}")
+        if isolate and self.python.is_file():
+            d = self.cache / SEPARATOR_DIR
+            env = self.python.parent.parent
+            if not (list(env.glob("lib/python*/site-packages/audio_separator"))
+                    + list(env.glob("Lib/site-packages/audio_separator"))
+                    and all((d / f).is_file() for f in (SEPARATOR_MODEL, Path(SEPARATOR_MODEL).stem + ".yaml"))):
+                out.append(f"removing music needs the audio-separator package and its model {SEPARATOR_MODEL} in "
+                           f"{d}; {SEPARATOR_HINT}")
         return out
 
     def running(self) -> bool:
@@ -190,9 +228,18 @@ class LocalTTS:
                              "instruct": instruct, "out": str(out), "seed": seed})["secs"]
 
     def clone(self, text: str, lang: str, ref_audio: Path, ref_text: str | None, out: Path,
-              seed: int | None = None) -> float:
+              seed: int | None = None, temperature: float | None = None) -> float:
         return self.request({"cmd": "clone", "model": self._path(QWEN_BASE), "text": text, "language": lang,
-                             "ref_audio": str(ref_audio), "ref_text": ref_text, "out": str(out), "seed": seed})["secs"]
+                             "ref_audio": str(ref_audio), "ref_text": ref_text, "out": str(out), "seed": seed,
+                             "temperature": temperature})["secs"]
+
+    def isolate(self, audio: Path, out: Path) -> float:
+        """The voice of a recording without its background music or noise (a WAV at out); returns its length."""
+        bad = self.problems(isolate=True)
+        if bad:
+            raise TtsError("; ".join(bad))
+        return self.request({"cmd": "isolate", "dir": str(self.cache / SEPARATOR_DIR), "model": SEPARATOR_MODEL,
+                             "audio": str(audio), "out": str(out)})["secs"]
 
     def transcribe(self, audio: Path, lang: str | None = None) -> str:
         return self.request({"cmd": "transcribe", "model": self._path(WHISPER), "audio": str(audio),
@@ -298,9 +345,12 @@ class ElevenLabs:
                 for m in (d if isinstance(d, list) else []) if m.get("can_do_text_to_speech")]
 
     def speak(self, text: str, voice_id: str, out: Path, model: str = "eleven_multilingual_v2",
-              lang: str | None = None, seed: int | None = None) -> float:
-        """A line in the voice as 48 kHz WAV at out; returns its length."""
+              lang: str | None = None, seed: int | None = None, settings: dict | None = None) -> float:
+        """A line in the voice as 48 kHz WAV at out; returns its length. settings: ElevenLabs' voice_settings for
+        this line (stability, speed ...), over the voice's own."""
         body = {"text": text, "model_id": model}
+        if settings:
+            body["voice_settings"] = dict(settings)
         if seed is not None:
             body["seed"] = int(seed) % 4294967296
         code = LANGUAGES.get(lang or "")
@@ -428,20 +478,67 @@ def frames_for(secs: float, have: int) -> int | None:
     raise TtsError(f"the lines take {secs:.1f} s; a clip is at most 15 s: split them over two clips")
 
 
-def render_lines(project: Path, tree: T.Tree, nid: str, eng, log=lambda _m: None) -> dict:
+def clean_line(text: str) -> str:
+    """A spoken line as typed in the Speak the lines window, fit to stand in quotes in a prompt: one line, no
+    quotation marks or angle brackets of its own."""
+    text = " ".join(str(text or "").split())
+    for ch in '"“”„«»':
+        text = text.replace(ch, "'")
+    return text.replace("<", "").replace(">", "").strip()
+
+
+def _tempo(wav: Path, speed: float) -> None:
+    """Make a WAV slower or faster without changing its pitch."""
+    tmp = wav.with_name(wav.stem + ".tempo.wav")
+    try:
+        subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(wav), "-af", f"atempo={speed:.3f}",
+                        "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le", str(tmp)], check=True, capture_output=True)
+        tmp.replace(wav)
+    except (OSError, subprocess.CalledProcessError) as e:
+        raise TtsError(f"could not change the speed of a line ({e})") from None
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def render_lines(project: Path, tree: T.Tree, nid: str, eng, log=lambda _m: None, take: int = 0,
+                 speak: dict | None = None, lines: list[str] | None = None) -> dict:
     """Speak the clip's lines, each in its speaker's voice, into one new WAV in refs/ (see join_lines). Reads the
     tree only (call it with a copy from a worker thread; apply_lines puts the result in). Returns {"file", "secs",
     "lines": [{"name", "line"}], "texts": {name: what its voice sample says, transcribed now}, "provider",
-    "language", "prompt": the prompt the lines are from}."""
+    "language", "prompt": the prompt the lines are from, "take", "speak"}.
+    take: another number, another version of the same lines (other seeds). speak: how they are spoken
+    (speak_options; None: the project's). lines: other words for the prompt's lines (one text per line, in order);
+    "prompt" is then the clip's prompt with these lines, "base_prompt" the prompt it was made from."""
     project = Path(project)
     node = tree.nodes[nid]
     if node.is_video:
         raise TtsError("a real video keeps its own sound")
+    base = node.prompt
+    if lines is not None:
+        said = [clean_line(x) for x in lines]
+        if not all(said):
+            raise TtsError("a line is empty")
+        try:
+            new = T.replace_lines(base, said)
+        except ValueError as e:
+            raise TtsError(str(e)) from None
+        node = copy.copy(node)                      # (the tree is only read: the changed prompt is the take's)
+        node.prompt = new
     bad = line_problems(tree, node, eng.name)
     if bad:
         raise TtsError("; ".join(bad))
     lang = language(tree)
     opts = options(tree)
+    how = speak_options(tree, speak)
+    speed = how["speed"] if abs(how["speed"] - 1.0) >= 0.005 else None
+    extra = {}                                      # (only what is not the default: engines without it still work)
+    if eng.name == "elevenlabs":
+        stab = (_ELEVEN_V3_STABILITY if "v3" in opts["eleven_model"] else _ELEVEN_STABILITY)[how["delivery"]]
+        vs = {**({"stability": stab} if stab is not None else {}), **({"speed": speed} if speed else {})}
+        if vs:
+            extra["settings"] = vs
+    elif _LOCAL_TEMPERATURE[how["delivery"]] is not None:
+        extra["temperature"] = _LOCAL_TEMPERATURE[how["delivery"]]
     lines = clip_lines(tree, node)
     refs = project / T.REFS_DIR
     refs.mkdir(parents=True, exist_ok=True)
@@ -453,25 +550,28 @@ def render_lines(project: Path, tree: T.Tree, nid: str, eng, log=lambda _m: None
         for k, d in enumerate(lines):
             c = d["speaker"]
             raw = Path(tmp) / f"line{k}_raw.wav"
-            seed = (node.seed + k) % 2_000_000_000
+            seed = (node.seed + k + 7919 * int(take)) % 2_000_000_000
             log(f"speaking line {k + 1} of {len(lines)} (@{c['name']}): {d['line'][:60]}")
             if eng.name == "elevenlabs":
-                eng.speak(d["line"], c["tts"]["eleven"]["id"], raw, opts["eleven_model"], lang, seed)
+                eng.speak(d["line"], c["tts"]["eleven"]["id"], raw, opts["eleven_model"], lang, seed, **extra)
             else:
                 text = c["voice"].get("text") or texts.get(c["name"])
                 if not text:
                     log(f"transcribing the voice sample of @{c['name']} (once)")
                     text = texts[c["name"]] = eng.transcribe(project / T.clone_file(c["voice"]),
                                                              LANGUAGES.get(lang))
-                eng.clone(d["line"], lang, project / T.clone_file(c["voice"]), text, raw, seed)
+                eng.clone(d["line"], lang, project / T.clone_file(c["voice"]), text, raw, seed, **extra)
             part = Path(tmp) / f"line{k}.wav"
             chain.to_wav(raw, part)
+            if speed and eng.name != "elevenlabs":
+                _tempo(part, speed)
             parts.append(part)
         rel = f"{T.REFS_DIR}/tts_{uuid.uuid4().hex[:8]}.wav"
         secs = join_lines(parts, project / rel)
     return {"file": rel, "secs": round(secs, 3), "lines": [{"name": d["speaker"]["name"], "line": d["line"]}
                                                            for d in lines],
-            "texts": texts, "voice_files": voice_files, "provider": eng.name, "language": lang, "prompt": node.prompt}
+            "texts": texts, "voice_files": voice_files, "provider": eng.name, "language": lang, "prompt": node.prompt,
+            "base_prompt": base, "take": int(take), "speak": how}
 
 
 def apply_lines(project: Path, tree: T.Tree, nid: str, r: dict) -> dict:

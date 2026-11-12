@@ -14,7 +14,7 @@ def cast_cells(options: dict, nodes: list) -> dict[tuple[str, str], tuple[str, s
     for n in nodes:
         if n.is_video:
             continue
-        use = T.clip_cast(options, n.prompt)
+        use = T.node_cast(options, n)
         mentioned = {c["name"] for c in T.mentions(options, T.full_prompt(options, n.prompt))[0]}
         talking = {c["name"] for c in use["characters"]
                    if c.get("voice") and c["voice"]["file"] in use.get("voices", [])}

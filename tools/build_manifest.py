@@ -166,7 +166,9 @@ COMFY = {"git": "https://github.com/comfyanonymous/ComfyUI", "rev": "1332fabf", 
          "licence": "GPL-3.0"}
 # Programs next to the app: the TTS environment and llama.cpp's server (a release build, no compiler needed)
 SOFTWARE = {
-    "tts": {"python": "3.12", "pip": ["qwen-tts==0.1.1", "soundfile"], "licence": "Apache-2.0"},
+    # (audio-separator: "remove the music" for voice samples; it fetches its own model, see installer.separator)
+    "tts": {"python": "3.12", "pip": ["qwen-tts==0.1.1", "soundfile", "audio-separator==0.48.0", "audioread"],
+            "licence": "Apache-2.0"},
     "llama": {"repo": "ggml-org/llama.cpp", "tag": "b12317", "licence": "MIT"},
 }
 
@@ -299,6 +301,10 @@ def models_doc(comps: dict) -> str:
             f"https://github.com/{SOFTWARE['llama']['repo']} | {SOFTWARE['llama']['licence']} |",
             f"| Qwen3-TTS (`{SOFTWARE['tts']['pip'][0]}`) | https://pypi.org/project/qwen-tts/ | "
             f"{SOFTWARE['tts']['licence']} |",
+            "| audio-separator with its model `vocals_mel_band_roformer.ckpt` (removes music from voice samples; "
+            "the tool downloads the model itself) | https://github.com/karaokenerds/python-audio-separator | "
+            "MIT (the tool, per PyPI); the model's author states MIT at "
+            "https://huggingface.co/KimberleyJSN/melbandroformer |",
             "| ffmpeg (only when the system has none with libx264) | https://github.com/BtbN/FFmpeg-Builds | "
             "GPL build of ffmpeg |",
             "| uv (only when the system has none) | https://docs.astral.sh/uv/ | Apache-2.0 / MIT |", ""]

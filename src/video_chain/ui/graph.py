@@ -56,6 +56,7 @@ class NodeItem(QGraphicsObject):
         self.setCursor(Qt.PointingHandCursor)
         self._hover = False
         self.focused = False                  # shown in the inspector
+        self.playing = False                  # the clip the played path is at
         self.setToolTip(info.prompt or info.title)
 
     def boundingRect(self) -> QRectF:
@@ -81,6 +82,10 @@ class NodeItem(QGraphicsObject):
         p.setPen(pen)
         p.setBrush(t.bgRaised)
         p.drawRoundedRect(r, 8, 8)
+        if self.playing:                      # the played path is at this clip: a wide ring (and a play mark)
+            p.setPen(QPen(t.accent, 4))
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(r.adjusted(-1, -1, 1, 1), 9, 9)
         if self.focused:                      # the clip in the inspector: a second, outer ring
             p.setPen(QPen(with_alpha(t.accent, 0.8), 1.5, Qt.DashLine))
             p.setBrush(Qt.NoBrush)
@@ -145,6 +150,15 @@ class NodeItem(QGraphicsObject):
         text = i.prompt.strip() or ("(empty prompt)" if i.status != "start" else "")
         p.drawText(QRectF(10, y + 20, W - 20, 16), Qt.AlignLeft | Qt.AlignVCenter,
                    fm.elidedText(text, Qt.ElideRight, W - 20))
+        if self.playing:
+            mark = QRectF(thumb.right() - 27, thumb.y() + 5, 22, 22)
+            p.setPen(Qt.NoPen)
+            p.setBrush(t.accent)
+            p.drawEllipse(mark)
+            c = mark.center()
+            p.setBrush(t.onAccent)
+            p.drawPolygon([QPointF(c.x() - 3.5, c.y() - 5.5), QPointF(c.x() - 3.5, c.y() + 5.5),
+                           QPointF(c.x() + 5.5, c.y())])
         if i.status == "generating":
             bar = QRectF(8, H - 7, W - 16, 3)
             p.setPen(Qt.NoPen)
@@ -195,6 +209,19 @@ class GraphView(QGraphicsView):
         self.edges: list[tuple[str, str, QGraphicsPathItem]] = []
         self._structure: tuple = ()
         self._focus: str | None = None
+        self._playing: str | None = None
+
+    def set_playing(self, nid: str | None) -> None:
+        """Mark the clip the played path is at (None: nothing is played), and bring it into view."""
+        if nid == self._playing:
+            return
+        self._playing = nid
+        for k, item in self.items_by_id.items():
+            if item.playing != (k == nid):
+                item.playing = k == nid
+                item.update()
+        if nid is not None:
+            self.reveal(nid)
 
     def set_focus(self, nid: str | None) -> None:
         """Mark the clip shown in the inspector."""
@@ -249,6 +276,7 @@ class GraphView(QGraphicsView):
             sc.addItem(item)
             self.items_by_id[i.id] = item
             item.focused = i.id == self._focus
+            item.playing = i.id == self._playing
         for i in infos:
             if i.parent is not None and i.parent in pos:
                 a, b = pos[i.parent], pos[i.id]
