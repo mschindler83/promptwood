@@ -1,7 +1,10 @@
 """video-chain: one start image + N prompts -> N chained MiniMax-H3 clips + one joined video, rendered by a running
 ComfyUI (see comfy.py). E.g.
-  ./video-chain start.jpg prompts.txt --out ~/chains/test1 --lora glow_h3_lora.safetensors
+  video-chain start.jpg prompts.txt --out ~/chains/test1 --lora my_h3_lora.safetensors
 The LoRA must be in one of ComfyUI's LoRA folders.
+
+  video-chain setup     installs everything the app needs (ComfyUI, models, …); safe to run again
+  video-chain doctor    reports what is installed and what is missing
 """
 from __future__ import annotations
 
@@ -49,7 +52,8 @@ def build_parser() -> argparse.ArgumentParser:
                         '({"cmd": "run", "tree": DIR, "targets": [ids]} or {"cmd": "quit"})')
     p.add_argument("--idle-minutes", type=float, default=15,
                    help="worker mode: quit (and free the memory) after this long without a job; 0 = never")
-    p.add_argument("--comfy-url", default="http://127.0.0.1:8188", help="ComfyUI address")
+    from . import paths
+    p.add_argument("--comfy-url", default=paths.comfy_url(), help="ComfyUI address")
     p.add_argument("--comfy-dir", type=Path, help="ComfyUI's folder (its LoRA folders; cleanup of its copies)")
     p.add_argument("--keep-comfy-copies", action="store_true",
                    help="leave ComfyUI's copies of clips and start images in its output/input folders")
@@ -64,6 +68,12 @@ def _printer(enabled: bool):
 
 
 def main(argv: list[str] | None = None) -> int:
+    from . import paths
+    paths.use_private_tools()
+    args = sys.argv[1:] if argv is None else list(argv)
+    if args and args[0] in ("setup", "doctor"):          # install / check what the app needs (setup/__main__.py)
+        from .setup.__main__ import main as setup_main
+        return setup_main(args)
     a = build_parser().parse_args(argv)
     emit = _printer(a.events)
     try:

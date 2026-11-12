@@ -27,19 +27,15 @@ import uuid
 import wave
 from pathlib import Path
 
-from . import chain
+from . import chain, paths
 from . import tree as T
 
-APP_DIR = Path(__file__).resolve().parents[2]
-TTS_PYTHON = APP_DIR / ".venv-tts" / "bin" / "python"
 WORKER = Path(__file__).resolve().with_name("tts_worker.py")
-HF_CACHE = Path("/path/to/ai/hf-models")
 QWEN_BASE = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
 QWEN_DESIGN = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
 WHISPER = "openai/whisper-large-v3-turbo"
 LOCAL_VRAM_MB = 5500                     # measured: 4.5 GB peak for the 1.7B models (bf16), Whisper turbo less
-SETUP_HINT = ("in the app folder: uv venv -p 3.12 .venv-tts && VIRTUAL_ENV=.venv-tts uv pip install qwen-tts "
-              "soundfile; the models: Qwen/Qwen3-TTS-12Hz-1.7B-Base and -VoiceDesign in " + str(HF_CACHE))
+SETUP_HINT = "run: video-chain setup --only tts   (Help > Setup check shows what is missing)"
 
 # the dialogue language (project setting) -> Qwen3-TTS's name / ISO 639-1 for ElevenLabs
 LANGUAGES = {"English": "en", "German": "de", "French": "fr", "Spanish": "es", "Italian": "it", "Portuguese": "pt",
@@ -69,9 +65,9 @@ def language(tree_or_options) -> str:
     return ((o.get("identity") or {}).get("language") or "English").strip() or "English"
 
 
-def snapshot(repo: str, cache: Path = HF_CACHE) -> Path | None:
+def snapshot(repo: str, cache: Path | None = None) -> Path | None:
     """The downloaded snapshot of a Hugging Face repo in the model cache (None: not there)."""
-    d = Path(cache) / ("models--" + repo.replace("/", "--"))
+    d = Path(cache or paths.hf_cache()) / ("models--" + repo.replace("/", "--"))
     ref = d / "refs" / "main"
     if ref.is_file():
         snap = d / "snapshots" / ref.read_text().strip()
@@ -90,9 +86,10 @@ class LocalTTS:
 
     name = "local"
 
-    def __init__(self, python: Path = TTS_PYTHON, cache: Path = HF_CACHE, log: Path | None = None,
+    def __init__(self, python: Path | None = None, cache: Path | None = None, log: Path | None = None,
                  worker: Path = WORKER, start_timeout: float = 120.0):
-        self.python, self.cache, self.log, self.worker = Path(python), Path(cache), log, Path(worker)
+        self.python, self.cache = Path(python or paths.tts_python()), Path(cache or paths.hf_cache())
+        self.log, self.worker = log, Path(worker)
         self.start_timeout = start_timeout
         self.proc: subprocess.Popen | None = None
         self._answers: queue.Queue = queue.Queue()
@@ -102,10 +99,10 @@ class LocalTTS:
     def problems(self, design: bool = False, transcribe: bool = False) -> list[str]:
         out = []
         if not self.python.is_file():
-            out.append(f"the TTS environment is missing ({self.python}); set it up {SETUP_HINT}")
+            out.append(f"the TTS environment is missing ({self.python}); {SETUP_HINT}")
         for repo, need in ((QWEN_BASE, True), (QWEN_DESIGN, design), (WHISPER, transcribe)):
             if need and snapshot(repo, self.cache) is None:
-                out.append(f"the model {repo} is not in {self.cache}")
+                out.append(f"the model {repo} is not in {self.cache}; {SETUP_HINT}")
         return out
 
     def running(self) -> bool:

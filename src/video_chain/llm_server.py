@@ -17,11 +17,12 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from . import paths
 from .comfy import clean_refined, refine_messages
 
 PREFIX = "llama:"                                # model ids of this backend in the refiner's list
 DEFAULT_PORT = 8091
-DEFAULT_SERVER = "/path/to/ai/llama.cpp/build/bin/llama-server"
+DEFAULT_SERVER = paths.llama_server()        # the installed one, else llama-server on PATH
 START_TIMEOUT = 600.0                            # a 25 GB model from a cold disk takes minutes
 CONTEXT = 16384                                  # a conversation with pictures (one ~1 MP picture: ~1-2k tokens)
 MAX_TOKENS = 1024                                # a prompt is a few hundred tokens; more means it rambles

@@ -2,6 +2,7 @@
 name = "video-chain"
 version = "0.1.0"
 description = "Chain MiniMax-H3 image-to-video clips: each prompt continues from the last frame of the clip before"
+readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "PySide6>=6.8",
@@ -15,6 +16,9 @@ dev = ["pytest", "pillow", "numpy", "safetensors"]
 # "Crop to face" for face pictures: insightface's SCRFD detector (from ComfyUI's models folder) on the CPU
 faces = ["onnxruntime>=1.18", "numpy"]
 
+[project.scripts]
+video-chain = "video_chain.__main__:main"
+
 [project.gui-scripts]
 video-chain-gui = "video_chain.app:main"
 
@@ -26,7 +30,7 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-video_chain = ["theme/*.json", "theme/*.in", "theme/icons/*.svg", "theme/fonts/*"]
+video_chain = ["theme/*.json", "theme/*.in", "theme/icons/*.svg", "theme/fonts/*", "setup/manifest.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

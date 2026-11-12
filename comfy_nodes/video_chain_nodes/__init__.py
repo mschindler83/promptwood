@@ -8,8 +8,22 @@ VideoChainFaceSwap: the face of one person swapped through video frames with Fac
 faceswap.py), the identity from up to four pictures of the new person; GPEN face restoration optional.
 Copy this folder into ComfyUI/custom_nodes and restart ComfyUI.
 """
+import os
+
 import comfy.ldm.qwen_image21.model
+import folder_paths
 from comfy_extras.nodes_model_patch import QwenImage21FunControlPatch
+
+# The face models' folders (models/insightface, models/facerestore_models): a plain ComfyUI does not know them; other
+# face nodes and extra_model_paths.yaml may have added them already, then theirs are kept and ours come after.
+for _kind in ("insightface", "facerestore_models"):
+    try:
+        folder_paths.add_model_folder_path(_kind, os.path.join(folder_paths.models_dir, _kind))
+        _paths, _exts = folder_paths.folder_names_and_paths[_kind]
+        if _exts:                                   # (no extensions listed: every file counts already)
+            folder_paths.folder_names_and_paths[_kind] = (_paths, set(_exts) | {".onnx"})
+    except Exception:  # noqa: BLE001  (an older ComfyUI: the face swap then reports the missing folder itself)
+        pass
 
 
 class VideoChainQwen21FunInpaint:

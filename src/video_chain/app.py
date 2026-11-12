@@ -8,6 +8,7 @@ import sys
 def main(argv: list[str] | None = None) -> int:
     import os
 
+    from . import paths
     from PySide6.QtCore import QLoggingCategory, QSettings
     # "Play videos on the GPU" (settings; read before Qt's media backend loads, so a change needs a restart): GPU =
     # hardware decoding and Qt's GPU video surface (smooth, but NVIDIA's EGL driver crashed once with a full GPU);
@@ -31,8 +32,12 @@ def main(argv: list[str] | None = None) -> int:
     app.setApplicationName("Video Chain")
     app.setDesktopFileName("video-chain")
     ThemeManager.instance().apply(app)
+    paths.use_private_tools()
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
-        QMessageBox.critical(None, "Promptwood", "ffmpeg and ffprobe are required (sudo dnf install ffmpeg).")
+        from .setup.system import install_hint
+        QMessageBox.critical(None, "Promptwood",
+                             "ffmpeg and ffprobe are required and were not found.\n\nRun  video-chain setup  in a "
+                             f"terminal (it installs what is missing), or:  {install_hint('ffmpeg')}")
         return 1
     w = MainWindow()
     w.show()

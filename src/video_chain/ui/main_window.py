@@ -54,9 +54,10 @@ from .video_editor import VideoRangeDialog, choose_video
 from .theme import icon, repolish, theme
 from .widgets import FrameTile, VideoView, guard_wheel, icon_button, label, section_bar
 
-DEFAULT_COMFY_URL = "http://127.0.0.1:8188"
+from .. import paths  # noqa: E402
+DEFAULT_COMFY_URL = paths.comfy_url()
 from ..llm_server import DEFAULT_PORT as LLM_DEFAULT_PORT, DEFAULT_SERVER as LLM_DEFAULT_SERVER  # noqa: E402
-LLM_MODEL_DIRS = (Path("/path/to/ai/hf-models"), Path.home() / ".cache" / "huggingface" / "hub")
+LLM_MODEL_DIRS = tuple(paths.model_cache_dirs())
 
 
 CHAT_HINTS = ("instruct", "chat", "-it-", "-it.", "_it_", "abliterated", "uncensored")
@@ -78,8 +79,8 @@ def find_gguf_models(roots=LLM_MODEL_DIRS) -> list[Path]:
         except OSError:
             continue
     return out
-DEFAULT_COMFY_LAUNCHER = str(Path.home() / "bin" / "comfyui")
-DEFAULT_COMFY_DIR = str(Path.home() / "ComfyUI")
+DEFAULT_COMFY_LAUNCHER = str(paths.comfy_launcher())
+DEFAULT_COMFY_DIR = str(paths.comfy_dir())
 # H3's 17n+5 frame grid from 3 s to 15 s (362 frames = 15.1 s, the top of its trained range of ~124-362)
 FRAME_CHOICES = [17 * n + 5 for n in range(4, 22)]
 
@@ -3273,7 +3274,7 @@ class MainWindow(QMainWindow):
         if cur is None or (cur.server, cur.model, cur.port, cur.cpu_moe, cur.mmproj) != key:
             if cur is not None:
                 cur.stop(wait=False)
-            self._llama = LlamaServer(*key, log_dir=Path.home() / ".cache" / "video-chain")
+            self._llama = LlamaServer(*key, log_dir=paths.cache_dir())
         url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL).rstrip("/")
         self._llama.before_launch = lambda llama=self._llama: self._room_for_llama(llama, url)
         return self._llama
@@ -3414,7 +3415,7 @@ class MainWindow(QMainWindow):
     def local_tts(self) -> "TTS.LocalTTS":
         """The app's Qwen3-TTS worker (started on demand; stop_tts unloads it)."""
         if self._tts_local is None:
-            d = Path.home() / ".cache" / "video-chain"
+            d = paths.cache_dir()
             d.mkdir(parents=True, exist_ok=True)
             self._tts_local = TTS.LocalTTS(log=d / "tts-worker.log")
         url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL).rstrip("/")
