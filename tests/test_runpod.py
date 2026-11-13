@@ -323,7 +323,7 @@ def test_pod_setup_script_keeps_private_files_in_ram():
     assert script.is_file()
     subprocess.run(["bash", "-n", str(script)], check=True)
     text = script.read_text()
-    assert "IO=/dev/shm/vc-io" in text and "/root/vc-io" not in text
+    assert 'IO="${IO_DIR:-/dev/shm/vc-io}"' in text and "/root/vc-io" not in text
     for flag in ("--input-directory \"$IO/input\"", "--output-directory \"$IO/output\"",
                  "--temp-directory \"$IO/temp\"", "--user-directory \"$IO/user\"",
                  "--database-url \"sqlite:///$IO/user/comfyui.db\"", "--listen 127.0.0.1"):
@@ -582,3 +582,103 @@ def test_global_volume_mounts_anywhere(fake, tmp_path):
     assert body["mounts"] == {"global": [{"volumeId": "gv1", "path": "/workspace"}]} and "dataCenterIds" not in body
     assert s.volume == "gv1" and s.volume_kind == "global" and body["disk"] == 30
     s.close()
+
+
+SHIMS = {
+    # git: a "clone" makes the folder with a requirements.txt; describe answers the tag cloned
+    "git": """#!/usr/bin/env bash
+if [ "$1" = clone ]; then dest="${@: -1}"; mkdir -p "$dest/models"; printf 'torch\\nnumpy>=1.25\\ntorchvision\\nav\\n' \\
+    > "$dest/requirements.txt"; echo "# fake" > "$dest/main.py"; echo clone >> "$SHIM_LOG"; exit 0; fi
+if [ "$3" = describe ]; then echo "$COMFY_REF"; exit 0; fi
+exit 0
+""",
+    "python3": """#!/usr/bin/env bash
+[ "$1" = -c ] && { echo 2.8.0; exit 0; }
+exit 0
+""",
+    # uv: a venv whose python "serves" ComfyUI (sleeps); pip install records what it was asked for
+    "uv": """#!/usr/bin/env bash
+if [ "$1" = venv ]; then d="${@: -1}"; mkdir -p "$d/bin"; printf '#!/usr/bin/env bash\\nexec sleep 300\\n' > "$d/bin/python"
+    chmod +x "$d/bin/python"; exit 0; fi
+if [ "$1" = pip ]; then cat "${@: -1}" >> "$SHIM_LOG"; echo pip >> "$SHIM_LOG"; exit 0; fi
+""",
+    # curl: ComfyUI answers; a HEAD gives the payload's sha256 as x-linked-etag; a download writes the payload
+    "curl": """#!/usr/bin/env bash
+for a in "$@"; do url="$a"; done
+case "$url" in http://127.0.0.1:8188/*) exit 0 ;; esac
+if [[ " $* " == *" -fsI "* ]]; then printf 'HTTP/2 302\\r\\nx-linked-etag: "%s"\\r\\n\\r\\n' "$SHIM_SHA"; exit 0; fi
+out=""; prev=""; for a in "$@"; do [ "$prev" = -o ] && out="$a"; prev="$a"; done
+printf '%s' "$SHIM_PAYLOAD" > "$out"; echo "download ${url%%\\?*}" >> "$SHIM_LOG"
+""",
+}
+
+
+def run_setup(tmp_path, volume, sha=None, extra=None):
+    import hashlib
+    bin_ = tmp_path / "bin"
+    bin_.mkdir(exist_ok=True)
+    for name, body in SHIMS.items():
+        (bin_ / name).write_text(body)
+        (bin_ / name).chmod(0o755)
+    log = tmp_path / "shim.log"
+    payload = "weights"
+    env = {**os.environ, "PATH": f"{bin_}:{os.environ['PATH']}", "SHIM_LOG": str(log), "SHIM_PAYLOAD": payload,
+           "SHIM_SHA": sha or hashlib.sha256(payload.encode()).hexdigest(), "COMFY_REF": RP.COMFY_REF,
+           "MODELS": "7b", "IDLE_MIN": "0", "MIN_RAM_GB": "0", "VOLUME_PATH": str(volume) if volume else "",
+           "CODE_DIR": str(tmp_path / "code"), "IO_DIR": str(tmp_path / "io"), **(extra or {})}
+    r = subprocess.run(["bash", str(RP.SETUP_SCRIPT)], env=env, capture_output=True, text=True, timeout=60,
+                       check=False)
+    pid = tmp_path / "io" / "comfy.pid"
+    if pid.is_file():                                         # the stand-in ComfyUI
+        try:
+            os.kill(int(pid.read_text()), 15)
+        except (ProcessLookupError, ValueError):
+            pass
+        pid.unlink()
+    return r, log.read_text() if log.is_file() else ""
+
+
+@pytest.mark.skipif(subprocess.run(["stat", "-f", "-c", "%T", "/tmp"], capture_output=True, text=True,
+                                   check=False).stdout.strip() != "tmpfs", reason="needs /tmp on tmpfs")
+def test_setup_script_keeps_only_the_weights_on_the_volume(tmp_path):
+    """The whole setup script with stand-ins for git, uv, python and curl: ComfyUI and its packages on the
+    container disk (a global volume allows no chmod: git failed there), only the checked weights on the volume,
+    ComfyUI pointed at them; an old layout's code on the volume removed; nothing fetched twice; a bad checksum
+    stops it; a volume that takes no files falls back to the container disk."""
+    vol = tmp_path / "workspace"
+    (vol / "video-chain" / "ComfyUI" / ".git").mkdir(parents=True)          # what the failed first run left
+    r, log = run_setup(tmp_path, vol)
+    assert r.returncode == 0, r.stderr
+    notes = [x[3:] for x in r.stdout.splitlines() if x.startswith("@@ ")]
+    assert notes[-1] == "ready" and "downloading seedvr2_7b_int8_convrot.safetensors" in notes
+    w = vol / "video-chain" / "models"
+    assert (w / "diffusion_models" / "seedvr2_7b_int8_convrot.safetensors").read_text() == "weights"
+    assert (w / "vae" / "seedvr2_ema_vae_fp16.safetensors").is_file()
+    assert sorted(p.name for p in (vol / "video-chain").iterdir()) == ["models"]   # nothing but the weights
+    code = tmp_path / "code"
+    assert (code / "ComfyUI" / "main.py").is_file() and (code / "venv" / "bin" / "python").is_file()
+    yaml = (code / "ComfyUI" / "extra_model_paths.yaml").read_text()
+    assert f"base_path: {w}" in yaml and "diffusion_models: diffusion_models/" in yaml and "vae: vae/" in yaml
+    assert "numpy>=1.25" in log and "av" in log and "torch\n" not in log and "torchvision" not in log
+    assert log.count("download ") == 2
+    assert oct((tmp_path / "io").stat().st_mode & 0o777) == "0o700"
+    r, log2 = run_setup(tmp_path, vol)                                        # the next pod: nothing fetched
+    assert r.returncode == 0 and log2.count("download ") == 2
+
+    (tmp_path / "bad").mkdir()
+    r, _ = run_setup(tmp_path / "bad", None, sha="0" * 64)
+    assert r.returncode == 3 and "checksum mismatch" in r.stderr
+    assert not list((tmp_path / "bad" / "code" / "ComfyUI" / "models").rglob("*.safetensors"))
+
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    (ro / "workspace").mkdir()
+    (ro / "workspace").chmod(0o500)                                           # takes no files
+    try:
+        r, _ = run_setup(ro, ro / "workspace")
+    finally:
+        (ro / "workspace").chmod(0o700)
+    assert r.returncode == 0, r.stderr
+    assert "the weights are fetched to the container disk" in r.stdout
+    assert (ro / "code" / "ComfyUI" / "models" / "diffusion_models" / "seedvr2_7b_int8_convrot.safetensors").is_file()
+    assert not (ro / "code" / "ComfyUI" / "extra_model_paths.yaml").exists()

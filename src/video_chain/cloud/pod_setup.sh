@@ -13,7 +13,8 @@
 # mount dm-crypt or FUSE, so instead every private byte stays in RAM: uploads, results, ComfyUI's temp files, its
 # database, user folder and log, and every program's temporary files (TMPDIR) live in /dev/shm/vc-io (tmpfs), which
 # the app empties after each job and which is gone when the pod is terminated. The disks (container disk, network
-# volume) hold only public files: ComfyUI's code, its Python packages and the public SeedVR2 weights.
+# volume) hold only public files: ComfyUI's code and its Python packages (container disk), the public SeedVR2
+# weights (the volume, if any).
 # ComfyUI listens on 127.0.0.1 only: reached through the SSH tunnel, never through RunPod's public HTTP proxy.
 # Lines "@@ <text>" are progress notes for the app.
 set -euo pipefail
@@ -22,7 +23,7 @@ COMFY_REF="${COMFY_REF:-v0.45.3}"
 MODELS="${MODELS:-7b}"
 IDLE_MIN="${IDLE_MIN:-20}"
 MIN_RAM_GB="${MIN_RAM_GB:-8}"
-HF=https://huggingface.co/Comfy-Org/SeedVR2/resolve/main
+HF="${HF_BASE:-https://huggingface.co/Comfy-Org/SeedVR2/resolve/main}"   # (HF_BASE, CODE_DIR, IO_DIR: tests)
 note() { echo "@@ $*"; }
 # an SSH session does not inherit the container's environment: take RunPod's variables from the init process
 if [ -r /proc/1/environ ]; then
@@ -31,26 +32,34 @@ if [ -r /proc/1/environ ]; then
     done < /proc/1/environ
 fi
 
-# the volume (network or global, if any) keeps ComfyUI, its Python packages and the models between pods: later
-# boots are fast
+# ComfyUI's code and its Python packages go on the container disk on every boot (about a minute: a shallow clone
+# and uv); only the SeedVR2 weights (~9 GB, the slow part) are kept on the volume, as plain files written once. A
+# global volume allows no chmod (git and a venv need it) and maybe no links, so nothing else is put there.
+CODE="${CODE_DIR:-/root/video-chain}"
 VOLUME_PATH="${VOLUME_PATH:-}"
-if [ -n "$VOLUME_PATH" ] && [ -d "$VOLUME_PATH" ] && [ -w "$VOLUME_PATH" ]; then
-    BASE="$VOLUME_PATH/video-chain"
-elif [ -n "$VOLUME_PATH" ]; then
-    note "warning: the volume is not mounted at $VOLUME_PATH (or not writable): using the container disk"
-    BASE=/root/video-chain
-elif [ -n "${RUNPOD_VOLUME_ID:-}" ] && [ -d /workspace ] && [ -w /workspace ]; then
-    BASE=/workspace/video-chain
-else
-    BASE=/root/video-chain
+if [ -z "$VOLUME_PATH" ] && [ -n "${RUNPOD_VOLUME_ID:-}" ] && [ -d /workspace ]; then
+    VOLUME_PATH=/workspace
+fi
+WEIGHTS="$CODE/ComfyUI/models"
+if [ -n "$VOLUME_PATH" ]; then
+    vol="$VOLUME_PATH/video-chain"
+    # (it must take a new file, a rename and a delete: what the downloads below do)
+    if mkdir -p "$vol/models" 2>/dev/null && echo probe > "$vol/models/.probe.part" 2>/dev/null \
+            && mv -f "$vol/models/.probe.part" "$vol/models/.probe" 2>/dev/null && rm -f "$vol/models/.probe"; then
+        WEIGHTS="$vol/models"
+        # an earlier layout kept ComfyUI, its venv and the uv cache there too: not any more (billed storage)
+        rm -rf "$vol/ComfyUI" "$vol/venv" "$vol/uv-cache" "$vol/requirements.txt" 2>/dev/null || true
+    else
+        note "warning: the volume at $VOLUME_PATH takes no files: the weights are fetched to the container disk"
+    fi
 fi
 # ---- the private area: RAM only (tmpfs), or nothing runs
-IO=/dev/shm/vc-io
-if [ "$(stat -f -c %T /dev/shm 2>/dev/null)" != "tmpfs" ]; then
+IO="${IO_DIR:-/dev/shm/vc-io}"
+if [ "$(stat -f -c %T "$(dirname "$IO")" 2>/dev/null)" != "tmpfs" ]; then
     echo "/dev/shm is not a RAM file system here: refusing to put private files on a disk" >&2
     exit 5
 fi
-room=$(( $(df -B1 --output=avail /dev/shm | tail -1) / 1073741824 ))
+room=$(( $(df -B1 --output=avail "$(dirname "$IO")" | tail -1) / 1073741824 ))
 if [ "$room" -lt "$MIN_RAM_GB" ]; then
     echo "/dev/shm has only ${room} GB (needs ${MIN_RAM_GB} GB): refusing to put private files on a disk" >&2
     exit 5
@@ -59,13 +68,12 @@ if [ -s /proc/swaps ] && [ "$(wc -l < /proc/swaps)" -gt 1 ]; then
     note "warning: the host has swap, RAM pages could be swapped out to its disk"
 fi
 umask 077
-mkdir -p "$BASE" "$IO/input" "$IO/output" "$IO/temp" "$IO/user" "$IO/tmp"
+mkdir -p "$CODE" "$IO/input" "$IO/output" "$IO/temp" "$IO/user" "$IO/tmp"
 chmod 700 "$IO"
-# (copies, not hard links: the uv cache and the venv may be on different file systems)
-export TMPDIR="$IO/tmp" UV_CACHE_DIR="$BASE/uv-cache" UV_LINK_MODE=copy HF_HUB_DISABLE_TELEMETRY=1 DO_NOT_TRACK=1
+export TMPDIR="$IO/tmp" UV_CACHE_DIR="$CODE/uv-cache" HF_HUB_DISABLE_TELEMETRY=1 DO_NOT_TRACK=1
 
 # ---- ComfyUI at the pinned tag
-COMFY="$BASE/ComfyUI"
+COMFY="$CODE/ComfyUI"
 if [ ! -d "$COMFY/.git" ]; then
     note "installing ComfyUI $COMFY_REF"
     git clone -q --depth 1 --branch "$COMFY_REF" https://github.com/comfyanonymous/ComfyUI "$COMFY"
@@ -76,14 +84,7 @@ elif [ "$(git -C "$COMFY" describe --tags --exact-match 2>/dev/null || true)" !=
 fi
 
 # ---- its Python packages (on top of the image's CUDA PyTorch)
-VENV="$BASE/venv"
-# a volume that takes no symbolic links (a venv needs them) keeps the code and weights; the packages then go on
-# the container disk, installed again per pod from the uv cache on the volume
-if ! ln -sfn / "$BASE/.symlink-probe" 2>/dev/null; then
-    note "the volume takes no symbolic links: Python packages go on the container disk"
-    VENV=/root/video-chain-venv
-fi
-rm -f "$BASE/.symlink-probe"
+VENV="$CODE/venv"
 STAMP="$VENV/.video-chain-$COMFY_REF-$(python3 -c 'import torch; print(torch.__version__)' 2>/dev/null || echo none)"
 if [ ! -f "$STAMP" ]; then
     note "installing ComfyUI's Python packages"
@@ -91,14 +92,18 @@ if [ ! -f "$STAMP" ]; then
     rm -rf "$VENV"
     uv venv -q --system-site-packages --python "$(command -v python3)" "$VENV"
     # torch / torchvision / torchaudio come from the image (built for its CUDA); everything else from the tag
-    grep -viE '^(torch|torchvision|torchaudio)([<>=~! ].*)?$' "$COMFY/requirements.txt" > "$BASE/requirements.txt"
-    uv pip install -q --python "$VENV/bin/python" -r "$BASE/requirements.txt"
+    grep -viE '^(torch|torchvision|torchaudio)([<>=~! ].*)?$' "$COMFY/requirements.txt" > "$CODE/requirements.txt"
+    uv pip install -q --python "$VENV/bin/python" -r "$CODE/requirements.txt"
     touch "$STAMP"
 fi
 
-# ---- SeedVR2 models (Comfy-Org/SeedVR2), checked against Hugging Face's SHA-256 once
-fetch() {   # fetch <repo path> <ComfyUI models subfolder>
-    local src="$1" dir="$COMFY/models/$2" name
+# ---- SeedVR2 models (Comfy-Org/SeedVR2), checked against Hugging Face's SHA-256 once, in WEIGHTS
+if [ "$WEIGHTS" != "$COMFY/models" ]; then
+    printf 'video_chain:\n    base_path: %s\n    diffusion_models: diffusion_models/\n    vae: vae/\n' "$WEIGHTS" \
+        > "$COMFY/extra_model_paths.yaml"
+fi
+fetch() {   # fetch <repo path> <models subfolder>
+    local src="$1" dir="$WEIGHTS/$2" name
     name="$(basename "$1")"
     mkdir -p "$dir"
     [ -f "$dir/$name" ] && [ -f "$dir/.$name.ok" ] && return 0
