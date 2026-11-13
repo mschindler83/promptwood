@@ -7530,7 +7530,10 @@ class MainWindow(QMainWindow):
         ok = self._phase == "done" and code == 0 and not self._error
         refine = (self._job or {}).get("refine")         # an export at a refined size
         for nid in [n for n, s in self.live.items() if s == "generating"]:
-            self.live[nid] = "stopped" if self._stopping else "failed"
+            if refine:                                   # an export never touches the clip itself, only its upscaled
+                self.live.pop(nid, None)                 # copy: the clip stays as it is (it was marked "stopped" and
+            else:                                        # blocked Play and Export path until the project reopened)
+                self.live[nid] = "stopped" if self._stopping else "failed"
         if ok:
             self.live.clear()
         self.progress_of.clear()

@@ -272,6 +272,27 @@ def test_failure_and_stop(app, win, tmp_path, image, monkeypatch):
     assert win.state(ids[0]) == "done" and win.b_gen.isEnabled()
 
 
+def test_stopping_an_export_leaves_the_clips_as_they_are(app, win, tmp_path, image, monkeypatch):
+    """An export works on upscaled copies only: stopped or failed in the middle of a clip, every clip of the path
+    stays "done" (it was marked "stopped" and blocked Play path and Export path until the project was reopened),
+    and the path can be exported again at once."""
+    ids = new_project(win, tmp_path, image, ("a", "b"))
+    run_and_wait(app, win, win.generate_path)
+    wait(app, lambda: not win._joins, timeout=30)
+    assert [win.state(i) for i in ids] == ["done", "done"] and win.b_export.isEnabled()
+    monkeypatch.setenv("FAKE_DELAY", "0.5")                           # (each fake upscale takes 5 s)
+    win.unload()
+    wait(app, lambda: not win.worker_alive, timeout=15)
+    win.export(tmp_path / "x.mp4", "2k")
+    wait(app, lambda: any(win.live.get(i) == "generating" for i in ids), timeout=30)
+    win.stop()
+    wait(app, lambda: not win.running, timeout=20)
+    assert win.status.text().startswith("Stopped")
+    assert [win.state(i) for i in ids] == ["done", "done"]
+    assert win.b_export.isEnabled() and win.b_play_path.isEnabled()
+    assert not (tmp_path / "x.mp4").exists()
+
+
 def test_start_explains_what_is_missing(app, win, tmp_path, image):
     win.open_project(tmp_path / "proj")
     win.generate_path()

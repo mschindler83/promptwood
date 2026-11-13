@@ -33,6 +33,7 @@ class FakeGenerator:
         """Fake SeedVR2 upscale: the draft scaled to size (frames and sound kept)."""
         self.seedvrs = getattr(self, "seedvrs", [])
         self.seedvrs.append({"draft": Path(draft).name, "size": tuple(size), "method": method, "denoise": denoise})
+        time.sleep(getattr(self, "step_delay", 0) * 10)          # (FAKE_DELAY: time to stop an export mid-clip)
         subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(draft), "-vf", f"scale={size[0]}:{size[1]},setsar=1",
                         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(out)], check=True)
 
