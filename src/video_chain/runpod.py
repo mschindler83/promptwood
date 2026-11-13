@@ -53,6 +53,8 @@ SETUP_SCRIPT = Path(__file__).with_name("cloud") / "pod_setup.sh"
 # GPU types (RunPod's ids) offered in the settings, fastest first. Prices change: RunPod's console shows them.
 GPUS = (
     ("NVIDIA H100 80GB HBM3", "H100 SXM 80 GB (fastest)"),
+    ("NVIDIA H200", "H200 141 GB (about as fast, pricier)"),
+    ("NVIDIA H100 NVL", "H100 NVL 94 GB"),
     ("NVIDIA H100 PCIe", "H100 PCIe 80 GB"),
     ("NVIDIA GeForce RTX 5090", "RTX 5090 32 GB"),
     ("NVIDIA L40S", "L40S 48 GB"),
