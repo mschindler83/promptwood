@@ -1196,3 +1196,19 @@ def test_seedvr2_full_precision_and_whole_frames_when_asked():
     assert wf["dec"] == {"class_type": "VAEDecode", "inputs": {"samples": ["merge", 0], "vae": ["vae", 0]}}
     assert C.build_seedvr_workflow(draft="d.mp4", width=1920, height=1088, unet="u", vae="v",
                                    prefix="p")["enc"]["class_type"] == "VAEEncodeTiled"
+
+
+def test_seedvr2_lanczos_on_all_cores_when_comfyui_has_the_node(server, tmp_path):
+    """With video-chain's VideoChainLanczosScale in ComfyUI (the same frames as ImageScale's lanczos, see
+    tests/test_scale_node.py) the resize uses it; without, ImageScale as before."""
+    import subprocess
+    draft = tmp_path / "d.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=64x36:r=24:d=1",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", str(draft)], check=True)
+    gen = C.ComfyGenerator(server.url)
+    gen.seedvr(draft, tmp_path / "a.mp4", (128, 72))
+    assert server.prompts[-1]["resize"]["class_type"] == "ImageScale"
+    server.scale_node = True
+    gen.seedvr(draft, tmp_path / "b.mp4", (128, 72))
+    r = server.prompts[-1]["resize"]
+    assert r == {"class_type": "VideoChainLanczosScale", "inputs": {"image": ["parts", 0], "width": 128, "height": 72}}

@@ -1733,13 +1733,18 @@ def pick_seedvr_files(unets: list[str], vaes: list[str], size: str,
     return {"unet": min(cands, key=order) if cands else None, "vae": vae}
 
 
+SCALE_NODE = "VideoChainLanczosScale"      # comfy_nodes/video_chain_nodes/scale.py: ImageScale's lanczos on all cores
+
+
 def build_seedvr_workflow(*, draft: str, width: int, height: int, unet: str, vae: str, prefix: str,
-                          seed: int = 42, tiled: bool = True) -> dict:
+                          seed: int = 42, tiled: bool = True, fast_scale: bool = False) -> dict:
     """Upscale the uploaded clip (with its sound) to width x height with SeedVR2 (see SEEDVR_NODES).
     tiled: the VAE passes in 512 px tiles (as the blueprint; for 24 GB). Off (40 GB and more): the plain
     VAEEncode / VAEDecode, which run SeedVR2's VAE on whole frames, split in time only as far as the free VRAM
     needs, with its causal cache carried between the slices: exact, no tile seams, the GPU kept busy (ComfyUI
-    falls back to tiles by itself on an out-of-memory)."""
+    falls back to tiles by itself on an out-of-memory).
+    fast_scale: the lanczos resize by SCALE_NODE (the same frames, bit for bit, on all CPU cores) instead of
+    ImageScale (one frame after another on one core)."""
     tiles = {"tile_size": 512, "overlap": 128, "temporal_size": 64, "temporal_overlap": 8}
     enc = ({"class_type": "VAEEncodeTiled", "inputs": {"pixels": ["pre", 0], "vae": ["vae", 0], **tiles}} if tiled
            else {"class_type": "VAEEncode", "inputs": {"pixels": ["pre", 0], "vae": ["vae", 0]}})
@@ -1748,9 +1753,11 @@ def build_seedvr_workflow(*, draft: str, width: int, height: int, unet: str, vae
     return {
         "load": {"class_type": "LoadVideo", "inputs": {"file": draft}},
         "parts": {"class_type": "GetVideoComponents", "inputs": {"video": ["load", 0]}},
-        "resize": {"class_type": "ImageScale", "inputs": {"image": ["parts", 0], "upscale_method": "lanczos",
-                                                          "width": int(width), "height": int(height),
-                                                          "crop": "disabled"}},
+        "resize": ({"class_type": SCALE_NODE, "inputs": {"image": ["parts", 0], "width": int(width),
+                                                         "height": int(height)}} if fast_scale else
+                   {"class_type": "ImageScale", "inputs": {"image": ["parts", 0], "upscale_method": "lanczos",
+                                                           "width": int(width), "height": int(height),
+                                                           "crop": "disabled"}}),
         "pre": {"class_type": "SeedVR2Preprocess", "inputs": {"resized_images": ["resize", 0]}},
         "vae": {"class_type": "VAELoader", "inputs": {"vae_name": vae}},
         "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": unet, "weight_dtype": "default"}},
@@ -1970,6 +1977,7 @@ def _seedvr_files(self, method: str) -> dict:
     unets = _combo_options(self._object_info("UNETLoader").get("input", {}).get("required", {}).get("unet_name"))
     vaes = _combo_options(self._object_info("VAELoader").get("input", {}).get("required", {}).get("vae_name"))
     files = pick_seedvr_files(unets, vaes, model, getattr(self, "seedvr_precision", SEEDVR_PRECISION_LOCAL))
+    files["fast_scale"] = bool(self._object_info(SCALE_NODE))   # (video-chain's node, when ComfyUI has it)
     if not files["unet"]:
         raise ComfyError(f"ComfyUI lists no SeedVR2 {model.upper()} model in its diffusion_models: "
                          + SEEDVR_DOWNLOAD.format(model))
@@ -2006,7 +2014,8 @@ def _seedvr_job(self, files: dict, draft: Path, out: Path, size: tuple[int, int]
             prefix = f"{SUBFOLDER}/seedvr_{uuid.uuid4().hex[:12]}"
             wf = build_seedvr_workflow(draft=name, width=size[0], height=size[1], unet=files["unet"],
                                        vae=files["vae"], prefix=prefix, seed=seed,
-                                       tiled=getattr(self, "seedvr_tiled", True))
+                                       tiled=getattr(self, "seedvr_tiled", True), fast_scale=files.get("fast_scale",
+                                                                                                         False))
             ws = self._connect_ws()
             clock = time.monotonic()
             try:

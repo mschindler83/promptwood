@@ -87,6 +87,12 @@ elif [ "$(git -C "$COMFY" describe --tags --exact-match 2>/dev/null || true)" !=
     git -C "$COMFY" checkout -q --force "$COMFY_REF"
 fi
 
+# ---- video-chain's nodes the app copied here (the lanczos resize on all cores)
+if [ -d "$CODE/nodes" ]; then
+    mkdir -p "$COMFY/custom_nodes"
+    cp -r "$CODE/nodes/." "$COMFY/custom_nodes/"
+fi
+
 # ---- its Python packages (on top of the image's CUDA PyTorch)
 VENV="$CODE/venv"
 TORCH_PINS="${TORCH_PINS:-}"

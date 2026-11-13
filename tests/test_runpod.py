@@ -476,6 +476,7 @@ def test_whole_session_over_real_ssh(tmp_path):
         notes, logs = [], []
         s = RP.RunpodSession(api(f), note=notes.append, log=logs.append, config=tmp_path / "cfg", models="3b")
         s.user, s.remote_port, s.setup_script = getpass.getuser(), comfy.server_address[1], setup
+        s.remote_code = str(tmp_path / "remote-code")
         url = s.start()
         assert url.startswith("http://127.0.0.1:") and int(url.rsplit(":", 1)[1]) != comfy.server_address[1]
         import urllib.request
@@ -483,6 +484,8 @@ def test_whole_session_over_real_ssh(tmp_path):
             "system": {"ram_free": 1}}                         # through the tunnel
         assert f"RunPod: installing ComfyUI {RP.COMFY_REF}" in notes and "RunPod: ready" in notes
         assert "models: 3b idle: 20 volume: []" in logs                      # (no volume: no path)
+        assert (tmp_path / "remote-code" / "nodes" / "video_chain_scale" / "__init__.py").read_bytes() == \
+            RP.SCALE_NODE_FILE.read_bytes()                                   # the node went over SSH first
         assert s.run("echo hi").stdout == b"hi\n"
         old = RP.REMOTE_IO                                     # remote removal, here inside tmp_path
         RP.REMOTE_IO = RP.PurePosixPath(str(io))
@@ -660,6 +663,9 @@ def test_setup_script_full_precision_on_big_gpus_and_new_weights_on_the_disk(tmp
         (w / sub / name).write_text("weights")
         (w / sub / f".{name}.ok").write_text("")
     (vol / "video-chain" / "ComfyUI" / ".git").mkdir(parents=True)          # what the failed first run left
+    node = tmp_path / "code" / "nodes" / "video_chain_scale"                 # what the app uploads first
+    node.mkdir(parents=True)
+    (node / "__init__.py").write_bytes(RP.SCALE_NODE_FILE.read_bytes())
     r, log = run_setup(tmp_path, vol, extra={"VRAM_MB": "81559", "CPUS": "23"})
     assert r.returncode == 0, r.stderr
     notes = [x[3:] for x in r.stdout.splitlines() if x.startswith("@@ ")]
@@ -675,6 +681,8 @@ def test_setup_script_full_precision_on_big_gpus_and_new_weights_on_the_disk(tmp
     yaml = (code / "ComfyUI" / "extra_model_paths.yaml").read_text()
     assert f"base_path: {w}" in yaml and "diffusion_models: diffusion_models/" in yaml
     assert "comfy main.py --listen 127.0.0.1 --port 8188 --disable-auto-launch --highvram" in log
+    assert (code / "ComfyUI" / "custom_nodes" / "video_chain_scale" / "__init__.py").read_bytes() == \
+        RP.SCALE_NODE_FILE.read_bytes()                                       # the lanczos node installed
     assert "numpy>=1.25" in log and "torch\n" not in log and "torchvision\n" not in log    # (unpinned ones out)
     assert "torch==2.15.0\ntorchvision==0.29.2\n" in log and " -c " in log              # pinned, as constraints
     assert oct((tmp_path / "io").stat().st_mode & 0o777) == "0o700"
@@ -723,7 +731,7 @@ def test_cloud_upscaler_uses_the_big_gpu_fully(tmp_path):
         for vram, unet, enc, dec in ((80 * 2**30, "seedvr2_7b_fp16.safetensors", "VAEEncode", "VAEDecode"),
                                      (24 * 2**30, "seedvr2_7b_int8_convrot.safetensors", "VAEEncodeTiled",
                                       "VAEDecodeTiled")):
-            server.vram_total = vram
+            server.vram_total, server.scale_node = vram, vram > 40 * 2**30
             logs = []
             gen = RP.CloudUpscaler(FakeSession(server.url, 0), log=logs.append)
             gen.seedvr(draft, tmp_path / "up.mp4", (128, 72))
@@ -731,6 +739,7 @@ def test_cloud_upscaler_uses_the_big_gpu_fully(tmp_path):
             assert server.seedvr_jobs[-1] == unet
             assert (wf["enc"]["class_type"], wf["dec"]["class_type"]) == (enc, dec)
             assert gen.seedvr_variant == ("fp16, whole frames" if enc == "VAEEncode" else None)
+            assert wf["resize"]["class_type"] == ("VideoChainLanczosScale" if server.scale_node else "ImageScale")
             if enc == "VAEEncode":
                 assert set(wf["enc"]["inputs"]) == {"pixels", "vae"} and set(wf["dec"]["inputs"]) == {"samples", "vae"}
                 assert any("full precision" in x for x in logs)

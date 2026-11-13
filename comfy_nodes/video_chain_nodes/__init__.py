@@ -6,6 +6,7 @@ keep (the inpaint image) is not an input there. This node hands the source image
 to ComfyUI's own QwenImage21FunControlPatch, optionally with a control image (pose, depth, ...).
 VideoChainFaceSwap: the face of one person swapped through video frames with FaceFusion's HyperSwap (see
 faceswap.py), the identity from up to four pictures of the new person; GPEN face restoration optional.
+VideoChainLanczosScale: ComfyUI's lanczos resize with the same frames, on all CPU cores (see scale.py).
 Copy this folder into ComfyUI/custom_nodes and restart ComfyUI.
 """
 import comfy.ldm.qwen_image21.model
@@ -112,7 +113,11 @@ class VideoChainFaceSwap:
         return (result, done)
 
 
+from .scale import VideoChainLanczosScale  # noqa: E402
+
 NODE_CLASS_MAPPINGS = {"VideoChainQwen21FunInpaint": VideoChainQwen21FunInpaint,
-                       "VideoChainFaceSwap": VideoChainFaceSwap}
+                       "VideoChainFaceSwap": VideoChainFaceSwap,
+                       "VideoChainLanczosScale": VideoChainLanczosScale}
 NODE_DISPLAY_NAME_MAPPINGS = {"VideoChainQwen21FunInpaint": "Qwen-Image 2.1 Fun Inpaint (Promptwood)",
-                              "VideoChainFaceSwap": "Face Swap, HyperSwap (Promptwood)"}
+                              "VideoChainFaceSwap": "Face Swap, HyperSwap (Promptwood)",
+                              "VideoChainLanczosScale": "Lanczos Scale, all cores (Promptwood)"}

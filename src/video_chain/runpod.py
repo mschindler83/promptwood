@@ -55,6 +55,9 @@ MIN_RAM_PER_GPU = 32                       # GB of system RAM: the SeedVR2 piece
 KEYRING_SERVICE, KEYRING_USER = "video-chain", "runpod-api-key"
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "video-chain" / "runpod"
 SETUP_SCRIPT = Path(__file__).with_name("cloud") / "pod_setup.sh"
+# video-chain's lanczos node (the same frames as ComfyUI's, on all cores), copied to the pod before the setup
+SCALE_NODE_FILE = Path(__file__).resolve().parents[2] / "comfy_nodes" / "video_chain_nodes" / "scale.py"
+REMOTE_CODE = "/root/video-chain"          # the pod's container-disk folder for ComfyUI (pod_setup.sh CODE)
 
 # GPU types (RunPod's ids) offered in the settings, fastest first. Prices change: RunPod's console shows them.
 GPUS = (
@@ -325,6 +328,7 @@ class RunpodSession:
         self.boot_timeout, self.setup_timeout = boot_timeout, setup_timeout
         self.key: Path = self.config / "id_ed25519"
         self.user, self.remote_port = "root", REMOTE_PORT      # (tests: a local sshd as oneself)
+        self.remote_code = REMOTE_CODE
         self.pod_id: str | None = None
         self.pod: dict = {}
         self.host: tuple[str, int] | None = None
@@ -494,9 +498,23 @@ class RunpodSession:
             time.sleep(3)
         raise RunpodError(f"could not log in to the pod over SSH ({err})")
 
+    def _upload_nodes(self) -> None:
+        """video-chain's lanczos node to the pod (pod_setup.sh puts it into ComfyUI's custom_nodes)."""
+        if not SCALE_NODE_FILE.is_file():
+            self.log(f"RunPod: {SCALE_NODE_FILE} is missing: the pod resizes with ComfyUI's ImageScale (slow)")
+            return
+        dest = f"{self.remote_code}/nodes/video_chain_scale"
+        r = self.run(f"mkdir -p {shlex.quote(dest)} && cat > {shlex.quote(dest + '/__init__.py')}", timeout=60,
+                     stdin=SCALE_NODE_FILE.read_bytes())
+        if r.returncode != 0:
+            raise RunpodError("could not copy video-chain's node to the pod: "
+                              + r.stderr.decode(errors="replace").strip()[:300])
+
     def _setup(self) -> None:
+        self._upload_nodes()
         env = {"COMFY_REF": COMFY_REF, "MODELS": self.models, "IDLE_MIN": str(self.idle_min),
-               "VOLUME_PATH": VOLUME_PATH if self.volume else "", "TORCH_PINS": " ".join(TORCH_PINS)}
+               "VOLUME_PATH": VOLUME_PATH if self.volume else "", "TORCH_PINS": " ".join(TORCH_PINS),
+               "CODE_DIR": self.remote_code}
         cmd = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items()) + " bash -s"
         p = subprocess.Popen(self.ssh_args() + [cmd], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT)

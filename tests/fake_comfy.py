@@ -31,7 +31,7 @@ KNOWN = {"UNETLoader", "CLIPLoader", "VAELoader", "LoadImage", "MiniMaxH3ImageTo
          "VedaSparseAttention",
          # SeedVR2
          "SeedVR2Preprocess", "SeedVR2Conditioning", "SeedVR2PostProcessing", "SeedVR2TemporalChunk",
-         "SeedVR2TemporalMerge", "VAEEncodeTiled",
+         "SeedVR2TemporalMerge", "VAEEncodeTiled", "VideoChainLanczosScale",
          # Wan 2.2 Animate (replace a person)
          "WanAnimateToVideo", "TrimVideoLatent", "DWPreprocessor", "BlockifyMask", "DrawMaskOnImage",
          "CLIPVisionEncode", "CLIPVisionLoader", "ModelSamplingSD3", "ImageBatch", "ImageScale",
@@ -92,6 +92,7 @@ SCHEMAS = {
     "SeedVR2TemporalMerge": ({"latents", "temporal_overlap"}, set()),
     "VAEEncodeTiled": ({"pixels", "vae", "tile_size", "overlap", "temporal_size", "temporal_overlap"}, set()),
     "ImageScale": ({"image", "upscale_method", "width", "height", "crop"}, set()),
+    "VideoChainLanczosScale": ({"image", "width", "height"}, set()),
     "WanAnimateToVideo": ({"positive", "negative", "vae", "width", "height", "length", "batch_size",
                            "continue_motion_max_frames", "video_frame_offset"},
                           {"clip_vision_output", "reference_image", "face_video", "pose_video", "continue_motion",
@@ -124,6 +125,7 @@ class FakeComfy:
         self.seedvr = True                         # SeedVR2's 7B / 3B models and VAE
         self.ram_free = 0                          # /system_stats ram_free (0: not reported)
         self.vram_total = 0                        # /system_stats devices[0].vram_total (0: no device listed)
+        self.scale_node = False                    # video-chain's VideoChainLanczosScale is installed
         self.veda = True                           # the Veda node and its two predictors
         self.seedvr_jobs: list[str] = []           # the model of every SeedVR2 job
         self.audio_refs = True                     # MiniMaxH3ReferenceToVideo takes reference sounds
@@ -209,6 +211,8 @@ class FakeComfy:
             if self.audio_refs:
                 opt["ref_audios"] = ["COMFY_AUTOGROW_V3", {"template": {"prefix": "ref_audio_", "min": 0, "max": 3}}]
             return {node: {"input": {"required": {}, "optional": opt}}}
+        if node == "VideoChainLanczosScale":
+            return {node: {"input": {"required": {}}}} if self.scale_node else {}
         if node in files:
             field, names = files[node]
             names = [] if self.models_missing and node == "UNETLoader" else names
