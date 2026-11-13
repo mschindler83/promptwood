@@ -7,6 +7,7 @@
 #   IDLE_MIN    the pod removes itself after this many minutes without an SSH connection (0: never)
 #   MIN_RAM_GB  the RAM area (/dev/shm) must have at least this much room, or nothing is started
 #   VOLUME_PATH where the app mounted the pod's network or global volume ("" without one)
+#   TORCH_PINS  the PyTorch packages to install, pinned (e.g. "torch==2.15.0 torchvision==0.29.2")
 #
 # Privacy: nothing of the user's is ever written to a RunPod disk. RunPod cannot encrypt container disks or network
 # volumes (only a pod's volume disk, with a key RunPod holds, and not through the API), and a container may not
@@ -40,19 +41,22 @@ VOLUME_PATH="${VOLUME_PATH:-}"
 if [ -z "$VOLUME_PATH" ] && [ -n "${RUNPOD_VOLUME_ID:-}" ] && [ -d /workspace ]; then
     VOLUME_PATH=/workspace
 fi
-WEIGHTS="$CODE/ComfyUI/models"
-if [ -n "$VOLUME_PATH" ]; then
-    vol="$VOLUME_PATH/video-chain"
-    # (it must take a new file, a rename and a delete: what the downloads below do)
-    if mkdir -p "$vol/models" 2>/dev/null && echo probe > "$vol/models/.probe.part" 2>/dev/null \
-            && mv -f "$vol/models/.probe.part" "$vol/models/.probe" 2>/dev/null && rm -f "$vol/models/.probe"; then
-        WEIGHTS="$vol/models"
-        # an earlier layout kept ComfyUI, its venv and the uv cache there too: not any more (billed storage)
-        rm -rf "$vol/ComfyUI" "$vol/venv" "$vol/uv-cache" "$vol/requirements.txt" 2>/dev/null || true
-    else
-        note "warning: the volume at $VOLUME_PATH takes no files: the weights are fetched to the container disk"
-    fi
+# weights already complete (checked) on the volume are used from there; anything new is fetched to the container
+# disk: Hugging Face delivered 111 MB/s to a pod, a global volume took writes at 7-9 MB/s (measured 2026-11-13)
+VOLW=""
+if [ -n "$VOLUME_PATH" ] && [ -d "$VOLUME_PATH/video-chain/models" ]; then
+    VOLW="$VOLUME_PATH/video-chain/models"
+    # an earlier layout kept ComfyUI, its venv and the uv cache there too: not any more (billed storage)
+    rm -rf "$VOLUME_PATH/video-chain/ComfyUI" "$VOLUME_PATH/video-chain/venv" "$VOLUME_PATH/video-chain/uv-cache" \
+        "$VOLUME_PATH/video-chain/requirements.txt" 2>/dev/null || true
 fi
+
+# the GPU: from 40 GB of VRAM the full-precision weights (fp16, nothing quantized) and ComfyUI keeps its models on
+# the GPU (--highvram); smaller GPUs the int8 copy, as at home (the app picks the same way from ComfyUI's VRAM)
+VRAM_MB="${VRAM_MB:-$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -dc 0-9)}"
+VRAM_MB="${VRAM_MB:-0}"
+if [ "$VRAM_MB" -ge 40000 ]; then PRECISION=fp16; HIGHVRAM=--highvram; else PRECISION=int8_convrot; HIGHVRAM=""; fi
+note "GPU with $((VRAM_MB / 1024)) GB VRAM: SeedVR2 $PRECISION"
 # ---- the private area: RAM only (tmpfs), or nothing runs
 IO="${IO_DIR:-/dev/shm/vc-io}"
 if [ "$(stat -f -c %T "$(dirname "$IO")" 2>/dev/null)" != "tmpfs" ]; then
@@ -85,26 +89,33 @@ fi
 
 # ---- its Python packages (on top of the image's CUDA PyTorch)
 VENV="$CODE/venv"
-STAMP="$VENV/.video-chain-$COMFY_REF-$(python3 -c 'import torch; print(torch.__version__)' 2>/dev/null || echo none)"
+TORCH_PINS="${TORCH_PINS:-}"
+STAMP="$VENV/.video-chain-$COMFY_REF-$(echo "$TORCH_PINS" | tr ' =' '_-')"
 if [ ! -f "$STAMP" ]; then
     note "installing ComfyUI's Python packages"
     command -v uv >/dev/null 2>&1 || python3 -m pip install -q --root-user-action=ignore uv
     rm -rf "$VENV"
     uv venv -q --system-site-packages --python "$(command -v python3)" "$VENV"
-    # torch / torchvision / torchaudio come from the image (built for its CUDA); everything else from the tag
+    # PyTorch pinned (TORCH_PINS, also as constraints: nothing may pull another one in), the rest from the tag
     grep -viE '^(torch|torchvision|torchaudio)([<>=~! ].*)?$' "$COMFY/requirements.txt" > "$CODE/requirements.txt"
-    uv pip install -q --python "$VENV/bin/python" -r "$CODE/requirements.txt"
+    printf '%s\n' $TORCH_PINS > "$CODE/constraints.txt"
+    uv pip install -q --python "$VENV/bin/python" -c "$CODE/constraints.txt" -r "$CODE/constraints.txt" \
+        -r "$CODE/requirements.txt"
     touch "$STAMP"
 fi
 
-# ---- SeedVR2 models (Comfy-Org/SeedVR2), checked against Hugging Face's SHA-256 once, in WEIGHTS
-if [ "$WEIGHTS" != "$COMFY/models" ]; then
-    printf 'video_chain:\n    base_path: %s\n    diffusion_models: diffusion_models/\n    vae: vae/\n' "$WEIGHTS" \
+# ---- SeedVR2 models (Comfy-Org/SeedVR2), checked against Hugging Face's SHA-256 once
+if [ -n "$VOLW" ]; then
+    printf 'video_chain:\n    base_path: %s\n    diffusion_models: diffusion_models/\n    vae: vae/\n' "$VOLW" \
         > "$COMFY/extra_model_paths.yaml"
 fi
-fetch() {   # fetch <repo path> <models subfolder>
-    local src="$1" dir="$WEIGHTS/$2" name
+fetch() {   # fetch <repo path> <models subfolder>: from the volume if it is complete there, else to the disk
+    local src="$1" dir="$COMFY/models/$2" name
     name="$(basename "$1")"
+    if [ -n "$VOLW" ] && [ -f "$VOLW/$2/$name" ] && [ -f "$VOLW/$2/.$name.ok" ]; then
+        note "$name: on the volume"
+        return 0
+    fi
     mkdir -p "$dir"
     [ -f "$dir/$name" ] && [ -f "$dir/.$name.ok" ] && return 0
     note "downloading $name"
@@ -123,7 +134,7 @@ fetch() {   # fetch <repo path> <models subfolder>
 }
 for m in $MODELS; do
     case "$m" in
-        7b|3b) fetch "diffusion_models/seedvr2_${m}_int8_convrot.safetensors" diffusion_models ;;
+        7b|3b) fetch "diffusion_models/seedvr2_${m}_${PRECISION}.safetensors" diffusion_models ;;
         *) echo "unknown SeedVR2 size $m" >&2; exit 2 ;;
     esac
 done
@@ -135,7 +146,7 @@ if [ -f "$IO/comfy.pid" ] && kill -0 "$(cat "$IO/comfy.pid")" 2>/dev/null; then
 else
     note "starting ComfyUI"
     cd "$COMFY"
-    TMPDIR="$IO/tmp" nohup "$VENV/bin/python" main.py --listen 127.0.0.1 --port 8188 --disable-auto-launch \
+    TMPDIR="$IO/tmp" nohup "$VENV/bin/python" main.py --listen 127.0.0.1 --port 8188 --disable-auto-launch $HIGHVRAM \
         --input-directory "$IO/input" --output-directory "$IO/output" --temp-directory "$IO/temp" \
         --user-directory "$IO/user" --database-url "sqlite:///$IO/user/comfyui.db" \
         > "$IO/comfy.log" 2>&1 < /dev/null &

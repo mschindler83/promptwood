@@ -123,6 +123,7 @@ class FakeComfy:
         self.refine_strengths: list[str] = []      # the strength of every refine job
         self.seedvr = True                         # SeedVR2's 7B / 3B models and VAE
         self.ram_free = 0                          # /system_stats ram_free (0: not reported)
+        self.vram_total = 0                        # /system_stats devices[0].vram_total (0: no device listed)
         self.veda = True                           # the Veda node and its two predictors
         self.seedvr_jobs: list[str] = []           # the model of every SeedVR2 job
         self.audio_refs = True                     # MiniMaxH3ReferenceToVideo takes reference sounds
@@ -386,7 +387,9 @@ class FakeComfy:
                 fake.calls.append(("GET", u.path))
                 if u.path == "/system_stats":
                     return self._send(200, {"system": {"comfyui_version": "fake",
-                                                       **({"ram_free": fake.ram_free} if fake.ram_free else {})}})
+                                                       **({"ram_free": fake.ram_free} if fake.ram_free else {})},
+                                            "devices": [{"name": "cuda:0 fake", "type": "cuda",
+                                                         "vram_total": fake.vram_total}] if fake.vram_total else []})
                 if u.path.startswith("/object_info/"):
                     return self._send(200, fake.object_info(u.path.rsplit("/", 1)[1]))
                 if u.path.startswith("/history/"):

@@ -33,12 +33,17 @@ import urllib.request
 import uuid
 from pathlib import Path, PurePosixPath
 
-from .comfy import SEEDVR_METHODS, SEEDVR_NODES, SUBFOLDER, ComfyError, ComfyGenerator
+from .comfy import (SEEDVR_FULL_VRAM, SEEDVR_METHODS, SEEDVR_NODES, SEEDVR_PRECISION_FULL, SUBFOLDER, ComfyError,
+                    ComfyGenerator)
 
 API_URL = "https://api.runpod.io/v2"
 # RunPod's official PyTorch image (starts sshd from PUBLIC_KEY); CUDA 12.8 runs on Ampere, Ada, Hopper and Blackwell
 IMAGE = "runpod/pytorch:2.1.0-cu1281-torch280-ubuntu2404"
-MIN_CUDA = "12.8"                          # host driver at least this (the image's CUDA)
+# PyTorch on the pod: pinned to what ran (2026-11-13, H100, driver 595 / CUDA 13.2). Unpinned, uv put the newest
+# torchvision (for spandrel) and with it the newest torch into the venv anyway, over the image's 2.8: pods would
+# have differed by the day, and a host with an older driver could not run it.
+TORCH_PINS = ("torch==2.15.0", "torchvision==0.29.2")
+MIN_CUDA = "13.2"                          # host driver at least this (the pinned PyTorch is built for CUDA 13.2)
 COMFY_REF = "v0.45.3"                      # ComfyUI tag on the pod (has the SeedVR2 core nodes this app's workflow uses)
 POD_PREFIX = "video-chain-upscale"         # every pod this app makes is named so (leftovers are found by it)
 REMOTE_IO = PurePosixPath("/dev/shm/vc-io")   # the pod's RAM-only folder for uploads and results (pod_setup.sh)
@@ -196,7 +201,8 @@ class RunpodApi:
 
     def gpus(self) -> list[dict]:
         """GPU types with their Secure Cloud price and current pod stock."""
-        res = self.call("GET", "/catalog/gpus?include=AVAILABILITY&product=POD&cloud=SECURE") or {}
+        res = self.call("GET", f"/catalog/gpus?include=AVAILABILITY&product=POD&cloud=SECURE&minCudaVersion={MIN_CUDA}")
+        res = res or {}
         return res.get("gpus") or []
 
 
@@ -221,7 +227,7 @@ def pod_body(*, name: str, gpu: str, public_key: str, volume: str | None = None,
         "image": image,
         "cloud": "SECURE",
         "gpu": {"id": gpu, "count": 1, "minCudaVersion": MIN_CUDA, "minRamPerGpu": MIN_RAM_PER_GPU},
-        "disk": 30 if volume else 60,       # without a volume: ComfyUI, packages and ~9 GB of weights on the disk
+        "disk": 80,                         # ComfyUI, its packages and new weights (7B fp16: 16.5 GB) go on the disk
         "ports": ["22/tcp"],
         "env": {"PUBLIC_KEY": public_key},  # (set here, RunPod does not put the account's own keys in)
         "startSsh": True,
@@ -490,7 +496,7 @@ class RunpodSession:
 
     def _setup(self) -> None:
         env = {"COMFY_REF": COMFY_REF, "MODELS": self.models, "IDLE_MIN": str(self.idle_min),
-               "VOLUME_PATH": VOLUME_PATH if self.volume else ""}
+               "VOLUME_PATH": VOLUME_PATH if self.volume else "", "TORCH_PINS": " ".join(TORCH_PINS)}
         cmd = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items()) + " bash -s"
         p = subprocess.Popen(self.ssh_args() + [cmd], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT)
@@ -622,6 +628,14 @@ class RunpodSession:
 # ----------------------------------------------------------------------------- ComfyUI on the pod
 
 
+def vram_total(stats: dict | None) -> int:
+    """The first GPU's VRAM in bytes from ComfyUI's /system_stats (0: not said)."""
+    for d in (stats or {}).get("devices") or []:
+        if d.get("type") == "cuda" and d.get("vram_total"):
+            return int(d["vram_total"])
+    return 0
+
+
 class CloudUpscaler(ComfyGenerator):
     """ComfyGenerator for the pod's ComfyUI (through the tunnel): SeedVR2 upscaling only. Uploads and results are
     removed on the pod after each job (its RAM folder), the frame budget comes from the pod's own RAM."""
@@ -633,6 +647,14 @@ class CloudUpscaler(ComfyGenerator):
         super().__init__(session.url, log=log, progress=progress, timeout=timeout, comfy_dir=None, cleanup=False)
         self.cleanup = True
         self.input_dir, self.output_dir = REMOTE_IO / "input", REMOTE_IO / "output"
+        self.vram = vram_total(self.stats)
+        self.seedvr_variant = None                     # (as at home: copies made there or here are the same)
+        if self.vram >= SEEDVR_FULL_VRAM:            # (an H100 & co.: what costs no accuracy and uses the GPU)
+            self.seedvr_tiled, self.seedvr_precision = False, SEEDVR_PRECISION_FULL
+            self.seedvr_variant = "fp16, whole frames"   # recorded with each kept copy: others are made again
+        log(f"RunPod: {self.vram / 2**30:.0f} GB VRAM: SeedVR2 "
+            + ("full precision (fp16 weights), whole frames (no tiles)" if self.vram >= SEEDVR_FULL_VRAM else
+               "int8 weights, 512 px tiles (as at home)"))
 
     def _check_models(self):
         for node in SEEDVR_NODES:

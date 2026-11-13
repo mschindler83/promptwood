@@ -1717,18 +1717,34 @@ SEEDVR_OVERLAP = 2                         # latent frames (8 frames) crossfaded
 SEEDVR_DOWNLOAD = "https://huggingface.co/Comfy-Org/SeedVR2 (diffusion_models/seedvr2_{}_int8_convrot.safetensors)"
 
 
-def pick_seedvr_files(unets: list[str], vaes: list[str], size: str) -> dict:
-    """SeedVR2's model of this size ('7b' / '3b'; not the "sharp" variant; int8 > fp8 > fp16 > any) and its VAE."""
-    cands = [u for u in unets if f"seedvr2_{size}" in Path(u).name.lower() and "sharp" not in u.lower()]
-    order = lambda u: next((i for i, k in enumerate(("int8", "fp8", "fp16")) if k in u.lower()), 9)   # noqa: E731
+SEEDVR_PRECISION_LOCAL = ("int8", "fp8", "fp16")   # 24 GB: the int8 copy fits with the frames (measured on a 4090)
+SEEDVR_PRECISION_FULL = ("fp16", "int8", "fp8")    # 40 GB and more: the full-precision weights, nothing quantized
+SEEDVR_FULL_VRAM = 40 * 2**30                      # from this much VRAM: fp16 weights and untiled VAE passes
+
+
+def pick_seedvr_files(unets: list[str], vaes: list[str], size: str,
+                      precision: tuple[str, ...] = SEEDVR_PRECISION_LOCAL) -> dict:
+    """SeedVR2's model of this size ('7b' / '3b'; not the "sharp" variant; in the order of precision, then any;
+    never mxfp8 / nvfp4, made for newer GPUs) and its VAE."""
+    cands = [u for u in unets if f"seedvr2_{size}" in Path(u).name.lower() and "sharp" not in u.lower()
+             and not any(k in u.lower() for k in ("mxfp8", "nvfp4"))]
+    order = lambda u: next((i for i, k in enumerate(precision) if k in u.lower()), 9)   # noqa: E731
     vae = next((v for v in vaes if "seedvr2" in Path(v).name.lower() and "vae" in Path(v).name.lower()), None)
     return {"unet": min(cands, key=order) if cands else None, "vae": vae}
 
 
 def build_seedvr_workflow(*, draft: str, width: int, height: int, unet: str, vae: str, prefix: str,
-                          seed: int = 42) -> dict:
-    """Upscale the uploaded clip (with its sound) to width x height with SeedVR2 (see SEEDVR_NODES)."""
+                          seed: int = 42, tiled: bool = True) -> dict:
+    """Upscale the uploaded clip (with its sound) to width x height with SeedVR2 (see SEEDVR_NODES).
+    tiled: the VAE passes in 512 px tiles (as the blueprint; for 24 GB). Off (40 GB and more): the plain
+    VAEEncode / VAEDecode, which run SeedVR2's VAE on whole frames, split in time only as far as the free VRAM
+    needs, with its causal cache carried between the slices: exact, no tile seams, the GPU kept busy (ComfyUI
+    falls back to tiles by itself on an out-of-memory)."""
     tiles = {"tile_size": 512, "overlap": 128, "temporal_size": 64, "temporal_overlap": 8}
+    enc = ({"class_type": "VAEEncodeTiled", "inputs": {"pixels": ["pre", 0], "vae": ["vae", 0], **tiles}} if tiled
+           else {"class_type": "VAEEncode", "inputs": {"pixels": ["pre", 0], "vae": ["vae", 0]}})
+    dec = ({"class_type": "VAEDecodeTiled", "inputs": {"samples": ["merge", 0], "vae": ["vae", 0], **tiles}} if tiled
+           else {"class_type": "VAEDecode", "inputs": {"samples": ["merge", 0], "vae": ["vae", 0]}})
     return {
         "load": {"class_type": "LoadVideo", "inputs": {"file": draft}},
         "parts": {"class_type": "GetVideoComponents", "inputs": {"video": ["load", 0]}},
@@ -1738,7 +1754,7 @@ def build_seedvr_workflow(*, draft: str, width: int, height: int, unet: str, vae
         "pre": {"class_type": "SeedVR2Preprocess", "inputs": {"resized_images": ["resize", 0]}},
         "vae": {"class_type": "VAELoader", "inputs": {"vae_name": vae}},
         "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": unet, "weight_dtype": "default"}},
-        "enc": {"class_type": "VAEEncodeTiled", "inputs": {"pixels": ["pre", 0], "vae": ["vae", 0], **tiles}},
+        "enc": enc,
         "chunk": {"class_type": "SeedVR2TemporalChunk", "inputs": {"latent": ["enc", 0],
                                                                    "temporal_overlap": SEEDVR_OVERLAP,
                                                                    "chunking_mode": "auto"}},
@@ -1751,7 +1767,7 @@ def build_seedvr_workflow(*, draft: str, width: int, height: int, unet: str, vae
                                                         "denoise": 1.0}},
         "merge": {"class_type": "SeedVR2TemporalMerge", "inputs": {"latents": ["sample", 0],
                                                                    "temporal_overlap": ["chunk", 1]}},
-        "dec": {"class_type": "VAEDecodeTiled", "inputs": {"samples": ["merge", 0], "vae": ["vae", 0], **tiles}},
+        "dec": dec,
         "post": {"class_type": "SeedVR2PostProcessing", "inputs": {"images": ["dec", 0],
                                                                    "original_resized_images": ["resize", 0],
                                                                    "color_correction_method": "lab"}},
@@ -1953,7 +1969,7 @@ def _seedvr_files(self, method: str) -> dict:
     model = SEEDVR_METHODS[method]
     unets = _combo_options(self._object_info("UNETLoader").get("input", {}).get("required", {}).get("unet_name"))
     vaes = _combo_options(self._object_info("VAELoader").get("input", {}).get("required", {}).get("vae_name"))
-    files = pick_seedvr_files(unets, vaes, model)
+    files = pick_seedvr_files(unets, vaes, model, getattr(self, "seedvr_precision", SEEDVR_PRECISION_LOCAL))
     if not files["unet"]:
         raise ComfyError(f"ComfyUI lists no SeedVR2 {model.upper()} model in its diffusion_models: "
                          + SEEDVR_DOWNLOAD.format(model))
@@ -1989,7 +2005,8 @@ def _seedvr_job(self, files: dict, draft: Path, out: Path, size: tuple[int, int]
             t_up = time.monotonic() - clock
             prefix = f"{SUBFOLDER}/seedvr_{uuid.uuid4().hex[:12]}"
             wf = build_seedvr_workflow(draft=name, width=size[0], height=size[1], unet=files["unet"],
-                                       vae=files["vae"], prefix=prefix, seed=seed)
+                                       vae=files["vae"], prefix=prefix, seed=seed,
+                                       tiled=getattr(self, "seedvr_tiled", True))
             ws = self._connect_ws()
             clock = time.monotonic()
             try:

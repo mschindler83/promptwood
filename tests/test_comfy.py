@@ -1182,3 +1182,17 @@ def test_seedvr2_timing_per_node_and_transfer(server, tmp_path, monkeypatch):
                     "-c:v", "libx264", "-pix_fmt", "yuv420p", str(draft)], check=True)
     gen.seedvr(draft, tmp_path / "up.mp4", (128, 72))
     assert any(x.startswith("SeedVR2 128x72 (seedvr2_7b_int8_convrot.safetensors): upload ") for x in logs)
+
+
+def test_seedvr2_full_precision_and_whole_frames_when_asked():
+    """The model order for big GPUs (fp16 first) and the untiled workflow; never the mxfp8 / nvfp4 files."""
+    unets = ["seedvr2_7b_int8_convrot.safetensors", "seedvr2_7b_fp16.safetensors", "seedvr2_7b_mxfp8.safetensors",
+             "seedvr2_7b_nvfp4.safetensors", "seedvr2_7b_sharp_fp16.safetensors"]
+    assert C.pick_seedvr_files(unets, [], "7b")["unet"] == "seedvr2_7b_int8_convrot.safetensors"     # as at home
+    assert C.pick_seedvr_files(unets, [], "7b", C.SEEDVR_PRECISION_FULL)["unet"] == "seedvr2_7b_fp16.safetensors"
+    assert C.pick_seedvr_files(unets[2:4], [], "7b")["unet"] is None
+    wf = C.build_seedvr_workflow(draft="d.mp4", width=1920, height=1088, unet="u", vae="v", prefix="p", tiled=False)
+    assert wf["enc"] == {"class_type": "VAEEncode", "inputs": {"pixels": ["pre", 0], "vae": ["vae", 0]}}
+    assert wf["dec"] == {"class_type": "VAEDecode", "inputs": {"samples": ["merge", 0], "vae": ["vae", 0]}}
+    assert C.build_seedvr_workflow(draft="d.mp4", width=1920, height=1088, unet="u", vae="v",
+                                   prefix="p")["enc"]["class_type"] == "VAEEncodeTiled"

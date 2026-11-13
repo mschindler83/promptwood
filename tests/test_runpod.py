@@ -81,6 +81,7 @@ class FakeRunpod:
                                                 "timedOut": False})
                 if method == "GET" and p == "/v2/catalog/gpus" and fake.catalog is not None:
                     assert "include=AVAILABILITY" in self.path and "cloud=SECURE" in self.path
+                    assert f"minCudaVersion={RP.MIN_CUDA}" in self.path               # stock that can run it
                     return self._send(200, {"gpus": [
                         {"id": g, "memory": 24, "price": {"secure": 1.0}, "availability": "LOW" if dcs else "NONE",
                          "dataCenters": [{"id": dc, "availability": "LOW"} for dc in dcs]}
@@ -125,10 +126,10 @@ def test_pod_request_is_secure_cloud_ssh_only_with_our_key():
     b = RP.pod_body(name="video-chain-upscale-x", gpu="NVIDIA L40S", public_key="ssh-ed25519 AAA app")
     assert b["cloud"] == "SECURE" and b["ports"] == ["22/tcp"] and b["startJupyter"] is False
     assert b["env"] == {"PUBLIC_KEY": "ssh-ed25519 AAA app"} and b["gpu"]["count"] == 1
-    assert b["gpu"]["minCudaVersion"] == RP.MIN_CUDA and "mounts" not in b and "dataCenterIds" not in b
+    assert b["gpu"]["minCudaVersion"] == RP.MIN_CUDA == "13.2" and "mounts" not in b and "dataCenterIds" not in b
     v = RP.pod_body(name="n", gpu="g", public_key="k", volume="vol9", data_center="EU-CZ-1")
     assert v["mounts"] == {"network": [{"volumeId": "vol9", "path": "/workspace"}]}
-    assert v["dataCenterIds"] == ["EU-CZ-1"] and v["disk"] < b["disk"]
+    assert v["dataCenterIds"] == ["EU-CZ-1"] and v["disk"] == b["disk"] == 80   # (new weights go on the disk)
 
 
 def test_api_calls_retry_on_429_and_page_through_pods(fake):
@@ -537,7 +538,7 @@ def test_without_the_volume_when_its_data_centre_has_none(fake, tmp_path):
     s._create("k")
     assert [c["gpu"]["id"] for c in creates(fake)] == ["NVIDIA GeForce RTX 4090"]     # only what is free
     body = creates(fake)[0]
-    assert "mounts" not in body and "dataCenterIds" not in body and body["disk"] == 60
+    assert "mounts" not in body and "dataCenterIds" not in body and body["disk"] == 80
     assert s.volume is None and any("without the volume" in n for n in s.notes)
     s.close()
 
@@ -580,7 +581,7 @@ def test_global_volume_mounts_anywhere(fake, tmp_path):
     body = creates(fake)[0]
     assert [c["gpu"]["id"] for c in creates(fake)] == ["NVIDIA H100 80GB HBM3"]
     assert body["mounts"] == {"global": [{"volumeId": "gv1", "path": "/workspace"}]} and "dataCenterIds" not in body
-    assert s.volume == "gv1" and s.volume_kind == "global" and body["disk"] == 30
+    assert s.volume == "gv1" and s.volume_kind == "global" and body["disk"] == 80
     s.close()
 
 
@@ -598,9 +599,10 @@ exit 0
 """,
     # uv: a venv whose python "serves" ComfyUI (sleeps); pip install records what it was asked for
     "uv": """#!/usr/bin/env bash
-if [ "$1" = venv ]; then d="${@: -1}"; mkdir -p "$d/bin"; printf '#!/usr/bin/env bash\\nexec sleep 300\\n' > "$d/bin/python"
+if [ "$1" = venv ]; then d="${@: -1}"; mkdir -p "$d/bin"; printf '#!/usr/bin/env bash\\necho "comfy $*" >> "$SHIM_LOG"\\nexec sleep 300\\n' > "$d/bin/python"
     chmod +x "$d/bin/python"; exit 0; fi
-if [ "$1" = pip ]; then cat "${@: -1}" >> "$SHIM_LOG"; echo pip >> "$SHIM_LOG"; exit 0; fi
+if [ "$1" = pip ]; then echo "uv $*" >> "$SHIM_LOG"; for a in "$@"; do [ -f "$a" ] && cat "$a" >> "$SHIM_LOG"; done
+    echo pip >> "$SHIM_LOG"; exit 0; fi
 """,
     # curl: ComfyUI answers; a HEAD gives the payload's sha256 as x-linked-etag; a download writes the payload
     "curl": """#!/usr/bin/env bash
@@ -625,6 +627,7 @@ def run_setup(tmp_path, volume, sha=None, extra=None):
     env = {**os.environ, "PATH": f"{bin_}:{os.environ['PATH']}", "SHIM_LOG": str(log), "SHIM_PAYLOAD": payload,
            "SHIM_SHA": sha or hashlib.sha256(payload.encode()).hexdigest(), "COMFY_REF": RP.COMFY_REF,
            "MODELS": "7b", "IDLE_MIN": "0", "MIN_RAM_GB": "0", "VOLUME_PATH": str(volume) if volume else "",
+           "TORCH_PINS": " ".join(RP.TORCH_PINS),
            "CODE_DIR": str(tmp_path / "code"), "IO_DIR": str(tmp_path / "io"), **(extra or {})}
     r = subprocess.run(["bash", str(RP.SETUP_SCRIPT)], env=env, capture_output=True, text=True, timeout=60,
                        check=False)
@@ -638,47 +641,98 @@ def run_setup(tmp_path, volume, sha=None, extra=None):
     return r, log.read_text() if log.is_file() else ""
 
 
-@pytest.mark.skipif(subprocess.run(["stat", "-f", "-c", "%T", "/tmp"], capture_output=True, text=True,
-                                   check=False).stdout.strip() != "tmpfs", reason="needs /tmp on tmpfs")
-def test_setup_script_keeps_only_the_weights_on_the_volume(tmp_path):
-    """The whole setup script with stand-ins for git, uv, python and curl: ComfyUI and its packages on the
-    container disk (a global volume allows no chmod: git failed there), only the checked weights on the volume,
-    ComfyUI pointed at them; an old layout's code on the volume removed; nothing fetched twice; a bad checksum
-    stops it; a volume that takes no files falls back to the container disk."""
+TMPFS = subprocess.run(["stat", "-f", "-c", "%T", "/tmp"], capture_output=True, text=True,
+                       check=False).stdout.strip() == "tmpfs"
+
+
+@pytest.mark.skipif(not TMPFS, reason="needs /tmp on tmpfs")
+def test_setup_script_full_precision_on_big_gpus_and_new_weights_on_the_disk(tmp_path):
+    """The whole setup script with stand-ins for git, uv, python and curl. 80 GB of VRAM: the 7B fp16 weights,
+    fetched to the container disk (a global volume took writes at 7-9 MB/s, Hugging Face gave 111), the VAE
+    already complete on the volume used from there, ComfyUI started with --highvram and pointed at the volume;
+    ComfyUI and its packages on the container disk, never on the volume (git failed there: no chmod); what an
+    old layout left on the volume removed; nothing fetched twice; a bad checksum stops it."""
     vol = tmp_path / "workspace"
+    w = vol / "video-chain" / "models"
+    for sub, name in (("diffusion_models", "seedvr2_7b_int8_convrot.safetensors"),
+                      ("vae", "seedvr2_ema_vae_fp16.safetensors")):
+        (w / sub).mkdir(parents=True)
+        (w / sub / name).write_text("weights")
+        (w / sub / f".{name}.ok").write_text("")
     (vol / "video-chain" / "ComfyUI" / ".git").mkdir(parents=True)          # what the failed first run left
-    r, log = run_setup(tmp_path, vol)
+    r, log = run_setup(tmp_path, vol, extra={"VRAM_MB": "81559"})
     assert r.returncode == 0, r.stderr
     notes = [x[3:] for x in r.stdout.splitlines() if x.startswith("@@ ")]
-    assert notes[-1] == "ready" and "downloading seedvr2_7b_int8_convrot.safetensors" in notes
-    w = vol / "video-chain" / "models"
-    assert (w / "diffusion_models" / "seedvr2_7b_int8_convrot.safetensors").read_text() == "weights"
-    assert (w / "vae" / "seedvr2_ema_vae_fp16.safetensors").is_file()
-    assert sorted(p.name for p in (vol / "video-chain").iterdir()) == ["models"]   # nothing but the weights
+    assert notes[-1] == "ready" and "GPU with 79 GB VRAM: SeedVR2 fp16" in notes
+    assert "downloading seedvr2_7b_fp16.safetensors" in notes and "seedvr2_ema_vae_fp16.safetensors: on the volume" in notes
     code = tmp_path / "code"
-    assert (code / "ComfyUI" / "main.py").is_file() and (code / "venv" / "bin" / "python").is_file()
+    assert (code / "ComfyUI" / "models" / "diffusion_models" / "seedvr2_7b_fp16.safetensors").read_text() == "weights"
+    assert log.count("download ") == 1 and "seedvr2_7b_fp16" in log
+    assert sorted(p.name for p in (vol / "video-chain").iterdir()) == ["models"]   # the volume: weights only
+    assert not (w / "diffusion_models" / "seedvr2_7b_fp16.safetensors").exists()     # nothing new written there
     yaml = (code / "ComfyUI" / "extra_model_paths.yaml").read_text()
-    assert f"base_path: {w}" in yaml and "diffusion_models: diffusion_models/" in yaml and "vae: vae/" in yaml
-    assert "numpy>=1.25" in log and "av" in log and "torch\n" not in log and "torchvision" not in log
-    assert log.count("download ") == 2
+    assert f"base_path: {w}" in yaml and "diffusion_models: diffusion_models/" in yaml
+    assert "comfy main.py --listen 127.0.0.1 --port 8188 --disable-auto-launch --highvram" in log
+    assert "numpy>=1.25" in log and "torch\n" not in log and "torchvision\n" not in log    # (unpinned ones out)
+    assert "torch==2.15.0\ntorchvision==0.29.2\n" in log and " -c " in log              # pinned, as constraints
     assert oct((tmp_path / "io").stat().st_mode & 0o777) == "0o700"
-    r, log2 = run_setup(tmp_path, vol)                                        # the next pod: nothing fetched
-    assert r.returncode == 0 and log2.count("download ") == 2
+    r, log2 = run_setup(tmp_path, vol, extra={"VRAM_MB": "81559"})       # the same pod again: nothing fetched
+    assert r.returncode == 0 and log2.count("download ") == 1
 
-    (tmp_path / "bad").mkdir()
-    r, _ = run_setup(tmp_path / "bad", None, sha="0" * 64)
-    assert r.returncode == 3 and "checksum mismatch" in r.stderr
-    assert not list((tmp_path / "bad" / "code" / "ComfyUI" / "models").rglob("*.safetensors"))
 
-    ro = tmp_path / "ro"
-    ro.mkdir()
-    (ro / "workspace").mkdir()
-    (ro / "workspace").chmod(0o500)                                           # takes no files
-    try:
-        r, _ = run_setup(ro, ro / "workspace")
-    finally:
-        (ro / "workspace").chmod(0o700)
+@pytest.mark.skipif(not TMPFS, reason="needs /tmp on tmpfs")
+def test_setup_script_on_a_24gb_gpu_and_without_a_volume(tmp_path):
+    """24 GB: the int8 copy (as at home), no --highvram; taken from the volume when it is complete there. No
+    volume: everything fetched to the container disk. A bad checksum stops it, nothing is kept."""
+    vol = tmp_path / "workspace"
+    w = vol / "video-chain" / "models"
+    for sub, name in (("diffusion_models", "seedvr2_7b_int8_convrot.safetensors"),
+                      ("vae", "seedvr2_ema_vae_fp16.safetensors")):
+        (w / sub).mkdir(parents=True)
+        (w / sub / name).write_text("weights")
+        (w / sub / f".{name}.ok").write_text("")
+    r, log = run_setup(tmp_path, vol, extra={"VRAM_MB": "24564"})
     assert r.returncode == 0, r.stderr
-    assert "the weights are fetched to the container disk" in r.stdout
-    assert (ro / "code" / "ComfyUI" / "models" / "diffusion_models" / "seedvr2_7b_int8_convrot.safetensors").is_file()
-    assert not (ro / "code" / "ComfyUI" / "extra_model_paths.yaml").exists()
+    assert "GPU with 23 GB VRAM: SeedVR2 int8_convrot" in r.stdout and "download " not in log
+    assert "--highvram" not in log and "--disable-auto-launch " in log
+    nv = tmp_path / "novol"
+    nv.mkdir()
+    r, log = run_setup(nv, None, extra={"VRAM_MB": "81559"})
+    assert r.returncode == 0, r.stderr
+    assert log.count("download ") == 2 and not (nv / "code" / "ComfyUI" / "extra_model_paths.yaml").exists()
+    assert (nv / "code" / "ComfyUI" / "models" / "vae" / "seedvr2_ema_vae_fp16.safetensors").is_file()
+    bad = tmp_path / "bad"
+    bad.mkdir()
+    r, _ = run_setup(bad, None, sha="0" * 64, extra={"VRAM_MB": "81559"})
+    assert r.returncode == 3 and "checksum mismatch" in r.stderr
+    assert not list((bad / "code" / "ComfyUI" / "models").rglob("*.safetensors"))
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg not installed")
+def test_cloud_upscaler_uses_the_big_gpu_fully(tmp_path):
+    """On 40 GB of VRAM or more the pod's SeedVR2 runs at full precision (the fp16 weights) and on whole frames
+    (plain VAEEncode / VAEDecode, no tile inputs); below that as at home (int8, 512 px tiles)."""
+    from fake_comfy import FakeComfy
+    server = FakeComfy(tmp_path / "comfy")
+    try:
+        draft = tmp_path / "d.mp4"
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=64x36:r=24:d=1",
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p", str(draft)], check=True)
+        for vram, unet, enc, dec in ((80 * 2**30, "seedvr2_7b_fp16.safetensors", "VAEEncode", "VAEDecode"),
+                                     (24 * 2**30, "seedvr2_7b_int8_convrot.safetensors", "VAEEncodeTiled",
+                                      "VAEDecodeTiled")):
+            server.vram_total = vram
+            logs = []
+            gen = RP.CloudUpscaler(FakeSession(server.url, 0), log=logs.append)
+            gen.seedvr(draft, tmp_path / "up.mp4", (128, 72))
+            wf = server.prompts[-1]
+            assert server.seedvr_jobs[-1] == unet
+            assert (wf["enc"]["class_type"], wf["dec"]["class_type"]) == (enc, dec)
+            assert gen.seedvr_variant == ("fp16, whole frames" if enc == "VAEEncode" else None)
+            if enc == "VAEEncode":
+                assert set(wf["enc"]["inputs"]) == {"pixels", "vae"} and set(wf["dec"]["inputs"]) == {"samples", "vae"}
+                assert any("full precision" in x for x in logs)
+            else:
+                assert wf["enc"]["inputs"]["tile_size"] == 512 and any("512 px tiles" in x for x in logs)
+    finally:
+        server.close()

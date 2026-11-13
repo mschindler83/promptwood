@@ -1469,3 +1469,21 @@ def test_frozen_clips_stay_consistent(project):
     a.made, a.frozen = None, True                           # never made: not frozen
     T.save(project, t)
     assert not T.load(project).nodes[a.id].frozen
+
+
+def test_seedvr2_cloud_variant_is_recorded(project, tmp_path):
+    """Copies upscaled on a big RunPod GPU (fp16, whole frames) record that: a copy made otherwise (int8, tiles)
+    is made again there instead of reused, and the other way round; the same variant is reused."""
+    t, a, b1, b2, c = build(project)
+    gen = run(project, [b1.id])
+    T.refine_path(gen, project, b1.id, "2k", tmp_path / "s.mp4", log=lambda _m: None, method="seedvr2_7b")
+    gen.seedvr_variant = "fp16, whole frames"
+    T.refine_path(gen, project, b1.id, "2k", tmp_path / "c.mp4", log=lambda _m: None, method="seedvr2_7b")
+    assert len(gen.seedvrs) == 4                                                     # made again
+    t = T.load(project)
+    assert T.refine_record(T.refined_file(project, t.nodes[a.id], "2k"))["variant"] == "fp16, whole frames"
+    T.refine_path(gen, project, b1.id, "2k", tmp_path / "c2.mp4", log=lambda _m: None, method="seedvr2_7b")
+    assert len(gen.seedvrs) == 4                                                     # then reused
+    gen.seedvr_variant = None
+    T.refine_path(gen, project, b1.id, "2k", tmp_path / "s2.mp4", log=lambda _m: None, method="seedvr2_7b")
+    assert len(gen.seedvrs) == 6                                                     # back home: made again

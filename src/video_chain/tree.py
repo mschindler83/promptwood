@@ -2834,6 +2834,9 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
                 pins["method"] = method
                 if denoise:
                     pins["denoise"] = True
+                variant = getattr(generator, "seedvr_variant", None)   # (RunPod's big GPUs: fp16, whole frames)
+                if variant:
+                    pins["variant"] = variant
             elif regen:
                 pins["strength"] = strength
                 if fast_attention:
