@@ -56,10 +56,14 @@ def serve_mode(a, emit) -> int:
         if os.environ.get("FAKE_COMFY_DOWN"):
             emit({"e": "error", "msg": f"ComfyUI is not reachable at {a.comfy_url}", "comfy_down": True})
             raise SystemExit(4)
-        emit({"e": "loading"})
+        emit({"e": "loading", **({"what": "runpod"} if a.cloud else {})})
+        if a.cloud:
+            emit({"e": "note", "id": None, "text": "RunPod: downloading seedvr2_7b_int8_convrot.safetensors"})
         if os.environ.get("FAKE_LOADS"):
             with open(os.environ["FAKE_LOADS"], "a") as f:
-                f.write(json.dumps({"url": a.comfy_url}) + "\n")
+                f.write(json.dumps({"url": a.comfy_url} if not a.cloud else {
+                    "cloud": a.cloud, "gpu": a.runpod_gpu, "models": a.runpod_models, "volume": a.runpod_volume,
+                    "fallback": not a.runpod_no_fallback, "idle": a.idle_minutes}) + "\n")
         time.sleep(float(os.environ.get("FAKE_LOAD_DELAY", "0")))
         cls = Failing if os.environ.get("FAKE_FAIL") else FakeGenerator
         gen = cls(frames=17, audio=True, size=None, step_delay=float(os.environ.get("FAKE_DELAY", "0")),

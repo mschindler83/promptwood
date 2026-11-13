@@ -41,6 +41,13 @@ def settings(tmp_path, name="s.ini"):
 
 
 @pytest.fixture(autouse=True)
+def no_runpod_key(monkeypatch):
+    """Never the real RunPod key from the system keyring in a test (a test that needs one sets its own)."""
+    from video_chain import runpod as RP
+    monkeypatch.setattr(RP, "api_key", lambda: "")
+
+
+@pytest.fixture(autouse=True)
 def silent_player(monkeypatch):
     """No test plays anything: the test clips have a 440 Hz tone, and offscreen only hides the picture, not the
     sound (windows made without the win fixture played their joined paths aloud)."""
@@ -1757,6 +1764,53 @@ def test_export_refined_and_hyperflow_speed(app, win, tmp_path, image):
     win.export(out, "2k", method="refine")                                   # the refine: its own copies
     wait(app, lambda: not win.running, timeout=120)
     assert win.status.text().startswith(f"Exported {out.name} (2k, refined; 2 clips upscaled now")
+    assert {win.state(n) for n in ids} == {"done"}
+
+
+def test_export_on_runpod(app, win, tmp_path, image, monkeypatch):
+    """“Upscale on RunPod”: only for SeedVR2 at a higher size and with a key; the export gets its own worker bound
+    to the pod settings (GPU, volume, fallback, SeedVR2 size), the local ComfyUI is neither needed nor started,
+    the pod's preparation shows in the status bar, and the worker (with its pod) ends after the export."""
+    from video_chain import runpod as RP
+    from video_chain.ui.main_window import ExportDialog
+    dlg = ExportDialog(None, str(tmp_path / "x.mp4"), (672, 384), {}, cloud=None, cloud_on=True)
+    assert not dlg.cloud.isEnabled() and not dlg.cloud.isChecked() and "API key" in dlg.cloud.toolTip()
+    dlg.reject()
+    dlg = ExportDialog(None, str(tmp_path / "x.mp4"), (672, 384), {}, cloud=True, cloud_on=True)
+    assert dlg.cloud.isChecked() and not dlg.cloud.isEnabled() and not dlg.on_cloud()   # as made: nothing to do
+    dlg.size.setCurrentIndex(2)
+    assert dlg.cloud.isEnabled() and dlg.on_cloud()
+    dlg.method.setCurrentIndex(dlg.method.findData("refine"))                # the refine needs the H3 models
+    assert not dlg.cloud.isEnabled() and not dlg.on_cloud()
+    dlg.reject()
+
+    loads = tmp_path / "loads.jsonl"
+    monkeypatch.setenv("FAKE_LOADS", str(loads))
+    ids = new_project(win, tmp_path, image, ("a",))
+    run_and_wait(app, win, win.generate_path)                                # the clip, by the local worker
+    wait(app, lambda: not win._joins, timeout=30)
+    out = tmp_path / "cloud-2k.mp4"
+    win.export(out, "2k", cloud=True)
+    assert not win.running and "RunPod API key" in win.status.text()        # no key: not started
+    monkeypatch.setattr(RP, "api_key", lambda: "k-123")
+    win.runpod_gpu.setCurrentIndex(win.runpod_gpu.findData("NVIDIA L40S"))
+    win.runpod_volume.setText("vol9")
+    win.runpod_volume.editingFinished.emit()
+    win.runpod_fallback.setChecked(False)
+    win.comfy_up = False                                                     # no local ComfyUI: not needed
+    monkeypatch.setenv("FAKE_LOAD_DELAY", "0.5")                             # (the pod "prepares" a moment)
+    win.export(out, "2k", method="seedvr2_3b", cloud=True)
+    assert win.running and win._worker_key()[0] == "runpod"
+    seen = []
+    wait(app, lambda: seen.append(win.status.text()) or not win.running, timeout=120)
+    assert any(t.startswith("RunPod: downloading") for t in seen)
+    assert win.status.text().startswith(f"Exported {out.name} (2k, SeedVR2 3B"), win.status.text()
+    assert chain.probe(out)["frames"] > 0
+    cloud = [json.loads(x) for x in loads.read_text().splitlines() if "cloud" in x]
+    assert cloud == [{"cloud": "runpod", "gpu": "NVIDIA L40S", "models": "3b", "volume": "vol9",
+                      "fallback": False, "idle": 0}]
+    wait(app, lambda: not win.worker_alive, timeout=30)                      # its pod is not left waiting
+    assert not win._comfy_starting                                            # the local ComfyUI was not started
     assert {win.state(n) for n in ids} == {"done"}
 
 

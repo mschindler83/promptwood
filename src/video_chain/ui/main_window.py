@@ -35,6 +35,7 @@ from .. import camera as CAM
 from .. import swap
 from .. import tree as T
 from .. import tts as TTS
+from .. import runpod as RP
 from ..comfy import REF_HINT
 from .graph import START, GraphView, NodeInfo
 from .image_picker import pick_image
@@ -353,9 +354,13 @@ class ExportDialog(QDialog):
                ("refine", "Open-H3 refine — draws detail anew"))
 
     def __init__(self, parent, default: str, made_size: tuple[int, int] | None, refined,
-                 swapped: int = 0, strength: str = "natural", method: str = "seedvr2_7b", denoise: bool = False):
+                 swapped: int = 0, strength: str = "natural", method: str = "seedvr2_7b", denoise: bool = False,
+                 cloud: bool | None = None, cloud_on: bool = False):
+        """cloud: None without a RunPod API key (the option is shown greyed), else whether it can be used;
+        cloud_on: its last choice."""
         super().__init__(parent)
         self.setWindowTitle("Export path")
+        self.cloud_ok = cloud
         self.setMinimumWidth(620)
         self.ready = refined if callable(refined) else (lambda size, _m, _s, _d=False: bool(refined.get(size)))
         self.made_size = made_size
@@ -397,6 +402,16 @@ class ExportDialog(QDialog):
                                 "little blur), so SeedVR2 does not sharpen it into grain or a painted texture on "
                                 "smooth areas (walls, long hair, skin). Upscaled copies are kept per choice")
         f.addRow("", self.denoise)
+        self.cloud = QCheckBox("Upscale on RunPod (a cloud GPU, terminated afterwards)")
+        self.cloud.setChecked(bool(cloud_on and cloud))
+        self.cloud.setToolTip(
+            "SeedVR2 on a RunPod Secure Cloud GPU instead of this computer's: a pod is made for this export (about "
+            "1-2 min with a network volume, longer the first time: ComfyUI and the weights are fetched), the clips "
+            "go there and back through an SSH tunnel and only ever sit in the pod's RAM, and the pod is terminated "
+            "when the export ends (it also removes itself 20 min after a lost connection). RunPod bills the pod by "
+            "the second. Settings → Cloud upscaling (RunPod)" if cloud is not None else
+            "Needs a RunPod API key: Settings → Cloud upscaling (RunPod)")
+        f.addRow("", self.cloud)
         self.strength = QComboBox()
         for key, text in (("soft", "Soft — calm, little new detail"),
                           ("natural", "Natural — clean, keeps the person (default)"),
@@ -449,6 +464,7 @@ class ExportDialog(QDialog):
         self.strength.setEnabled(up and refine)
         self.fast.setEnabled(up and refine)
         self.denoise.setEnabled(up and not refine)
+        self.cloud.setEnabled(bool(up and not refine and self.cloud_ok))
         self.swapped.setEnabled(up)
         w, h = self.made_size or (0, 0)
         from ..comfy import refine_size
@@ -474,6 +490,10 @@ class ExportDialog(QDialog):
         f, _ = QFileDialog.getSaveFileName(self, "Export path", self.file.text(), "Video (*.mp4)")
         if f:
             self.file.setText(f)
+
+    def on_cloud(self) -> bool:
+        """The export runs on RunPod (only SeedVR2, only at a higher size, only with a key)."""
+        return bool(self.cloud.isEnabled() and self.cloud.isChecked())
 
     def target(self) -> Path:
         f = self.file.text().strip()
@@ -2037,6 +2057,57 @@ class MainWindow(QMainWindow):
         a.addRow("", krow)
         self.keep_loaded.toggled.connect(self.idle_minutes.setEnabled)
         prefs_v.addWidget(aw)
+
+        bar, _ = section_bar("Cloud upscaling (RunPod)", left)
+        prefs_v.addWidget(bar)
+        rw = QWidget()
+        r = QFormLayout(rw)
+        r.setContentsMargins(10, 6, 10, 8)
+        rrow = QHBoxLayout()
+        self.runpod_key = QLineEdit()
+        self.runpod_key.setEchoMode(QLineEdit.Password)
+        self.runpod_key.setToolTip("Your RunPod API key (runpod.io → Settings → API Keys), for “Upscale on RunPod” "
+                                   "in the export. Kept in the system keyring, never in a settings file or a "
+                                   "project; sent only to RunPod. ($RUNPOD_API_KEY wins when it is set.)")
+        b_rkey = QPushButton("Save key")
+        b_rkey.setAutoDefault(False)
+        b_rkey.clicked.connect(lambda: self._save_runpod_key())
+        rrow.addWidget(self.runpod_key, 1)
+        rrow.addWidget(b_rkey)
+        r.addRow("RunPod API key", rrow)
+        self.runpod_gpu = QComboBox()
+        self.runpod_gpu.setEditable(True)
+        for gid, text in RP.GPUS:
+            self.runpod_gpu.addItem(text, gid)
+        self.runpod_gpu.setToolTip("The GPU the export's pod gets (Secure Cloud only: RunPod's own data centres, "
+                                   "never Community Cloud hosts). A RunPod GPU type id can be typed too. Prices: "
+                                   "RunPod's console or: python -m video_chain.runpod gpus")
+        r.addRow("GPU", self.runpod_gpu)
+        self.runpod_fallback = QCheckBox("Take another of these GPUs when this one is not free")
+        self.runpod_fallback.setChecked(True)
+        self.runpod_fallback.setToolTip("In the order of the list (fastest first). Off: the export waits for "
+                                        "nothing and fails when the chosen GPU has no capacity")
+        r.addRow("", self.runpod_fallback)
+        self.runpod_volume = QLineEdit()
+        self.runpod_volume.setPlaceholderText("optional: a network volume id, for fast starts")
+        self.runpod_volume.setToolTip("A RunPod network volume (Storage → Network volumes, about 40 GB) keeps ComfyUI, "
+                                      "its packages and the SeedVR2 weights between pods: a pod is ready in about "
+                                      "1-2 min instead of 5-10. It only ever holds these public files, never a "
+                                      "clip: those stay in the pod's RAM. The pod is made in the volume's data "
+                                      "centre (fewer GPUs to choose from there).")
+        r.addRow("Network volume", self.runpod_volume)
+        note = label("Your clips never touch a RunPod disk: they go through an SSH tunnel (the pod's host key is "
+                     "checked through RunPod's API) and sit only in the pod's RAM, removed after each job; the pod is "
+                     "terminated when the export ends. Leftovers: python -m video_chain.runpod status / down.",
+                     level="tertiary")
+        note.setWordWrap(True)
+        r.addRow("", note)
+        for w_ in (self.runpod_gpu,):
+            w_.currentTextChanged.connect(lambda *_: self._runpod_changed())
+        self.runpod_fallback.toggled.connect(lambda *_: self._runpod_changed())
+        self.runpod_volume.editingFinished.connect(self._runpod_changed)
+        prefs_v.addWidget(rw)
+        self._show_runpod_key()
         pb = QDialogButtonBox(QDialogButtonBox.Close)
         pb.button(QDialogButtonBox.Close).setAutoDefault(False)     # Enter in a field must not close it
         pb.button(QDialogButtonBox.Close).setDefault(False)
@@ -2325,6 +2396,16 @@ class MainWindow(QMainWindow):
         self.video_gpu.setChecked(q.value("videoGpu", True, type=bool))
         self.video_gpu.blockSignals(False)
         self.idle_minutes.setValue(q.value("idleMinutes", 15, type=int))
+        self._runpod_loading = True
+        gpu = q.value("runpodGpu", RP.DEFAULT_GPU, type=str)
+        i = self.runpod_gpu.findData(gpu)
+        if i >= 0:
+            self.runpod_gpu.setCurrentIndex(i)
+        else:
+            self.runpod_gpu.setEditText(gpu)
+        self.runpod_fallback.setChecked(q.value("runpodFallback", True, type=bool))
+        self.runpod_volume.setText(q.value("runpodVolume", "", type=str))
+        self._runpod_loading = False
         if g := q.value("geometry"):
             self.restoreGeometry(g)
         self._restore_layout()
@@ -3389,6 +3470,36 @@ class MainWindow(QMainWindow):
         self._eleven_voices = None
         self._show_eleven_key()
         self.status.setText("ElevenLabs API key kept in the system keyring." if key else "ElevenLabs API key removed.")
+
+    def _show_runpod_key(self):
+        has = bool(RP.api_key())
+        self.runpod_key.clear()
+        self.runpod_key.setPlaceholderText("a key is kept (type a new one, or save empty to remove it)" if has else
+                                           "none: paste your key to upscale on RunPod")
+
+    def _save_runpod_key(self):
+        key = self.runpod_key.text().strip()
+        try:
+            RP.set_api_key(key)
+        except RuntimeError as e:
+            QMessageBox.warning(self, "RunPod API key", f"Could not keep the key: {e}")
+            return
+        self._show_runpod_key()
+        self.status.setText("RunPod API key kept in the system keyring." if key else "RunPod API key removed.")
+
+    def _runpod_gpu_id(self) -> str:
+        i = self.runpod_gpu.currentIndex()
+        text = self.runpod_gpu.currentText().strip()
+        if i >= 0 and self.runpod_gpu.itemText(i) == text:
+            return self.runpod_gpu.itemData(i) or text
+        return text or RP.DEFAULT_GPU
+
+    def _runpod_changed(self):
+        if getattr(self, "_runpod_loading", False):
+            return
+        self.qs.setValue("runpodGpu", self._runpod_gpu_id())
+        self.qs.setValue("runpodFallback", self.runpod_fallback.isChecked())
+        self.qs.setValue("runpodVolume", self.runpod_volume.text().strip())
 
     def _tts_changed(self, *_):
         if self._loading or self.tree is None:
@@ -6883,7 +6994,8 @@ class MainWindow(QMainWindow):
             return all(kept(n) for n in path)
         swapped = sum(1 for n in path if T.swapped_video(n))
         dlg = ExportDialog(self, default, (base["width"], base["height"]) if base else None, ready, swapped,
-                           strength, method, denoise)
+                           strength, method, denoise, cloud=True if RP.api_key() else None,
+                           cloud_on=self.qs.value("exportCloud", False, type=bool))
         if single is not None:
             dlg.setWindowTitle(f"Export {'video' if path[0].is_video else 'clip'} #{single[1:]}")
         try:
@@ -6893,19 +7005,23 @@ class MainWindow(QMainWindow):
             refine_swapped = bool(swapped) and dlg.swapped.isChecked()
             strength, method = dlg.strength.currentData(), dlg.method.currentData()
             denoise = dlg.denoise.isChecked()
+            cloud = dlg.on_cloud()
         finally:
             dlg.deleteLater()
         if size != "made":
             self.qs.setValue("refineStrength", strength)
             self.qs.setValue("exportUpscaler", method)
             self.qs.setValue("exportDenoise", denoise)
-        self.export(out, size, fast, refine_swapped, strength, method, single, denoise and method != "refine")
+            if method != "refine":
+                self.qs.setValue("exportCloud", cloud)
+        self.export(out, size, fast, refine_swapped, strength, method, single, denoise and method != "refine",
+                    cloud=cloud and method != "refine")
 
     def export(self, out: Path, size: str = "made", fast_attention: bool = False,
                refine_swapped: bool = False, strength: str = "natural", method: str = "seedvr2_7b",
-               single: str | None = None, denoise: bool = False) -> None:
+               single: str | None = None, denoise: bool = False, cloud: bool = False) -> None:
         """Export the selected path (single: that clip alone) to out: as made (joined / copied here), or upscaled at
-        '1080p' / '2k' (a generator job)."""
+        '1080p' / '2k' (a generator job; cloud: SeedVR2 on a RunPod pod made for it)."""
         if single is not None:
             node = self.tree.nodes.get(single) if self.tree else None
             if node is None or not node.made:
@@ -6932,7 +7048,8 @@ class MainWindow(QMainWindow):
         self._start([target], refine={"size": size, "out": str(out), "fast_attention": bool(fast_attention),
                                       "refine_swapped": bool(refine_swapped), "strength": strength,
                                       "method": method, **({"single": True} if single is not None else {}),
-                                      **({"denoise": True} if denoise else {})})
+                                      **({"denoise": True} if denoise else {}),
+                                      **({"cloud": "runpod"} if cloud and method != "refine" else {})})
 
     # ------------------------------------------------------------------ GPU
     def _poll_gpu(self):
@@ -6992,9 +7109,22 @@ class MainWindow(QMainWindow):
             self._start([n.id for n in self.tree.leaves()])
 
     def _worker_key(self) -> tuple:
-        """What a running worker is bound to (which ComfyUI, its folder, cleanup); a change needs a new worker."""
+        """What a running worker is bound to (which ComfyUI, its folder, cleanup; or the RunPod pod of a cloud
+        export: GPU, volume, fallback, SeedVR2 size); a change needs a new worker."""
+        refine = (self._job or {}).get("refine") or {}
+        if refine.get("cloud"):
+            from ..comfy import SEEDVR_METHODS
+            return ("runpod", self.qs.value("runpodGpu", RP.DEFAULT_GPU, type=str),
+                    self.qs.value("runpodVolume", "", type=str).strip(),
+                    self.qs.value("runpodFallback", True, type=bool),
+                    SEEDVR_METHODS.get(refine.get("method"), "7b"))
         return ((self.comfy_url.text().strip() or DEFAULT_COMFY_URL), self.comfy_dir.text().strip(),
                 self.comfy_cleanup.isChecked())
+
+    @property
+    def _cloud_worker(self) -> bool:
+        """The running worker is a RunPod one (it ends, and its pod with it, after its export)."""
+        return bool(self.proc is not None and self._worker_bound and self._worker_bound[0] == "runpod")
 
     def _start(self, targets: list[str], refine: dict | None = None):
         if self.running or self.tree is None:
@@ -7061,7 +7191,11 @@ class MainWindow(QMainWindow):
             if empty and len(targets) > 1:
                 self.select(empty[0].id)
             return
-        if self.comfy_up is False and not self.worker_alive and self._autostart(targets, refine):
+        cloud = bool((refine or {}).get("cloud"))
+        if cloud and not RP.api_key():
+            self.status.setText("To upscale on RunPod: save your RunPod API key (Settings → Cloud upscaling).")
+            return
+        if not cloud and self.comfy_up is False and not self.worker_alive and self._autostart(targets, refine):
             return
         self._waiting_comfy = None
         self._save_timer.stop()
@@ -7114,12 +7248,23 @@ class MainWindow(QMainWindow):
         self._worker_idle, self._worker_bound, self._replace_worker = False, self._worker_key(), False
         self._worker_leaving = False
         minutes = self.idle_minutes.value() if self.keep_loaded.isChecked() else 0
-        url, comfy_dir, cleanup = self._worker_bound
-        args = pre + ["--serve", "--events", "--idle-minutes", f"{minutes:g}", "--comfy-url", url]
-        if comfy_dir:
-            args += ["--comfy-dir", os.path.expanduser(comfy_dir)]
-        if not cleanup:
-            args.append("--keep-comfy-copies")
+        if self._worker_bound[0] == "runpod":         # a pod for this export only: never idles, quits after it
+            _, gpu, volume, fallback, models = self._worker_bound
+            args = pre + ["--serve", "--events", "--idle-minutes", "0", "--cloud", "runpod", "--runpod-gpu", gpu,
+                          "--runpod-models", models]
+            if volume:
+                args += ["--runpod-volume", volume]
+            if not fallback:
+                args.append("--runpod-no-fallback")
+            self._kill_timer.setInterval(60000)        # (time to terminate the pod on Stop)
+        else:
+            url, comfy_dir, cleanup = self._worker_bound
+            args = pre + ["--serve", "--events", "--idle-minutes", f"{minutes:g}", "--comfy-url", url]
+            if comfy_dir:
+                args += ["--comfy-dir", os.path.expanduser(comfy_dir)]
+            if not cleanup:
+                args.append("--keep-comfy-copies")
+            self._kill_timer.setInterval(8000)
         self.log.appendPlainText("$ " + " ".join([program, *args]))
         self.status.setText("Starting …")
         self.proc.start(program, args)
@@ -7137,6 +7282,12 @@ class MainWindow(QMainWindow):
             cmd["last_hyperflow"] = self._comfy_model == "h3-hyperflow"
         if self._job.get("refine"):                                # export refined: re-render the path's clips
             cmd.update({"cmd": "refine", "target": self._job["targets"][0], **self._job["refine"]})
+        if self._cloud_worker:                                     # the local ComfyUI is not touched
+            cmd.pop("free_first", None)
+            cmd.pop("last_hyperflow", None)
+            self.proc.write((json.dumps(cmd) + "\n").encode())
+            self._update_model_label()
+            return
         self._qwen_timer.stop()
         hyper = bool((self.tree.options.get("hyperflow") or {}).get("on")) and not self._job.get("refine") \
             if self.tree is not None else False
@@ -7266,12 +7417,13 @@ class MainWindow(QMainWindow):
         e = ev.get("e")
         if e == "loading":
             self._worker_idle = False
-            self.status.setText("Connecting to ComfyUI …")
+            self.status.setText("Starting a RunPod pod …" if ev.get("what") == "runpod" else "Connecting to ComfyUI …")
             self.progress.setRange(0, 0)
             self._model_state = "loading"
             self._update_model_label()
         elif e == "loaded":
-            self.status.setText("Connected to ComfyUI.")
+            self.status.setText("Connected to the RunPod pod." if ev.get("what") == "runpod" else
+                                "Connected to ComfyUI.")
             self._model_state = "loaded"
         elif e == "idle":
             self._worker_idle = True
@@ -7346,6 +7498,8 @@ class MainWindow(QMainWindow):
                         f" · {fmt_left(left)} left" if left is not None else "") if upscaling else None)
         elif e == "note":                              # what the generator is doing now (e.g. a SeedVR2 piece)
             self._clip_note = str(ev.get("text") or "")
+            if self._model_state == "loading":         # (preparing the RunPod pod: each step in the status bar)
+                self.status.setText(self._clip_note + " …")
         elif e == "done":
             self._phase = "done"
         elif e == "exported":
@@ -7354,6 +7508,9 @@ class MainWindow(QMainWindow):
             self.status.setText("Joining the refined clips …")
         elif e == "error":
             self._error = ev.get("msg", "error")
+            if self._job is None:                      # after the job (e.g. a RunPod pod that could not be ended)
+                self.status.setText(f"Warning: {self._error}")
+                self.log.appendPlainText(f"Warning: {self._error}")
 
     def _job_finished(self, code: int = 0):
         """End of a job: the worker reported idle again (code 0), or the worker ended (its exit code)."""
@@ -7394,8 +7551,8 @@ class MainWindow(QMainWindow):
             self.status.setText(f"Failed: {self._error or f'the generator exited with code {code}'}")
             self.tabs.setCurrentWidget(self.log)
         self._stopping = False
-        if self.worker_alive and not self.keep_loaded.isChecked():
-            self._quit_worker()
+        if self.worker_alive and (self._cloud_worker or not self.keep_loaded.isChecked()):
+            self._quit_worker()                    # (a RunPod worker always: its pod is billed while it waits)
         self._save_timer.start()                   # what was chosen during the run (selection …) is saved now
         if ok and self.film is not None and len(self.film.scenes) > 1 and not self.film.problem \
                 and self._film_queue is None:
@@ -7581,9 +7738,10 @@ class MainWindow(QMainWindow):
             if p.state() == QProcess.Running:
                 p.write(b'{"cmd": "quit", "free": true}\n')     # ComfyUI: give the memory back too
                 p.closeWriteChannel()
+                cloud = bool(self._worker_bound and self._worker_bound[0] == "runpod")   # (its pod is terminated)
                 if not p.waitForFinished(3000):
                     p.terminate()
-                    if not p.waitForFinished(5000):
+                    if not p.waitForFinished(45000 if cloud else 5000):
                         p.kill()
                         p.waitForFinished(3000)
             self._job = None

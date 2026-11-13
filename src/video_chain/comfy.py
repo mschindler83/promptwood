@@ -1845,10 +1845,7 @@ def _seedvr(self, draft: Path, out: Path, size: tuple[int, int], method: str = "
         self.last_hyperflow = False
     self._last_seedvr = True
     total = probe(Path(draft))["frames"]
-    try:                                           # (after the unload: what SeedVR2 can really use)
-        ram_free = int((self._json("GET", "/system_stats").get("system") or {}).get("ram_free") or 0)
-    except (ComfyError, ValueError, TypeError):
-        ram_free = 0
+    ram_free = self._ram_free()                    # (after the unload: what SeedVR2 can really use)
     pieces = seedvr_pieces(total, seedvr_piece_frames(*size, seedvr_budget(ram_free)))
     outer = self.progress
     track = SeedvrProgress(len(pieces), outer)
@@ -1863,6 +1860,14 @@ def _seedvr(self, draft: Path, out: Path, size: tuple[int, int], method: str = "
         self._seedvr_pieces(files, Path(draft), Path(out), size, seed, pieces, total, track)
     finally:
         self.progress = outer
+
+
+def _ram_free(self) -> int:
+    """The RAM ComfyUI has free now, in bytes (0: it does not say)."""
+    try:
+        return int((self._json("GET", "/system_stats").get("system") or {}).get("ram_free") or 0)
+    except (ComfyError, ValueError, TypeError):
+        return 0
 
 
 def _seedvr_pieces(self, files, draft, out, size, seed, pieces, total, track) -> None:
@@ -1987,6 +1992,7 @@ def _seedvr_job(self, files: dict, draft: Path, out: Path, size: tuple[int, int]
 
 
 ComfyGenerator.seedvr = _seedvr
+ComfyGenerator._ram_free = _ram_free
 ComfyGenerator._seedvr_files = _seedvr_files
 ComfyGenerator._seedvr_job = _seedvr_job
 ComfyGenerator._seedvr_pieces = _seedvr_pieces

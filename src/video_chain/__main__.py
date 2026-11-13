@@ -53,6 +53,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--comfy-dir", type=Path, help="ComfyUI's folder (its LoRA folders; cleanup of its copies)")
     p.add_argument("--keep-comfy-copies", action="store_true",
                    help="leave ComfyUI's copies of clips and start images in its output/input folders")
+    p.add_argument("--cloud", choices=("runpod",),
+                   help="worker mode: upscale (SeedVR2) on a RunPod pod made for this worker and terminated when it "
+                        "ends, instead of the local ComfyUI (API key: $RUNPOD_API_KEY or the system keyring)")
+    p.add_argument("--runpod-gpu", default=None, help="RunPod GPU type id (default: the fastest offered)")
+    p.add_argument("--runpod-no-fallback", action="store_true",
+                   help="only that GPU type (default: the others in turn when it has no capacity)")
+    p.add_argument("--runpod-volume", default=None,
+                   help="RunPod network volume id for ComfyUI and the SeedVR2 weights (public files only): "
+                        "faster starts")
+    p.add_argument("--runpod-models", default="7b", help="SeedVR2 sizes to fetch on the pod: 7b, 3b or '7b 3b'")
     return p
 
 
@@ -81,6 +91,47 @@ def _fail(emit, msg: str) -> int:
 
 
 COMFY_DOWN = 4      # exit code: ComfyUI is not running
+
+
+CLOUD_FAILED = 5    # exit code: the RunPod pod could not be made ready
+
+
+def _cloud_generator(a, emit, current, holder: dict):
+    """A RunPod pod made ready for this worker (holder["session"]: terminated when the worker ends), and the
+    upscaler talking to its ComfyUI through the SSH tunnel."""
+    from . import runpod as rp
+    emit({"e": "loading", "what": "runpod"})
+    def note(text):
+        emit({"e": "note", "id": current.get("id"), "text": str(text)})
+
+    try:
+        session = rp.RunpodSession(rp.RunpodApi(rp.api_key()), gpu=a.runpod_gpu or rp.DEFAULT_GPU,
+                                   fallback=not a.runpod_no_fallback, volume=a.runpod_volume,
+                                   models=a.runpod_models, note=note, log=lambda t: print(t, flush=True))
+        holder["session"] = session
+        session.start()
+        gen = rp.CloudUpscaler(session, progress=lambda i, n: emit(
+            {"e": "step", "id": current.get("id"), "k": current.get("k", 0), "i": i, "n": n}))
+    except Exception as e:  # noqa: BLE001
+        traceback.print_exc()
+        emit({"e": "error", "msg": f"RunPod: {e}"})
+        _close_cloud(holder, emit)
+        raise SystemExit(CLOUD_FAILED)
+    gen.note = note
+    emit({"e": "loaded", "what": "runpod"})
+    return gen
+
+
+def _close_cloud(holder: dict, emit) -> None:
+    """Terminate the worker's pod (if any); a pod that may be left is reported."""
+    session = holder.pop("session", None)
+    if session is None:
+        return
+    try:
+        session.close()
+    except Exception as e:  # noqa: BLE001
+        print(f"RunPod: {e}", file=sys.stderr, flush=True)
+        emit({"e": "error", "msg": f"RunPod: {e}"})
 
 
 def _generator(a, emit, current):
@@ -289,6 +340,10 @@ def serve(a, emit, make_generator: Callable[[dict], object], stdin=None) -> int:
         if cmd.get("cmd") != "run":
             emit({"e": "error", "msg": f"unknown command {cmd.get('cmd')!r}"})
             continue
+        if getattr(gen, "upscale_only", False):     # (the cloud worker: an export only)
+            emit({"e": "error", "msg": "this worker only upscales on RunPod; clips are made by the local ComfyUI"})
+            emit({"e": "idle", "timeout": idle})
+            continue
         started = time.monotonic()
         if cmd.get("free_first") and hasattr(gen, "free"):
             gen.free()                              # ComfyUI holds another model (an image edit): unload it first
@@ -327,12 +382,22 @@ def _main_serve(a, emit) -> int:
     signal.signal(signal.SIGTERM, on_term)
 
     def make(current: dict):
-        holder["gen"] = _generator(a, emit, current)
+        holder["gen"] = (_cloud_generator(a, emit, current, holder) if a.cloud
+                         else _generator(a, emit, current))
         return holder["gen"]
-    return serve(a, emit, make)
+    if not a.cloud:
+        return serve(a, emit, make)
+    signal.signal(signal.SIGHUP, on_term)            # (the pod is terminated whichever way the worker ends)
+    signal.signal(signal.SIGINT, on_term)
+    try:
+        return serve(a, emit, make)
+    finally:
+        _close_cloud(holder, emit)
 
 
 def _main(a, emit) -> int:
+    if a.cloud and not a.serve:
+        return _fail(emit, "--cloud works in worker mode (--serve) only")
     if a.serve:
         return _main_serve(a, emit)
     if a.tree:
