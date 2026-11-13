@@ -63,7 +63,8 @@ def serve_mode(a, emit) -> int:
             with open(os.environ["FAKE_LOADS"], "a") as f:
                 f.write(json.dumps({"url": a.comfy_url} if not a.cloud else {
                     "cloud": a.cloud, "gpu": a.runpod_gpu, "models": a.runpod_models, "volume": a.runpod_volume,
-                    "fallback": not a.runpod_no_fallback, "idle": a.idle_minutes}) + "\n")
+                    "fallback": not a.runpod_no_fallback, "idle": a.idle_minutes,
+                    "without_volume": a.runpod_without_volume}) + "\n")
         time.sleep(float(os.environ.get("FAKE_LOAD_DELAY", "0")))
         cls = Failing if os.environ.get("FAKE_FAIL") else FakeGenerator
         gen = cls(frames=17, audio=True, size=None, step_delay=float(os.environ.get("FAKE_DELAY", "0")),

@@ -2096,6 +2096,13 @@ class MainWindow(QMainWindow):
                                       "clip: those stay in the pod's RAM. The pod is made in the volume's data "
                                       "centre (fewer GPUs to choose from there).")
         r.addRow("Network volume", self.runpod_volume)
+        self.runpod_without_volume = QCheckBox("Start without the volume when its data centre has no GPU free")
+        self.runpod_without_volume.setChecked(True)
+        self.runpod_without_volume.setToolTip("A pod with the volume must run in the volume's data centre, and that "
+                                              "one may have none of the GPUs free. On: the pod then starts anywhere "
+                                              "without it, and ComfyUI and the weights are fetched again (about 5-10 "
+                                              "min more). Off: the export stops and says where GPUs are free")
+        r.addRow("", self.runpod_without_volume)
         note = label("Your clips never touch a RunPod disk: they go through an SSH tunnel (the pod's host key is "
                      "checked through RunPod's API) and sit only in the pod's RAM, removed after each job; the pod is "
                      "terminated when the export ends. Leftovers: python -m video_chain.runpod status / down.",
@@ -2105,6 +2112,7 @@ class MainWindow(QMainWindow):
         for w_ in (self.runpod_gpu,):
             w_.currentTextChanged.connect(lambda *_: self._runpod_changed())
         self.runpod_fallback.toggled.connect(lambda *_: self._runpod_changed())
+        self.runpod_without_volume.toggled.connect(lambda *_: self._runpod_changed())
         self.runpod_volume.editingFinished.connect(self._runpod_changed)
         prefs_v.addWidget(rw)
         self._show_runpod_key()
@@ -2405,6 +2413,7 @@ class MainWindow(QMainWindow):
             self.runpod_gpu.setEditText(gpu)
         self.runpod_fallback.setChecked(q.value("runpodFallback", True, type=bool))
         self.runpod_volume.setText(q.value("runpodVolume", "", type=str))
+        self.runpod_without_volume.setChecked(q.value("runpodWithoutVolume", True, type=bool))
         self._runpod_loading = False
         if g := q.value("geometry"):
             self.restoreGeometry(g)
@@ -3500,6 +3509,7 @@ class MainWindow(QMainWindow):
         self.qs.setValue("runpodGpu", self._runpod_gpu_id())
         self.qs.setValue("runpodFallback", self.runpod_fallback.isChecked())
         self.qs.setValue("runpodVolume", self.runpod_volume.text().strip())
+        self.qs.setValue("runpodWithoutVolume", self.runpod_without_volume.isChecked())
 
     def _tts_changed(self, *_):
         if self._loading or self.tree is None:
@@ -7117,7 +7127,8 @@ class MainWindow(QMainWindow):
             return ("runpod", self.qs.value("runpodGpu", RP.DEFAULT_GPU, type=str),
                     self.qs.value("runpodVolume", "", type=str).strip(),
                     self.qs.value("runpodFallback", True, type=bool),
-                    SEEDVR_METHODS.get(refine.get("method"), "7b"))
+                    SEEDVR_METHODS.get(refine.get("method"), "7b"),
+                    self.qs.value("runpodWithoutVolume", True, type=bool))
         return ((self.comfy_url.text().strip() or DEFAULT_COMFY_URL), self.comfy_dir.text().strip(),
                 self.comfy_cleanup.isChecked())
 
@@ -7249,13 +7260,15 @@ class MainWindow(QMainWindow):
         self._worker_leaving = False
         minutes = self.idle_minutes.value() if self.keep_loaded.isChecked() else 0
         if self._worker_bound[0] == "runpod":         # a pod for this export only: never idles, quits after it
-            _, gpu, volume, fallback, models = self._worker_bound
+            _, gpu, volume, fallback, models, without_volume = self._worker_bound
             args = pre + ["--serve", "--events", "--idle-minutes", "0", "--cloud", "runpod", "--runpod-gpu", gpu,
                           "--runpod-models", models]
             if volume:
                 args += ["--runpod-volume", volume]
             if not fallback:
                 args.append("--runpod-no-fallback")
+            if volume and without_volume:
+                args.append("--runpod-without-volume")
             self._kill_timer.setInterval(60000)        # (time to terminate the pod on Stop)
         else:
             url, comfy_dir, cleanup = self._worker_bound

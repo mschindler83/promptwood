@@ -1808,7 +1808,7 @@ def test_export_on_runpod(app, win, tmp_path, image, monkeypatch):
     assert chain.probe(out)["frames"] > 0
     cloud = [json.loads(x) for x in loads.read_text().splitlines() if "cloud" in x]
     assert cloud == [{"cloud": "runpod", "gpu": "NVIDIA L40S", "models": "3b", "volume": "vol9",
-                      "fallback": False, "idle": 0}]
+                      "fallback": False, "idle": 0, "without_volume": True}]
     wait(app, lambda: not win.worker_alive, timeout=30)                      # its pod is not left waiting
     assert not win._comfy_starting                                            # the local ComfyUI was not started
     assert {win.state(n) for n in ids} == {"done"}

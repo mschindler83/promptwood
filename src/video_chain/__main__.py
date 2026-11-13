@@ -62,6 +62,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--runpod-volume", default=None,
                    help="RunPod network volume id for ComfyUI and the SeedVR2 weights (public files only): "
                         "faster starts")
+    p.add_argument("--runpod-without-volume", action="store_true",
+                   help="when the network volume's data centre has no GPU free, start without the volume")
     p.add_argument("--runpod-models", default="7b", help="SeedVR2 sizes to fetch on the pod: 7b, 3b or '7b 3b'")
     return p
 
@@ -107,7 +109,8 @@ def _cloud_generator(a, emit, current, holder: dict):
     try:
         session = rp.RunpodSession(rp.RunpodApi(rp.api_key()), gpu=a.runpod_gpu or rp.DEFAULT_GPU,
                                    fallback=not a.runpod_no_fallback, volume=a.runpod_volume,
-                                   models=a.runpod_models, note=note, log=lambda t: print(t, flush=True))
+                                   models=a.runpod_models, note=note, log=lambda t: print(t, flush=True),
+                                   without_volume=a.runpod_without_volume)
         holder["session"] = session
         session.start()
         gen = rp.CloudUpscaler(session, progress=lambda i, n: emit(

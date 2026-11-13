@@ -21,6 +21,7 @@ class FakeRunpod:
     def __init__(self, no_capacity=(), keep_running=False, busy_first=0):
         self.no_capacity, self.keep_running, self.busy = set(no_capacity), keep_running, busy_first
         self.pods, self.calls, self.n = {}, [], 0
+        self.catalog = None                       # GPU id -> data centres with stock (None: no catalog answer)
         self.host_keys = "ssh-ed25519 AAAAC3Nz host\nssh-rsa AAAAB3 host\n"
         self.ssh = ("203.0.113.5", 40022)
         fake = self
@@ -78,8 +79,14 @@ class FakeRunpod:
                     if method == "POST" and p.endswith("/exec"):
                         return self._send(200, {"stdout": fake.host_keys, "stderr": "", "exitCode": 0,
                                                 "timedOut": False})
+                if method == "GET" and p == "/v2/catalog/gpus" and fake.catalog is not None:
+                    assert "include=AVAILABILITY" in self.path and "cloud=SECURE" in self.path
+                    return self._send(200, {"gpus": [
+                        {"id": g, "memory": 24, "price": {"secure": 1.0}, "availability": "LOW" if dcs else "NONE",
+                         "dataCenters": [{"id": dc, "availability": "LOW"} for dc in dcs]}
+                        for g, dcs in fake.catalog.items()]})
                 if method == "GET" and p == "/v2/network-volumes/vol9":
-                    return self._send(200, {"id": "vol9", "dataCenterId": "EU-CZ-1", "size": 40})
+                    return self._send(200, {"id": "vol9", "dataCenter": "EU-CZ-1", "size": 40})
                 return self._send(404, {"title": "Not Found", "status": 404, "detail": p})
 
             def do_GET(self):
@@ -500,3 +507,55 @@ def test_whole_session_over_real_ssh(tmp_path):
         sshd.wait(5)
         comfy.shutdown()
         f.close()
+
+
+def creates(fake):
+    return [c[2] for c in fake.calls if c[:2] == ("POST", "/v2/pods")]
+
+
+def test_volume_data_centre_without_free_gpus_is_said_plainly(fake, tmp_path):
+    """The volume's data centre has none of the GPUs free (as EUR-IS-3 on 2026-11-13): nothing is asked for in
+    vain, and the message names the data centre and where GPUs are free."""
+    fake.catalog = {g: [] for g, _ in RP.GPUS}
+    fake.catalog["NVIDIA GeForce RTX 4090"] = ["EUR-IS-2"]
+    fake.catalog["NVIDIA GeForce RTX 5090"] = ["EU-RO-1"]
+    s = session(fake, tmp_path, volume="vol9")
+    with pytest.raises(RP.RunpodError) as e:
+        s._create("k")
+    msg = str(e.value)
+    assert "EU-CZ-1" in msg and "RTX 4090 in EUR-IS-2" in msg and "RTX 5090 in EU-RO-1" in msg
+    assert "without the volume" in msg and creates(fake) == []
+    s.close()
+
+
+def test_without_the_volume_when_its_data_centre_has_none(fake, tmp_path):
+    fake.catalog = {g: [] for g, _ in RP.GPUS}
+    fake.catalog["NVIDIA GeForce RTX 4090"] = ["EUR-IS-2"]
+    s = session(fake, tmp_path, volume="vol9", without_volume=True)
+    s._create("k")
+    assert [c["gpu"]["id"] for c in creates(fake)] == ["NVIDIA GeForce RTX 4090"]     # only what is free
+    body = creates(fake)[0]
+    assert "mounts" not in body and "dataCenterIds" not in body and body["disk"] == 60
+    assert s.volume is None and any("without the volume" in n for n in s.notes)
+    s.close()
+
+
+def test_only_gpus_free_in_the_volume_data_centre_are_asked_for(fake, tmp_path):
+    fake.catalog = {g: ["US-GA-2"] for g, _ in RP.GPUS}
+    fake.catalog["NVIDIA L40S"] = ["EU-CZ-1", "US-GA-2"]
+    s = session(fake, tmp_path, volume="vol9", without_volume=True)
+    s._create("k")
+    assert [(c["gpu"]["id"], c["dataCenterIds"]) for c in creates(fake)] == [("NVIDIA L40S", ["EU-CZ-1"])]
+    assert s.volume == "vol9" and creates(fake)[0]["mounts"]["network"][0]["volumeId"] == "vol9"
+    assert creates(fake)[0]["gpu"]["minRamPerGpu"] == RP.MIN_RAM_PER_GPU == 32
+    s.close()
+
+
+def test_chosen_gpu_not_free_without_fallback(fake, tmp_path):
+    fake.catalog = {g: ["EU-RO-1"] for g, _ in RP.GPUS}
+    fake.catalog[RP.GPUS[0][0]] = []
+    s = session(fake, tmp_path, gpu=RP.GPUS[0][0], fallback=False)
+    with pytest.raises(RP.RunpodError, match="allow other GPUs") as e:
+        s._create("k")
+    assert "free elsewhere now" in str(e.value) and creates(fake) == []
+    s.close()

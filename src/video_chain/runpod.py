@@ -44,7 +44,8 @@ POD_PREFIX = "video-chain-upscale"         # every pod this app makes is named s
 REMOTE_IO = PurePosixPath("/dev/shm/vc-io")   # the pod's RAM-only folder for uploads and results (pod_setup.sh)
 REMOTE_PORT = 8188
 IDLE_MIN = 20                              # the pod removes itself after this long without an SSH connection
-MIN_RAM_PER_GPU = 64                       # GB of system RAM (SeedVR2 holds several float copies of the frames)
+MIN_RAM_PER_GPU = 32                       # GB of system RAM: the SeedVR2 pieces are cut to what the pod has
+                                           # (64 left out most RTX 4090 / 5090 hosts)
 KEYRING_SERVICE, KEYRING_USER = "video-chain", "runpod-api-key"
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "video-chain" / "runpod"
 SETUP_SCRIPT = Path(__file__).with_name("cloud") / "pod_setup.sh"
@@ -286,8 +287,12 @@ class RunpodSession:
 
     def __init__(self, api: RunpodApi, *, gpu: str = DEFAULT_GPU, fallback: bool = True, volume: str | None = None,
                  models: str = "7b", note=None, log=None, config: Path = CONFIG_DIR, idle_min: int = IDLE_MIN,
-                 ssh: str = "ssh", boot_timeout: float = 900, setup_timeout: float = 3600):
+                 ssh: str = "ssh", boot_timeout: float = 900, setup_timeout: float = 3600,
+                 without_volume: bool = False):
+        """without_volume: when the network volume's data centre has none of the GPUs free, start without the
+        volume anywhere (ComfyUI and the weights are fetched again: a slower start)."""
         self.api, self.gpu, self.fallback, self.volume, self.models = api, gpu, fallback, volume or None, models
+        self.without_volume = bool(without_volume)
         self.note, self.log = note or (lambda _t: None), log or (lambda _t: None)
         self.config, self.idle_min, self.ssh_bin = Path(config), int(idle_min), ssh
         self.boot_timeout, self.setup_timeout = boot_timeout, setup_timeout
@@ -323,6 +328,18 @@ class RunpodSession:
         rest = [g for g, _ in GPUS if g != self.gpu] if self.fallback else []
         return [self.gpu] + rest
 
+    def _stock(self) -> dict[str, set[str]] | None:
+        """GPU type -> the data centres where RunPod's Secure Cloud has it free now (None: the catalog did not
+        answer; then every type is tried)."""
+        try:
+            gpus = self.api.gpus()
+        except RunpodError as e:
+            self.log(f"RunPod: no GPU catalog ({e}); trying every GPU type")
+            return None
+        return {g["id"]: {x["id"] for x in g.get("dataCenters") or []
+                          if x.get("id") and x.get("availability") not in (None, "NONE")}
+                for g in gpus if g.get("id")}
+
     def _create(self, public_key: str) -> None:
         dc = None
         if self.volume:                          # the pod must be in the volume's data center
@@ -330,12 +347,42 @@ class RunpodSession:
             dc = vol.get("dataCenterId") or vol.get("dataCenter") or None
             if isinstance(dc, dict):
                 dc = dc.get("id")
+        stock = self._stock()
+        order = self._candidates()
+
+        def free_in(where):                      # the candidates RunPod has free there (anywhere: None)
+            if stock is None:
+                return order
+            return [g for g in order if stock.get(g) and (where is None or where in stock[g])]
+
+        def elsewhere() -> str:
+            if not stock:
+                return ""
+            free = [f"{re.sub(r' [0-9]+ GB.*$', '', dict(GPUS)[g])} in {', '.join(sorted(stock[g])[:4])}"
+                    for g, _ in GPUS if stock.get(g)]
+            return f"; free elsewhere now: {'; '.join(free)}" if free else "; RunPod lists none of them free anywhere"
+
+        cands, volume = free_in(dc), self.volume
+        if volume and dc and not cands and stock is not None:
+            if self.without_volume:
+                self.note(f"RunPod: no GPU free in {dc} (the network volume's data centre): starting without "
+                          "the volume (a slower start)")
+                volume, dc, cands = None, None, free_in(None)
+            else:
+                raise RunpodError(f"none of these GPUs is free in {dc}, your network volume's data centre, right "
+                                  f"now{elsewhere()}. Try again later, or switch on “start without the volume” "
+                                  "(Settings → Cloud upscaling), or make a volume in a data centre with more GPUs")
+        if not cands:
+            raise RunpodError("none of these GPUs is free on RunPod's Secure Cloud right now"
+                              + (elsewhere() if not self.fallback else "") + "; try again later"
+                              + ("" if self.fallback else " or allow other GPUs"))
+        self.volume = volume
         last = None
-        for gpu in self._candidates():
+        for gpu in cands:
             name = f"{POD_PREFIX}-{uuid.uuid4().hex[:8]}"
             self.note(f"RunPod: asking for a {gpu}" + (f" in {dc}" if dc else ""))
             try:
-                pod = self.api.create_pod(pod_body(name=name, gpu=gpu, public_key=public_key, volume=self.volume,
+                pod = self.api.create_pod(pod_body(name=name, gpu=gpu, public_key=public_key, volume=volume,
                                                    data_center=dc))
             except RunpodError as e:
                 if e.status in (400, 403):       # no capacity for this one (or not allowed): the next type
@@ -350,8 +397,9 @@ class RunpodSession:
             self.log(f"RunPod: pod {self.pod_id} ({gpu}, {pod.get('dataCenterId') or '?'}"
                      + (f", ${cost:.2f}/h" if isinstance(cost, (int, float)) else "") + ")")
             return
-        raise RunpodError("RunPod has none of these GPUs free right now"
-                          + (f" (last answer: {last})" if last else "") + "; try again later or choose another GPU")
+        raise RunpodError(("RunPod listed these GPUs as free but gave none of them" if stock is not None else
+                           "RunPod has none of these GPUs free right now")
+                          + (f" (last answer: {last})" if last else "") + "; try again in a minute")
 
     def _wait_running(self) -> tuple[str, int]:
         self.note("RunPod: starting the pod")
