@@ -650,6 +650,7 @@ class ComfyGenerator:
         on its way (or after a lost answer) can still cancel the job ComfyUI may have accepted."""
         pid = str(uuid.uuid4())
         self.current = pid
+        self.node_times, self._running_node = {}, None
         res = self._json("POST", "/prompt", {"prompt": wf, "client_id": self.client_id, "prompt_id": pid})
         if res.get("node_errors"):
             self.current = None
@@ -858,11 +859,14 @@ class ComfyGenerator:
         t, d = msg.get("type"), msg.get("data") or {}
         if d.get("prompt_id") not in (None, pid):
             return None
+        if t == "executing" and d.get("prompt_id") == pid:
+            self._node_clock(d.get("node"))
         if t == "progress" and self.progress is not None and d.get("max"):
             self.progress(int(d["value"]), int(d["max"]))
         elif t == "executing" and d.get("node") is None and d.get("prompt_id") == pid:
             return "done"
         elif t == "execution_success" and d.get("prompt_id") == pid:
+            self._node_clock(None)
             return "done"
         elif t == "execution_error" and d.get("prompt_id") == pid:
             raise ComfyJobFailed(f"ComfyUI: {d.get('exception_type', 'error')}: {d.get('exception_message', '')}"
@@ -870,6 +874,17 @@ class ComfyGenerator:
         elif t == "execution_interrupted" and d.get("prompt_id") == pid:
             raise ComfyJobFailed("ComfyUI: the job was interrupted")
         return None
+
+    def _node_clock(self, node) -> None:
+        """Seconds per workflow node (node_times), from ComfyUI's "executing" messages: a node runs until the next
+        one starts (None: the job ended). Cached nodes send none and are not counted."""
+        now = time.monotonic()
+        last = getattr(self, "_running_node", None)
+        if not hasattr(self, "node_times"):
+            self.node_times = {}
+        if last is not None:
+            self.node_times[last[0]] = self.node_times.get(last[0], 0.0) + now - last[1]
+        self._running_node = (node, now) if node is not None else None
 
     def _wait(self, pid: str, ws) -> dict:
         end = time.monotonic() + self.timeout
@@ -1948,22 +1963,39 @@ def _seedvr_files(self, method: str) -> dict:
     return files
 
 
+def seedvr_timing(size, unet, up_bytes, t_up, t_run, down_bytes, t_down, node_times: dict, wf: dict) -> str:
+    """One log line: where a SeedVR2 job's time went (upload, ComfyUI by node type, download)."""
+    def rate(b, t):
+        return f"{b / 1e6:.1f} MB in {t:.1f} s ({b / 1e6 / t:.1f} MB/s)" if t > 0 else f"{b / 1e6:.1f} MB"
+    by_type: dict[str, float] = {}
+    for node, secs in node_times.items():
+        kind = (wf.get(str(node)) or {}).get("class_type", str(node))
+        by_type[kind] = by_type.get(kind, 0.0) + secs
+    nodes = ", ".join(f"{k} {v:.1f} s" for k, v in sorted(by_type.items(), key=lambda kv: -kv[1]) if v >= 0.05)
+    return (f"SeedVR2 {size[0]}x{size[1]} ({unet}): upload {rate(up_bytes, t_up)}; ComfyUI {t_run:.1f} s"
+            + (f" [{nodes}]" if nodes else "") + f"; download {rate(down_bytes, t_down)}")
+
+
 def _seedvr_job(self, files: dict, draft: Path, out: Path, size: tuple[int, int], seed: int) -> None:
     """One SeedVR2 job in ComfyUI: draft (with its sound, silence if none) upscaled to size into out."""
     import tempfile
     uploads: list[tuple[str, Path]] = []
     with tempfile.TemporaryDirectory(prefix="video-chain-seedvr-") as tmp:
         src = _with_audio(Path(draft), Path(tmp) / "draft.mp4")
+        clock = time.monotonic()
         try:
             name = self.upload(src)
             uploads.append((name, src))
+            t_up = time.monotonic() - clock
             prefix = f"{SUBFOLDER}/seedvr_{uuid.uuid4().hex[:12]}"
             wf = build_seedvr_workflow(draft=name, width=size[0], height=size[1], unet=files["unet"],
                                        vae=files["vae"], prefix=prefix, seed=seed)
             ws = self._connect_ws()
+            clock = time.monotonic()
             try:
                 self._queue(wf)
                 entry = self._wait(self.current, ws)
+                t_run = time.monotonic() - clock
             except ComfyJobFailed:
                 raise
             except Exception:
@@ -1980,8 +2012,12 @@ def _seedvr_job(self, files: dict, draft: Path, out: Path, size: tuple[int, int]
             if video is None:
                 raise ComfyError("ComfyUI finished without the upscaled clip")
             part = Path(out).with_name(Path(out).stem + ".part.mp4")
+            clock = time.monotonic()
             part.write_bytes(self._download(video))
+            t_down = time.monotonic() - clock
             part.replace(out)
+            self.log(seedvr_timing(size, files["unet"], src.stat().st_size, t_up, t_run, Path(out).stat().st_size,
+                                   t_down, getattr(self, "node_times", {}), wf))
             if self.cleanup:
                 self._remove(self.output_dir, video, Path(out))
         finally:

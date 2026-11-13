@@ -1153,3 +1153,32 @@ def test_middle_keyframes_in_the_workflow(server, start, tmp_path):
     wf = server.prompts[-1]
     assert wf["key_guide0"]["inputs"]["frame_idx"] == 12 and wf["key0"]["inputs"]["image"].endswith(".png")
     assert not list((server.root / "input" / "video-chain").glob("*"))      # the upload is cleaned up
+
+
+def test_seedvr2_timing_per_node_and_transfer(server, tmp_path, monkeypatch):
+    """Each SeedVR2 job logs where its time went: upload and download (MB, s, MB/s) and ComfyUI's time by node type,
+    from its "executing" messages (a node runs until the next starts; cached nodes are not counted)."""
+    import subprocess
+    gen = C.ComfyGenerator(server.url)
+    clock = iter([0.0, 2.0, 2.5])
+    monkeypatch.setattr(C.time, "monotonic", lambda: next(clock))
+    gen.node_times, gen._running_node = {}, None
+    for node in ("enc", "sample", None):
+        gen.handle_message({"type": "executing", "data": {"node": node, "prompt_id": "p"}}, "p")
+    gen.handle_message({"type": "executing", "data": {"node": "x", "prompt_id": "other"}}, "p")   # not ours
+    monkeypatch.undo()
+    assert gen.node_times == {"enc": 2.0, "sample": 0.5}
+    wf = {"enc": {"class_type": "VAEEncodeTiled"}, "dec": {"class_type": "VAEDecodeTiled"},
+          "sample": {"class_type": "KSampler"}}
+    line = C.seedvr_timing((1920, 1088), "seedvr2_7b_int8_convrot.safetensors", 25e6, 5.0, 40.0, 80e6, 4.0,
+                           {"enc": 12.0, "dec": 20.0, "sample": 6.0, "x": 0.01}, wf)
+    assert line == ("SeedVR2 1920x1088 (seedvr2_7b_int8_convrot.safetensors): upload 25.0 MB in 5.0 s (5.0 MB/s); "
+                    "ComfyUI 40.0 s [VAEDecodeTiled 20.0 s, VAEEncodeTiled 12.0 s, KSampler 6.0 s]; "
+                    "download 80.0 MB in 4.0 s (20.0 MB/s)")
+    logs = []
+    gen = C.ComfyGenerator(server.url, log=logs.append)
+    draft = tmp_path / "d.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=64x36:r=24:d=1",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", str(draft)], check=True)
+    gen.seedvr(draft, tmp_path / "up.mp4", (128, 72))
+    assert any(x.startswith("SeedVR2 128x72 (seedvr2_7b_int8_convrot.safetensors): upload ") for x in logs)
