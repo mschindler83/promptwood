@@ -6,6 +6,7 @@
 #   MODELS      which SeedVR2 sizes to fetch: "7b", "3b" or "7b 3b"
 #   IDLE_MIN    the pod removes itself after this many minutes without an SSH connection (0: never)
 #   MIN_RAM_GB  the RAM area (/dev/shm) must have at least this much room, or nothing is started
+#   VOLUME_PATH where the app mounted the pod's network or global volume ("" without one)
 #
 # Privacy: nothing of the user's is ever written to a RunPod disk. RunPod cannot encrypt container disks or network
 # volumes (only a pod's volume disk, with a key RunPod holds, and not through the API), and a container may not
@@ -30,8 +31,15 @@ if [ -r /proc/1/environ ]; then
     done < /proc/1/environ
 fi
 
-# the network volume (if any) keeps ComfyUI, its Python packages and the models between pods: later boots are fast
-if [ -n "${RUNPOD_VOLUME_ID:-}" ] && [ -d /workspace ] && [ -w /workspace ]; then
+# the volume (network or global, if any) keeps ComfyUI, its Python packages and the models between pods: later
+# boots are fast
+VOLUME_PATH="${VOLUME_PATH:-}"
+if [ -n "$VOLUME_PATH" ] && [ -d "$VOLUME_PATH" ] && [ -w "$VOLUME_PATH" ]; then
+    BASE="$VOLUME_PATH/video-chain"
+elif [ -n "$VOLUME_PATH" ]; then
+    note "warning: the volume is not mounted at $VOLUME_PATH (or not writable): using the container disk"
+    BASE=/root/video-chain
+elif [ -n "${RUNPOD_VOLUME_ID:-}" ] && [ -d /workspace ] && [ -w /workspace ]; then
     BASE=/workspace/video-chain
 else
     BASE=/root/video-chain
@@ -53,7 +61,8 @@ fi
 umask 077
 mkdir -p "$BASE" "$IO/input" "$IO/output" "$IO/temp" "$IO/user" "$IO/tmp"
 chmod 700 "$IO"
-export TMPDIR="$IO/tmp" UV_CACHE_DIR="$BASE/uv-cache" HF_HUB_DISABLE_TELEMETRY=1 DO_NOT_TRACK=1
+# (copies, not hard links: the uv cache and the venv may be on different file systems)
+export TMPDIR="$IO/tmp" UV_CACHE_DIR="$BASE/uv-cache" UV_LINK_MODE=copy HF_HUB_DISABLE_TELEMETRY=1 DO_NOT_TRACK=1
 
 # ---- ComfyUI at the pinned tag
 COMFY="$BASE/ComfyUI"
@@ -68,6 +77,13 @@ fi
 
 # ---- its Python packages (on top of the image's CUDA PyTorch)
 VENV="$BASE/venv"
+# a volume that takes no symbolic links (a venv needs them) keeps the code and weights; the packages then go on
+# the container disk, installed again per pod from the uv cache on the volume
+if ! ln -sfn / "$BASE/.symlink-probe" 2>/dev/null; then
+    note "the volume takes no symbolic links: Python packages go on the container disk"
+    VENV=/root/video-chain-venv
+fi
+rm -f "$BASE/.symlink-probe"
 STAMP="$VENV/.video-chain-$COMFY_REF-$(python3 -c 'import torch; print(torch.__version__)' 2>/dev/null || echo none)"
 if [ ! -f "$STAMP" ]; then
     note "installing ComfyUI's Python packages"

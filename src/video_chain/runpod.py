@@ -43,6 +43,7 @@ COMFY_REF = "v0.45.3"                      # ComfyUI tag on the pod (has the See
 POD_PREFIX = "video-chain-upscale"         # every pod this app makes is named so (leftovers are found by it)
 REMOTE_IO = PurePosixPath("/dev/shm/vc-io")   # the pod's RAM-only folder for uploads and results (pod_setup.sh)
 REMOTE_PORT = 8188
+VOLUME_PATH = "/workspace"                 # where the pod's network or global volume is mounted
 IDLE_MIN = 20                              # the pod removes itself after this long without an SSH connection
 MIN_RAM_PER_GPU = 32                       # GB of system RAM: the SeedVR2 pieces are cut to what the pod has
                                            # (64 left out most RTX 4090 / 5090 hosts)
@@ -179,6 +180,20 @@ class RunpodApi:
         res = self.call("GET", f"/network-volumes/{urllib.parse.quote(vol_id)}") or {}
         return res.get("networkVolume", res) if isinstance(res, dict) else {}
 
+    def global_volume(self, vol_id: str) -> dict:
+        res = self.call("GET", f"/global-volumes/{urllib.parse.quote(vol_id)}") or {}
+        return res.get("globalVolume", res) if isinstance(res, dict) else {}
+
+    def volume(self, vol_id: str) -> tuple[str, dict]:
+        """("network" | "global", its record) for a volume id; RunpodError if the account has no such volume."""
+        for kind, get in (("network", self.network_volume), ("global", self.global_volume)):
+            try:
+                return kind, get(vol_id)
+            except RunpodError as e:
+                if e.status not in (400, 404, 422):
+                    raise
+        raise RunpodError(f"RunPod has no network or global volume {vol_id!r} in this account", 404)
+
     def gpus(self) -> list[dict]:
         """GPU types with their Secure Cloud price and current pod stock."""
         res = self.call("GET", "/catalog/gpus?include=AVAILABILITY&product=POD&cloud=SECURE") or {}
@@ -197,9 +212,10 @@ def _detail(body: str) -> str:
 
 
 def pod_body(*, name: str, gpu: str, public_key: str, volume: str | None = None, data_center: str | None = None,
-             image: str = IMAGE) -> dict:
+             image: str = IMAGE, volume_kind: str = "network") -> dict:
     """The create request for an upscale pod: Secure Cloud, one GPU, SSH only (22/tcp; no HTTP port, no Jupyter),
-    this app's key; the network volume (public files only) at /workspace when one is given."""
+    this app's key; the volume (public files only; volume_kind "network": in one data centre, "global": any) at
+    /workspace when one is given."""
     body = {
         "name": name,
         "image": image,
@@ -212,7 +228,9 @@ def pod_body(*, name: str, gpu: str, public_key: str, volume: str | None = None,
         "startJupyter": False,
     }
     if volume:
-        body["mounts"] = {"network": [{"volumeId": volume, "path": "/workspace"}]}
+        if volume_kind not in ("network", "global"):
+            raise ValueError(f"unknown volume kind {volume_kind!r}")
+        body["mounts"] = {volume_kind: [{"volumeId": volume, "path": VOLUME_PATH}]}
     if data_center:
         body["dataCenterIds"] = [data_center]
     return body
@@ -295,6 +313,7 @@ class RunpodSession:
         volume anywhere (ComfyUI and the weights are fetched again: a slower start)."""
         self.api, self.gpu, self.fallback, self.volume, self.models = api, gpu, fallback, volume or None, models
         self.without_volume = bool(without_volume)
+        self.volume_kind = "network"
         self.note, self.log = note or (lambda _t: None), log or (lambda _t: None)
         self.config, self.idle_min, self.ssh_bin = Path(config), int(idle_min), ssh
         self.boot_timeout, self.setup_timeout = boot_timeout, setup_timeout
@@ -344,11 +363,13 @@ class RunpodSession:
 
     def _create(self, public_key: str) -> None:
         dc = None
-        if self.volume:                          # the pod must be in the volume's data center
-            vol = self.api.network_volume(self.volume)
-            dc = vol.get("dataCenterId") or vol.get("dataCenter") or None
-            if isinstance(dc, dict):
-                dc = dc.get("id")
+        if self.volume:                          # a network volume: the pod must be in its data centre; global: any
+            self.volume_kind, vol = self.api.volume(self.volume)
+            if self.volume_kind == "network":
+                dc = vol.get("dataCenterId") or vol.get("dataCenter") or None
+                if isinstance(dc, dict):
+                    dc = dc.get("id")
+            self.log(f"RunPod: {self.volume_kind} volume {self.volume}" + (f" in {dc}" if dc else ""))
         stock = self._stock()
         order = self._candidates()
 
@@ -385,7 +406,7 @@ class RunpodSession:
             self.note(f"RunPod: asking for a {gpu}" + (f" in {dc}" if dc else ""))
             try:
                 pod = self.api.create_pod(pod_body(name=name, gpu=gpu, public_key=public_key, volume=volume,
-                                                   data_center=dc))
+                                                   data_center=dc, volume_kind=self.volume_kind))
             except RunpodError as e:
                 if e.status in (400, 403):       # no capacity for this one (or not allowed): the next type
                     self.log(f"RunPod: {gpu}: {e}")
@@ -468,7 +489,8 @@ class RunpodSession:
         raise RunpodError(f"could not log in to the pod over SSH ({err})")
 
     def _setup(self) -> None:
-        env = {"COMFY_REF": COMFY_REF, "MODELS": self.models, "IDLE_MIN": str(self.idle_min)}
+        env = {"COMFY_REF": COMFY_REF, "MODELS": self.models, "IDLE_MIN": str(self.idle_min),
+               "VOLUME_PATH": VOLUME_PATH if self.volume else ""}
         cmd = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items()) + " bash -s"
         p = subprocess.Popen(self.ssh_args() + [cmd], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT)

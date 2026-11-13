@@ -2089,13 +2089,13 @@ class MainWindow(QMainWindow):
                                         "nothing and fails when the chosen GPU has no capacity")
         r.addRow("", self.runpod_fallback)
         self.runpod_volume = QLineEdit()
-        self.runpod_volume.setPlaceholderText("optional: a network volume id, for fast starts")
-        self.runpod_volume.setToolTip("A RunPod network volume (Storage → Network volumes, about 40 GB) keeps ComfyUI, "
-                                      "its packages and the SeedVR2 weights between pods: a pod is ready in about "
-                                      "1-2 min instead of 5-10. It only ever holds these public files, never a "
-                                      "clip: those stay in the pod's RAM. The pod is made in the volume's data "
-                                      "centre (fewer GPUs to choose from there).")
-        r.addRow("Network volume", self.runpod_volume)
+        self.runpod_volume.setPlaceholderText("optional: a global or network volume id, for fast starts")
+        self.runpod_volume.setToolTip("A RunPod volume keeps ComfyUI, its packages and the SeedVR2 weights (about "
+                                      "15 GB) between pods: a pod is ready in minutes instead of 5-10 more. It only "
+                                      "ever holds these public files, never a clip: those stay in the pod's RAM. "
+                                      "A global volume mounts in any data centre (the GPU can be wherever one is "
+                                      "free); a network volume ties the pod to its data centre.")
+        r.addRow("Volume", self.runpod_volume)
         self.runpod_without_volume = QCheckBox("Start without the volume when its data centre has no GPU free")
         self.runpod_without_volume.setChecked(True)
         self.runpod_without_volume.setToolTip("A pod with the volume must run in the volume's data centre, and that "

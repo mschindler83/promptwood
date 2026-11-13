@@ -85,6 +85,8 @@ class FakeRunpod:
                         {"id": g, "memory": 24, "price": {"secure": 1.0}, "availability": "LOW" if dcs else "NONE",
                          "dataCenters": [{"id": dc, "availability": "LOW"} for dc in dcs]}
                         for g, dcs in fake.catalog.items()]})
+                if method == "GET" and p == "/v2/global-volumes/gv1":
+                    return self._send(200, {"globalVolume": {"id": "gv1", "name": "video-chain"}})
                 if method == "GET" and p == "/v2/network-volumes/vol9":
                     return self._send(200, {"id": "vol9", "dataCenter": "EU-CZ-1", "size": 40})
                 return self._send(404, {"title": "Not Found", "status": 404, "detail": p})
@@ -463,7 +465,7 @@ def test_whole_session_over_real_ssh(tmp_path):
     victim.write_bytes(b"result")
     setup = tmp_path / "setup.sh"
     setup.write_text('#!/usr/bin/env bash\nset -e\necho "@@ installing ComfyUI $COMFY_REF"\n'
-                     'echo "models: $MODELS idle: $IDLE_MIN"\necho "@@ ready"\n')
+                     'echo "models: $MODELS idle: $IDLE_MIN volume: [$VOLUME_PATH]"\necho "@@ ready"\n')
     try:
         for _ in range(100):                                  # sshd up
             with socket.socket() as c:
@@ -479,7 +481,7 @@ def test_whole_session_over_real_ssh(tmp_path):
         assert json.loads(urllib.request.urlopen(url + "/system_stats", timeout=5).read()) == {
             "system": {"ram_free": 1}}                         # through the tunnel
         assert f"RunPod: installing ComfyUI {RP.COMFY_REF}" in notes and "RunPod: ready" in notes
-        assert "models: 3b idle: 20" in logs
+        assert "models: 3b idle: 20 volume: []" in logs                      # (no volume: no path)
         assert s.run("echo hi").stdout == b"hi\n"
         old = RP.REMOTE_IO                                     # remote removal, here inside tmp_path
         RP.REMOTE_IO = RP.PurePosixPath(str(io))
@@ -558,4 +560,25 @@ def test_chosen_gpu_not_free_without_fallback(fake, tmp_path):
     with pytest.raises(RP.RunpodError, match="allow other GPUs") as e:
         s._create("k")
     assert "free elsewhere now" in str(e.value) and creates(fake) == []
+    s.close()
+
+
+def test_global_volume_mounts_anywhere(fake, tmp_path):
+    """A global volume has no data centre: it is mounted as `global`, and the GPU may be wherever one is free."""
+    b = RP.pod_body(name="n", gpu="g", public_key="k", volume="gv1", volume_kind="global")
+    assert b["mounts"] == {"global": [{"volumeId": "gv1", "path": "/workspace"}]} and "dataCenterIds" not in b
+    with pytest.raises(ValueError):
+        RP.pod_body(name="n", gpu="g", public_key="k", volume="x", volume_kind="persistent")
+    assert RP.RunpodApi("k-123", base=fake.url).volume("gv1")[0] == "global"
+    assert RP.RunpodApi("k-123", base=fake.url).volume("vol9")[0] == "network"
+    with pytest.raises(RP.RunpodError, match="no network or global volume"):
+        RP.RunpodApi("k-123", base=fake.url).volume("nope")
+    fake.catalog = {g: [] for g, _ in RP.GPUS}
+    fake.catalog["NVIDIA H100 80GB HBM3"] = ["EU-FR-1"]
+    s = session(fake, tmp_path, volume="gv1", without_volume=True)
+    s._create("k")
+    body = creates(fake)[0]
+    assert [c["gpu"]["id"] for c in creates(fake)] == ["NVIDIA H100 80GB HBM3"]
+    assert body["mounts"] == {"global": [{"volumeId": "gv1", "path": "/workspace"}]} and "dataCenterIds" not in body
+    assert s.volume == "gv1" and s.volume_kind == "global" and body["disk"] == 30
     s.close()
