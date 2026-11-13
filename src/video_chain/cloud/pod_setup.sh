@@ -140,6 +140,26 @@ for m in $MODELS; do
 done
 fetch vae/seedvr2_ema_vae_fp16.safetensors vae
 
+# ---- CPU threads: as many as the container may use. A pod sees all of the host's CPUs (224 on an H100 host) but
+# its cgroup allows only its share (cpu.max 2380000/100000: 23.8 CPUs); PyTorch then ran 112 threads per operation,
+# the container was throttled, and a tensor conversion took 0.28 s instead of 0.007 s with one thread (measured
+# 2026-11-13, during a 13 min single-core phase before the GPU started; whether this was its cause is not proven).
+# Same results, no accuracy cost.
+CPUS="${CPUS:-}"
+if [ -z "$CPUS" ] && [ -r /sys/fs/cgroup/cpu.max ]; then
+    read -r quota period < /sys/fs/cgroup/cpu.max || true
+    if [ "${quota:-max}" != max ] && [ "${period:-0}" -gt 0 ]; then CPUS=$(( quota / period )); fi
+fi
+if [ -z "$CPUS" ] && [ -r /sys/fs/cgroup/cpu/cpu.cfs_quota_us ]; then          # (cgroup v1)
+    quota=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us); period=$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us)
+    if [ "$quota" -gt 0 ] && [ "$period" -gt 0 ]; then CPUS=$(( quota / period )); fi
+fi
+CPUS="${CPUS:-$(nproc)}"
+[ "$CPUS" -ge 1 ] || CPUS=1
+note "CPU threads: $CPUS (the container's share of $(nproc))"
+export OMP_NUM_THREADS="$CPUS" MKL_NUM_THREADS="$CPUS" OPENBLAS_NUM_THREADS="$CPUS" NUMEXPR_NUM_THREADS="$CPUS" \
+    TORCH_NUM_THREADS="$CPUS"
+
 # ---- ComfyUI on 127.0.0.1:8188 (only through the SSH tunnel)
 if [ -f "$IO/comfy.pid" ] && kill -0 "$(cat "$IO/comfy.pid")" 2>/dev/null; then
     note "ComfyUI is already running"

@@ -599,7 +599,7 @@ exit 0
 """,
     # uv: a venv whose python "serves" ComfyUI (sleeps); pip install records what it was asked for
     "uv": """#!/usr/bin/env bash
-if [ "$1" = venv ]; then d="${@: -1}"; mkdir -p "$d/bin"; printf '#!/usr/bin/env bash\\necho "comfy $*" >> "$SHIM_LOG"\\nexec sleep 300\\n' > "$d/bin/python"
+if [ "$1" = venv ]; then d="${@: -1}"; mkdir -p "$d/bin"; printf '#!/usr/bin/env bash\\necho "comfy $*" >> "$SHIM_LOG"\\necho "threads OMP=$OMP_NUM_THREADS MKL=$MKL_NUM_THREADS" >> "$SHIM_LOG"\\nexec sleep 300\\n' > "$d/bin/python"
     chmod +x "$d/bin/python"; exit 0; fi
 if [ "$1" = pip ]; then echo "uv $*" >> "$SHIM_LOG"; for a in "$@"; do [ -f "$a" ] && cat "$a" >> "$SHIM_LOG"; done
     echo pip >> "$SHIM_LOG"; exit 0; fi
@@ -660,10 +660,12 @@ def test_setup_script_full_precision_on_big_gpus_and_new_weights_on_the_disk(tmp
         (w / sub / name).write_text("weights")
         (w / sub / f".{name}.ok").write_text("")
     (vol / "video-chain" / "ComfyUI" / ".git").mkdir(parents=True)          # what the failed first run left
-    r, log = run_setup(tmp_path, vol, extra={"VRAM_MB": "81559"})
+    r, log = run_setup(tmp_path, vol, extra={"VRAM_MB": "81559", "CPUS": "23"})
     assert r.returncode == 0, r.stderr
     notes = [x[3:] for x in r.stdout.splitlines() if x.startswith("@@ ")]
     assert notes[-1] == "ready" and "GPU with 79 GB VRAM: SeedVR2 fp16" in notes
+    assert any(n.startswith("CPU threads: 23 (the container's share of ") for n in notes)
+    assert "threads OMP=23 MKL=23" in log                     # ComfyUI starts with the container's share
     assert "downloading seedvr2_7b_fp16.safetensors" in notes and "seedvr2_ema_vae_fp16.safetensors: on the volume" in notes
     code = tmp_path / "code"
     assert (code / "ComfyUI" / "models" / "diffusion_models" / "seedvr2_7b_fp16.safetensors").read_text() == "weights"
