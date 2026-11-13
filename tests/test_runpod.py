@@ -649,12 +649,12 @@ TMPFS = subprocess.run(["stat", "-f", "-c", "%T", "/tmp"], capture_output=True, 
 
 
 @pytest.mark.skipif(not TMPFS, reason="needs /tmp on tmpfs")
-def test_setup_script_full_precision_on_big_gpus_and_new_weights_on_the_disk(tmp_path):
-    """The whole setup script with stand-ins for git, uv, python and curl. 80 GB of VRAM: the 7B fp16 weights,
-    fetched to the container disk (a global volume took writes at 7-9 MB/s, Hugging Face gave 111), the VAE
-    already complete on the volume used from there, ComfyUI started with --highvram and pointed at the volume;
-    ComfyUI and its packages on the container disk, never on the volume (git failed there: no chmod); what an
-    old layout left on the volume removed; nothing fetched twice; a bad checksum stops it."""
+def test_setup_script_full_precision_on_big_gpus_everything_on_the_disk(tmp_path):
+    """The whole setup script with stand-ins for git, uv, python and curl. 80 GB of VRAM: the 7B fp16 weights and
+    the VAE fetched to the container disk, even when the volume has weights (a global volume took writes at
+    7-9 MB/s and loaded the VAE in 16 s; Hugging Face gave 111-182 MB/s), ComfyUI started with --highvram; ComfyUI
+    and its packages on the container disk, never on the volume (git failed there: no chmod); what an old layout
+    left on the volume removed, its weights left alone; nothing fetched twice."""
     vol = tmp_path / "workspace"
     w = vol / "video-chain" / "models"
     for sub, name in (("diffusion_models", "seedvr2_7b_int8_convrot.safetensors"),
@@ -672,14 +672,16 @@ def test_setup_script_full_precision_on_big_gpus_and_new_weights_on_the_disk(tmp
     assert notes[-1] == "ready" and "GPU with 79 GB VRAM: SeedVR2 fp16" in notes
     assert any(n.startswith("CPU threads: 23 (the container's share of ") for n in notes)
     assert "threads OMP=23 MKL=23" in log                     # ComfyUI starts with the container's share
-    assert "downloading seedvr2_7b_fp16.safetensors" in notes and "seedvr2_ema_vae_fp16.safetensors: on the volume" in notes
+    assert "downloading seedvr2_7b_fp16.safetensors" in notes and "downloading seedvr2_ema_vae_fp16.safetensors" in notes
+    assert not any("on the volume" in n for n in notes)
     code = tmp_path / "code"
     assert (code / "ComfyUI" / "models" / "diffusion_models" / "seedvr2_7b_fp16.safetensors").read_text() == "weights"
-    assert log.count("download ") == 1 and "seedvr2_7b_fp16" in log
-    assert sorted(p.name for p in (vol / "video-chain").iterdir()) == ["models"]   # the volume: weights only
-    assert not (w / "diffusion_models" / "seedvr2_7b_fp16.safetensors").exists()     # nothing new written there
-    yaml = (code / "ComfyUI" / "extra_model_paths.yaml").read_text()
-    assert f"base_path: {w}" in yaml and "diffusion_models: diffusion_models/" in yaml
+    assert (code / "ComfyUI" / "models" / "vae" / "seedvr2_ema_vae_fp16.safetensors").read_text() == "weights"
+    assert log.count("download ") == 2 and "seedvr2_7b_fp16" in log
+    assert sorted(p.name for p in (vol / "video-chain").iterdir()) == ["models"]   # old layout gone, weights kept
+    assert sorted(p.name for p in (w / "diffusion_models").iterdir()) == [".seedvr2_7b_int8_convrot.safetensors.ok",
+                                                                         "seedvr2_7b_int8_convrot.safetensors"]
+    assert not (code / "ComfyUI" / "extra_model_paths.yaml").exists()            # ComfyUI does not look there
     assert "comfy main.py --listen 127.0.0.1 --port 8188 --disable-auto-launch --highvram" in log
     assert (code / "ComfyUI" / "custom_nodes" / "video_chain_scale" / "__init__.py").read_bytes() == \
         RP.SCALE_NODE_FILE.read_bytes()                                       # the lanczos node installed
@@ -687,13 +689,13 @@ def test_setup_script_full_precision_on_big_gpus_and_new_weights_on_the_disk(tmp
     assert "torch==2.15.0\ntorchvision==0.29.2\n" in log and " -c " in log              # pinned, as constraints
     assert oct((tmp_path / "io").stat().st_mode & 0o777) == "0o700"
     r, log2 = run_setup(tmp_path, vol, extra={"VRAM_MB": "81559"})       # the same pod again: nothing fetched
-    assert r.returncode == 0 and log2.count("download ") == 1
+    assert r.returncode == 0 and log2.count("download ") == 2
 
 
 @pytest.mark.skipif(not TMPFS, reason="needs /tmp on tmpfs")
 def test_setup_script_on_a_24gb_gpu_and_without_a_volume(tmp_path):
-    """24 GB: the int8 copy (as at home), no --highvram; taken from the volume when it is complete there. No
-    volume: everything fetched to the container disk. A bad checksum stops it, nothing is kept."""
+    """24 GB: the int8 copy (as at home), no --highvram; fetched to the container disk, also with a volume that
+    has it. No volume: the same. A bad checksum stops it, nothing is kept."""
     vol = tmp_path / "workspace"
     w = vol / "video-chain" / "models"
     for sub, name in (("diffusion_models", "seedvr2_7b_int8_convrot.safetensors"),
@@ -703,7 +705,8 @@ def test_setup_script_on_a_24gb_gpu_and_without_a_volume(tmp_path):
         (w / sub / f".{name}.ok").write_text("")
     r, log = run_setup(tmp_path, vol, extra={"VRAM_MB": "24564"})
     assert r.returncode == 0, r.stderr
-    assert "GPU with 23 GB VRAM: SeedVR2 int8_convrot" in r.stdout and "download " not in log
+    assert "GPU with 23 GB VRAM: SeedVR2 int8_convrot" in r.stdout and log.count("download ") == 2
+    assert (tmp_path / "code" / "ComfyUI" / "models" / "diffusion_models" / "seedvr2_7b_int8_convrot.safetensors").is_file()
     assert "--highvram" not in log and "--disable-auto-launch " in log
     nv = tmp_path / "novol"
     nv.mkdir()
@@ -739,6 +742,9 @@ def test_cloud_upscaler_uses_the_big_gpu_fully(tmp_path):
             assert server.seedvr_jobs[-1] == unet
             assert (wf["enc"]["class_type"], wf["dec"]["class_type"]) == (enc, dec)
             assert gen.seedvr_variant == ("fp16, whole frames" if enc == "VAEEncode" else None)
+            assert gen.seedvr_keep_cache                                     # loaders not run again per clip
+            frees = [c[2] for c in server.calls if c[:2] == ("BODY", "/free")]
+            assert {"unload_models": False, "free_memory": True} not in frees     # the cache is never dropped
             assert wf["resize"]["class_type"] == ("VideoChainLanczosScale" if server.scale_node else "ImageScale")
             if enc == "VAEEncode":
                 assert set(wf["enc"]["inputs"]) == {"pixels", "vae"} and set(wf["dec"]["inputs"]) == {"samples", "vae"}

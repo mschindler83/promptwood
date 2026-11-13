@@ -1892,7 +1892,8 @@ def _seedvr(self, draft: Path, out: Path, size: tuple[int, int], method: str = "
         if len(pieces) == 1:
             track.piece(0, self.note)
             self._seedvr_job(files, Path(draft), Path(out), size, seed)
-            self.free_cache()
+            if not getattr(self, "seedvr_keep_cache", False):
+                self.free_cache()
             track.finish()
             return
         self._seedvr_pieces(files, Path(draft), Path(out), size, seed, pieces, total, track)
@@ -1922,7 +1923,8 @@ def _seedvr_pieces(self, files, draft, out, size, seed, pieces, total, track) ->
                            check=True, capture_output=True)
             done = tmp / f"out{i}.mp4"
             self._seedvr_job(files, part, done, size, seed)
-            self.free_cache()                      # (ComfyUI keeps the last job's frames cached otherwise)
+            if not getattr(self, "seedvr_keep_cache", False):
+                self.free_cache()                  # (ComfyUI keeps the last job's frames cached otherwise)
             made.append(done)
         self.note("joining the upscaled pieces")
         _join_pieces(made, pieces, Path(draft), Path(out), total)

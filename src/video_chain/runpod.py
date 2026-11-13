@@ -667,6 +667,10 @@ class CloudUpscaler(ComfyGenerator):
         self.input_dir, self.output_dir = REMOTE_IO / "input", REMOTE_IO / "output"
         self.vram = vram_total(self.stats)
         self.seedvr_variant = None                     # (as at home: copies made there or here are the same)
+        # ComfyUI keeps its cache between clips: the VAE and model loaders are not run again for every clip (24 s
+        # per clip on an H100 pod, 2026-11-13). At home the cache is dropped after each clip for its RAM; a pod has
+        # far more (the pieces are cut to what is free, after the last clip's frames).
+        self.seedvr_keep_cache = True
         if self.vram >= SEEDVR_FULL_VRAM:            # (an H100 & co.: what costs no accuracy and uses the GPU)
             self.seedvr_tiled, self.seedvr_precision = False, SEEDVR_PRECISION_FULL
             self.seedvr_variant = "fp16, whole frames"   # recorded with each kept copy: others are made again

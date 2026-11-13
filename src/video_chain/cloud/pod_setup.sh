@@ -33,20 +33,18 @@ if [ -r /proc/1/environ ]; then
     done < /proc/1/environ
 fi
 
-# ComfyUI's code and its Python packages go on the container disk on every boot (about a minute: a shallow clone
-# and uv); only the SeedVR2 weights (~9 GB, the slow part) are kept on the volume, as plain files written once. A
-# global volume allows no chmod (git and a venv need it) and maybe no links, so nothing else is put there.
+# Everything goes on the container disk on every boot: ComfyUI's code and its Python packages (about a minute: a
+# shallow clone and uv) and the SeedVR2 weights straight from Hugging Face. Measured on pods (2026-11-13): Hugging
+# Face 111-182 MB/s; a global volume took writes at 7-9 MB/s and its VAE loaded in 16 s against seconds from the
+# disk; it allows no chmod either (git and a venv need it). A volume is not used for anything any more.
 CODE="${CODE_DIR:-/root/video-chain}"
 VOLUME_PATH="${VOLUME_PATH:-}"
 if [ -z "$VOLUME_PATH" ] && [ -n "${RUNPOD_VOLUME_ID:-}" ] && [ -d /workspace ]; then
     VOLUME_PATH=/workspace
 fi
-# weights already complete (checked) on the volume are used from there; anything new is fetched to the container
-# disk: Hugging Face delivered 111 MB/s to a pod, a global volume took writes at 7-9 MB/s (measured 2026-11-13)
-VOLW=""
-if [ -n "$VOLUME_PATH" ] && [ -d "$VOLUME_PATH/video-chain/models" ]; then
-    VOLW="$VOLUME_PATH/video-chain/models"
-    # an earlier layout kept ComfyUI, its venv and the uv cache there too: not any more (billed storage)
+if [ -n "$VOLUME_PATH" ] && [ -d "$VOLUME_PATH/video-chain" ]; then
+    # an earlier layout kept ComfyUI, its venv and the uv cache there: not any more (billed storage). The weights
+    # an earlier pod put there stay (they are public; delete the volume when it is not wanted any more)
     rm -rf "$VOLUME_PATH/video-chain/ComfyUI" "$VOLUME_PATH/video-chain/venv" "$VOLUME_PATH/video-chain/uv-cache" \
         "$VOLUME_PATH/video-chain/requirements.txt" 2>/dev/null || true
 fi
@@ -111,17 +109,9 @@ if [ ! -f "$STAMP" ]; then
 fi
 
 # ---- SeedVR2 models (Comfy-Org/SeedVR2), checked against Hugging Face's SHA-256 once
-if [ -n "$VOLW" ]; then
-    printf 'video_chain:\n    base_path: %s\n    diffusion_models: diffusion_models/\n    vae: vae/\n' "$VOLW" \
-        > "$COMFY/extra_model_paths.yaml"
-fi
-fetch() {   # fetch <repo path> <models subfolder>: from the volume if it is complete there, else to the disk
+fetch() {   # fetch <repo path> <models subfolder>, to the container disk
     local src="$1" dir="$COMFY/models/$2" name
     name="$(basename "$1")"
-    if [ -n "$VOLW" ] && [ -f "$VOLW/$2/$name" ] && [ -f "$VOLW/$2/.$name.ok" ]; then
-        note "$name: on the volume"
-        return 0
-    fi
     mkdir -p "$dir"
     [ -f "$dir/$name" ] && [ -f "$dir/.$name.ok" ] && return 0
     note "downloading $name"
