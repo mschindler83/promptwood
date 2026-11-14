@@ -22,3 +22,60 @@ def test_note_failure_uses_the_named_engine_down_code():
 
 def test_prompt_card_does_not_guess_its_own_attributes():
     assert 'getattr(self, "ov"' not in (UI / "clip_cards.py").read_text(encoding="utf-8")
+
+
+# ------------------------------------------------------------------ MWA-14: widget defaults come from T.DEFAULT_OPTIONS
+import copy  # noqa: E402
+import os  # noqa: E402
+
+os.environ["QT_QPA_PLATFORM"] = "offscreen"
+from ui_helpers import FAKE, app, settings  # noqa: E402,F401
+from video_chain import tree as T  # noqa: E402
+
+
+def _other_defaults():
+    d = copy.deepcopy(T.DEFAULT_OPTIONS)
+    d.update({"frames": 90, "steps": 30, "resolution": 768, "aspect": "9:16", "audio": False, "keep_repeated": True,
+              "lora_triggers": False})
+    d["turbo"] = {**d["turbo"], "steps": 7, "strength": 1.1}
+    d["veda"] = {"on": False}
+    return d
+
+
+def _check_widgets(w):
+    assert w.frames.currentData() == 90
+    assert w.steps.value() == 30
+    assert w.resolution.currentData() == 768
+    assert w.aspect.currentData() == "9:16"
+    assert not w.audio.isChecked()
+    assert w.keep_rep.isChecked()
+    assert not w.lora_triggers.isChecked()
+    assert w.turbo_steps.value() == 7
+    assert abs(w.turbo_strength.value() - 1.1) < 1e-6
+    assert not w.veda.isChecked()
+
+
+def test_widgets_start_with_the_default_options(app, tmp_path, monkeypatch):
+    from video_chain.ui.main_window import MainWindow
+    monkeypatch.setattr(T, "DEFAULT_OPTIONS", _other_defaults())
+    w = MainWindow(settings(tmp_path), command=FAKE)
+    try:
+        _check_widgets(w)
+    finally:
+        w.close()
+
+
+def test_options_without_a_value_show_the_default_options(app, tmp_path, monkeypatch, image=None):
+    from PIL import Image
+    from video_chain.ui.main_window import MainWindow
+    img = tmp_path / "s.jpg"
+    Image.new("RGB", (64, 36)).save(img)
+    w = MainWindow(settings(tmp_path), command=FAKE)
+    try:
+        assert w.create_project(tmp_path / "p", str(img))
+        monkeypatch.setattr(T, "DEFAULT_OPTIONS", _other_defaults())
+        w.tree.options.clear()
+        w._options_to_widgets()
+        _check_widgets(w)
+    finally:
+        w.close()
