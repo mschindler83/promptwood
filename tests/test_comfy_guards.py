@@ -49,3 +49,11 @@ def test_join_pieces_refuses_a_wrong_frame_count(tmp_path):
     assert not (tmp_path / "bad.mp4").exists()
     with pytest.raises(C.ComfyError, match="overlap"):
         _join_pieces([a, b], [(0, 20), (20, 20)], draft, tmp_path / "no.mp4", 40)
+
+
+def test_one_frame_rate_everywhere():
+    from video_chain import chain, media, swap
+    from video_chain.comfy import wfb
+    assert chain.FPS == media.DEFAULT_FPS == wfb.FPS == 24
+    import inspect
+    assert inspect.signature(swap.write_mask).parameters["fps"].default == chain.FPS

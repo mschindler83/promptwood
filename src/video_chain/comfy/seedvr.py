@@ -206,8 +206,8 @@ def _join_pieces(made: list[Path], pieces: list[tuple[int, int]], draft: Path, o
         overlap = length - first                   # frames this piece shares with the clip so far
         if overlap <= 0:
             raise ComfyError("the upscaled pieces do not overlap, they cannot be crossfaded")
-        filt.append(f"{last}[p{i}]xfade=transition=fade:duration={overlap / 24:.6f}:"
-                    f"offset={(length - overlap) / 24:.6f}[x{i}]")
+        filt.append(f"{last}[p{i}]xfade=transition=fade:duration={overlap / FPS:.6f}:"
+                    f"offset={(length - overlap) / FPS:.6f}[x{i}]")
         last, length = f"[x{i}]", first + count
     args += ["-i", str(draft)]
     with media.part_file(out) as part:

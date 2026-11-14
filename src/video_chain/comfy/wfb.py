@@ -7,8 +7,10 @@ from __future__ import annotations
 
 from typing import Sequence
 
+from ..media import DEFAULT_FPS
+
 SUBFOLDER = "video-chain"        # ComfyUI's input / output subfolder for everything the app uploads or makes
-FPS = 24.0                       # every video the app makes (CreateVideo)
+FPS = DEFAULT_FPS                # every video the app makes (CreateVideo)
 QWEN_SHIFT = 3.1                 # ModelSamplingAuraFlow's shift in ComfyUI's Qwen blueprints (edit and text to image)
 
 # The ids of the nodes whose output the caller reads back (the builder names them, the caller looks them up).
