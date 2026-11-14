@@ -5,10 +5,11 @@ from pathlib import Path
 
 from .. import chain
 from .consts import START_FILE
+from .schema import Source
 from .model import Tree
 
 
-def video_source(file: str, start: float, end: float, rotate: int = 0) -> dict:
+def video_source(file: str, start: float, end: float, rotate: int = 0) -> Source:
     """A video node's source: the file, the range (seconds) and, when it is turned, "rotate" (clockwise degrees;
     left out at 0, so videos without it keep the records and keys they had)."""
     src = {"file": str(file), "start": round(float(start), 4), "end": round(float(end), 4)}
@@ -17,7 +18,7 @@ def video_source(file: str, start: float, end: float, rotate: int = 0) -> dict:
     return src
 
 
-def source_rotation(src: dict | None) -> int:
+def source_rotation(src: Source | None) -> int:
     return chain.rotation((src or {}).get("rotate", 0))
 
 
@@ -43,7 +44,7 @@ ASPECTS = {"16:9": (16, 9), "9:16": (9, 16), "1:1": (1, 1), "4:5": (4, 5), "5:4"
            "2:3": (2, 3), "21:9": (21, 9)}
 
 
-def size_origin(project: Path, tree: "Tree | None") -> str:
+def size_origin(project: Path, tree: Tree | None) -> str:
     """What the video size follows: 'image' (the start image), 'video' (the first video) or 'aspect' (the project's
     aspect setting: a project without either)."""
     if (Path(project) / START_FILE).is_file():
@@ -53,7 +54,7 @@ def size_origin(project: Path, tree: "Tree | None") -> str:
     return "aspect"
 
 
-def size_source(project: Path, tree: "Tree | None") -> tuple[int, int] | None:
+def size_source(project: Path, tree: Tree | None) -> tuple[int, int] | None:
     """The picture whose aspect ratio the video size follows: the start image, else the first video of the tree
     (by number), else the project's aspect setting (ASPECTS; a first clip then starts from its text). None only
     without a tree and a start image."""

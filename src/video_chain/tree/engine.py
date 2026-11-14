@@ -23,7 +23,7 @@ from .inputs import empty_prompts, frame_numbers, loras_needed, model_prompt, pl
 from .checker import Checker, keyframe_problem, video_key
 
 
-def clip_inputs(project: Path, tree: Tree, nid: str, checker: "Checker | None" = None) -> dict:
+def clip_inputs(project: Path, tree: Tree, nid: str, checker: Checker | None = None) -> dict:
     """What a generated clip is made with, in the order the model gets it, and the exact prompt (for the clip card's
     chips and the "Model prompt" dialog; nothing is made or written). Either format.
     {"format": "h3" | "classic", "model": "ref2va" | "fl2va", "seconds": clip length,
@@ -212,7 +212,7 @@ def _guides(project: Path, tree: Tree, node: Node, settings: dict, tmp: Path) ->
     return guides, end_image
 
 
-def guide_problem(tree: Tree, checker: "Checker", todo: list[str]) -> str | None:
+def guide_problem(tree: Tree, checker: Checker, todo: list[str]) -> str | None:
     """Why a motion guide of a clip to be made cannot work (a neighbour shorter than the guide, a clip too short
     for its guides), or None. Checked before anything is made, with the lengths the clips will have."""
     def length(n: Node) -> int:

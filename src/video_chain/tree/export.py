@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Protocol
 
 from .. import camera as _camera
 from .. import chain
@@ -18,6 +18,17 @@ from .sources import source_rotation
 from .audio_tracks import sound_file
 from .checker import Checker
 from .engine import _clip_frames, given_sound, remix_sounds
+
+
+class RefineGenerator(Protocol):
+    """What refine_path needs of a generator (comfy.ComfyGenerator): re-render a clip at a size, or upscale it."""
+
+    def refine(self, draft: Path, prompt: str, out: Path, seed: int, size: tuple[int, int], frames: int,
+               loras: list[tuple[str, float]], first_frame: Path | None = None, last_frame: Path | None = None,
+               sparse: float | None = None, strength: str = ...) -> None: ...
+
+    def seedvr(self, draft: Path, out: Path, size: tuple[int, int], method: str = ..., seed: int = ...,
+               denoise: bool = ...) -> None: ...
 
 
 def swapped_video(node: Node) -> dict | None:
@@ -55,7 +66,7 @@ def _refined_sound(project: Path, node: Node, target: Path, tmp: Path, log: Call
         chain.replace_audio(target, wav)
 
 
-def refine_path(generator, project: Path, nid: str, size: str, out: Path,
+def refine_path(generator: RefineGenerator, project: Path, nid: str, size: str, out: Path,
                 events: Callable[[dict], None] | None = None, log: Callable[[str], None] = print,
                 pin: bool = True, fast_attention: bool = False, refine_swapped: bool = False,
                 strength: str = "natural", method: str = "refine", single: bool = False,
@@ -100,8 +111,8 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
     files: dict[str, Path] = {}
     emit({"e": "plan", "make": [n.id for n in order]})
     made_now = []
-    with media.scratch("job", dir=str(project / "nodes")) as tmp:
-        tmp = Path(tmp)
+    with media.scratch("job", dir=str(project / "nodes")) as scratch:
+        tmp = Path(scratch)
         for k, node in enumerate(order, start=1):
             target = refined_file(project, node, size)
             first = last = None

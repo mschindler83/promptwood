@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .. import chain
 from .guard import retire
+from .schema import Keyframe, MadeRecord, Options, Overrides, Source
 from .consts import (
     AI,
     ENDS_DIR,
@@ -29,13 +30,13 @@ class Node:
     parent: str | None             # None: starts from the start image
     prompt: str = ""
     seed: int = 42
-    made: dict | None = None       # what the current files were made from (prompt, seed, settings, start_sha1, files)
-    overrides: dict = field(default_factory=dict)   # loras [{"path", "strength"}], frames, steps, guide
+    made: MadeRecord | None = None       # what the current files were made from (prompt, seed, settings, start_sha1, files)
+    overrides: Overrides = field(default_factory=dict)   # loras [{"path", "strength"}], frames, steps, guide
     kind: str = AI                 # AI: generated clip; VIDEO: a range of a real video file
-    source: dict | None = None     # VIDEO: {"file": absolute path, "start": s, "end": s}
+    source: Source | None = None     # VIDEO: {"file": absolute path, "start": s, "end": s}
     end_image: str | None = None   # AI: its own end image (ends/..., project-relative); a video after it wins
     end_at: int | None = None      # AI: hand over at this frame instead of the last one (see handover_index)
-    keyframes: list = field(default_factory=list)   # AI: [{"image": ends/..., "at": s, "note": str}], by time
+    keyframes: list[Keyframe] = field(default_factory=list)   # AI: [{"image": ends/..., "at": s, "note": str}], by time
     frozen: bool = False           # kept as made: done whatever the settings say (see freeze)
     start_image: str | None = None  # AI, a first clip: its own start picture (starts/..., project-relative)
     #                                 instead of the project's start image (see add_start_rows)
@@ -54,7 +55,7 @@ def short_id(nid: str) -> str:
 @dataclass
 class Tree:
     nodes: dict[str, Node] = field(default_factory=dict)
-    options: dict = field(default_factory=lambda: copy.deepcopy(DEFAULT_OPTIONS))
+    options: Options = field(default_factory=lambda: copy.deepcopy(DEFAULT_OPTIONS))
     image: str | None = None       # where the start image came from (start.png is the copy that counts)
     selected: str | None = None
     next_num: int = 1
@@ -182,7 +183,7 @@ class Tree:
         heal_frozen(self)
         return gone
 
-    def siblings(self, nid: str) -> list["Node"]:
+    def siblings(self, nid: str) -> list[Node]:
         """The other clips that start from the same point as nid."""
         parent = self.nodes[nid].parent
         return [n for n in self.children(parent) if n.id != nid]
@@ -202,7 +203,7 @@ class Tree:
                 "nodes": [asdict(n) for n in sorted(self.nodes.values(), key=lambda n: self.number(n.id))]}
 
     @classmethod
-    def from_json(cls, d: dict) -> "Tree":
+    def from_json(cls, d: dict) -> Tree:
         """Raises ValueError for a tree that cannot be right (duplicate ids, missing parents, cycles)."""
         from .cast import _migrate_cast
         from .files import _int_or, _merged_options, migrate_loras

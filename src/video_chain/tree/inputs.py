@@ -160,7 +160,7 @@ def veda_for(options: dict, width: int, height: int, frames: int) -> bool:
     return bool((options.get("veda") or {"on": True}).get("on", True)) and chain.veda_useful(width, height, frames)
 
 
-def loras_needed(tree: Tree, checker: "Checker", nids: list[str]) -> list[str]:
+def loras_needed(tree: Tree, checker: Checker, nids: list[str]) -> list[str]:
     """The LoRA files these nodes are made with (each once, in order)."""
     out: list[str] = []
     for nid in nids:

@@ -8,6 +8,7 @@ from .. import chain
 from .consts import ENDS_DIR
 from .guard import inside, retire
 from .model import Node, Tree, short_id
+from .schema import Keyframe
 
 
 def _in_ends(project: Path, rel: str) -> bool:
@@ -47,7 +48,7 @@ def copy_end_image(project: Path, tree: Tree, src: str, dst: str) -> None:
         set_end_image(project, tree, dst, Path(project) / rel)
 
 
-def clean_keyframes(raw) -> list[dict]:
+def clean_keyframes(raw: object) -> list[Keyframe]:
     """Keyframes as tree.json holds them: {"image": "ends/...", "at": s > 0, "note"}, sorted by time (damaged
     entries are left out)."""
     out = []

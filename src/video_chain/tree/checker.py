@@ -60,7 +60,7 @@ def freeze(project: Path, tree: Tree, nid: str) -> list[str]:
     return out
 
 
-def keyframe_problem(tree: Tree, checker: "Checker", todo: list[str]) -> str | None:
+def keyframe_problem(tree: Tree, checker: Checker, todo: list[str]) -> str | None:
     """Why a clip's keyframes cannot be used (one past its end, on its first or last frame, inside a motion guide,
     two on the same frame), or None. Checked with the length the clip will have."""
     for nid in todo:
@@ -318,7 +318,7 @@ class Checker:
         return "something it depends on changed"
 
 
-def current_settings(project: Path, options: dict, tree: "Tree | None" = None) -> dict | None:
+def current_settings(project: Path, options: dict, tree: Tree | None = None) -> dict | None:
     """What every clip depends on besides prompt, seed and start frame (None while there is neither a start image
     nor a video to take the size from)."""
     dims = size_source(project, tree)

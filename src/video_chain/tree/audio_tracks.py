@@ -8,6 +8,7 @@ from pathlib import Path
 from .. import chain
 from .consts import AUDIO_REF_MIN, AUDIO_REF_TOTAL, MAX_AUDIO_REFS, REFS_DIR
 from .model import Node, Tree, short_id
+from .schema import Track
 from .timeline import _guide_of, clip_length, full_prompt, handover_index, made_frames, path_cuts
 from .files import load
 from .cast import audio_mentioned, audio_refs, cast_of
@@ -82,7 +83,7 @@ def _join_lead(tree: Tree, node: Node) -> int:
 
 
 # ---- audio tracks: imported sound (cut to a range), played by clips one after another
-def tracks(tree: Tree) -> list[dict]:
+def tracks(tree: Tree) -> list[Track]:
     """The project's audio tracks ({"id", "name", "file", "secs", "source", "start", "end"}); shared by the film's
     scenes. file: the cut sound as WAV in refs/ (a new name for every cut)."""
     return [t for t in (tree.options.get("tracks") or []) if isinstance(t, dict) and t.get("id") and t.get("file")]

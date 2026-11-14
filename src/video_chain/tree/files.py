@@ -52,7 +52,7 @@ def _unlink(f: Path) -> bool:
         return False
 
 
-def clip_files(project: Path, node: "Node") -> list[Path]:
+def clip_files(project: Path, node: Node) -> list[Path]:
     """The files a node's current record points to."""
     if not node.made:
         return []
@@ -80,7 +80,7 @@ def new_clip_files(project: Path, nid: str) -> tuple[Path, Path]:
     return d / f"{nid}_{tag}.mp4", d / f"{nid}_{tag}.png"
 
 
-def remove_stale_files(project: Path, tree: "Tree") -> list[Path]:
+def remove_stale_files(project: Path, tree: Tree) -> list[Path]:
     """Clip files of this app that no record points to any more: finished ones (old versions that could not be
     moved while they were open) go to old/ (chain.keep_aside), half-written ones of a stopped run are deleted.
     Returns what could not be moved."""

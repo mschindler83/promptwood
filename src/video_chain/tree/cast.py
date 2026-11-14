@@ -23,6 +23,7 @@ from .consts import (
     VOICE_REF_MAX_SECS)
 from .guard import retire
 from .model import Tree
+from .schema import AudioRef, CastEntry, Options
 
 
 def _migrate_cast(options: dict, has_cast: bool) -> None:
@@ -60,21 +61,25 @@ def _migrate_cast(options: dict, has_cast: bool) -> None:
     options["cast"] = cast
 
 
-def cast_of(tree_or_options) -> list[dict]:
+def _options_of(src: Tree | Options) -> Options:
+    """The options of a tree, or the options handed in."""
+    return src.options if isinstance(src, Tree) else src
+
+
+def cast_of(src: Tree | Options) -> list[CastEntry]:
     """The characters ({"name", "images", "desc", "lead"}), in the order of the cast list."""
-    options = tree_or_options.options if isinstance(tree_or_options, Tree) else tree_or_options
-    return list(options.get("cast") or [])
+    return list(_options_of(src).get("cast") or [])
 
 
-def character(tree_or_options, name: str) -> dict | None:
+def character(src: Tree | Options, name: str) -> CastEntry | None:
     """The character with this name (case does not matter), or None."""
     low = (name or "").lower()
-    return next((c for c in cast_of(tree_or_options) if c["name"].lower() == low), None)
+    return next((c for c in cast_of(src) if c["name"].lower() == low), None)
 
 
-def lead_of(tree_or_options) -> dict | None:
+def lead_of(src: Tree | Options) -> CastEntry | None:
     """The lead (only a person can be it)."""
-    return next((c for c in cast_of(tree_or_options) if c.get("lead") and kind_of(c) == "person"), None)
+    return next((c for c in cast_of(src) if c.get("lead") and kind_of(c) == "person"), None)
 
 
 def kind_of(c: dict | None) -> str:
@@ -84,16 +89,16 @@ def kind_of(c: dict | None) -> str:
     return k if k in CAST_KINDS else "person"
 
 
-def refiner_cast(tree_or_options) -> list[dict]:
+def refiner_cast(src: Tree | Options) -> list[dict]:
     """The cast as the prompt refiner is told about it (comfy.cast_instruction): [{"name", "desc", "voice": bool}],
     + "kind" for a place, object or style (so the refiner does not make it a person)."""
     return [{"name": c["name"], "desc": c.get("desc", ""), "voice": bool(c.get("voice")) and kind_of(c) == "person",
-             **({"kind": kind_of(c)} if kind_of(c) != "person" else {})} for c in cast_of(tree_or_options)]
+             **({"kind": kind_of(c)} if kind_of(c) != "person" else {})} for c in cast_of(src)]
 
 
-def is_h3(tree_or_options) -> bool:
+def is_h3(src: Tree | Options) -> bool:
     """The project writes H3's official prompt formats (options "prompt_format" == "h3"); else the classic one."""
-    options = tree_or_options.options if isinstance(tree_or_options, Tree) else tree_or_options
+    options = _options_of(src)
     return (options or {}).get("prompt_format") == "h3"
 
 
@@ -105,9 +110,9 @@ def set_prompt_format(tree: Tree, fmt: str) -> None:
     tree.options["prompt_format"] = fmt
 
 
-def all_pictures(tree_or_options) -> list[str]:
+def all_pictures(src: Tree | Options) -> list[str]:
     """Every face picture of the cast, in cast order (what <Picture 1> ... number in a prompt that writes them)."""
-    return [r for c in cast_of(tree_or_options) for r in c["images"]]
+    return [r for c in cast_of(src) for r in c["images"]]
 
 
 def check_name(tree: Tree, name: str, keep: str | None = None) -> str:
@@ -259,8 +264,8 @@ def remove_character(project: Path, tree: Tree, name: str) -> None:
         _drop_voice(project, c["voice"], tree)
 
 
-def voices_in_use(tree_or_options) -> list[str]:
-    return [c["voice"]["file"] for c in cast_of(tree_or_options) if c.get("voice")]
+def voices_in_use(src: Tree | Options) -> list[str]:
+    return [c["voice"]["file"] for c in cast_of(src) if c.get("voice")]
 
 
 def clone_file(voice: dict) -> str:
@@ -427,7 +432,7 @@ def mentions(options: dict, text: str) -> tuple[list[dict], list[str]]:
     return found, unknown
 
 
-def audio_refs(tree: Tree) -> list[dict]:
+def audio_refs(tree: Tree) -> list[AudioRef]:
     """The project's sound references ({"file", "name", "secs"}), <Audio 1> first."""
     return list(tree.options.get("audio_refs") or [])
 
