@@ -294,10 +294,11 @@ class EndsMixin(MainWindowHost):
 
     def _choose_video_file(self, exclude: str | None = None) -> str | None:
         """Choose a video: the project's real videos and its made clips (not clip exclude) first, or any file."""
-        assert self.tree is not None
+        tree = self.tree
+        assert tree is not None
         assert self.project is not None
         clips = [(str(self.project / n.made["video"]), f"Clip #{T.short_id(n.id)} · {n.prompt[:40]}")
-                 for n in sorted(self.tree.nodes.values(), key=lambda n: self.tree.number(n.id))
+                 for n in sorted(tree.nodes.values(), key=lambda n: tree.number(n.id))
                  if not n.is_video and n.made and (self.project / n.made["video"]).is_file() and n.id != exclude]
         cols = self.project_media("video") + ([("Clips of this project", clips)] if clips else [])
         return choose_video(self, self.qs, places=self._picker_places(), collections=cols) or None
@@ -403,12 +404,14 @@ class EndsMixin(MainWindowHost):
         elif act in ("add_video", "video", "add_moment", "moment"):
             self._keyframe_from_video(nid, at, i, own=act in ("add_moment", "moment"))
         elif act == "note":
+            assert i is not None
             text, ok = QInputDialog.getText(
                 self, f"Keyframe at {at:.2f} s", "What happens at this moment (added to the prompt with its time, "
                 "e.g. “she turns to the camera”; empty: nothing):", text=node.keyframes[i]["note"])
             if ok:
                 self._set_keyframe(nid, None, at, note=text.strip(), index=i)
         elif act == "remove":
+            assert i is not None
             try:
                 assert self.project is not None
                 assert self.tree is not None
@@ -501,12 +504,12 @@ class EndsMixin(MainWindowHost):
         size may follow it)."""
         try:
             tree = self.tree
-            assert self.tree is not None
+            assert tree is not None
             if nid is not None and nid in tree.nodes and tree.nodes[nid].is_video:
                 tree = copy.copy(tree)                       # (only this node differs: not a copy of the whole tree)
                 tree.nodes = dict(tree.nodes)
                 node = tree.nodes[nid] = copy.copy(tree.nodes[nid])
-                src = node.source
+                src = node.source_dict()
                 node.source = T.video_source(file or src["file"], src["start"], src["end"], rotate)
             assert self.project is not None
             base = T.Checker(self.project, tree).base()
@@ -515,7 +518,7 @@ class EndsMixin(MainWindowHost):
             if file:
                 info = chain.probe_source(Path(file))
                 w, h = chain.rotated_size(info["width"], info["height"], rotate)
-                return chain.canvas_size(w, h, int(self.tree.options.get("resolution", 512)))
+                return chain.canvas_size(w, h, int(tree.options.get("resolution", 512)))
         except Exception:  # noqa: BLE001  (an unreadable file: no size)
             logging.getLogger(__name__).debug("canvas of %s", file, exc_info=True)
         return None

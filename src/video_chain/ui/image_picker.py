@@ -658,12 +658,13 @@ def scratch_settings() -> QSettings:
     return QSettings(str(Path(tempfile.mkdtemp(prefix="video-chain-")) / "picker.ini"), QSettings.Format.IniFormat)
 
 
-def pick_image(parent, title: str, settings: QSettings, start_dir: str | None = None,
+def pick_image(parent, title: str, settings: QSettings | None, start_dir: str | None = None,
                places: list[tuple[str, str]] | None = None,
                collections: list[tuple[str, list[tuple[str, str]]]] | None = None, kind: str = "image") -> str | None:
     """Show the picker; the chosen file's path or None. kind: 'image', 'video' or 'media' (sounds and videos).
-    The thumbnail cache can be moved with the setting 'thumbCacheDir' (empty = no disk cache)."""
-    qs = settings
+    The thumbnail cache can be moved with the setting 'thumbCacheDir' (empty = no disk cache). settings None: the
+    picker remembers nothing (scratch_settings)."""
+    qs = settings if settings is not None else scratch_settings()
     cache: Any = qs.value("thumbCacheDir", None)
     cache_dir = CACHE_DIR if cache is None else (Path(cache) if cache else None)
     dlg = ImagePickerDialog(parent, title, start_dir, qs, places, cache_dir=cache_dir, collections=collections,

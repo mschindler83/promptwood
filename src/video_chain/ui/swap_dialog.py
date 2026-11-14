@@ -321,9 +321,8 @@ class SwapDialog(QDialog):
             if self.pick is not None:
                 path = self.pick("Picture of the new person")
             else:
-                from .image_picker import pick_image, scratch_settings
-                path = pick_image(self, "Picture of the new person",
-                                  self.qs if self.qs is not None else scratch_settings())
+                from .image_picker import pick_image
+                path = pick_image(self, "Picture of the new person", self.qs)
             if not path:                                  # cancelled: the picture before stays shown
                 k = self.ref_combo.findData(self.ref) if self.ref else 0
                 self.ref_combo.setCurrentIndex(max(0, k))

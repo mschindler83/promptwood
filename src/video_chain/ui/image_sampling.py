@@ -5,6 +5,7 @@ A mixin of ImageEditDialog (ui/image_edit.py): the widgets it uses are created t
 from __future__ import annotations
 
 import json
+from typing import Any
 
 from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QGridLayout, QHBoxLayout, QSpinBox
 
@@ -37,8 +38,8 @@ class SamplingMixin(ImageEditHost):
                                   "replaces it)")
         b_reset = icon_button("rotate", "Back to the model's own settings (all auto)")
         b_reset.clicked.connect(lambda: self.set_sampling({}))
-        for w in (self.steps, self.cfg):
-            guard_wheel(w)
+        for spin in (self.steps, self.cfg):
+            guard_wheel(spin)
         grid = QGridLayout()                       # two rows, so the panel stays narrow
         for k, (w, text) in enumerate(((self.steps, "Steps"), (self.cfg, "CFG"), (self.sampler, "Sampler"),
                                        (self.scheduler, "Scheduler"))):
@@ -79,7 +80,7 @@ class SamplingMixin(ImageEditHost):
 
     def sampling(self) -> dict:
         """The chosen sampling settings; a missing key: the model's own."""
-        out = {}
+        out: dict[str, Any] = {}
         if self.steps.value():
             out["steps"] = self.steps.value()
         if self.cfg.value():

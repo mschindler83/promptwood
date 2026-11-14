@@ -377,6 +377,7 @@ class ResultGallery(QScrollArea):
         self._selected = png
         th = self.thumbs.get(png) if png else None
         if th is not None:
+            assert png is not None
             th.set_state(selected=True)
             if scroll:
                         QTimer.singleShot(0, lambda: self._reveal_thumb(png))

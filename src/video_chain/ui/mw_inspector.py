@@ -96,8 +96,8 @@ class InspectorMixin(MainWindowHost):
         for n in sorted(self.tree.nodes.values(), key=lambda n: self.tree.number(n.id)):
             text = n.prompt
             if n.is_video:
-                text = (f"{Path(n.source['file']).name} · {format_time(n.source['start'], 1)}–"
-                        f"{format_time(n.source['end'], 1)}"
+                text = (f"{Path(n.source_dict()['file']).name} · {format_time(n.source_dict()['start'], 1)}–"
+                        f"{format_time(n.source_dict()['end'], 1)}"
                         + (f" · ↻{T.source_rotation(n.source)}°" if T.source_rotation(n.source) else ""))
             parent = n.parent or START
             if n.parent is None and n.start_image:          # a first clip with its own start image: its own row

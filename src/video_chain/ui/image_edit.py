@@ -704,6 +704,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         refs = [s.path for s in self.cpics[:FAMILIES[fam]["refs"]] if s.path] if self.use_refs.isChecked() else []
         self._remember_loras()                    # what it was made with is offered next time
         w, h = size_for(fam, self.aspect.currentData() or 1.0)
+        assert self.connect_create is not None
         plan = CreatePlan(self.project / EDITS_DIR, self.connect_create, prompt, quality, n, [], runs, run_words,
                           refs, jobs, family=fam, model_file=model, negative=negative, width=w, height=h,
                           strength=self.ref_strength.value(), tags=self.tags.isChecked(), sampling=self.sampling())
@@ -756,7 +757,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
                f"({names[(k - 1) // self._per_image]})" if names and (k - 1) // self._per_image < len(names) else "")
         self.state.setText(f"Result {k} of {n}{pic}: step {i} / {steps}")
 
-    def _result(self, png: str, meta: dict):
+    def _result(self, png: str, meta: ResultRecord):
         if isinstance(meta.get("variation"), dict) and meta["variation"].get("step") is not None:
             self.variations.done(int(meta["variation"]["step"]), meta["variation"].get("key"))   # continues after
         self._result_added(png, meta)

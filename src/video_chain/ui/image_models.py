@@ -112,6 +112,8 @@ class ModelsMixin(ImageEditHost):
 
         def work():
             try:
+                if connect is None:
+                    raise RuntimeError("no image creator")
                 sig.families.emit(connect(None).files, "")
             except Exception as e:  # noqa: BLE001
                 safe_emit(sig.families, {}, str(e))

@@ -10,7 +10,7 @@ from typing import Any
 
 from .dialogs import confirm as ask
 from .image_common import MAX_RESULTS, SEED_MAX
-from .image_picker import pick_image, scratch_settings
+from .image_picker import pick_image
 from .image_host import ImageEditHost
 
 
@@ -66,7 +66,7 @@ class PromptMixin(ImageEditHost):
 
     def _pick_list(self) -> str | None:
         return pick_image(self, "Choose a wildcard list (.txt, one value per line)",
-                          self.qs if self.qs is not None else scratch_settings(), kind="text")
+                          self.qs, kind="text")
 
     def _variation_jobs(self) -> list | None:
         """The next Generate's prompts when variations are active (None: not active; [] after a refusal)."""

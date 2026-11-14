@@ -63,7 +63,7 @@ class TtsMixin(MainWindowHost):
             d.mkdir(parents=True, exist_ok=True)
             self._tts_local = TTS.LocalTTS(log=d / "tts-worker.log")
         url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL).rstrip("/")
-        self._tts_local.before_launch = lambda _w: self._make_room(TTS.LOCAL_VRAM_MB, url, "Qwen3-TTS",
+        self._tts_local.before_launch = lambda _w:  # type: ignore[assignment]  # (tts.py types the hook as None) self._make_room(TTS.LOCAL_VRAM_MB, url, "Qwen3-TTS",
                                                                    TTS.TtsError, "speak the lines after the run")
         return self._tts_local
 
@@ -76,7 +76,7 @@ class TtsMixin(MainWindowHost):
             self._tts_fish = TTS.FishTTS(log=d / "fish-worker.log", helper=self.local_tts())
         url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL).rstrip("/")
         self._tts_fish.helper = self.local_tts()
-        self._tts_fish.before_launch = lambda _w: self._room_for_fish(url)
+        self._tts_fish.before_launch = lambda _w: self._room_for_fish(url)  # type: ignore[assignment]  # (as above)
         return self._tts_fish
 
     def _room_for_fish(self, url: str) -> None:
@@ -124,6 +124,7 @@ class TtsMixin(MainWindowHost):
         eng = self._speak_engine(nid)
         if eng is None:
             return False
+        assert self.tree is not None and self.project is not None      # (_speak_engine)
         snap, project = copy.deepcopy(self.tree), self.project
 
         def render(take: int, how: dict, lines: list[str]) -> dict:
@@ -152,9 +153,10 @@ class TtsMixin(MainWindowHost):
             for r in dlg.unused():                      # the other takes are never deleted: they go to old/
                 chain.keep_aside(project, project / r["file"])
             if ok and dlg.chosen is not None:
-                texts = {}                              # (every take's transcripts: each was made once only)
+                texts: dict = {}                        # (every take's transcripts: each was made once only)
                 for r in dlg.takes:
                     texts.update(r.get("texts") or {})
+                assert self.tree is not None
                 node = self.tree.nodes.get(nid)
                 if node is not None and not node.frozen and dlg.chosen["prompt"] != node.prompt \
                         and dlg.chosen.get("base_prompt") == node.prompt:
@@ -193,6 +195,7 @@ class TtsMixin(MainWindowHost):
         eng = self._speak_engine(nid)
         if eng is None:
             return False
+        assert self.tree is not None and self.project is not None      # (_speak_engine)
         snap, project = copy.deepcopy(self.tree), self.project
         self._tts_busy = True
         try:
@@ -225,6 +228,7 @@ class TtsMixin(MainWindowHost):
             self._report_error(f"Could not speak the lines of clip #{T.short_id(nid)}: {err}")
             return
         node = self.tree.nodes[nid]
+        assert self.project is not None
         if node.frozen:
             chain.keep_aside(self.project, self.project / r["file"])
             self._frozen_block(node, "speak")
@@ -238,7 +242,7 @@ class TtsMixin(MainWindowHost):
         self._write_tree()
         self.refresh(rebuild_path=True)
         msg = (f"Clip #{T.short_id(nid)}: {plural(done['lines'], 'line')} spoken ({done['secs']:.1f} s)"
-               f" and made its sound (track “{T.track_of(self.tree, done['track'])['name']}”); the picture is made "
+               f" and made its sound (track “{(T.track_of(self.tree, done['track']) or {}).get('name')}”); the picture is made "
                "to it, lips in sync.")
         if done["frames"]:
             msg += f" The clip is now {done['frames'] / chain.FPS:.1f} s long, so the lines fit."
