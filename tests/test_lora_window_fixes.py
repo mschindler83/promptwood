@@ -7,6 +7,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QToolButton
 
+from waiting import show_lora, wait_loaded
+
 from test_lora_notes import db_with, details, lora
 
 app = QApplication.instance() or QApplication([])
@@ -23,6 +25,7 @@ def window(tmp_path, **more):
     db.scan([other], lookup=lambda sha: None, gap=0)
     w = LoraWindow(None, [p, other], current=p, db=db, fetch=lambda item: None, **more)
     w.flush()
+    wait_loaded(app, w)
     return w, db, p, other
 
 
@@ -77,7 +80,7 @@ def test_strength_link_keeps_unsaved_edits(tmp_path):
     from PySide6.QtCore import QUrl
     w, db, p, other = window(tmp_path, set_strength=lambda path, v: True)
     w.strengths[p] = 1.0
-    w.show_lora(p)
+    show_lora(app, w, p)
     w.note_edit.setPlainText("typing …")
     w._link(QUrl("strength:0.80"))
     assert w.note_edit.toPlainText() == "typing …"
@@ -134,7 +137,7 @@ def test_forgetting_a_note_and_deleting_pictures_ask_first(tmp_path, monkeypatch
     from video_chain import lora_notes as LN
     w, db, p, other = window(tmp_path)
     assert LN.save_user(db, p, note="Does: mine.")
-    w.show_lora(p)
+    show_lora(app, w, p)
     asked = []
     answer = [False]
     from PySide6.QtWidgets import QMessageBox

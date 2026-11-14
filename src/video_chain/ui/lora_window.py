@@ -15,6 +15,7 @@ prompts that were part of it."""
 from __future__ import annotations
 
 import html
+import logging
 import queue
 import threading
 from collections.abc import Callable
@@ -33,6 +34,8 @@ from .dialogs import add_action, button_row, confirm
 from .lora_stack import lora_label
 from .widgets import fit_size, guard_wheel, label
 from .qsvalue import qs_value
+
+log = logging.getLogger(__name__)
 
 PER_PAGE = 8
 PICTURE = 200                    # pixels: the side of a card's picture
@@ -171,11 +174,13 @@ class LoraWindow(QDialog):
         self.shown: list[dict] = []
         self.cards: list[ExampleCard] = []
         self.page = 0
+        self._load_gen = 0                         # (the answer of the LoRA page being read: an older one is dropped)
+        self._loaded = ""                          # the LoRA whose page is filled in
         self._gen = 0                              # (answers of an earlier page or LoRA are dropped)
         self._closed = threading.Event()
         self._kept_of: dict = {}                   # (is a kept still on disk? per example: looked up once)
         # (details, info, mat, k) of the LoRA shown
-        self._ctx: tuple[dict | None, dict, dict | None, dict] | None = None
+        self._ctx: tuple[dict | None, dict, dict | None, dict, str] | None = None
         self._pending: str | None = None           # the LoRA chosen in the list, shown when the arrow keys rest
         self._reverting = False
         self._find_timer, self._pick_timer = QTimer(self), QTimer(self)
@@ -428,13 +433,50 @@ class LoraWindow(QDialog):
 
     # ---- one LoRA
     def show_lora(self, path: str):
+        """Show a LoRA: its files and database are read in the background (a network share or a long list must not
+        freeze the window); the page fills in when they are read. A newer choice drops the answer of an older one."""
         self.path = path
         self._gen += 1
+        self._load_gen += 1
         self._kept_of = {}
-        details = self.db.details(path)
-        info = self.db.info(path) or {}
-        k = lora_notes.what_is_known(path, self.db)
-        mat = lora_notes.material(details, self.db.words(path), path) if (details or info.get("words")) else None
+        self._loaded = ""
+        self.title.setText(Path(path).name)
+        self.facts.setText("Reading what is known …")
+        self._saved = {"note": "", "remarks": ""}
+        for edit in (self.note_edit, self.remarks_edit):
+            edit.blockSignals(True)
+            edit.clear()                           # (the text of the LoRA before is not this one's)
+            edit.blockSignals(False)
+            edit.setEnabled(False)
+        self._note_buttons()
+        gen, db, prompt_text = self._load_gen, self.db, self.prompt_text
+
+        def work():
+            return self._read_lora(path, db, prompt_text)
+        run_in_background(work, on_done=lambda data: self._apply_lora(gen, path, data),
+                          on_error=lambda e: self._lora_failed(gen, path, e), owner=self)
+
+    @staticmethod
+    def _read_lora(path: str, db, prompt_text: str) -> dict:
+        """(a worker thread) Everything the page of one LoRA shows."""
+        details = db.details(path)
+        info = db.info(path) or {}
+        k = lora_notes.what_is_known(path, db)
+        mat = lora_notes.material(details, db.words(path), path) if (details or info.get("words")) else None
+        return {"details": details, "info": info, "k": k, "mat": mat, "examples": lora_notes.examples(details),
+                "n": lora_notes.note_of(db, path, mat), "guide": lora_notes.guidance([path], db, prompt=prompt_text)}
+
+    def _lora_failed(self, gen: int, path: str, error: BaseException) -> None:
+        if gen == self._load_gen:
+            log.warning("could not read what is known of %s: %s", path, error)
+            self.facts.setText("This LoRA's data could not be read.")
+
+    def _apply_lora(self, gen: int, path: str, data: dict) -> None:
+        if gen != self._load_gen or self._closed.is_set():
+            return                                 # (another LoRA was chosen meanwhile)
+        for edit in (self.note_edit, self.remarks_edit):
+            edit.setEnabled(True)
+        details, info, k, mat, n = data["details"], data["info"], data["k"], data["mat"], data["n"]
         self.material = mat
         self.title.setText(k["name"])
         if details:
@@ -450,16 +492,15 @@ class LoraWindow(QDialog):
             self.facts.setText(("CivitAI does not know this file. " if info.get("source") == "none" else
                                 "CivitAI was not asked about this file yet (it is looked up in the background when "
                                 "the lookup is on in the settings). ") + Path(path).name)
-        self.examples = lora_notes.examples(details)
+        self.examples = data["examples"]
         told = set()
         if self.told and mat:                      # (the examples a refine shows: those in the text it was told)
             told = {e["clean"] for e in self.examples if e["clean"] and
                     lora_notes.cut(e["clean"], lora_notes.GUIDE_EXAMPLE_CHARS) in self.told}
         for e in self.examples:
             e["told"] = e["clean"] in told
-        self._ctx = (details, info, mat, k)
-        self.how.setHtml(self._how_html(path, details, info, mat, k))
-        n = lora_notes.note_of(self.db, path, mat)
+        self._ctx = (details, info, mat, k, data["guide"])
+        self.how.setHtml(self._how_html(path, details, info, mat, k, data["guide"]))
         self._saved = {"note": n["note"], "remarks": n["remarks"]}
         for edit, text in ((self.note_edit, n["note"]), (self.remarks_edit, n["remarks"])):
             edit.blockSignals(True)
@@ -477,8 +518,9 @@ class LoraWindow(QDialog):
         self.about.setHtml(details_html(details, None) if details else
                            "<p>CivitAI has told nothing about this LoRA.</p>")
         self._refill()
+        self._loaded = path
 
-    def _how_html(self, path: str, details, info: dict, mat, k: dict) -> str:
+    def _how_html(self, path: str, details, info: dict, mat, k: dict, guide: str) -> str:
         e = html.escape
         out = []
         source = {"user": "set by you", "file": "named in the LoRA file", "civitai": "from CivitAI",
@@ -506,7 +548,6 @@ class LoraWindow(QDialog):
         elif usual is not None:
             out.append(f"<p style='color:gray'>Usual strength: {usual:.2f}"
                        + (" (this LoRA is not in the prompt's stack)" if self.strengths else "") + ".</p>")
-        guide = lora_notes.guidance([path], self.db, prompt=self.prompt_text)
         out.append("<h3>What the prompt refiner is told about this LoRA</h3>")
         if guide:
             out.append("<p style='color:gray'>Word for word, when this is the only LoRA of the prompt (with more "
@@ -528,8 +569,8 @@ class LoraWindow(QDialog):
                 self.strengths[self.path] = value
                 self.state.setText(f"{self.title.text()}: strength set to {value:.2f} in this prompt's LoRAs.")
                 if self._ctx is not None:          # (only the How tab changes: what is typed in the note stays)
-                    details, info, mat, k = self._ctx
-                    self.how.setHtml(self._how_html(self.path, details, info, mat, k))
+                    details, info, mat, k, guide = self._ctx
+                    self.how.setHtml(self._how_html(self.path, details, info, mat, k, guide))
             else:
                 self.state.setText("The strength could not be set (the LoRA is not in the stack, or the clip "
                                    "cannot be changed now).")

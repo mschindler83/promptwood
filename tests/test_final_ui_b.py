@@ -64,3 +64,33 @@ def test_a_failing_guidance_is_logged_not_swallowed(app, caplog, monkeypatch, tm
     with caplog.at_level(logging.WARNING):
         assert PR.guidance_or_empty(["/x/a.safetensors"], "a prompt") == ""
     assert any("could not be read" in r.getMessage() for r in caplog.records)
+
+
+def test_a_lora_page_is_read_off_the_gui_thread_and_a_newer_choice_wins(app, tmp_path, monkeypatch):
+    import threading
+    import time
+
+    from test_lora_window_fixes import window
+    from video_chain import lora_notes
+    from waiting import wait
+    w, db, p, other = window(tmp_path)
+    seen, release = [], threading.Event()
+    real = lora_notes.what_is_known
+
+    def known(path, d):
+        seen.append((path, threading.current_thread()))
+        if path == p:
+            release.wait(5)
+        return real(path, d)
+    monkeypatch.setattr(lora_notes, "what_is_known", known)
+    w.show_lora(p)                                   # (slow: still being read)
+    t0 = time.monotonic()
+    w.show_lora(other)
+    assert time.monotonic() - t0 < 1 and w.facts.text() == "Reading what is known …"
+    assert wait(app, lambda: w._loaded == other)
+    release.set()
+    wait(app, lambda: len(seen) >= 2)
+    app.processEvents()
+    assert w._loaded == other and w.path == other           # the older answer arrived later and was dropped
+    assert all(t is not threading.main_thread() for _p, t in seen)
+    w.done(0)
