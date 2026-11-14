@@ -1803,6 +1803,7 @@ class MainWindow(QMainWindow):
         self.bridge.eleven_cloned.connect(self._eleven_cloned)
         self.bridge.tts_log.connect(lambda m: (self.log.appendPlainText("TTS: " + m), self.status.setText(m + "…")))
         self._tts_local: TTS.LocalTTS | None = None
+        self._tts_fish: TTS.FishTTS | None = None
         self._tts_busy = False
         self._eleven_voices: list | None = None
         self.h3_loras: list[tuple[str, str]] = []
@@ -2085,8 +2086,11 @@ class MainWindow(QMainWindow):
         for k, text in TTS.PROVIDERS.items():
             self.tts_provider.addItem(text, k)
         self.tts_provider.setToolTip("Who speaks the lines with text to speech (Speak the lines on a clip, TTS… for a "
-                                     "voice): Qwen3-TTS on this computer, cloning each character's voice sample, or "
-                                     "ElevenLabs with your API key (Settings), in each character's ElevenLabs voice")
+                                     "voice): Qwen3-TTS on this computer, cloning each character's voice sample; "
+                                     "Fish S2 Pro on this computer, cloning it too and taking the tone from [tags] "
+                                     "in a line (\"[angry] Lass mich!\"; about 19 GB of VRAM, its licence allows "
+                                     "non-commercial use only); or ElevenLabs with your API key (Settings), in each "
+                                     "character's ElevenLabs voice (its v3 models hear [tags] too)")
         irow.addRow("Text to speech", self.tts_provider)
         mrow = QHBoxLayout()
         self.eleven_model = QComboBox()
@@ -4280,14 +4284,37 @@ class MainWindow(QMainWindow):
                                                                    TTS.TtsError, "speak the lines after the run")
         return self._tts_local
 
+    def fish_tts(self) -> "TTS.FishTTS":
+        """The app's Fish S2 Pro worker (started on demand; stop_tts unloads it). Before it starts, the refiner's
+        llama.cpp server is stopped (its RAM and VRAM) and ComfyUI unloads its models when VRAM is short."""
+        if self._tts_fish is None:
+            d = Path.home() / ".cache" / "video-chain"
+            d.mkdir(parents=True, exist_ok=True)
+            self._tts_fish = TTS.FishTTS(log=d / "fish-worker.log", helper=self.local_tts())
+        url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL).rstrip("/")
+        self._tts_fish.helper = self.local_tts()
+        self._tts_fish.before_launch = lambda _w: self._room_for_fish(url)
+        return self._tts_fish
+
+    def _room_for_fish(self, url: str) -> None:
+        """(a worker thread) Room for Fish S2 Pro: the llama.cpp server goes (it may hold many GB of RAM as well as
+        VRAM), then ComfyUI is asked to unload its models (_make_room)."""
+        cur = getattr(self, "_llama", None)
+        if cur is not None and cur.stop(wait=True):
+            self.bridge.tts_log.emit("stopped the llama.cpp server: Fish S2 Pro needs its RAM and VRAM")
+        self._make_room(TTS.FISH_VRAM_MB, url, "Fish S2 Pro", TTS.TtsError, "speak the lines after the run")
+
     def stop_tts(self, why: str = "") -> bool:
-        stopped = bool(self._tts_local is not None and self._tts_local.stop())
-        if stopped and why:
-            self.log.appendPlainText(f"Stopped Qwen3-TTS ({why}).")
+        stopped = False
+        for w, what in ((self._tts_local, "Qwen3-TTS"), (self._tts_fish, "Fish S2 Pro")):
+            if w is not None and w.stop():
+                stopped = True
+                if why:
+                    self.log.appendPlainText(f"Stopped {what} ({why}).")
         return stopped
 
     def _tts_engine(self):
-        return TTS.engine(self.tree, self.local_tts())
+        return TTS.engine(self.tree, self.local_tts(), self.fish_tts())
 
     def _speak_engine(self, nid: str):
         """The engine a clip's lines can be spoken with now, or None (the status line says why not)."""
@@ -4302,7 +4329,7 @@ class MainWindow(QMainWindow):
             return None
         eng = self._tts_engine()
         bad = TTS.line_problems(self.tree, node, eng.name) + eng.problems(
-            transcribe=eng.name == "local" and TTS.needs_transcript(self.tree, node))
+            transcribe=eng.name in ("local", "fish") and TTS.needs_transcript(self.tree, node))
         if bad:
             self.status.setText(f"Cannot speak the lines of clip #{nid[1:]}: " + "; ".join(bad) + ".")
             return None
@@ -4325,6 +4352,7 @@ class MainWindow(QMainWindow):
             self, f"#{nid[1:]}", [{"name": d["speaker"]["name"], "line": d["line"]}
                                   for d in TTS.clip_lines(self.tree, self.tree.nodes[nid])],
             eng.name, TTS.speak_options(self.tree),
+            tags=TTS.takes_tags(eng.name, TTS.options(self.tree)["eleven_model"]),
             play=lambda path, title: self.preview.open(Path(path), title),
             render=render,
             file=lambda r: project / r["file"])
@@ -4357,7 +4385,7 @@ class MainWindow(QMainWindow):
             self._tts_busy = False
             self._update_buttons()
             dlg.deleteLater()
-            if eng.name == "local":
+            if eng.name in ("local", "fish"):
                 self.stop_tts("the lines window was closed")
         return used
 
@@ -4393,7 +4421,7 @@ class MainWindow(QMainWindow):
             except Exception as e:  # noqa: BLE001
                 self.bridge.spoken.emit(nid, None, str(e), str(project))
             finally:
-                if eng.name == "local":
+                if eng.name in ("local", "fish"):
                     eng.stop()                      # (unloaded right after: its VRAM back for ComfyUI)
         threading.Thread(target=work, daemon=True).start()
         return True

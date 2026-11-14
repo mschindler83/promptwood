@@ -1,5 +1,5 @@
 """Text to speech: the spoken lines of a clip as its sound (the picture is made to it, lips in sync), and voice samples
-for characters. Two providers:
+for characters. Three providers:
 
 - local: Qwen3-TTS (Apache 2.0; German, English and 8 more languages) in its own environment (.venv-tts next to the
   app), run by tts_worker.py, started when needed and stopped right after. A character speaks in the voice of its
@@ -8,11 +8,21 @@ for characters. Two providers:
   description (VoiceDesign model).
   The same worker removes background music from a voice recording before it becomes a voice (vocal separation with
   a Mel-Band RoFormer model through the audio-separator package; a cloned voice copies whatever is in its sample).
+- fish: Fish S2 Pro (Fish Audio Research License: free for research and non-commercial use only; about 80
+  languages, German among the well-supported ones) in fish-speech's own environment (.fish-speech next to the app,
+  its .venv), run by fish_worker.py. Like local it clones each character's voice sample (transcribed once with the
+  local worker's Whisper), and it takes the tone of a line from free-form [tags] in it: "[angry] Lass mich!",
+  "[whispering, scared] Hörst du das?", "Ja [laughs] genau". It needs about 19 GB of VRAM (a 24 GB card with
+  nothing else on it), so the refiner's llama.cpp server is stopped and ComfyUI unloads its models before it
+  starts; it runs in a systemd scope with a hard RAM limit, so a runaway load ends the worker, never the desktop.
 - elevenlabs: the ElevenLabs API with the user's key (system keyring or $ELEVENLABS_API_KEY); each character is
   given one of the account's voices, or an instant voice clone of its voice sample (made in the account).
 
 Spoken lines are the quoted lines of a prompt ("..." after @Name, see tree.dialogue); they are spoken one after the
-other, with a short pause before the first and between them, and become an audio track of the clip."""
+other, with a short pause before the first and between them, and become an audio track of the clip.
+A line may say how it is spoken in square brackets ([angry], [sighs] ...: tree.SPEECH_TAG). Fish S2 Pro and
+ElevenLabs' v3 models hear them; the others get the line without them (spoken_text), and the clip model never sees
+them (tree.clip_cast takes them out)."""
 from __future__ import annotations
 
 import copy
@@ -45,6 +55,17 @@ SEPARATOR_MODEL = "vocals_mel_band_roformer.ckpt"    # Mel-Band RoFormer, vocals
 LOCAL_VRAM_MB = 5500                     # measured: 4.5 GB peak for the 1.7B models (bf16), Whisper turbo less
 SETUP_HINT = ("in the app folder: uv venv -p 3.12 .venv-tts && VIRTUAL_ENV=.venv-tts uv pip install qwen-tts "
               "soundfile; the models: Qwen/Qwen3-TTS-12Hz-1.7B-Base and -VoiceDesign in " + str(HF_CACHE))
+FISH_DIR = APP_DIR / ".fish-speech"         # fish-speech's code (git checkout) with its own .venv
+FISH_PYTHON = FISH_DIR / ".venv" / "bin" / "python"
+FISH_WORKER = Path(__file__).resolve().with_name("fish_worker.py")
+FISH_MODEL = "fishaudio/s2-pro"
+FISH_COMMIT = "0f8a12e8a651062fdee9c33a894bdccd3a8513f1"     # the fish-speech version fish_worker.py was made for
+FISH_VRAM_MB = 19500                     # measured: 19.4 GB of the GPU at the peak (model, caches, codec)
+FISH_RAM_MB = 6000                       # free RAM needed to start it (measured: 3 GB at the peak, with fish_worker)
+FISH_RAM_CAP_GB = 12                     # the hard limit of its systemd scope (no swap): a runaway worker ends there
+FISH_SETUP_HINT = (f"in the app folder: git clone https://github.com/fishaudio/fish-speech .fish-speech && "
+                   f"git -C .fish-speech checkout {FISH_COMMIT[:7]} && cd .fish-speech && uv sync --python 3.12 "
+                   f"--extra cu129 --no-install-package pyaudio; the model: {FISH_MODEL} in " + str(HF_CACHE))
 SEPARATOR_HINT = ("in the app folder: VIRTUAL_ENV=.venv-tts uv pip install audio-separator audioread && "
                   f".venv-tts/bin/audio-separator --model_file_dir {HF_CACHE / SEPARATOR_DIR} "
                   f"--download_model_only -m {SEPARATOR_MODEL}")
@@ -55,16 +76,21 @@ LANGUAGES = {"English": "en", "German": "de", "French": "fr", "Spanish": "es", "
 SAMPLE_TEXT = {"German": "Hallo, schön dich zu sehen. Heute ist ein wirklich guter Tag, findest du nicht auch?",
                "English": "Hi, it's good to see you. Today is a really good day, don't you think?"}
 LEAD_IN, GAP, TAIL = 0.25, 0.35, 0.3     # seconds of silence before the first line, between lines, after the last
-PROVIDERS = {"local": "Qwen3-TTS (local)", "elevenlabs": "ElevenLabs (API key)"}
+PROVIDERS = {"local": "Qwen3-TTS (local)", "fish": "Fish S2 Pro (local, tone tags; non-commercial use)",
+             "elevenlabs": "ElevenLabs (API key)"}
 DEFAULT_OPTIONS = {"provider": "local", "eleven_model": "eleven_multilingual_v2"}
 # How lines are spoken (the Speak the lines window; kept in the project as options["tts"]["speak"]):
 # takes: how many versions are made to choose from; delivery: how steady or lively; speed: how fast.
 SPEAK_DEFAULTS = {"takes": 3, "delivery": "natural", "speed": 1.0}
 DELIVERIES = {"steady": "Steady (even, fewest slips)", "natural": "Natural",
               "lively": "Lively (more varied, more slips)"}
+# tones offered in the Speak the lines window (as [tag]; any other words work too)
+TONE_TAGS = ["angry", "shouting", "whispering", "sad", "crying", "happy", "excited", "scared", "sarcastic", "calm",
+             "tender", "laughs", "sighs", "gasps", "out of breath"]
 # local: the sampling temperature (None: the model's own, 0.9). ElevenLabs: the voice's stability (None: the
 # voice's own setting); eleven_v3 only takes 0, 0.5 and 1.
 _LOCAL_TEMPERATURE = {"steady": 0.7, "natural": None, "lively": 1.1}
+_FISH_TEMPERATURE = {"steady": 0.5, "natural": None, "lively": 0.9}     # (Fish's own: 0.7)
 _ELEVEN_STABILITY = {"steady": 0.8, "natural": None, "lively": 0.3}
 _ELEVEN_V3_STABILITY = {"steady": 1.0, "natural": None, "lively": 0.0}
 SPEED_RANGE = (0.7, 1.2)                 # (what ElevenLabs takes; local lines are made slower / faster afterwards)
@@ -156,11 +182,12 @@ class LocalTTS:
             raise TtsError("; ".join(bad))
         if self.before_launch is not None:
             self.before_launch(self)
+        self._ready_to_launch()
         env = {**os.environ, "HF_HUB_CACHE": str(self.cache), "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
                "PYTHONUNBUFFERED": "1", "TOKENIZERS_PARALLELISM": "false"}
         err = open(self.log, "ab") if self.log else subprocess.DEVNULL
         try:
-            self.proc = subprocess.Popen([str(self.python), "-I", str(self.worker)], stdin=subprocess.PIPE,
+            self.proc = subprocess.Popen(self._command(), stdin=subprocess.PIPE,
                                          stdout=subprocess.PIPE, stderr=err, env=env, cwd=tempfile.gettempdir(),
                                          text=True, bufsize=1)
         finally:
@@ -171,6 +198,12 @@ class LocalTTS:
         first = self._wait(self.start_timeout)
         if not first.get("ready"):
             raise TtsError(f"the TTS worker did not start: {first.get('error', 'no answer')}")
+
+    def _ready_to_launch(self) -> None:
+        """(after before_launch) TtsError when the worker must not start now."""
+
+    def _command(self) -> list[str]:
+        return [str(self.python), "-I", str(self.worker)]
 
     @staticmethod
     def _read(proc, answers):
@@ -248,6 +281,102 @@ class LocalTTS:
     def transcribe(self, audio: Path, lang: str | None = None) -> str:
         return self.request({"cmd": "transcribe", "model": self._path(WHISPER), "audio": str(audio),
                              "language": lang})["text"]
+
+
+# ----------------------------------------------------------------------------- local: Fish S2 Pro
+
+
+def mem_available_mb() -> int | None:
+    """The system's available RAM (MemAvailable), None when it cannot be read."""
+    try:
+        for line in open("/proc/meminfo"):
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) // 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def _user_systemd() -> bool:
+    """A systemd user manager runs (systemd-run --user can make a scope)."""
+    return bool(shutil.which("systemd-run")) and (bool(os.environ.get("DBUS_SESSION_BUS_ADDRESS"))
+                                                   or Path(f"/run/user/{os.getuid()}/bus").exists())
+
+
+class FishTTS(LocalTTS):
+    """The Fish S2 Pro worker process (fish_worker.py in fish-speech's environment): started on the first line, kept
+    while takes are made, stopped with stop(). Voice samples are transcribed by `helper` (the app's Qwen3-TTS
+    worker, its Whisper), which is stopped right after so the two never share the GPU. Before it starts:
+    before_launch (make room in VRAM), then the checks of _ready_to_launch (free RAM and VRAM; TtsError when there
+    is too little). It runs in a systemd scope with mem_cap_gb of RAM and no swap (when systemd is there):
+    a load that runs away ends the worker, not the user's session."""
+
+    name = "fish"
+
+    def __init__(self, python: Path = FISH_PYTHON, cache: Path = HF_CACHE, log: Path | None = None,
+                 worker: Path = FISH_WORKER, start_timeout: float = 180.0, helper: LocalTTS | None = None,
+                 mem_cap_gb: float | None = FISH_RAM_CAP_GB, need_vram_mb: int = FISH_VRAM_MB,
+                 need_ram_mb: int = FISH_RAM_MB):
+        super().__init__(python=python, cache=cache, log=log, worker=worker, start_timeout=start_timeout)
+        self.helper = helper if helper is not None else LocalTTS(cache=cache)
+        self.mem_cap_gb, self.need_vram_mb, self.need_ram_mb = mem_cap_gb, need_vram_mb, need_ram_mb
+
+    def problems(self, design: bool = False, transcribe: bool = False, isolate: bool = False) -> list[str]:
+        out = []
+        if not self.python.is_file():
+            out.append(f"Fish S2 Pro's environment is missing ({self.python}); set it up {FISH_SETUP_HINT}")
+        if snapshot(FISH_MODEL, self.cache) is None:
+            out.append(f"the model {FISH_MODEL} is not in {self.cache}")
+        if transcribe:                          # (its voice samples are transcribed by the Qwen3-TTS worker)
+            if not self.helper.python.is_file():
+                out.append(f"transcribing a voice sample needs the TTS environment ({self.helper.python}); set it "
+                           f"up {SETUP_HINT}")
+            elif snapshot(WHISPER, self.helper.cache) is None:
+                out.append(f"the model {WHISPER} is not in {self.helper.cache}")
+        if design or isolate:
+            out += [p for p in self.helper.problems(design=design, isolate=isolate) if p not in out]
+        return out
+
+    def _ready_to_launch(self) -> None:
+        self.helper.stop()                      # (Whisper's worker may still hold VRAM)
+        ram = mem_available_mb()
+        if ram is not None and ram < self.need_ram_mb:
+            raise TtsError(f"only {ram / 1024:.1f} GB of RAM is free and Fish S2 Pro needs about "
+                           f"{self.need_ram_mb / 1024:.0f} GB to start; close some programs and try again")
+        from .llm_server import free_vram_mb
+        vram = free_vram_mb()
+        if vram is not None and vram < self.need_vram_mb:
+            raise TtsError(f"only {vram / 1024:.1f} GB of VRAM is free and Fish S2 Pro needs about "
+                           f"{self.need_vram_mb / 1024:.1f} GB; close other programs that use the GPU")
+
+    def _command(self) -> list[str]:
+        cmd = super()._command()
+        if self.mem_cap_gb and _user_systemd():
+            cmd = ["systemd-run", "--user", "--scope", "--quiet", f"--unit=video-chain-fish-{uuid.uuid4().hex[:8]}",
+                   "-p", f"MemoryMax={self.mem_cap_gb:g}G", "-p", "MemorySwapMax=0", "--", *cmd]
+        return cmd
+
+    def clone(self, text: str, lang: str, ref_audio: Path, ref_text: str | None, out: Path,
+              seed: int | None = None, temperature: float | None = None) -> float:
+        """A line in the voice of ref_audio (its [tags] say how); lang is not needed: Fish reads it from the text."""
+        return self.request({"cmd": "clone", "model": self._path(FISH_MODEL), "text": text,
+                             "ref_audio": str(ref_audio), "ref_text": ref_text, "out": str(out), "seed": seed,
+                             "temperature": temperature})["secs"]
+
+    def transcribe(self, audio: Path, lang: str | None = None) -> str:
+        self.stop()                             # (never Whisper and Fish on the GPU at once)
+        try:
+            return self.helper.transcribe(audio, lang)
+        finally:
+            self.helper.stop()
+
+    def design(self, text: str, lang: str, instruct: str, out: Path, seed: int | None = None) -> float:
+        self.stop()
+        return self.helper.design(text, lang, instruct, out, seed)
+
+    def isolate(self, audio: Path, out: Path) -> float:
+        self.stop()
+        return self.helper.isolate(audio, out)
 
 
 # ----------------------------------------------------------------------------- ElevenLabs
@@ -380,9 +509,24 @@ class ElevenLabs:
         return d["voice_id"]
 
 
-def engine(tree_or_options, local: LocalTTS | None = None):
-    """The provider the project uses (local: the given worker, one per app)."""
-    return ElevenLabs() if options(tree_or_options)["provider"] == "elevenlabs" else (local or LocalTTS())
+def engine(tree_or_options, local: LocalTTS | None = None, fish: FishTTS | None = None):
+    """The provider the project uses (local, fish: the given workers, one each per app)."""
+    provider = options(tree_or_options)["provider"]
+    if provider == "elevenlabs":
+        return ElevenLabs()
+    if provider == "fish":
+        return fish or FishTTS(helper=local)
+    return local or LocalTTS()
+
+
+def takes_tags(provider: str, eleven_model: str = "") -> bool:
+    """The engine hears [tags] in a line: Fish S2 Pro, ElevenLabs' v3 models."""
+    return provider == "fish" or (provider == "elevenlabs" and "v3" in (eleven_model or ""))
+
+
+def spoken_text(line: str, provider: str, eleven_model: str = "") -> str:
+    """A line as the engine gets it: with its [tags] where it hears them (takes_tags), else without."""
+    return line if takes_tags(provider, eleven_model) else T.without_tags(line)
 
 
 # ----------------------------------------------------------------------------- the project side
@@ -541,14 +685,22 @@ def render_lines(project: Path, tree: T.Tree, nid: str, eng, log=lambda _m: None
         vs = {**({"stability": stab} if stab is not None else {}), **({"speed": speed} if speed else {})}
         if vs:
             extra["settings"] = vs
-    elif _LOCAL_TEMPERATURE[how["delivery"]] is not None:
-        extra["temperature"] = _LOCAL_TEMPERATURE[how["delivery"]]
+    else:
+        temp = (_FISH_TEMPERATURE if eng.name == "fish" else _LOCAL_TEMPERATURE)[how["delivery"]]
+        if temp is not None:
+            extra["temperature"] = temp
     lines = clip_lines(tree, node)
     refs = project / T.REFS_DIR
     refs.mkdir(parents=True, exist_ok=True)
     texts: dict[str, str] = {}
     voice_files = {d["speaker"]["name"]: d["speaker"]["voice"]["file"] for d in lines
                    if eng.name != "elevenlabs" and d["speaker"].get("voice")}
+    if eng.name != "elevenlabs":                    # every transcript first (Whisper, then the TTS model)
+        for d in lines:
+            c = d["speaker"]
+            if not c["voice"].get("text") and c["name"] not in texts:
+                log(f"transcribing the voice sample of @{c['name']} (once)")
+                texts[c["name"]] = eng.transcribe(project / T.clone_file(c["voice"]), LANGUAGES.get(lang))
     with tempfile.TemporaryDirectory(prefix="video-chain-tts-") as tmp:
         parts = []
         for k, d in enumerate(lines):
@@ -556,15 +708,14 @@ def render_lines(project: Path, tree: T.Tree, nid: str, eng, log=lambda _m: None
             raw = Path(tmp) / f"line{k}_raw.wav"
             seed = (node.seed + k + 7919 * int(take)) % 2_000_000_000
             log(f"speaking line {k + 1} of {len(lines)} (@{c['name']}): {d['line'][:60]}")
+            said = spoken_text(d["line"], eng.name, opts["eleven_model"])
+            if not said:
+                raise TtsError(f"a line of @{c['name']} has nothing to say besides its [tags]")
             if eng.name == "elevenlabs":
-                eng.speak(d["line"], c["tts"]["eleven"]["id"], raw, opts["eleven_model"], lang, seed, **extra)
+                eng.speak(said, c["tts"]["eleven"]["id"], raw, opts["eleven_model"], lang, seed, **extra)
             else:
-                text = c["voice"].get("text") or texts.get(c["name"])
-                if not text:
-                    log(f"transcribing the voice sample of @{c['name']} (once)")
-                    text = texts[c["name"]] = eng.transcribe(project / T.clone_file(c["voice"]),
-                                                             LANGUAGES.get(lang))
-                eng.clone(d["line"], lang, project / T.clone_file(c["voice"]), text, raw, seed, **extra)
+                text = c["voice"].get("text") or texts[c["name"]]
+                eng.clone(said, lang, project / T.clone_file(c["voice"]), text, raw, seed, **extra)
             part = Path(tmp) / f"line{k}.wav"
             chain.to_wav(raw, part)
             if speed and eng.name != "elevenlabs":
