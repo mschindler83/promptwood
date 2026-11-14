@@ -1895,6 +1895,7 @@ class MainWindow(QMainWindow):
         self.bridge.tts_log.connect(lambda m: (self.log.appendPlainText("TTS: " + m), self.status.setText(m + "…")))
         self._tts_local: TTS.LocalTTS | None = None
         self._tts_busy = False
+        self._notices: list[QMessageBox] = []        # non-blocking notices, kept until they are closed
         self._eleven_voices: list | None = None
         self.h3_loras: list[tuple[str, str]] = []
         self.qwen_loras: list[tuple[str, str]] = []
@@ -2968,8 +2969,7 @@ class MainWindow(QMainWindow):
             (self._tts_form, self.ref_size), self.ref_hint, (self._tts_form, self._eleven_row),
             # preferences: ComfyUI's technical part (the address, start command and auto start stay), RunPod
             (a, self._comfy_dir_row), (a, self.comfy_cleanup), (a, self.triggers_online), (a, self.civitai_site),
-            (a, self.llm_on),
-            (a, self.llm_server), (a, self._gguf_row), (a, self.llm_cpu_moe), (a, self._civitai_row),
+            (a, self._civitai_row),               # (the prompt refiner's language model setup stays: UX-4)
             (a, self._keep_row), *self._runpod_section,
             # the GPU's memory (the log stays: Details on a failed clip and bug reports lead there)
             self.gpu)
@@ -4036,7 +4036,26 @@ class MainWindow(QMainWindow):
         self.status.setText(f"Project {folder.name}: {len(tree.nodes)} clip{'s' if len(tree.nodes) != 1 else ''}."
                             + synced + (f" Note: {film.problem}; the film's scene list is not changed until it is "
                                         "fixed." if film.problem else ""))
+        if tree.recovered_from is not None:
+            self._tell_recovered(folder, tree.recovered_from)
         return True
+
+    def _tell_recovered(self, folder: Path, backup: Path):
+        """tree.json was damaged and its backup was opened: said in the status line and the log, and in a notice
+        that does not block the window (the last changes before the damage may be missing)."""
+        text = (f"tree.json of {folder.name} was damaged; the backup {backup.name} (the state before the last save) "
+                "was opened instead. The last changes may be missing. The damaged file is kept next to it "
+                "(tree.json.damaged) when the project is saved.")
+        self._report_error(text)
+        self.notify("Project opened from its backup", text)
+
+    def notify(self, title: str, text: str):
+        """A notice that does not block the window (a message box opened, not run); kept until it is closed."""
+        box = QMessageBox(QMessageBox.Information, title, text, QMessageBox.Ok, self)
+        box.setAttribute(Qt.WA_DeleteOnClose)
+        self._notices.append(box)
+        box.destroyed.connect(lambda _=None, b=box: self._notices.remove(b) if b in self._notices else None)
+        box.open()
 
     def _open_dir(self):
         if self.project and self.project.is_dir():
@@ -8944,6 +8963,13 @@ class MainWindow(QMainWindow):
             problems.append(f"could not check the settings ({e})")
         return problems, [n.id for n in empty]
 
+    def _runpod_key_hint(self) -> str:
+        """Where the RunPod key is set; in the Simple view that place is hidden, so the way there is named (UX-3)."""
+        where = "Settings → Cloud upscaling"
+        if self.simple:
+            where = "the Advanced view (View → Advanced view), then Settings → Preferences → Cloud upscaling"
+        return f"To upscale on RunPod: save your RunPod API key ({where})."
+
     def _checked(self, gen: int, problems: list, empty: list):
         """Generate's pre-flight is done: report what is missing, or go on with the job."""
         if gen != self._check_gen or not self._checking or self.tree is None:
@@ -8960,7 +8986,7 @@ class MainWindow(QMainWindow):
         nodes = {n.id: n for t in targets for n in self.tree.path_to(t)}
         cloud = bool((refine or {}).get("cloud"))
         if cloud and not RP.api_key():
-            self.status.setText("To upscale on RunPod: save your RunPod API key (Settings → Cloud upscaling).")
+            self.status.setText(self._runpod_key_hint())
             self._film_queue = None
             self._cancel_check()
             return
