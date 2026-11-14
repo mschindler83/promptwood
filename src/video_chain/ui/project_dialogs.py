@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
 from .. import tree as T
 from ..comfy import refine_size
 from .lora_stack import LORA_MAX, LORA_MIN, lora_label
-from .widgets import guard_wheel, icon_button, label
+from .widgets import guard_wheel, icon_button, label, label_for, remember_geometry
 from . import image_picker as IP
 from .ui_logic import repeated_variants, variant_strengths
 
@@ -26,6 +26,7 @@ class NewProjectDialog(QDialog):
         self.qs = settings                 # (the image picker keeps its folders and cache in it)
         self.setWindowTitle("New project")
         self.setMinimumWidth(520)
+        remember_geometry(self, settings, "new")
         f = QFormLayout(self)
         self.name = QLineEdit()
         self.name.setPlaceholderText("e.g. smoke-scene-1")
@@ -36,7 +37,7 @@ class NewProjectDialog(QDialog):
         b.clicked.connect(self._choose_location)
         lrow.addWidget(self.location, 1)
         lrow.addWidget(b)
-        f.addRow("Location", lrow)
+        f.addRow(label_for("Location", self.location), lrow)
         irow = QHBoxLayout()
         self.image = QLineEdit(image)
         self.image.setPlaceholderText("optional: start image")
@@ -44,7 +45,7 @@ class NewProjectDialog(QDialog):
         b2.clicked.connect(self._choose_image)
         irow.addWidget(self.image, 1)
         irow.addWidget(b2)
-        f.addRow("Start image", irow)
+        f.addRow(label_for("Start image", self.image), irow)
         self.target = label("", level="tertiary")
         self.target.setWordWrap(True)
         f.addRow("", self.target)
@@ -98,9 +99,10 @@ class VariantsDialog(QDialog):
     """How many variants of a clip, and whether to generate them right away. Advanced: move each LoRA's strength
     by a step per variant (a strength sweep), and keep the clip's seed so only the strengths differ."""
 
-    def __init__(self, parent, node):
+    def __init__(self, parent, node, settings: QSettings | None = None):
         super().__init__(parent)
         self.setWindowTitle("Create variants")
+        remember_geometry(self, settings, "variants")
         self.stack = list((node.overrides or {}).get("loras") or [])
         self.loras = [e for e in self.stack if e.get("path")]
         f = QFormLayout(self)
@@ -221,7 +223,8 @@ class ExportDialog(QDialog):
 
     def __init__(self, parent, default: str, made_size: tuple[int, int] | None, refined,
                  swapped: int = 0, strength: str = "natural", method: str = "seedvr2_7b", denoise: bool = False,
-                 cloud: bool | None = None, cloud_on: bool = False, simple: bool = False):
+                 cloud: bool | None = None, cloud_on: bool = False, simple: bool = False,
+                 settings: QSettings | None = None):
         """cloud: None without a RunPod API key (the option is shown greyed), else whether it can be used;
         cloud_on: its last choice. simple: the Simple view, where cloud upscaling is offered only once it is set up
         (its settings are in the Advanced view)."""
@@ -229,6 +232,7 @@ class ExportDialog(QDialog):
         self.setWindowTitle("Export path")
         self.cloud_ok = cloud
         self.setMinimumWidth(620)
+        remember_geometry(self, settings, "export")
         self.ready = refined if callable(refined) else (lambda size, _m, _s, _d=False: bool(refined.get(size)))
         self.made_size = made_size
         f = QFormLayout(self)
@@ -238,7 +242,7 @@ class ExportDialog(QDialog):
         b.clicked.connect(self._choose)
         row.addWidget(self.file, 1)
         row.addWidget(b)
-        f.addRow("File", row)
+        f.addRow(label_for("File", self.file), row)
         self.size = QComboBox()
         w, h = made_size or (0, 0)
         self.size.addItem(f"As made ({w}×{h}) — quick" if made_size else "As made — quick", "made")

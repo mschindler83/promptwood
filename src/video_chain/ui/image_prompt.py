@@ -118,10 +118,12 @@ class PromptMixin(ImageEditHost):
         if "loras" in params:                      # the refiner is told what is known of the chosen LoRAs
             more["loras"] = [it["path"] for it in self.loras.items()]
         new = self.refine(self.prompt.toPlainText(), self.prompt_kind(), **more)
-        if isinstance(new, list) and new:
-            self.use_ideas(new)
-        elif new:
-                replace_text(self.prompt, str(new))
+        if new is None:
+            return
+        if new.ideas:
+            self.use_ideas(new.ideas)
+        elif new.text:
+            replace_text(self.prompt, new.text)
 
     def use_ideas(self, prompts: list[str]):
         """All ideas from the refiner as one Generate: the prompt becomes {idea}, its values the ideas, every

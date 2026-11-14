@@ -12,7 +12,7 @@ from .workers import run_in_background
 from ..comfy import EDIT_MODELS
 from ..edits import MOSS_EDIT_QUALITIES, QUALITY_TEXT, lora_note
 from ..imagegen import FAMILIES, size_for
-from .image_common import CREATE_HINT, PROMPT_HINT
+from .image_common import CREATE_HINT, FAMILY_RETRY_MS, PROMPT_HINT, QUALITY_FILE
 from .widgets import combo_item
 from .image_host import ImageEditHost
 from .qsvalue import qs_value
@@ -46,7 +46,7 @@ class ModelsMixin(ImageEditHost):
         if create:
             fam = self.family.currentData()
             files = self.families.get(fam) or {}
-            need = {"qwen21": {"fast": "turbo", "best": "base"}, "chroma": {"fast": "flash", "best": "hd"}}.get(fam, {})
+            need = QUALITY_FILE.get(fam, {})
             for key, text in (FAMILIES[fam]["qualities"].items() if fam in FAMILIES else []):
                 if "models" in files and key in need and not files.get(need[key]):
                     continue                       # its model file is not installed
@@ -126,7 +126,7 @@ class ModelsMixin(ImageEditHost):
         self._families_error = error
         if error and self._retry_families > 0:           # ComfyUI is starting: ask again in a few seconds
             self._retry_families -= 1
-            QTimer.singleShot(5000, self._load_families)
+            QTimer.singleShot(FAMILY_RETRY_MS, self._load_families)
         elif not error and self._retry_families >= 0 and self._was_down:
             self.state.setText("ComfyUI is running: the models are listed.")
         self._was_down = bool(error)

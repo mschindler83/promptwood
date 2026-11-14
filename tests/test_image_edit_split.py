@@ -28,9 +28,9 @@ def _results(tmp_path, names=("r0", "r1", "r2")):
 
 
 def _dialog(tmp_path, **kw):
-    from video_chain.ui.image_edit import ImageEditDialog
+    from video_chain.ui.image_edit import ImageEditDialog, ImageEditServices
     q = QSettings(str(tmp_path / "t.ini"), QSettings.IniFormat)
-    return ImageEditDialog(None, tmp_path, [], None, None, lambda p: None, lambda k, p: False, q, **kw)
+    return ImageEditDialog(None, tmp_path, [], None, None, services=ImageEditServices(connect=lambda p: None, on_use=lambda k, p: False, settings=q, **kw))
 
 
 def test_several_deletes_can_each_be_undone(app, tmp_path):

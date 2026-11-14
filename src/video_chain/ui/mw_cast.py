@@ -17,6 +17,9 @@ from .ui_logic import _SELECTED, plural
 from .mw_host import MainWindowHost
 
 
+SPEECH_BUSY = "Text to speech is busy: this is possible when it is done."
+
+
 class CastMixin(MainWindowHost):
     """Characters and their references."""
 
@@ -307,7 +310,7 @@ class CastMixin(MainWindowHost):
         """The crop window: the square (x, y, side), None for the whole picture, or False (cancelled)."""
         try:
             dlg = FaceCropDialog(QApplication.activeModalWidget() or self, Path(path), self.face_detector(), title,
-                                 crop)                # over the video / image window it was opened from
+                                 crop, settings=self.qs)                # over the video / image window it was opened from
         except ValueError as e:
             self.status.setText(str(e))
             return False
@@ -550,11 +553,17 @@ class CastMixin(MainWindowHost):
         idle = self.project is not None and not self.running
         v = bool(c and c.get("voice"))
         self.char_kind.setEnabled(idle and c is not None)
-        for w in (self.b_char_rename, self.b_char_del, self.char_desc, self.char_lead, self.b_voice_file,
-                  self.b_voice_tts):
+        for w in (self.b_char_rename, self.b_char_del, self.char_desc, self.char_lead, self.b_voice_file):
             w.setEnabled(idle and c is not None)
+        speaking = self._tts_busy            # (these two use the text to speech worker: off, with the reason)
+        for w, ok in ((self.b_voice_tts, c is not None), (self.b_voice_clone, v)):
+            tip = w.property("plainTip")
+            if tip is None:
+                tip = w.toolTip()
+                w.setProperty("plainTip", tip)
+            w.setEnabled(idle and ok and not speaking)
+            w.setToolTip(SPEECH_BUSY if speaking else tip)
         self.b_voice_del.setEnabled(idle and v)
-        self.b_voice_clone.setEnabled(idle and v)
         self.b_voice_play.setEnabled(v)
         pic = self.refs.currentItem() is not None
         self.b_ref_crop.setEnabled(idle and pic)

@@ -278,7 +278,7 @@ class VideosMixin(MainWindowHost):
         switch = ModelSwitch()
 
         def before():                               # GUI thread: the clip model makes room
-            self._qwen_timer.stop()
+            self.stop_idle_unload()
             switch.prepare(self.comfy.model)
             if self.worker_alive and not self.running:
                 self._quit_worker(free=False)
@@ -362,7 +362,7 @@ class VideosMixin(MainWindowHost):
             key = node.made.get("key") or {}
             size = (int(key.get("width") or 0) or DEFAULT_SIZE[0], int(key.get("height") or 0) or DEFAULT_SIZE[1])
             dlg = SplitDialog(self, clip, frames, size, node.source_dict()["start"], node.source_dict()["end"],
-                              f"Split video #{T.short_id(nid)}")
+                              f"Split video #{T.short_id(nid)}", settings=self.qs)
             try:
                 if dlg.exec() != QDialog.DialogCode.Accepted:
                     return None

@@ -12,21 +12,31 @@ from .speak_dialog import SpeakLinesDialog
 from .tts_dialog import VoiceTtsDialog
 from . import speak_dialog as SPD, tts_dialog as TD
 from .ui_logic import DEFAULT_COMFY_URL, app_cache_dir, plural
+from .clip_cards import PromptCard
 from .mw_host import MainWindowHost
 
 
 class TtsMixin(MainWindowHost):
     """Text to speech and speaking a clip's lines."""
 
+    def _set_tts_busy(self, on: bool) -> None:
+        """Text to speech starts or stops working: the buttons that need it follow (off, with the reason)."""
+        self._tts_busy = on
+        if "b_voice_clone" in self.__dict__:           # (not while the window is being built)
+            self._update_cast_buttons()
+            for c in self.cards:
+                if isinstance(c, PromptCard):
+                    c.set_speech_busy(on)
+
     @contextmanager
     def _tts_session(self) -> Iterator[None]:
         """Text to speech is busy from here; the worker's answer ends it (_lines_spoken, _eleven_cloned). When what
         starts the work fails, it never started: it is not busy for ever."""
-        self._tts_busy = True
+        self._set_tts_busy(True)
         try:
             yield
         except BaseException:
-            self._tts_busy = False
+            self._set_tts_busy(False)
             raise
 
     def _tts_changed(self, *_):
@@ -148,7 +158,7 @@ class TtsMixin(MainWindowHost):
             play=lambda path, title: self.preview.open(Path(path), title),
             render=render,
             file=lambda r: project / r["file"])
-        self._tts_busy = True
+        self._set_tts_busy(True)
         used = False
         try:
             self._update_buttons()
@@ -175,7 +185,7 @@ class TtsMixin(MainWindowHost):
             elif dlg.takes:                             # nothing used: the transcripts are still kept
                 self._keep_transcripts(dlg.takes)
         finally:
-            self._tts_busy = False
+            self._set_tts_busy(False)
             self._update_buttons()
             dlg.deleteLater()
             if eng.name in ("local", "fish"):
@@ -221,7 +231,7 @@ class TtsMixin(MainWindowHost):
         return True
 
     def _lines_spoken(self, nid: str, r, err: str, project: str):
-        self._tts_busy = False
+        self._set_tts_busy(False)
         self._update_buttons()
         if self.project is None or str(self.project) != project or self.tree is None or nid not in self.tree.nodes:
             if r:                                   # (another project now, or the clip is gone: not used)
@@ -267,7 +277,7 @@ class TtsMixin(MainWindowHost):
                              play=lambda path, title: self.preview.open(Path(path), title),
                              local=lambda w=self.local_tts(): w, eleven=TTS.ElevenLabs,
                              voices_cache=self._eleven_voices)
-        self._tts_busy = True
+        self._set_tts_busy(True)
         try:
             ok = TD.run_dialog(dlg)
             self._eleven_voices = getattr(dlg, "voices", None) or self._eleven_voices
@@ -289,7 +299,7 @@ class TtsMixin(MainWindowHost):
                 if self._report_remade(before, f"Voice of @{c['name']} set"):
                     self.status.setText(msg + " " + self.status.text())
         finally:
-            self._tts_busy = False
+            self._set_tts_busy(False)
             self.preview.stop()                     # (it may still play the sample, whose folder goes now)
             dlg.cleanup()
             self.stop_tts("the voice window was closed")

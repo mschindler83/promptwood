@@ -11,7 +11,7 @@ from PySide6.QtWidgets import QDialog, QFileDialog, QInputDialog
 from .. import chain, comfy as CMF, imagegen, llm_server as LLM, media, tree as T
 from . import dialogs as D, shortcuts as S, image_picker as IP, prompt_refiner as PR
 from .clip_dialogs import HandoverDialog, VideoFrameDialog
-from .image_edit import ImageEditDialog, record_use
+from .image_edit import ImageEditDialog, ImageEditServices, record_use
 from .video_editor import choose_video
 from .generator_state import ComfyModel, ModelSwitch
 from .ui_logic import ASPECT_TOLERANCE, DEFAULT_COMFY_URL, label_loras, plural
@@ -26,8 +26,9 @@ class EndsMixin(MainWindowHost):
 
     # ---- prompt refiner
     def refine_text(self, text: str, kind: str, pictures: list | None = None, seconds: float | None = None,
-                    start_image: Path | None = None, loras: list[str] | None = None) -> str | list[str] | None:
-        """Open the prompt refiner for a prompt ('video' / 'video_h3' / 'image' / 'edit'); the text to use, or None.
+                    start_image: Path | None = None, loras: list[str] | None = None) -> PR.RefineResult | None:
+        """Open the prompt refiner for a prompt ('video' / 'video_h3' / 'image' / 'edit'); what to use (a text, or
+        all ideas), or None if nothing was chosen.
         seconds, start_image: the clip's length and the frame it starts from (used by 'video_h3'). loras: the
         paths of the LoRAs the result is made with (the refiner is told what is known of them)."""
         if not text.strip():
@@ -53,15 +54,17 @@ class EndsMixin(MainWindowHost):
             if dlg.exec() != QDialog.DialogCode.Accepted:
                 return None
             ideas = dlg.chosen_ideas()
-            return ideas if ideas else dlg.chosen()       # (a list: all ideas, for the image window's variations)
+            if ideas:
+                return PR.RefineResult(ideas=list(ideas))     # (all ideas: for the image window's variations)
+            chosen = dlg.chosen()
+            return PR.RefineResult(text=chosen) if chosen else None
         finally:
             # the llama.cpp model goes with the window: it slows image / clip generation down while it is loaded
             self.stop_llama("the prompt refiner was closed")
             if dlg.refined_any and not self.running and self.comfy.model != ComfyModel.QWEN:
                 # a language model is in ComfyUI now: unloaded before the next clips, idle time as usual
                 self.comfy.language_model_loaded()
-                if self.keep_loaded.isChecked():
-                    self._qwen_timer.start(self.idle_minutes.value() * 60_000)
+                self.start_idle_unload()
                 self._update_model_label()
             dlg.deleteLater()
 
@@ -116,7 +119,7 @@ class EndsMixin(MainWindowHost):
         switch = ModelSwitch()
 
         def before_edit():                          # GUI thread, before each Generate
-            self._qwen_timer.stop()
+            self.stop_idle_unload()
             self.stop_llama("its memory is needed for the image")
             switch.prepare(self.comfy.model)       # (the clip model is unloaded once, before the first image)
             if self.worker_alive and not self.running:
@@ -168,14 +171,13 @@ class EndsMixin(MainWindowHost):
         if (self.project / T.START_FILE).is_file():
             img = QImage(str(self.project / T.START_FILE))
             aspect = img.width() / img.height() if img.height() else None
-        dlg = ImageEditDialog(self, self.project, sources, first, target, connect, use, self.qs,
-                              self._picker_places(), start_comfy=self.start_comfy, on_start=before_edit,
-                              known_loras=known, lora_dir=self._lora_dir(),
-                              uses=self._uses,
-                              refine=self.refine_text, connect_create=connect_create, family_loras=family_loras,
-                              start_aspect=aspect, mode=mode, check_lora=self.in_comfy_loras,
-                              collections=self.project_images,
-                              use_triggers=bool(self.tree.options.get("lora_triggers", True)))
+        services = ImageEditServices(
+            connect=connect, on_use=use, settings=self.qs, places=self._picker_places(), start_comfy=self.start_comfy,
+            on_start=before_edit, known_loras=known, lora_dir=self._lora_dir(), uses=self._uses,
+            refine=self.refine_text, connect_create=connect_create, family_loras=family_loras, start_aspect=aspect,
+            mode=mode, check_lora=self.in_comfy_loras, collections=self.project_images,
+            use_triggers=bool(self.tree.options.get("lora_triggers", True)))
+        dlg = ImageEditDialog(self, self.project, sources, first, target, services=services)
         self._edit_switch = switch
         if character:
             pc = T.character(self.tree, character)
@@ -195,7 +197,7 @@ class EndsMixin(MainWindowHost):
         if self.comfy.model != ComfyModel.QWEN or self.running:
             return
         if self.keep_loaded.isChecked():
-            self._qwen_timer.start(self.idle_minutes.value() * 60_000)
+            self.start_idle_unload()
         else:
             self._free_comfy()
         self._update_model_label()
@@ -217,7 +219,7 @@ class EndsMixin(MainWindowHost):
         need = max([int((c.overrides or {}).get("guide") or 0) for c in self.tree.children(nid)
                     if not c.is_video] + [1])
         dlg = HandoverDialog(self, self.project / node.made["video"], f"Hand-over frame of clip #{T.short_id(nid)}",
-                             T.handover_index(self.tree, node), min_frame=max(1, need - 1))
+                             T.handover_index(self.tree, node), min_frame=max(1, need - 1), settings=self.qs)
         try:
             if dlg.exec() != QDialog.DialogCode.Accepted:
                 return
@@ -307,7 +309,7 @@ class EndsMixin(MainWindowHost):
     def _frame_dialog(self, video: str, title: str):
         """The dialog that picks one frame of a video (None, reported, when the video cannot be read)."""
         try:
-            return VideoFrameDialog(self, Path(video), title, self._known_info(video))
+            return VideoFrameDialog(self, Path(video), title, self._known_info(video), settings=self.qs)
         except (RuntimeError, OSError) as e:
             self._report_error(f"Cannot read {Path(video).name}: {e}")
             return None
@@ -446,7 +448,7 @@ class EndsMixin(MainWindowHost):
         if dlg is None:
             return None
         if own:
-            dlg.slider.setValue(min(dlg.frames - 2, max(1, T.keyframe_frame(at))))
+            dlg.after_ready(lambda: dlg.slider.setValue(min(dlg.frames - 2, max(1, T.keyframe_frame(at)))))
         if not self.modal_dialogs:
             return dlg
         try:

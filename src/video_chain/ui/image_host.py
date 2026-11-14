@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from pathlib import Path
     from ..edits import ResultRecord
     from .image_common import PictureSlot
+    from .prompt_refiner import RefineResult
     from .lora_stack import LoraStack
     from .results_gallery import InfoCard, ResultGallery, ResultView, ThumbLoader
     from .variations_panel import PlaceholderHighlighter, VariationsPanel
@@ -88,7 +89,7 @@ if TYPE_CHECKING:
         ref_strength: QDoubleSpinBox
         ref_strength_label: QLabel
         ref_text: QLabel
-        refine: Callable[..., str | list[str] | None] | None
+        refine: Callable[..., RefineResult | None] | None
         res_info: InfoCard
         results: QListWidget
         seed: QSpinBox

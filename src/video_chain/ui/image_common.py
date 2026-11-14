@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 
 from .imageio import upright
@@ -11,6 +11,13 @@ from .widgets import FrameTile, icon_button, label
 
 MAX_RESULTS = 20                           # results per Generate (made one after another, Stop ends it)
 SEED_MAX = 2**31 - 1                       # (the seeds ComfyUI's image samplers take here)
+SIDE_PANEL_WIDTH = 430                     # the left column (source, prompt, options)
+RESULT_ICON = QSize(150, 100)              # a result in the strip: its picture,
+RESULT_GRID = QSize(158, 108)              # its cell,
+RESULT_STRIP_HEIGHT = 130                  # and the strip's height
+FAMILY_RETRIES, FAMILY_RETRY_MS = 36, 5000   # asking for the models while ComfyUI starts: up to 3 minutes
+# the model file a quality needs (key in the family's files); a quality whose file is not installed is not offered
+QUALITY_FILE = {"qwen21": {"fast": "turbo", "best": "base"}, "chroma": {"fast": "flash", "best": "hd"}}
 FOLDER_ITEM, FOLDER_PREFIX = "\x00choose-folder", "\x00folder:"   # the source list's folder entries
 ASK_ABOVE = 10                             # a folder Generate of more images than this asks first
 PROMPT_HINT = ("Describe the change, e.g. “she smiles and looks into the camera”, “night, lit by a street lamp”, "

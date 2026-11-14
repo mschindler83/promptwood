@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtWidgets import (
     QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
-    QFrame, QHBoxLayout, QLineEdit, QListWidget, QMenu, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea,
+    QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMenu, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea,
     QSizePolicy, QSpinBox, QSplitter, QTabWidget, QVBoxLayout, QWidget)
 
 from .. import chain, runpod as RP, tree as T, triggers, tts as TTS
@@ -19,7 +19,7 @@ from .guide import EngineBanner, GuidePanel, NextHint
 from .storyboard import Storyboard
 from .timeline import Timeline
 from .view_mode import AdvancedNote, row_widget
-from .widgets import guard_wheel, icon_button, label, section_bar, shortcut, timer
+from .widgets import guard_wheel, icon_button, label, label_for, remember_geometry, section_bar, shortcut, timer
 from .mw_support import FileDrop, _CurrentStack
 from .preview import Preview, StartTile
 from .ui_logic import (
@@ -35,6 +35,14 @@ def _panel() -> tuple[QWidget, QVBoxLayout]:
     v.setContentsMargins(0, 0, 0, 0)
     v.setSpacing(0)
     return w, v
+
+
+def _buddy(text: str, field: QWidget, name: str | None = None) -> QLabel:
+    """The label of a form row that holds a layout: a buddy of the field (a screen reader reads both)."""
+    lab = QLabel(text)
+    lab.setBuddy(field)
+    field.setAccessibleName(name or text)
+    return lab
 
 
 def _scrolled(w: QWidget) -> QScrollArea:
@@ -65,6 +73,7 @@ class BuildMixin(MainWindowHost):
         shared.sound_w, shared.sound_v = _panel()
         self.prefs = QDialog(self)
         self.prefs.setWindowTitle("Preferences")
+        remember_geometry(self.prefs, self.qs, "prefs")
         shared.prefs_v = QVBoxLayout(self.prefs)
         self._build_project_panel(shared)
         self._build_start_image(shared)
@@ -82,10 +91,22 @@ class BuildMixin(MainWindowHost):
         self._build_viewer(shared)
         self._build_toolbar(shared)
         self._build_shortcuts(shared)
+        self._name_fields()
         self._register_advanced()
         self._show_view()
         self._update_buttons()
         self._update_guide()
+
+    def _name_fields(self) -> None:
+        """Accessible names for the fields that have no label of their own beside them (UX-10)."""
+        for field, name in ((self.char_desc, "Description of the selected entry"),
+                            (self.char_kind, "What the selected entry is"), (self.eleven_model, "ElevenLabs model"),
+                            (self.llm_model, "Language model file"), (self.llm_port, "Port of the language model server"),
+                            (self.clip_cfg, "CFG (how strictly the model follows the prompt)"),
+                            (self.turbo_steps, "Steps of the fast speed"),
+                            (self.turbo_strength, "Strength of the fast speed add-on"),
+                            (self.idle_minutes, "Minutes the model stays loaded"), (self.log, "Log")):
+            field.setAccessibleName(name)
 
     def _build_project_panel(self, shared):
         """Build the Project tab: the folder."""
@@ -105,7 +126,7 @@ class BuildMixin(MainWindowHost):
         prow.addWidget(self.project_edit, 1)
         prow.addWidget(self.b_project)
         prow.addWidget(self.b_open_dir)
-        pf.addRow("Folder", prow)
+        pf.addRow(_buddy("Folder", self.project_edit, "Project folder"), prow)
         brow = QHBoxLayout()
         self.b_new = QPushButton("New…")
         self.b_new.setToolTip(S.tip("Create a new project", "new_project"))
@@ -527,7 +548,7 @@ class BuildMixin(MainWindowHost):
         self.turbo_strength.setToolTip("Keep 1.0; smear/ghosting -> a bit higher (1.05-1.2), over-sharp grain -> "
                                        "a bit lower (0.8-0.95)")
         trow.addWidget(self.turbo_steps)
-        trow.addWidget(label("strength", level="tertiary"))
+        trow.addWidget(label_for("strength", self.turbo_strength, level="tertiary"))
         trow.addWidget(self.turbo_strength)
         trow.addStretch(1)
         self._turbo_row = QWidget()
@@ -595,7 +616,7 @@ class BuildMixin(MainWindowHost):
         self.b_start_comfy.clicked.connect(self.start_comfy)
         crow.addWidget(self.comfy_launcher, 1)
         crow.addWidget(self.b_start_comfy)
-        a.addRow("Start with", crow)
+        a.addRow(_buddy("Start with", self.comfy_launcher, "Command that starts ComfyUI"), crow)
         self.comfy_dir = QLineEdit(UL.DEFAULT_COMFY_DIR)
         self.comfy_dir.setToolTip("ComfyUI's folder: its LoRA folders are searched for the chosen LoRA files, and "
                                   "its copies of the clips are removed after they were taken over")
@@ -607,7 +628,7 @@ class BuildMixin(MainWindowHost):
         self.b_rescan.clicked.connect(lambda: self.scan_loras(report=True))
         drow.addWidget(self.b_rescan)
         self._comfy_dir_row = row_widget(drow)
-        a.addRow("Folder", self._comfy_dir_row)
+        a.addRow(_buddy("Folder", self.comfy_dir, "ComfyUI folder"), self._comfy_dir_row)
         self.comfy_cleanup = QCheckBox("Clean up ComfyUI's copies after each clip")
         self.comfy_cleanup.setChecked(True)
         self.comfy_cleanup.setToolTip("ComfyUI keeps every clip and start image in output/video-chain and "
@@ -648,7 +669,7 @@ class BuildMixin(MainWindowHost):
         self.llm_port.setValue(LLM_DEFAULT_PORT)
         self.llm_port.setToolTip("The local port of the llama.cpp server")
         lrow.addWidget(self.llm_model, 1)
-        lrow.addWidget(label("port", level="tertiary"))
+        lrow.addWidget(label_for("port", self.llm_port, level="tertiary"))
         lrow.addWidget(self.llm_port)
         self._gguf_row = row_widget(lrow)
         a.addRow("GGUF model", self._gguf_row)
@@ -692,7 +713,7 @@ class BuildMixin(MainWindowHost):
         crow.addWidget(self.civitai_key, 1)
         crow.addWidget(b_key)
         self._civitai_row = row_widget(crow)
-        a.addRow("CivitAI API key", self._civitai_row)
+        a.addRow(_buddy("CivitAI API key", self.civitai_key), self._civitai_row)
         self._show_civitai_key()
         erow = QHBoxLayout()
         self.eleven_key = QLineEdit()
@@ -706,7 +727,7 @@ class BuildMixin(MainWindowHost):
         self.eleven_key.returnPressed.connect(self._save_eleven_key)
         erow.addWidget(self.eleven_key, 1)
         erow.addWidget(b_ekey)
-        a.addRow("ElevenLabs API key", erow)
+        a.addRow(_buddy("ElevenLabs API key", self.eleven_key), erow)
         self._show_eleven_key()
         krow = QHBoxLayout()
         self.keep_loaded = QCheckBox("Keep the model loaded for")
@@ -747,7 +768,7 @@ class BuildMixin(MainWindowHost):
         self.runpod_key.returnPressed.connect(self._save_runpod_key)
         rrow.addWidget(self.runpod_key, 1)
         rrow.addWidget(b_rkey)
-        r.addRow("RunPod API key", rrow)
+        r.addRow(_buddy("RunPod API key", self.runpod_key), rrow)
         self.runpod_gpu = QComboBox()
         self.runpod_gpu.setEditable(True)
         for gid, text in RP.GPUS:

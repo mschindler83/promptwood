@@ -7,6 +7,7 @@ import html
 import logging
 import random
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any
 from pathlib import Path
 
@@ -55,6 +56,14 @@ KIND_TEXT = {"video": "video clip prompt", "video_h3": "video clip prompt", "ima
 
 SETUP_HINT = ("More models: set up a local language model (llama.cpp, GGUF files) in the main window under "
               "Preferences, Prompt refiner.")
+
+
+@dataclass(frozen=True)
+class RefineResult:
+    """What the refiner window gave back: one text for the prompt, or all ideas (Generate all, for the image
+    window's variations). Never both."""
+    text: str = ""
+    ideas: list[str] = field(default_factory=list)
 
 
 class RefineDialog(QDialog):

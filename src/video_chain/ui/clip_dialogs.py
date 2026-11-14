@@ -3,9 +3,10 @@ side to pick one (CompareDialog)."""
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtCore import QSettings, Qt, QTimer, QUrl
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QGridLayout, QHBoxLayout,
                                QLabel, QPushButton, QSlider, QVBoxLayout, QWidget)
@@ -15,7 +16,7 @@ from .workers import run_in_background
 from .. import chain, media
 from .theme import icon
 from .dialogs import add_action, button_row
-from .widgets import fit_size, FrameStepper, FrameTile, icon_button, label, VideoView, shortcut
+from .widgets import fit_size, FrameStepper, FrameTile, icon_button, label, remember_geometry, VideoView, shortcut
 
 log = logging.getLogger(__name__)
 
@@ -36,10 +37,12 @@ def decode_frames(video: Path, width: int = PREVIEW_W, on_start=None) -> list[QI
 class HandoverDialog(QDialog):
     """Pick the frame of a made clip that the clips after it start from. frame() is the choice (None: the last)."""
 
-    def __init__(self, parent, video: Path, title: str, current: int | None = None, min_frame: int = 1):
+    def __init__(self, parent, video: Path, title: str, current: int | None = None, min_frame: int = 1,
+                 settings: QSettings | None = None):
         super().__init__(parent)
         self.setWindowTitle(title)
         fit_size(self, 760, 640)
+        remember_geometry(self, settings, "handover")
         self.frames: list[QImage] = []
         self.min_frame = max(1, int(min_frame))
         self._current = current
@@ -120,10 +123,11 @@ class CompareDialog(QDialog):
     items: [(node id, title, detail, video file)]; on_keep(nid) -> bool (True: kept, close)."""
 
     def __init__(self, parent, items: list[tuple[str, str, str, Path]], on_keep, player: bool = True,
-                 title: str = "Compare"):
+                 title: str = "Compare", settings: QSettings | None = None):
         super().__init__(parent)
         self.setWindowTitle(title)
         fit_size(self, 1280, 820)
+        remember_geometry(self, settings, "compare")
         self.items, self.on_keep = items, on_keep
         self.players: list = []
         self.kept: str | None = None
@@ -305,11 +309,12 @@ class SplitDialog(QDialog):
     frame by frame; at() is the moment in the video's file (start + frame / 24 s)."""
 
     def __init__(self, parent, clip: Path, frames: int, size: tuple[int, int], start: float, end: float,
-                 title: str):
+                 title: str, settings: QSettings | None = None):
         from .compare_player import ComparePlayer
         super().__init__(parent)
         self.setWindowTitle(title)
         fit_size(self, 820, 640)
+        remember_geometry(self, settings, "split")
         self.start, self.end, self.n = float(start), float(end), int(frames)
         v = QVBoxLayout(self)
         info = label("The video ends at the frame you choose; a new clip follows it (it starts from that frame), "
@@ -359,14 +364,16 @@ class VideoFrameDialog(QDialog):
     """Choose one frame of any video (any length: only the frame shown is decoded): a slider over the whole
     video, one frame / one second back and on. frame_file() writes the chosen frame at the video's full size."""
 
-    def __init__(self, parent, video: Path, title: str, info: dict | None = None):
+    def __init__(self, parent, video: Path, title: str, info: dict | None = None, settings: QSettings | None = None):
         super().__init__(parent)
         self.setWindowTitle(title)
         fit_size(self, 860, 640)
+        remember_geometry(self, settings, "frame")
         self.video = Path(video)
         self._req = 0
         self._closed = False
         self.ready = False                          # (the video is probed: for a file the user picked that is a worker's job)
+        self._when_ready: list[Callable[[], None]] = []
         self._grabbing = self._again = False        # one ffmpeg at a time; the newest position after it
         self._tmp = media.scratch("frame")
         self.fps, self.duration, self.frames = float(FPS), 0.0, 1
@@ -418,6 +425,16 @@ class VideoFrameDialog(QDialog):
         self.ready = True
         self.slider.valueChanged.connect(self._moved)
         self._moved(0)                               # (the first frame: read when the timer fires)
+        waiting, self._when_ready = self._when_ready, []
+        for call in waiting:
+            call()
+
+    def after_ready(self, call: Callable[[], None]) -> None:
+        """Run call once the video is known (at once if it is): `frames` and `slider` are the placeholders before."""
+        if self.ready:
+            call()
+        else:
+            self._when_ready.append(call)
 
     def at(self) -> float:
         """The chosen frame's time in the video (its own frame rate)."""

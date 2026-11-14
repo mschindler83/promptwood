@@ -7,12 +7,13 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtWidgets import QListWidgetItem
 
 from .. import edits
 from ..edits import ResultRecord
+from .image_common import RESULT_ICON
 from .imageio import upright
 from .lora_stack import lora_label
 from .results_gallery import badged, model_key, model_name, run_groups
@@ -126,7 +127,7 @@ class ResultsMixin(ImageEditHost):
 
     def _strip_icon(self, png: str, meta: edits.ResultRecord, selected: bool = False) -> QIcon:
         pix = self._thumbs.get(png, (None, QPixmap()))[1]
-        return QIcon(badged(pix, QSize(150, 100), "", bool(meta.get("favorite")), png in self._in_use, selected,
+        return QIcon(badged(pix, RESULT_ICON, "", bool(meta.get("favorite")), png in self._in_use, selected,
                             self.devicePixelRatioF()))
 
     def _strip_selection(self, cur, prev):

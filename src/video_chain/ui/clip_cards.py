@@ -159,6 +159,17 @@ class PromptCard(_ClipCardBase):
         self._build_sound_rows(shared)
         self._build_end_rows(shared)
         self._build_footer(shared, view)
+        self._name_fields()
+
+    def _name_fields(self) -> None:
+        """Accessible names for the fields (the seed has its label beside it: its buddy)."""
+        self.seed_label.setBuddy(self.seed)
+        for field, name in ((self.edit, "Prompt of this clip"), (self.seed, "Seed"), (self.steps, "Steps"),
+                            (self.length, "Length of this clip"), (self.cam_move, "Camera move"),
+                            (self.cam_amp, "How far the camera moves"), (self.cam_speed, "How fast the camera moves"),
+                            (self.src_sound, "Where the clip's sound comes from"),
+                            (self.mix_level, "Level of the given sound")):
+            field.setAccessibleName(name)
 
     def _build_header(self, shared, node):
         """Build the header: title, state tag, variant button, More menu."""
@@ -209,6 +220,7 @@ class PromptCard(_ClipCardBase):
         self.b_compare = acts["compare"]
         self._can_compare = False
         self.frozen, self._on = False, True
+        self.speech_busy = False                 # text to speech works on something else
         self.has_lines = False                   # its prompt has a spoken line (text to speech can speak it)
         self.b_freeze = acts["freeze_toggle"]
         self.b_freeze.setCheckable(True)
@@ -696,10 +708,15 @@ class PromptCard(_ClipCardBase):
     def _enable_speak(self):
         """"Speak the lines" is always on the card; it can be used once the prompt has a line in quotes."""
         self.has_lines = bool(T.spoken_lines(self.text()))
-        self.b_speak.setEnabled(not self.edit.isReadOnly() and self.has_lines)
-        self.b_speak.setToolTip(SPEAK_TIP if self.has_lines else
+        self.b_speak.setEnabled(not self.edit.isReadOnly() and self.has_lines and not self.speech_busy)
+        self.b_speak.setToolTip("Text to speech is busy: this is possible when it is done." if self.speech_busy else
+                                SPEAK_TIP if self.has_lines else
                                 "Write what is said in quotes first, e.g. @Anna says \"Hello, nice to see you.\" "
                                 "Then this speaks it with text to speech and makes it the clip's sound.")
+
+    def set_speech_busy(self, on: bool):
+        self.speech_busy = on
+        self._enable_speak()
 
     def _words(self):
         n = len(self.text().split())

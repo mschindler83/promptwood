@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
-from PySide6.QtCore import QSettings, QSize, QTimer, Qt
+from PySide6.QtCore import QSettings, QTimer, Qt
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFrame, QGridLayout,
                                QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QProgressBar,
@@ -33,13 +33,15 @@ from ..edits import (EDITS_DIR, MOSS_EDIT_QUALITIES, QUALITY_TEXT, ResultRecord,
 from ..imagegen import FAMILIES, size_for
 from . import shortcuts as S
 from .dialogs import button_row, confirm as ask
-from .image_common import (ASK_ABOVE, CREATE_HINT, FOLDER_ITEM, FOLDER_PREFIX, MAX_RESULTS, PROMPT_HINT,  # noqa: F401
-                           SEED_MAX, PictureSlot)
+from .image_common import (ASK_ABOVE, CREATE_HINT, FAMILY_RETRIES, FAMILY_RETRY_MS, FOLDER_ITEM, FOLDER_PREFIX,  # noqa: F401
+                           MAX_RESULTS, PROMPT_HINT, RESULT_GRID, RESULT_ICON, RESULT_STRIP_HEIGHT, SEED_MAX,
+                           SIDE_PANEL_WIDTH, PictureSlot)
 from .image_generate import CreatePlan, EditPlan, CreateWorker, EditWorker, GenerateWorker
 from .image_loras import LorasMixin
 from .image_models import ModelsMixin
 from .image_presets import PresetsMixin
 from .image_prompt import PromptMixin
+from .prompt_refiner import RefineResult
 from .image_results import ResultsMixin
 from .image_sampling import SamplingMixin
 from .image_source import SourceMixin
@@ -66,7 +68,7 @@ class ImageEditServices:
     known_loras: list[tuple[str, str]] | None = None
     lora_dir: str = ""
     uses: Callable[[ResultRecord], list[str]] | None = None          # where a result is used (words)
-    refine: Callable[..., str | list[str] | None] | None = None      # refine(text, kind) -> new text or None
+    refine: Callable[..., RefineResult | None] | None = None      # refine(text, kind) -> a RefineResult or None
     connect_create: Callable[[Callable | None], object] | None = None
     family_loras: dict[str, list] | None = field(default=None)
     start_aspect: float | None = None
@@ -83,28 +85,12 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
     on_use(kind 'start' | 'end', png) -> bool; start_comfy() -> bool."""
 
     def __init__(self, parent, project: Path, sources: list[tuple[str, str]], source: str | None,
-                 end_target: str | None, connect: Callable[[Callable | None], object] | None = None,
-                 on_use: Callable[[str, str], bool] | None = None, settings: QSettings | None = None,
-                 places: list[tuple[str, str]] | None = None, start_comfy: Callable[[], bool] | None = None,
-                 on_start: Callable[[], None] | None = None, known_loras: list[tuple[str, str]] | None = None,
-                 lora_dir: str = "", uses: Callable[[ResultRecord], list[str]] | None = None,
-                 refine: Callable[..., str | list[str] | None] | None = None,
-                 connect_create: Callable[[Callable | None], object] | None = None,
-                 family_loras: dict[str, list] | None = None, start_aspect: float | None = None, mode: str = "edit",
-                 check_lora: Callable[[str | None], bool | None] | None = None, use_triggers: bool = True,
-                 collections: Callable[[], list] | None = None, *, services: ImageEditServices | None = None):
+                 end_target: str | None, *, services: ImageEditServices):
         """What the dialog is for (project, the images to offer, the one chosen, the clip it ends) is given as
-        arguments; everything it calls out to or is told by the app is one ImageEditServices (`services`). The
-        single keyword arguments after end_target are the older way to give the same and still work."""
+        arguments; everything it calls out to or is told by the app is one ImageEditServices (`services`)."""
         super().__init__(parent)
-        if services is None:
-            services = ImageEditServices(
-                connect=connect, on_use=on_use, settings=settings, places=places, start_comfy=start_comfy,
-                on_start=on_start, known_loras=known_loras, lora_dir=lora_dir, uses=uses, refine=refine,
-                connect_create=connect_create, family_loras=family_loras, start_aspect=start_aspect, mode=mode,
-                check_lora=check_lora, use_triggers=use_triggers, collections=collections)
         if services.connect is None or services.on_use is None:
-            raise TypeError("ImageEditDialog needs connect and on_use (in services or as arguments)")
+            raise TypeError("ImageEditDialog needs connect and on_use in its services")
         self.services = services
         self.setWindowTitle("Edit an image with AI")
         fit_size(self, 1240, 820)
@@ -143,7 +129,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         self.end_target, self.qs, self.places, self.start_comfy = end_target, settings, places or [], start_comfy
         self.on_start = on_start                         # called (GUI thread) before each Generate
         self.uses = uses or (lambda _meta: [])           # uses(meta) -> where a result is used (words)
-        self.refine = refine                             # refine(text, kind) -> new text or None
+        self.refine = refine                             # refine(text, kind) -> a RefineResult or None
         self.connect_create = connect_create             # connect_create(progress) -> a ComfyImageCreator
         self.start_aspect = start_aspect
         self.check_lora = check_lora                     # check_lora(path) -> False if ComfyUI cannot load it
@@ -465,7 +451,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(lw)
-        scroll.setFixedWidth(430)
+        scroll.setFixedWidth(SIDE_PANEL_WIDTH)
         self.left_scroll = scroll
         return scroll
 
@@ -541,9 +527,9 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         self.results.setViewMode(QListWidget.ViewMode.IconMode)
         self.results.setFlow(QListWidget.Flow.LeftToRight)
         self.results.setWrapping(False)
-        self.results.setIconSize(QSize(150, 100))
-        self.results.setGridSize(QSize(158, 108))
-        self.results.setFixedHeight(130)
+        self.results.setIconSize(RESULT_ICON)
+        self.results.setGridSize(RESULT_GRID)
+        self.results.setFixedHeight(RESULT_STRIP_HEIGHT)
         self.results.setMovement(QListWidget.Movement.Static)
         self.results.setToolTip("The results shown (newest first); Gallery shows them all, grouped by run")
         self.results.setProperty("role", "resultStrip")      # (the theme styles it: transparent, no frame)
@@ -828,8 +814,8 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
                                "Generate.")
             self.b_start_comfy.hide()
             if self.connect_create is not None:
-                self._retry_families = 36              # up to 3 minutes
-                QTimer.singleShot(5000, self._load_families)
+                self._retry_families = FAMILY_RETRIES
+                QTimer.singleShot(FAMILY_RETRY_MS, self._load_families)
 
     # ---- using a result
     def _use(self, kind: str):
