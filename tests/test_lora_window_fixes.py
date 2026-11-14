@@ -167,3 +167,22 @@ def test_refiner_points_to_the_local_model_setup_when_there_is_none():
     with_llama = _refine_dialog([{"file": "llama:/m/q.gguf", "label": "Q", "chat": True, "vision": False}])
     assert "Preferences" not in with_llama.state.text()
     with_llama.reject()
+
+
+def test_chip_row_uses_the_widget_flow_and_chips_are_reachable_by_tab():
+    from PySide6.QtCore import QObject, Qt
+    from PySide6.QtWidgets import QLayout
+    from video_chain.ui.clip_inputs import ChipRow
+    row = ChipRow()
+    specs = [{"text": "@ann · lead", "tip": "t", "variant": "", "lead": True},
+             {"text": "Start frame", "tip": "t", "variant": "", "lead": None}]
+    row.set_specs(specs)
+    assert not any(type(c).__module__.startswith("video_chain") for c in row.findChildren(QLayout)), "no Python QLayout"
+    assert row.chips[0].focusPolicy() & Qt.TabFocus          # (the lead chip can be switched from the keyboard)
+    assert row.b_prompt.focusPolicy() & Qt.TabFocus
+    assert row.chips[1].focusPolicy() == Qt.NoFocus
+    row.set_specs([specs[1]])
+    assert row.texts() == ["Start frame"]
+    row.resize(300, 40)
+    row.set_specs(specs)
+    assert row.texts() == ["@ann · lead", "Start frame"]

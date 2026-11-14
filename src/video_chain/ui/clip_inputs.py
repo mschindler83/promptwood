@@ -5,77 +5,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
-from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QLayout, QPlainTextEdit, QPushButton,
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QPlainTextEdit, QPushButton,
                                QToolButton, QVBoxLayout, QWidget)
 
+from .results_gallery import FlowBox
 from .widgets import label
 
 KIND_NAMES = {"person": "Person", "place": "Place", "object": "Object", "style": "Style"}
 FORMAT_NAMES = {"h3": "official", "classic": "classic"}
-
-
-class FlowLayout(QLayout):
-    """Lays out widgets left to right and wraps them into new lines (for the chips; as in another app)."""
-
-    def __init__(self, parent=None, spacing: int = 4):
-        super().__init__(parent)
-        self._items = []
-        self._sp = spacing
-        self.setContentsMargins(0, 0, 0, 0)
-
-    def addItem(self, item):                       # noqa: N802  (Qt naming)
-        self._items.append(item)
-
-    def count(self):
-        return len(self._items)
-
-    def itemAt(self, i):                           # noqa: N802
-        return self._items[i] if 0 <= i < len(self._items) else None
-
-    def takeAt(self, i):                           # noqa: N802
-        return self._items.pop(i) if 0 <= i < len(self._items) else None
-
-    def expandingDirections(self):                 # noqa: N802
-        return Qt.Orientation(0)
-
-    def hasHeightForWidth(self):                   # noqa: N802
-        return True
-
-    def heightForWidth(self, w):                   # noqa: N802
-        return self._layout(QRect(0, 0, w, 0), True)
-
-    def setGeometry(self, rect):                   # noqa: N802
-        super().setGeometry(rect)
-        self._layout(rect, False)
-
-    def sizeHint(self):                            # noqa: N802
-        return self.minimumSize()
-
-    def minimumSize(self):                         # noqa: N802
-        s = QSize()
-        for it in self._items:
-            s = s.expandedTo(it.minimumSize())
-        return s
-
-    def clear(self):
-        while self._items:
-            w = self._items.pop().widget()
-            if w:
-                w.setParent(None)
-                w.deleteLater()
-
-    def _layout(self, rect, test):
-        x, y, line = rect.x(), rect.y(), 0
-        for it in self._items:
-            hint = it.sizeHint()
-            if x + hint.width() > rect.right() and line > 0:
-                x, y, line = rect.x(), y + line + self._sp, 0
-            if not test:
-                it.setGeometry(QRect(QPoint(x, y), hint))
-            x += hint.width() + self._sp
-            line = max(line, hint.height())
-        return y + line - rect.y()
 
 
 def _tags(word: str, numbers: list[int]) -> str:
@@ -180,7 +118,10 @@ class ChipRow(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.flow = FlowLayout(self, spacing=4)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.flow = FlowBox(self, spacing=4)       # (a widget that places the chips: no Python QLayout)
+        lay.addWidget(self.flow)
         self._specs: list[dict] | None = None
         self.chips: list[QToolButton] = []
         self.model_chip: QToolButton | None = None      # how the clip is made (the Simple view hides it)
@@ -205,20 +146,22 @@ class ChipRow(QWidget):
                 b.setProperty("variant", s["variant"])
             b.setText(s["text"])
             b.setToolTip(s["tip"])
-            b.setFocusPolicy(Qt.NoFocus)
+            b.setFocusPolicy(Qt.NoFocus)             # (informational chips stay out of the Tab order)
             if s["lead"] is not None:
                 b.setCheckable(True)
+                b.setFocusPolicy(Qt.TabFocus)        # (the lead switch is reachable from the keyboard)
                 b.setChecked(bool(s["lead"]))
                 b.clicked.connect(lambda on: self.leadToggled.emit(bool(on)))
-            self.flow.addWidget(b)
+            self.flow.add(b)
             self.chips.append(b)
             if s.get("model"):
                 self.model_chip = b
         self.b_prompt = QToolButton(self)
         self.b_prompt.setText("Model prompt")
         self.b_prompt.setToolTip("The exact text the model gets for this clip, and its pictures and sounds in order")
+        self.b_prompt.setFocusPolicy(Qt.TabFocus)
         self.b_prompt.clicked.connect(self.promptWanted.emit)
-        self.flow.addWidget(self.b_prompt)
+        self.flow.add(self.b_prompt)
         self.setVisible(True)
         self.updateGeometry()
 
