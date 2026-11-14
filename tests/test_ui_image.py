@@ -1095,10 +1095,12 @@ def test_variations_panel_review_cases(app, monkeypatch):
 def test_all_ideas_become_variations(app, tmp_path):
     from PySide6.QtCore import QSettings
 
+    from video_chain.ui.prompt_refiner import RefineResult
+
     from video_chain.ui.image_edit import ImageEditDialog
     q = QSettings(str(tmp_path / "i.ini"), QSettings.IniFormat)
     dlg = ImageEditDialog(None, tmp_path, [], None, None, lambda p: None, lambda k, p: False, q,
-                          connect_create=lambda p: None, refine=lambda text, kind, pictures=None: ["a cat", "a dog"])
+                          connect_create=lambda p: None, refine=lambda text, kind, pictures=None: RefineResult(ideas=["a cat", "a dog"]))
     dlg.set_mode("create")
     dlg.prompt.setPlainText("- an animal")
     dlg._refine_prompt()

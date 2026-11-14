@@ -26,8 +26,9 @@ class EndsMixin(MainWindowHost):
 
     # ---- prompt refiner
     def refine_text(self, text: str, kind: str, pictures: list | None = None, seconds: float | None = None,
-                    start_image: Path | None = None, loras: list[str] | None = None) -> str | list[str] | None:
-        """Open the prompt refiner for a prompt ('video' / 'video_h3' / 'image' / 'edit'); the text to use, or None.
+                    start_image: Path | None = None, loras: list[str] | None = None) -> PR.RefineResult | None:
+        """Open the prompt refiner for a prompt ('video' / 'video_h3' / 'image' / 'edit'); what to use (a text, or
+        all ideas), or None if nothing was chosen.
         seconds, start_image: the clip's length and the frame it starts from (used by 'video_h3'). loras: the
         paths of the LoRAs the result is made with (the refiner is told what is known of them)."""
         if not text.strip():
@@ -53,7 +54,10 @@ class EndsMixin(MainWindowHost):
             if dlg.exec() != QDialog.DialogCode.Accepted:
                 return None
             ideas = dlg.chosen_ideas()
-            return ideas if ideas else dlg.chosen()       # (a list: all ideas, for the image window's variations)
+            if ideas:
+                return PR.RefineResult(ideas=list(ideas))     # (all ideas: for the image window's variations)
+            text = dlg.chosen()
+            return PR.RefineResult(text=text) if text else None
         finally:
             # the llama.cpp model goes with the window: it slows image / clip generation down while it is loaded
             self.stop_llama("the prompt refiner was closed")

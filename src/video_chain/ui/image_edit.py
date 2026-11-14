@@ -40,6 +40,7 @@ from .image_loras import LorasMixin
 from .image_models import ModelsMixin
 from .image_presets import PresetsMixin
 from .image_prompt import PromptMixin
+from .prompt_refiner import RefineResult
 from .image_results import ResultsMixin
 from .image_sampling import SamplingMixin
 from .image_source import SourceMixin
@@ -66,7 +67,7 @@ class ImageEditServices:
     known_loras: list[tuple[str, str]] | None = None
     lora_dir: str = ""
     uses: Callable[[ResultRecord], list[str]] | None = None          # where a result is used (words)
-    refine: Callable[..., str | list[str] | None] | None = None      # refine(text, kind) -> new text or None
+    refine: Callable[..., RefineResult | None] | None = None      # refine(text, kind) -> a RefineResult or None
     connect_create: Callable[[Callable | None], object] | None = None
     family_loras: dict[str, list] | None = field(default=None)
     start_aspect: float | None = None
@@ -88,7 +89,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
                  places: list[tuple[str, str]] | None = None, start_comfy: Callable[[], bool] | None = None,
                  on_start: Callable[[], None] | None = None, known_loras: list[tuple[str, str]] | None = None,
                  lora_dir: str = "", uses: Callable[[ResultRecord], list[str]] | None = None,
-                 refine: Callable[..., str | list[str] | None] | None = None,
+                 refine: Callable[..., RefineResult | None] | None = None,
                  connect_create: Callable[[Callable | None], object] | None = None,
                  family_loras: dict[str, list] | None = None, start_aspect: float | None = None, mode: str = "edit",
                  check_lora: Callable[[str | None], bool | None] | None = None, use_triggers: bool = True,
@@ -143,7 +144,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         self.end_target, self.qs, self.places, self.start_comfy = end_target, settings, places or [], start_comfy
         self.on_start = on_start                         # called (GUI thread) before each Generate
         self.uses = uses or (lambda _meta: [])           # uses(meta) -> where a result is used (words)
-        self.refine = refine                             # refine(text, kind) -> new text or None
+        self.refine = refine                             # refine(text, kind) -> a RefineResult or None
         self.connect_create = connect_create             # connect_create(progress) -> a ComfyImageCreator
         self.start_aspect = start_aspect
         self.check_lora = check_lora                     # check_lora(path) -> False if ComfyUI cannot load it

@@ -263,8 +263,7 @@ def test_window_keeps_the_model_in_its_comfy_service(app, tmp_path):
 
 
 def test_refine_text_asks_the_dialog_directly():
-    assert "hasattr(dlg" not in (UI / "mw_ends.py").read_text(encoding="utf-8")
-    assert "isinstance(new, str)" in (UI / "mw_nodes.py").read_text(encoding="utf-8")      # a clip prompt is one text
+    assert "hasattr(dlg" not in (UI / "mw_ends.py").read_text(encoding="utf-8")      # (behaviour: test_final_sweep)
 
 
 # ------------------------------------------------------------------ MWC-29: a stale background answer is dropped (Latest)
