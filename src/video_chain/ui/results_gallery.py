@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QPoint, QRect, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QGuiApplication, QImage, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QColor, QFont, QGuiApplication, QImage, QImageReader, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy,
                                QToolButton, QVBoxLayout, QWidget)
 
@@ -84,11 +84,14 @@ def run_groups(items: list[tuple[str, dict, float]]) -> list[dict]:
     return groups
 
 
-def badged(pix: QPixmap, size: QSize, tag: str, fav: bool, in_use: bool, selected: bool = False) -> QPixmap:
+def badged(pix: QPixmap, size: QSize, tag: str, fav: bool, in_use: bool, selected: bool = False,
+           dpr: float | None = None) -> QPixmap:
     """A thumbnail fitted into size, with its badges painted on: the model tag (bottom left), IN USE (top left),
-    the star (top right) and the selection ring."""
+    the star (top right) and the selection ring. dpr: the pixel ratio of the widget that shows it (default: the
+    primary screen's)."""
     t = theme()
-    dpr = QGuiApplication.primaryScreen().devicePixelRatio() if QGuiApplication.primaryScreen() else 1.0
+    if dpr is None:
+        dpr = QGuiApplication.primaryScreen().devicePixelRatio() if QGuiApplication.primaryScreen() else 1.0
     out = QPixmap(size * dpr)
     out.setDevicePixelRatio(dpr)
     out.fill(Qt.transparent)
@@ -274,10 +277,12 @@ class Thumb(QWidget):
         self.update()
 
     def rendered(self) -> QPixmap:
-        key = (self.pix.cacheKey(), self._size.width(), self.selected, self.in_use, bool(self.meta.get("favorite")))
+        dpr = self.devicePixelRatioF()
+        key = (self.pix.cacheKey(), self._size.width(), self.selected, self.in_use, bool(self.meta.get("favorite")),
+               dpr)
         if self._cache is None or self._cache[0] != key:
             self._cache = (key, badged(self.pix, self._size, model_tag(self.meta), bool(self.meta.get("favorite")),
-                                       self.in_use, self.selected))
+                                       self.in_use, self.selected, dpr))
         return self._cache[1]
 
     def paintEvent(self, _e):                    # noqa: N802
@@ -430,6 +435,17 @@ class ResultGallery(QScrollArea):
             super().keyPressEvent(e)
 
 
+def read_thumb(png: str) -> QImage:
+    """A result's thumbnail, decoded at the reduced size (a PNG is not read in full when only 400 px are shown)."""
+    r = QImageReader(png)
+    r.setAutoTransform(True)
+    size = r.size()
+    if size.isValid() and (size.width() > THUMB_DECODE or size.height() > THUMB_DECODE):
+        r.setScaledSize(size.scaled(THUMB_DECODE, THUMB_DECODE, Qt.KeepAspectRatio))
+    img = r.read()
+    return img if not img.isNull() else QImage()
+
+
 class ThumbLoader(QObject):
     """Decodes result thumbnails in a background thread, newest request first; ready(png, mtime_ns, image)."""
     ready = Signal(str, object, QImage)            # (object: a nanosecond time does not fit a Qt int)
@@ -453,9 +469,10 @@ class ThumbLoader(QObject):
             if job is None or self._stop.is_set():
                 return
             png, mt = job
-            img = QImage(png)
-            if not img.isNull():
-                img = img.scaled(THUMB_DECODE, THUMB_DECODE, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            try:
+                img = read_thumb(png)
+            except Exception:  # noqa: BLE001  (one bad file or a decoder error must not stop the other thumbnails)
+                img = QImage()
             try:
                 self.ready.emit(png, mt, img)
             except RuntimeError:                  # the window is gone

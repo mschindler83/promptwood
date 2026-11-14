@@ -8,6 +8,7 @@ edits/sources/), so earlier tries stay at hand.
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 import random
@@ -91,12 +92,26 @@ def project_edits(project: Path) -> list[tuple[Path, dict]]:
     for png in d.glob("*.png") if d.is_dir() else []:
         if ".part" in png.name:
             continue
-        try:
-            meta = json.loads(png.with_suffix(".json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            meta = {}
+        meta = _record(png.with_suffix(".json"))
         out.append((png, meta))
     return sorted(out, key=lambda x: _mtime(x[0]), reverse=True)
+
+
+_RECORDS: dict[str, tuple[tuple[int, int], dict]] = {}     # record file -> ((mtime_ns, size), parsed)
+
+
+def _record(f: Path) -> dict:
+    """A result's record, parsed once per version of the file (a reload of hundreds of results reads none again)."""
+    try:
+        st = f.stat()
+        key = (st.st_mtime_ns, st.st_size)
+        hit = _RECORDS.get(str(f))
+        if hit is None or hit[0] != key:
+            hit = (key, json.loads(f.read_text(encoding="utf-8")))
+            _RECORDS[str(f)] = hit
+    except (OSError, ValueError):
+        return {}
+    return copy.deepcopy(hit[1])
 
 
 def write_meta(meta_file: Path, meta: dict) -> None:
@@ -1123,7 +1138,8 @@ class ImageEditDialog(QDialog):
 
     def _strip_icon(self, png: str, meta: dict, selected: bool = False) -> QIcon:
         pix = self._thumbs.get(png, (None, QPixmap()))[1]
-        return QIcon(badged(pix, QSize(150, 100), "", bool(meta.get("favorite")), png in self._in_use, selected))
+        return QIcon(badged(pix, QSize(150, 100), "", bool(meta.get("favorite")), png in self._in_use, selected,
+                            self.devicePixelRatioF()))
 
     def _strip_selection(self, cur, prev):
         for it, on in ((prev, False), (cur, True)):

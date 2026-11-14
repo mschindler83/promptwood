@@ -295,3 +295,60 @@ def test_picker_video_preview_runs_off_the_ui_thread(app, tmp_path, monkeypatch)
     assert "fake" in dlg.info.text()
     assert threads and all(t is not threading.main_thread() for t in threads)
     dlg.deleteLater()
+
+
+def test_thumbnail_loader_survives_a_failing_decode(app, tmp_path, monkeypatch):
+    from PySide6.QtGui import QImage
+
+    from video_chain.ui import results_gallery as RG
+    got = []
+
+    def read(png):
+        if png.endswith("bad.png"):
+            raise MemoryError("boom")
+        img = QImage(10, 10, QImage.Format_RGB32)
+        img.fill(0x00ff00)
+        return img
+    monkeypatch.setattr(RG, "read_thumb", read)
+    loader = RG.ThumbLoader()
+    loader.ready.connect(lambda png, ns, img: got.append((png, img.isNull())))
+    loader.request("bad.png", 1)
+    time.sleep(0.2)
+    loader.request("good.png", 2)
+    end = time.time() + 5
+    while len(got) < 2 and time.time() < end:
+        app.processEvents()
+        time.sleep(0.02)
+    loader.stop()
+    assert ("bad.png", True) in got and ("good.png", False) in got
+
+
+def test_thumbnails_follow_the_widgets_pixel_ratio():
+    from PySide6.QtCore import QSize
+    from PySide6.QtGui import QPixmap
+
+    from video_chain.ui.results_gallery import badged
+    pm = QPixmap(20, 20)
+    pm.fill()
+    assert badged(pm, QSize(150, 100), "", False, False, dpr=2.0).devicePixelRatio() == 2.0
+
+
+def test_project_edits_reads_each_record_once(tmp_path, monkeypatch):
+    from video_chain.ui import image_edit as IE
+    edits = tmp_path / IE.EDITS_DIR
+    edits.mkdir()
+    for i in range(3):
+        (edits / f"r{i}.png").write_bytes(b"x")
+        (edits / f"r{i}.json").write_text(json.dumps({"prompt": str(i)}))
+    reads = []
+    orig = Path.read_text
+    monkeypatch.setattr(Path, "read_text", lambda self, *a, **k: (reads.append(self), orig(self, *a, **k))[1])
+    first = IE.project_edits(tmp_path)
+    n = len(reads)
+    again = IE.project_edits(tmp_path)
+    assert len(reads) == n and sorted(m["prompt"] for _p, m in again) == ["0", "1", "2"]
+    again[0][1]["prompt"] = "changed"                     # (a caller's change does not leak into the cache)
+    assert sorted(m["prompt"] for _p, m in IE.project_edits(tmp_path)) == ["0", "1", "2"]
+    (edits / "r0.json").write_text(json.dumps({"prompt": "new, longer"}))      # a changed record is read again
+    assert "new, longer" in [m["prompt"] for _p, m in IE.project_edits(tmp_path)]
+    assert first
