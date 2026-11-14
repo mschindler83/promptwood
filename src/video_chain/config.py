@@ -16,6 +16,11 @@ def _xdg(var: str, fallback: str) -> Path:
     return Path(os.environ.get(var) or Path.home() / fallback) / "video-chain"
 
 
+def cache_dir() -> Path:
+    """Logs and caches (the llama.cpp log, thumbnails): $XDG_CACHE_HOME/video-chain."""
+    return _xdg("XDG_CACHE_HOME", ".cache")
+
+
 def data_dir() -> Path:
     """The app's own data (LoRA presets and trigger words): $XDG_DATA_HOME/video-chain."""
     return _xdg("XDG_DATA_HOME", ".local/share")

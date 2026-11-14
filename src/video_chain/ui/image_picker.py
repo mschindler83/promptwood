@@ -22,7 +22,7 @@ from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QMenu, QSlider, QSplitter, QStyle, QVBoxLayout, QWidget)
 
-from .. import media
+from .. import config, media
 from .imageio import file_facts, read_scaled
 from .theme import icon, theme
 from .widgets import fit_size, format_time, icon_button, label, remember_geometry, safe_emit, label_for
@@ -38,8 +38,19 @@ KINDS = {"image": (IMAGE_EXTS, "images", "pickerDir"), "video": (VIDEO_EXTS, "vi
 MAX_RECENT_DIRS = 8
 THUMB_MAX = 320                    # thumbnails are made at this size once and scaled for the grid
 THREADS = 8                        # parallel reads: on a network share every file costs round trips
-CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "video-chain" / "thumbs"
-DESKTOP_THUMBS = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "thumbnails"
+
+
+def thumb_cache_dir() -> Path:
+    return config.cache_dir() / "thumbs"
+
+
+def desktop_thumbs_dir() -> Path:
+    """The desktop's own thumbnails (the file manager's), only read."""
+    return config.cache_dir().parent / "thumbnails"
+
+
+CACHE_DIR = thumb_cache_dir()
+DESKTOP_THUMBS = desktop_thumbs_dir()
 MAX_CACHED = 20000                 # beyond this many cached thumbnails the oldest are removed
 
 
