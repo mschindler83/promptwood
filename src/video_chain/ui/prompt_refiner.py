@@ -14,7 +14,8 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
                                QPushButton, QSpinBox, QTextBrowser, QToolButton, QVBoxLayout, QWidget)
 
 from ..tree import refine_problems
-from .theme import repolish
+from .lora_details import themed
+from .theme import repolish, theme
 from .widgets import guard_wheel, icon_button, label
 
 LIKE_EXAMPLE = ("Rewrite my prompt in the manner of this example prompt, which is known to work with the LoRA: take "
@@ -597,8 +598,8 @@ class RefineDialog(QDialog):
 
     def _render(self):
         if not self.turns:
-            self.talk.setHtml("<p style='color:gray'>Your prompt is the start. Each message changes the current "
-                              "version; every version stays here.</p>")
+            self.talk.setHtml(themed("<p style='color:gray'>Your prompt is the start. Each message changes the current "
+                              "version; every version stays here.</p>"))
             return
         rows = []
         for k, (ask, version) in enumerate(self.turns):
@@ -608,8 +609,8 @@ class RefineDialog(QDialog):
                         f"<p style='margin:0 0 6px 12px'><a href='v:{k}' style='text-decoration:none'>"
                         f"<b>{'▶ ' if cur else ''}Version {k + 1}</b></a>"
                         f"{' <i>(edited by you)</i>' if self._edited.get(k) else ''}<br>"
-                        f"<span style='color:{'#ddd' if cur else 'gray'}'>{short}</span></p>")
-        self.talk.setHtml("".join(rows))
+                        f"<span style='color:{theme().textPrimary.name() if cur else theme().textTertiary.name()}'>{short}</span></p>")
+        self.talk.setHtml(themed("".join(rows)))
         self.talk.verticalScrollBar().setValue(self.talk.verticalScrollBar().maximum())
 
     def _update_buttons(self):
@@ -758,19 +759,19 @@ class RefineDialog(QDialog):
         if not self.ideas_view.isVisibleTo(self):
             return
         if not self.ideas:
-            self.ideas_view.setHtml("<p style='color:gray'>Write bullet points on the left, e.g.<br>"
-                                    "- @Anna in a red coat<br>- an old lighthouse<br>- heavy rain<br>"
-                                    f"then press Make {self.count.value()} ideas.</p>")
+            self.ideas_view.setHtml(themed("<p style='color:gray'>Write bullet points on the left, e.g.<br>"
+                                           "- @Anna in a red coat<br>- an old lighthouse<br>- heavy rain<br>"
+                                           f"then press Make {self.count.value()} ideas.</p>"))
             return
         rows = []
         for k, d in enumerate(self.ideas):
-            miss = ("<br><span style='color:#e0a040'>may leave out: "
+            miss = ("<br><span style='color:" + (theme().colour("warning") or theme().accent).name() + "'>may leave out: "
                     + html.escape("; ".join(d["missing"])) + "</span>") if d.get("missing") else ""
             rows.append(f"<p style='margin:0 0 10px 0'><b>{k + 1}. {html.escape(d['title'])}</b>"
                         f" <span style='color:gray'>— {html.escape(d['angle'])}</span><br>"
                         f"{html.escape(d['prompt'])}{miss}<br>"
                         f"<a href='use:{k}'>Use this</a> &nbsp; <a href='more:{k}'>Refine further</a></p>")
-        self.ideas_view.setHtml("".join(rows))
+        self.ideas_view.setHtml(themed("".join(rows)))
 
     def _idea_link(self, url):
         if self._busy:

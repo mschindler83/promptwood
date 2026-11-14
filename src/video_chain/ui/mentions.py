@@ -65,21 +65,21 @@ class MentionHelper(QObject):
         edit.textChanged.connect(self._update)
         edit.installEventFilter(self)
 
-    def _typed(self) -> re.Match | None:
-        """An @name or #camera token being typed right before the cursor (its kind in self._kind)."""
+    def _typed(self) -> tuple[str, re.Match | None]:
+        """What is being typed right before the cursor: ("@", the match of a cast name) or ("#", a camera token);
+        the match is None when neither is."""
         cur = self.edit.textCursor()
         block = cur.block().text()[:cur.positionInBlock()]
         m = _TYPING.search(block)
-        self._kind = "@"
-        if m is None:
-            m = _TYPING_CAM.search(block)
-            self._kind = "#"
-        return m
+        if m is not None:
+            return "@", m
+        return "#", _TYPING_CAM.search(block)
 
     def _update(self):
         popup = self.completer.popup()
-        m = self._typed() if self.edit.hasFocus() else None
-        names = (self.names() if self._kind == "@" else CAM.tokens()) if m is not None else []
+        kind, m = self._typed() if self.edit.hasFocus() else (self._kind, None)
+        self._kind = kind                           # (what the list now shows: _fill and _insert go by it)
+        names = (self.names() if kind == "@" else CAM.tokens()) if m is not None else []
         if m is None or not names:
             popup.hide()
             return
@@ -112,7 +112,7 @@ class MentionHelper(QObject):
         return [(cm.index(r, 0).data(), cm.index(r, 0).data(INSERT)) for r in range(cm.rowCount())]
 
     def _insert(self, name: str):
-        m = self._typed()
+        _kind, m = self._typed()
         if m is None:
             return
         cur = self.edit.textCursor()

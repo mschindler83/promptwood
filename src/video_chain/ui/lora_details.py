@@ -6,6 +6,13 @@ from __future__ import annotations
 import html
 import re
 
+from .theme import theme
+
+
+def themed(text: str) -> str:
+    """Rich text written with `color:gray` in the theme's quiet text colour (the theme decides, not the code)."""
+    return text.replace("color:gray", f"color:{theme().textTertiary.name()}")
+
 
 def clean_html(text: str) -> str:
     """CivitAI's description HTML without pictures, scripts, styles and embedded frames."""
@@ -90,4 +97,4 @@ def details_html(details: dict, prompts: list[dict] | None = None, note: str = "
             f"<li>{e(str(f.get('name') or '?'))} ({e(_size(f.get('sizeKB')))})"
             f"<br><span style='color:gray'>SHA256 {e(str((f.get('hashes') or {}).get('SHA256') or ''))}</span></li>"
             for f in files if isinstance(f, dict)) + "</ul>")
-    return "\n".join(out)
+    return themed("\n".join(out))

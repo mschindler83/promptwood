@@ -14,7 +14,11 @@ app = QApplication.instance() or QApplication([])
 
 def window(tmp_path, **more):
     from video_chain.ui.lora_window import LoraWindow
-    db, p = db_with(tmp_path, details(7))
+    d = details(7)
+    for i, it in enumerate(d["examples"]):
+        if isinstance(it, dict):
+            it.update({"id": 100 + i, "url": f"https://image.civitai.com/k/u/original=true/{i}.jpeg"})
+    db, p = db_with(tmp_path, d)
     other = str(lora(tmp_path / "loras" / "other.safetensors", {"y": "2"}))
     db.scan([other], lookup=lambda sha: None, gap=0)
     w = LoraWindow(None, [p, other], current=p, db=db, fetch=lambda item: None, **more)
@@ -299,3 +303,40 @@ def test_description_html_drops_remote_loaders():
     from video_chain.ui.lora_details import clean_html
     out = clean_html('<link rel="stylesheet" href="http://x/y.css"><meta http-equiv="refresh" content="0"><p>hi</p>')
     assert "<link" not in out and "<meta" not in out and "<p>hi</p>" in out
+
+
+def test_rich_text_uses_the_theme_colours_not_fixed_grey():
+    from video_chain.ui.lora_details import details_html, themed
+    from video_chain.ui.theme import theme
+    dim = theme().textTertiary.name()
+    assert themed("<p style='color:gray'>x</p>") == f"<p style='color:{dim}'>x</p>"
+    out = details_html({"version": {"id": 1, "name": "v", "trainedWords": [], "files": [
+        {"name": "f", "hashes": {"SHA256": "ab"}}]}, "model": {"name": "m"}}, [{"prompt": "p", "negative": "n"}])
+    assert "color:gray" not in out
+    w, db, p, other = window(__import__("pathlib").Path(__import__("tempfile").mkdtemp()))
+    assert "color:gray" not in w.how.toHtml() and "gray" not in w._how_html(p, *w._ctx)
+    w.done(0)
+
+
+def test_picture_loader_threads_start_only_when_a_picture_is_wanted(tmp_path):
+    from PySide6.QtCore import QSettings
+    qs = QSettings(str(tmp_path / "s.ini"), QSettings.IniFormat)
+    qs.setValue("loraPictures", "off")
+    w, db, p, other = window(tmp_path, settings=qs)
+    assert w._loaders == []
+    w.pictures.setCurrentIndex(w.pictures.findData("all"))
+    assert len(w._loaders) > 0
+    w.done(0)
+
+
+def test_mention_typed_tells_its_kind_without_a_side_effect():
+    from PySide6.QtWidgets import QPlainTextEdit
+    from video_chain.ui.mentions import MentionHelper
+    edit = QPlainTextEdit()
+    helper = MentionHelper(edit, lambda: ["Anna"])
+    edit.setPlainText("hello @An")
+    c = edit.textCursor()
+    c.movePosition(c.MoveOperation.End)
+    edit.setTextCursor(c)
+    kind, m = helper._typed()
+    assert kind == "@" and m.group(1) == "An"

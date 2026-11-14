@@ -17,16 +17,17 @@ from __future__ import annotations
 import html
 import queue
 import threading
+from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QObject, QSettings, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QGuiApplication, QImage, QPixmap
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSplitter,
                                QTabWidget, QTextBrowser, QToolButton, QVBoxLayout, QWidget)
 
 from .. import lora_notes, lora_pictures, triggers
-from .lora_details import details_html
+from .lora_details import details_html, themed
 from .widgets import guard_wheel, label
 
 PER_PAGE = 8
@@ -143,9 +144,12 @@ class LoraWindow(QDialog):
     into the prompt; adapt(example) has the prompt rewritten in the example's manner (the window closes);
     strengths {path: strength} of the LoRAs in the prompt's stack and set_strength(path, value) -> bool."""
 
-    def __init__(self, parent=None, loras=(), current: str | None = None, settings=None, prompt: str = "",
-                 told: str = "", told_title: str = "What the language model was told", fetch=None, db=None,
-                 use_prompt=None, adapt=None, strengths: dict | None = None, set_strength=None):
+    def __init__(self, parent=None, loras=(), current: str | None = None, settings: QSettings | None = None,
+                 prompt: str = "", told: str = "", told_title: str = "What the language model was told",
+                 fetch: Callable[[dict], Path | str | None] | None = None, db: triggers.TriggerDB | None = None,
+                 use_prompt: Callable[[str], None] | None = None, adapt: Callable[[str], None] | None = None,
+                 strengths: dict[str, float] | None = None,
+                 set_strength: Callable[[str, float], bool] | None = None):
         super().__init__(parent)
         self.setWindowTitle("LoRAs: what is known of them")
         self.resize(1180, 780)
@@ -326,7 +330,7 @@ class LoraWindow(QDialog):
         v.addWidget(self.state)
         buttons = QDialogButtonBox(QDialogButtonBox.Close, self)
         buttons.rejected.connect(self.reject)
-        self.b_forget = buttons.addButton("Delete the kept pictures", QDialogButtonBox.ResetRole)
+        self.b_forget = buttons.addButton("Delete the kept pictures", QDialogButtonBox.ActionRole)
         self.b_forget.setToolTip("Delete the stills kept on disk (they are loaded again when shown)")
         self.b_forget.clicked.connect(self._forget_pictures)
         v.addWidget(buttons)
@@ -339,8 +343,7 @@ class LoraWindow(QDialog):
             it.setToolTip(path)
             self.list.addItem(it)
         self._known_of: dict[str, dict] = {}
-        for _ in range(LOADERS):
-            threading.Thread(target=self._load_pictures, daemon=True).start()
+        self._loaders: list[threading.Thread] = []      # (started when the first picture is wanted)
         self._read_all()
         first = str(current) if current else (self.loras[0][0] if self.loras else None)
         if first:
@@ -514,7 +517,7 @@ class LoraWindow(QDialog):
                        "<pre style='white-space:pre-wrap'>" + e(guide) + "</pre>")
         else:
             out.append("<p><i>Nothing: the app knows nothing that helps writing a prompt for it.</i></p>")
-        return "\n".join(out)
+        return themed("\n".join(out))
 
     def _link(self, url: QUrl):
         s = url.toString()
@@ -645,6 +648,7 @@ class LoraWindow(QDialog):
                 card.show_text("CivitAI gave no picture for it")
             else:
                 card.show_text("Loading …")
+                self._start_loaders()
                 self._jobs.put((self._gen, i, item))
         self.box_v.addStretch(1)
         self.scroll.verticalScrollBar().setValue(0)
@@ -661,6 +665,13 @@ class LoraWindow(QDialog):
                                 f"{all_} picture{'s' if all_ != 1 else ''} and videos from the LoRA's gallery, "
                                 "each with the prompt that made it.")
                                + " The prompt refiner reads the prompts without weights and LoRA tags.")
+
+    def _start_loaders(self):
+        if not self._loaders:
+            for _ in range(LOADERS):
+                t = threading.Thread(target=self._load_pictures, daemon=True)
+                t.start()
+                self._loaders.append(t)
 
     def _kept(self, item: dict) -> bool:
         key = item.get("id", id(item))

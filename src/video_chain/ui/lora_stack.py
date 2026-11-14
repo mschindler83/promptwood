@@ -3,6 +3,7 @@ names, other files), and the helpers to fill a LoRA combo box. Used by the clip 
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
@@ -191,7 +192,7 @@ class LoraStack(QWidget):
         self.known: list[tuple[str, str]] = []
         self.file_dir = ""
         self.rows: list[tuple[QWidget, QPushButton, QDoubleSpinBox]] = []
-        self.use_prompt = None                     # set by the owner: put a text into the prompt these LoRAs are for
+        self.use_prompt: Callable[[str], None] | None = None     # set by the owner: put a text into the prompt these LoRAs are for
         self.v = QVBoxLayout(self)
         self.v.setContentsMargins(0, 0, 0, 0)
         self.v.setSpacing(4)

@@ -76,7 +76,7 @@ class PlaceholderHighlighter(QSyntaxHighlighter):
             var = self.panel.variable(name)
             if var is None or not var.active():
                 f.setUnderlineStyle(QTextCharFormat.WaveUnderline)
-                f.setUnderlineColor(QColor("#e05555"))
+                f.setUnderlineColor(theme().colour("danger") or QColor("#e05555"))
                 f.setToolTip(f"{{{name}}} has no values yet: add them in Variations")
             else:
                 c = color_of(name, names)
@@ -780,7 +780,9 @@ class VariationsPanel(QFrame):
                 + (" (random picks)" if self.mode() == "random" else
                    f" (more than {V.SHUFFLE_LIMIT:,} combinations cannot be shuffled: random picks)" if big else "")
                 + ":</p>")
-        self.preview.setHtml(head + "".join(rows) + more)
+        self.preview.setHtml(head.replace("color:gray", "color:" + theme().textTertiary.name())
+                             + "".join(rows).replace("color:gray", "color:" + theme().textTertiary.name())
+                             + more.replace("color:gray", "color:" + theme().textTertiary.name()))
 
     def sizeHint(self):                          # noqa: N802
         return QSize(400, super().sizeHint().height())
