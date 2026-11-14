@@ -51,7 +51,7 @@ def copy_end_image(project: Path, tree: Tree, src: str, dst: str) -> None:
 def clean_keyframes(raw: object) -> list[Keyframe]:
     """Keyframes as tree.json holds them: {"image": "ends/...", "at": s > 0, "note"}, sorted by time (damaged
     entries are left out)."""
-    out = []
+    out: list[Keyframe] = []
     for k in raw if isinstance(raw, list) else []:
         if not isinstance(k, dict) or not isinstance(k.get("image"), str) or not k["image"].startswith(ENDS_DIR + "/"):
             continue
@@ -86,7 +86,7 @@ def set_keyframe(project: Path, tree: Tree, nid: str, image: Path | None, at: fl
         raise ValueError("a keyframe needs a time after the start")
     if index is not None and not 0 <= index < len(node.keyframes):
         raise ValueError(f"no keyframe {index}")
-    old = dict(node.keyframes[index]) if index is not None else None
+    old = Keyframe(**node.keyframes[index]) if index is not None else None
     rel = old["image"] if old else None
     if image is not None:
         d = Path(project) / ENDS_DIR
@@ -95,7 +95,8 @@ def set_keyframe(project: Path, tree: Tree, nid: str, image: Path | None, at: fl
         chain.to_png(Path(image), Path(project) / rel)
     if rel is None:
         raise ValueError("a new keyframe needs a picture")
-    entry = {"image": rel, "at": round(float(at), 3), "note": (old or {}).get("note", "") if note is None else note}
+    entry: Keyframe = {"image": rel, "at": round(float(at), 3),
+                       "note": old["note"] if old and note is None else (note or "")}
     kfs = [k for i, k in enumerate(node.keyframes) if i != index] + [entry]
     node.keyframes = sorted(kfs, key=lambda k: k["at"])
     if old and old["image"] != rel:
@@ -135,4 +136,4 @@ def end_image_used(tree: Tree, node: Node) -> str | None:
 
 def missing_end_images(project: Path, tree: Tree, todo: list[str]) -> list[str]:
     return [nid for nid in todo if end_image_used(tree, tree.nodes[nid])
-            and not (Path(project) / tree.nodes[nid].end_image).is_file()]
+            and not (Path(project) / str(tree.nodes[nid].end_image)).is_file()]

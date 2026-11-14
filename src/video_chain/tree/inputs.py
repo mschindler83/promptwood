@@ -173,6 +173,7 @@ def continue_frames(options: Options, node: Node) -> int:
 def frames_before(tree: Tree, node: Node) -> int:
     """Frames of the clip before a node that lead into it: up to its hand-over frame (its made length, else its
     length setting / the video's range)."""
+    assert node.parent is not None                   # (only asked for a clip with one)
     parent = tree.nodes[node.parent]
     n = made_frames(parent) or clip_length(tree, parent)
     k = handover_index(tree, parent, n)
@@ -201,6 +202,8 @@ def loras_needed(tree: Tree, checker: Checker, nids: list[str]) -> list[str]:
         if tree.nodes[nid].is_video:
             continue
         s = checker.settings(nid)
+        if s is None:
+            continue
         for lora in ([s["lora"]] + [e["lora"] for e in s.get("extra_loras") or []]
                      + ([s["turbo"]["lora"]] if s.get("turbo") else [])):
             if lora and lora not in out:

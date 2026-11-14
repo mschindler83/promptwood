@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import logging
 from pathlib import Path
+from typing import Any, cast
 
 from .. import chain
 from .consts import DEFAULT_FRAMES, DEFAULT_OPTIONS
@@ -18,7 +19,7 @@ from .starts import start_source
 from .sources import size_source, source_rotation
 from .audio_tracks import source_sound_span
 from .inputs import node_settings, plain_frames
-from .schema import Options
+from .schema import MadeRecord, Options
 
 logger = logging.getLogger(__name__)
 
@@ -186,7 +187,7 @@ class Checker:
         if vc is None:
             own = end_image_used(self.tree, node)
             return {"image": self.sha(self.project / own)} if own else None
-        return vc.made.get("key") if self.status(vc.id) == "done" else False
+        return (vc.made or {}).get("key") if self.status(vc.id) == "done" else False
 
     def keyframe_key(self, node: Node) -> list | None:
         """What a generated clip's middle keyframes are: [[picture sha1, frame, note], ...], None without any."""
@@ -237,7 +238,7 @@ class Checker:
         if not node.is_video and node.parent is not None and node.parent not in self._status:
             for above in self.tree.path_to(nid)[:-1]:   # parents first (path_to is iterative): no deep recursion
                 self.status(above.id)
-        m = node.made
+        m: MadeRecord = node.made or {}
         if not self._files_there(node):
             st = "new"
         elif node.frozen:                          # kept as made, whatever the settings say now
@@ -266,7 +267,7 @@ class Checker:
         the level) or in a new version of the sound it repeats from the clip before (sound_rev): the model heard
         none of that, so the clip need not be made again, as long as the model's own sound was kept (own_sound).
         Clips made before it was kept are made again."""
-        m = node.made
+        m: MadeRecord = node.made or {}
         own = m.get("own_sound")
         if not own or not (self.project / own).is_file():
             return False
@@ -307,7 +308,7 @@ class Checker:
         if self.status(nid) != "changed":
             return ""
         node = self.tree.nodes[nid]
-        m = node.made
+        m: MadeRecord = node.made or {}
         if node.is_video:
             return "its range, file or the video size changed"
         edited = changed_inputs(self.tree, nid)
@@ -359,7 +360,7 @@ def current_settings(project: Path, options: Options, tree: Tree | None = None) 
                                pika=float(pika.get("strength", 1.0)) if pika_on else None,
                                width=w, height=h, audio=options.get("audio", True),
                                turbo=(turbo["lora"], turbo.get("strength", 1.0)) if turbo_on else None,
-                               cfg=float((turbo if turbo_on else hyper if hyper_on else pika if pika_on
-                                          else options).get("cfg", 1.0)),
+                               cfg=float(cast(dict[str, Any], turbo if turbo_on else hyper if hyper_on
+                                              else pika if pika_on else options).get("cfg", 1.0)),
                                backend="comfyui",
                                style=(style.get("prefix") or "", style.get("suffix") or ""))

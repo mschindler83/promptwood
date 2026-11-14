@@ -14,7 +14,8 @@ def clip_length(tree: Tree, node: Node) -> int:
     if node.is_video:
         if node.made and node.made.get("frames"):
             return int(node.made["frames"])
-        return chain.range_frames(node.source["start"], node.source["end"])
+        src = node.source or {}
+        return chain.range_frames(src["start"], src["end"])
     return int((node.overrides or {}).get("frames", tree.options.get("frames", DEFAULT_FRAMES)))
 
 
