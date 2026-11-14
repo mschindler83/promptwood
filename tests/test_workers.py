@@ -5,6 +5,7 @@ import threading
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import shiboken6
 from PySide6.QtCore import QObject
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -55,9 +56,7 @@ def test_nothing_is_delivered_to_a_deleted_owner():
     gate, got, errs = threading.Event(), [], []
     owner = QObject()
     run_in_background(lambda: gate.wait(5), on_done=got.append, on_error=errs.append, owner=owner)
-    owner.deleteLater()
-    app.sendPostedEvents(None, 0)             # (delete it now)
-    del owner
+    shiboken6.delete(owner)                   # (its C++ object is gone, the Python name is not)
     gate.set()
     done, other = [], QWidget()
     run_in_background(lambda: 1, on_done=done.append, owner=other)
