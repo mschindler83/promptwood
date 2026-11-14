@@ -586,6 +586,36 @@ def label_loras(items: list[tuple[str, str]]) -> list[tuple[str, str]]:
     return out
 
 
+class FileDrop(QObject):
+    """Makes a widget take files dropped on it: on_files(list of local paths). accept(): whether it takes them now.
+    (For a list or other scroll area pass its viewport(): that is where the drop arrives.)"""
+
+    def __init__(self, widget: QWidget, on_files, accept=lambda: True):
+        super().__init__(widget)
+        self.on_files, self.accept = on_files, accept
+        widget.setAcceptDrops(True)
+        widget.installEventFilter(self)
+
+    @staticmethod
+    def _files(e) -> list[str]:
+        md = e.mimeData()
+        return [u.toLocalFile() for u in md.urls() if u.isLocalFile()] if md.hasUrls() else []
+
+    def eventFilter(self, obj, e):
+        kind = e.type()
+        if kind in (e.Type.DragEnter, e.Type.DragMove):
+            if self._files(e) and self.accept():
+                e.acceptProposedAction()
+                return True
+        elif kind == e.Type.Drop:
+            files = self._files(e)
+            if files and self.accept():
+                e.acceptProposedAction()
+                self.on_files(files)
+                return True
+        return False
+
+
 class _Bridge(QObject):
     joined = Signal(object, object, str, str, str)  # path or None, error or None, purpose, status prefix, project
     film = Signal(object, object, str)               # the joined film or None, error or None, 'play' / 'export'
@@ -742,6 +772,7 @@ class PromptCard(QFrame):
     lora_picked = Signal(str, str)             # node id, LoRA path chosen in the picker
     action = Signal(str, str)                  # action, node id
     keyframe = Signal(str, str, object)        # keyframe action, node id, {"index", "at"}
+    end_dropped = Signal(str, str)             # node id, a picture dropped on the end of the clip
     play = Signal(str)
     leadChanged = Signal(str, bool)            # node id, the lead switch (the lead chip)
     modelPrompt = Signal(str)                  # node id: show the exact prompt the model gets
@@ -1036,6 +1067,9 @@ class PromptCard(QFrame):
         erow.addWidget(self.b_end_ai)
         erow.addWidget(self.b_end_clear)
         link.addRow("End", erow)
+        for w in (self.end_text, self.end_thumb):          # (a picture dropped here is the end image)
+            FileDrop(w, lambda files: self.end_dropped.emit(self.nid, files[0]),
+                     lambda: self._end_free and not self.edit.isReadOnly())
         kbox = QVBoxLayout()
         kbox.setSpacing(2)
         krow = QHBoxLayout()
@@ -2280,6 +2314,8 @@ class MainWindow(QMainWindow):
                                "In a clip's prompt the first one is <Audio 1>, the second "
                                "<Audio 2> ... Double-click to listen")
         self.sounds.itemDoubleClicked.connect(lambda _i: self._play_sound())
+        FileDrop(self.sounds.viewport(), lambda files: [self.add_sound(f) for f in files],
+                 lambda: self.project is not None)
         self.sounds.currentRowChanged.connect(lambda _r: self._update_sound_buttons())
         av.addWidget(self.sounds)
         arow = QHBoxLayout()
@@ -2945,6 +2981,10 @@ class MainWindow(QMainWindow):
         self._model_timer.start()
 
         self.start_tile.clicked.connect(lambda _t: self._choose_image())
+        for lst in (self.refs, self.cast_list):          # pictures dropped on the cast are faces / pictures of it
+            FileDrop(lst.viewport(), lambda files: [self.add_reference(f) for f in files],
+                     lambda: self.project is not None)
+        FileDrop(self, self._dropped_on_window)         # a project folder dropped anywhere on the window
         self.start_tile.dropped.connect(lambda f: self.set_image(f, confirm=True))
         for sig in (self.frames.currentIndexChanged, self.resolution.currentIndexChanged,
                     self.aspect.currentIndexChanged,
@@ -3931,6 +3971,16 @@ class MainWindow(QMainWindow):
         if self.open_project((Path(target) / getattr(self, "_copy_scene", ".")).resolve(),
                              scene=getattr(self, "_copy_scene_id", None)):
             self.status.setText(f"Saved as {Path(target).name}; you are working in the copy now.")
+
+    def _dropped_on_window(self, files: list[str]):
+        """A project folder (or its tree.json) dropped on the window opens it."""
+        f = Path(files[0])
+        folder = f.parent if f.name == T.TREE_FILE else f
+        if folder.is_dir() and self._is_project(folder):
+            self.open_project(folder)
+        else:
+            self.status.setText(f"{f.name} is not a project: drop a project folder here to open it, "
+                                "or pictures on the cast, sounds on the sounds, a picture on a clip's end.")
 
     def close_project(self):
         if self.project is None or not self._idle_or_say():
@@ -6610,6 +6660,7 @@ class MainWindow(QMainWindow):
                              known)
             card.action.connect(self.node_action)
             card.keyframe.connect(self.keyframe_action)
+            card.end_dropped.connect(self.set_end_image)
             card.play.connect(self._play_node)
             card.leadChanged.connect(self.set_clip_lead)
             card.modelPrompt.connect(self.show_model_prompt)

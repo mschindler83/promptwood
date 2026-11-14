@@ -346,3 +346,57 @@ def test_the_graph_keys_are_in_the_table():
     from video_chain.ui import shortcuts as S
     ids = {s.id for s in S.SHORTCUTS}
     assert {"graph_delete", "graph_fit"} <= ids
+
+
+# ---------------------------------------------------------------- UX-9: more drop targets than the start tile
+def _drop(widget, *paths):
+    from PySide6.QtCore import QMimeData, QPoint, QPointF, QUrl, Qt
+    from PySide6.QtGui import QDragEnterEvent, QDropEvent
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(p)) for p in paths])
+    pos = QPoint(5, 5)
+    enter = QDragEnterEvent(pos, Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier)
+    QApplication.sendEvent(widget, enter)
+    drop = QDropEvent(QPointF(pos), Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier)
+    QApplication.sendEvent(widget, drop)
+    return enter.isAccepted()
+
+
+def test_a_project_folder_dropped_on_the_window_opens(app, win, tmp_path, image):
+    new_project(win, tmp_path, image, ("a",))
+    folder = win.project
+    win.close_project()
+    assert _drop(win, folder)
+    assert win.project == folder.resolve()
+
+
+def test_a_dropped_non_project_says_so(app, win, tmp_path):
+    (tmp_path / "plain").mkdir()
+    win.open_project(tmp_path / "proj")
+    assert _drop(win, tmp_path / "plain")
+    assert win.project == (tmp_path / "proj").resolve() and "project" in win.status.text()
+
+
+def test_pictures_dropped_on_the_references_are_added(app, win, tmp_path, image):
+    new_project(win, tmp_path, image, ("a",))
+    added = []
+    win.add_reference = lambda path, crop="ask": added.append(path) or True
+    assert _drop(win.refs.viewport(), image)
+    assert added == [str(image)]
+
+
+def test_sounds_dropped_on_the_sounds_are_added(app, win, tmp_path, image):
+    new_project(win, tmp_path, image, ("a",))
+    added = []
+    win.add_sound = lambda path, name=None: added.append(path) or True
+    wav = tmp_path / "s.wav"
+    wav.write_bytes(b"x")
+    assert _drop(win.sounds.viewport(), wav)
+    assert added == [str(wav)]
+
+
+def test_a_picture_dropped_on_the_end_of_a_clip_sets_it(app, win, tmp_path, image):
+    ids = new_project(win, tmp_path, image, ("a",))
+    card = next(c for c in win.cards if c.nid == ids[0])
+    assert _drop(card.end_text, image)
+    assert win.tree.nodes[ids[0]].end_image
