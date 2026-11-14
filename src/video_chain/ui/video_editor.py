@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QDoubleSpinBox, QHBoxL
 from .. import chain, media
 from .theme import icon, theme, with_alpha
 from .dialogs import button_row
-from .widgets import fit_size, format_time, FrameTile, guard_wheel, icon_button, label, safe_emit, VideoView
+from .widgets import fit_size, format_time, FrameTile, guard_wheel, icon_button, label, safe_emit, VideoView, shortcut
 
 FPS = chain.FPS
 
@@ -373,8 +373,8 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
                         ("]", lambda: self.set_range(self.start, self.position(), moved="end")),
                         ("R", lambda: self.set_rotation(self.rotate + 90)),
                         ("Shift+R", lambda: self.set_rotation(self.rotate - 90))):
-            from PySide6.QtGui import QKeySequence, QShortcut
-            QShortcut(QKeySequence(key), self, activated=fn)
+            from PySide6.QtGui import QKeySequence
+            shortcut(QKeySequence(key), self, fn)
         self._pos = 0.0
         self._keep = None if file else (start, end)   # a missing file: its range (and turn) is kept for the one
                                                       # chosen again

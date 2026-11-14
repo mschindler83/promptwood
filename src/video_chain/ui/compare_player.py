@@ -16,7 +16,7 @@ from PySide6.QtWidgets import QHBoxLayout, QSlider, QToolButton, QVBoxLayout, QW
 
 from .. import chain, media
 from .theme import icon, theme
-from .widgets import icon_button, label, safe_emit
+from .widgets import icon_button, label, safe_emit, shortcut
 
 MEMORY_BUDGET = 900 * 2**20               # bytes for the stored frames of both clips (RGB, 3 bytes a pixel)
 MAX_SIZE = (1280, 720)                    # never stored larger than this (the view is smaller)
@@ -190,12 +190,12 @@ class ComparePlayer(QWidget):
         row.addWidget(self.hint)
         v.addLayout(row)
         self._controls(False)
-        from PySide6.QtGui import QKeySequence, QShortcut
+        from PySide6.QtGui import QKeySequence
         for key, fn in (("Space", self.toggle), ("Left", lambda: self.step(-1)), ("Right", lambda: self.step(1)),
                         ("Shift+Left", lambda: self.step(-round(self.fps))),
                         ("Shift+Right", lambda: self.step(round(self.fps))), ("Home", lambda: self.seek(0)),
                         ("End", lambda: self.seek(self.count() - 1))):
-            QShortcut(QKeySequence(key), self, activated=fn, context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            shortcut(QKeySequence(key), self, fn, context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
 
     @staticmethod
     def _button(text: str, tip: str, fn) -> QToolButton:

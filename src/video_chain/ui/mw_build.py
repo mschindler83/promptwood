@@ -4,7 +4,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from PySide6.QtCore import QSize, Qt, QTimer
-from PySide6.QtGui import QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
     QFrame, QHBoxLayout, QLineEdit, QListWidget, QMenu, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea,
@@ -20,7 +19,7 @@ from .guide import EngineBanner, GuidePanel, NextHint
 from .storyboard import Storyboard
 from .timeline import Timeline
 from .view_mode import AdvancedNote, row_widget
-from .widgets import guard_wheel, icon_button, label, section_bar
+from .widgets import guard_wheel, icon_button, label, section_bar, shortcut
 from .mw_support import FileDrop, _CurrentStack
 from .preview import Preview, StartTile
 from .ui_logic import (
@@ -1109,12 +1108,12 @@ class BuildMixin(MainWindowHost):
                         ("variant", lambda: self.node_action("variant", self.target_id())),
                         ("generate", self.generate_path), ("generate_all", self.generate_all),
                         ("prev_clip", lambda: self._step_focus(-1)), ("next_clip", lambda: self._step_focus(1))):
-            QShortcut(S.sequence(sid), self, activated=fn)
+            shortcut(S.sequence(sid), self, fn)
         for w in (*self._panels, self.prefs):
             guard_wheel(w)
         # plain keys act only while the graph (or a child) has the focus: in a list or a combo, Delete / F are theirs
         self.graph.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         for sid, fn in (("graph_delete", lambda: self.node_action("delete", self.target_id())),
                         ("graph_fit", self.graph.fit)):
-            sc = QShortcut(S.sequence(sid), self.graph, activated=fn)
+            sc = shortcut(S.sequence(sid), self.graph, fn)
             sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)

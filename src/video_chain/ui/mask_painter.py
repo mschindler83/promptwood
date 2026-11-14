@@ -6,12 +6,12 @@ Erase tool) takes it away; Ctrl + wheel changes the brush. The mask is kept at t
 from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QShortcut
+from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen
 from PySide6.QtWidgets import (QButtonGroup, QDialog, QHBoxLayout, QPushButton, 
                                QSlider, QVBoxLayout, QWidget)
 
 from .dialogs import button_row, confirm
-from .widgets import fit_size, label, smooth_scaled
+from .widgets import fit_size, label, smooth_scaled, shortcut
 
 MASK_COLOUR = QColor(255, 40, 40, 120)
 UNDO_STEPS = 30                 # steps kept; each holds only the area it changed (Clear and Invert: the whole mask)
@@ -62,6 +62,8 @@ def overlay(image: QImage, mask: QImage | None) -> QImage:
 class MaskCanvas(QWidget):
     """The image and its mask; paints with a round brush in image pixels."""
     changed = Signal()
+    # (the white-is-drawn picture; the name shadows QWidget.mask(), which this app never calls)
+    mask: QImage  # type: ignore[assignment]
 
     def __init__(self, image: QImage, mask: QImage | None = None, parent=None):
         super().__init__(parent)
@@ -117,6 +119,7 @@ class MaskCanvas(QWidget):
         p.fillRect(self.rect(), QColor(20, 20, 22))
         f = self._frame()
         self._ensure_display()
+        assert self._shown is not None and self._tint is not None      # (made by _ensure_display)
         p.drawImage(f.topLeft(), self._shown[1])
         p.setOpacity(MASK_COLOUR.alphaF())
         p.drawImage(f.topLeft(), self._tint)
@@ -165,6 +168,7 @@ class MaskCanvas(QWidget):
         self._dab(pos, pos, erase)
 
     def _stroke_to(self, pt: QPointF) -> None:
+        assert self._last is not None                  # (a stroke is in progress)
         self._dab(self._last, pt, self._stroke_erase)
         self._last = pt
 
@@ -254,6 +258,7 @@ class MaskCanvas(QWidget):
 
 class MaskPainterDialog(QDialog):
     """Paint a mask over image (a QImage at its own size). .mask: the result (Format_Grayscale8)."""
+    size: QSlider  # type: ignore[assignment]   # (the brush size; the name shadows QWidget.size(), never called here)
 
     def __init__(self, parent, image: QImage, mask: QImage | None = None):
         super().__init__(parent)
@@ -295,13 +300,13 @@ class MaskPainterDialog(QDialog):
         v.addLayout(row)
         buttons, _ok = button_row(self, "Use this mask")
         v.addWidget(buttons)
-        QShortcut(QKeySequence.StandardKey.Undo, self, activated=self.canvas.undo)
+        shortcut(QKeySequence.StandardKey.Undo, self, self.canvas.undo)
         for key in (QKeySequence.StandardKey.Redo, QKeySequence("Ctrl+Y")):
-            QShortcut(key, self, activated=self.canvas.redo)
-        QShortcut(QKeySequence("["), self, activated=lambda: self.canvas.set_brush(round(self.canvas.brush / 1.15) - 1))
-        QShortcut(QKeySequence("]"), self, activated=lambda: self.canvas.set_brush(round(self.canvas.brush * 1.15) + 1))
-        QShortcut(QKeySequence("B"), self, activated=self.b_paint.click)
-        QShortcut(QKeySequence("E"), self, activated=self.b_erase.click)
+            shortcut(key, self, self.canvas.redo)
+        shortcut(QKeySequence("["), self, lambda: self.canvas.set_brush(round(self.canvas.brush / 1.15) - 1))
+        shortcut(QKeySequence("]"), self, lambda: self.canvas.set_brush(round(self.canvas.brush * 1.15) + 1))
+        shortcut(QKeySequence("B"), self, self.b_paint.click)
+        shortcut(QKeySequence("E"), self, self.b_erase.click)
         self._start = self.canvas.mask.copy()            # (to tell, when closing, whether work would be lost)
         self.canvas.changed.connect(self._show_area)
         self._show_area()
@@ -324,5 +329,5 @@ class MaskPainterDialog(QDialog):
             self.size.blockSignals(False)
 
     @property
-    def mask(self) -> QImage:
+    def mask(self) -> QImage:  # type: ignore[override]   # (shadows QWidget.mask(), which this app never uses)
         return self.canvas.mask

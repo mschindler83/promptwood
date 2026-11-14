@@ -30,6 +30,15 @@ TERMS = {
 }
 
 
+def shortcut(key, parent: QWidget, fn, context=None) -> QShortcut:
+    """A keyboard shortcut that calls fn (the PySide6 stubs know the signal, not its use as a keyword argument)."""
+    sc = QShortcut(key, parent)
+    if context is not None:
+        sc.setContext(context)
+    sc.activated.connect(fn)
+    return sc
+
+
 def safe_emit(signal, *args) -> bool:
     """Emit a signal from a worker thread. A window that is already closed has no receiver any more (PySide then
     raises RuntimeError): there is nobody to tell. True when it was emitted."""
@@ -485,7 +494,7 @@ class FrameStepper(QWidget):
             row.addWidget(b)
         row.addWidget(self.label)
         for key, step in (("Left", -1), ("Right", 1), ("Shift+Left", -sec), ("Shift+Right", sec)):
-            QShortcut(QKeySequence(key), host, activated=lambda s=step: self.step(s))
+            shortcut(QKeySequence(key), host, lambda s=step: self.step(s))
         self.slider.valueChanged.connect(self._moved)
         self.slider.valueChanged.connect(self.valueChanged)
 

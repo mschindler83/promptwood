@@ -12,7 +12,7 @@ import threading
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QPointF, QRectF, QSettings, Qt, QUrl, Signal
-from PySide6.QtGui import QKeySequence, QPainter, QPen, QShortcut
+from PySide6.QtGui import QKeySequence, QPainter, QPen
 from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout,
                                QLineEdit, QPushButton, QVBoxLayout)
 
@@ -21,7 +21,7 @@ from ..tree import AUDIO_REF_MIN, VOICE_MAX_SECS, VOICE_REF_MAX_SECS
 from .theme import theme, with_alpha
 from .video_editor import RangeBar, RangePlayerMixin, fmt
 from .dialogs import button_row
-from .widgets import fit_size, guard_wheel, icon_button, label, safe_emit
+from .widgets import fit_size, guard_wheel, icon_button, label, safe_emit, shortcut
 
 PEAKS = 1200                                    # waveform columns
 
@@ -254,7 +254,7 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
         v.addWidget(self.buttons)
         for key, fn in (("Space", self.toggle), ("[", lambda: self.set_range(self.position(), self.end)),
                         ("]", lambda: self.set_range(self.start, self.position(), moved="end"))):
-            QShortcut(QKeySequence(key), self, activated=fn)
+            shortcut(QKeySequence(key), self, fn)
         if file:
             self.load(file, start, end)
         self._update_enabled()

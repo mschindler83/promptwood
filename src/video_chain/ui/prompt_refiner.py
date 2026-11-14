@@ -9,7 +9,7 @@ import threading
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QIcon, QImage, QKeySequence, QPixmap, QShortcut
+from PySide6.QtGui import QIcon, QImage, QKeySequence, QPixmap
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLineEdit, QPlainTextEdit,
                                QPushButton, QSpinBox, QTextBrowser, QToolButton, QVBoxLayout, QWidget)
 
@@ -18,7 +18,7 @@ from .lora_details import themed
 from .theme import repolish, theme
 from .dialogs import add_action, button_row
 from .text_edit import replace_text  # noqa: F401  (main_window and image_edit import it from here)
-from .widgets import fit_size, guard_wheel, icon_button, label, safe_emit
+from .widgets import fit_size, guard_wheel, icon_button, label, safe_emit, shortcut
 
 LIKE_EXAMPLE = ("Rewrite my prompt in the manner of this example prompt, which is known to work with the LoRA: take "
                 "its wording, its structure and its level of detail. Keep what my prompt is about (my subjects, my "
@@ -212,7 +212,7 @@ class RefineDialog(QDialog):
         v.addWidget(self.buttons)
         self.out.textChanged.connect(lambda: self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(
             bool(self.out.toPlainText().strip()) and not self._busy))
-        QShortcut(QKeySequence("Ctrl+Return"), self, activated=lambda: self.refine())
+        shortcut(QKeySequence("Ctrl+Return"), self, lambda: self.refine())
         guard_wheel(self)
         self._show_pictures()
         self._mode_changed()

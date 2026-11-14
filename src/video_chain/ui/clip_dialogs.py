@@ -6,14 +6,14 @@ import threading
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QImage, QKeySequence, QShortcut
+from PySide6.QtGui import QImage, QKeySequence
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QGridLayout, QHBoxLayout,
                                QPushButton, QSlider, QVBoxLayout, QWidget)
 
 from .. import chain, media
 from .theme import icon
 from .dialogs import add_action, button_row
-from .widgets import fit_size, FrameStepper, FrameTile, icon_button, label, safe_emit, VideoView
+from .widgets import fit_size, FrameStepper, FrameTile, icon_button, label, safe_emit, VideoView, shortcut
 
 FPS = chain.FPS
 PREVIEW_W = 480                    # frames are decoded once at this width, so scrubbing is instant
@@ -205,7 +205,7 @@ class CompareDialog(QDialog):
         v.addLayout(ctl)
         close, _none = button_row(self)
         v.addWidget(close)
-        QShortcut(QKeySequence("Space"), self, activated=self.toggle)
+        shortcut(QKeySequence("Space"), self, self.toggle)
         for w in (self.b_play, self.b_restart, self.slider, self.loop, self.sound):
             w.setEnabled(bool(self.players))
         if self.players:

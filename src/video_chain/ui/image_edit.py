@@ -19,7 +19,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, QSize, QTimer, Qt, Signal, QObject
-from PySide6.QtGui import QImage, QKeySequence, QPixmap, QShortcut
+from PySide6.QtGui import QImage, QKeySequence, QPixmap
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFrame, QGridLayout,
                                QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QProgressBar,
                                QPushButton, QScrollArea, QSlider, QSpinBox, QStackedWidget, QVBoxLayout, QWidget)
@@ -44,7 +44,7 @@ from .imageio import decode_upright as _decode_upright, upright  # noqa: F401  (
 from .lora_stack import LoraStack
 from .results_gallery import InfoCard, ResultGallery, ResultView, ThumbLoader
 from .variations_panel import PlaceholderHighlighter, VariationsPanel
-from .widgets import FrameTile, fit_size, guard_wheel, icon_button, label
+from .widgets import FrameTile, fit_size, guard_wheel, icon_button, label, shortcut
 
 
 class _FamiliesSignal(QObject):
@@ -569,11 +569,11 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         return right
 
     def _add_shortcuts(self):
-        QShortcut(QKeySequence("Ctrl+Return"), self, activated=self.generate)
+        shortcut(QKeySequence("Ctrl+Return"), self, self.generate)
         for key, fn in (("Delete", self.delete_selected), ("B", self.b_before.toggle),
                         ("F", lambda: self.toggle_favorite())):
             for w in (self.results, self.gallery):
-                sc = QShortcut(QKeySequence(key), w, activated=fn)
+                sc = shortcut(QKeySequence(key), w, fn)
                 sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)  # only while the results have the focus
         for b in self.findChildren(QPushButton):              # Enter in a field must not press a button
             b.setAutoDefault(False)
