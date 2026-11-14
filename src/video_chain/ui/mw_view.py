@@ -17,7 +17,7 @@ from . import shortcuts as S
 from .clip_cards import PromptCard
 from .graph import START
 from .mw_nodes import NODE_ACTIONS
-from .ui_logic import (COMFY_START_TIMEOUT, DEFAULT_COMFY_LAUNCHER, LAYOUTS, LAYOUT_VERSION, as_dict,
+from .ui_logic import (COMFY_START_TIMEOUT, DEFAULT_COMFY_LAUNCHER, LAYOUTS, LayoutState, as_dict,
                        project_setting_changes)
 from .mw_host import MainWindowHost
 from .qsvalue import qs_value
@@ -378,25 +378,15 @@ class ViewMixin(MainWindowHost):
     def _restore_layout(self):
         """The layout of the last session; the default one if there is none, it was saved by an older version or
         it is damaged."""
-        try:
-            d = json.loads(qs_value(self.qs, "layout", "", str) or "{}")
-            split, center = d["split"], d["center"]
-            ok = (d.get("v") == LAYOUT_VERSION and len(split) == 3 and len(center) == 2
-                  and all(isinstance(x, int) and x >= 0 for x in split + center)
-                  and split[1] > 0 and split[2] > 0 and all(x > 0 for x in center))
-            left_w = int(d.get("left_w") or 0)
-        except (TypeError, ValueError, KeyError, AttributeError):
-            ok = False
-        if not ok:
+        saved = LayoutState.from_json(qs_value(self.qs, "layout", "", str))
+        if saved is None:
             self.apply_layout("edit")
             return
-        if left_w > 0:
-            self._left_w = left_w
-        elif split[0] > 0:
-            self._left_w = split[0]
-        self.split.setSizes(split)
-        self.act_left.setChecked(bool(d.get("left", True)))
-        self.center.setSizes(center)
+        if saved.left_width() > 0:
+            self._left_w = saved.left_width()
+        self.split.setSizes(saved.split)
+        self.act_left.setChecked(saved.left)
+        self.center.setSizes(saved.center)
 
     def show_prefs(self):
         """ComfyUI's address, launcher, folder and the model / trigger word settings (not modal: the status bar

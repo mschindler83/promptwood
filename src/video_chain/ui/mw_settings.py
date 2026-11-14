@@ -9,7 +9,7 @@ from PySide6.QtCore import Qt
 from .. import runpod as RP, tree as T, triggers
 from . import ui_logic as UL
 from .ui_logic import (
-    DEFAULT_COMFY_LAUNCHER, DEFAULT_COMFY_URL, LAYOUT_VERSION, LLM_DEFAULT_PORT, LLM_DEFAULT_SERVER, MAX_RECENT)
+    DEFAULT_COMFY_LAUNCHER, DEFAULT_COMFY_URL, LLM_DEFAULT_PORT, LLM_DEFAULT_SERVER, MAX_RECENT)
 from .mw_host import MainWindowHost
 from .qsvalue import qs_value
 from .workers import run_in_background
@@ -107,10 +107,9 @@ class SettingsMixin(MainWindowHost):
         if self.tree is not None:
             q.setValue("lastOptions", json.dumps(self.tree.options))
         q.setValue("geometry", self.saveGeometry())
-        q.setValue("layout", json.dumps({"v": LAYOUT_VERSION, "split": self.split.sizes(),
-                                         "center": self.center.sizes(), "left": self.act_left.isChecked(),
-                                         "left_w": (self.split.sizes()[0] if self.act_left.isChecked() else 0)
-                                         or self._left_w}))
+        split, shown = self.split.sizes(), self.act_left.isChecked()
+        q.setValue("layout", UL.LayoutState(split, self.center.sizes(), shown,
+                                            (split[0] if shown else 0) or self._left_w).to_json())
         q.sync()
 
     # ---- recent projects

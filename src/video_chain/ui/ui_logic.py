@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import re
 from collections import Counter
 from dataclasses import dataclass
@@ -204,6 +205,37 @@ STEPS_TIP = ("Steps: how many times the model refines each clip (sampling steps)
 STEPS_UNSET = 3        # the per-clip steps box at its lowest value means "the project's steps" (nothing set)
 
 LAYOUT_VERSION = 1
+@dataclass(frozen=True)
+class LayoutState:
+    """The panel sizes saved with the window: the three columns, the centre's two rows, whether the left panel is
+    shown and the width it had (kept while it is hidden)."""
+    split: list[int]
+    center: list[int]
+    left: bool = True
+    left_w: int = 0
+
+    def to_json(self) -> str:
+        return json.dumps({"v": LAYOUT_VERSION, "split": self.split, "center": self.center, "left": self.left,
+                           "left_w": self.left_w})
+
+    @classmethod
+    def from_json(cls, text: str) -> LayoutState | None:
+        """The saved layout, or None when it is empty, damaged or from another version of the layout."""
+        try:
+            d = json.loads(text or "{}")
+            split, center = d["split"], d["center"]
+            ok = (d.get("v") == LAYOUT_VERSION and len(split) == 3 and len(center) == 2
+                  and all(isinstance(x, int) and x >= 0 for x in split + center)
+                  and split[1] > 0 and split[2] > 0 and all(x > 0 for x in center))
+            return cls(split, center, bool(d.get("left", True)), int(d.get("left_w") or 0)) if ok else None
+        except (TypeError, ValueError, KeyError, AttributeError):
+            return None
+
+    def left_width(self) -> int:
+        """The width the left panel gets back when shown: the saved one, else the column's width."""
+        return self.left_w if self.left_w > 0 else self.split[0]
+
+
 # preset: shares of the width (left panel, viewer, inspector) and of the centre's height for the viewer
 LAYOUTS = {"edit": (0.20, 0.58, 0.22, 0.62), "write": (0.17, 0.51, 0.32, 0.55), "watch": (0.0, 0.84, 0.16, 0.70)}
 

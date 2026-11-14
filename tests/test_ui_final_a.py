@@ -492,3 +492,19 @@ def test_bars_and_the_preview_slider_have_accessible_names(app, win, tmp_path, i
     assert win.preview.slider.accessibleName() == "Position in the video"
     card = next(c for c in win.cards if c.nid == ids[0])
     assert card.bar.accessibleName() == "Progress of this clip"
+
+
+# ------------------------------------------------------------------ MWB-25: the saved layout is a LayoutState
+def test_layout_state_round_trips_and_refuses_damage():
+    from video_chain.ui.ui_logic import LAYOUT_VERSION, LayoutState
+    st = LayoutState(split=[200, 700, 300], center=[500, 300], left=True, left_w=200)
+    assert LayoutState.from_json(st.to_json()) == st
+    for bad in ("", "not json", "{}", '{"v": 0, "split": [1,2,3], "center": [1,2]}',
+                f'{{"v": {LAYOUT_VERSION}, "split": [1,0,3], "center": [1,2]}}',
+                f'{{"v": {LAYOUT_VERSION}, "split": [1,2], "center": [1,2]}}',
+                f'{{"v": {LAYOUT_VERSION}, "split": [1,2,"x"], "center": [1,2]}}'):
+        assert LayoutState.from_json(bad) is None, bad
+    hidden = LayoutState.from_json(LayoutState([0, 800, 300], [500, 300], False, 0).to_json())
+    assert hidden is not None and hidden.left_width() == 0
+    assert LayoutState([0, 800, 300], [500, 300], False, 250).left_width() == 250     # (the width it had when hidden)
+    assert LayoutState([260, 800, 300], [500, 300], True, 0).left_width() == 260
