@@ -43,6 +43,14 @@ class Variable:
         return [v for v in self.values if v.on]
 
 
+def _weight(x) -> int:
+    """A weight from stored or imported data: a whole number of at least 1 (anything else counts as 1)."""
+    try:
+        return max(1, int(x))
+    except (ValueError, TypeError, OverflowError):
+        return 1
+
+
 def names_in(*templates: str) -> list[str]:
     """The placeholder names used in the templates, in order of first appearance."""
     out: list[str] = []
@@ -102,8 +110,6 @@ class Plan:
         self.total = 1
         for v in self.vars:
             self.total *= len(v.active())
-        if not self.vars:
-            self.total = 1
 
     def combination(self, index: int) -> dict[str, str]:
         out, index = {}, index % max(1, self.total)
@@ -122,8 +128,18 @@ class Plan:
         return idx
 
     def random_combination(self, rng: random.Random) -> dict[str, str]:
-        return {v.name: rng.choices([x.text for x in v.active()], weights=[max(1, x.weight) for x in v.active()])[0]
-                for v in self.vars}
+        return self.random_pick(rng)[0]
+
+    def random_pick(self, rng: random.Random) -> tuple[dict[str, str], int]:
+        """A weighted random combination and its number (as combination() counts: the picked positions)."""
+        combo, idx, mul = {}, 0, 1
+        for v in self.vars:
+            vals = v.active()
+            pos = rng.choices(range(len(vals)), weights=[max(1, x.weight) for x in vals])[0]
+            combo[v.name] = vals[pos].text
+            idx += pos * mul
+            mul *= len(vals)
+        return combo, idx
 
     def shuffled(self, seed: int) -> list[int] | None:
         if self.total > SHUFFLE_LIMIT:
@@ -143,29 +159,33 @@ class Job:
     key: str = ""                 # (the panel's position key it was planned under)
 
 
-def plan_jobs(variables: list[Variable], prompt: str, negative: str = "", mode: str = "order", repeat: int = 1,
-              count: int | None = None, start: int = 0, seed: int = 0) -> list[Job]:
-    """The prompts of the next Generate: count images (None: every combination once, each `repeat` times),
-    from position `start` (order / shuffle continue there; random uses it only to vary its picks)."""
+def iter_jobs(variables: list[Variable], prompt: str, negative: str = "", mode: str = "order", repeat: int = 1,
+              count: int | None = None, start: int = 0, seed: int = 0):
+    """The prompts of the next Generate, one Job at a time (see plan_jobs)."""
     plan = Plan(variables, prompt, negative)
     repeat = max(1, int(repeat))
     n = min(MAX_IMAGES, plan.total * repeat if count is None else max(0, int(count)))
     order = plan.shuffled(seed) if mode == "shuffle" else None
     rng = random.Random(f"{seed}:{start}")
-    jobs = []
     combo: dict[str, str] = {}
+    index = 0
     for k in range(n):
         step = start + k
         if mode == "random" or (mode == "shuffle" and order is None):
             if k % repeat == 0:
-                combo = plan.random_combination(rng)
-            index = plan.index_of(combo)
+                combo, index = plan.random_pick(rng)
         else:
             pos = (step // repeat) % plan.total
             index = order[pos] if order is not None else pos
             combo = plan.combination(index)
-        jobs.append(Job(step, index, dict(combo), substitute(prompt, combo), substitute(negative, combo)))
-    return jobs
+        yield Job(step, index, dict(combo), substitute(prompt, combo), substitute(negative, combo))
+
+
+def plan_jobs(variables: list[Variable], prompt: str, negative: str = "", mode: str = "order", repeat: int = 1,
+              count: int | None = None, start: int = 0, seed: int = 0) -> list[Job]:
+    """The prompts of the next Generate: count images (None: every combination once, each `repeat` times),
+    from position `start` (order / shuffle continue there; random uses it only to vary its picks)."""
+    return list(iter_jobs(variables, prompt, negative, mode, repeat, count, start, seed))
 
 
 # ---- the Dynamic Prompter node's JSON ({"p1": ["a", "b"], "p2": [["c", 3], "d"]}) and wildcard files
@@ -182,9 +202,9 @@ def from_json(text: str) -> list[Variable]:
             if isinstance(v, list) and not v:
                 continue                                    # (an empty list is no value)
             if isinstance(v, list):
-                var.values.append(Value(str(v[0]), int(v[1]) if len(v) > 1 and str(v[1]).isdigit() else 1))
+                var.values.append(Value(str(v[0]), _weight(v[1]) if len(v) > 1 else 1))
             elif isinstance(v, dict):
-                var.values.append(Value(str(v.get("text", "")), int(v.get("weight", 1) or 1), bool(v.get("on", True))))
+                var.values.append(Value(str(v.get("text", "")), _weight(v.get("weight", 1)), bool(v.get("on", True))))
             else:
                 var.values.append(Value(str(v)))
         out.append(var)
@@ -206,7 +226,7 @@ def from_state(state) -> list[Variable]:
     out = []
     for d in state or []:
         if isinstance(d, dict) and re.fullmatch(NAME, str(d.get("name", ""))):
-            out.append(Variable(d["name"], [Value(str(x.get("text", "")), int(x.get("weight", 1) or 1),
+            out.append(Variable(d["name"], [Value(str(x.get("text", "")), _weight(x.get("weight", 1)),
                                                   bool(x.get("on", True)))
                                             for x in d.get("values") or [] if isinstance(x, dict)]))
     return out
