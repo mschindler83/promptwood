@@ -261,3 +261,19 @@ def test_the_image_dialog_takes_its_services_as_one_object_and_the_old_keywords_
     old.reject()
     with pytest.raises(TypeError):
         ImageEditDialog(None, tmp_path, [], None, None)
+
+
+def test_the_swap_letterbox_turns_a_phone_photo_upright(app, tmp_path):
+    from PIL import Image
+
+    from video_chain.ui.swap_dialog import letterbox
+    im = Image.new("RGB", (40, 20), "red")                 # stored wide, EXIF says: turn it (portrait)
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    src = tmp_path / "p.jpg"
+    im.save(src, exif=exif)
+    out = tmp_path / "o.png"
+    assert letterbox(str(src), out, 100)
+    got = Image.open(out).convert("RGB")
+    # upright = 20 wide x 40 high: red in the middle columns, black bars left and right
+    assert got.getpixel((50, 50))[0] > 200 and got.getpixel((5, 50)) == (0, 0, 0)

@@ -26,6 +26,7 @@ from .compare_player import ComparePlayer
 from .dialogs import confirm
 from .face_crop import FaceCropDialog
 from .image_picker import pick_image
+from .imageio import upright
 from .theme import theme
 from .widgets import fit_size, FrameTile, guard_wheel, label
 from .qsvalue import qs_value
@@ -40,7 +41,7 @@ METHODS = (("animate+lock", "Head + face lock (Animate, then face swap)"), ("ani
 def letterbox(src: str, dest, size: int, crop: tuple[int, int, int] | None = None) -> bool:
     """The picture (cut to the square crop (x, y, side) first, when given) fitted into a size x size square, centred
     on black (the head swap LoRA's reference format)."""
-    img = QImage(src)
+    img = upright(src)                            # (as the crop was chosen: a phone photo turned)
     if img.isNull():
         return False
     if crop is not None:
