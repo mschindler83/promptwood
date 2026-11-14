@@ -22,6 +22,7 @@ cannot be reached."""
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import threading
@@ -32,7 +33,10 @@ import urllib.request
 from pathlib import Path
 from typing import Callable
 
-from . import media
+from . import keys, media, net
+from .h3_prompt import contains_word
+
+logger = logging.getLogger(__name__)
 
 RECHECK_DAYS = 30
 SITES = ("https://civitai.com", "https://civitai.red")    # CivitAI's two sites (the first is the default)
@@ -85,11 +89,10 @@ def api_key() -> str:
     if env:
         return env
     if _API_KEY is None:
-        try:
-            import keyring
-            _API_KEY = (keyring.get_password(KEYRING_SERVICE, KEYRING_USER) or "").strip()
-        except Exception:  # noqa: BLE001  (no keyring now, e.g. locked: no key this time, asked again later)
+        found = keys.read_key(KEYRING_SERVICE, KEYRING_USER)
+        if found is None:                       # (no keyring now, e.g. locked: no key this time, asked again later)
             return ""
+        _API_KEY = found
     return _API_KEY
 
 
@@ -99,18 +102,7 @@ def set_api_key(key: str | None) -> None:
     global _API_KEY
     key = (key or "").strip()
     _REJECTED.discard(key)                              # (a key saved anew gets another chance)
-    try:
-        import keyring
-        import keyring.errors
-        if key:
-            keyring.set_password(KEYRING_SERVICE, KEYRING_USER, key)
-        else:
-            try:
-                keyring.delete_password(KEYRING_SERVICE, KEYRING_USER)
-            except keyring.errors.PasswordDeleteError:
-                pass
-    except Exception as e:  # noqa: BLE001
-        raise RuntimeError(f"the system keyring is not available ({e})") from e
+    keys.set_key(KEYRING_SERVICE, KEYRING_USER, key)
     _API_KEY = key
 
 
@@ -135,7 +127,8 @@ def _clean(words) -> list[str]:
 def file_words(path: str | Path) -> tuple[list[str] | None, str]:
     try:
         return _file_words(path)
-    except Exception:  # noqa: BLE001  (an odd header must not stop a scan)
+    except Exception as e:  # noqa: BLE001  (an odd header must not stop a scan)
+        logger.warning("file header of %s unreadable: %s", path, e)
         return None, ""
 
 
@@ -258,7 +251,7 @@ def _get_json(path: str, timeout: float, use_key: bool = True,
         data = None
         for attempt in (0, 1):
             try:
-                with urllib.request.urlopen(req, timeout=timeout) as r:
+                with net.urlopen(req, timeout) as r:
                     data = json.loads(r.read(MAX_ANSWER).decode("utf-8", "replace"))
                 break
             except urllib.error.HTTPError as e:
@@ -432,8 +425,8 @@ class TriggerDB:
             if isinstance(d, dict):
                 self.data = {"version": 1, "by_sha": dict(d.get("by_sha") or {}), "files": dict(d.get("files") or {})}
                 self._mtime = st.st_mtime_ns
-        except (OSError, ValueError):
-            pass
+        except (OSError, ValueError) as e:
+            logger.warning("the trigger database is not readable: %s", e)
 
     def save(self):
         """Write the database; what another process added in between is kept (merged, ours first)."""
@@ -623,8 +616,8 @@ class TriggerDB:
             for path in paths:
                 try:
                     total += os.path.isfile(path) and self.needs_lookup(path, key)
-                except (OSError, ValueError, TypeError, AttributeError):
-                    pass
+                except (OSError, ValueError, TypeError, AttributeError) as e:
+                    logger.debug("lookup count: %s", e)
 
         def flush(force=False):
             nonlocal dirty
@@ -668,8 +661,8 @@ class TriggerDB:
                 if progress:
                     try:
                         progress(n["looked"], max(total, n["looked"]), Path(path).name)
-                    except Exception:  # noqa: BLE001  (a window that is gone: the scan goes on)
-                        pass
+                    except Exception as e:  # noqa: BLE001  (a window that is gone: the scan goes on)
+                        logger.warning("the progress callback failed: %s", e)
                 try:
                     hit = lookup(sha) if lookup is not civitai_lookup else civitai_lookup(sha, stop=stop)
                 except OSError:
@@ -709,19 +702,20 @@ class TriggerDB:
                                                 new[part] = prev[part]
                                         if len(prev.get("examples") or []) > len(new.get("examples") or []):
                                             new["examples"] = prev["examples"]     # (a gallery read only in part)
-                                    except (OSError, ValueError):
-                                        pass
+                                    except (OSError, ValueError) as e:
+                                        logger.debug("merge of earlier details failed: %s", e)
                                 self._save_details(sha, new)
                                 rec["details"] = True
                                 base = (hit["details"].get("version") or {}).get("baseModel")
                                 if base:
                                     rec["base_model"] = str(base)
-                            except (OSError, TypeError, ValueError):
-                                pass
+                            except (OSError, TypeError, ValueError) as e:
+                                logger.debug("details not read: %s", e)
                         n["found"] += bool(hit["words"])
                     dirty += 1
                 flush()
-            except (OSError, ValueError, TypeError, AttributeError):
+            except (OSError, ValueError, TypeError, AttributeError) as e:
+                logger.warning("scan of a file failed: %s", e)
                 continue                               # a file that vanished or cannot be read: the next one
         flush(force=True)
         n["key_rejected"] = key_rejected() if online else False
@@ -755,7 +749,7 @@ def stack_words(paths: list[str], lookup: Callable[[str], list[str]] | None = No
 def with_triggers(prompt: str, words: list[str]) -> str:
     """The prompt with the trigger words in front (those it does not contain yet). In MiniMax's structured
     format they go at the start of the shot description."""
-    missing = [w for w in words if not re.search(r"(?<!\w)" + re.escape(w.lower()) + r"(?!\w)", (prompt or "").lower())]
+    missing = [w for w in words if not contains_word(prompt, w)]
     if not missing:
         return prompt
     lead = ", ".join(missing)

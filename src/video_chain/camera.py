@@ -8,7 +8,10 @@ Two ways in: a clip's own camera setting ({"move", "amplitude", "speed"}: one se
 """
 from __future__ import annotations
 
+import logging
 import re
+
+logger = logging.getLogger(__name__)
 
 # slug -> (label, phrase after "the camera", takes amplitude / speed)
 MOVES: dict[str, tuple[str, str, bool]] = {

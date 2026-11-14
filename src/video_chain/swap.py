@@ -8,6 +8,7 @@ soft edge: everything outside the head stays as it was, frame for frame, with th
 """
 from __future__ import annotations
 
+import logging
 import bisect
 import json
 import shutil
@@ -19,6 +20,8 @@ from pathlib import Path
 from typing import Callable, TypedDict
 
 from . import chain, faces, media
+
+logger = logging.getLogger(__name__)
 
 Box = tuple[float, float, float, float]            # x1, y1, x2, y2 in pixels
 Face = tuple[float, float, float, float, float]    # a Box and the detector's score

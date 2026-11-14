@@ -5,6 +5,7 @@ the gallery's text (prompts, settings); a picture is loaded only when the LoRA w
 Only CivitAI's picture server is asked, without the API key, and only for a picture address CivitAI gave."""
 from __future__ import annotations
 
+import logging
 import re
 import urllib.error
 import urllib.parse
@@ -12,6 +13,8 @@ import urllib.request
 from pathlib import Path
 
 from . import media, triggers
+
+logger = logging.getLogger(__name__)
 
 WIDTH = 320                      # pixels wide (CivitAI's server scales)
 MAX_BYTES = 4 * 2**20            # a small still is ~50 kB; more is not a still
@@ -135,8 +138,8 @@ def kept(db=None) -> tuple[int, int]:
             if f.is_file():
                 n += 1
                 size += f.stat().st_size
-    except OSError:
-        pass
+    except OSError as e:
+        logger.debug("cache size unknown: %s", e)
     return n, size
 
 
@@ -148,6 +151,6 @@ def forget(db=None) -> int:
             if f.is_file() and f.suffix in (".jpg", ".part"):
                 f.unlink(missing_ok=True)
                 n += 1
-    except OSError:
-        pass
+    except OSError as e:
+        logger.warning("cache not fully cleared: %s", e)
     return n

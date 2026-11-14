@@ -15,6 +15,7 @@ Output folder:
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import shutil
@@ -25,6 +26,8 @@ from typing import Callable, Protocol
 
 from . import media
 from .media import MediaError
+
+logger = logging.getLogger(__name__)
 
 FPS = 24
 HYPERFLOW_STEPS = 8      # HyperFlow's trained sigma grid

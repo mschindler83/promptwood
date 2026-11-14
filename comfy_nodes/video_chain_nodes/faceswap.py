@@ -26,6 +26,10 @@ DET_SIZE, DET_SCORE, MASK_BLUR = 640, 0.5, 0.3
 LOST = 12                                          # frames without the face before the largest face is taken again
 
 
+# NOTE: _nms (and the idea of _session) also exist in src/video_chain/faces.py. They are NOT shared on purpose: this
+# package is copied into ComfyUI's custom_nodes and runs in ComfyUI's own Python, where video_chain is not installed
+# (and must not be imported: it pulls in Qt-free but app-only modules). tests/test_errors_foundation.py compares the
+# two _nms so they cannot drift apart. _session differs too (this one uses CUDA when it can, faces.py is CPU only).
 def _session(path: str, gpu: bool = True):
     import onnxruntime as ort
     providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if gpu else ["CPUExecutionProvider"]

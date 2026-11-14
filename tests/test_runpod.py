@@ -157,7 +157,7 @@ def test_create_not_retried_after_a_server_error_so_no_second_pod(fake, monkeypa
     def boom(req, timeout):
         calls.append(req.full_url)
         raise RP.urllib.error.URLError("connection reset")
-    monkeypatch.setattr(RP.urllib.request, "urlopen", boom)
+    monkeypatch.setattr(RP.net, "urlopen", boom)   # (the fake RunPod is a local address: no proxy, via net)
     with pytest.raises(RP.RunpodError, match="not reachable"):
         api(fake).create_pod(RP.pod_body(name="video-chain-upscale-a", gpu="g", public_key="k"))
     assert len(calls) == 1

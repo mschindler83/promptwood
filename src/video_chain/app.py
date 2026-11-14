@@ -1,12 +1,15 @@
 """GUI entry point: video-chain-gui"""
 from __future__ import annotations
 
+import logging
 import signal
 import sys
 import threading
 import traceback
 
 from . import media
+
+logger = logging.getLogger(__name__)
 
 
 def _qt_error_relay():
@@ -96,6 +99,9 @@ def install_signal_handlers(app, window):
 
 def main(argv: list[str] | None = None) -> int:
     import os
+
+    from . import logs
+    logs.setup()
 
     from PySide6.QtCore import QLoggingCategory, QSettings
     # "Play videos on the GPU" (settings; read before Qt's media backend loads, so a change needs a restart): GPU =

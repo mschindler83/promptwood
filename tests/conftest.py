@@ -99,6 +99,18 @@ def no_internet(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def own_log_handlers():
+    """A test that runs an entry point (logs.setup) leaves no log handler of ours behind."""
+    import logging
+    yield
+    root = logging.getLogger()
+    for h in list(root.handlers):
+        if getattr(h, "_video_chain", False):
+            root.removeHandler(h)
+            h.close()
+
+
+@pytest.fixture(autouse=True)
 def stop_leftover_timers():
     """A window a test leaves open must not keep ticking (GPU / ComfyUI checks) into the next tests."""
     yield

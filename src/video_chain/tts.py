@@ -17,10 +17,10 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import math
 import os
 import queue
-import shutil
 import subprocess
 import tempfile
 import threading
@@ -32,14 +32,16 @@ import uuid
 import wave
 from pathlib import Path
 
-from . import chain, media
+from . import chain, config, keys, media, net
 from . import tree as T
 from .llm_server import rotate_log
+
+logger = logging.getLogger(__name__)
 
 APP_DIR = Path(__file__).resolve().parents[2]
 TTS_PYTHON = APP_DIR / ".venv-tts" / "bin" / "python"
 WORKER = Path(__file__).resolve().with_name("tts_worker.py")
-HF_CACHE = Path(os.environ.get("VIDEO_CHAIN_HF_CACHE") or "/path/to/ai/hf-models")
+HF_CACHE = config.hf_cache()
 QWEN_BASE = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
 QWEN_DESIGN = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
 WHISPER = "openai/whisper-large-v3-turbo"
@@ -190,8 +192,8 @@ class LocalTTS:
             if line.startswith("@@TTS "):
                 try:
                     answers.put(json.loads(line[6:]))
-                except ValueError:
-                    pass
+                except ValueError as e:
+                    logger.debug("not a JSON answer line: %s", e)
         answers.put({"ok": False, "error": "the TTS worker stopped", "dead": True})
 
     def _wait(self, timeout: float, want: int | None = None) -> dict:
@@ -277,30 +279,12 @@ class LocalTTS:
 def eleven_key() -> str:
     """$ELEVENLABS_API_KEY, else the key kept in the system keyring; "" without one."""
     env = os.environ.get("ELEVENLABS_API_KEY", "").strip()
-    if env:
-        return env
-    try:
-        import keyring
-        return (keyring.get_password(KEYRING_SERVICE, KEYRING_USER) or "").strip()
-    except Exception:  # noqa: BLE001  (no keyring now)
-        return ""
+    return env or keys.get_key(KEYRING_SERVICE, KEYRING_USER)
 
 
 def set_eleven_key(key: str | None) -> None:
     """Keep the ElevenLabs API key in the system keyring (empty: remove it). RuntimeError: no keyring."""
-    key = (key or "").strip()
-    try:
-        import keyring
-        import keyring.errors
-        if key:
-            keyring.set_password(KEYRING_SERVICE, KEYRING_USER, key)
-        else:
-            try:
-                keyring.delete_password(KEYRING_SERVICE, KEYRING_USER)
-            except keyring.errors.PasswordDeleteError:
-                pass
-    except Exception as e:  # noqa: BLE001
-        raise RuntimeError(f"the system keyring is not available ({e})") from e
+    keys.set_key(KEYRING_SERVICE, KEYRING_USER, key)
 
 
 class ElevenLabs:
@@ -331,7 +315,7 @@ class ElevenLabs:
         req = urllib.request.Request(self.url + path, data=body, headers=headers, method=method)
         for attempt in (0, 1):
             try:
-                with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                with net.urlopen(req, self.timeout) as r:
                     return r.read()
             except urllib.error.HTTPError as e:
                 if e.code == 429 and not attempt:        # slow down: wait as told (at most 30 s), ask once more

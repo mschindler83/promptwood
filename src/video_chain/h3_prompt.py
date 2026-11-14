@@ -340,9 +340,13 @@ def _shot_parts(body: str) -> tuple[str, str]:
     return body[:m.start()].strip(), body[m.end():].strip()
 
 
+def contains_word(text: str | None, word: str) -> bool:
+    """True when `word` is in `text` as a whole word (case-insensitive): "ink" is not in "pinkish" or "ink_sketch"."""
+    return bool(re.search(r"(?<!\w)" + re.escape(word.lower()) + r"(?!\w)", (text or "").lower()))
+
+
 def _missing_triggers(words: Iterable[str], text: str) -> list[str]:
-    low = (text or "").lower()
-    return [w for w in words if w and not re.search(r"(?<!\w)" + re.escape(w.lower()) + r"(?!\w)", low)]
+    return [w for w in words if w and not contains_word(text, w)]
 
 
 # ----------------------------------------------------------------------------- the prompt

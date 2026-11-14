@@ -5,10 +5,14 @@ buffalo_l), run on the CPU with onnxruntime. Both are optional: without them the
 The picture is read with ffmpeg (scaled to fit the detector's 640 x 640), so no image library is needed."""
 from __future__ import annotations
 
+import logging
 import threading
 from pathlib import Path
 
 from . import media
+
+
+logger = logging.getLogger(__name__)
 
 Box5 = tuple[float, float, float, float, float]    # x1, y1, x2, y2, score
 
@@ -64,6 +68,7 @@ def _session(model: Path):
         return _SESSIONS[key]
 
 
+# (a copy of comfy_nodes/video_chain_nodes/faceswap.py:_nms: that package runs inside ComfyUI and cannot import this one)
 def _nms(boxes, scores, thresh: float = 0.4) -> list[int]:
     """Indices of the boxes kept: the best score first, others overlapping it by more than thresh dropped."""
     import numpy as np

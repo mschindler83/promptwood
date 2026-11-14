@@ -18,6 +18,7 @@ RunPod. Needs: ssh and ssh-keygen (OpenSSH) on this machine. Standard library on
 """
 from __future__ import annotations
 
+import logging
 import json
 import os
 import re
@@ -35,6 +36,10 @@ from pathlib import Path, PurePosixPath
 
 from .comfy import (SEEDVR_FULL_VRAM, SEEDVR_METHODS, SEEDVR_NODES, SEEDVR_PRECISION_FULL, SUBFOLDER, ComfyError,
                     ComfyGenerator)
+
+from . import keys, net
+
+logger = logging.getLogger(__name__)
 
 API_URL = "https://api.runpod.io/v2"
 # RunPod's official PyTorch image (starts sshd from PUBLIC_KEY); CUDA 12.8 runs on Ampere, Ada, Hopper and Blackwell
@@ -85,30 +90,12 @@ class RunpodError(RuntimeError):
 def api_key() -> str:
     """$RUNPOD_API_KEY, else the key kept in the system keyring; "" without one."""
     env = os.environ.get("RUNPOD_API_KEY", "").strip()
-    if env:
-        return env
-    try:
-        import keyring
-        return (keyring.get_password(KEYRING_SERVICE, KEYRING_USER) or "").strip()
-    except Exception:  # noqa: BLE001  (no keyring now)
-        return ""
+    return env or keys.get_key(KEYRING_SERVICE, KEYRING_USER)
 
 
 def set_api_key(key: str | None) -> None:
     """Keep the RunPod API key in the system keyring (empty: remove it). RuntimeError: no keyring."""
-    key = (key or "").strip()
-    try:
-        import keyring
-        import keyring.errors
-        if key:
-            keyring.set_password(KEYRING_SERVICE, KEYRING_USER, key)
-        else:
-            try:
-                keyring.delete_password(KEYRING_SERVICE, KEYRING_USER)
-            except keyring.errors.PasswordDeleteError:
-                pass
-    except Exception as e:  # noqa: BLE001
-        raise RuntimeError(f"the system keyring is not available ({e})") from e
+    keys.set_key(KEYRING_SERVICE, KEYRING_USER, key)
 
 
 # ----------------------------------------------------------------------------- REST API v2
@@ -134,7 +121,7 @@ class RunpodApi:
         for attempt in range(tries):
             req = urllib.request.Request(self.base + path, data=data, method=method, headers=headers)
             try:
-                with urllib.request.urlopen(req, timeout=timeout) as r:
+                with net.urlopen(req, timeout) as r:
                     body = r.read()
                     try:
                         return json.loads(body) if body.strip() else None
@@ -341,6 +328,7 @@ class RunpodSession:
         self.volume_kind = "network"
         self.note, self.log = note or (lambda _t: None), log or (lambda _t: None)
         self.config, self.idle_min, self.ssh_bin = Path(config), int(idle_min), ssh
+        self.close_timeout = 180.0              # close() gives up (and says so) after this many seconds
         self.boot_timeout, self.setup_timeout = boot_timeout, setup_timeout
         self.key: Path = self.config / "id_ed25519"
         self.user, self.remote_port = "root", REMOTE_PORT      # (tests: a local sshd as oneself)
@@ -589,6 +577,17 @@ class RunpodSession:
             raise RunpodError(f"preparing the pod failed (exit {code}): " + " | ".join(tail[-5:]))
 
     def _open_tunnel(self) -> None:
+        """The port is free when chosen, but another program may take it before ssh binds it: when ssh ends because
+        of that, one more try on a new port."""
+        try:
+            self._open_tunnel_once()
+        except RunpodError as e:
+            if not re.search(r"in use|cannot listen|forward", str(e), re.I):
+                raise
+            logger.warning("the SSH tunnel's port was taken (%s): trying another", e)
+            self._open_tunnel_once()
+
+    def _open_tunnel_once(self) -> None:
         port = free_port()
         self._tunnel_err = tempfile.TemporaryFile()      # (a file, not a pipe: nobody reads it while the tunnel lives)
         self.tunnel = subprocess.Popen(
@@ -603,13 +602,13 @@ class RunpodSession:
                 err = self._tunnel_err.read().decode(errors="replace").strip()
                 raise RunpodError(f"the SSH tunnel to the pod ended: {err}")
             try:
-                with urllib.request.urlopen(url + "/system_stats", timeout=5) as r:
+                with net.urlopen(urllib.request.Request(url + "/system_stats"), 5) as r:
                     if r.status == 200:
                         self.url = url
                         self.note("RunPod: connected")
                         return
-            except Exception:  # noqa: BLE001  (not forwarded yet)
-                pass
+            except Exception as e:  # noqa: BLE001  (not forwarded yet)
+                logger.debug("tunnel not ready: %s", e)
             time.sleep(1)
         raise RunpodError("ComfyUI on the pod does not answer through the SSH tunnel")
 
@@ -621,8 +620,8 @@ class RunpodSession:
         path = REMOTE_IO / kind / SUBFOLDER / filename
         try:
             self.run(f"rm -f -- {shlex.quote(str(path))}", timeout=30)
-        except (subprocess.TimeoutExpired, OSError):
-            pass
+        except (subprocess.TimeoutExpired, OSError) as e:
+            logger.warning("could not remove %s on the pod: %s", path, e)
 
     def ram_free(self) -> int:
         """RAM the pod's container may still use, in bytes, from its cgroup (ComfyUI sees the host's RAM in a
@@ -669,6 +668,7 @@ class RunpodSession:
             if self.pod_id:
                 spent = self.cost_so_far
                 err = None
+                end = time.monotonic() + self.close_timeout        # (an overall limit: each call may itself retry)
                 for attempt in range(5):
                     try:
                         self.api.delete_pod(self.pod_id)
@@ -680,6 +680,11 @@ class RunpodSession:
                         err = f"status {st}"
                     except RunpodError as e:
                         err = str(e)
+                    if time.monotonic() >= end:
+                        err = f"{err}; gave up after {self.close_timeout:.0f} s"
+                        raise RunpodError(f"could not terminate pod {self.pod_id} ({err}): end it in RunPod's "
+                                          f"console (it removes itself after {self.idle_min} min without a "
+                                          "connection)")
                     time.sleep(2 * (attempt + 1))
                 else:
                     raise RunpodError(f"could not terminate pod {self.pod_id} ({err}): end it in RunPod's console "
@@ -791,33 +796,34 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("what", choices=("status", "down", "gpus"))
     a = p.parse_args(argv)
     try:
-        return _cli(a.what)
+        return _cli(a.what, out=print)
     except RunpodError as e:
         print(f"error: {e}")
         return 1
 
 
-def _cli(what: str) -> int:
+def _cli(what: str, out=print) -> int:
+    """The command line's work; every line it has for the user goes to out (the library itself prints nothing)."""
     api = RunpodApi(api_key())
     if what == "gpus":
         for g in api.gpus():
             price = (g.get("price") or {}).get("secure")
-            print(f"{str(g.get('id') or '?'):40} {g.get('memory', '?'):>3} GB  "
+            out(f"{str(g.get('id') or '?'):40} {g.get('memory', '?'):>3} GB  "
                   + (f"${price:.2f}/h" if isinstance(price, (int, float)) else "   -   ")
                   + f"  {g.get('availability') or ''}")
         return 0
     pods, failed = leftover_pods(api), 0
     for pod in pods:
-        print(f"{pod.get('id')}  {pod.get('name')}  {pod.get('status')}  {(pod.get('gpu') or {}).get('id', '')}")
+        out(f"{pod.get('id')}  {pod.get('name')}  {pod.get('status')}  {(pod.get('gpu') or {}).get('id', '')}")
         if what == "down":
             try:
                 api.delete_pod(pod["id"])
-                print("  terminated")
+                out("  terminated")
             except RunpodError as e:         # (the others still get their turn)
                 failed += 1
-                print(f"  NOT terminated: {e}")
+                out(f"  NOT terminated: {e}")
     if not pods:
-        print("no video-chain pods on RunPod")
+        out("no video-chain pods on RunPod")
     return 1 if failed else 0
 
 

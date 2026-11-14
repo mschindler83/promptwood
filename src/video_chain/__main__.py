@@ -6,6 +6,7 @@ The LoRA must be in one of ComfyUI's LoRA folders.
 from __future__ import annotations
 
 import argparse
+import logging
 import json
 import os
 import select
@@ -16,8 +17,10 @@ import traceback
 from pathlib import Path
 from typing import Callable
 
-from . import chain, media
+from . import chain, logs, media
 from . import tree as treemod
+
+logger = logging.getLogger(__name__)
 
 
 def _positive(kind):
@@ -124,6 +127,7 @@ def _printer(enabled: bool):
 
 def main(argv: list[str] | None = None) -> int:
     a = parse_args(argv)
+    logs.setup(to_file=False)                  # (stderr only: the GUI that starts this keeps it)
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")      # (the events do not depend on the locale)
     except (AttributeError, ValueError, OSError):
@@ -463,8 +467,8 @@ def _main_serve(a, emit) -> int:
         try:
             if gen is not None and hasattr(gen, "interrupt"):
                 gen.interrupt()
-        except Exception:  # noqa: BLE001  (Stop must end the worker whatever ComfyUI answers)
-            pass
+        except Exception as e:  # noqa: BLE001  (Stop must end the worker whatever ComfyUI answers)
+            logger.warning("interrupt on stop failed: %s", e)
         finally:
             raise SystemExit(143)
     signal.signal(signal.SIGTERM, on_term)

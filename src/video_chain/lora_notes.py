@@ -12,12 +12,15 @@ guidance() puts this into the refiner's instruction: the note when there is one 
 example prompts and the settings. The refiner takes wording from it, never content."""
 from __future__ import annotations
 
+import logging
 import html
 import re
 import time
 from collections import Counter
 from pathlib import Path
 from typing import Callable
+
+logger = logging.getLogger(__name__)
 
 NOTE_VERSION = 1            # raised when notes are asked for differently: every note is made once more
 NOTE_EXAMPLES = 20          # example prompts a note is written from (the most liked, each kind once)
@@ -368,7 +371,8 @@ def make_notes(paths: list[str], complete: Callable[[str, str, int], str], db=No
         system, user = note_messages(mat)
         try:
             note = clean_note(complete(system, user, NOTE_TOKENS))
-        except Exception:  # noqa: BLE001  (the refine goes on with the example prompts alone)
+        except Exception as e:  # noqa: BLE001  (the refine goes on with the example prompts alone)
+            logger.warning("no note for %s: %s", mat["name"], e)
             continue
         if not note:
             continue
@@ -459,11 +463,13 @@ def guidance(paths: list[str], db=None, prompt: str = "") -> str:
     for p in list(dict.fromkeys(paths))[:MAX_LORAS]:
         try:
             mat = material(db.details(p), db.words(p), p)
-        except Exception:  # noqa: BLE001  (a details file that cannot be read: this LoRA goes without)
+        except Exception as e:  # noqa: BLE001  (a details file that cannot be read: this LoRA goes without)
+            logger.warning("details of a LoRA unreadable: %s", e)
             mat = None
         try:
             n = note_of(db, p, mat)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            logger.warning("note of a LoRA unreadable: %s", e)
             n = {"note": "", "remarks": ""}
         if mat or n["remarks"] or n["note"]:               # (the user's own words on a LoRA are told too)
             known.append((mat or _bare(p), n))
@@ -514,11 +520,13 @@ def what_is_known(path: str, db=None) -> dict:
         seen = (details or {}).get("examples_seen")
         out["seen"] = seen if isinstance(seen, int) else 0
         out["pictures"] = len(examples(details))
-    except Exception:  # noqa: BLE001  (a file that cannot be read: shown as not known)
+    except Exception as e:  # noqa: BLE001  (a file that cannot be read: shown as not known)
+        logger.warning("details of a LoRA unreadable: %s", e)
         return out
     try:
         n = note_of(db, path, mat)
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        logger.warning("note of a LoRA unreadable: %s", e)
         n = {"note": "", "remarks": "", "edited": False}
     out.update(note=bool(n["note"]), edited=n["edited"], remarks=bool(n["remarks"]))
     if not mat:
