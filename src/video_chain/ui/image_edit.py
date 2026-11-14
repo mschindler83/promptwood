@@ -41,7 +41,7 @@ SEED_MAX = 2**31 - 1                      # (the seeds ComfyUI's image samplers 
 
 EDITS_DIR = "edits"
 FOLDER_ITEM, FOLDER_PREFIX = "\x00choose-folder", "\x00folder:"   # the source list's folder entries
-ASK_ABOVE = 40                             # a folder Generate of more images than this asks first
+ASK_ABOVE = 10                             # a folder Generate of more images than this asks first
 MOSS_EDIT_QUALITIES = {"standard": "Standard (30 steps)"}
 LORA_FAMILY = {"chroma": "flux1"}         # Chroma LoRAs have FLUX.1's layer names (and FLUX.1 LoRAs often work)
 QUALITY_TEXT = {"fast": "Fast (Lightning, 4 steps)", "standard": "Standard (20 steps)", "best": "Best (40 steps, slow)"}
@@ -129,21 +129,34 @@ def record_use(png: str | Path, use: dict) -> None:
     write_meta(meta_file, meta)
 
 
-def uses_of(project: Path, tree, meta: dict) -> list[str]:
+def uses_index(tree) -> dict:
+    """What `uses_of` looks up, built once for the whole project (a reload asks once per result): who owns each
+    face picture, and which clips have which end image."""
+    from .. import tree as T
+    owner = {r: c["name"] for c in (T.cast_of(tree) if tree is not None else []) for r in c["images"]}
+    ends: dict[str, list[str]] = {}
+    for n in (tree.nodes.values() if tree is not None else []):
+        for f in (n.end_image, (n.made or {}).get("end_image")):
+            if f:
+                ends.setdefault(f, []).append(n.id)
+    return {"owner": owner, "ends": ends}
+
+
+def uses_of(project: Path, tree, meta: dict, index: dict | None = None) -> list[str]:
     """Where a result is used now, in words: the start image (still that picture), a clip's end image (set now or
-    made with), a face reference. Empty: it can go."""
+    made with), a face reference. Empty: it can go. index: `uses_index(tree)`, when many results are asked in a row."""
     from .. import chain
     from .. import tree as T
     out = []
-    owner = {r: c["name"] for c in (T.cast_of(tree) if tree is not None else []) for r in c["images"]}
+    index = index or uses_index(tree)
+    owner = index["owner"]
     for u in meta.get("uses") or []:
         kind = u.get("kind")
         if kind == "start" and u.get("sha1") and chain.file_signature(Path(project) / T.START_FILE) == u["sha1"]:
             out.append("the start image")
         elif kind == "end" and tree is not None:
-            for n in tree.nodes.values():
-                if u.get("file") and u["file"] in (n.end_image, (n.made or {}).get("end_image")):
-                    out.append(f"the end image of clip #{n.id[1:]}")
+            for nid in dict.fromkeys(index["ends"].get(u.get("file"), [])) if u.get("file") else []:
+                out.append(f"the end image of clip #{nid[1:]}")
         elif kind == "ref" and u.get("file") in owner:
             out.append(f"face of @{owner[u['file']]}")
     return list(dict.fromkeys(out))
@@ -191,7 +204,7 @@ class PictureSlot(QWidget):
     def set(self, path: str | None):
         self.path = path
         if path:
-            self.tile.set_image(QImage(path))
+            self.tile.set_image(upright(path))
             self.tile.setToolTip(path)
         else:
             self.tile.clear_frame(self.title)
@@ -566,7 +579,7 @@ class ImageEditDialog(QDialog):
         head.addWidget(self.b_fav)
         self.b_before = QPushButton("Show the original")
         self.b_before.setCheckable(True)
-        self.b_before.setToolTip("Switch between the result and the image it was made from (or hold B)")
+        self.b_before.setToolTip("Switch between the result and the image it was made from (press B)")
         self.b_before.toggled.connect(lambda _on: self._show_selected())
         head.addWidget(self.b_before)
         right.addLayout(head)
@@ -1239,7 +1252,7 @@ class ImageEditDialog(QDialog):
             png, meta = sel
             orig = meta.get("source_copy") or meta.get("source")
             show = orig if self.b_before.isChecked() and orig and Path(orig).is_file() else png
-            img = QImage(show)
+            img = upright(show) if show != png else QImage(show)        # (a phone photo turned, like the result)
             self.view.set_image(img)
             how = (f"{FAMILIES.get(meta.get('family'), {}).get('label', '')} "
                    f"{FAMILIES.get(meta.get('family'), {}).get('qualities', {}).get(meta.get('quality'), '')}"
@@ -1409,8 +1422,7 @@ class ImageEditDialog(QDialog):
                                      "refs": refs, "size": list(size) if size else None,
                                      **({"folder": str(Path(src).parent)} if len(sources) > 1 else {}),
                                      **(self._variation_meta(job, prompt, job.key) if job else {})})
-                        out.with_suffix(".json").write_text(json.dumps(meta, indent=2, ensure_ascii=False),
-                                                            encoding="utf-8")
+                        write_meta(out.with_suffix(".json"), meta)
                         sig.result.emit(str(out), meta)
                 sig.finished.emit("")
             except Exception as e:  # noqa: BLE001
@@ -1935,8 +1947,7 @@ class ImageEditDialog(QDialog):
                                  "seed": seed, "refs": refs, **(self._variation_meta(job, prompt, job.key) if job else {}),
                                  "tags": tags,
                                  "source_copy": str(kept) if kept else None})
-                    out.with_suffix(".json").write_text(json.dumps(meta, indent=2, ensure_ascii=False),
-                                                        encoding="utf-8")
+                    write_meta(out.with_suffix(".json"), meta)
                     sig.result.emit(str(out), meta)
                 sig.finished.emit("")
             except Exception as e:  # noqa: BLE001
@@ -2279,6 +2290,13 @@ class ImageEditDialog(QDialog):
             self.qs.setValue(self._recent_key(), json.dumps([p] + [r for r in self._recent_files() if r != p][:11]))
         self.loras.set_items(self._known(), self.loras.items() + [{"path": p, "strength": float(strength)}])
         self._remember_loras()
+
+    def reject(self):
+        """Close, Esc: a running job is only stopped after asking (the rest of its images would be lost)."""
+        if self._busy and QMessageBox.question(
+                self, "Edit an image", "Images are being made. Stop and close?") != QMessageBox.Yes:
+            return
+        super().reject()
 
     def done(self, r):
         busy = self._busy

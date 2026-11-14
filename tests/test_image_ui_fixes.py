@@ -86,3 +86,119 @@ def test_generate_tooltip_resets_when_enabled(app, tmp_path):
     dlg.prompt.setPlainText("a cat")
     assert dlg.b_gen.isEnabled() and "Describe" not in dlg.b_gen.toolTip() and "Ctrl+Enter" in dlg.b_gen.toolTip()
     dlg.reject()
+
+
+def _dialog(tmp_path, name="d.ini", **kw):
+    from video_chain.ui.image_edit import ImageEditDialog
+    q = QSettings(str(tmp_path / name), QSettings.IniFormat)
+    return ImageEditDialog(None, tmp_path, [], None, None, lambda p: None, lambda k, p: False, q,
+                           connect_create=lambda p: None, **kw)
+
+
+def test_before_after_tooltip_says_toggle(app, tmp_path):
+    dlg = _dialog(tmp_path)
+    assert "hold" not in dlg.b_before.toolTip().lower()
+    dlg.reject()
+
+
+def test_original_is_shown_upright(app, tmp_path):
+    """A phone photo (EXIF-rotated) as the original: shown turned like the result, not sideways."""
+    from PIL import Image
+
+    from video_chain.ui.image_edit import EDITS_DIR
+    orig = tmp_path / "phone.jpg"
+    im = Image.new("RGB", (40, 20), "blue")
+    ex = Image.Exif()
+    ex[0x0112] = 6                                         # rotated 90 degrees
+    im.save(orig, exif=ex)
+    edits = tmp_path / EDITS_DIR
+    edits.mkdir()
+    Image.new("RGB", (20, 40), "red").save(edits / "r.png")
+    (edits / "r.json").write_text(json.dumps({"prompt": "a", "source_copy": str(orig)}))
+    dlg = _dialog(tmp_path)
+    shown = []
+    dlg.view.set_image = lambda img: shown.append(img.size())
+    dlg.b_before.setChecked(True)
+    dlg._show_selected()
+    assert (shown[-1].width(), shown[-1].height()) == (20, 40)
+    dlg.reject()
+
+
+def test_close_while_working_asks(app, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    dlg = _dialog(tmp_path)
+    cancelled = []
+    dlg.cancel = lambda: cancelled.append(1)
+    dlg._busy = True
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.No)
+    dlg.reject()
+    assert not cancelled and not dlg.closed                 # kept working, still open
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    dlg.reject()
+    assert cancelled and dlg.closed
+
+
+def test_folder_run_of_a_dozen_asks(app, tmp_path, monkeypatch):
+    from PIL import Image
+    from PySide6.QtWidgets import QMessageBox
+    folder = tmp_path / "pics"
+    folder.mkdir()
+    for i in range(6):
+        Image.new("RGB", (16, 16), "red").save(folder / f"p{i}.png")
+    dlg = _dialog(tmp_path)
+    assert dlg.set_folder(str(folder))
+    dlg.prompt.setPlainText("x")
+    dlg.tries.setValue(2)                                   # 6 pictures x 2 = 12 images
+    asked = []
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: asked.append(a) or QMessageBox.No)
+    dlg.generate()
+    assert len(asked) == 1 and "12" in asked[0][2]
+    assert not dlg._busy
+    dlg.reject()
+
+
+def test_uses_of_with_a_prebuilt_index(tmp_path):
+    from video_chain import tree as T
+    from video_chain.ui.image_edit import uses_of, uses_index
+    t = T.Tree()
+    meta = {"uses": [{"kind": "end", "file": "e.png"}, {"kind": "ref", "file": "r.png"}]}
+    idx = uses_index(t)
+    assert uses_of(tmp_path, t, meta, idx) == uses_of(tmp_path, t, meta)
+
+
+def test_result_record_is_written_atomically(app, tmp_path, monkeypatch):
+    from PIL import Image
+
+    from video_chain.ui import image_edit as IE
+
+    class Editor:
+        def models(self):
+            return list(IE.EDIT_MODELS)
+
+        def qualities(self, model):
+            return ["fast", "standard", "best"]
+
+        def edit(self, src, prompt, out, seed, quality, refs, loras, model=None, mask=None):
+            Image.new("RGB", (16, 16), "red").save(out)
+            return {"edit_model": model}
+
+        def interrupt(self):
+            pass
+
+    written = []
+    real = IE.write_meta
+    monkeypatch.setattr(IE, "write_meta", lambda f, m: (written.append(Path(f)), real(f, m)))
+    src = tmp_path / "s.png"
+    Image.new("RGB", (16, 16), "blue").save(src)
+    dlg = _dialog(tmp_path)
+    dlg.connect_editor = lambda progress: Editor()
+    dlg.set_source(str(src))
+    dlg.prompt.setPlainText("x")
+    dlg.tries.setValue(1)
+    dlg.generate()
+    end = time.time() + 20
+    while dlg._busy and time.time() < end:
+        QApplication.processEvents()
+        time.sleep(0.02)
+    assert any(f.parent.name == IE.EDITS_DIR and f.suffix == ".json" and f.stem.startswith("edit_") for f in written)
+    dlg.reject()
