@@ -387,8 +387,7 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
             if self._cancelled.is_set():         # Stop came before the job was queued: take it out again
                 self.interrupt()
                 raise ComfyJobFailed("stopped")
-            assert self.current is not None          # (_queue set it)
-            return self._wait(self.current, ws)
+            return self._wait(self.current or "", ws)   # (_queue set it)
         except ComfyJobFailed:
             raise
         except BaseException:                    # (also a stop by KeyboardInterrupt / SystemExit: cancel the job)
