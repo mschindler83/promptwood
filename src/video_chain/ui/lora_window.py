@@ -299,7 +299,7 @@ class LoraWindow(QDialog):
         self.b_rewrite = QPushButton("Let the model write the note again")
         self.b_rewrite.setToolTip("Forget this note (yours or the model's); the language model writes a new one at "
                                   "the next refine with this LoRA. Your remarks stay.")
-        self.b_rewrite.clicked.connect(lambda: self.save_note(forget=True))
+        self.b_rewrite.clicked.connect(self._forget_note)
         nrow.addWidget(self.b_save)
         nrow.addWidget(self.b_rewrite)
         nrow.addStretch(1)
@@ -541,6 +541,14 @@ class LoraWindow(QDialog):
         self.b_save.setEnabled(bool(self.path) and changed)
         self.b_rewrite.setEnabled(bool(self.path) and bool(self._saved["note"]))
 
+    def _confirm(self, title: str, text: str) -> bool:
+        return QMessageBox.question(self, title, text, QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes
+
+    def _forget_note(self):
+        if self._confirm("Forget the note", "Forget this note (yours or the model's)? The language model writes a "
+                         "new one at the next refine with this LoRA. Your remarks stay."):
+            self.save_note(forget=True)
+
     def _unsaved(self) -> bool:
         return bool(self.path) and (self.note_edit.toPlainText().strip() != self._saved["note"]
                                     or self.remarks_edit.toPlainText().strip() != self._saved["remarks"])
@@ -692,6 +700,9 @@ class LoraWindow(QDialog):
         self.show_page(self.page)
 
     def _forget_pictures(self):
+        if not self._confirm("Delete the kept pictures", "Delete the pictures kept on disk? They are loaded from "
+                             "CivitAI again when shown."):
+            return
         n = lora_pictures.forget(self.db)
         self._kept_of = {}
         self.state.setText(f"{n} kept picture{'s' if n != 1 else ''} deleted.")

@@ -40,6 +40,9 @@ def replace_text(edit: QPlainTextEdit, text: str) -> None:
     edit.setTextCursor(cur)
 
 
+SETUP_HINT = ("More models: set up a local language model (llama.cpp, GGUF files) in the main window under "
+              "Preferences, Prompt refiner.")
+
 class _Sig(QObject):
     models = Signal(object, str)          # [model dicts], error
     result = Signal(str, str)             # text, error
@@ -377,6 +380,7 @@ class RefineDialog(QDialog):
             self.b_start.setVisible(down and self.start_comfy is not None)
             self.model.setItemText(0, "no language model")
             return
+        has_local = any(str(m.get("file", "")).startswith("llama:") for m in models)
         self.model.blockSignals(True)
         self.model.clear()
         for m in models:
@@ -391,7 +395,10 @@ class RefineDialog(QDialog):
         self._mode_changed()
         self.state.setText(("Write what should change and press Send (Ctrl+Enter), or just Send to improve it. "
                             if self.chatting() else "Choose a model and press Refine (Ctrl+Enter). ")
-                           + "The first answer loads the model, which takes a moment.")
+                           + "The first answer loads the model, which takes a moment."
+                           + ("" if has_local else " " + SETUP_HINT))
+        self.model.setToolTip(self.model.toolTip().split("\n\n" + SETUP_HINT)[0]
+                              + ("" if has_local else "\n\n" + SETUP_HINT))
         self.b_refine.setFocus()
 
     # ---- the LoRAs the result is made with

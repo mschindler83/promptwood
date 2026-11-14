@@ -123,3 +123,47 @@ def test_kept_pictures_are_looked_up_once(tmp_path, monkeypatch):
     w._kept(item)
     assert len(calls) == 1
     w.done(0)
+
+
+def test_forgetting_a_note_and_deleting_pictures_ask_first(tmp_path):
+    from video_chain import lora_notes as LN
+    w, db, p, other = window(tmp_path)
+    assert LN.save_user(db, p, note="Does: mine.")
+    w.show_lora(p)
+    asked = []
+    answer = [False]
+    w._confirm = lambda title, text: (asked.append(title), answer[0])[1]
+    w.b_rewrite.click()
+    assert asked and db.note(p)["note"] == "Does: mine."               # "no": the note stays
+    answer[0] = True
+    w.b_rewrite.click()
+    assert db.note(p) is None or not db.note(p).get("note")
+    asked.clear()
+    answer[0] = False
+    w.b_forget.click()
+    assert asked
+    w.done(0)
+
+
+def _refine_dialog(models):
+    from video_chain.ui.prompt_refiner import RefineDialog
+
+    class Fake:
+        pass
+    Fake.models = models
+    dlg = RefineDialog(None, "a cat", "image", lambda: Fake())
+    end = time.time() + 5
+    while not dlg.model.isEnabled() and time.time() < end:
+        app.processEvents()
+    app.processEvents()
+    return dlg
+
+
+def test_refiner_points_to_the_local_model_setup_when_there_is_none():
+    only_comfy = _refine_dialog([{"file": "comfy/q.safetensors", "label": "Q", "chat": False, "vision": False}])
+    assert "Preferences" in only_comfy.state.text() and "Prompt refiner" in only_comfy.state.text()
+    assert "Preferences" in only_comfy.model.toolTip()
+    only_comfy.reject()
+    with_llama = _refine_dialog([{"file": "llama:/m/q.gguf", "label": "Q", "chat": True, "vision": False}])
+    assert "Preferences" not in with_llama.state.text()
+    with_llama.reject()
