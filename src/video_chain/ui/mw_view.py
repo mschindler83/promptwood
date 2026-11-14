@@ -291,7 +291,7 @@ class ViewMixin:
             self._left_w = sizes[0]
         self.left_tabs.setVisible(on)
         if on:
-            want = max(getattr(self, "_left_w", 0), self.left_tabs.minimumWidth())
+            want = max(self._left_w, self.left_tabs.minimumWidth())
             sizes = self.split.sizes()
             if sizes[0] < want:
                 give = want - sizes[0]

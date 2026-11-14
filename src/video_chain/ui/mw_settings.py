@@ -85,7 +85,7 @@ class SettingsMixin:
         q.setValue("layout", json.dumps({"v": LAYOUT_VERSION, "split": self.split.sizes(),
                                          "center": self.center.sizes(), "left": self.act_left.isChecked(),
                                          "left_w": (self.split.sizes()[0] if self.act_left.isChecked() else 0)
-                                         or getattr(self, "_left_w", 0)}))
+                                         or self._left_w}))
         q.sync()
 
     # ---- recent projects

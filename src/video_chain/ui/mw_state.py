@@ -343,7 +343,7 @@ class StateMixin:
 
     def veda_used(self, n: T.Node) -> bool:
         """This generated clip is made with Veda sparse attention (see tree.veda_for)."""
-        canvas = getattr(self, "_canvas", None)
+        canvas = self._canvas
         if n.is_video or canvas is None or self.tree is None:
             return False
         frames = int((n.overrides or {}).get("frames", self.tree.options.get("frames", 73)))

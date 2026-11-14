@@ -154,8 +154,8 @@ class ProjectMixin:
         if here != source:
             self.status.setText(f"Copied the project to {target}.")
             return
-        if self.open_project((Path(target) / getattr(self, "_copy_scene", ".")).resolve(),
-                             scene=getattr(self, "_copy_scene_id", None)):
+        if self.open_project((Path(target) / self._copy_scene).resolve(),
+                             scene=self._copy_scene_id):
             self.status.setText(f"Saved as {Path(target).name}; you are working in the copy now.")
 
     def _dropped_on_window(self, files: list[str]):

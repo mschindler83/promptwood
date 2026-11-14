@@ -74,3 +74,18 @@ def test_export_dialog_hands_its_answers_over_as_one_request(app, tmp_path):
     assert dlg.request().swapped is False
     assert ExportDialog(None, str(tmp_path / "y"), (672, 384), {}).request().swapped is False
     dlg.deleteLater()
+
+
+def test_a_failing_trigger_scan_says_so_in_the_log(app, win, tmp_path, image, monkeypatch):
+    from test_ui import wait
+    from video_chain import triggers
+    assert win.create_project(tmp_path / "p", str(image))
+
+    class Broken:
+        def scan(self, *a, **k):
+            raise ValueError("the CivitAI answer was nonsense")
+    monkeypatch.setattr(triggers, "db", lambda: Broken())
+    monkeypatch.setattr(win, "_trigger_paths", lambda: ["/x/some.safetensors"])
+    win._scan_triggers()
+    wait(app, lambda: win._trigger_scan is None)
+    assert "nonsense" in win.log.toPlainText()

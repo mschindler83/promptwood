@@ -81,7 +81,7 @@ class TtsMixin:
     def _room_for_fish(self, url: str) -> None:
         """(a worker thread) Room for Fish S2 Pro: the llama.cpp server goes (it may hold many GB of RAM as well as
         VRAM), then ComfyUI is asked to unload its models (_make_room)."""
-        cur = getattr(self, "_llama", None)
+        cur = self._llama
         if cur is not None and cur.stop(wait=True):
             self.bridge.tts_log.emit("stopped the llama.cpp server: Fish S2 Pro needs its RAM and VRAM")
         self._make_room(TTS.FISH_VRAM_MB, url, "Fish S2 Pro", TTS.TtsError, "speak the lines after the run")

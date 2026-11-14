@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 import threading
 
 from PySide6.QtCore import QTimer
@@ -207,9 +208,10 @@ class OptionsMixin:
 
     def _scan_triggers(self):
         """Read the trigger words of LoRAs not known yet (their files; CivitAI if allowed), in the background."""
-        if getattr(self, "_trigger_scan", None) is not None or not self._trigger_paths():
+        paths = self._trigger_paths()
+        if self._trigger_scan is not None or not paths:
             return
-        paths, online, bridge = self._trigger_paths(), self.triggers_online.isChecked(), self.bridge
+        online, bridge = self.triggers_online.isChecked(), self.bridge
         self._trigger_scan = threading.Event()
         self._trigger_scan_online = online
         stop = self._trigger_scan
@@ -219,7 +221,9 @@ class OptionsMixin:
             try:
                 counts = triggers.db().scan(paths, online=online, stop=stop.is_set,
                                             progress=bridge.trigger_progress.emit)
-            except Exception:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001  (the scan ends; what went wrong is in the log)
+                logging.getLogger(__name__).warning("trigger word scan failed", exc_info=True)
+                safe_emit(bridge.log, f"The trigger word scan failed: {type(e).__name__}: {e}")
                 counts = {}
             safe_emit(bridge.triggers, counts)
         threading.Thread(target=work, daemon=True).start()
@@ -255,7 +259,7 @@ class OptionsMixin:
         changed = counts.get("new") or counts.get("looked")
         if self.tree is not None and changed and not self.running:
             self.refresh()                         # clips record their LoRAs' words
-        if self.triggers_online.isChecked() and not getattr(self, "_trigger_scan_online", True):
+        if self.triggers_online.isChecked() and not self._trigger_scan_online:
             QTimer.singleShot(0, self._scan_triggers)     # switched on while an offline scan ran
         if counts.get("key_rejected"):
             self.status.setText("CivitAI rejected your API key: LoRAs are looked up without it. Check or renew the "

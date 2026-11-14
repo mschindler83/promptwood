@@ -173,29 +173,27 @@ class MainWindow(BuildMixin, GeneratorMixin, ComfyMixin, ExportMixin, VideosMixi
         QTimer.singleShot(0, self._poll_gpu)
 
 
-    _write_error: str | None = None            # why the last _write_tree did not save (None: it did)
-
-
+    # ---- class defaults: what is only set once something happens, and is read before that
+    _write_error: str | None = None             # why the last _write_tree did not save (None: it did)
     # While the cards are updated every file is looked at once (a path of clips asked about the same pictures and
     # videos several times each; on a network share every look is a round trip).
     _stat_memo: dict | None = None
     _cmp_memo: dict | None = None
-
-
     # what a frozen clip / video cannot do: it would change the clip as made (or what it ends at)
     FROZEN_LOCKED = {"end_image", "end_video", "end_ai", "end_clear", "revert", "refine", "speak", "handover",
                      "handover_clear", "edit", "split", "swap", "swap_undo", "video", "keyframe"}
-
-
-    # ------------------------------------------------------------------ running
-    # The generator runs as a worker process: it loads the model once and then takes jobs (JSON lines on stdin).
-    # With "keep loaded" it waits for the next job and quits by itself after the idle time; without, it is told
-    # to quit after each job. Stop ends the worker (a clip cannot be interrupted cleanly).
-
-
+    _trigger_scan_online = True                 # the running trigger word scan may ask CivitAI
+    _left_w = 0                                 # the width of the left panel (kept while it is hidden)
+    _shared_sent = None                         # the shared settings last written into the film's other scenes
+    _copy_scene, _copy_scene_id = ".", None     # Save as: the scene to open in the copy
+    _tracks_shown = None                        # what the audio tracks list shows (a signature)
+    _canvas = None                              # the clips' size as _update_size_info last worked it out
+    _llama = None                               # the llama.cpp server of this window
+    _runpod_loading = False                     # the settings are being loaded (the RunPod fields change unsaved)
+    _dialogs_modeless = False                   # tests: dialogs are not run, they are handed back
+    # the generator run (mw_generator): checking the project first, then the clips
     _checking = False                           # Generate is checking the project (in the background)
     _check_gen = 0
-    # (defaults of what the run, the LoRA scan and the image edit window fill in; read before they are first set)
     _exported = None
     _clip_started = _run_started = 0.0
     _clip_note = ""
@@ -204,4 +202,3 @@ class MainWindow(BuildMixin, GeneratorMixin, ComfyMixin, ExportMixin, VideosMixi
     _lora_hits: dict = {}
     _lora_scan_gen = 0
     _path_end = None
-

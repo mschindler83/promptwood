@@ -418,7 +418,7 @@ class AudioMixin:
         cur = select or (self.track_list.currentItem().data(Qt.UserRole) if self.track_list.currentItem() else None)
         trs = T.tracks(self.tree) if self.tree else []
         sig = ([(tr["id"], tr["name"], tr["file"], len(T.track_users(self.tree, tr["id"]))) for tr in trs], cur)
-        if sig == getattr(self, "_tracks_shown", None) and select is None:
+        if sig == self._tracks_shown and select is None:
             self._update_track_buttons()
             return
         self._tracks_shown = sig

@@ -6,11 +6,28 @@ import os
 import threading
 import time
 from pathlib import Path
+from collections.abc import Callable
+from dataclasses import dataclass
 
 from .. import comfy as CMF, llm_server as LLM, runpod as RP, triggers, tts as TTS
 from . import dialogs as D
 from .widgets import safe_emit
 from .ui_logic import CLOSE_GRACE, DEFAULT_COMFY_URL, LLM_DEFAULT_SERVER, UNLOAD_TIMEOUT, VRAM_POLL_SECONDS
+
+
+@dataclass
+class KeyField:
+    """One API key of the Preferences: its line edit, how to read and set the key (the system keyring), the text of
+    the empty field and what happens around saving it."""
+    title: str                       # the name in a failure dialog
+    service: str
+    edit: str                        # the window's attribute of its line edit (built after this is declared)
+    get: Callable[[], str | None]
+    set: Callable[[str], None]
+    none_hint: str                   # the placeholder while no key is kept
+    kept: str = ""                   # the status line after a key was kept (default: from the service)
+    before: Callable[[str], None] | None = None     # after the key was set, before the field is shown again
+    after: Callable[[str], None] | None = None      # after the status line
 
 
 class LlamaMixin:
@@ -28,7 +45,7 @@ class LlamaMixin:
             return None
         key = (self.llm_server.text().strip() or LLM_DEFAULT_SERVER, self.llm_model_path(), self.llm_port.value(),
                self.llm_cpu_moe.isChecked(), LLM.find_mmproj(self.llm_model_path()))
-        cur = getattr(self, "_llama", None)
+        cur = self._llama
         if cur is None or (cur.server, cur.model, cur.port, cur.cpu_moe, cur.mmproj) != key:
             if cur is not None:
                 cur.stop(wait=False)
@@ -103,65 +120,72 @@ class LlamaMixin:
         """Stop the refiner's llama.cpp server if the app started it (its RAM / VRAM back for ComfyUI). wait: until
         it is gone (when the window closes: a background wait would die with the app, leaving the server). grace:
         seconds it gets to end before it is killed (short when the window closes)."""
-        cur = getattr(self, "_llama", None)
+        cur = self._llama
         stopped = bool(cur is not None and (cur.stop(wait=wait) if grace is None else cur.stop(wait=wait, grace=grace)))
         if stopped and why:
             self.log.appendPlainText(f"Stopped the llama.cpp server ({why}).")
         return stopped
 
+    def _key_fields(self) -> dict[str, KeyField]:
+        """The API keys of the services (looked up when asked: the key functions are the modules' own)."""
+        return {
+            "civitai": KeyField("CivitAI API key", "CivitAI", "civitai_key", lambda: triggers.api_key(),
+                                lambda k: triggers.set_api_key(k),
+                                "none: paste your key to get everything CivitAI holds back",
+                                kept="CivitAI API key kept in the system keyring; LoRAs are looked up once more "
+                                     "with it.",
+                                after=lambda key: self._scan_triggers() if key and self.triggers_online.isChecked()
+                                else None),
+            "eleven": KeyField("ElevenLabs API key", "ElevenLabs", "eleven_key", lambda: TTS.eleven_key(),
+                               lambda k: TTS.set_eleven_key(k),
+                               "none: paste your key for text to speech with ElevenLabs",
+                               before=lambda key: setattr(self, "_eleven_voices", None)),
+            "runpod": KeyField("RunPod API key", "RunPod", "runpod_key", lambda: RP.api_key(),
+                               lambda k: RP.set_api_key(k), "none: paste your key to upscale on RunPod"),
+        }
+
+    def _show_key(self, name: str):
+        """The key field of a service: empty, and its placeholder says whether a key is kept."""
+        field = self._key_fields()[name]
+        has = bool(field.get())
+        edit = getattr(self, field.edit)
+        edit.clear()
+        edit.setPlaceholderText("a key is kept (type a new one, or save empty to remove it)" if has
+                                      else field.none_hint)
+
+    def _save_key(self, name: str):
+        field = self._key_fields()[name]
+        key = getattr(self, field.edit).text().strip()
+        try:
+            field.set(key)
+        except RuntimeError as e:
+            D.failed(self, field.title, "keep the key", e)
+            return
+        if field.before:
+            field.before(key)
+        self._show_key(name)
+        self.status.setText(field.kept or f"{field.service} API key kept in the system keyring." if key
+                            else f"{field.service} API key removed.")
+        if field.after:
+            field.after(key)
+
     def _show_civitai_key(self):
-        has = bool(triggers.api_key())
-        self.civitai_key.clear()
-        self.civitai_key.setPlaceholderText("a key is kept (type a new one, or save empty to remove it)" if has else
-                                            "none: paste your key to get everything CivitAI holds back")
+        self._show_key("civitai")
 
     def _save_civitai_key(self):
-        key = self.civitai_key.text().strip()
-        try:
-            triggers.set_api_key(key)
-        except RuntimeError as e:
-            D.failed(self, "CivitAI API key", "keep the key", e)
-            return
-        self._show_civitai_key()
-        if key:
-            self.status.setText("CivitAI API key kept in the system keyring; LoRAs are looked up once more with it.")
-            if self.triggers_online.isChecked():
-                self._scan_triggers()
-        else:
-            self.status.setText("CivitAI API key removed.")
+        self._save_key("civitai")
 
     def _show_eleven_key(self):
-        has = bool(TTS.eleven_key())
-        self.eleven_key.clear()
-        self.eleven_key.setPlaceholderText("a key is kept (type a new one, or save empty to remove it)" if has else
-                                           "none: paste your key for text to speech with ElevenLabs")
+        self._show_key("eleven")
 
     def _save_eleven_key(self):
-        key = self.eleven_key.text().strip()
-        try:
-            TTS.set_eleven_key(key)
-        except RuntimeError as e:
-            D.failed(self, "ElevenLabs API key", "keep the key", e)
-            return
-        self._eleven_voices = None
-        self._show_eleven_key()
-        self.status.setText("ElevenLabs API key kept in the system keyring." if key else "ElevenLabs API key removed.")
+        self._save_key("eleven")
 
     def _show_runpod_key(self):
-        has = bool(RP.api_key())
-        self.runpod_key.clear()
-        self.runpod_key.setPlaceholderText("a key is kept (type a new one, or save empty to remove it)" if has else
-                                           "none: paste your key to upscale on RunPod")
+        self._show_key("runpod")
 
     def _save_runpod_key(self):
-        key = self.runpod_key.text().strip()
-        try:
-            RP.set_api_key(key)
-        except RuntimeError as e:
-            D.failed(self, "RunPod API key", "keep the key", e)
-            return
-        self._show_runpod_key()
-        self.status.setText("RunPod API key kept in the system keyring." if key else "RunPod API key removed.")
+        self._save_key("runpod")
 
     def _runpod_gpu_id(self) -> str:
         i = self.runpod_gpu.currentIndex()
@@ -171,7 +195,7 @@ class LlamaMixin:
         return text or RP.DEFAULT_GPU
 
     def _runpod_changed(self):
-        if getattr(self, "_runpod_loading", False):
+        if self._runpod_loading:
             return
         self.qs.setValue("runpodGpu", self._runpod_gpu_id())
         self.qs.setValue("runpodFallback", self.runpod_fallback.isChecked())

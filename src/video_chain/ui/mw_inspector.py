@@ -368,7 +368,7 @@ class InspectorMixin:
             return None
         dlg = ModelPromptDialog(self, nid, info)
         self._model_prompt_dialog = dlg            # (tests look at it)
-        if not getattr(self, "_dialogs_modeless", False):
+        if not self._dialogs_modeless:
             dlg.exec()
             dlg.deleteLater()
         return dlg

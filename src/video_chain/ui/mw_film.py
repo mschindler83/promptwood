@@ -182,7 +182,7 @@ class FilmMixin:
         if self.film is None or len(self.film.scenes) < 2 or self.tree is None:
             return
         now = json.dumps(self.film.shared(self.tree.options), sort_keys=True)
-        if now == getattr(self, "_shared_sent", None):
+        if now == self._shared_sent:
             return
         try:
             self.film.sync_shared(self.project, self.tree.options)
@@ -358,7 +358,7 @@ class FilmMixin:
         v.addWidget(buttons)
         dlg.resize(min(900, 160 + 120 * len(rows)), min(600, 140 + 30 * len(names)))
         self._film_cast_dialog = dlg               # (tests look at it)
-        if not getattr(self, "_dialogs_modeless", False):
+        if not self._dialogs_modeless:
             dlg.exec()
             dlg.deleteLater()
 
