@@ -55,7 +55,7 @@ class AudioMixin(MainWindowHost):
                           owner=self)
 
     def _eleven_cloned(self, name: str, voice, err: str, project: str):
-        self._tts_busy = False
+        self._set_tts_busy(False)
         self._update_buttons()
         if voice is None:
             self._report_error(f"Could not clone the voice of @{name} at ElevenLabs: {err}")
@@ -90,7 +90,7 @@ class AudioMixin(MainWindowHost):
             return
         mine = not self._tts_busy                   # (the worker that removes music is the text to speech one)
         dlg = self._voice_dialog(f, c["name"], isolate=mine)
-        self._tts_busy = self._tts_busy or mine
+        self._set_tts_busy(self._tts_busy or mine)
         try:
             if not dlg.file:
                 self._report_error(f"Could not set the voice: {dlg.info_label.text()}")
@@ -106,7 +106,7 @@ class AudioMixin(MainWindowHost):
             dlg.cleanup()
             dlg.deleteLater()
             if mine:
-                self._tts_busy = False
+                self._set_tts_busy(False)
                 self.stop_tts("the voice window was closed")
 
     def _voice_dialog(self, file: str, name: str, isolate: bool = True):

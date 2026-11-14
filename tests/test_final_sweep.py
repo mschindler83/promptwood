@@ -230,3 +230,20 @@ def test_the_idle_unload_timer_is_started_and_stopped_in_one_place(app, tmp_path
         assert not w._qwen_timer.isActive()
     finally:
         w.close()
+
+
+# ------------------------------------------------------------------ UX-30: text to speech busy: the buttons say so
+def test_the_speak_and_voice_buttons_are_off_with_their_reason_while_speech_is_busy(app, win, tmp_path, image):
+    from video_chain.ui.clip_cards import PromptCard
+    ids = new_project(win, tmp_path, image, ('@Anna says "Hello there."',))
+    win.tree.options["cast"] = [{"name": "Anna", "images": [], "desc": "", "lead": False,
+                                 "voice": {"file": "refs/v.wav", "secs": 3.0}}]
+    win._show_references(select="Anna")
+    card = next(c for c in win.cards if isinstance(c, PromptCard) and c.nid == ids[0])
+    assert card.b_speak.isEnabled() and win.b_voice_tts.isEnabled() and win.b_voice_clone.isEnabled()
+    win._set_tts_busy(True)
+    for b in (card.b_speak, win.b_voice_tts, win.b_voice_clone):
+        assert not b.isEnabled() and "text to speech is busy" in b.toolTip().lower(), b.text()
+    win._set_tts_busy(False)
+    assert card.b_speak.isEnabled() and win.b_voice_tts.isEnabled() and win.b_voice_clone.isEnabled()
+    assert "busy" not in card.b_speak.toolTip().lower()

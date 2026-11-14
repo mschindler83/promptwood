@@ -64,6 +64,7 @@ class PathMixin(MainWindowHost):
             self.card_stack.addWidget(card)
             self.cards.append(card)
             card.set_editable(not self.running)
+            card.set_speech_busy(self._tts_busy)
         ids = [c.nid for c in self.cards]
         end = ids[-1] if ids else None
         if self.focus not in ids or end != self._path_end:
