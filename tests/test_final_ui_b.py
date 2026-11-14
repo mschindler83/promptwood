@@ -210,3 +210,14 @@ def test_the_picker_reads_an_image_preview_and_a_list_head_in_the_pool(app, tmp_
     assert wait(app, lambda: "second line" in dlg.info.text())
     assert all(t is not main for _w, t in seen)
     dlg.reject()
+
+
+def test_scratch_settings_share_one_folder_that_is_removed(app):
+    from video_chain.ui import image_picker as IP
+    a, b = IP.scratch_settings(), IP.scratch_settings()
+    folders = {Path(a.fileName()).parent, Path(b.fileName()).parent}
+    assert len(folders) == 1 and a.fileName() != b.fileName()
+    folder = folders.pop()
+    assert folder.is_dir()
+    IP.drop_scratch_settings()
+    assert not folder.exists()

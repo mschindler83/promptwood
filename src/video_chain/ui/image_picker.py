@@ -6,6 +6,7 @@ on a network share is read in full only once; thumbnails the desktop already mad
 ~/.cache/thumbnails, e.g. from the file manager) are used without reading the image at all."""
 from __future__ import annotations
 
+import atexit
 import hashlib
 import json
 import os
@@ -655,11 +656,28 @@ class ImagePickerDialog(QDialog):
         super().done(r)
 
 
+_SCRATCH: Any = None                  # the one folder of the session's scratch settings (removed when the program ends)
+_SCRATCH_COUNT = 0
+
+
+def drop_scratch_settings() -> None:
+    """Remove the folder of the scratch settings (at the end of the program; the next call makes a new one)."""
+    global _SCRATCH
+    if _SCRATCH is not None:
+        _SCRATCH.cleanup()
+        _SCRATCH = None
+
+
 def scratch_settings() -> QSettings:
     """Settings that live only for this session (a window made without settings of its own: its picker remembers
-    nothing; it never reads or writes the user's real store)."""
-    import tempfile
-    return QSettings(str(Path(tempfile.mkdtemp(prefix="video-chain-")) / "picker.ini"), QSettings.Format.IniFormat)
+    nothing; it never reads or writes the user's real store). All of them share one temporary folder, removed
+    when the program ends."""
+    global _SCRATCH, _SCRATCH_COUNT
+    if _SCRATCH is None:
+        _SCRATCH = media.scratch("picker")
+        atexit.register(drop_scratch_settings)
+    _SCRATCH_COUNT += 1
+    return QSettings(str(Path(_SCRATCH.name) / f"picker{_SCRATCH_COUNT}.ini"), QSettings.Format.IniFormat)
 
 
 def pick_image(parent, title: str, settings: QSettings | None, start_dir: str | None = None,
