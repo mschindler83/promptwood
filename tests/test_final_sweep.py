@@ -122,3 +122,66 @@ def test_a_frame_window_runs_its_callbacks_when_ready(app, tmp_path):
     dlg.after_ready(lambda: seen.append("now"))                    # ready: at once
     assert seen == [24, "now"]
     dlg.deleteLater()
+
+
+# ------------------------------------------------------------------ MWC-8: what the worker sends is what the window accepts
+def test_every_event_the_worker_serves_is_one_the_window_accepts(tmp_path, monkeypatch):
+    import json
+
+    from video_chain import __main__ as M, events as EV
+    monkeypatch.setattr(M.treemod, "refine_path", lambda *a, **k: (_ for _ in ()).throw(ValueError("no target")))
+
+    class Gen:
+        def free(self):
+            pass
+    r, w = os.pipe()
+    cmd = {"cmd": "refine", "tree": str(tmp_path), "target": "n1", "size": 2048, "out": str(tmp_path / "o")}
+    lines = ["garbage", '{"cmd": "dance"}', json.dumps(cmd), '{"cmd": "quit", "free": true}']
+    os.write(w, "".join(x + "\n" for x in lines).encode())
+    stdin = os.fdopen(r)
+    events: list = []
+    try:
+        a = M.build_parser().parse_args(["--serve", "--idle-minutes", "1"])
+        assert M.serve(a, events.append, lambda cur: Gen(), stdin=stdin) == 0
+    finally:
+        os.close(w)
+        stdin.close()
+    assert [e["e"] for e in events].count("error") == 3 and events[-1] == {"e": "bye", "reason": "quit"}
+    assert [EV.event_problem(e) for e in events] == [None] * len(events)
+    for e in events:                                   # (the fields the window's handlers read)
+        assert {"idle": "timeout" in e, "error": isinstance(e.get("msg"), str), "bye": "reason" in e}[e["e"]], e
+
+
+def test_the_worker_does_not_load_the_window_code():
+    """The worker is a separate process: importing it must not pull in Qt or video_chain.ui (MWC-8)."""
+    import subprocess
+    import sys
+    import video_chain
+    src = os.path.dirname(os.path.dirname(video_chain.__file__))
+    code = (f"import sys; sys.path.insert(0, {src!r})\nimport video_chain.__main__\n"
+            "bad = [m for m in sys.modules if m.startswith('video_chain.ui') or m.startswith('PySide6')]\n"
+            "sys.exit(1 if bad else 0)")
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+
+
+# ------------------------------------------------------------------ MWB-31: the voice transcript is kept through the public call
+def test_voice_fields_are_set_through_the_public_call(app, win, tmp_path, image):
+    from video_chain import tts as TTS
+    from video_chain import tree as T
+    from ui_helpers import new_project
+    new_project(win, tmp_path, image, ("a",))
+    win.tree.options["cast"] = [{"name": "Anna", "images": [], "desc": "", "lead": False,
+                                 "voice": {"file": "refs/v.wav", "secs": 3.0}}]
+    TTS.set_voice_fields(win.tree, "Anna", text="hello there")
+    assert T.character(win.tree, "Anna")["voice"] == {"file": "refs/v.wav", "secs": 3.0, "text": "hello there"}
+    TTS.set_voice_fields(win.tree, "Anna", eleven={"id": "e1", "name": "Eve"})
+    assert T.character(win.tree, "Anna")["tts"]["eleven"] == {"id": "e1", "name": "Eve"}
+    TTS.set_voice_fields(win.tree, "Anna", eleven=None)
+    assert "eleven" not in T.character(win.tree, "Anna")["tts"]
+    # the window keeps what the takes transcribed, once, and only for the voice file it was made from
+    win.tree.options["cast"][0]["voice"].pop("text")
+    win._keep_transcripts([{"voice_files": {"Anna": "refs/v.wav"}, "texts": {"Anna": "from a take"}}])
+    assert T.character(win.tree, "Anna")["voice"]["text"] == "from a take"
+    win._keep_transcripts([{"voice_files": {"Anna": "refs/other.wav"}, "texts": {"Anna": "stale"}}])
+    assert T.character(win.tree, "Anna")["voice"]["text"] == "from a take"
