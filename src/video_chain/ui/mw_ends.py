@@ -283,6 +283,22 @@ class EndsMixin:
                         "width": key.get("width") or "?", "height": key.get("height") or "?"}
         return None
 
+    def _choose_video_file(self, exclude: str | None = None) -> str | None:
+        """Choose a video: the project's real videos and its made clips (not clip exclude) first, or any file."""
+        clips = [(str(self.project / n.made["video"]), f"Clip #{T.short_id(n.id)} · {n.prompt[:40]}")
+                 for n in sorted(self.tree.nodes.values(), key=lambda n: self.tree.number(n.id))
+                 if not n.is_video and n.made and (self.project / n.made["video"]).is_file() and n.id != exclude]
+        cols = self.project_media("video") + ([("Clips of this project", clips)] if clips else [])
+        return choose_video(self, self.qs, places=self._picker_places(), collections=cols) or None
+
+    def _frame_dialog(self, video: str, title: str):
+        """The dialog that picks one frame of a video (None, reported, when the video cannot be read)."""
+        try:
+            return VideoFrameDialog(self, Path(video), title, self._known_info(video))
+        except (RuntimeError, OSError) as e:
+            self._report_error(f"Cannot read {Path(video).name}: {e}")
+            return None
+
     def end_from_video(self, nid: str, video: str | None = None, dialog: bool = True):
         """End image from a video: choose a video (the project's real videos and clips first, or any file), then
         one of its frames; that frame at the video's full size becomes the clip's end image."""
@@ -293,18 +309,11 @@ class EndsMixin:
             self.status.setText(f"Clip #{T.short_id(nid)} ends at the first frame of the video after it.")
             return None
         if video is None:
-            clips = [(str(self.project / n.made["video"]), f"Clip #{T.short_id(n.id)} · {n.prompt[:40]}")
-                     for n in sorted(self.tree.nodes.values(), key=lambda n: self.tree.number(n.id))
-                     if not n.is_video and n.made and (self.project / n.made["video"]).is_file() and n.id != nid]
-            cols = self.project_media("video") + ([("Clips of this project", clips)] if clips else [])
-            video = choose_video(self, self.qs, places=self._picker_places(), collections=cols)
+            video = self._choose_video_file(exclude=nid)
             if not video:
                 return None
-        try:
-            dlg = VideoFrameDialog(self, Path(video), f"End image of clip #{T.short_id(nid)}: a frame of {Path(video).name}",
-                                   self._known_info(video))
-        except (RuntimeError, OSError) as e:
-            self._report_error(f"Cannot read {Path(video).name}: {e}")
+        dlg = self._frame_dialog(video, f"End image of clip #{T.short_id(nid)}: a frame of {Path(video).name}")
+        if dlg is None:
             return None
         if not dialog:
             return dlg
@@ -404,19 +413,13 @@ class EndsMixin:
                 return None
             video = str(self.project / node.made["video"])
         elif video is None:
-            clips = [(str(self.project / n.made["video"]), f"Clip #{T.short_id(n.id)} · {n.prompt[:40]}")
-                     for n in sorted(self.tree.nodes.values(), key=lambda n: self.tree.number(n.id))
-                     if not n.is_video and n.made and (self.project / n.made["video"]).is_file()]
-            cols = self.project_media("video") + ([("Clips of this project", clips)] if clips else [])
-            video = choose_video(self, self.qs, places=self._picker_places(), collections=cols)
+            video = self._choose_video_file()
             if not video:
                 return None
         title = (f"Keep a moment of clip #{T.short_id(nid)}: the frame to keep (it is pinned at its time)" if own else
                  f"Keyframe of clip #{T.short_id(nid)} at {at:.2f} s: a frame of {Path(video).name}")
-        try:
-            dlg = VideoFrameDialog(self, Path(video), title, self._known_info(video))
-        except (RuntimeError, OSError) as e:
-            self._report_error(f"Cannot read {Path(video).name}: {e}")
+        dlg = self._frame_dialog(video, title)
+        if dlg is None:
             return None
         if own:
             dlg.slider.setValue(min(dlg.frames - 2, max(1, T.keyframe_frame(at))))
