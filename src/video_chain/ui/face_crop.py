@@ -6,7 +6,7 @@ import tempfile
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QObject, QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QHBoxLayout, QPushButton, QVBoxLayout, QWidget
 
@@ -67,6 +67,15 @@ class CropView(QWidget):
             self.update()
             self.changed.emit()
 
+    def _ensure_shown(self) -> None:
+        """The picture scaled to the view in device pixels (sharp on a 150 % or 200 % display)."""
+        s = self._frame()[0]
+        dpr = self.devicePixelRatioF()
+        size = QSize(round(self.image.width() * s * dpr), round(self.image.height() * s * dpr))
+        if self._shown is None or self._shown.size() != size or self._shown.devicePixelRatio() != dpr:
+            self._shown = self.image.scaled(size, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+            self._shown.setDevicePixelRatio(dpr)
+
     def paintEvent(self, _e):
         t = theme()
         p = QPainter(self)
@@ -75,8 +84,7 @@ class CropView(QWidget):
             return
         s, ox, oy = self._frame()
         target = QRectF(ox, oy, self.image.width() * s, self.image.height() * s)
-        if self._shown is None or self._shown.size() != target.size().toSize():
-            self._shown = self.image.scaled(target.size().toSize(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        self._ensure_shown()
         p.drawImage(target.topLeft(), self._shown)
         x, y, side = self.crop
         box = self._to_widget(x, y, side, side)
@@ -169,6 +177,7 @@ class FaceCropDialog(QDialog):
         self.loading = True
         self.faces: list = []
         self.why: str | None = None
+        self._note = ""
         self.whole = False
         v = QVBoxLayout(self)
         self.view = CropView(QImage(), [], crop or (0, 0, 0))
@@ -208,10 +217,12 @@ class FaceCropDialog(QDialog):
         """Worker thread: the upright picture, then the faces. A window closed meanwhile just drops the result."""
         try:
             png = Path(self._tmp.name) / "picture.png"
+            note = ""
             try:
                 chain.to_png(image_path, png)
             except Exception:  # noqa: BLE001
                 png = image_path
+                note = "the picture could not be turned upright (a rotated photo may show sideways)"
             image = QImage(str(png))
             faces: list = []
             why = None
@@ -224,9 +235,9 @@ class FaceCropDialog(QDialog):
                         faces = F.detect(png, model)
                     except Exception as e:  # noqa: BLE001
                         why = f"the face detector failed: {e}"
-            self._result = (image, faces, why)
+            self._result = (image, faces, why, note)
         except Exception as e:  # noqa: BLE001  (the temporary folder removed by a close, ...)
-            self._result = (QImage(), [], f"the picture could not be read: {e}")
+            self._result = (QImage(), [], f"the picture could not be read: {e}", "")
         self._finished.set()
         try:
             self._loaded.done.emit()
@@ -236,7 +247,7 @@ class FaceCropDialog(QDialog):
     def _apply(self) -> None:
         if self._result is None or self._closed:
             return
-        image, self.faces, why = self._result
+        image, self.faces, why, self._note = self._result
         self._result = None
         if image.isNull():
             self.view.set_content(image, [], (0, 0, 0))
@@ -261,6 +272,7 @@ class FaceCropDialog(QDialog):
             return
         side = self.view.crop[2]
         n = len(self.faces)
+        note = f"Note: {self._note}. " if self._note else ""
         if self.why:
             text = f"No face detection: {self.why}. Set the square by hand."
         elif n == 0:
@@ -273,7 +285,7 @@ class FaceCropDialog(QDialog):
                  "crop of the face keeps the model from copying the picture's scene or pose.")
         if side < SMALL_SIDE:
             text += f" Small: below {SMALL_SIDE} px the face picture is soft; a bigger source works better."
-        self.info.setText(text)
+        self.info.setText(note + text)
 
     def done(self, r):
         self._closed = True

@@ -184,3 +184,31 @@ def test_swap_close_with_a_result_asks(app, tmp_path, monkeypatch):
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
     dlg.reject()
     assert finished == [0]
+
+
+def test_crop_view_picture_follows_pixel_ratio(app):
+    from PySide6.QtGui import QImage
+
+    from video_chain.ui.face_crop import CropView
+    img = QImage(400, 300, QImage.Format_RGB32)
+    img.fill(0x808080)
+    v = CropView(img, [], (0, 0, 100))
+    v.resize(200, 150)
+    v.devicePixelRatioF = lambda: 2.0
+    v._ensure_shown()
+    assert v._shown.devicePixelRatio() == 2.0 and v._shown.width() == round(400 * v._frame()[0] * 2)
+
+
+def test_crop_says_when_the_picture_could_not_be_turned(app, tmp_path, monkeypatch):
+    from video_chain import chain
+    from video_chain.ui.face_crop import FaceCropDialog
+    p = tmp_path / "pic.png"
+    Image.new("RGB", (300, 200), (90, 80, 70)).save(p)
+
+    def bad(*a, **k):
+        raise RuntimeError("ffmpeg missing")
+    monkeypatch.setattr(chain, "to_png", bad)
+    dlg = FaceCropDialog(None, p, None)
+    wait(app, lambda: not dlg.loading)
+    assert "upright" in dlg.info.text()
+    dlg.deleteLater()
