@@ -1833,6 +1833,9 @@ class MainWindow(QMainWindow):
         self._remix_stuck: set[str] = set()     # the due clips whose remix failed (tried again after an edit)
         self._build()
         self._load_settings()
+        from .plugin_host import PluginHost      # separately installed features (plugins.py); none: nothing added
+        self.plugins = PluginHost(self)
+        self.plugins.start()
         self._gpu_proc: QProcess | None = None
         self._gpu_timer = QTimer(self, interval=4000, timeout=self._poll_gpu)
         self._gpu_timer.start()
@@ -3878,6 +3881,7 @@ class MainWindow(QMainWindow):
         self.status.setText(f"Project {folder.name}: {len(tree.nodes)} clip{'s' if len(tree.nodes) != 1 else ''}."
                             + synced + (f" Note: {film.problem}; the film's scene list is not changed until it is "
                                         "fixed." if film.problem else ""))
+        self.plugins.emit("project_opened", folder)
         return True
 
     def _open_dir(self):
@@ -8077,8 +8081,12 @@ class MainWindow(QMainWindow):
             keep_path = m.addAction("Keep only this path, delete all other branches")
             keep_path.setEnabled(bool(self.tree.others_than_path(nid)))
             delete = m.addAction("Delete (with everything after it)")
+        extra = self.plugins.context_actions(m, nid) if nid != START else {}     # (the plugins' clip actions)
         chosen = self._exec_menu(m, pos.toPoint() if hasattr(pos, "toPoint") else pos)
         if chosen is None:
+            return
+        if chosen in extra:
+            QTimer.singleShot(0, extra[chosen])
             return
         # run it later: this is still inside the node's mouse handler, and the action may rebuild the graph
         # (deleting that very node)
@@ -8798,6 +8806,7 @@ class MainWindow(QMainWindow):
 
     def _event(self, ev: dict):
         e = ev.get("e")
+        self.plugins.emit("run_event", ev)
         if e == "loading":
             self._worker_idle = False
             self.status.setText("Starting a RunPod pod …" if ev.get("what") == "runpod" else "Connecting to ComfyUI …")
@@ -8898,6 +8907,8 @@ class MainWindow(QMainWindow):
     def _job_finished(self, code: int = 0):
         """End of a job: the worker reported idle again (code 0), or the worker ended (its exit code)."""
         ok = self._phase == "done" and code == 0 and not self._error
+        result = 0 if ok else (int(code) or 1)           # (told to the plugins once the window is up to date)
+        QTimer.singleShot(0, lambda: self.plugins.emit("run_finished", result))
         refine = (self._job or {}).get("refine")         # an export at a refined size
         for nid in [n for n, s in self.live.items() if s == "generating"]:
             if refine:                                   # an export never touches the clip itself, only its upscaled
