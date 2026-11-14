@@ -6,6 +6,20 @@ one after it starts from its last frame.
 The project folder holds tree.json, start.png and the clips (see tree/). Clips are rendered by ComfyUI; a small
 worker process (python -m video_chain --serve) talks to it and reports '@@ {json}' events; Stop ends that process
 and cancels the clip in ComfyUI.
+
+How the window is built (the design, and what is still shared):
+- MainWindow is one QMainWindow made from mixins, one per area (mw_build the widgets, mw_options the project options,
+  mw_generator the worker, mw_nodes the node actions and the node menu, mw_inspector the cards and the problems, ...).
+  The mixins share ONE object's state (the attributes listed in mw_host.MainWindowHost), so a mixin is a file-sized
+  slice of the window, not an independent unit. What was clearly separable has moved out into plain objects the
+  window owns: generator_state (Job, Phase, ModelSwitch, the worker's typed events and their check), ComfyService
+  (what is loaded in ComfyUI), ui_logic (pure helpers, Problem), workers (background work: run_in_background, post,
+  Latest), the NODE_ACTIONS registry in mw_nodes. The rest stays in the mixins until it has a second user.
+- Background work always goes through workers.run_in_background / post; a stale answer is dropped with Latest.
+- Policy that tests set is a constructor argument (modal_dialogs, audio_player), never a check of the environment.
+- Edit windows (image edit, replace a person, clips' frame pickers, the LoRA window) stay MODAL on purpose: they hold
+  a ComfyUI model (ModelSwitch / ComfyService) and the project's files while open, and the window's edits and Generate
+  are locked by a run, not by a dialog; a non-modal window would need that lock extended to them first (UX-13).
 """
 from __future__ import annotations
 
