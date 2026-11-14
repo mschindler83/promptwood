@@ -120,6 +120,10 @@ class Subject:
     pictures: tuple[int, ...] = ()
     voice: bool = False
 
+    def __post_init__(self):
+        if self.kind not in KINDS:                      # (a hand-built Subject: the dict path does the same)
+            object.__setattr__(self, "kind", "person")
+
 
 @dataclass(frozen=True)
 class Line:
@@ -159,6 +163,8 @@ def _sound_cut(text: str) -> tuple[int, str | None, str | None]:
         label, own = m.group(1).lower(), m.group(2).strip()
         if label in found or (own and i != end - 1):
             break                                  # body text (a label with words of its own is one line)
+        if not own and any(SHOT.match(rows[k][1].strip()) for k in range(i + 1, end)):
+            break                                  # a label alone above more shots: body text, not a sound line
         found[label] = " ".join(x for x in [own] + [rows[k][1].strip() for k in range(i + 1, end)] if x)
         cut, end = rows[i][0], i
     if not found:
@@ -251,7 +257,7 @@ def _ends_sentence(s: str) -> bool:
                 break
         else:
             break
-    return s[-1:] in (".", "!", "?")
+    return s[-1:] in (".", "!", "?", "…", "。", "！", "？")
 
 
 def _join(a: str, b: str) -> str:
