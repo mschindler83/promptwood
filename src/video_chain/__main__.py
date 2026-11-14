@@ -151,7 +151,8 @@ def _generator(a, emit, current):
         raise SystemExit(COMFY_DOWN)
     gen.note = lambda text: emit({"e": "note", "id": current.get("id"), "text": str(text)})
     emit({"e": "loaded", "what": "comfyui"})
-    return gen
+    from . import plugins                          # (a plugin may wrap the generator or give another backend)
+    return plugins.wrap_generator(gen, a, log=lambda m: print(m, file=sys.stderr, flush=True))
 
 
 class JobError(Exception):
