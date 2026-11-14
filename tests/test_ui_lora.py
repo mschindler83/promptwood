@@ -294,7 +294,8 @@ def test_lora_trigger_words_in_the_image_window(app, tmp_path, image, monkeypatc
         lora.parent.mkdir(parents=True)
         save_file({"a.lora_A.weight": np.zeros((2, 2), np.float16)}, str(lora),
                   metadata={"modelspec.trigger_phrase": "glowx"})
-        dlg = w.edit_image(start=True, dialog=False)
+        w.modal_dialogs = False
+        dlg = w.edit_image(start=True)
         dlg.add_lora_file(str(lora), 1.0)
         row = dlg.loras.rows[0][0]
         assert row.trigger_label.text() == "trigger words: not looked up yet"
@@ -312,7 +313,8 @@ def test_lora_trigger_words_in_the_image_window(app, tmp_path, image, monkeypatc
         assert "Prompt: she smiles" in dlg.res_info.toolTip() and "Trigger words added: glowx" in dlg.view.toolTip()
         dlg.done(0)
         w.lora_triggers.setChecked(False)                                       # the project's choice
-        dlg = w.edit_image(start=True, dialog=False)
+        w.modal_dialogs = False
+        dlg = w.edit_image(start=True)
         assert dlg._trigger_words() == []
         dlg.done(0)
         w.close()
@@ -345,7 +347,8 @@ def test_one_image_per_lora_in_the_image_window(app, tmp_path, image, monkeypatc
                       metadata={"modelspec.trigger_phrase": f"{name}x"})
             files.append(str(f))
         TR.db().scan(files, online=False)
-        dlg = w.edit_image(start=True, dialog=False)
+        w.modal_dialogs = False
+        dlg = w.edit_image(start=True)
         dlg.add_lora_file(files[0], 0.7)
         dlg.add_lora_file(files[1], 1.2)
         dlg.prompt.setPlainText("she smiles")
@@ -369,7 +372,8 @@ def test_one_image_per_lora_in_the_image_window(app, tmp_path, image, monkeypatc
         assert got == [(500, "rain", 1.2, 1, ["rainx"], "she smiles"), (500, "glow", 0.7, 1, ["glowx"], "she smiles"),
                        (501, "rain", 1.2, 1, ["rainx"], "she smiles"), (501, "glow", 0.7, 1, ["glowx"], "she smiles")]
         dlg.done(0)
-        dlg = w.edit_image(start=True, dialog=False)                   # remembered
+        w.modal_dialogs = False
+        dlg = w.edit_image(start=True)                   # remembered
         assert dlg.lora_each.isChecked()
         dlg.lora_each.setChecked(False)
         assert len(dlg._lora_runs()) == 1 and len(dlg._lora_runs()[0]) == 2   # off: all LoRAs together

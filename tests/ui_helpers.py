@@ -55,7 +55,7 @@ def win(app, tmp_path, monkeypatch):
     played = []
     monkeypatch.setattr(Preview, "open", lambda self, path, title, autoplay=True: played.append(Path(path)))
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
-    w = MainWindow(settings(tmp_path), command=FAKE)
+    w = MainWindow(settings(tmp_path), command=FAKE, audio_player=False)
     w.played = played
     w.show()
     yield w
@@ -85,7 +85,9 @@ def wait_for_joined_path(app, win, last: str, timeout=30):
 
 
 def flush(app, win):
-    """Run the debounced save/refresh now."""
+    """Run the debounced save/refresh now (a settled burst of option ticks first: it starts those two)."""
+    if win._options_timer.isActive():
+        win._options_settled()
     for t in (win._save_timer, win._refresh_timer):
         if t.isActive():
             t.stop()

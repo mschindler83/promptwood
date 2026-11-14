@@ -109,8 +109,6 @@ class LorasMixin(MainWindowHost):
         status bar how many were found."""
         comfy_dir = Path(os.path.expanduser(self.comfy_dir.text().strip() or UL.DEFAULT_COMFY_DIR))
         self._scanned_at = time.monotonic()
-        self._lora_scan_gen = self._lora_scan_gen + 1
-        gen = self._lora_scan_gen
 
         def work():
             roots = CMF.comfy_lora_roots(comfy_dir)
@@ -120,11 +118,10 @@ class LorasMixin(MainWindowHost):
                 found += [(p, n, fam) for p, n in items]
             return found
 
-        def done(found):
-            if gen == self._lora_scan_gen:           # (a newer scan was started: e.g. another ComfyUI folder)
-                self._loras_found(found, report)
-        # (a failed scan keeps the lists found before: a folder may be offline)
-        run_in_background(work, on_done=done, on_error=lambda e: log.info("LoRA scan failed: %s", e), owner=self)
+        # (a newer scan was started, e.g. another ComfyUI folder: only its answer counts; a failed scan keeps the
+        # lists found before: a folder may be offline)
+        run_in_background(work, on_done=lambda found: self._loras_found(found, report),
+                          on_error=lambda e: log.info("LoRA scan failed: %s", e), owner=self, latest=self._lora_scan)
 
     def _loras_found(self, found: list, report: bool = False):
         self.h3_loras = [(p, n) for p, n, kind in found if kind == "h3"]

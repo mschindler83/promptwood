@@ -316,10 +316,10 @@ class CastMixin(MainWindowHost):
         finally:
             dlg.deleteLater()
 
-    def create_reference(self, dialog: bool = True):
+    def create_reference(self):
         """The Create image window for a face picture of the selected character (its "Add as face reference")."""
         c = self._selected_character()
-        return self.edit_image(mode="create", dialog=dialog, character=c["name"] if c else None)
+        return self.edit_image(mode="create", character=c["name"] if c else None)
 
     def add_reference(self, path: str, crop="ask") -> bool:
         """A face picture for the selected character (none selected: the lead, else the first person, else a new

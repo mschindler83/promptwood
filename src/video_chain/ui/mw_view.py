@@ -1,19 +1,23 @@
 """Simple / Advanced view, the guide, the engine banner, the menu and the panel layouts."""
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import os
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QActionGroup
-from PySide6.QtWidgets import QApplication, QLineEdit, QPlainTextEdit
+from PySide6.QtGui import QAction, QActionGroup
+from PySide6.QtWidgets import QApplication, QLineEdit, QMessageBox, QPlainTextEdit
 
 from .. import tree as T
 from . import shortcuts as S
 from .clip_cards import PromptCard
-from .ui_logic import (COMFY_START_TIMEOUT, DEFAULT_COMFY_LAUNCHER, LAYOUTS, LAYOUT_VERSION, as_dict,
+from .graph import START
+from .mw_nodes import NODE_ACTIONS
+from .ui_logic import (COMFY_START_TIMEOUT, DEFAULT_COMFY_LAUNCHER, LAYOUTS, LayoutState, as_dict,
                        project_setting_changes)
 from .mw_host import MainWindowHost
 from .qsvalue import qs_value
@@ -268,12 +272,73 @@ class ViewMixin(MainWindowHost):
             a.setCheckable(True)
             group.addAction(a)
             a.triggered.connect(lambda _=False, on=simple: self.set_simple(on))
+        self._build_clip_menu()
         st = self.menuBar().addMenu("&Settings")
         st.addAction("Preferences…", self.show_prefs).setShortcut(S.sequence("preferences"))
         h = self.menuBar().addMenu("&Help")
         h.addAction("Getting started", lambda: self.show_guide(True))
         h.addAction("Keyboard shortcuts…", self.show_shortcuts).setShortcut(S.sequence("shortcuts"))
         h.addAction("Show the log", self.show_log)
+        h.addSeparator()
+        h.addAction("About Promptwood", self.show_about)
+
+    def _build_clip_menu(self):
+        """The Clip menu: what the node menu and the card buttons do, for the clip in the inspector. The node
+        actions are the registry's (NODE_ACTIONS); a shortcut's keys are shown in the text and bound once (mw_build)."""
+        m = self.menuBar().addMenu("&Clip")
+        self._clip_actions: list[tuple[QAction, str | None]] = []
+
+        def node(text: str, action: str, key: str | None = None):
+            shown = text + (f"\t{S.keys(key)}" if key else "")
+            act = m.addAction(shown, lambda: self.node_action(action, self.target_id()))
+            self._clip_actions.append((act, action))
+
+        def direct(text: str, fn: Callable[[], None], key: str | None = None):
+            shown = text + (f"\t{S.keys(key)}" if key else "")
+            self._clip_actions.append((m.addAction(shown, fn), None))
+        node("Continue from here", "continue", "continue")
+        node("Branch (another continuation)", "branch", "branch")
+        node("Variant (same prompt, other seed)", "variant", "variant")
+        node("Variants… (several, generated at once)", "variants")
+        node("Add a real video after this…", "video", "add_video")
+        node("Refine the prompt with AI…", "refine")
+        node("Freeze (keep it and the clips before it as made)", "freeze_toggle")
+        m.addSeparator()
+        direct("Generate the path to here", self.generate_path, "generate")
+        direct("Generate every branch", self.generate_all, "generate_all")
+        direct("Stop", self.stop)
+        direct("Export the path…", lambda: self.export_path())
+        m.addSeparator()
+        node("Delete (with everything after it)", "delete", "graph_delete")
+        m.aboutToShow.connect(self._update_clip_menu)
+
+    def _update_clip_menu(self):
+        """Enable what fits the clip in the inspector now (nothing without a project, nothing but Stop while a run
+        goes)."""
+        tree = self.tree
+        nid = self.target_id() if tree is not None else None
+        node = tree.nodes.get(nid) if tree is not None and nid and nid != START else None
+        for act, action in self._clip_actions:
+            name = act.text().split("\t")[0]
+            if tree is None:
+                act.setEnabled(False)
+            elif action is None:
+                act.setEnabled(self.running if name == "Stop" else not self.running)
+            else:
+                act.setEnabled(not self.running and NODE_ACTIONS[action].fits(node))
+            if action == "freeze_toggle" and node is not None:
+                act.setText("Unfreeze (edit it, follow the settings again)" if node.frozen else
+                            "Freeze (keep it and the clips before it as made)")
+
+    def show_about(self):
+        """Help → About: what this is and which version."""
+        try:
+            version = importlib.metadata.version("video-chain")
+        except importlib.metadata.PackageNotFoundError:
+            version = "development"
+        QMessageBox.about(self, "About Promptwood",
+                          f"<b>Promptwood</b> {version}<br>Chain MiniMax-H3 image-to-video clips: each prompt "
+                          "continues from the last frame of the clip before.")
 
     def show_shortcuts(self):
         """Help → Keyboard shortcuts: the table every window binds from (not modal: it stays beside the work)."""
@@ -313,25 +378,15 @@ class ViewMixin(MainWindowHost):
     def _restore_layout(self):
         """The layout of the last session; the default one if there is none, it was saved by an older version or
         it is damaged."""
-        try:
-            d = json.loads(qs_value(self.qs, "layout", "", str) or "{}")
-            split, center = d["split"], d["center"]
-            ok = (d.get("v") == LAYOUT_VERSION and len(split) == 3 and len(center) == 2
-                  and all(isinstance(x, int) and x >= 0 for x in split + center)
-                  and split[1] > 0 and split[2] > 0 and all(x > 0 for x in center))
-            left_w = int(d.get("left_w") or 0)
-        except (TypeError, ValueError, KeyError, AttributeError):
-            ok = False
-        if not ok:
+        saved = LayoutState.from_json(qs_value(self.qs, "layout", "", str))
+        if saved is None:
             self.apply_layout("edit")
             return
-        if left_w > 0:
-            self._left_w = left_w
-        elif split[0] > 0:
-            self._left_w = split[0]
-        self.split.setSizes(split)
-        self.act_left.setChecked(bool(d.get("left", True)))
-        self.center.setSizes(center)
+        if saved.left_width() > 0:
+            self._left_w = saved.left_width()
+        self.split.setSizes(saved.split)
+        self.act_left.setChecked(saved.left)
+        self.center.setSizes(saved.center)
 
     def show_prefs(self):
         """ComfyUI's address, launcher, folder and the model / trigger word settings (not modal: the status bar

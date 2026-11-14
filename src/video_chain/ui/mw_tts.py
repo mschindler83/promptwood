@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import copy
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from .workers import post, run_in_background
@@ -15,6 +17,17 @@ from .mw_host import MainWindowHost
 
 class TtsMixin(MainWindowHost):
     """Text to speech and speaking a clip's lines."""
+
+    @contextmanager
+    def _tts_session(self) -> Iterator[None]:
+        """Text to speech is busy from here; the worker's answer ends it (_lines_spoken, _eleven_cloned). When what
+        starts the work fails, it never started: it is not busy for ever."""
+        self._tts_busy = True
+        try:
+            yield
+        except BaseException:
+            self._tts_busy = False
+            raise
 
     def _tts_changed(self, *_):
         if self._loading or self.tree is None:
@@ -192,13 +205,9 @@ class TtsMixin(MainWindowHost):
             return False
         assert self.tree is not None and self.project is not None      # (_speak_engine)
         snap, project = copy.deepcopy(self.tree), self.project
-        self._tts_busy = True
-        try:
+        with self._tts_session():
             self._update_buttons()
             self.status.setText(f"Speaking the lines of clip #{T.short_id(nid)} ({TTS.PROVIDERS[eng.name]})…")
-        except BaseException:
-            self._tts_busy = False                  # (it never started: not busy for ever)
-            raise
 
         def work():
             try:

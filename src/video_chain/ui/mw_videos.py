@@ -246,8 +246,8 @@ class VideosMixin(MainWindowHost):
         self.refresh()
 
     # ---- replace a person in a real video (Wan 2.2 Animate)
-    def replace_person(self, nid: str, dialog: bool = True):
-        """The swap window for a video node (its converted clip). dialog=False: returned without exec (tests)."""
+    def replace_person(self, nid: str):
+        """The swap window for a video node (its converted clip). Not run (returned) when modal_dialogs is off."""
         node = self.tree.nodes.get(nid) if self.tree else None
         if node is None or not node.is_video or self.running:
             return None
@@ -279,7 +279,7 @@ class VideosMixin(MainWindowHost):
 
         def before():                               # GUI thread: the clip model makes room
             self._qwen_timer.stop()
-            switch.prepare(self._comfy_model)
+            switch.prepare(self.comfy.model)
             if self.worker_alive and not self.running:
                 self._quit_worker(free=False)
 
@@ -313,7 +313,7 @@ class VideosMixin(MainWindowHost):
                          pick=lambda title: IP.pick_image(
                              self, title, self.qs, None, self._picker_places(), self.project_images()))
         self._edit_switch = switch                  # (as the image window: the model is unloaded after it)
-        if not dialog:
+        if not self.modal_dialogs:
             return dlg
         try:
             if dlg.exec() == QDialog.DialogCode.Accepted and dlg.result is not None:

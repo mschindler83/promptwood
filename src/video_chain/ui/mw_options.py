@@ -12,7 +12,7 @@ from .. import tree as T, triggers, tts as TTS
 from ..comfy import REF_HINT
 from .clip_cards import PromptCard
 from .mw_support import select_frames
-from .ui_logic import FRAME_CHOICES, as_dict, speed_mode
+from .ui_logic import FRAME_CHOICES, SPEED_NAMES, as_dict, speed_mode
 from .mw_host import MainWindowHost
 
 
@@ -48,26 +48,27 @@ class OptionsMixin(MainWindowHost):
     def _options_to_widgets(self):
         assert self.tree is not None
         o = self.tree.options
+        d = as_dict(T.DEFAULT_OPTIONS)              # (what a missing value shows)
         self._loading = True
         try:
             for k in range(self.frames.count() - 1, len(FRAME_CHOICES) - 1, -1):   # an old value added earlier
                 self.frames.removeItem(k)
-            fr = int(o.get("frames", 73))
+            fr = int(o.get("frames", d["frames"]))
             if fr in FRAME_CHOICES:
                 self.frames.setCurrentIndex(FRAME_CHOICES.index(fr))
             else:
                 select_frames(self.frames, fr)
-            i = self.resolution.findData(int(o.get("resolution", 512)))
+            i = self.resolution.findData(int(o.get("resolution", d["resolution"])))
             self.resolution.setCurrentIndex(i if i >= 0 else 1)
-            self.aspect.setCurrentIndex(max(0, self.aspect.findData(o.get("aspect", "16:9"))))
-            self.steps.setValue(int(o.get("steps", 28)))
-            self.audio.setChecked(bool(o.get("audio", True)))
+            self.aspect.setCurrentIndex(max(0, self.aspect.findData(o.get("aspect", d["aspect"]))))
+            self.steps.setValue(int(o.get("steps", d["steps"])))
+            self.audio.setChecked(bool(o.get("audio", d["audio"])))
             ident = o.get("identity") or {}
-            self.ref_size.setCurrentIndex(max(0, self.ref_size.findData(ident.get("size", "match"))))
-            self.ref_hint.setChecked(bool(ident.get("hint", True)))
+            self.ref_size.setCurrentIndex(max(0, self.ref_size.findData(ident.get("size", d["identity"]["size"]))))
+            self.ref_hint.setChecked(bool(ident.get("hint", d["identity"]["hint"])))
             self.prompt_format.setCurrentIndex(max(0, self.prompt_format.findData("h3" if T.is_h3(o) else "classic")))
             self._update_hint_enabled()
-            self.dialogue_lang.setCurrentText(ident.get("language") or "English")
+            self.dialogue_lang.setCurrentText(ident.get("language") or d["identity"]["language"])
             topt = TTS.options(o)
             self.tts_provider.setCurrentIndex(max(0, self.tts_provider.findData(topt["provider"])))
             if self.eleven_model.findData(topt["eleven_model"]) < 0:
@@ -76,18 +77,18 @@ class OptionsMixin(MainWindowHost):
             self.view.show((self._tts_form, self._eleven_row), topt["provider"] == "elevenlabs")
             turbo = o.get("turbo") or {}
             self.speed.setCurrentIndex(self.speed.findData(speed_mode(as_dict(o))))
-            self.turbo_steps.setValue(int(turbo.get("steps", 6)))
-            self.turbo_strength.setValue(float(turbo.get("strength", 1.0)))
+            self.turbo_steps.setValue(int(turbo.get("steps", d["turbo"]["steps"])))
+            self.turbo_strength.setValue(float(turbo.get("strength", d["turbo"]["strength"])))
             self._cfg_mode = self.speed.currentData()
             self.clip_cfg.setValue(float(self._mode_options(as_dict(o), self._cfg_mode).get("cfg", 1.0)))
             self._cfg_hint()
             self._fill_turbo(turbo.get("lora"))
-            self.keep_rep.setChecked(bool(o.get("keep_repeated", False)))
-            self.veda.setChecked(bool((o.get("veda") or {"on": True}).get("on", True)))
+            self.keep_rep.setChecked(bool(o.get("keep_repeated", d["keep_repeated"])))
+            self.veda.setChecked(bool((o.get("veda") or d["veda"]).get("on", d["veda"]["on"])))
             style = o.get("style") or {}
             self.style_prefix.setText(style.get("prefix") or "")
             self.style_suffix.setText(style.get("suffix") or "")
-            self.lora_triggers.setChecked(bool(o.get("lora_triggers", True)))
+            self.lora_triggers.setChecked(bool(o.get("lora_triggers", d["lora_triggers"])))
         finally:
             self._loading = False
         self._update_adv_note()
@@ -99,15 +100,20 @@ class OptionsMixin(MainWindowHost):
 
     def _cfg_hint(self):
         v = self.clip_cfg.value()
-        name = {"normal": "Normal", "turbo": "Turbo", "hyperflow": "HyperFlow", "pika": "Pika"}.get(
-            self.speed.currentData(), "")
+        name = SPEED_NAMES.get(self.speed.currentData(), "")
         self.cfg_note.setText(f"for {name}: off (one pass per step)" if abs(v - 1) < 1e-6 else
                               f"for {name}: two passes per step (about twice as slow)")
 
-    def _options_changed(self, *_):
+    def _options_typing(self, *_):
+        """A spin box ticked (typing, arrow keys, the wheel): the value is taken at once, the heavy follow-up work
+        (references, card choices, saving, what is remade) waits for a short pause and runs once (MWB-9)."""
+        self._options_changed(defer=True)
+
+    def _options_changed(self, *_, defer: bool = False):
         if self._loading or self.tree is None or self.running:
             return
-        before = self._done_clips()
+        if self._options_before is None:            # (what was done before the first tick of this burst)
+            self._options_before = self._done_clips()
         mode = self.speed.currentData()
         if mode != self._cfg_mode:                  # another speed mode: its own CFG into the field (not this one's)
             self._cfg_mode = mode
@@ -131,8 +137,19 @@ class OptionsMixin(MainWindowHost):
         else:
             as_dict(self.tree.options)[mode]["cfg"] = cfg
         self._update_size_info()
-        self._show_references()
         self._turbo_widgets()
+        if defer:
+            self._options_timer.start()
+        else:
+            self._options_settled()
+
+    def _options_settled(self):
+        """The burst of option changes is over (or a combo box / check box changed): the follow-up work, once."""
+        self._options_timer.stop()
+        before, self._options_before = self._options_before, None
+        if before is None or self.tree is None:
+            return
+        self._show_references()
         self._refresh_card_choices()
         self._changed()
         if not self._report_remade(before, "Project settings changed"):

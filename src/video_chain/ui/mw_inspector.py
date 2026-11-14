@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import stat as stat_module
 from collections.abc import Mapping
 from pathlib import Path
@@ -20,7 +19,9 @@ from .lora_stack import lora_label
 from .widgets import format_time
 from . import ui_logic as UL
 from .clip_cards import PromptCard
-from .ui_logic import REMIX_DELAY_MS, SourceSoundInfo, plain_problem, plural, row_start
+from .ui_logic import (REMIX_DELAY_MS, Problem, ProblemKind as PK, SourceSoundInfo, classify_cast_problem, plain_problem,
+                       plural, row_start)
+from ..__main__ import COMFY_DOWN
 from .mw_host import MainWindowHost
 
 log = logging.getLogger(__name__)
@@ -94,7 +95,8 @@ class InspectorMixin(MainWindowHost):
                 and not self._remixing and not self.running:
             self._remix_timer.start(REMIX_DELAY_MS)  # (e.g. one left over by a stopped run: mixed again soon)
         sel = self.selected_id()
-        on_path = {n.id for n in self.selected_path()}
+        path = self.selected_path()
+        on_path = {n.id for n in path}
         start_pm = self._pixmap(self.project / T.START_FILE)
         infos = [NodeInfo(START, None, "Start", "", Path(self.tree.image).name if self.tree.image else "",
                           "start", start_pm, on_path=True, selected=sel == START)]
@@ -120,7 +122,7 @@ class InspectorMixin(MainWindowHost):
                                   self.badge(n), n.kind))
         self.graph.show_nodes(infos)
         self._show_tracks()                        # (how many clips play each track)
-        if rebuild_path or [c.nid for c in self.cards] != [n.id for n in self.selected_path()]:
+        if rebuild_path or [c.nid for c in self.cards] != [n.id for n in path]:
             self._rebuild_path()
         else:
             self._update_cards()
@@ -175,66 +177,74 @@ class InspectorMixin(MainWindowHost):
             return None
 
     # ------------------------------------------------------------------ problems where they are
-    def clip_problems(self, nid: str, checker: T.Checker | None = None) -> list[dict]:
+    def clip_problems(self, nid: str, checker: T.Checker | None = None) -> list[Problem]:
         """What blocks making this clip, from the checks Generate makes (_start; nothing new is checked here and
         Generate refuses exactly as before), each as a plain sentence with the technical text in its tooltip and,
         where the app can do it, an action (fix_problem). A clip that is made (and unchanged) has none. The prompt
-        of a new clip being empty is not one: the placeholder and the guide say that."""
+        of a new clip being empty is not one: the placeholder and the guide say that. A check that itself fails is
+        said on the card (kind CHECK) and logged; Generate says it again."""
         if self.tree is None or self.project is None or nid not in self.tree.nodes:
             return []
         n = self.tree.nodes[nid]
         if n.is_video or n.frozen or self.status_of.get(nid) == "done":
             return []
-        out: list[dict] = []
-
-        def add(text, tip="", action=None, button=None):
-            out.append({"text": text, "tip": tip, "action": action, "button": button})
+        out: list[Problem] = []
         try:
             turbo = self.tree.options.get("turbo") or {}
             if turbo.get("on") and not turbo.get("lora"):
-                add("The fast speed (turbo) needs an add-on that is not chosen yet. Choose it, or set Speed to "
-                    "Normal.", "Clips → Turbo LoRA: choose a turbo LoRA (or switch Speed to Normal)", "turbo", "Show")
+                out.append(Problem(
+                    PK.TURBO, "The fast speed (turbo) needs an add-on that is not chosen yet. Choose it, or set Speed "
+                    "to Normal.", "Clips → Turbo LoRA: choose a turbo LoRA (or switch Speed to Normal)", "turbo", "Show"))
             checker = checker or T.Checker(self.project, self.tree)
             if checker.base() is None:
-                add("Choose a start image for the first clip.", "The project has no start image and no real "
-                    "video to start from", "start_image", "Choose…")
+                out.append(Problem(PK.START_IMAGE, "Choose a start image for the first clip.", "The project has no "
+                                   "start image and no real video to start from", "start_image", "Choose…"))
                 return out
-            todo = [nid]
-            guide = T.guide_problem(self.tree, checker, todo)
-            if guide:
-                add("The carry-over of this clip does not fit the clip next to it. Make it shorter, or make the "
-                    "clip longer.", guide, "carry", "Show")
-            if T.missing_end_images(self.project, self.tree, todo):
-                add("The end image of this clip is missing from the project folder. Choose it again.",
-                    f"ends/: {n.end_image}", "end_image", "Choose…")
-            for raw in T.audio_problems(self.project, self.tree, todo):
-                text = ("A sound reference this clip uses is missing from the project folder. Add it again in "
-                        "Sounds." if "missing" in raw else
-                        plain_problem(raw, nid) + " Add the sound in Sounds, or change the description.")
-                add(text, raw + " (Sound reference)", "sounds", "Open Sounds")
-            for raw in T.source_sound_problems(self.tree, todo, self.project):
-                add(plain_problem(raw, nid), raw + " (the clip's “Sound” setting)", "sound", "Show")
-            for raw in T.cast_problems(self.project, self.tree, todo):
-                m = re.search(r"mentions @([\w-]+), but there is no such character(?: — did you mean @([\w-]+)\?)?",
-                              raw)
-                pic = re.match(r"@([\w-]+) \(clip #\d+\) has no (picture|face picture or voice) yet", raw)
-                if m:
-                    add(f"The description names @{m.group(1)}, but Cast & references has no {m.group(1)}."
-                        + (f" Did you mean @{m.group(2)}?" if m.group(2) else " Add it there, or change the name."),
-                        raw, "cast_new", "Open Cast & references")
-                elif pic:
-                    add(f"@{pic.group(1)} has no picture yet. Add one, so the clip can show "
-                        + ("this person." if pic.group(2) != "picture" else "it."), raw, f"cast:{pic.group(1)}",
-                        "Add a picture")
-                else:
-                    add(plain_problem(raw, nid), raw + " (Cast & references)", "cast", "Open Cast & references")
-            for lo in T.loras_needed(self.tree, checker, [nid]):
-                if not Path(lo).is_file():
-                    add(f"An add-on (LoRA) of this clip is missing: {Path(lo).name}. Choose it again or remove it.",
-                        f"The LoRA file does not exist: {lo}", "loras", "Show")
-                    break
-        except Exception:  # noqa: BLE001  (Generate says what it could not check)
+            out += self._file_problems(nid, n, checker)
+        except Exception as e:  # noqa: BLE001  (Generate says what it could not check)
             log.warning("what the clip needs could not be checked", exc_info=True)
+            out.append(Problem(PK.CHECK, "What this clip needs could not be checked. Generate says more.",
+                               f"{type(e).__name__}: {e}"))
+        return out
+
+    def _file_problems(self, nid: str, n: T.Node, checker: T.Checker) -> list[Problem]:
+        """The problems from the project's files and settings: carry-over, end image, sounds, cast, LoRAs."""
+        assert self.project is not None and self.tree is not None
+        out: list[Problem] = []
+        todo = [nid]
+        guide = T.guide_problem(self.tree, checker, todo)
+        if guide:
+            out.append(Problem(PK.CARRY, "The carry-over of this clip does not fit the clip next to it. Make it "
+                               "shorter, or make the clip longer.", guide, "carry", "Show"))
+        if T.missing_end_images(self.project, self.tree, todo):
+            out.append(Problem(PK.END_IMAGE, "The end image of this clip is missing from the project folder. Choose it "
+                               "again.", f"ends/: {n.end_image}", "end_image", "Choose…"))
+        for raw in T.audio_problems(self.project, self.tree, todo):
+            text = ("A sound reference this clip uses is missing from the project folder. Add it again in "
+                    "Sounds." if "missing" in raw else
+                    plain_problem(raw, nid) + " Add the sound in Sounds, or change the description.")
+            out.append(Problem(PK.SOUND_REF, text, raw + " (Sound reference)", "sounds", "Open Sounds"))
+        for raw in T.source_sound_problems(self.tree, todo, self.project):
+            out.append(Problem(PK.SOURCE_SOUND, plain_problem(raw, nid), raw + " (the clip's “Sound” setting)", "sound",
+                               "Show"))
+        for raw in T.cast_problems(self.project, self.tree, todo):
+            c = classify_cast_problem(raw)
+            if c.kind is PK.CAST_UNKNOWN:
+                out.append(Problem(
+                    c.kind, f"The description names @{c.name}, but Cast & references has no {c.name}."
+                    + (f" Did you mean @{c.suggestion}?" if c.suggestion else " Add it there, or change the name."),
+                    raw, "cast_new", "Open Cast & references"))
+            elif c.kind is PK.CAST_NO_PICTURE:
+                out.append(Problem(c.kind, f"@{c.name} has no picture yet. Add one, so the clip can show "
+                                   + ("this person." if c.person else "it."), raw, f"cast:{c.name}", "Add a picture"))
+            else:
+                out.append(Problem(PK.CAST, plain_problem(raw, nid), raw + " (Cast & references)", "cast",
+                                   "Open Cast & references"))
+        for lo in T.loras_needed(self.tree, checker, [nid]):
+            if not Path(lo).is_file():
+                out.append(Problem(PK.LORA, f"An add-on (LoRA) of this clip is missing: {Path(lo).name}. Choose it "
+                                   "again or remove it.", f"The LoRA file does not exist: {lo}", "loras", "Show"))
+                break
         return out
 
     def _note_failure(self, code: int):
@@ -248,7 +258,7 @@ class InspectorMixin(MainWindowHost):
             todo = [n.id for t in self._targets if t in self.tree.nodes for n in self.tree.path_to(t)
                     if self.status_of.get(n.id) != "done" and not n.is_video]
             nids = todo[:1]
-        down = code == 4 or "not running" in err.lower() or "connection refused" in err.lower()
+        down = code == COMFY_DOWN or "not running" in err.lower() or "connection refused" in err.lower()
         missing = not down and any(w in err.lower() for w in ("missing", "not found", "not in comfyui"))
         if down:
             text = ("The video engine (ComfyUI) stopped or is not running, so this clip was not made. Start it, "
@@ -263,8 +273,7 @@ class InspectorMixin(MainWindowHost):
             text = "Making this clip failed. Details shows why; press Generate to try again."
             more = []
         for nid in nids:
-            self._failures[nid] = {"text": text, "tip": err, "error": True, "action": "log", "button": "Details",
-                                   "more": more}
+            self._failures[nid] = Problem(PK.FAILURE, text, err, "log", "Details", True, tuple(more))
         if nids and self.simple:                    # (Simple has no Log tab in sight: the card shows it)
             self.focus_clip(nids[0])
         self._update_problems()
@@ -279,7 +288,7 @@ class InspectorMixin(MainWindowHost):
                 c.set_problems([])
                 continue
             fail = self._failures.get(c.nid)
-            c.set_problems(([fail] if fail else []) + ([] if self.running else self.clip_problems(c.nid)))
+            c.set_problems([p.item() for p in ([fail] if fail else []) + ([] if self.running else self.clip_problems(c.nid))])
 
     def fix_problem(self, action: str, nid: str):
         """A problem's button on a card: the place that fixes it (or the action itself)."""
@@ -373,7 +382,7 @@ class InspectorMixin(MainWindowHost):
 
     def show_model_prompt(self, nid: str) -> QDialog | None:
         """The Model prompt window of a clip: the exact text the model gets and its numbered pictures / sounds.
-        Returns the dialog (kept modeless and not run in tests: _dialogs_modeless)."""
+        Returns the dialog (not run when modal_dialogs is off)."""
         node = self.tree.nodes.get(nid) if self.tree is not None else None
         info = self._clip_inputs(node) if node is not None else None
         if info is None:
@@ -381,7 +390,7 @@ class InspectorMixin(MainWindowHost):
             return None
         dlg = ModelPromptDialog(self, nid, info)
         self._model_prompt_dialog = dlg            # (tests look at it)
-        if not self._dialogs_modeless:
+        if self.modal_dialogs:
             dlg.exec()
             dlg.deleteLater()
         return dlg

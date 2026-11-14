@@ -15,7 +15,7 @@ from .workers import run_in_background
 from .. import comfy as CMF, net
 from . import dialogs as D, shortcuts as S
 from .theme import repolish
-from .generator_state import ComfyModel, IMAGE_MODELS, ModelState
+from .generator_state import ComfyModel, ModelState
 from .ui_logic import CLOSE_GRACE, COMFY_START_TIMEOUT, DEFAULT_COMFY_LAUNCHER, DEFAULT_COMFY_URL
 from .mw_host import MainWindowHost
 
@@ -32,7 +32,7 @@ class ComfyMixin(MainWindowHost):
         if self.worker_alive and not self.running:
             self.status.setText("Unloading the model …")
             self._quit_worker()
-        elif self._comfy_model in IMAGE_MODELS and not self.running:
+        elif self.comfy.holds_image() and not self.running:
             self.status.setText("Unloading the image model …")
             self._free_comfy()
 
@@ -51,14 +51,14 @@ class ComfyMixin(MainWindowHost):
     def _comfy_freed(self, ok: bool):
         """ComfyUI answered the unload request (MWC-30): the model counts as unloaded only when it did."""
         if ok:
-            self._comfy_model = None
+            self.comfy.forget()
             self.log.appendPlainText("ComfyUI's models were unloaded.")
         else:
             self._report_error("Could not unload the model: ComfyUI did not answer; it may still hold the memory.")
         self._update_model_label()
 
     def _qwen_idle(self):
-        if self._comfy_model in IMAGE_MODELS and not self.running:
+        if self.comfy.holds_image() and not self.running:
             self._free_comfy()
             self.status.setText("The image model was unloaded after the idle time.")
 
@@ -147,10 +147,10 @@ class ComfyMixin(MainWindowHost):
         return True
 
     def _update_model_label(self):
-        if not self.worker_alive and self._comfy_model in IMAGE_MODELS:
+        if not self.worker_alive and self.comfy.holds_image():
             left = self._qwen_timer.remainingTime() if self._qwen_timer.isActive() else -1
             text, sev = (("Model: language model (prompt refiner) loaded in ComfyUI"
-                          if self._comfy_model == ComfyModel.LLM
+                          if self.comfy.model == ComfyModel.LLM
                           else "Model: image model loaded in ComfyUI") +
                          (f" · unloads in {max(1, round(left / 60000))} min" if left >= 0 else "")), ""
         elif not self.worker_alive:
@@ -168,7 +168,7 @@ class ComfyMixin(MainWindowHost):
         self.model_label.setProperty("severity", sev)
         repolish(self.model_label)
         self.b_unload.setVisible((self.worker_alive and not self.running and self._worker_idle) or
-                                 (not self.worker_alive and self._comfy_model in IMAGE_MODELS))
+                                 (not self.worker_alive and self.comfy.holds_image()))
 
     def changeEvent(self, e):
         """Back in this window (e.g. after training a LoRA): look for new LoRAs, at most every 30 s."""
@@ -264,10 +264,10 @@ class ComfyMixin(MainWindowHost):
             gp.kill()
             gp.waitForFinished(1000)
         freed = None
-        if self._comfy_model in IMAGE_MODELS:              # nor the image edit model
+        if self.comfy.holds_image():              # nor the image edit model
             freed = threading.Event()
             self._post_free((self.comfy_url.text().strip() or DEFAULT_COMFY_URL), freed)
-            self._comfy_model = None
+            self.comfy.forget()
         p = self.proc
         cloud = self._cloud_worker
         if p is not None:                            # never leave the generator (and the model) behind

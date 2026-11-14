@@ -267,8 +267,11 @@ def test_actions_while_generating_say_why(app, win, tmp_path, image, monkeypatch
     win.node_action("continue", ids[0])
     assert "Wait until generating has finished" in win.status.text()
     win.status.setText("")
+    seen = []
+    monkeypatch.setattr(win, "_exec_menu", lambda m, pos: seen.append([a.isEnabled() for a in m.actions()
+                                                                        if not a.isSeparator()]))
     win._context(ids[0], win.mapToGlobal(win.rect().center()))
-    assert "Wait until generating has finished" in win.status.text()
+    assert seen and not any(seen[0])                       # UX-30: the menu is there, greyed (no status line)
     win.stop()
     wait(app, lambda: not win.running, timeout=20)
 

@@ -314,7 +314,7 @@ def test_scene_duplicate_notes_and_film_cast(app, win, tmp_path, image, monkeypa
     win.storyboard.notesWanted.emit("s1")
     assert win.film.scene("s1").notes == "She opens the door."
     assert "She opens the door." in win.storyboard.list.item(0).toolTip()
-    win._dialogs_modeless = True
+    win.modal_dialogs = False
     win.show_film_cast()
     assert win._film_cast_dialog.windowTitle() == "Cast in the film"
     win._film_cast_dialog.deleteLater()

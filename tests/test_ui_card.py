@@ -213,7 +213,7 @@ def test_buttons_open_their_windows(app, win, tmp_path, image, monkeypatch):
     seen = []
     monkeypatch.setattr(win, "edit_image", lambda **kw: seen.append(kw))
     win.b_ref_create.click()                                                # Cast → Create…: the window opens
-    assert seen and seen[0]["mode"] == "create" and seen[0]["dialog"] is True
+    assert seen and seen[0]["mode"] == "create"
 
 
 def test_civitai_api_key_field(app, win):
@@ -254,7 +254,7 @@ def test_clip_chips_and_the_model_prompt(app, win, tmp_path, image, monkeypatch)
     assert "<Picture 4>" in tips[0] and "<Picture 1> and <Picture 2>" in tips[1] and "<Picture 3>" in tips[2]
     info = T.clip_inputs(p, win.tree, ids[0])
     assert card.edit.toolTip() == "Sent to the model: " + info["prompt"]
-    win._dialogs_modeless = True
+    win.modal_dialogs = False
     card.chips.b_prompt.click()
     dlg = win._model_prompt_dialog
     assert dlg.text.toPlainText() == info["prompt"] and dlg.text.isReadOnly()

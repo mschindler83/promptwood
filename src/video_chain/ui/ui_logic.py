@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 import copy
+import json
+import re
 from collections import Counter
+from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, NamedTuple, cast
 
@@ -201,6 +205,37 @@ STEPS_TIP = ("Steps: how many times the model refines each clip (sampling steps)
 STEPS_UNSET = 3        # the per-clip steps box at its lowest value means "the project's steps" (nothing set)
 
 LAYOUT_VERSION = 1
+@dataclass(frozen=True)
+class LayoutState:
+    """The panel sizes saved with the window: the three columns, the centre's two rows, whether the left panel is
+    shown and the width it had (kept while it is hidden)."""
+    split: list[int]
+    center: list[int]
+    left: bool = True
+    left_w: int = 0
+
+    def to_json(self) -> str:
+        return json.dumps({"v": LAYOUT_VERSION, "split": self.split, "center": self.center, "left": self.left,
+                           "left_w": self.left_w})
+
+    @classmethod
+    def from_json(cls, text: str) -> LayoutState | None:
+        """The saved layout, or None when it is empty, damaged or from another version of the layout."""
+        try:
+            d = json.loads(text or "{}")
+            split, center = d["split"], d["center"]
+            ok = (d.get("v") == LAYOUT_VERSION and len(split) == 3 and len(center) == 2
+                  and all(isinstance(x, int) and x >= 0 for x in split + center)
+                  and split[1] > 0 and split[2] > 0 and all(x > 0 for x in center))
+            return cls(split, center, bool(d.get("left", True)), int(d.get("left_w") or 0)) if ok else None
+        except (TypeError, ValueError, KeyError, AttributeError):
+            return None
+
+    def left_width(self) -> int:
+        """The width the left panel gets back when shown: the saved one, else the column's width."""
+        return self.left_w if self.left_w > 0 else self.split[0]
+
+
 # preset: shares of the width (left panel, viewer, inspector) and of the centre's height for the viewer
 LAYOUTS = {"edit": (0.20, 0.58, 0.22, 0.62), "write": (0.17, 0.51, 0.32, 0.55), "watch": (0.0, 0.84, 0.16, 0.70)}
 
@@ -217,6 +252,66 @@ def plain_problem(raw: str, nid: str) -> str:
     t = " ".join(t.split())
     t = t[:1].upper() + t[1:]
     return t if t.endswith((".", "?", "!")) else t + "."
+
+
+class ProblemKind(StrEnum):
+    """What a problem on a clip's card is about (it decides the button's action)."""
+    TURBO = "turbo"
+    START_IMAGE = "start_image"
+    CARRY = "carry"
+    END_IMAGE = "end_image"
+    SOUND_REF = "sounds"
+    SOURCE_SOUND = "sound"
+    CAST_UNKNOWN = "cast_new"
+    CAST_NO_PICTURE = "cast_picture"
+    CAST = "cast"
+    LORA = "loras"
+    CHECK = "check"                 # the check itself could not be made
+    FAILURE = "log"                 # a run failed (the button opens the log)
+
+
+@dataclass(frozen=True)
+class Problem:
+    """One thing that blocks a clip or went wrong when it was made: a plain sentence, the technical text for its
+    tooltip, and the button that helps (action is a ProblemKind's value, or "cast:<name>" for a picture of that
+    person)."""
+    kind: ProblemKind
+    text: str
+    tip: str = ""
+    action: str | None = None
+    button: str | None = None
+    error: bool = False
+    more: tuple[tuple[str, str], ...] = ()
+
+    def item(self) -> dict[str, Any]:
+        """The dict the card's ProblemBox shows."""
+        d: dict[str, Any] = {"text": self.text, "tip": self.tip, "action": self.action, "button": self.button}
+        if self.error:
+            d["error"] = True
+        if self.more:
+            d["more"] = list(self.more)
+        return d
+
+
+class CastProblem(NamedTuple):
+    kind: ProblemKind
+    name: str = ""                  # the @name the message is about
+    suggestion: str = ""            # CAST_UNKNOWN: the name it may have meant
+    person: bool = False            # CAST_NO_PICTURE: the message is about a person (a face picture or voice)
+
+
+def classify_cast_problem(raw: str) -> CastProblem:
+    """What a cast check's message (tree.cast_problems: text only) is about. The one place that reads its wording."""
+    m = re.search(r"mentions @([\w-]+), but there is no such character(?: — did you mean @([\w-]+)\?)?", raw)
+    if m:
+        return CastProblem(ProblemKind.CAST_UNKNOWN, m.group(1), m.group(2) or "")
+    pic = re.match(r"@([\w-]+) \(clip #\d+\) has no (picture|face picture or voice) yet", raw)
+    if pic:
+        return CastProblem(ProblemKind.CAST_NO_PICTURE, pic.group(1), person=pic.group(2) != "picture")
+    return CastProblem(ProblemKind.CAST)
+
+
+SPEED_NAMES = {"normal": "Normal", "turbo": "Turbo", "hyperflow": "HyperFlow", "pika": "Pika"}   # (the modes, as named)
 
 
 def speed_mode(o: dict) -> str:

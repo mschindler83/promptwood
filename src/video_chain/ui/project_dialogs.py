@@ -276,8 +276,8 @@ class ExportDialog(QDialog):
             "1-2 min with a network volume, longer the first time: ComfyUI and the weights are fetched), the clips "
             "go there and back through an SSH tunnel and only ever sit in the pod's RAM, and the pod is terminated "
             "when the export ends (it also removes itself 20 min after a lost connection). RunPod bills the pod by "
-            "the second. Settings → Cloud upscaling (RunPod)" if cloud is not None else
-            "Needs a RunPod API key: Settings → Cloud upscaling (RunPod)")
+            "the second. Settings → Preferences → Cloud upscaling (RunPod)" if cloud is not None else
+            "Needs a RunPod API key: Settings → Preferences → Cloud upscaling (RunPod)")
         if simple:
             self.cloud.setToolTip(self.cloud.toolTip() + " (Simple view: switch to the Advanced view first, "
                                   "View → Advanced view, then Settings → Preferences)")

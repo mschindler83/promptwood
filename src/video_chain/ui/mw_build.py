@@ -24,7 +24,7 @@ from .mw_support import FileDrop, _CurrentStack
 from .preview import Preview, StartTile
 from .ui_logic import (
     DEFAULT_COMFY_LAUNCHER, DEFAULT_COMFY_URL, FRAME_CHOICES, LLM_DEFAULT_PORT, LLM_DEFAULT_SERVER, STEPS_TIP,
-    find_gguf_models, frames_text)
+    frames_text)
 from .mw_host import MainWindowHost
 
 
@@ -434,11 +434,12 @@ class BuildMixin(MainWindowHost):
         c = QFormLayout(cw)
         c.setContentsMargins(10, 6, 10, 8)
         self.adv_note = AdvancedNote(self.view)          # Simple: the hidden project settings that still apply
+        d = UL.as_dict(T.DEFAULT_OPTIONS)                   # (the widgets start with the project defaults)
         c.addRow(self.adv_note)
         self.frames = QComboBox()
         for n in FRAME_CHOICES:
             self.frames.addItem(frames_text(n), n)
-        self.frames.setCurrentIndex(FRAME_CHOICES.index(73))
+        self.frames.setCurrentIndex(FRAME_CHOICES.index(d["frames"]))
         self.frames.setToolTip("Length of every clip (a clip can have its own). Longer clips mean fewer hand-overs "
                                "between clips, so the face drifts less; they take longer and need more memory")
         c.addRow("Length", self.frames)
@@ -446,7 +447,7 @@ class BuildMixin(MainWindowHost):
         for r, txt in ((384, "384 (fast draft)"), (512, "512 (standard)"), (640, "640"), (768, "768"),
                        (chain.H3_NATIVE, "768p — the model's native size (16:9 = 1344×768; slower)")):
             self.resolution.addItem(txt, r)
-        self.resolution.setCurrentIndex(1)
+        self.resolution.setCurrentIndex(max(0, self.resolution.findData(d["resolution"])))
         self.resolution.setToolTip("Size: how big the clips are made, about this many pixels squared in the start "
                                    "image's aspect ratio (bigger is sharper and slower). 512: like the training (the "
                                    "default); 768p: MiniMax H3's native size (fast attention, Veda, helps there)")
@@ -457,10 +458,11 @@ class BuildMixin(MainWindowHost):
         self.aspect.setToolTip("The picture format of a project without a start image or real video: its first clip "
                                "starts from the prompt alone (with the cast's face pictures as references when it "
                                "mentions someone). With a start image or video, their format is used instead")
+        self.aspect.setCurrentIndex(max(0, self.aspect.findData(d["aspect"])))
         c.addRow("Aspect", self.aspect)
         self.steps = QSpinBox()
         self.steps.setRange(4, 80)
-        self.steps.setValue(28)
+        self.steps.setValue(d["steps"])
         self.steps.setToolTip(STEPS_TIP)
         c.addRow("Steps", self.steps)
         self.speed = QComboBox()
@@ -499,7 +501,7 @@ class BuildMixin(MainWindowHost):
         c.addRow("CFG", self._cfg_row)
         self._cfg_mode = "normal"
         self.veda = QCheckBox("Fast attention (Veda) for large and long clips")
-        self.veda.setChecked(True)
+        self.veda.setChecked(d["veda"]["on"])
         self.veda.setToolTip(
             "Fast attention: makes large and long clips much faster. "
             "Veda sparse attention (the veda-sparse-attention node in ComfyUI) computes only the attention that "
@@ -515,13 +517,13 @@ class BuildMixin(MainWindowHost):
         trow = QHBoxLayout()
         self.turbo_steps = QSpinBox()
         self.turbo_steps.setRange(4, 8)
-        self.turbo_steps.setValue(6)
+        self.turbo_steps.setValue(d["turbo"]["steps"])
         self.turbo_steps.setSuffix(" steps")
         self.turbo_steps.setToolTip("4 is the minimum, 6-8 look clearly better; above 8 it gets over-sharp")
         self.turbo_strength = QDoubleSpinBox()
         self.turbo_strength.setRange(-10.0, 10.0)
         self.turbo_strength.setSingleStep(0.05)
-        self.turbo_strength.setValue(1.0)
+        self.turbo_strength.setValue(d["turbo"]["strength"])
         self.turbo_strength.setToolTip("Keep 1.0; smear/ghosting -> a bit higher (1.05-1.2), over-sharp grain -> "
                                        "a bit lower (0.8-0.95)")
         trow.addWidget(self.turbo_steps)
@@ -534,9 +536,10 @@ class BuildMixin(MainWindowHost):
         c.addRow("", self._turbo_row)
         self._clips_form = c
         self.audio = QCheckBox("Generate sound")
-        self.audio.setChecked(True)
+        self.audio.setChecked(d["audio"])
         c.addRow("", self.audio)
         self.keep_rep = QCheckBox("Keep repeated frames in paths")
+        self.keep_rep.setChecked(d["keep_repeated"])
         self.keep_rep.setToolTip("Each clip starts with the last frame of the clip before; by default that repeated "
                                  "frame is left out when a path is joined")
         c.addRow("", self.keep_rep)
@@ -564,7 +567,7 @@ class BuildMixin(MainWindowHost):
         for w in (self.style_prefix, self.style_suffix):
             w.editingFinished.connect(self._style_changed)
         self.lora_triggers = QCheckBox("Put the LoRAs' trigger words before the prompt")
-        self.lora_triggers.setChecked(True)
+        self.lora_triggers.setChecked(d["lora_triggers"])
         self.lora_triggers.setToolTip("Trigger words: the words a LoRA was trained with, which switch on its effect. "
                                       "A clip with LoRAs gets their trigger words in front of its prompt (from the "
                                       "LoRA files and CivitAI; shown under each LoRA, right-click to change them). "
@@ -639,9 +642,7 @@ class BuildMixin(MainWindowHost):
         self.llm_model = QComboBox()
         self.llm_model.setEditable(True)
         self.llm_model.setToolTip("The GGUF model file (found in the model folders; a path can be typed too)")
-        for f in find_gguf_models():
-            self.llm_model.addItem(f.name, str(f))
-            self.llm_model.setItemData(self.llm_model.count() - 1, str(f), Qt.ItemDataRole.ToolTipRole)
+        # (the model folders are searched in the background after the settings are loaded: _scan_gguf_models)
         self.llm_port = QSpinBox()
         self.llm_port.setRange(1024, 65535)
         self.llm_port.setValue(LLM_DEFAULT_PORT)
@@ -1044,6 +1045,7 @@ class BuildMixin(MainWindowHost):
         self.b_stop.setEnabled(False)
         self.b_stop.clicked.connect(self.stop)
         self.progress = QProgressBar()
+        self.progress.setAccessibleName("Progress of the run")
         self.progress.setFixedWidth(220)
         self.progress.setRange(0, 1000)
         self.status = label("Open or create a project folder.", role="statusText")
@@ -1095,12 +1097,12 @@ class BuildMixin(MainWindowHost):
         FileDrop(self, self._dropped_on_window)         # a project folder dropped anywhere on the window
         self.start_tile.dropped.connect(lambda f: self.set_image(f, confirm=True))
         for sig in (self.frames.currentIndexChanged, self.resolution.currentIndexChanged,
-                    self.aspect.currentIndexChanged,
-                    self.steps.valueChanged, self.audio.toggled, self.keep_rep.toggled,
-                    self.speed.currentIndexChanged, self.veda.toggled,
-                    self.turbo_lora.currentIndexChanged, self.turbo_steps.valueChanged,
-                    self.turbo_strength.valueChanged, self.clip_cfg.valueChanged):
+                    self.aspect.currentIndexChanged, self.audio.toggled, self.keep_rep.toggled,
+                    self.speed.currentIndexChanged, self.veda.toggled, self.turbo_lora.currentIndexChanged):
             sig.connect(self._options_changed)
+        for sig in (self.steps.valueChanged, self.turbo_steps.valueChanged, self.turbo_strength.valueChanged,
+                    self.clip_cfg.valueChanged):             # (spin boxes tick many times: settled after a pause)
+            sig.connect(self._options_typing)
 
     def _build_shortcuts(self, shared):
         """Build the shortcuts."""

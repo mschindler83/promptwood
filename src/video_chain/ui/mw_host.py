@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from ..tts import FishTTS, LocalTTS
     from .cast_strip import CastStrip
     from .clip_cards import PromptCard, VideoCard
-    from .generator_state import ComfyModel, Job, ModelState, ModelSwitch, WorkerBinding
+    from .generator_state import ComfyModel, ComfyService, Job, ModelState, ModelSwitch, WorkerBinding
     from .graph import GraphView
     from .guide import EngineBanner, GuidePanel, NextHint
     from .mw_support import _CurrentStack
@@ -34,17 +34,19 @@ if TYPE_CHECKING:
     from .preview import Preview, StartTile
     from .storyboard import Storyboard
     from .timeline import Timeline
+    from .ui_logic import Problem
     from .view_mode import AdvancedNote, ViewMode
+    from .workers import Latest
 
     class MainWindowHost(QMainWindow):
-        _check_gen: int
+        _check: Latest
         _comfy_polling: bool
         _eleven_voices: list | None
         _first_shown: bool
         _gpu_proc: QProcess | None
         _lora_hits: dict
         _lora_misses: dict
-        _lora_scan_gen: int
+        _lora_scan: Latest
         _path_end: str | None
         FROZEN_LOCKED: set[str]
         _worker_bound: WorkerBinding | None
@@ -68,15 +70,17 @@ if TYPE_CHECKING:
         _cmp_memo: dict | None
         _comfy_dir_row: QWidget
         _comfy_form: QFormLayout
+        comfy: ComfyService
         _comfy_model: ComfyModel | None
         _comfy_starting: float
         _comfy_timer: QTimer
         _converts: dict[str, str]
         _copying: str | None
-        _dialogs_modeless: bool
+        modal_dialogs: bool
+        audio_player: bool
         _eleven_row: QWidget
         _error: str
-        _failures: dict[str, dict]
+        _failures: dict[str, Problem]
         _gpu_timer: QTimer
         _idle_since: float
         _idle_timeout: float | None
@@ -91,12 +95,15 @@ if TYPE_CHECKING:
         _model_timer: QTimer
         _notices: list[QMessageBox]
         _pix: dict[tuple[Any, ...], QPixmap]
+        _options_before: set[str] | None
+        _options_timer: QTimer
         _qwen_timer: QTimer
         _refresh_timer: QTimer
         _remade_note: str
         _remix_stuck: set[str]
         _remix_timer: QTimer
         _remixing: bool
+        _llm_on_saved: bool
         _runpod_loading: bool
         _runpod_section: tuple[QWidget, QWidget]
         _save_timer: QTimer

@@ -156,7 +156,8 @@ def test_ai_image_edit_for_start_and_end_images(app, tmp_path, image, monkeypatc
         ids = new_project(w, tmp_path, image, ("a", "b"))
         run_and_wait(app, w, w.generate_path)
         flush(app, w)
-        dlg = w.edit_image(ids[1], dialog=False)
+        w.modal_dialogs = False
+        dlg = w.edit_image(ids[1])
         texts = [dlg.src_combo.itemText(i) for i in range(dlg.src_combo.count())]
         assert texts[0] == f"Last frame of clip #{ids[1][1:]}" and "Start image" in texts and texts[-2:] == ["Choose file…", "Choose folder…"]
         assert dlg.source.endswith(".png") and not dlg.b_gen.isEnabled()          # no prompt yet
@@ -187,7 +188,8 @@ def test_ai_image_edit_for_start_and_end_images(app, tmp_path, image, monkeypatc
         dlg.b_use_end.click()                                       # the clip's end image
         assert dlg.used == ("end", png) and w.tree.nodes[ids[1]].end_image and w.state(ids[1]) == "changed"
         # from the start image section: a result as the new start image; earlier results are listed
-        dlg2 = w.edit_image(start=True, dialog=False)
+        w.modal_dialogs = False
+        dlg2 = w.edit_image(start=True)
         assert dlg2.results.count() == 2 and dlg2.source == str(w.project / T.START_FILE)
         assert dlg2.loras.items() == [{"path": str(lora), "strength": 0.7}]      # remembered for next time
         dlg2.loras.set_items(dlg2._known(), [])
@@ -215,12 +217,14 @@ def test_ai_image_edit_for_start_and_end_images(app, tmp_path, image, monkeypatc
         dlg2.b_use_start.click()
         assert (w.project / T.START_FILE).read_bytes() != before and w.state(ids[0]) == "changed"
         assert not (w.project / "edits" / ".deleted").exists() and not Path(bad).exists()   # gone for good on close
-        dlg4 = w.edit_image(start=True, dialog=False)
+        w.modal_dialogs = False
+        dlg4 = w.edit_image(start=True)
         assert dlg4.results.count() == 1 and "the start image" in dlg4.res_info.text() and not dlg4.b_delete.isEnabled()
         dlg4.reject()
         assert any(text == "Project AI edits" for text, _p in w._picker_places())
         server.close()                                              # ComfyUI gone: a clear message
-        dlg3 = w.edit_image(start=True, dialog=False)
+        w.modal_dialogs = False
+        dlg3 = w.edit_image(start=True)
         dlg3.prompt.setPlainText("x")
         dlg3.generate()
         wait(app, lambda: not dlg3._busy, timeout=60)
@@ -257,7 +261,8 @@ def test_switching_between_clips_and_image_edits_unloads_only_then(app, tmp_path
         ids = new_project(w, tmp_path, image, ("a",))
         run_and_wait(app, w, w.generate_path)
         assert w._comfy_model == "h3" and w.worker_alive
-        dlg = w.edit_image(ids[0], dialog=False)
+        w.modal_dialogs = False
+        dlg = w.edit_image(ids[0])
         dlg.prompt.setPlainText("night")
         dlg.tries.setValue(1)
         dlg.generate()
@@ -304,6 +309,9 @@ def test_prompt_refiner_on_the_card(app, win, tmp_path, image, monkeypatch):
         def chosen(self):
             return "A man walks slowly towards the camera; footsteps on gravel."
 
+        def chosen_ideas(self):
+            return None
+
         def deleteLater(self):
             pass
     monkeypatch.setattr(PR, "RefineDialog", FakeDialog)
@@ -341,7 +349,8 @@ def test_create_a_new_image_in_the_window(app, tmp_path, image, monkeypatch):
         sdxl_lora.parent.mkdir(parents=True)
         sdxl_lora.write_bytes(b"x")
         w.image_loras = {"sdxl": [(str(sdxl_lora), "anime/style.safetensors")], "flux1": [], "krea2": []}
-        dlg = w.edit_image(start=True, dialog=False, mode="create")
+        w.modal_dialogs = False
+        dlg = w.edit_image(start=True, mode="create")
         assert dlg.mode() == "create" and not dlg.edit_box.isVisibleTo(dlg) and dlg.create_box.isVisibleTo(dlg)
         wait(app, lambda: dlg.families, timeout=20)
         labels = [dlg.family.itemText(i) for i in range(dlg.family.count())]
@@ -387,7 +396,8 @@ def test_create_a_new_image_in_the_window(app, tmp_path, image, monkeypatch):
         assert dlg.b_gen.isEnabled()
         dlg.b_use_start.click()                                         # the new image as the start image
         assert dlg.used == ("start", png)
-        dlg2 = w.edit_image(start=True, dialog=False)                  # remembered: create mode, the family
+        w.modal_dialogs = False
+        dlg2 = w.edit_image(start=True)                  # remembered: create mode, the family
         assert dlg2.mode() == "create"
         wait(app, lambda: dlg2.families, timeout=20)
         assert dlg2.family.currentData() == "sdxl" and dlg2.loras.items()[0]["strength"] == 0.8
@@ -465,7 +475,8 @@ def test_qwen_image_21_in_the_image_window(app, tmp_path, image, monkeypatch):
         q.setValue("comfyUrl", server.url)
         w = MainWindow(q, command=FAKE)
         new_project(w, tmp_path, image, ("a",))
-        dlg = w.edit_image(start=True, dialog=False)
+        w.modal_dialogs = False
+        dlg = w.edit_image(start=True)
         wait(app, lambda: dlg.families, timeout=20)
         models = [dlg.edit_model.itemText(i) for i in range(dlg.edit_model.count())]
         assert models == ["Qwen-Image-Edit 2511", "Qwen-Image 2.1", "MOSS-Image Edit"]
@@ -504,7 +515,8 @@ def test_qwen_image_21_in_the_image_window(app, tmp_path, image, monkeypatch):
         dlg.done(0)
         # without the 2.1 and MOSS files: offered, but not available, with what is missing
         server.qwen21 = server.moss = False
-        dlg = w.edit_image(start=True, dialog=False)
+        w.modal_dialogs = False
+        dlg = w.edit_image(start=True)
         wait(app, lambda: dlg.families, timeout=20)
         k = dlg.edit_model.findData("qwen21")
         assert not dlg.edit_model.model().item(k).isEnabled() and dlg.edit_model.currentData() == "2511"
@@ -548,7 +560,8 @@ def test_edit_every_image_of_a_folder(app, tmp_path, image, monkeypatch):
             f.parent.mkdir(parents=True, exist_ok=True)
             save_file({"a.lora_A.weight": np.zeros((2, 2), np.float16)}, str(f))
             files.append(str(f))
-        dlg = w.edit_image(start=True, dialog=False)
+        w.modal_dialogs = False
+        dlg = w.edit_image(start=True)
         assert [Path(f).name for f in dlg.folder_images(folder)] == ["broken.png", "img1.png", "img2.jpg", "img10.png"]
         assert dlg.set_folder(str(folder))
         assert dlg.batch and Path(dlg.source).name == "img1.png"        # (broken.png is not shown)
@@ -604,7 +617,8 @@ def test_paint_a_mask_and_inpaint(app, tmp_path, image, monkeypatch):
         q.setValue("comfyUrl", server.url)
         w = MainWindow(q, command=FAKE)
         new_project(w, tmp_path, image, ("a",))
-        dlg = w.edit_image(start=True, dialog=False)
+        w.modal_dialogs = False
+        dlg = w.edit_image(start=True)
         wait(app, lambda: dlg.families, timeout=20)
         assert dlg.source and dlg.mask is None and dlg.b_mask.isEnabled() and not dlg.b_mask_clear.isVisible()
         from video_chain.ui.image_edit import upright
@@ -683,7 +697,8 @@ def test_replace_a_person_in_a_real_video(app, tmp_path, image, monkeypatch):
                     "size": swap.probe(video)[:2], "fps": 24.0, "track": tr}
         monkeypatch.setattr(swap, "find_heads", heads)
         monkeypatch.setattr(w, "face_detector", lambda: tmp_path / "det.onnx")
-        dlg = w.replace_person(v, dialog=False)
+        w.modal_dialogs = False
+        dlg = w.replace_person(v)
         wait(app, lambda: dlg.heads is not None, timeout=20)
         assert f"found in {n} of {n} frames" in dlg.found_text.text() and not dlg.b_gen.isEnabled()
         dlg.head_size.setValue(1.3)                                    # larger head: the boxes grow
@@ -801,7 +816,8 @@ def test_replace_a_person_in_a_real_video(app, tmp_path, image, monkeypatch):
         dlg.done(0)
         # without a face detector: Face only and H3 still work (the clip's own frames), the Animate methods not
         monkeypatch.setattr(w, "face_detector", lambda: None)
-        nodet = w.replace_person(v, dialog=False)
+        w.modal_dialogs = False
+        nodet = w.replace_person(v)
         assert nodet.heads is not None and nodet.heads["frames"] == n and not nodet.boxes
         nodet.set_reference(str(image))
         wait(app, lambda: not nodet.ref_busy, timeout=20)
@@ -967,7 +983,8 @@ def test_prompt_variations_in_the_create_window(app, tmp_path, image, monkeypatc
         q.setValue("comfyUrl", server.url)
         w = MainWindow(q, command=FAKE)
         new_project(w, tmp_path, image, ("a",))
-        dlg = w.edit_image(start=True, dialog=False, mode="create")
+        w.modal_dialogs = False
+        dlg = w.edit_image(start=True, mode="create")
         wait(app, lambda: dlg.families, timeout=20)
         dlg.family.setCurrentIndex(dlg.family.findData("sdxl"))
         dlg.show()                                                           # (offscreen; the negative is sent when shown)

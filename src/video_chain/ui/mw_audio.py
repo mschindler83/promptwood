@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import logging
 import copy
-import os
 from pathlib import Path
 
 from PySide6.QtCore import Qt
@@ -46,13 +45,9 @@ class AudioMixin(MainWindowHost):
             return
         assert self.tree is not None and self.project is not None
         snap, project = copy.deepcopy(self.tree), self.project
-        self._tts_busy = True
-        try:
+        with self._tts_session():
             self._update_buttons()
             self.status.setText(f"Cloning the voice of @{name} at ElevenLabs…")
-        except BaseException:
-            self._tts_busy = False                  # (it never started: not busy for ever)
-            raise
 
         run_in_background(lambda: TTS.clone_sample(project, snap, name, TTS.ElevenLabs()),
                           on_done=lambda v: self._eleven_cloned(name, v, "", str(project)),      # (the answer ends "busy")
@@ -124,7 +119,7 @@ class AudioMixin(MainWindowHost):
             bad = w.problems(isolate=True)
             fn, why = (None, "Not set up: " + "; ".join(bad)) if bad else (w.isolate, "")
         return AudioRangeDialog(self, file=file, settings=self.qs, title=f"Voice of @{name}: choose the part",
-                                voice=True, player=os.environ.get("QT_QPA_PLATFORM") != "offscreen",
+                                voice=True, player=self.audio_player,
                                 isolate=fn, no_isolate=why)
 
     def _voice_from_selected(self):
@@ -275,7 +270,7 @@ class AudioMixin(MainWindowHost):
     def _track_dialog(self, file: str = "", start=None, end=None, name: str = "", title: str = "Audio track"):
         from .audio_editor import AudioRangeDialog      # (lazy: a rarely opened editor with its own heavy parts)
         return AudioRangeDialog(self, file=file, start=start, end=end, name=name, settings=self.qs, title=title,
-                                player=os.environ.get("QT_QPA_PLATFORM") != "offscreen")
+                                player=self.audio_player)
 
     def import_track(self, file: str = "", name: str = "") -> str | None:
         """Choose a sound file, cut it, add it as an audio track. Returns its id."""

@@ -61,7 +61,8 @@ def test_identity_references_in_the_window(app, win, tmp_path, image, monkeypatc
     monkeypatch.delattr(win, "crop_face")                                     # the window's own again
     # Create…: the Create image window, its face button for the selected character
     assert win.b_ref_create.isEnabled()
-    dlg = win.create_reference(dialog=False)
+    win.modal_dialogs = False
+    dlg = win.create_reference()
     assert dlg.mode() == "create" and dlg.b_use_ref.text() == "Add as face of @Ben"
     made = tmp_path / "made.png"
     Image.new("RGB", (90, 90), (20, 90, 160)).save(made)

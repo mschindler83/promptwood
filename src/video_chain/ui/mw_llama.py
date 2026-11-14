@@ -6,6 +6,7 @@ import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import NamedTuple
 
 from .workers import post, run_in_background
 from .. import comfy as CMF, llm_server as LLM, runpod as RP, triggers, tts as TTS
@@ -30,6 +31,15 @@ class KeyField:
     after: Callable[[str], None] | None = None      # after the status line
 
 
+class LlamaConfig(NamedTuple):
+    """What a llama.cpp server is started with (a change of any field means a new server)."""
+    server: str
+    model: str
+    port: int
+    cpu_moe: bool
+    mmproj: str | None
+
+
 class LlamaMixin(MainWindowHost):
     """The local llama.cpp server and the API keys."""
 
@@ -39,17 +49,23 @@ class LlamaMixin(MainWindowHost):
         data = self.llm_model.itemData(i) if i >= 0 else None
         return data if data and self.llm_model.itemText(i) == typed else os.path.expanduser(typed)
 
+    def llama_config(self) -> LlamaConfig:
+        """The settings that decide whether the llama.cpp server has to be renewed."""
+        model = self.llm_model_path()
+        return LlamaConfig(self.llm_server.text().strip() or LLM_DEFAULT_SERVER, model, self.llm_port.value(),
+                           self.llm_cpu_moe.isChecked(), LLM.find_mmproj(model))
+
     def llama_server(self):
         """The llama.cpp server of the refiner (one per app; renewed when its settings change), None when off."""
         if not self.llm_on.isChecked() or not self.llm_model_path():
             return None
-        key = (self.llm_server.text().strip() or LLM_DEFAULT_SERVER, self.llm_model_path(), self.llm_port.value(),
-               self.llm_cpu_moe.isChecked(), LLM.find_mmproj(self.llm_model_path()))
+        cfg = self.llama_config()
         cur = self._llama
-        if cur is None or (cur.server, cur.model, cur.port, cur.cpu_moe, cur.mmproj) != key:
+        if cur is None or LlamaConfig(cur.server, cur.model, cur.port, cur.cpu_moe, cur.mmproj) != cfg:
             if cur is not None:
                 cur.stop(wait=False)
-            self._llama = LLM.LlamaServer(*key, log_dir=app_cache_dir())
+            self._llama = LLM.LlamaServer(cfg.server, cfg.model, cfg.port, cfg.cpu_moe, cfg.mmproj,
+                                          log_dir=app_cache_dir())
         url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL).rstrip("/")
         llama = self._llama
         assert llama is not None
@@ -110,7 +126,7 @@ class LlamaMixin(MainWindowHost):
         self.status.setText(message + "…")
 
     def _room_made(self, msg: str):
-        self._comfy_model = None                    # (nothing of this app is loaded in ComfyUI any more)
+        self.comfy.forget()                    # (nothing of this app is loaded in ComfyUI any more)
         self._qwen_timer.stop()
         if self.worker_alive and not self.running:
             self._quit_worker(free=False)           # its model is gone; a new worker starts for the next clips

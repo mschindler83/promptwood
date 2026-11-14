@@ -7,6 +7,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 from PySide6.QtCore import QProcess, QProcessEnvironment, QTimer
 
@@ -14,9 +15,12 @@ from .workers import run_in_background
 from .. import comfy as CMF, runpod as RP, tree as T
 from ..__main__ import COMFY_DOWN
 from .generator_state import (
-    CLIP_MODELS, ComfyBinding, ComfyModel, IMAGE_MODELS, Job, ModelState, Phase, RunpodBinding, WorkerBinding)
-from .ui_logic import CLOUD_KILL_GRACE_MS, DEFAULT_COMFY_URL, KILL_GRACE_MS, fmt_left, plural, time_left
+    ByeEvent, ComfyBinding, ComfyModel, ErrorEvent, IdleEvent, Job, LoadingEvent, ModelState,
+    NodeEvent, Phase, PlanEvent, RunpodBinding, StartEvent, StepEvent, WorkerBinding, event_problem)
+from .ui_logic import CLOUD_KILL_GRACE_MS, DEFAULT_COMFY_URL, KILL_GRACE_MS, as_dict, fmt_left, plural, speed_mode, time_left
 from .mw_host import MainWindowHost
+
+log = logging.getLogger(__name__)
 from .qsvalue import qs_value
 
 
@@ -94,8 +98,8 @@ class GeneratorMixin(MainWindowHost):
         if self._tts_busy:
             self.status.setText("Wait until text to speech is done.")
             return
-        self._checking, self._check_gen = True, self._check_gen + 1
-        gen, project, tree = self._check_gen, self.project, self.tree
+        self._checking = True
+        project, tree = self.project, self.tree
         self._check_args = (list(targets), refine)
         self.status.setText("Checking the project …")
         for c in self.cards:
@@ -105,11 +109,12 @@ class GeneratorMixin(MainWindowHost):
         def work():
             assert project is not None
             return self._preflight(project, tree, targets, refine)
-        run_in_background(work, on_done=lambda r: self._checked(gen, *r), owner=self)
+        run_in_background(work, on_done=lambda r: self._checked(*r), owner=self, latest=self._check)
 
     def _cancel_check(self):
         """Stop waiting for the pre-flight (Stop, closing): its result is not used any more."""
-        self._checking, self._check_gen = False, self._check_gen + 1
+        self._checking = False
+        self._check.ticket()                        # (the answer on its way is old now)
         for c in self.cards:
             c.set_editable(not self.running)
         self._update_buttons()
@@ -166,14 +171,14 @@ class GeneratorMixin(MainWindowHost):
 
     def _runpod_key_hint(self) -> str:
         """Where the RunPod key is set; in the Simple view that place is hidden, so the way there is named (UX-3)."""
-        where = "Settings → Cloud upscaling"
+        where = "Settings → Preferences → Cloud upscaling (RunPod)"
         if self.simple:
             where = "the Advanced view (View → Advanced view), then Settings → Preferences → Cloud upscaling"
         return f"To upscale on RunPod: save your RunPod API key ({where})."
 
-    def _checked(self, gen: int, problems: list, empty: list):
+    def _checked(self, problems: list, empty: list):
         """Generate's pre-flight is done: report what is missing, or go on with the job."""
-        if gen != self._check_gen or not self._checking or self.tree is None:
+        if not self._checking or self.tree is None:
             return                                  # (stopped, closed or another project meanwhile)
         self._checking = False
         targets, refine = self._check_args
@@ -281,9 +286,9 @@ class GeneratorMixin(MainWindowHost):
         self._worker_idle = False
         self.stop_llama("its RAM and VRAM are needed for the clips")
         cmd = {"cmd": "run", "tree": str(self.project), "targets": self._job.targets,
-               "free_first": self._comfy_model in IMAGE_MODELS}          # an image edit model is loaded: unload it
-        if self._comfy_model in CLIP_MODELS:                        # earlier workers: was HyperFlow last?
-            cmd["last_hyperflow"] = self._comfy_model == ComfyModel.H3_HYPERFLOW
+               "free_first": self.comfy.holds_image()}          # an image edit model is loaded: unload it
+        if self.comfy.holds_clip():                        # earlier workers: was HyperFlow last?
+            cmd["last_hyperflow"] = self.comfy.model == ComfyModel.H3_HYPERFLOW
         if self._job.refine:                                       # export refined: re-render the path's clips
             cmd.update({"cmd": "refine", "target": self._job.targets[0], **self._job.refine})
         if self._cloud_worker:                                     # the local ComfyUI is not touched
@@ -293,9 +298,9 @@ class GeneratorMixin(MainWindowHost):
             self._update_model_label()
             return
         self._qwen_timer.stop()
-        hyper = bool((self.tree.options.get("hyperflow") or {}).get("on")) and not self._job.refine \
+        hyper = speed_mode(as_dict(self.tree.options)) == "hyperflow" and not self._job.refine \
             if self.tree is not None else False
-        self._comfy_model = ComfyModel.H3_HYPERFLOW if hyper else ComfyModel.H3
+        self.comfy.model = ComfyModel.H3_HYPERFLOW if hyper else ComfyModel.H3
         self._write_job(cmd)
         self._update_model_label()
 
@@ -310,7 +315,7 @@ class GeneratorMixin(MainWindowHost):
         """Ask an idle worker to quit (free: and unload the model); killed if it does not go."""
         if self.proc is None:
             return
-        self._quit_frees = free
+        self.comfy.quit_frees = free
         self._worker_leaving = True                       # no new job for it (a new worker starts instead)
         if self.proc.state() == QProcess.ProcessState.Running:
             self.proc.write(b'{"cmd": "quit", "free": true}\n' if free else b'{"cmd": "quit"}\n')
@@ -413,14 +418,18 @@ class GeneratorMixin(MainWindowHost):
                 self.tree.nodes[nid].end_at = n.end_at   # a clip made again hands over at its last frame again
         self._tree_stamp = self._stamp()            # the generator wrote it; this window is up to date
 
-    def _event(self, ev: dict):
+    def _event(self, ev: Any):
         """One event of the worker ('@@ {json}' line): the handler of its kind, then the plugins hear it."""
-        handler = getattr(self, "_ev_" + str(ev.get("e")), None)
-        if handler is not None:
-            handler(ev)
+        why = event_problem(ev)
+        if why is not None:                            # (checked once here: the handlers index the fields they need)
+            log.warning("ignoring a worker event: %s", why)
+        else:
+            handler = getattr(self, "_ev_" + str(ev.get("e")), None)
+            if handler is not None:
+                handler(ev)
         self.plugins.emit("run_event", ev)             # (the plugins hear it once the app has handled it)
 
-    def _ev_loading(self, ev: dict):
+    def _ev_loading(self, ev: LoadingEvent):
         self._worker_idle = False
         self.status.setText("Starting a RunPod pod …" if ev.get("what") == "runpod" else "Connecting to ComfyUI …")
         self.progress.setRange(0, 0)
@@ -432,7 +441,7 @@ class GeneratorMixin(MainWindowHost):
                             "Connected to ComfyUI.")
         self._model_state = ModelState.LOADED
 
-    def _ev_idle(self, ev: dict):
+    def _ev_idle(self, ev: IdleEvent):
         self._worker_idle = True
         self._idle_since = time.monotonic()
         self._idle_timeout = ev.get("timeout")
@@ -442,28 +451,25 @@ class GeneratorMixin(MainWindowHost):
             self._job_finished()
         self._update_model_label()
 
-    def _ev_bye(self, ev: dict):
+    def _ev_bye(self, ev: ByeEvent):
         self._worker_idle = False
         self._worker_leaving = True
         if self._job is not None and self._job.sent and self._phase != Phase.DONE:
             self._replace_worker = True               # our job crossed its goodbye: a new worker takes it
-        if self._comfy_model in CLIP_MODELS and (ev.get("reason") == "idle" or self._quit_frees):
-            self._comfy_model = None                       # it unloaded the clip model
+        if self.comfy.holds_clip() and (ev.get("reason") == "idle" or self.comfy.quit_frees):
+            self.comfy.forget()                       # it unloaded the clip model
         if ev.get("reason") == "idle" and not self.running:
             self.status.setText("The model was unloaded after the idle time.")
 
-    def _ev_start(self, ev: dict):
+    def _ev_start(self, ev: StartEvent):
         self.status.setText(f"{ev.get('nodes', 0)} clips to make at {ev['width']}×{ev['height']}, "
                             f"{ev['frames']} frames each.")
 
-    def _ev_plan(self, ev: dict):
+    def _ev_plan(self, ev: PlanEvent):
         self._plan = list(ev.get("make", []))
 
-    def _ev_node(self, ev: dict):
-        nid, st = ev.get("id"), ev.get("state")
-        if not isinstance(nid, str) or not isinstance(st, str):
-            logging.getLogger(__name__).warning("ignoring a node event without id or state: %r", ev)
-            return
+    def _ev_node(self, ev: NodeEvent):
+        nid, st = ev["id"], ev["state"]
         if st == "generating":
             self._made_now.add(nid)
             self.live[nid] = "generating"
@@ -485,9 +491,9 @@ class GeneratorMixin(MainWindowHost):
         if st == "generating":
             self.graph.reveal(nid)
 
-    def _ev_step(self, ev: dict):
+    def _ev_step(self, ev: StepEvent):
         nid = ev.get("id")
-        if not (nid and ev.get("n")):
+        if not (nid and ev["n"]):
             return
         frac = ev["i"] / ev["n"]
         self.progress_of[nid] = frac
@@ -526,7 +532,7 @@ class GeneratorMixin(MainWindowHost):
     def _ev_joining(self, ev: dict):
         self.status.setText("Joining the refined clips …")
 
-    def _ev_error(self, ev: dict):
+    def _ev_error(self, ev: ErrorEvent):
         self._error = ev.get("msg", "error")
         if self._job is None:                      # after the job (e.g. a RunPod pod that could not be ended)
             self.status.setText(f"Warning: {self._error}")
@@ -634,7 +640,7 @@ class GeneratorMixin(MainWindowHost):
                         self._film_queue = film_rest
                 else:
                     self.status.setText(f"ComfyUI is not running at {self.comfy_url.text().strip()}. "
-                                        "Start it (Settings → ComfyUI and preferences → Start ComfyUI) and generate "
+                                        "Start it (Settings → Preferences → Start ComfyUI) and generate "
                                         "again.")
                 self._update_comfy_label()
         self._update_model_label()

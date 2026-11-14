@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any, TypedDict
 
 
 class ComfyModel(str, Enum):
@@ -64,6 +65,31 @@ WorkerBinding = ComfyBinding | RunpodBinding
 
 
 @dataclass
+class ComfyService:
+    """What this app has loaded in ComfyUI (the model it last used, None: nothing) and whether the worker's next quit
+    unloads it. One place for what mw_comfy, mw_generator, mw_ends and mw_llama each used to set by hand (MWC-13)."""
+    model: ComfyModel | None = None
+    quit_frees: bool = True         # the worker's next quit unloads the clip model
+
+    def holds_clip(self) -> bool:
+        """The generator worker holds the clip model."""
+        return self.model in CLIP_MODELS
+
+    def holds_image(self) -> bool:
+        """An editing window's model (image edit, language model) is loaded in ComfyUI: it has to be unloaded."""
+        return self.model in IMAGE_MODELS
+
+    def forget(self) -> None:
+        """Nothing of this app is loaded in ComfyUI any more."""
+        self.model = None
+
+    def language_model_loaded(self) -> None:
+        """The prompt refiner's language model is in ComfyUI now (the image model stays the one to unload)."""
+        if self.model != ComfyModel.QWEN:
+            self.model = ComfyModel.LLM
+
+
+@dataclass
 class ModelSwitch:
     """ComfyUI changing from the clip model to the model of an editing window (an image edit, a replaced person):
     the clip model is unloaded once, before the first job of the window, and the window says when its own model was
@@ -80,3 +106,81 @@ class ModelSwitch:
         if self.free:
             editor.free()
             self.free = False
+
+
+# ---------------------------------------------------------------- the worker's events ('@@ {json}' lines, MWC-8)
+# One TypedDict per kind of event the worker (video_chain.__main__) sends. `total=False` fields are optional on the wire.
+# The window checks an event once, at the boundary (event_problem), so a handler can index the required fields.
+class _Event(TypedDict):
+    e: str
+
+
+class LoadingEvent(_Event, total=False):
+    what: str                           # "runpod" | "comfyui"
+
+
+class IdleEvent(_Event, total=False):
+    timeout: float | None
+    took: float
+
+
+class ByeEvent(_Event, total=False):
+    reason: str
+
+
+class StartEvent(_Event, total=False):
+    nodes: int
+    width: int
+    height: int
+    frames: int
+
+
+class PlanEvent(_Event):
+    make: list[str]
+
+
+class NodeEvent(_Event, total=False):
+    id: str
+    state: str
+    k: int
+
+
+class StepEvent(_Event, total=False):
+    id: str | None
+    i: float
+    n: float
+
+
+class NoteEvent(_Event, total=False):
+    id: str | None
+    text: str
+
+
+class ErrorEvent(_Event, total=False):
+    msg: str
+    comfy_down: bool
+
+
+def _number(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+# kind -> {field: (check, what it must be)} for the fields that must be there
+_REQUIRED: dict[str, dict[str, tuple[Any, str]]] = {
+    "start": {"width": (_number, "a number"), "height": (_number, "a number"), "frames": (_number, "a number")},
+    "plan": {"make": (lambda v: isinstance(v, list), "a list")},
+    "node": {"id": (lambda v: isinstance(v, str), "text"), "state": (lambda v: isinstance(v, str), "text")},
+    "step": {"i": (_number, "a number"), "n": (_number, "a number")},
+}
+
+
+def event_problem(ev: Any) -> str | None:
+    """Why a worker event cannot be handled (None: it can). Unknown kinds are fine: the plugins hear them."""
+    if not isinstance(ev, dict):
+        return f"it is not an object: {ev!r}"
+    for field, (ok, what) in _REQUIRED.get(str(ev.get("e")), {}).items():
+        if field not in ev:
+            return f"a {ev.get('e')} event without {field!r}: {ev!r}"
+        if not ok(ev[field]):
+            return f"a {ev.get('e')} event whose {field!r} is not {what}: {ev!r}"
+    return None
