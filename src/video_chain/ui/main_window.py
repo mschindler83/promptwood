@@ -20,69 +20,81 @@ import stat as stat_module
 import sys
 import threading
 import time
+from collections import Counter
 from pathlib import Path
 from typing import NamedTuple
 
-from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QSettings, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import (QEventLoop, QObject, QProcess, QProcessEnvironment, QSettings, QSize, Qt, QTimer, QUrl,
+                            Signal)
 from PySide6.QtGui import (QAction, QActionGroup, QCursor, QDesktopServices, QIcon, QImage, QImageReader, QKeySequence, QPixmap,
                            QShortcut)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
                                QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QInputDialog, QLabel,
                                QFrame, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu,
-                               QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
-                               QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QStackedWidget, QTabWidget,
-                               QToolButton, QToolTip, QVBoxLayout, QWidget)
+                               QMessageBox, QPlainTextEdit, QProgressBar, QProgressDialog, QPushButton,
+                               QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QStackedWidget, QTableWidget,
+                               QTableWidgetItem, QTabWidget, QToolButton, QToolTip, QVBoxLayout, QWidget)
 
+from .. import animate
+from .. import camera as CAM
 from .. import chain
 from .. import comfy as CMF
+from .. import config
+from .. import faces
+from .. import film as F
+from .. import imagegen
+from .. import llm_server as LLM
 from .. import media
 from .. import net
-from .. import config
-from .. import film as F
-from .. import camera as CAM
+from .. import runpod as RP
 from .. import swap
 from .. import tree as T
+from .. import triggers
 from .. import tts as TTS
-from .. import runpod as RP
 from ..__main__ import COMFY_DOWN
 from ..comfy import REF_HINT, refine_size
-from .graph import START, GraphView, NodeInfo
-from .image_picker import pick_image
-from .clip_dialogs import CompareDialog, HandoverDialog, SplitDialog, VideoFrameDialog
-from .keyframe_strip import KeyframeStrip
-from .lora_stack import LORA_MAX, LORA_MIN, LoraStack, fill_lora_combo, lora_label, lora_path
-from .swap_dialog import SwapDialog
-from .mentions import MentionHelper
-from .cast_strip import CastStrip
-from .clip_inputs import KIND_NAMES, ChipRow, ModelPromptDialog, chip_specs
-from .timeline import Block, Timeline
-from .storyboard import Storyboard
-from .face_crop import FaceCropDialog
-from .prompt_refiner import RefineDialog, replace_text
-from .speak_dialog import SpeakLinesDialog, run_dialog as run_speak_dialog
-from .tts_dialog import VoiceTtsDialog, run_dialog as run_voice_dialog
-from .image_edit import EDITS_DIR, ImageEditDialog, project_edits, record_use, uses_index, uses_of
-from .video_editor import VideoRangeDialog, choose_video
-from .theme import icon, repolish, theme
-from .widgets import FrameTile, VideoView, format_time, guard_wheel, icon_button, label, safe_emit, section_bar
-from .view_mode import AdvancedNote, ViewMode, row_widget
-from .problems import EXAMPLES, ProblemBox, add_example, camera_menu_items, insert_at_cursor
-from .guide import EngineBanner, GuidePanel, NextHint
 from . import dialogs as D
 from . import shortcuts as S
+from .cast_strip import CastStrip
+from .clip_dialogs import CompareDialog, HandoverDialog, SplitDialog, VideoFrameDialog
+from .clip_inputs import KIND_NAMES, ChipRow, ModelPromptDialog, chip_specs
+from .face_crop import FaceCropDialog
+from .graph import START, GraphView, NodeInfo
+from .guide import EngineBanner, GuidePanel, NextHint
+from .image_edit import EDITS_DIR, ImageEditDialog, project_edits, record_use, uses_index, uses_of
+from .image_picker import pick_image
+from .keyframe_strip import KeyframeStrip
+from .lora_stack import LORA_MAX, LORA_MIN, LoraStack, fill_lora_combo, lora_label, lora_path
+from .mentions import MentionHelper
+from .problems import EXAMPLES, ProblemBox, add_example, camera_menu_items, insert_at_cursor
+from .prompt_refiner import RefineDialog, replace_text
+from .speak_dialog import SpeakLinesDialog, run_dialog as run_speak_dialog
+from .storyboard import Storyboard
+from .swap_dialog import SwapDialog
+from .theme import icon, repolish, theme
+from .timeline import Block, Timeline
+from .tts_dialog import VoiceTtsDialog, run_dialog as run_voice_dialog
+from .video_editor import VideoRangeDialog, choose_video
+from .view_mode import AdvancedNote, ViewMode, row_widget
+from .widgets import FrameTile, VideoView, format_time, guard_wheel, icon_button, label, safe_emit, section_bar
 
 try:                                            # (the player is optional: Preview says so when it is missing)
-    from PySide6.QtMultimedia import QMediaPlayer
+    from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 except ImportError:                             # pragma: no cover
-    QMediaPlayer = None
+    QAudioOutput = QMediaPlayer = None
+
 
 DEFAULT_COMFY_URL = "http://127.0.0.1:8188"
-from ..llm_server import DEFAULT_PORT as LLM_DEFAULT_PORT, DEFAULT_SERVER as LLM_DEFAULT_SERVER  # noqa: E402
+DEFAULT_COMFY_LAUNCHER = str(Path.home() / "bin" / "comfyui")
+DEFAULT_COMFY_DIR = str(Path.home() / "ComfyUI")
+LLM_DEFAULT_PORT, LLM_DEFAULT_SERVER = LLM.DEFAULT_PORT, LLM.DEFAULT_SERVER
 LLM_MODEL_DIRS = (config.hf_cache(), Path.home() / ".cache" / "huggingface" / "hub")
-
-
 CLOSE_GRACE = 3.0          # seconds llama-server gets to end after SIGTERM when the window closes
 CHAT_HINTS = ("instruct", "chat", "-it-", "-it.", "_it_", "abliterated", "uncensored")
+MAX_RECENT = 10
+# H3's 17n+5 frame grid from 3 s to 15 s (362 frames = 15.1 s, the top of its trained range of ~124-362)
+FRAME_CHOICES = [17 * n + 5 for n in range(4, 22)]
+IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff)"
 
 
 def find_gguf_models(roots=LLM_MODEL_DIRS) -> list[Path]:
@@ -106,10 +118,6 @@ def find_gguf_models(roots=LLM_MODEL_DIRS) -> list[Path]:
         except OSError:
             continue
     return out
-DEFAULT_COMFY_LAUNCHER = str(Path.home() / "bin" / "comfyui")
-DEFAULT_COMFY_DIR = str(Path.home() / "ComfyUI")
-# H3's 17n+5 frame grid from 3 s to 15 s (362 frames = 15.1 s, the top of its trained range of ~124-362)
-FRAME_CHOICES = [17 * n + 5 for n in range(4, 22)]
 
 
 def frames_text(n: int) -> str:
@@ -126,7 +134,8 @@ def select_frames(combo: QComboBox, frames: int | None) -> None:
         combo.addItem(frames_text(int(frames)) + " – no longer offered", int(frames))
         i = combo.count() - 1
     combo.setCurrentIndex(i)
-IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff)"
+
+
 STATE_TEXT = {"done": "DONE", "reused": "DONE", "changed": "CHANGED", "new": "NEW", "generating": "GENERATING",
               "failed": "FAILED", "stopped": "STOPPED", "converting": "CONVERTING"}
 STATE_TIP = {"done": "Made, and nothing it depends on changed: it is reused, not made again",
@@ -180,7 +189,6 @@ def time_left(elapsed: float, frac: float) -> float | None:
     return elapsed * (1 - min(frac, 1.0)) / frac
 
 
-MAX_RECENT = 10
 
 
 class NewProjectDialog(QDialog):
@@ -574,7 +582,6 @@ class SourceSoundInfo(NamedTuple):
 def label_loras(items: list[tuple[str, str]]) -> list[tuple[str, str]]:
     """(path, name relative to the LoRA folder) -> (path, label): just the file name; the folder only where two
     LoRAs share a name."""
-    from collections import Counter
     count = Counter(Path(n).stem for _p, n in items)
     out = []
     for p, n in items:
@@ -1783,8 +1790,7 @@ class Preview(QWidget):
         if self.player is not None:
             return True
         try:
-            from PySide6.QtMultimedia import QAudioOutput
-            if QMediaPlayer is None:
+            if QMediaPlayer is None or QAudioOutput is None:
                 raise ImportError
         except ImportError:
             self.placeholder.setText("Video playback is not available (QtMultimedia missing).")
@@ -2578,8 +2584,7 @@ class MainWindow(QMainWindow):
         self.triggers_online.toggled.connect(lambda on: on and self._scan_triggers())
         a.addRow("", self.triggers_online)
         self.civitai_site = QComboBox()
-        from .. import triggers as _trg
-        for s_ in _trg.SITES:
+        for s_ in triggers.SITES:
             self.civitai_site.addItem(s_.split("//", 1)[1], s_)
         self.civitai_site.setToolTip("CivitAI has two sites that share their LoRAs: civitai.com and civitai.red. "
                                      "The one chosen here is asked first and is where links open (a LoRA's page, a "
@@ -3215,7 +3220,6 @@ class MainWindow(QMainWindow):
         self.comfy_cleanup.setChecked(q.value("comfyCleanup", True, type=bool))
         self.comfy_autostart.setChecked(q.value("comfyAutoStart", True, type=bool))
         self.triggers_online.setChecked(q.value("loraTriggersOnline", True, type=bool))
-        from .. import triggers
         self.civitai_site.blockSignals(True)
         self.civitai_site.setCurrentIndex(max(0, self.civitai_site.findData(
             triggers.set_site(q.value("civitaiSite", "", type=str)))))
@@ -3770,7 +3774,6 @@ class MainWindow(QMainWindow):
             return
         if not self._save_tree():
             return
-        from PySide6.QtWidgets import QTableWidget, QTableWidgetItem
         names, rows = F.cast_by_scene(self.film)
         dlg = QDialog(self)
         dlg.setWindowTitle("Cast in the film")
@@ -3905,7 +3908,6 @@ class MainWindow(QMainWindow):
                                              str(root.parent))
         if not d:
             return
-        from PySide6.QtWidgets import QInputDialog
         name, ok = QInputDialog.getText(self, "Save as", "Name of the copy:", text=f"{root.name}-copy")
         if not ok or not name.strip():
             return
@@ -4339,7 +4341,6 @@ class MainWindow(QMainWindow):
         def work():
             counts = {}
             try:
-                from .. import triggers
                 counts = triggers.db().scan(paths, online=online, stop=stop.is_set,
                                             progress=bridge.trigger_progress.emit)
             except Exception:  # noqa: BLE001
@@ -4362,15 +4363,13 @@ class MainWindow(QMainWindow):
         """The llama.cpp server of the refiner (one per app; renewed when its settings change), None when off."""
         if not self.llm_on.isChecked() or not self.llm_model_path():
             return None
-        from ..llm_server import LlamaServer
-        from ..llm_server import find_mmproj
         key = (self.llm_server.text().strip() or LLM_DEFAULT_SERVER, self.llm_model_path(), self.llm_port.value(),
-               self.llm_cpu_moe.isChecked(), find_mmproj(self.llm_model_path()))
+               self.llm_cpu_moe.isChecked(), LLM.find_mmproj(self.llm_model_path()))
         cur = getattr(self, "_llama", None)
         if cur is None or (cur.server, cur.model, cur.port, cur.cpu_moe, cur.mmproj) != key:
             if cur is not None:
                 cur.stop(wait=False)
-            self._llama = LlamaServer(*key, log_dir=Path.home() / ".cache" / "video-chain")
+            self._llama = LLM.LlamaServer(*key, log_dir=Path.home() / ".cache" / "video-chain")
         url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL).rstrip("/")
         self._llama.before_launch = lambda llama=self._llama: self._room_for_llama(llama, url)
         return self._llama
@@ -4378,13 +4377,12 @@ class MainWindow(QMainWindow):
     def _end_leftover_llama(self):
         """At start-up: a llama-server an earlier run left behind (it crashed; found by its pid file) holds RAM and
         VRAM nobody knows about; it is ended, in the background. Nothing else is touched."""
-        from ..llm_server import LlamaServer
         log_dir = Path.home() / ".cache" / "video-chain"
         server, port = self.llm_server.text().strip() or LLM_DEFAULT_SERVER, self.llm_port.value()
 
         def work():
             try:
-                LlamaServer(server, "", port, log_dir=log_dir).stop(wait=True, grace=CLOSE_GRACE)
+                LLM.LlamaServer(server, "", port, log_dir=log_dir).stop(wait=True, grace=CLOSE_GRACE)
             except Exception:  # noqa: BLE001
                 logging.getLogger(__name__).warning("ending a leftover llama-server", exc_info=True)
         threading.Thread(target=work, daemon=True, name="llama-leftover").start()
@@ -4393,16 +4391,14 @@ class MainWindow(QMainWindow):
         """(start()'s thread, just before the llama.cpp server starts) Too little free VRAM for it: ComfyUI is asked
         to unload its models (the clip / image model loads again when it is needed). While clips are generated it
         refuses instead (their run keeps its VRAM)."""
-        from ..llm_server import LlmServerError, vram_needed_mb
-        self._make_room(vram_needed_mb(llama.model, llama.cpu_moe, llama.mmproj), url, "the llama.cpp model",
-                        LlmServerError, "refine after the run, or choose a ComfyUI model", settle)
+        self._make_room(LLM.vram_needed_mb(llama.model, llama.cpu_moe, llama.mmproj), url, "the llama.cpp model",
+                        LLM.LlmServerError, "refine after the run, or choose a ComfyUI model", settle)
 
     def _make_room(self, need: int, url: str, what: str, error=RuntimeError, later: str = "try again after the run",
                    settle: float = 15.0) -> None:
         """(a worker thread, before a model of this app starts) Too little free VRAM for need MB: ComfyUI is asked to
         unload its models; while clips are generated: error instead (their run keeps its VRAM)."""
-        from ..llm_server import free_vram_mb
-        free = free_vram_mb()
+        free = LLM.free_vram_mb()
         if free is None or free >= need:
             return
         gb = lambda mb: f"{mb / 1024:.1f} GB"   # noqa: E731
@@ -4415,7 +4411,7 @@ class MainWindow(QMainWindow):
         now = free
         while time.time() < end:
             time.sleep(0.5)
-            now = free_vram_mb()
+            now = LLM.free_vram_mb()
             if now is None or now >= need:
                 break
         safe_emit(self.bridge.llm_room,
@@ -4443,14 +4439,12 @@ class MainWindow(QMainWindow):
         return stopped
 
     def _show_civitai_key(self):
-        from .. import triggers
         has = bool(triggers.api_key())
         self.civitai_key.clear()
         self.civitai_key.setPlaceholderText("a key is kept (type a new one, or save empty to remove it)" if has else
                                             "none: paste your key to get everything CivitAI holds back")
 
     def _save_civitai_key(self):
-        from .. import triggers
         key = self.civitai_key.text().strip()
         try:
             triggers.set_api_key(key)
@@ -4758,7 +4752,6 @@ class MainWindow(QMainWindow):
     def _civitai_site_changed(self, *_):
         """The CivitAI site asked first and linked to (kept at once; LoRAs neither site was asked about yet are
         looked up with the next scan)."""
-        from .. import triggers
         chosen = triggers.set_site(self.civitai_site.currentData())
         self.qs.setValue("civitaiSite", chosen)
         self.status.setText(f"CivitAI: {chosen.split('//', 1)[1]} is asked first and is where links open.")
@@ -5049,9 +5042,8 @@ class MainWindow(QMainWindow):
         return False
 
     def face_detector(self) -> Path | None:
-        from .. import faces as F
         comfy_dir = os.path.expanduser(self.comfy_dir.text().strip()) or None
-        return F.find_detector(Path(comfy_dir)) if comfy_dir else None
+        return faces.find_detector(Path(comfy_dir)) if comfy_dir else None
 
     def crop_face(self, path: str, title: str, crop=None):
         """The crop window: the square (x, y, side), None for the whole picture, or False (cancelled)."""
@@ -5399,7 +5391,7 @@ class MainWindow(QMainWindow):
     def _voice_dialog(self, file: str, name: str, isolate: bool = True):
         """The window the part of a file is chosen in that becomes a character's voice (isolate: it can take the
         background music out with the app's text to speech worker)."""
-        from .audio_editor import AudioRangeDialog
+        from .audio_editor import AudioRangeDialog      # (lazy: a rarely opened editor with its own heavy parts)
         fn, why = None, "Text to speech is busy; choose the voice again when it is done to remove music."
         if isolate:
             w = self.local_tts()
@@ -5547,7 +5539,7 @@ class MainWindow(QMainWindow):
 
     # ---- audio tracks (imported sound the clips play, carried on from clip to clip)
     def _track_dialog(self, file: str = "", start=None, end=None, name: str = "", title: str = "Audio track"):
-        from .audio_editor import AudioRangeDialog
+        from .audio_editor import AudioRangeDialog      # (lazy: a rarely opened editor with its own heavy parts)
         return AudioRangeDialog(self, file=file, start=start, end=end, name=name, settings=self.qs, title=title,
                                 player=os.environ.get("QT_QPA_PLATFORM") != "offscreen")
 
@@ -6974,7 +6966,7 @@ class MainWindow(QMainWindow):
     def show_loras(self, current: str | None = None):
         """The LoRA window: every LoRA the app offers, with what is known of each (its gallery's prompts with their
         pictures, the prompt refiner's note, the settings its examples were made with)."""
-        from .lora_window import LoraWindow
+        from .lora_window import LoraWindow      # (lazy: a rarely opened window)
         card = next((c for c in self.cards if c.nid == self.focus and isinstance(c, PromptCard)), None)
         more = card.loras.window_args() if card is not None else {}    # (the clip in focus: its LoRAs, its prompt)
         LoraWindow(self, self.known_loras(), current=current, settings=self.qs, **more).exec()
@@ -7060,12 +7052,10 @@ class MainWindow(QMainWindow):
 
         def work():
             try:
-                from ..comfy import comfy_lora_roots, find_h3_loras, find_qwen_loras, is_turbo_lora
-                roots = comfy_lora_roots(comfy_dir)
-                found = [(p, n, "turbo" if is_turbo_lora(Path(p)) else "h3") for p, n in find_h3_loras(roots)]
-                found += [(p, n, "qwen") for p, n in find_qwen_loras(roots)]
-                from ..imagegen import find_image_loras
-                for fam, items in find_image_loras(roots).items():
+                roots = CMF.comfy_lora_roots(comfy_dir)
+                found = [(p, n, "turbo" if CMF.is_turbo_lora(Path(p)) else "h3") for p, n in CMF.find_h3_loras(roots)]
+                found += [(p, n, "qwen") for p, n in CMF.find_qwen_loras(roots)]
+                for fam, items in imagegen.find_image_loras(roots).items():
                     found += [(p, n, fam) for p, n in items]
             except Exception:  # noqa: BLE001
                 return                           # keep the lists found before (a folder may be offline)
@@ -7105,8 +7095,7 @@ class MainWindow(QMainWindow):
     def _lora_dir(self) -> str:
         """Where to start looking for LoRA files: ComfyUI's first LoRA folder (the ones it can load)."""
         try:
-            from ..comfy import comfy_lora_roots
-            roots = comfy_lora_roots(Path(os.path.expanduser(self.comfy_dir.text().strip() or DEFAULT_COMFY_DIR)))
+            roots = CMF.comfy_lora_roots(Path(os.path.expanduser(self.comfy_dir.text().strip() or DEFAULT_COMFY_DIR)))
             extra = [r for r in roots if "models/loras" not in r.as_posix()]
             return str((extra or roots)[0]) if roots else ""
         except Exception:  # noqa: BLE001
@@ -7173,8 +7162,7 @@ class MainWindow(QMainWindow):
         """Whether ComfyUI can load this LoRA file: it lies in one of ComfyUI's LoRA folders (links followed), or
         is a LoRA found there. None: ComfyUI's folder is not known here."""
         try:
-            from ..comfy import comfy_lora_roots
-            roots = comfy_lora_roots(Path(os.path.expanduser(self.comfy_dir.text().strip() or DEFAULT_COMFY_DIR)))
+            roots = CMF.comfy_lora_roots(Path(os.path.expanduser(self.comfy_dir.text().strip() or DEFAULT_COMFY_DIR)))
         except Exception:  # noqa: BLE001
             roots = []
         if not roots:
@@ -7477,15 +7465,13 @@ class MainWindow(QMainWindow):
         llama = self.llama_server()
 
         def connect():
-            from ..comfy import ComfyPromptRefiner
-            from ..llm_server import CombinedRefiner
             if llama is None:
-                return ComfyPromptRefiner(url, log=lambda _m: None, comfy_dir=comfy_dir, cleanup=False)
+                return CMF.ComfyPromptRefiner(url, log=lambda _m: None, comfy_dir=comfy_dir, cleanup=False)
             try:
-                comfy, err = ComfyPromptRefiner(url, log=lambda _m: None, comfy_dir=comfy_dir, cleanup=False), ""
+                comfy, err = CMF.ComfyPromptRefiner(url, log=lambda _m: None, comfy_dir=comfy_dir, cleanup=False), ""
             except Exception as e:  # noqa: BLE001  (ComfyUI down: the llama.cpp model still refines)
                 comfy, err = None, str(e)
-            return CombinedRefiner(comfy, llama, err)
+            return LLM.CombinedRefiner(comfy, llama, err)
         cast = T.refiner_cast(self.tree) if self.tree is not None and kind in ("video", "video_h3") else []
         dlg = RefineDialog(self, text, kind, connect, self.qs, start_comfy=self.start_comfy, cast=cast,
                            pictures=pictures or [], seconds=seconds, start_image=start_image, loras=loras)
@@ -7564,8 +7550,7 @@ class MainWindow(QMainWindow):
                 self._quit_worker(free=False)               # its model goes now; it is started again for clips
 
         def connect(progress):                      # worker thread
-            from ..comfy import ComfyImageEditor
-            ed = ComfyImageEditor(url, log=lambda _m: None, progress=progress, comfy_dir=comfy_dir, cleanup=cleanup)
+            ed = CMF.ComfyImageEditor(url, log=lambda _m: None, progress=progress, comfy_dir=comfy_dir, cleanup=cleanup)
             if switch["free"]:
                 ed.free()
                 switch["free"] = False
@@ -7573,8 +7558,7 @@ class MainWindow(QMainWindow):
             return ed
 
         def connect_create(progress):               # worker thread: the image creator (any image family)
-            from ..imagegen import ComfyImageCreator
-            ed = ComfyImageCreator(url, log=lambda _m: None, progress=progress, comfy_dir=comfy_dir, cleanup=cleanup)
+            ed = imagegen.ComfyImageCreator(url, log=lambda _m: None, progress=progress, comfy_dir=comfy_dir, cleanup=cleanup)
             if switch["free"]:
                 ed.free()
                 switch["free"] = False
@@ -8563,8 +8547,7 @@ class MainWindow(QMainWindow):
         if now - miss.get((key, comfy_dir), -1e9) < 30:
             return None                              # (looked for a moment ago: not there)
         try:
-            from ..comfy import comfy_lora_roots
-            for root in comfy_lora_roots(comfy_dir):
+            for root in CMF.comfy_lora_roots(comfy_dir):
                 for f in sorted(Path(root).rglob("*.safetensors")):
                     if key in f.name.lower():
                         self._lora_hits = {**self._lora_hits, (key, comfy_dir): (str(f), now)}
@@ -8608,8 +8591,7 @@ class MainWindow(QMainWindow):
                 self._quit_worker(free=False)
 
         def connect(progress):                      # worker thread
-            from ..animate import ComfyAnimator
-            an = ComfyAnimator(url, log=lambda _m: None, progress=progress, comfy_dir=comfy_dir, cleanup=cleanup)
+            an = animate.ComfyAnimator(url, log=lambda _m: None, progress=progress, comfy_dir=comfy_dir, cleanup=cleanup)
             switch["loaded"] = True                 # another model in ComfyUI now (unloaded after the window)
             if switch["free"]:
                 an.free()
@@ -8617,14 +8599,12 @@ class MainWindow(QMainWindow):
             return an
 
         def describe_face(picture):                 # worker thread: the face details for the head swap
-            from ..comfy import ComfyPromptRefiner
             switch["loaded"] = True
-            return ComfyPromptRefiner(url, log=lambda _m: None, comfy_dir=comfy_dir, cleanup=cleanup).describe_face(
+            return CMF.ComfyPromptRefiner(url, log=lambda _m: None, comfy_dir=comfy_dir, cleanup=cleanup).describe_face(
                 picture)
 
         def connect_h3(progress):                   # worker thread: the clip generator (H3 head swap)
-            from ..comfy import ComfyGenerator
-            gen = ComfyGenerator(url, log=lambda _m: None, progress=progress, comfy_dir=comfy_dir, cleanup=cleanup)
+            gen = CMF.ComfyGenerator(url, log=lambda _m: None, progress=progress, comfy_dir=comfy_dir, cleanup=cleanup)
             if switch["free"]:
                 gen.free()
                 switch["free"] = False
@@ -8995,11 +8975,10 @@ class MainWindow(QMainWindow):
         export: GPU, volume, fallback, SeedVR2 size); a change needs a new worker."""
         refine = (self._job or {}).get("refine") or {}
         if refine.get("cloud"):
-            from ..comfy import SEEDVR_METHODS
             return ("runpod", self.qs.value("runpodGpu", RP.DEFAULT_GPU, type=str),
                     self.qs.value("runpodVolume", "", type=str).strip(),
                     self.qs.value("runpodFallback", True, type=bool),
-                    SEEDVR_METHODS.get(refine.get("method"), "7b"),
+                    CMF.SEEDVR_METHODS.get(refine.get("method"), "7b"),
                     self.qs.value("runpodWithoutVolume", True, type=bool))
         return ((self.comfy_url.text().strip() or DEFAULT_COMFY_URL), self.comfy_dir.text().strip(),
                 self.comfy_cleanup.isChecked())
@@ -9704,8 +9683,6 @@ class MainWindow(QMainWindow):
     def _wait_for_shutdown(self, p: QProcess | None, cloud: bool, also: threading.Event | None):
         """Wait (the window stays alive and says what it waits for) until the generator process has ended: it gets
         3 s to quit by itself, then is asked to terminate (a cloud worker ends its pod: long), then killed."""
-        from PySide6.QtCore import QEventLoop
-        from PySide6.QtWidgets import QProgressDialog
         def over() -> bool:
             return (p is None or p.state() == QProcess.NotRunning) and (also is None or also.is_set())
         if over():
