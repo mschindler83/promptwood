@@ -29,6 +29,12 @@ Project folder:
   paths/<id>.mp4       a joined path (start -> node), made on demand
   ends/<id>_<tag>.png  a generated clip's own end image
   ends/<id>_k<tag>.png a middle keyframe of a generated clip (Node.keyframes)
+  starts/<id>_<tag>.png a first clip's own start picture (Node.start_image), with its prepared copies
+
+A first clip normally starts from the project's start image. It can have a start picture of its own
+(Node.start_image); add_start_rows makes the same clip once per picture: a row of the node view each, with the same
+prompt, seed and settings (a set, Node.row), which can then go its own way. The video size stays the project's
+(it follows start.png): every start picture is cut from its centre to that shape, as start.png is.
 
 Every generated clip has its own LoRA stack (Node.overrides["loras"]: [{"path", "strength"}], applied in order;
 none by default) and can override the project's clip length and steps
@@ -99,6 +105,7 @@ PROMPT_FORMATS = ("h3", "classic")
 CAST_KINDS = ("person", "place", "object", "style")   # what a cast entry is (no "kind": a person)
 REFS_DIR = "refs"
 ENDS_DIR = "ends"
+STARTS_DIR = "starts"              # first clips' own start pictures (Node.start_image)
 MAX_CAST_PICTURES = 9              # MiniMax H3 ref2va takes up to 9 reference images
 MAX_PICTURES_PER_CHARACTER = 3
 MAX_AUDIO_REFS = 3                 # MiniMax H3 ref2va: up to 3 sounds, each 2-15 s, together at most 15 s
@@ -132,6 +139,9 @@ class Node:
     end_at: int | None = None      # AI: hand over at this frame instead of the last one (see handover_index)
     keyframes: list = field(default_factory=list)   # AI: [{"image": ends/..., "at": s, "note": str}], by time
     frozen: bool = False           # kept as made: done whatever the settings say (see freeze)
+    start_image: str | None = None  # AI, a first clip: its own start picture (starts/..., project-relative)
+    #                                 instead of the project's start image (see add_start_rows)
+    row: str | None = None         # the first clips made as one set for several start pictures share this id
 
     @property
     def is_video(self) -> bool:
@@ -256,6 +266,7 @@ class Tree:
                 for rel in ({node.end_image, (node.made or {}).get("end_image")} | keyframe_files(node)) - {None}:
                     if _in_ends(project, rel):
                         chain.keep_aside(project, Path(project) / rel)
+                _drop_start_file(project, node.start_image)
                 chain.keep_aside(project, Path(project) / "paths" / f"{g}.mp4")     # its joined path too
                 _unlink(Path(project) / "paths" / f"{g}.json")
         if self.selected in gone:
@@ -323,10 +334,15 @@ class Tree:
             at = nd.get("end_at")
             at = int(at) if kind == AI and isinstance(at, (int, float)) and not isinstance(at, bool) and at >= 1 \
                 else None
+            own = nd.get("start_image")
+            own = own if kind == AI and nd.get("parent") is None and isinstance(own, str) \
+                and own.startswith(STARTS_DIR + "/") else None
+            row = nd.get("row") if isinstance(nd.get("row"), str) and re.fullmatch(r"n\d+", nd["row"]) else None
             n = Node(nd["id"], nd.get("parent"), nd.get("prompt", ""), int(nd.get("seed", 42)), nd.get("made"), ov,
                      kind, dict(src) if kind == VIDEO else None, end, at,
                      clean_keyframes(nd.get("keyframes")) if kind == AI else [],
-                     bool(nd.get("frozen")) and isinstance(nd.get("made"), dict))
+                     bool(nd.get("frozen")) and isinstance(nd.get("made"), dict), own,
+                     row if kind == AI and nd.get("parent") is None else None)
             t.nodes[n.id] = n
         for n in t.nodes.values():
             if n.parent is not None and n.parent not in t.nodes:
@@ -1773,13 +1789,121 @@ def missing_end_images(project: Path, tree: Tree, todo: list[str]) -> list[str]:
             and not (Path(project) / tree.nodes[nid].end_image).is_file()]
 
 
-def prepared_start(project: Path, width: int, height: int) -> Path | None:
-    """The start image prepared for a canvas (chain.prepare_image): start_<w>x<h>.png in the project, made again
-    when start.png changes. None without a start image."""
-    src = Path(project) / START_FILE
+def _in_starts(project: Path, rel: str) -> bool:
+    """rel points into the project's starts/ folder (a damaged/hand-edited record never reaches elsewhere)."""
+    area = (Path(project) / STARTS_DIR).resolve()
+    return area in (Path(project) / rel).resolve().parents
+
+
+def _drop_start_file(project: Path, rel: str | None) -> None:
+    """A first clip's own start picture that is no longer used goes to old/, its prepared copies are removed."""
+    if not rel or not _in_starts(project, rel):
+        return
+    src = Path(project) / rel
+    for f in src.parent.glob(f"{src.stem}_*x*.png"):
+        _unlink(f)
+        _unlink(f.with_suffix(".json"))
+    chain.keep_aside(project, src)
+
+
+def start_source(project: Path, node: Node) -> Path | None:
+    """The picture a first clip starts from: its own start picture, else the project's start image; None when
+    there is neither (it starts from its text)."""
+    if node.start_image:
+        return Path(project) / node.start_image
+    start = Path(project) / START_FILE
+    return start if start.is_file() else None
+
+
+def set_node_start(project: Path, tree: Tree, nid: str, image: Path) -> str:
+    """Copy a picture in as a first clip's own start picture (a new name every time; the copy before goes to
+    old/). The clip then starts from it instead of the project's start image."""
+    node = tree.nodes[nid]
+    if node.is_video or node.parent is not None:
+        raise ValueError("only a first generated clip has a start picture of its own")
+    d = Path(project) / STARTS_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    rel = f"{STARTS_DIR}/{nid}_{uuid.uuid4().hex[:8]}.png"
+    chain.to_png(Path(image), Path(project) / rel)
+    _drop_start_file(project, node.start_image)
+    node.start_image = rel
+    return rel
+
+
+def clear_node_start(project: Path, tree: Tree, nid: str) -> None:
+    """A first clip starts from the project's start image again (its own picture goes to old/)."""
+    node = tree.nodes[nid]
+    _drop_start_file(project, node.start_image)
+    node.start_image = None
+
+
+def copy_node_start(project: Path, tree: Tree, src: str, dst: str) -> None:
+    """A variant of a first clip with its own start picture gets its own copy of that picture."""
+    rel = tree.nodes[src].start_image
+    target = tree.nodes[dst]
+    if rel and (Path(project) / rel).is_file() and target.parent is None and not target.is_video:
+        set_node_start(project, tree, dst, Path(project) / rel)
+        target.row = tree.nodes[src].row
+
+
+def row_members(tree: Tree, nid: str) -> list[Node]:
+    """The first clips made as one set with nid (the same clip for several start pictures), nid among them, by
+    number; [] when nid is in no such set."""
+    row = tree.nodes[nid].row if nid in tree.nodes else None
+    if not row:
+        return []
+    return sorted((n for n in tree.nodes.values() if n.row == row and n.parent is None),
+                  key=lambda n: tree.number(n.id))
+
+
+def add_start_rows(project: Path, tree: Tree, nid: str, images: list[Path]) -> list[Node]:
+    """The same first clip for more start pictures: for each picture a new first clip with nid's prompt, seed and
+    own settings, starting from that picture (copied into starts/). nid and the new clips form a set (Node.row).
+    A picture that cannot be read is left out: -> the new clips, in the pictures' order. Raises ValueError when
+    nid is not a first generated clip."""
+    src = tree.nodes[nid]
+    if src.is_video or src.parent is not None:
+        raise ValueError("more start pictures can be given to a first generated clip only")
+    out = []
+    for image in images:
+        new = tree.add(None, src.prompt, src.seed)
+        try:
+            set_node_start(project, tree, new.id, Path(image))
+        except (OSError, RuntimeError, ValueError):
+            del tree.nodes[new.id]
+            continue
+        new.overrides = copy.deepcopy(src.overrides)
+        out.append(new)
+    if out:
+        src.row = src.row or src.id
+        for new in out:
+            new.row = src.row
+    return out
+
+
+def apply_to_row(tree: Tree, nid: str) -> list[str]:
+    """Give nid's prompt and own settings (LoRAs, length, steps …) to the other clips of its set; each keeps its
+    start picture, seed and end image. A frozen clip is left as it is. -> the ids that changed."""
+    src = tree.nodes[nid]
+    changed = []
+    for n in row_members(tree, nid):
+        if n.id == nid or n.frozen or (n.prompt == src.prompt and n.overrides == src.overrides):
+            continue
+        n.prompt, n.overrides = src.prompt, copy.deepcopy(src.overrides)
+        changed.append(n.id)
+    return changed
+
+
+def prepared_start(project: Path, width: int, height: int, source: Path | None = None) -> Path | None:
+    """A start picture prepared for a canvas (chain.prepare_image): the project's start image as
+    start_<w>x<h>.png in the project, a first clip's own one (source, in starts/) as <its name>_<w>x<h>.png next
+    to it; made again when the picture changes. None without a start picture."""
+    src = Path(source) if source is not None else Path(project) / START_FILE
     if not src.is_file():
         return None
-    dst = Path(project) / f"start_{int(width)}x{int(height)}.png"
+    main = src.resolve() == (Path(project) / START_FILE).resolve()
+    stem = "start" if main else src.stem
+    dst = src.parent / f"{stem}_{int(width)}x{int(height)}.png"
     rec = dst.with_suffix(".json")
     sig = chain.file_signature(src)
     try:
@@ -1787,7 +1911,7 @@ def prepared_start(project: Path, width: int, height: int) -> Path | None:
             return dst
     except (OSError, ValueError):
         pass
-    for old in Path(project).glob("start_*x*.png"):        # (one prepared copy at a time)
+    for old in src.parent.glob(f"{stem}_*x*.png"):         # (one prepared copy at a time)
         if old != dst:
             old.unlink(missing_ok=True)
             old.with_suffix(".json").unlink(missing_ok=True)
@@ -1968,11 +2092,10 @@ class Checker:
                                                        frames_given=plain_frames(self.project, self.tree, node))
 
     def start_frame(self, node: Node) -> Path | None:
-        """The frame a generated clip starts from: the parent's last frame, the start image, or None (a first
-        clip without a start image)."""
+        """The frame a generated clip starts from: the parent's last frame, a first clip's start picture (its
+        own, else the project's start image), or None (a first clip without one)."""
         if node.parent is None:
-            start = self.project / START_FILE
-            return start if start.is_file() else None
+            return start_source(self.project, node)
         parent = self.tree.nodes[node.parent]
         if not parent.made:
             return node_files(self.project, node.parent)[1]
@@ -2553,7 +2676,7 @@ def plain_frames(project: Path, tree: Tree, node: Node) -> tuple[bool, bool]:
     if node.is_video:
         return False, False
     guide = int((node.overrides or {}).get("guide") or 0)
-    start = (Path(project) / START_FILE).is_file() if node.parent is None else not guide
+    start = start_source(project, node) is not None if node.parent is None else not guide
     vc = tree.video_child(node.id)
     end = not guide if vc is not None else bool(end_image_used(tree, node))
     return start, end
@@ -3000,11 +3123,11 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
             start = checker.start_frame(node)
             log(f"[{k}/{len(todo)}] {nid}: generating (seed {node.seed}) from "
                 f"{start.name if start else 'nothing (no start frame)'}")
-            send = start                                 # what H3 gets: start.png prepared for the canvas
-            if start is not None and start == project / START_FILE:   # (the record keeps start.png's hash)
+            send = start                                 # what H3 gets: a start picture prepared for the canvas
+            if start is not None and node.parent is None:   # (the record keeps the picture's own hash)
                 base = checker.base() or {}
                 if base.get("width") and base.get("height"):
-                    send = prepared_start(project, base["width"], base["height"])
+                    send = prepared_start(project, base["width"], base["height"], start)
             emit({"e": "node", "id": nid, "state": "generating", "k": k, "n": len(todo)})
             # a new clip gets new file names: nothing is overwritten, a failed or stopped generation keeps the
             # previous clip and its record, and a still-open old file (SMB) does not stop anything
@@ -3224,7 +3347,8 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
                 i = path.index(node)
                 if i == 0:
                     s0 = node.made.get("settings") or {}
-                    first = prepared_start(project, *refine_size(int(s0["width"]), int(s0["height"]), size)) \
+                    first = prepared_start(project, *refine_size(int(s0["width"]), int(s0["height"]), size),
+                                           source=start_source(project, node)) \
                         if s0.get("width") and s0.get("height") else None
                 else:
                     before = path[i - 1]

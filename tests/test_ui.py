@@ -4368,8 +4368,12 @@ def test_card_more_menu_triggers_the_same_actions_and_the_card_fits(app):
     got = []
     card.action.connect(lambda a, nid: got.append((a, nid)))
     menu = card.b_more.menu()
-    entries = [a for a in menu.actions() if not a.isSeparator()]
+    entries = [a for a in menu.actions() if not a.isSeparator() and a.isVisible()]
     assert [a.text() for a in entries] == ["Variants…", "Compare…", "Branch", "Freeze", "Delete…"]
+    card.set_rows(True, 1)                                      # a clip that starts the video, with other pictures
+    assert [a.text() for a in menu.actions() if not a.isSeparator() and a.isVisible()][3:5] == [
+        "More start pictures…", "Apply to its other start pictures"]
+    card.set_rows(False, 0)
     assert all(not a.icon().isNull() and a.toolTip() for a in entries)
     assert card.more_actions["branch"].shortcut().toString() == "Ctrl+B"
     assert card.more_actions["delete"].shortcut().toString() == "Del"
@@ -4669,3 +4673,74 @@ def test_cloud_upscaling_not_offered_in_simple_without_a_key(app, win, tmp_path,
     win.set_simple(True)
     win.export_path()
     assert not seen[-1].cloud.isHidden() and "Advanced view" not in seen[-1].size.toolTip()
+
+
+def test_more_start_pictures_make_rows(app, win, tmp_path, image, monkeypatch):
+    """A first clip, made once per start picture: each new clip on its own row of the node view, behind a start
+    node that shows its picture; the prompt can be given to the others later; a row's picture can be changed."""
+    from video_chain.ui.graph import START
+    from video_chain.ui.main_window import PromptCard, row_start, row_start_of
+    ids = new_project(win, tmp_path, image, ("she waves", "then she leaves"))
+    first, second = ids
+    pics = []
+    for k, colour in enumerate(((200, 10, 10), (10, 200, 10), (10, 10, 200))):
+        f = tmp_path / f"pic{k}.png"
+        Image.new("RGB", (108, 192) if k == 0 else (192, 108), colour).save(f)
+        pics.append(str(f))
+    assert win.add_start_rows(second, pics, generate=False) == []            # only a clip that starts the video
+    assert "first generated clip" in win.status.text()
+    monkeypatch.setattr(win, "_pick_images", lambda title: pics[:2])         # the file dialog: two pictures chosen
+    asked = []
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: asked.append(a[2]) or QMessageBox.Yes)
+    win.node_action("start_rows", first)                                      # (asked "make them now?": yes)
+    new = [n.id for n in T.row_members(win.tree, first) if n.id != first]
+    assert len(new) == 2 and win.running
+    assert "2 start pictures added" in asked[0] and "cut from its centre" in asked[0] and "Make the 3 clips" in asked[0]
+    nodes = [win.tree.nodes[n] for n in new]
+    src = win.tree.nodes[first]
+    assert all(n.parent is None and n.prompt == "she waves" and n.seed == src.seed and n.start_image for n in nodes)
+    wait(app, lambda: not win.running)
+    assert all(win.state(n) == "done" for n in new + [first]) and win.state(second) == "new"
+    # the node view: the project's start node with its clip, then a start node and a clip per picture
+    items = win.graph.items_by_id
+    assert set(items) == {START, first, second, new[0], new[1], row_start(new[0]), row_start(new[1])}
+    assert items[new[0]].info.parent == row_start(new[0]) and items[first].info.parent == START
+    assert items[row_start(new[0])].info.status == "start" and items[row_start(new[0])].info.pixmap is not None
+    ys = sorted(items[i].pos().y() for i in (START, row_start(new[0]), row_start(new[1])))
+    assert ys[0] < ys[1] < ys[2]                                              # one row under the other
+    assert row_start_of(row_start(new[1])) == new[1] and row_start_of(START) is None and row_start_of(first) is None
+    win._graph_clicked(row_start(new[1]))                                     # a click on a row's picture: its clip
+    assert win.selected_id() == new[1] and win.focus == new[1]
+    win._activate(row_start(new[1]))                                          # (a double click plays nothing)
+    # the card's More menu offers both actions for a first clip only
+    card = next(c for c in win.cards if isinstance(c, PromptCard) and c.nid == new[1])
+    assert card.more_actions["start_rows"].isVisible() and card.more_actions["row_apply"].isVisible()
+    win.select(second)
+    win.focus_clip(second)
+    later = next(c for c in win.cards if isinstance(c, PromptCard) and c.nid == second)
+    assert not later.more_actions["start_rows"].isVisible() and not later.more_actions["row_apply"].isVisible()
+    # a changed prompt goes to the other rows on request: they count as changed
+    win.tree.nodes[first].prompt = "she waves and smiles"
+    assert win.apply_to_row(first) == new and all(win.tree.nodes[n].prompt == "she waves and smiles" for n in new)
+    assert all(win.state(n) == "changed" for n in new) and "given to" in win.status.text()
+    assert win.apply_to_row(first) == [] and "already have" in win.status.text()
+    # a variant of a row starts from the same picture (its own copy); another picture for one row; back to the
+    # project's start image
+    win.node_action("variant", new[0])
+    variant = max(win.tree.nodes, key=win.tree.number)
+    v = win.tree.nodes[variant]
+    assert v.start_image and v.start_image != win.tree.nodes[new[0]].start_image and v.row == first
+    assert chain_sig(win.project / v.start_image) == chain_sig(win.project / win.tree.nodes[new[0]].start_image)
+    before = win.tree.nodes[new[1]].start_image
+    assert win.set_row_start(new[1], pics[2]) and win.tree.nodes[new[1]].start_image != before
+    assert win.set_row_start(new[1], clear=True) and win.tree.nodes[new[1]].start_image is None
+    assert row_start(new[1]) not in win.graph.items_by_id and win.graph.items_by_id[new[1]].info.parent == START
+    # reloaded, the rows are as they were
+    proj = win.project
+    win.open_project(proj)
+    assert win.tree.nodes[new[0]].start_image and row_start(new[0]) in win.graph.items_by_id
+
+
+def chain_sig(path):
+    from video_chain import chain
+    return chain.file_signature(path)

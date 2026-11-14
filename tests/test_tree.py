@@ -1828,3 +1828,64 @@ def test_multi_line_prompts_survive(tmp_path):
     T.refine_path(gen, p, a.id, "2k", tmp_path / "out.mp4", log=lambda _m: None)
     assert gen.refines[0]["prompt"] == ('A man says "Hi."\n[Shot 2] At 00:00.500, he leaves. The camera holds a '
                                         "static shot.")
+
+
+def test_the_same_first_clip_for_more_start_pictures(project, tmp_path):
+    """A first clip can have a start picture of its own; add_start_rows makes the same clip once per picture
+    (a set): each starts from its picture, fitted to the project's size, and can then go its own way."""
+    t = T.load(project)
+    a = t.add(None, "she waves", seed=7)
+    a.overrides = {"frames": 49, "steps": 30}
+    pics = []
+    for k, (size, colour) in enumerate((((54, 96), (200, 10, 10)), ((96, 54), (10, 10, 200)))):   # a tall one too
+        f = tmp_path / f"p{k}.jpg"
+        Image.new("RGB", size, colour).save(f)
+        pics.append(f)
+    with pytest.raises(ValueError):
+        T.add_start_rows(project, t, t.add(a.id, "later").id, pics)          # only a first clip
+    new = T.add_start_rows(project, t, a.id, pics + [tmp_path / "missing.jpg"])
+    assert len(new) == 2 and all(n.parent is None and n.prompt == "she waves" and n.seed == 7 for n in new)
+    assert all(n.overrides == a.overrides and n.overrides is not a.overrides for n in new)
+    assert a.row == a.id and {n.row for n in new} == {a.id} and a.start_image is None
+    assert [n.id for n in T.row_members(t, new[0].id)] == [a.id, new[0].id, new[1].id]
+    assert all(n.start_image.startswith("starts/") and (project / n.start_image).is_file() for n in new)
+    ck = T.Checker(project, t)
+    assert ck.start_frame(a) == project / T.START_FILE and ck.start_frame(new[0]) == project / new[0].start_image
+    T.save(project, t)
+    t2 = T.load(project)                                                      # kept in tree.json
+    assert t2.nodes[new[0].id].start_image == new[0].start_image and t2.nodes[new[1].id].row == a.id
+    assert t2.to_json() == t.to_json()
+    # each row is made from its own picture, cut to the project's shape (the tall one is not stretched)
+    gen = run(project, [a.id, new[0].id, new[1].id])
+    starts = {c["start"] for c in gen.calls}
+    stem0, stem1 = Path(new[0].start_image).stem, Path(new[1].start_image).stem
+    assert starts == {"start_672x384.png", f"{stem0}_672x384.png", f"{stem1}_672x384.png"}
+    with Image.open(project / "starts" / f"{stem0}_672x384.png") as im:
+        assert im.size == (672, 384) and im.getpixel((5, 5))[0] > 150 and im.getpixel((660, 380))[0] > 150
+    assert set(statuses(project).values()) == {"done"} | ({"new"} if "later" in statuses(project) else set())
+    # a changed prompt goes to the other rows on request; seeds, pictures and frozen clips stay
+    t = T.load(project)
+    a, r0, r1 = (t.nodes[i] for i in (a.id, new[0].id, new[1].id))
+    r0.seed = 99
+    r1.frozen = True
+    a.prompt, a.overrides = "she waves and smiles", {"frames": 73}
+    assert T.apply_to_row(t, a.id) == [r0.id]
+    assert r0.prompt == "she waves and smiles" and r0.overrides == {"frames": 73} and r0.seed == 99
+    assert r1.prompt == "she waves" and r0.start_image == new[0].start_image
+    assert T.apply_to_row(t, a.id) == [] and T.row_members(t, t.add(None, "alone").id) == []
+    # another picture for one row: its clip counts as changed; back to the project's start image; removing
+    T.save(project, t)
+    old = r0.start_image
+    T.set_node_start(project, t, r0.id, pics[1])
+    assert r0.start_image != old and not (project / old).exists() and not list((project / "starts").glob(f"{stem0}_*"))
+    T.save(project, t)
+    assert T.Checker(project, T.load(project)).status(r0.id) == "changed"
+    T.clear_node_start(project, t, r0.id)
+    assert r0.start_image is None and T.Checker(project, t).start_frame(r0) == project / T.START_FILE
+    kept = project / r1.start_image
+    t.remove(r1.id, project)
+    assert not kept.exists() and (project / "old" / "starts" / kept.name).is_file()
+    # a damaged record never points outside starts/
+    d = t.to_json()
+    d["nodes"][0]["start_image"] = "../elsewhere.png"
+    assert T.Tree.from_json(d).nodes[d["nodes"][0]["id"]].start_image is None

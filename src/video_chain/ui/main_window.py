@@ -232,6 +232,16 @@ class NewProjectDialog(QDialog):
             self.image.setText(f)
 
 
+def row_start(nid: str) -> str:
+    """The id of the node-view node that shows a first clip's own start picture."""
+    return f"{START}:{nid}"
+
+
+def row_start_of(gid) -> str | None:
+    """The clip whose own start picture a node-view node shows (None: another node)."""
+    return gid[len(START) + 1:] if isinstance(gid, str) and gid.startswith(START + ":") else None
+
+
 def variant_strengths(loras: list[dict], steps: list[float], k: int) -> list[dict]:
     """The LoRA stack of variant k (1, 2, ...): each strength moved by k times its step (within the LoRA range).
     steps go with the entries that have a path, in order; other entries are kept as they are."""
@@ -712,14 +722,23 @@ class PromptCard(QFrame):
             ("compare", "cmp", "Compare…", "Compare: play this clip and its made variants side by side, keep one",
              None),
             ("branch", "split", "Branch", "Branch: another continuation from the same point (Ctrl+B)", "Ctrl+B"),
+            ("start_rows", "layers", "More start pictures…",
+             "More start pictures…: choose several pictures; this clip is made once for each, with the same prompt, "
+             "seed and settings, each on its own row (for a clip that starts the video)", None),
+            ("row_apply", "clone", "Apply to its other start pictures",
+             "Give this clip's prompt and settings to the clips made for its other start pictures (each keeps its "
+             "picture and seed)", None),
             None,
             ("freeze_toggle", "lock", "Freeze", FREEZE_TIP, None),
             None,
             ("delete", "trash", "Delete…", "Delete this clip and everything after it (asks first)", "Del")))
         head.addWidget(self.b_more)
         self.more_actions = acts                 # action name -> QAction (the More menu's entries)
+        for k in ("start_rows", "row_apply"):    # (shown for a clip that starts the video: set_rows)
+            acts[k].setVisible(False)
         # (the old header buttons by their names: enabled / clicked as before)
-        self.buttons = [self.act_variant, acts["variants"], acts["compare"], acts["branch"], acts["delete"]]
+        self.buttons = [self.act_variant, acts["variants"], acts["compare"], acts["branch"], acts["delete"],
+                        acts["start_rows"], acts["row_apply"]]
         self.b_compare = acts["compare"]
         self._can_compare = False
         self.frozen, self._on = False, True
@@ -1292,6 +1311,12 @@ class PromptCard(QFrame):
         on = not self.edit.isReadOnly()
         self.b_hand.setEnabled(on and self._can_hand)
         self.b_hand_clear.setEnabled(on and self._has_hand)
+
+    def set_rows(self, first: bool, others: int):
+        """first: the clip starts the video (it can have several start pictures); others: the clips made for its
+        other start pictures."""
+        self.more_actions["start_rows"].setVisible(first)
+        self.more_actions["row_apply"].setVisible(first and others > 0)
 
     def set_compare(self, n: int):
         """n: made clips next to this one (its variants / branches) that can be compared with it."""
@@ -5789,7 +5814,13 @@ class MainWindow(QMainWindow):
                 text = (f"{Path(n.source['file']).name} · {fmt_time(n.source['start'])}–"
                         f"{fmt_time(n.source['end'])}"
                         + (f" · ↻{T.source_rotation(n.source)}°" if T.source_rotation(n.source) else ""))
-            infos.append(NodeInfo(n.id, n.parent or START,
+            parent = n.parent or START
+            if n.parent is None and n.start_image:          # a first clip with its own start picture: its own row
+                parent = row_start(n.id)
+                infos.append(NodeInfo(parent, None, "Start", f"for #{n.id[1:]}", "The start picture of clip "
+                                      f"#{n.id[1:]} (its own, instead of the project's start image)", "start",
+                                      self._pixmap(self.project / n.start_image), on_path=n.id in on_path))
+            infos.append(NodeInfo(n.id, parent,
                                   f"{'Video' if n.is_video else 'Clip'} {self.tree.depth(n.id)}", f"#{n.id[1:]}",
                                   text, self.state(n.id), self._pixmap(self._node_frame(n)),
                                   self.progress_of.get(n.id, 0.0), n.id in on_path, n.id == sel,
@@ -6268,6 +6299,7 @@ class MainWindow(QMainWindow):
     def _graph_clicked(self, nid):
         """A click in the graph: a clip of the shown path is shown in the inspector; another one is selected (its
         path is shown, it in focus)."""
+        nid = row_start_of(nid) or nid             # (a row's start picture: its clip)
         if nid != START and any(c.nid == nid for c in self.cards):
             self.focus_clip(nid)
             return
@@ -6363,6 +6395,7 @@ class MainWindow(QMainWindow):
                                       "" if n.made else "Make the clip first, then choose an earlier frame if its "
                                                         "last one is not good")
                 card.set_compare(len(self.compare_candidates(n.id)) - 1 if n.made else 0)
+                card.set_rows(n.parent is None, max(0, len(T.row_members(self.tree, n.id)) - 1))
                 card.words.setText(card.words.text().split(" + ")[0] +
                                    (" + style" if T.full_prompt(self.tree.options, "x") != "x" else ""))
                 use = T.node_cast(self.tree.options, n)
@@ -6756,6 +6789,16 @@ class MainWindow(QMainWindow):
             return
         if node is not None and self._frozen_block(node, action):
             return
+        if action in ("start_rows", "row_apply", "start_own", "start_own_clear") and node is not None:
+            if node.is_video or node.parent is not None:
+                self.status.setText("Start pictures are for a first generated clip (one that starts the video).")
+            elif action == "start_rows":
+                self.add_start_rows(node.id)
+            elif action == "row_apply":
+                self.apply_to_row(node.id)
+            else:
+                self.set_row_start(node.id, clear=action == "start_own_clear")
+            return
         if action in ("variant", "variants") and node is not None and node.is_video:
             self.status.setText("Variants are for generated clips; a real video stays as it is.")
             return
@@ -6840,6 +6883,7 @@ class MainWindow(QMainWindow):
             if action == "variant":                # the same clip with another seed: its own settings too
                 new.overrides = copy.deepcopy(node.overrides)
                 self._copy_video_child(node.id, new.id)
+                self._copy_row_start(node.id, new.id)
         elif action == "delete" and node is not None:
             if self._busy_files():
                 return
@@ -6947,6 +6991,13 @@ class MainWindow(QMainWindow):
             T.copy_keyframes(self.project, self.tree, source, target)
         except (OSError, RuntimeError, ValueError) as e:
             self.status.setText(f"Could not copy the end image or the keyframes: {e}")
+
+    def _copy_row_start(self, source: str, target: str) -> None:
+        """A variant of a first clip with its own start picture starts from its own copy of that picture."""
+        try:
+            T.copy_node_start(self.project, self.tree, source, target)
+        except (OSError, RuntimeError, ValueError) as e:
+            self.status.setText(f"Could not copy the start picture: {e}")
 
     def revert_clip(self, nid: str) -> list[str]:
         """Undo the edits of a made clip (prompt, seed, own settings, end image) so it counts as done again."""
@@ -7636,6 +7687,8 @@ class MainWindow(QMainWindow):
 
     def _activate(self, nid: str):
         """Double-click on a node: a real video opens its range editor, a generated clip plays."""
+        if row_start_of(nid):
+            return
         if self.tree is not None and nid in self.tree.nodes and self.tree.nodes[nid].is_video and not self.running:
             QTimer.singleShot(0, lambda: self.edit_video(nid))
         else:
@@ -7691,6 +7744,7 @@ class MainWindow(QMainWindow):
             if any(steps) and loras:
                 new.overrides["loras"] = variant_strengths(stack, steps, k)   # (every entry kept)
             self._copy_video_child(nid, new.id)
+            self._copy_row_start(nid, new.id)
             ids.append(new.id)
         self._write_tree()
         self.refresh()
@@ -7702,8 +7756,134 @@ class MainWindow(QMainWindow):
             self._start(ids)
         return ids
 
+    # ---- the same first clip for several start pictures (rows of the node view)
+    def _pick_images(self, title: str) -> list[str]:
+        """Several pictures from the file dialog (it opens where the start image came from)."""
+        start = str(Path(self.tree.image).parent) if self.tree and self.tree.image and \
+            Path(self.tree.image).parent.is_dir() else self.qs.value("startRowsDir", "", type=str)
+        files, _f = QFileDialog.getOpenFileNames(self, title, start or "",
+                                                 "Pictures (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff)")
+        if files:
+            self.qs.setValue("startRowsDir", str(Path(files[0]).parent))
+        return list(files)
+
+    def add_start_rows(self, nid: str, images: list[str] | None = None, generate: bool | None = None) -> list[str]:
+        """The same first clip for more start pictures: one new first clip per picture, with nid's prompt, seed
+        and own settings, each on its own row of the node view. images None: asked for (several can be chosen).
+        generate None: asked whether to make them now. Returns the new ids."""
+        if self.tree is None or self.running or nid not in self.tree.nodes:
+            return []
+        node = self.tree.nodes[nid]
+        if node.is_video or node.parent is not None:
+            self.status.setText("More start pictures are for a first generated clip (one that starts the video).")
+            return []
+        if images is None:
+            images = self._pick_images(f"Start pictures: clip #{nid[1:]} is made once for each")
+        if not images:
+            return []
+        try:
+            new = T.add_start_rows(self.project, self.tree, nid, [Path(f) for f in images])
+        except (OSError, RuntimeError, ValueError) as e:
+            self.status.setText(f"Could not add the start pictures: {e}")
+            return []
+        ids = [n.id for n in new]
+        if not ids:
+            self.status.setText("None of the pictures could be read.")
+            return []
+        for i in ids:                              # (a video the clip leads into, its end image, its keyframes)
+            self._copy_video_child(nid, i)
+        self._pix.clear()
+        self._write_tree()
+        self.refresh()
+        self.graph.reveal(ids[-1])
+        skipped = len(images) - len(ids)
+        size = ""
+        try:
+            base = T.Checker(self.project, self.tree).base() or {}
+            if base.get("width") and base.get("height"):
+                size = (f" Each picture is cut from its centre to the project's {base['width']}×{base['height']} "
+                        "shape (nothing is stretched).")
+        except Exception:  # noqa: BLE001
+            pass
+        self.status.setText(f"{len(ids)} start picture{'s' if len(ids) != 1 else ''} added: clip #{nid[1:]} "
+                            f"once for each, with the same prompt, seed and settings, on its own row."
+                            + (f" {skipped} could not be read." if skipped else "") + size)
+        todo = ([nid] if self.status_of.get(nid) != "done" else []) + ids
+        if generate is None:
+            generate = QMessageBox.question(
+                self, "Start pictures", f"{self.status.text()}\n\nMake the {len(todo)} "
+                f"clip{'s' if len(todo) != 1 else ''} now? They are made one after the other. You can also make "
+                "them later: select one and press Generate.") == QMessageBox.Yes
+        if generate:
+            self._start(todo)
+        return ids
+
+    def apply_to_row(self, nid: str) -> list[str]:
+        """Give a first clip's prompt and own settings to the other clips of its set (the same clip for other
+        start pictures). Each keeps its start picture, seed and end image; made ones count as changed."""
+        if self.tree is None or self.running or nid not in self.tree.nodes:
+            return []
+        others = [n for n in T.row_members(self.tree, nid) if n.id != nid]
+        if not others:
+            self.status.setText(f"Clip #{nid[1:]} has no other start pictures (More start pictures… adds some).")
+            return []
+        changed = T.apply_to_row(self.tree, nid)
+        frozen = [n.id for n in others if n.frozen]
+        if changed:
+            self._write_tree()
+            self.refresh(rebuild_path=True)
+        self.status.setText(
+            (f"Prompt and settings of clip #{nid[1:]} given to {', '.join('#' + i[1:] for i in changed)}; made ones "
+             "count as changed and are made again by Generate." if changed else
+             "The other start pictures already have this prompt and these settings.")
+            + (f" Frozen and left as made: {', '.join('#' + i[1:] for i in frozen)}." if frozen else ""))
+        return changed
+
+    def set_row_start(self, nid: str, image: str | None = None, clear: bool = False) -> bool:
+        """A first clip's own start picture: another one (image None: asked for), or none (clear: it starts from
+        the project's start image again)."""
+        if self.tree is None or self.running or nid not in self.tree.nodes:
+            return False
+        node = self.tree.nodes[nid]
+        if node.frozen:
+            self.status.setText(f"Clip #{nid[1:]} is frozen: unfreeze it to change its start picture.")
+            return False
+        try:
+            if clear:
+                T.clear_node_start(self.project, self.tree, nid)
+            else:
+                if image is None:
+                    image = pick_image(self, f"Start picture of clip #{nid[1:]}", self.qs, None,
+                                       self._picker_places(), self.project_images())
+                if not image:
+                    return False
+                T.set_node_start(self.project, self.tree, nid, Path(image))
+        except (OSError, RuntimeError, ValueError) as e:
+            self.status.setText(f"Could not set the start picture: {e}")
+            return False
+        self._pix.clear()
+        self._write_tree()
+        self.refresh(rebuild_path=True)
+        self.status.setText(f"Clip #{nid[1:]} starts from " + ("the project's start image again." if clear else
+                                                                 "its own start picture.")
+                            + (" It counts as changed: Generate makes it again." if node.made else ""))
+        return True
+
     def _context(self, nid: str, pos):
         if self.running or self.tree is None:
+            return
+        own = row_start_of(nid)
+        if own:                                    # a row's start picture
+            if own not in self.tree.nodes:
+                return
+            m = QMenu(self)
+            acts = {m.addAction("Another picture for this row…"): "start_own",
+                    m.addAction("Start from the project's start image instead"): "start_own_clear",
+                    m.addAction("More start pictures… (the same clip for each)"): "start_rows"}
+            chosen = self._exec_menu(m, pos.toPoint() if hasattr(pos, "toPoint") else pos)
+            if chosen in acts:
+                act = acts[chosen]
+                QTimer.singleShot(0, lambda: self.node_action(act, own))
             return
         m = QMenu(self)
         acts = {m.addAction("Continue from here"): "continue"}
@@ -7727,6 +7907,13 @@ class MainWindow(QMainWindow):
             if node is not None and not node.is_video:
                 acts[m.addAction("Variant (same prompt, other seed)")] = "variant"
                 acts[m.addAction("Variants… (several, generated at once)")] = "variants"
+                if node.parent is None:
+                    acts[m.addAction("More start pictures… (the same clip for each)")] = "start_rows"
+                    if len(T.row_members(self.tree, nid)) > 1:
+                        acts[m.addAction("Give this prompt and settings to its other start pictures")] = "row_apply"
+                    acts[m.addAction("Its own start picture…")] = "start_own"
+                    if node.start_image:
+                        acts[m.addAction("Start from the project's start image instead")] = "start_own_clear"
                 vc = self.tree.video_child(nid)
                 end = m.addAction("End image…" if vc is None else f"End image… (ends at video #{vc.id[1:]})")
                 end.setEnabled(vc is None)
