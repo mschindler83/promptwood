@@ -1000,7 +1000,8 @@ class ComfyGenerator:
             ws = websocket.create_connection(f"{scheme}://{u.netloc}/ws?clientId={self.client_id}", timeout=5)
             ws.settimeout(2.0)
             return ws
-        except Exception:  # noqa: BLE001  (no websocket: fall back to polling)
+        except Exception as e:  # noqa: BLE001  (no websocket: fall back to polling)
+            logger.debug("no websocket, polling instead: %s", e)
             return None
 
     def _history(self, pid: str) -> dict | None:

@@ -128,7 +128,8 @@ def _clean(words) -> list[str]:
 def file_words(path: str | Path) -> tuple[list[str] | None, str]:
     try:
         return _file_words(path)
-    except Exception:  # noqa: BLE001  (an odd header must not stop a scan)
+    except Exception as e:  # noqa: BLE001  (an odd header must not stop a scan)
+        logger.warning("file header of %s unreadable: %s", path, e)
         return None, ""
 
 

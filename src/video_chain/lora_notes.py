@@ -463,11 +463,13 @@ def guidance(paths: list[str], db=None, prompt: str = "") -> str:
     for p in list(dict.fromkeys(paths))[:MAX_LORAS]:
         try:
             mat = material(db.details(p), db.words(p), p)
-        except Exception:  # noqa: BLE001  (a details file that cannot be read: this LoRA goes without)
+        except Exception as e:  # noqa: BLE001  (a details file that cannot be read: this LoRA goes without)
+            logger.warning("details of a LoRA unreadable: %s", e)
             mat = None
         try:
             n = note_of(db, p, mat)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            logger.warning("note of a LoRA unreadable: %s", e)
             n = {"note": "", "remarks": ""}
         if mat or n["remarks"] or n["note"]:               # (the user's own words on a LoRA are told too)
             known.append((mat or _bare(p), n))
@@ -518,11 +520,13 @@ def what_is_known(path: str, db=None) -> dict:
         seen = (details or {}).get("examples_seen")
         out["seen"] = seen if isinstance(seen, int) else 0
         out["pictures"] = len(examples(details))
-    except Exception:  # noqa: BLE001  (a file that cannot be read: shown as not known)
+    except Exception as e:  # noqa: BLE001  (a file that cannot be read: shown as not known)
+        logger.warning("details of a LoRA unreadable: %s", e)
         return out
     try:
         n = note_of(db, path, mat)
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        logger.warning("note of a LoRA unreadable: %s", e)
         n = {"note": "", "remarks": "", "edited": False}
     out.update(note=bool(n["note"]), edited=n["edited"], remarks=bool(n["remarks"]))
     if not mat:

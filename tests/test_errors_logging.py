@@ -107,3 +107,26 @@ def test_a_failing_progress_callback_is_logged(tmp_path, caplog):
     with caplog.at_level(logging.WARNING):
         db.scan([str(f)], online=True, progress=boom, lookup=lambda sha: None, gap=0)
     assert any("window gone" in r.getMessage() for r in caplog.records)
+
+
+def test_an_odd_file_header_is_logged_and_does_not_stop_a_scan(monkeypatch, caplog):
+    from video_chain import triggers as TR
+
+    def boom(path):
+        raise ValueError("odd header")
+    monkeypatch.setattr(TR, "_file_words", boom)
+    with caplog.at_level(logging.WARNING):
+        assert TR.file_words("/x/a.safetensors") == (None, "")
+    assert any("odd header" in r.getMessage() for r in caplog.records)
+
+
+def test_unreadable_trigger_words_are_logged(monkeypatch, caplog):
+    from video_chain import tree as T
+    from video_chain import triggers as TR
+
+    def boom(paths):
+        raise OSError("database locked")
+    monkeypatch.setattr(TR, "stack_words", boom)
+    with caplog.at_level(logging.WARNING):
+        assert T.lora_trigger_words(["/x/a.safetensors"]) is None
+    assert any("database locked" in r.getMessage() for r in caplog.records)

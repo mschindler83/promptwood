@@ -531,7 +531,8 @@ def _parses(p: Path) -> bool:
     try:
         Tree.from_json(json.loads(p.read_text(encoding="utf-8")))
         return True
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        logger.debug("%s does not parse as a tree: %s", p, e)
         return False
 
 
@@ -2549,7 +2550,8 @@ def unused_track_files(project: Path, scene_dirs: list[Path], open_tree: Tree | 
     for d in scene_dirs:
         try:
             t = load(Path(d))
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            logger.warning("a scene could not be loaded: %s", e)
             return []
         listed |= {tr["file"] for tr in tracks(t)}
     refs = Path(project) / REFS_DIR
@@ -2737,7 +2739,8 @@ def lora_trigger_words(paths: list[str]) -> list[str] | None:
     try:
         from . import triggers
         return triggers.stack_words(paths)
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        logger.warning("trigger words unreadable: %s", e)
         return None                                # unknown (e.g. the database cannot be read right now)
 
 
