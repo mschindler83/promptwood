@@ -23,7 +23,7 @@ from .. import chain, media
 from .theme import icon, theme, with_alpha
 from .dialogs import button_row
 from .widgets import (fit_size, format_time, FrameTile, guard_wheel, icon_button, label, remember_geometry, VideoView,
-                      shortcut, timer)
+                      shortcut, timer, label_for)
 
 if TYPE_CHECKING:
     from PySide6.QtMultimedia import QMediaPlayer
@@ -340,11 +340,11 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
         b_set_end = QPushButton("End here")
         b_set_end.setToolTip("Set the end of the range at the playhead (])")
         b_set_end.clicked.connect(lambda: self.set_range(self.start, self.position(), moved="end"))
-        rrow.addWidget(label("Start", level="tertiary"))
+        rrow.addWidget(label_for("Start", self.start_spin, level="tertiary"))
         rrow.addWidget(self.start_spin)
         rrow.addWidget(b_set_start)
         rrow.addSpacing(16)
-        rrow.addWidget(label("End", level="tertiary"))
+        rrow.addWidget(label_for("End", self.end_spin, level="tertiary"))
         rrow.addWidget(self.end_spin)
         rrow.addWidget(b_set_end)
         rrow.addStretch(1)

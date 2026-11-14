@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QHBoxLayout
 from .. import media
 from .imageio import file_facts, read_scaled
 from .theme import icon, theme
-from .widgets import fit_size, format_time, icon_button, label, remember_geometry, safe_emit
+from .widgets import fit_size, format_time, icon_button, label, remember_geometry, safe_emit, label_for
 from .qsvalue import qs_value
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
@@ -205,9 +205,9 @@ class ImagePickerDialog(QDialog):
         top.addWidget(self.b_up)
         top.addWidget(self.path, 1)
         top.addWidget(self.b_fav)
-        top.addWidget(label("Sort", level="tertiary"))
+        top.addWidget(label_for("Sort", self.sort, level="tertiary"))
         top.addWidget(self.sort)
-        top.addWidget(label("Size", level="tertiary"))
+        top.addWidget(label_for("Size", self.zoom, level="tertiary"))
         top.addWidget(self.zoom)
         v.addLayout(top)
 

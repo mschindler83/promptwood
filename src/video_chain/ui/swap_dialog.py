@@ -28,7 +28,7 @@ from .face_crop import FaceCropDialog
 from .image_picker import pick_image
 from .imageio import upright
 from .theme import theme
-from .widgets import fit_size, FrameTile, guard_wheel, label, remember_geometry
+from .widgets import fit_size, FrameTile, guard_wheel, label, remember_geometry, label_for
 from .qsvalue import qs_value
 
 log = logging.getLogger(__name__)
@@ -119,7 +119,7 @@ class SwapDialog(QDialog):
                                   "the neck; everything outside it stays as it is")
         self.head_size.valueChanged.connect(self._resize_heads)
         guard_wheel(self.head_size)
-        hrow.addWidget(label("Head size", level="tertiary"))
+        hrow.addWidget(label_for("Head size", self.head_size, level="tertiary"))
         hrow.addWidget(self.head_size)
         hrow.addStretch(1)
         left.addLayout(hrow)

@@ -214,8 +214,11 @@ class LoraPickerDialog(QDialog):
         self.search.setPlaceholderText("Search LoRAs by name or folder … (several words: all must match)")
         self.search.setClearButtonEnabled(True)
         bar.addWidget(self.search, 1)
-        bar.addWidget(label("Pictures", level="tertiary"))
+        pictures_label = label("Pictures", level="tertiary")
+        bar.addWidget(pictures_label)
         self.pictures = QComboBox()
+        pictures_label.setBuddy(self.pictures)
+        self.pictures.setAccessibleName("Pictures")
         for key, text in SHOW:
             self.pictures.addItem(text, key)
         saved = qs_value(self.qs, "loraPictures", "safe", str) if self.qs is not None else "safe"

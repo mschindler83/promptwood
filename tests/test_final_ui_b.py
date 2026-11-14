@@ -448,3 +448,88 @@ def test_garbage_is_collected_on_the_gui_thread_not_in_a_worker(app, monkeypatch
     monkeypatch.setattr(gc, "collect", lambda *a: (seen.append(threading.current_thread()), real(*a))[1])
     workers._gc_timer.timeout.emit()
     assert seen and all(t is threading.main_thread() for t in seen)
+
+
+def _buddies(widget) -> dict:
+    from PySide6.QtWidgets import QLabel
+    return {lab.text(): lab.buddy() for lab in widget.findChildren(QLabel) if lab.buddy() is not None}
+
+
+def test_the_form_labels_of_the_dialogs_are_buddies_of_their_fields(app, tmp_path):
+    from PySide6.QtCore import QSettings
+
+    from test_image_edit_split import _dialog
+    from test_ui_media_fixes import make_wav
+    from video_chain.ui import image_picker as IP
+    from video_chain.ui.audio_editor import AudioRangeDialog
+    img = _dialog(tmp_path)
+    got = _buddies(img)
+    for text in ("Model", "Shape", "Quality", "Results", "Seed", "Preset"):
+        assert text in got, (text, sorted(got))
+    assert got["Seed"] is img.seed and got["Quality"] is img.quality and got["Model"] is img.edit_model
+    assert got["Seed"].accessibleName() == "Seed"
+    img.reject()
+    ad = AudioRangeDialog(None, str(make_wav(tmp_path / "s.wav")), player=False)
+    got = _buddies(ad)
+    assert got["Start"] is ad.start_spin and got["End"] is ad.end_spin
+    ad.done(0)
+    q = QSettings(str(tmp_path / "s.ini"), QSettings.IniFormat)
+    pk = IP.ImagePickerDialog(None, "x", str(tmp_path), q, cache_dir=None, desktop_thumbs=None, kind="image")
+    got = _buddies(pk)
+    assert got["Sort"] is pk.sort and got["Size"] is pk.zoom
+    pk.reject()
+    from video_chain.ui.lora_window import LoraWindow
+    lw = LoraWindow(None, [], settings=q)
+    assert _buddies(lw)["Pictures"] is lw.pictures
+    lw.done(0)
+
+
+def _next_with_focus(w):
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QAbstractSpinBox
+    n = w.nextInFocusChain()
+    while n is not w and not (n.focusPolicy() & Qt.FocusPolicy.TabFocus and n.isEnabledTo(n.window())
+                              and not isinstance(n.parentWidget(), QAbstractSpinBox)):
+        n = n.nextInFocusChain()
+    return n
+
+
+def test_the_range_fields_are_tabbed_in_the_order_they_are_shown(app, tmp_path):
+    from test_ui_media_fixes import make_wav
+    from video_chain.ui.audio_editor import AudioRangeDialog
+    dlg = AudioRangeDialog(None, str(make_wav(tmp_path / "s.wav")), player=False)
+    dlg.show()
+    here = []
+    w = dlg.start_spin
+    for _ in range(4):                            # start field, Start here, end field, End here
+        here.append(w)
+        w = _next_with_focus(w)
+    assert here[0] is dlg.start_spin and here[1].text() == "Start here"
+    assert here[2] is dlg.end_spin and here[3].text() == "End here"
+    dlg.done(0)
+
+
+def test_the_graph_the_timeline_and_the_keyframe_strip_describe_themselves(app):
+    from test_ui_media_fixes import infos
+    from video_chain.ui.graph import GraphView
+    from video_chain.ui.keyframe_strip import KeyframeStrip
+    from video_chain.ui.timeline import Block, Timeline
+    g = GraphView()
+    assert g.accessibleName() == "Clip graph"
+    nodes = infos()
+    g.show_nodes(nodes)
+    assert f"{len(nodes) - 1} clip" in g.accessibleDescription()
+    first = nodes[1].id
+    g.set_focus(first)
+    assert nodes[1].title in g.accessibleDescription() and "Focused" in g.accessibleDescription()
+    t = Timeline()
+    assert t.accessibleName() == "Timeline of the played path"
+    t.show_path([Block("n1", "#1", 4.0, "done", True, None), Block("n2", "#2", 6.5, "new", True, None)], "n2")
+    assert "2 clips" in t.accessibleDescription() and "10.5 s" in t.accessibleDescription()
+    assert "#2" in t.accessibleDescription()
+    k = KeyframeStrip()
+    assert k.accessibleName() == "Middle keyframes"
+    k.set_data(5.0, [{"at": 1.0, "pixmap": None, "note": "", "ok": True}, {"at": 3.5, "pixmap": None, "note": "", "ok": True}])
+    assert "2 keyframes" in k.accessibleDescription() and "1.00 s" in k.accessibleDescription()
+    k.set_data(5.0, [])
+    assert "no keyframes" in k.accessibleDescription()

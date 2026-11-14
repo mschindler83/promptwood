@@ -35,6 +35,8 @@ class KeyframeStrip(QWidget):
         self._press = None
         self._hover: int | None = None
         self._thumbs: dict[int, tuple] = {}   # keyframe index -> ((picture key, scale), the picture cut to a thumbnail)
+        self.setAccessibleName("Middle keyframes")
+        self.setAccessibleDescription("no keyframes")
 
     def sizeHint(self):
         return self.minimumSizeHint().expandedTo(self.minimumSize())
@@ -46,6 +48,10 @@ class KeyframeStrip(QWidget):
         self._drag = None
         self._thumbs = {}
         self.update()
+        n = len(self.items)
+        self.setAccessibleDescription(
+            f"{n} keyframe{'s' if n != 1 else ''} at " + ", ".join(f"{it['at']:.2f} s" for it in self.items)
+            if n else "no keyframes")
         tips = [f"{it['at']:.2f} s" + (f": {it['note']}" if it.get("note") else "") +
                 ("" if it.get("ok", True) else " (picture missing)") for it in self.items]
         self.setToolTip("Middle keyframes: pictures the clip passes through at these moments.\n"

@@ -12,7 +12,7 @@ from .. import presets
 from ..imagegen import FAMILIES
 from .dialogs import confirm as ask, failed
 from .lora_stack import lora_label
-from .widgets import icon_button, label
+from .widgets import icon_button, label_for
 from .image_host import ImageEditHost
 
 
@@ -36,7 +36,7 @@ class PresetsMixin(ImageEditHost):
         self.b_preset_rename.clicked.connect(lambda: self.rename_preset())
         self.b_preset_delete = icon_button("trash", "Delete the chosen preset")
         self.b_preset_delete.clicked.connect(lambda: self.delete_preset())
-        row.addWidget(label("Preset", level="tertiary"))
+        row.addWidget(label_for("Preset", self.preset, level="tertiary"))
         row.addWidget(self.preset, 1)
         for b in (self.b_preset_new, self.b_preset_save, self.b_preset_rename, self.b_preset_delete):
             row.addWidget(b)

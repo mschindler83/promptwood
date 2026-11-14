@@ -242,8 +242,11 @@ class LoraWindow(QDialog):
                              "the most words with yours (how the prompt refiner chooses its examples)")
         self.sort.currentIndexChanged.connect(lambda *_: self._refill())
         bar.addWidget(self.sort)
-        bar.addWidget(label("Pictures", level="tertiary"))
+        pictures_label = label("Pictures", level="tertiary")
+        bar.addWidget(pictures_label)
         self.pictures = QComboBox()
+        pictures_label.setBuddy(self.pictures)
+        self.pictures.setAccessibleName("Pictures")
         for key, text in SHOW:
             self.pictures.addItem(text, key)
         saved = qs_value(self.qs, "loraPictures", "safe", str) if self.qs is not None else "safe"

@@ -47,7 +47,8 @@ from .imageio import decode_upright as _decode_upright, upright  # noqa: F401  (
 from .lora_stack import LoraStack
 from .results_gallery import InfoCard, ResultGallery, ResultView, ThumbLoader
 from .variations_panel import PlaceholderHighlighter, VariationsPanel
-from .widgets import FrameTile, fit_size, guard_wheel, icon_button, label, remember_geometry, shortcut, combo_item
+from .widgets import (FrameTile, fit_size, guard_wheel, icon_button, label, remember_geometry,
+                      shortcut, combo_item, label_for)
 from .qsvalue import qs_value
 
 
@@ -230,7 +231,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         self.edit_model.setCurrentIndex(max(0, self.edit_model.findData(saved)))
         self.edit_model.currentIndexChanged.connect(self._edit_model_changed)
         self.edit_model.activated.connect(lambda _i: self._remember("editModel", self.edit_model.currentData()))
-        erow.addWidget(label("Model", level="tertiary"))
+        erow.addWidget(label_for("Model", self.edit_model, level="tertiary"))
         erow.addWidget(self.edit_model, 1)
         ev.addLayout(erow)
         mrow2 = QHBoxLayout()
@@ -303,7 +304,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         self.aspect.setCurrentIndex(0)
         self.aspect.currentIndexChanged.connect(lambda *_: self._create_widgets())
         self.size_text = label("", level="tertiary")
-        arow.addWidget(label("Shape", level="tertiary"))
+        arow.addWidget(label_for("Shape", self.aspect, level="tertiary"))
         arow.addWidget(self.aspect, 1)
         arow.addWidget(self.size_text)
         cv.addLayout(arow)
@@ -406,9 +407,9 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         self.tags = QCheckBox("Add the usual quality tags (masterpiece, best quality …)")
         self.tags.setChecked(True)
         self.tags.setToolTip("Illustrious models are trained on such tags; they are put before your prompt")
-        opts.addWidget(label("Quality", level="tertiary"), 0, 0)
+        opts.addWidget(label_for("Quality", self.quality, level="tertiary"), 0, 0)
         opts.addWidget(self.quality, 0, 1)
-        opts.addWidget(label("Results", level="tertiary"), 0, 2)
+        opts.addWidget(label_for("Results", self.tries, level="tertiary"), 0, 2)
         opts.addWidget(self.tries, 0, 3)
         srow = QHBoxLayout()
         self.seed = QSpinBox()
@@ -425,7 +426,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         srow.addWidget(self.seed, 1)
         srow.addWidget(self.b_seed)
         srow.addWidget(self.fresh_seed)
-        opts.addWidget(label("Seed", level="tertiary"), 1, 0)
+        opts.addWidget(label_for("Seed", self.seed, level="tertiary"), 1, 0)
         opts.addLayout(srow, 1, 1, 1, 3)
         opts.addWidget(self.keep_size, 2, 0, 1, 4)
         opts.addWidget(self.tags, 3, 0, 1, 4)

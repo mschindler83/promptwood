@@ -23,7 +23,7 @@ from ..tree import AUDIO_REF_MIN, VOICE_MAX_SECS, VOICE_REF_MAX_SECS
 from .theme import theme, with_alpha
 from .video_editor import RangeBar, RangePlayerMixin, fmt
 from .dialogs import button_row
-from .widgets import VideoView, fit_size, guard_wheel, icon_button, label, remember_geometry, shortcut
+from .widgets import VideoView, fit_size, guard_wheel, icon_button, label, remember_geometry, shortcut, label_for
 from .qsvalue import qs_value
 
 if TYPE_CHECKING:
@@ -204,11 +204,11 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
         b_e = QPushButton("End here")
         b_e.setToolTip("Set the end at the playhead (])")
         b_e.clicked.connect(lambda: self.set_range(self.start, self.position(), moved="end"))
-        rrow.addWidget(label("Start", level="tertiary"))
+        rrow.addWidget(label_for("Start", self.start_spin, level="tertiary"))
         rrow.addWidget(self.start_spin)
         rrow.addWidget(b_s)
         rrow.addSpacing(16)
-        rrow.addWidget(label("End", level="tertiary"))
+        rrow.addWidget(label_for("End", self.end_spin, level="tertiary"))
         rrow.addWidget(self.end_spin)
         rrow.addWidget(b_e)
         rrow.addStretch(1)

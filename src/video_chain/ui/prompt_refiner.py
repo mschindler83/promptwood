@@ -95,8 +95,11 @@ class RefineDialog(QDialog):
         self._chosen_ideas: list[str] | None = None
         v = QVBoxLayout(self)
         top = QHBoxLayout()
-        top.addWidget(label("Model", level="tertiary"))
+        model_label = label("Model", level="tertiary")
+        top.addWidget(model_label)
         self.model = QComboBox()
+        model_label.setBuddy(self.model)
+        self.model.setAccessibleName("Model")
         self.model.addItem("looking for language models …", None)
         self.model.setEnabled(False)
         self.model.setToolTip("The language model that rewrites the prompt. Uncensored ones follow your wording "

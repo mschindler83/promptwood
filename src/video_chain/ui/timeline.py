@@ -199,9 +199,21 @@ class Timeline(QScrollArea):
         self.lane.menu.connect(self.menu)
         self._blocks: list[Block] = []
         self._focus: str | None = None
+        self.setAccessibleName("Timeline of the played path")
+        self.setAccessibleDescription("No clips on the path.")
+
+    def _describe(self) -> None:
+        """What a screen reader says: the clips of the path, their length together, the one in the inspector."""
+        n, total = len(self._blocks), sum(b.secs for b in self._blocks)
+        text = f"{n} clip{'s' if n != 1 else ''}, {total:.1f} s together." if n else "No clips on the path."
+        cur = next((b for b in self._blocks if b.nid == self._focus), None)
+        if cur is not None:
+            text += f" Focused: {cur.label}, {cur.state}."
+        self.setAccessibleDescription(text)
 
     def show_path(self, blocks: list[Block], focus: str | None):
         self._blocks, self._focus = blocks, focus
+        self._describe()
         self.lane._thumbs = {k: v for k, v in self.lane._thumbs.items() if k in {b.nid for b in blocks}}
         self.lane.set_blocks(blocks, focus, self.viewport().width())
 
@@ -209,6 +221,7 @@ class Timeline(QScrollArea):
         self._focus = nid
         self.lane.focus = nid
         self.lane.update()
+        self._describe()
 
     def set_playing(self, nid: str | None):
         """Mark the clip the played path is at (None: nothing is played)."""
