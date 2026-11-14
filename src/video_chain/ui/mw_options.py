@@ -263,5 +263,6 @@ class OptionsMixin:
         elif counts.get("looked"):
             self.status.setText(f"CivitAI: looked up {counts['looked']} LoRA"
                                 f"{'s' if counts['looked'] != 1 else ''} (trigger words, descriptions, gallery "
-                                f"prompts), {counts.get('found', 0)} with trigger words" + (f", {counts['failed']} could not be asked (offline?)"
-                                                   if counts.get("failed") else "") + ".")
+                                f"prompts), {counts.get('found', 0)} with trigger words"
+                                + (f", {counts['failed']} could not be asked (offline?)"
+                                   if counts.get("failed") else "") + ".")

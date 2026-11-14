@@ -101,7 +101,8 @@ class ViewMixin:
         self._update_guide()
 
     def _guide_text_only(self):
-        """Step 1 without a picture: the first clip is made from its description; its picture format is the Aspect setting."""
+        """Step 1 without a picture: the first clip is made from its description; its picture format is the Aspect
+        setting."""
         if self.project is None:
             return
         self._guide_mark("text_only")

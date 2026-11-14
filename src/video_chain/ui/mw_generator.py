@@ -20,7 +20,8 @@ from .ui_logic import CLOUD_KILL_GRACE_MS, DEFAULT_COMFY_URL, KILL_GRACE_MS, fmt
 
 def step_status(nid: str, k: int, total: int, what: str, frac: float, left: float | None,
                 left_all: float | None) -> str:
-    """The status line of a clip being made: 'Clip #3 (2 of 5): step 4 / 20 · 20 % · about 40 s left (all clips: ...)'."""
+    """The status line of a clip being made: 'Clip #3 (2 of 5): step 4 / 20 · 20 % · about 40 s left (all clips:
+    about 3 min)'."""
     text = f"Clip #{T.short_id(nid)} ({k} of {total}): {what} · {round(100 * frac)} %"
     if left is not None:
         text += f" · {fmt_left(left)} left"
@@ -628,7 +629,8 @@ class GeneratorMixin:
                         self._film_queue = film_rest
                 else:
                     self.status.setText(f"ComfyUI is not running at {self.comfy_url.text().strip()}. "
-                                        "Start it (Settings → ComfyUI and preferences → Start ComfyUI) and generate again.")
+                                        "Start it (Settings → ComfyUI and preferences → Start ComfyUI) and generate "
+                                        "again.")
                 self._update_comfy_label()
         self._update_model_label()
         self._update_buttons()

@@ -213,7 +213,8 @@ class ProjectMixin:
             return False
         folder = Path(folder).expanduser().resolve()
         try:
-            folder.mkdir(parents=True, exist_ok=True)     # (after the leave check above; tests and the API open new folders)
+            # (after the leave check above; tests and the API open new folders)
+            folder.mkdir(parents=True, exist_ok=True)
             root = F.root_of(folder)
             film = F.Film.load(root)               # the film this folder belongs to, and which scene opens
             if len(film.scenes) > 1 and not film.problem:
@@ -239,7 +240,8 @@ class ProjectMixin:
             try:                                 # a new project starts with the last used settings
                 last = json.loads(self.qs.value("lastOptions", "{}", type=str))
                 tree.options.update({k: v for k, v in last.items()
-                                     if k in T.DEFAULT_OPTIONS and k not in ("identity", "cast", "style", "audio_refs")})
+                                     if k in T.DEFAULT_OPTIONS and k not in ("identity", "cast", "style",
+                                                                             "audio_refs")})
             except ValueError:
                 pass
         self._clean_options(tree.options)           # (a value that cannot be read must not leave a half-open project)

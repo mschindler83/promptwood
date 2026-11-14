@@ -103,7 +103,8 @@ class InspectorMixin:
                                       f"#{T.short_id(n.id)} (its own, instead of the project's start image)", "start",
                                       self._pixmap(self.project / n.start_image), on_path=n.id in on_path))
             infos.append(NodeInfo(n.id, parent,
-                                  f"{'Video' if n.is_video else 'Clip'} {self.tree.depth(n.id)}", f"#{T.short_id(n.id)}",
+                                  f"{'Video' if n.is_video else 'Clip'} {self.tree.depth(n.id)}",
+                                  f"#{T.short_id(n.id)}",
                                   text, self.state(n.id), self._pixmap(self._node_frame(n)),
                                   self.progress_of.get(n.id, 0.0), n.id in on_path, n.id == sel,
                                   self.badge(n), n.kind))
@@ -353,7 +354,8 @@ class InspectorMixin:
         self._update_cards()
         who = f"@{lead['name']}" if lead else "the lead"
         if not self._report_remade(before, f"Clip #{T.short_id(nid)}: lead {'on' if on else 'off'}"):
-            self.status.setText(f"Clip #{T.short_id(nid)} is made with {who} again (its prompt mentions nobody)." if on else
+            self.status.setText(f"Clip #{T.short_id(nid)} is made with {who} again (its prompt mentions nobody)."
+                                if on else
                                 f"Clip #{T.short_id(nid)} is made without {who}.")
 
     def show_model_prompt(self, nid: str) -> QDialog | None:
@@ -472,8 +474,8 @@ class InspectorMixin:
         fits = [g for g in T.GUIDE_CHOICES if g <= have and g < T.clip_length(self.tree, n)]
         span = T.source_sound_span(self.tree, n)
         return made(f"Uses {t(span['start'])}\u2013{t(span['start'] + span['secs'])} of "
-                    f"{Path(span['file']).name} (video #{T.short_id(video.id)}): the sound right after its range, exactly as "
-                    "recorded", guide=max(fits, default=0),
+                    f"{Path(span['file']).name} (video #{T.short_id(video.id)}): the sound right after its range, "
+                    "exactly as recorded", guide=max(fits, default=0),
                     tail=" Write in the prompt what happens; the words come from the video.")
 
     def _sound_suffix(self, n: T.Node, ov: dict) -> str:

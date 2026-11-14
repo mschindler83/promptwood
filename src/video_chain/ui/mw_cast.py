@@ -167,7 +167,8 @@ class CastMixin:
         if c is None or not self._cast_edit_ok():
             return
         users = self._mentioning(c["name"])
-        text = (f"Remove @{c['name']} and its {len(c['images'])} {self._ref_word(c)}{'s' if len(c['images']) != 1 else ''}"
+        text = (f"Remove @{c['name']} and its {len(c['images'])} "
+                f"{self._ref_word(c)}{'s' if len(c['images']) != 1 else ''}"
                 + (" and its voice?" if c.get("voice") else "?"))
         if users:
             text += (f" {len(users)} clip{'s mention' if len(users) != 1 else ' mentions'} @{c['name']}; "

@@ -183,8 +183,8 @@ class StateMixin:
         roots = [n for n in (self.tree.nodes.values() if self.tree else []) if n.frozen and n.parent is None
                  and not n.is_video]
         if roots:
-            self.status.setText(f"Clip #{T.short_id(roots[0].id)} is frozen and starts from the start image: unfreeze it "
-                                "first to change the start image.")
+            self.status.setText(f"Clip #{T.short_id(roots[0].id)} is frozen and starts from the start image: "
+                                "unfreeze it first to change the start image.")
         return bool(roots)
 
     def clear_image(self, confirm: bool = False) -> bool:
@@ -232,7 +232,8 @@ class StateMixin:
             pass
         if confirm and made and not D.confirm(
                 self, "Replace the start image",
-                f"Use {Path(path).name} as the start image?\n\n{len(made)} made clip{'s depend' if len(made) != 1 else ' depends'}"
+                f"Use {Path(path).name} as the start image?\n\n{len(made)} made "
+                f"clip{'s depend' if len(made) != 1 else ' depends'}"
                 " on the current one (it starts from it, or it sets the video size); they will count as CHANGED and "
                 "be made again with their paths."):
             return False
@@ -264,7 +265,8 @@ class StateMixin:
         made = node is not None and bool(node.made)
         self.b_ref_clip.setEnabled(made and not self.running)
         if made:
-            what = (f"the first frame of video #{T.short_id(nid)}" if node.is_video else f"the last frame of clip #{T.short_id(nid)}")
+            what = (f"the first frame of video #{T.short_id(nid)}" if node.is_video else f"the last frame of clip "
+                                                                                         f"#{T.short_id(nid)}")
             tip = f"Add {what} as a {ref}"
         else:
             tip = "Select a converted video or a made clip"
@@ -274,8 +276,8 @@ class StateMixin:
         self.b_voice_clip.setEnabled(has_sound and self._ref_word() == "face picture"
                                      and self._selected_character() is not None and not self.running)
         self.b_voice_clip.setToolTip(
-            f"Set the voice from the sound of {'video' if node.is_video else 'clip'} #{T.short_id(nid)}: choose the part "
-            "of it, with or without its background music" if has_sound
+            f"Set the voice from the sound of {'video' if node.is_video else 'clip'} #{T.short_id(nid)}: choose the "
+            "part of it, with or without its background music" if has_sound
             else "Select a made clip or a converted video with the voice")
 
     def _show_start_image(self):

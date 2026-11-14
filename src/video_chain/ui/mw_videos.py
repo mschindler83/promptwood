@@ -27,7 +27,8 @@ class VideosMixin:
             return
         if not self.tree.can_add_video(parent):
             vc = self.tree.video_child(parent)
-            self.status.setText(f"Clip #{T.short_id(parent)} already leads into video #{T.short_id(vc.id)}: a generated clip can "
+            self.status.setText(f"Clip #{T.short_id(parent)} already leads into video #{T.short_id(vc.id)}: a "
+                                "generated clip can "
                                 "end at one video only. Branch from the clip before it for another one.")
             return
         f = choose_video(self, self.qs, places=self._picker_places(), collections=self.project_media("video"))
@@ -276,7 +277,8 @@ class VideosMixin:
                 self._quit_worker(free=False)
 
         def connect(progress):                      # worker thread
-            an = animate.ComfyAnimator(url, log=lambda _m: None, progress=progress, comfy_dir=comfy_dir, cleanup=cleanup)
+            an = animate.ComfyAnimator(url, log=lambda _m: None, progress=progress, comfy_dir=comfy_dir,
+                                       cleanup=cleanup)
             switch["loaded"] = True                 # another model in ComfyUI now (unloaded after the window)
             if switch["free"]:
                 an.free()
@@ -332,8 +334,8 @@ class VideosMixin:
         self.refresh(rebuild_path=True)
         self.convert_video(nid)
         if not self._report_remade(before, f"Video #{T.short_id(nid)}: person replaced"):
-            self.status.setText(f"Video #{T.short_id(nid)} plays the clip with the replaced person now (its menu goes back "
-                                "to the original).")
+            self.status.setText(f"Video #{T.short_id(nid)} plays the clip with the replaced person now (its menu "
+                                "goes back to the original).")
         return True
 
     def split_video(self, nid: str, at: float | None = None) -> str | None:
@@ -375,7 +377,8 @@ class VideosMixin:
         self.convert_video(rest.id)
         if not self._report_remade(before, f"Video #{T.short_id(nid)} split"):
             self.status.setText(f"Video #{T.short_id(nid)} split at {at:.2f} s: write the prompt of the new clip "
-                                f"#{T.short_id(clip_node.id)}; it ends at the first frame of video #{T.short_id(rest.id)}.")
+                                f"#{T.short_id(clip_node.id)}; it ends at the first frame of video "
+                                f"#{T.short_id(rest.id)}.")
         return clip_node.id
 
     def undo_replacement(self, nid: str) -> bool:

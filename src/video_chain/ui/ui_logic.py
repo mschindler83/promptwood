@@ -1,4 +1,4 @@
-"""Pure helpers and constants of the main window (no Qt widgets): texts, number formats, small calculations on options."""
+"""Pure helpers and constants of the main window (no Qt widgets): texts, number formats, calculations on options."""
 from __future__ import annotations
 
 import copy
@@ -103,8 +103,8 @@ CONTINUE_TIP = ("Continue the clip before: the model is shown the end of the cli
                 "first frames of this clip exactly; this shows the model the clip before as a reference. It uses the "
                 "reference model, so the clip takes longer to make. New: whether it helps has not been tested here "
                 "yet. (ComfyUI describes reference videos as 2-15 s long; shorter ones are taken too.)")
-CONTINUE_CLASSIC_TIP = ("Continue the clip before needs the official prompt format (Project → Prompt format): only that "
-                        "prompt can tell the model what the reference video is.")
+CONTINUE_CLASSIC_TIP = ("Continue the clip before needs the official prompt format (Project → Prompt format): only "
+                        "that prompt can tell the model what the reference video is.")
 CONTINUE_FIRST_TIP = "The first clip has no clip before it to continue."
 CONTINUE_SHORT_TIP = ("The clip before or this clip is shorter than the shortest continuation (22 frames, 0.9 s): "
                       "there is nothing that fits.")

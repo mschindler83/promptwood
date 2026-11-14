@@ -105,8 +105,8 @@ class VariantsDialog(QDialog):
         self.loras = [e for e in self.stack if e.get("path")]
         f = QFormLayout(self)
         text = node.prompt if len(node.prompt) < 90 else node.prompt[:87] + "…"
-        info = label(f"Clip #{T.short_id(node.id)}: “{text}”\nEach variant is a new branch from the same point with the same "
-                     "prompt and settings and another seed.", level="secondary")
+        info = label(f"Clip #{T.short_id(node.id)}: “{text}”\nEach variant is a new branch from the same point with "
+                     "the same prompt and settings and another seed.", level="secondary")
         info.setWordWrap(True)
         f.addRow(info)
         self.count = QSpinBox()
@@ -263,9 +263,9 @@ class ExportDialog(QDialog):
         f.addRow("Upscaler", self.method)
         self.denoise = QCheckBox("Light denoise before SeedVR2")
         self.denoise.setChecked(bool(denoise))
-        self.denoise.setToolTip("Calms the draft's fine noise first (mostly the noise that changes from frame to frame, "
-                                "little blur), so SeedVR2 does not sharpen it into grain or a painted texture on "
-                                "smooth areas (walls, long hair, skin). Upscaled copies are kept per choice")
+        self.denoise.setToolTip("Calms the draft's fine noise first (mostly the noise that changes from frame to "
+                                "frame, little blur), so SeedVR2 does not sharpen it into grain or a painted texture "
+                                "on smooth areas (walls, long hair, skin). Upscaled copies are kept per choice")
         f.addRow("", self.denoise)
         self.cloud = QCheckBox("Upscale on RunPod (a cloud GPU, terminated afterwards)")
         self.cloud.setChecked(bool(cloud_on and cloud))

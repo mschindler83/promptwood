@@ -486,7 +486,8 @@ class BuildMixin:
         self.clip_cfg.setToolTip(
             "CFG: how strictly the model follows the prompt. It belongs to the chosen speed mode (each mode keeps "
             "its own value). 1: off, one pass per step, as H3 and its speed LoRAs (turbo, HyperFlow, Pika) are made "
-            "for. Above 1: real classifier-free guidance against an empty prompt (start / end frames stay): the prompt is followed more strongly, but every step runs twice "
+            "for. Above 1: real classifier-free guidance against an empty prompt (start / end frames stay): the "
+            "prompt is followed more strongly, but every step runs twice "
             "(about twice as slow) and the step-distilled LoRAs can burn colours or over-sharpen from about 1.5-2; "
             "try 1.2-1.5 first. Below 1 (e.g. 0.9): the prompt is followed a little less, also two passes per step")
         self.cfg_note = label("", level="tertiary")
@@ -615,8 +616,8 @@ class BuildMixin:
         a.addRow("", self.comfy_autostart)
         self.triggers_online = QCheckBox("Look up LoRAs on CivitAI (trigger words, example prompts)")
         self.triggers_online.setChecked(True)
-        self.triggers_online.setToolTip("In the background, after each LoRA scan: LoRAs are looked up on CivitAI by their "
-                                        "file hash (this tells CivitAI which LoRA files you have, nothing else). "
+        self.triggers_online.setToolTip("In the background, after each LoRA scan: LoRAs are looked up on CivitAI by "
+                                        "their file hash (this tells CivitAI which LoRA files you have, nothing else). "
                                         "Found trigger words are kept in ~/.local/share/video-chain/"
                                         "lora_triggers.json, everything else CivitAI tells next to it in civitai/: "
                                         "descriptions, base model, files, license, and the prompts and settings of "
@@ -796,7 +797,8 @@ class BuildMixin:
             v.addStretch(1)
         self.left_tabs = QTabWidget()
         self.left_tabs.setDocumentMode(True)
-        shared.cast_scroll, shared.sound_scroll, proj_scroll = _scrolled(shared.cast_w), _scrolled(shared.sound_w), _scrolled(shared.proj_w)
+        shared.cast_scroll, shared.sound_scroll = _scrolled(shared.cast_w), _scrolled(shared.sound_w)
+        proj_scroll = _scrolled(shared.proj_w)
         self.inspector = QTabWidget()
         self.inspector.setDocumentMode(True)
         self.inspector.addTab(proj_scroll, "Project")

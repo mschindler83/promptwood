@@ -244,8 +244,8 @@ class FilmMixin:
             return
         n = F.summary(self.film, sid)["clips"]
         if not D.confirm(self, "Delete scene", f"Delete the scene “{sc.title}” with its {n} clip"
-                                f"{'s' if n != 1 else ''} from the film? Its folder with their files is not deleted: it is moved to "
-                                "old/ in the film's folder."):
+                                f"{'s' if n != 1 else ''} from the film? Its folder with their files is not deleted: "
+                                "it is moved to old/ in the film's folder."):
             return
         if self.film.path(sid) == self.project:    # leave it first
             other = next(s for s in self.film.scenes if s.id != sid)
@@ -338,7 +338,8 @@ class FilmMixin:
         dlg.setWindowTitle("Cast in the film")
         v = QVBoxLayout(dlg)
         if not names:
-            v.addWidget(label("The film has no characters yet (the Cast & references tab, " + S.keys("tab_cast") + ").", level="secondary"))
+            v.addWidget(label("The film has no characters yet (the Cast & references tab, " + S.keys("tab_cast")
+                              + ").", level="secondary"))
         table = QTableWidget(len(names), len(rows))
         table.setHorizontalHeaderLabels([f"{k}  {title}" for k, (title, _m) in enumerate(rows, start=1)])
         table.setVerticalHeaderLabels([f"@{n}" for n in names])

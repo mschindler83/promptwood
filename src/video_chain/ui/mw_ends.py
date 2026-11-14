@@ -129,7 +129,8 @@ class EndsMixin:
             return ed
 
         def connect_create(progress):               # worker thread: the image creator (any image family)
-            ed = imagegen.ComfyImageCreator(url, log=lambda _m: None, progress=progress, comfy_dir=comfy_dir, cleanup=cleanup)
+            ed = imagegen.ComfyImageCreator(url, log=lambda _m: None, progress=progress, comfy_dir=comfy_dir,
+                                            cleanup=cleanup)
             if switch["free"]:
                 ed.free()
                 switch["free"] = False
@@ -250,7 +251,8 @@ class EndsMixin:
         self._pix.clear()
         self._write_tree()
         self.refresh()
-        what = (f"Clip #{T.short_id(nid)} hands over at frame {frame + 1} ({frame / chain.FPS:.2f} s)" if frame is not None
+        what = (f"Clip #{T.short_id(nid)} hands over at frame {frame + 1} ({frame / chain.FPS:.2f} s)"
+                if frame is not None
                 else f"Clip #{T.short_id(nid)} hands over at its last frame")
         if not self._report_remade(before, what):
             self.status.setText(what + ".")
@@ -265,7 +267,8 @@ class EndsMixin:
             self.status.setText(f"Clip #{T.short_id(nid)} ends at the first frame of the video after it.")
             return
         start = str(Path(self.project / node.end_image).parent) if node.end_image else None
-        f = IP.pick_image(self, f"End image of clip #{T.short_id(nid)} (the frame it steers its end to)", self.qs, start,
+        f = IP.pick_image(self, f"End image of clip #{T.short_id(nid)} (the frame it steers its end to)", self.qs,
+                          start,
                        self._picker_places(), self.project_images())
         if f:
             self.set_end_image(nid, f)
@@ -353,7 +356,8 @@ class EndsMixin:
         self._pix.clear()
         self._write_tree()
         self.refresh()
-        self.status.setText(f"Clip #{T.short_id(nid)} " + ("now ends at its end image." if image else "ends freely now."))
+        self.status.setText(f"Clip #{T.short_id(nid)} " + ("now ends at its end image." if image
+                                                           else "ends freely now."))
         return True
 
     # ---- middle keyframes
@@ -380,7 +384,8 @@ class EndsMixin:
         if act == "move":
             self._set_keyframe(nid, None, at, index=i)
         elif act in ("add", "change"):
-            f = IP.pick_image(self, f"Keyframe of clip #{T.short_id(nid)} at {at:.2f} s (a picture the clip passes through)",
+            f = IP.pick_image(self, f"Keyframe of clip #{T.short_id(nid)} at {at:.2f} s (a picture the clip passes "
+                                    "through)",
                            self.qs, None, self._picker_places(), self.project_images())
             if f:
                 self._set_keyframe(nid, f, at, index=i)
@@ -469,7 +474,8 @@ class EndsMixin:
             if abs(img.width() / img.height() - canvas[0] / canvas[1]) > ASPECT_TOLERANCE * canvas[0] / canvas[1]:
                 msg += (f" Its shape ({img.width()}×{img.height()}) differs from the clip's ({canvas[0]}×{canvas[1]}):"
                         " H3 crops it to the middle.")
-        self.status.setText(msg + " Keep it reachable by motion from what comes before it, or the video model cuts to it.")
+        self.status.setText(msg + " Keep it reachable by motion from what comes before it, or the video model cuts "
+                                  "to it.")
         return True
 
     # ---- real videos
@@ -573,7 +579,8 @@ class EndsMixin:
             self._write_tree()
             self.refresh(rebuild_path=True)
         self.status.setText(
-            (f"Prompt and settings of clip #{T.short_id(nid)} given to {', '.join('#' + T.short_id(i) for i in changed)}; made ones "
+            (f"Prompt and settings of clip #{T.short_id(nid)} given to "
+             f"{', '.join('#' + T.short_id(i) for i in changed)}; made ones "
              "count as changed and are made again by Generate." if changed else
              "The other start images already have this prompt and these settings.")
             + (f" Frozen and left as made: {', '.join('#' + T.short_id(i) for i in frozen)}." if frozen else ""))

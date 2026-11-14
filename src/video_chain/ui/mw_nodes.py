@@ -114,7 +114,8 @@ class NodeMixin:
                                        loras=[p for p, _s in T.node_loras(node)])
                 if new:
                     replace_text(card.edit, new)          # Ctrl+Z in the prompt takes it back
-                    self.status.setText(f"Clip #{T.short_id(node.id)}: prompt refined (Ctrl+Z in the prompt undoes it).")
+                    self.status.setText(f"Clip #{T.short_id(node.id)}: prompt refined (Ctrl+Z in the prompt undoes "
+                                        "it).")
             return
         if action == "handover" and node is not None and not node.is_video:
             self.choose_handover(node.id)
@@ -145,8 +146,8 @@ class NodeMixin:
                 return
             below = len(self.tree.descendants(node.id))
             made = node.made is not None or any(d.made for d in self.tree.descendants(node.id))
-            msg = f"Delete {'video' if node.is_video else 'clip'} #{T.short_id(node.id)}" + (f" and the {plural(below, 'clip')} after it"
-                                                   if below else "") + "?"
+            after = f" and the {plural(below, 'clip')} after it" if below else ""
+            msg = f"Delete {'video' if node.is_video else 'clip'} #{T.short_id(node.id)}{after}?"
             if made:
                 msg += "\nTheir video files are not deleted: they are moved to old/ in the project folder."
             if not D.confirm(self, "Delete", msg):
@@ -179,10 +180,11 @@ class NodeMixin:
         if not self._is_locked(node, action):
             return False
         what = "Video" if node.is_video else "Clip"
-        text = (f"{what} #{T.short_id(node.id)} is frozen (kept as made): unfreeze it first (the lock button on its card, "
-                "or right-click → Unfreeze).")
+        text = (f"{what} #{T.short_id(node.id)} is frozen (kept as made): unfreeze it first (the lock button on its "
+                "card, or right-click → Unfreeze).")
         self.status.setText(text)
-        QToolTip.showText(QCursor.pos(), text, self)       # (where the user just pressed: the status bar is easy to miss)
+        # (where the user just pressed: the status bar is easy to miss)
+        QToolTip.showText(QCursor.pos(), text, self)
         return True
 
     def freeze_clip(self, nid: str, confirm: bool = True) -> list[str]:
@@ -197,8 +199,8 @@ class NodeMixin:
         edits = T.freeze_edits(self.tree, nid)
         if confirm and edits and not D.confirm(
                 self, "Freeze",
-                f"Freeze {what} #{T.short_id(nid)} and the clips before it?\n\nThese edits are not made yet and are undone "
-                "(back to what the clips were made with):\n" +
+                f"Freeze {what} #{T.short_id(nid)} and the clips before it?\n\nThese edits are not made yet and are "
+                "undone (back to what the clips were made with):\n" +
                 "\n".join(f"#{T.short_id(i)}: {', '.join(e)}" for i, e in edits.items())):
             return []
         try:
@@ -226,7 +228,8 @@ class NodeMixin:
         self.refresh(rebuild_path=True)
         changed = [i for i in ids if self.status_of.get(i) == "changed"]
         more = [i for i in ids if i != nid]
-        text = (f"#{T.short_id(nid)} unfrozen" + (f", with {', '.join('#' + T.short_id(i) for i in more)}" if more else ""))
+        text = (f"#{T.short_id(nid)} unfrozen" + (f", with {', '.join('#' + T.short_id(i) for i in more)}" if more
+                                                  else ""))
         if changed:
             text += (f"; {len(changed)} of them count{'s' if len(changed) == 1 else ''} as CHANGED now (the settings "
                      "differ): Generate makes them again. Freeze again to keep them.")

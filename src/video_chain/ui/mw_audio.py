@@ -223,7 +223,8 @@ class AudioMixin:
         self._write_tree()
         self._changed()
         msg = (f"Sound reference <Audio {n}> added ({entry['secs']:.1f} s"
-               + (f", the first part only: all sounds together may have {T.AUDIO_REF_TOTAL:g} s" if entry.get("cut") else "")
+               + (f", the first part only: all sounds together may have {T.AUDIO_REF_TOTAL:g} s" if entry.get("cut")
+                  else "")
                + f"). Name it in a clip's prompt as <Audio {n}>.")
         self._say(msg)
         if self._report_remade(before, "Sound reference added"):
@@ -457,7 +458,8 @@ class AudioMixin:
         node = self.tree.nodes.get(self.target_id()) if self.tree else None
         has = node is not None and bool((node.made or {}).get("video"))
         self.b_track_clip.setEnabled(idle and has)
-        self.b_track_clip.setToolTip(f"Import the sound of {'video' if node.is_video else 'clip'} #{T.short_id(node.id)} "
+        self.b_track_clip.setToolTip(f"Import the sound of {'video' if node.is_video else 'clip'} "
+                                     f"#{T.short_id(node.id)} "
                                      "and cut it" if has else "Select a made clip or a converted video")
         for b in (self.b_track_cut, self.b_track_del):
             b.setEnabled(idle and sel)
@@ -480,12 +482,13 @@ class AudioMixin:
         refs = T.audio_refs(self.tree) if self.tree else []
         total = sum(float(a.get("secs") or 0) for a in refs)
         if not refs:
-            text = (f"A voice, music or a beat for clips: add a sound ({AUDIO_REF_RANGE}), then name it in a clip's prompt, e.g. "
-                    "\"<Audio 1> is the complete soundtrack\". Only clips that name a sound use it (with the "
-                    "reference model).")
+            text = (f"A voice, music or a beat for clips: add a sound ({AUDIO_REF_RANGE}), then name it in a clip's "
+                    "prompt, e.g. \"<Audio 1> is the complete soundtrack\". Only clips that name a sound use it "
+                    "(with the reference model).")
         else:
             users = self._sound_users(1)
-            text = (f"{total:.1f} of {T.AUDIO_REF_TOTAL:g} s used, {len(users)} clip{'s use' if len(users) != 1 else ' uses'} "
+            text = (f"{total:.1f} of {T.AUDIO_REF_TOTAL:g} s used, {len(users)} "
+                    f"clip{'s use' if len(users) != 1 else ' uses'} "
                     "them. \"<Audio 1> is the complete soundtrack\" copies it. A voice only works in the long "
                     "reference format (\"<Audio 1> is the voice-timbre reference for <Subject 1> (S1)\" …), not as a "
                     "plain \"in the voice of <Audio 1>\".")
@@ -502,8 +505,8 @@ class AudioMixin:
         has = node is not None and bool((node.made or {}).get("video"))
         self.b_sound_clip.setEnabled(idle and room and has)
         self.b_sound_clip.setToolTip(
-            (f"Add the sound of {'video' if node.is_video else 'clip'} #{T.short_id(nid)} (its first seconds), e.g. to keep "
-             "a voice from an earlier clip" if has else "Select a made clip or a converted video")
+            (f"Add the sound of {'video' if node.is_video else 'clip'} #{T.short_id(nid)} (its first seconds), e.g. "
+             "to keep a voice from an earlier clip" if has else "Select a made clip or a converted video")
             if room else f"There are already {T.MAX_AUDIO_REFS} sounds or {T.AUDIO_REF_TOTAL:g} s; remove one first")
         sel = 0 <= self.sounds.currentRow() < len(refs)
         self.b_sound_del.setEnabled(idle and sel)

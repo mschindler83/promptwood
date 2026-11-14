@@ -124,7 +124,8 @@ class ComfyMixin:
             text, sev = "Video engine: …", ""
         self.comfy_label.setText(text)
         self.comfy_label.setToolTip(f"The video engine is ComfyUI, the program that makes the clips "
-                                    f"({self.comfy_url.text().strip() or DEFAULT_COMFY_URL}); its settings: {S.keys('preferences')}")
+                                    f"({self.comfy_url.text().strip() or DEFAULT_COMFY_URL}); its settings: "
+                                    f"{S.keys('preferences')}")
         self.comfy_label.setProperty("severity", sev)
         repolish(self.comfy_label)
         self.b_start_comfy.setEnabled(not self.comfy_up)
@@ -149,7 +150,8 @@ class ComfyMixin:
     def _update_model_label(self):
         if not self.worker_alive and self._comfy_model in IMAGE_MODELS:
             left = self._qwen_timer.remainingTime() if self._qwen_timer.isActive() else -1
-            text, sev = (("Model: language model (prompt refiner) loaded in ComfyUI" if self._comfy_model == ComfyModel.LLM
+            text, sev = (("Model: language model (prompt refiner) loaded in ComfyUI"
+                          if self._comfy_model == ComfyModel.LLM
                           else "Model: image model loaded in ComfyUI") +
                          (f" · unloads in {max(1, round(left / 60000))} min" if left >= 0 else "")), ""
         elif not self.worker_alive:

@@ -152,7 +152,8 @@ class LorasMixin:
     def _lora_dir(self) -> str:
         """Where to start looking for LoRA files: ComfyUI's first LoRA folder (the ones it can load)."""
         try:
-            roots = CMF.comfy_lora_roots(Path(os.path.expanduser(self.comfy_dir.text().strip() or UL.DEFAULT_COMFY_DIR)))
+            roots = CMF.comfy_lora_roots(Path(os.path.expanduser(self.comfy_dir.text().strip()
+                                                                 or UL.DEFAULT_COMFY_DIR)))
             extra = [r for r in roots if "models/loras" not in r.as_posix()]
             return str((extra or roots)[0]) if roots else ""
         except Exception:  # noqa: BLE001
@@ -219,7 +220,8 @@ class LorasMixin:
         """Whether ComfyUI can load this LoRA file: it lies in one of ComfyUI's LoRA folders (links followed), or
         is a LoRA found there. None: ComfyUI's folder is not known here."""
         try:
-            roots = CMF.comfy_lora_roots(Path(os.path.expanduser(self.comfy_dir.text().strip() or UL.DEFAULT_COMFY_DIR)))
+            roots = CMF.comfy_lora_roots(Path(os.path.expanduser(self.comfy_dir.text().strip()
+                                                                 or UL.DEFAULT_COMFY_DIR)))
         except Exception:  # noqa: BLE001
             roots = []
         if not roots:

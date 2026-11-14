@@ -1,4 +1,4 @@
-"""Small Qt helpers of the main window: drop target, the signals worker threads send, a stack that is as big as its shown page."""
+"""Small Qt helpers of the main window: drop target, the signals worker threads send, a stack as big as its page."""
 from __future__ import annotations
 
 from PySide6.QtCore import QObject, Signal
@@ -63,7 +63,8 @@ class _Bridge(QObject):
     remixed = Signal(object, str, str)         # [(clip id, its new record)], error ('' = done), project
     exported = Signal(str, str, str)           # a single clip was copied out: its id, the file, error ('' = done)
     freed = Signal(bool)                       # ComfyUI's answer to "unload your models" (True: done)
-    room_made = Signal(str)                     # ComfyUI's models were unloaded for a model of this app (the llama.cpp server, text to speech)
+    # ComfyUI's models were unloaded for a model of this app (the llama.cpp server, text to speech)
+    room_made = Signal(str)
     spoken = Signal(str, object, str, str)     # clip id, rendered lines (tts.render_lines) or None, error, project
     log = Signal(str)                          # a line for the log from a worker thread
     tts_log = Signal(str)                      # a step of text to speech

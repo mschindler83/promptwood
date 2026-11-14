@@ -174,7 +174,8 @@ class PromptCard(_ClipCardBase):
                                                 "but other seeds, generated at once", None),
             ("compare", "cmp", "Compare…", "Compare: play this clip and its made variants side by side, keep one",
              None),
-            ("branch", "split", "Branch", S.tip("Branch: another continuation from the same point", "branch"), S.keys("branch")),
+            ("branch", "split", "Branch", S.tip("Branch: another continuation from the same point", "branch"),
+             S.keys("branch")),
             ("start_rows", "layers", "More start images…",
              "More start images…: choose several pictures; this clip is made once for each, with the same prompt, "
              "seed and settings, each on its own row (for a clip that starts the video)", None),
@@ -184,7 +185,8 @@ class PromptCard(_ClipCardBase):
             None,
             ("freeze_toggle", "lock", "Freeze", FREEZE_TIP, None),
             None,
-            ("delete", "trash", "Delete…", "Delete this clip and everything after it (asks first)", S.keys("graph_delete"))))
+            ("delete", "trash", "Delete…", "Delete this clip and everything after it (asks first)",
+             S.keys("graph_delete"))))
         head.addWidget(self.b_more)
         self.more_actions = acts                 # action name -> QAction (the More menu's entries)
         for k in ("start_rows", "row_apply"):    # (shown for a clip that starts the video: set_rows)
@@ -504,7 +506,9 @@ class PromptCard(_ClipCardBase):
         self.adv_note = AdvancedNote(self.view)
         shared.v.addWidget(self.adv_note)
         self.view.advanced(self.seed_label, self.seed, self.b_seed, self.veda_mark, self.steps_label, self.steps,
-                           (shared.link, self.loras), (shared.link, self.guide), (shared.link, self.cont), (shared.link, self.keys_row),
+                           (shared.link, self.loras), (shared.link, self.guide), (shared.link,
+                                                                                  self.cont), (shared.link,
+                                                                                               self.keys_row),
                            (shared.link, self.hand_row), self.mix_level_box)
         self._show_mix()
         self._show_settings(PromptCard.settings_open)
@@ -578,7 +582,8 @@ class PromptCard(_ClipCardBase):
             self.steps.setToolTip(f"Sampling steps of this clip (lowest value = the project's: {project_steps})")
             self.steps.setEnabled(not self.edit.isReadOnly() and not self.steps_locked)
             if self.steps_locked:
-                self.steps.setToolTip("Turbo / HyperFlow / Pika H3 Flex: every clip uses their own steps (Clips → Speed)")
+                self.steps.setToolTip("Turbo / HyperFlow / Pika H3 Flex: every clip uses their own steps (Clips → "
+                                      "Speed)")
         finally:
             for w in widgets:
                 w.blockSignals(False)
@@ -837,7 +842,8 @@ class PromptCard(_ClipCardBase):
         try:
             self.cont.clear()
             for c in want:
-                self.cont.addItem("off" if c is None else continue_text(c) + ("" if c in fits or self._cont_why else " (does not fit)"),
+                self.cont.addItem("off" if c is None else continue_text(c) + ("" if c in fits or self._cont_why
+                                                                              else " (does not fit)"),
                                   c)
             self.cont.setCurrentIndex(max(0, self.cont.findData(cur)))
         finally:
@@ -989,8 +995,8 @@ class PromptCard(_ClipCardBase):
         image file exists (the window knows it from its one look at the file; None: this looks itself)."""
         self._end_free, self._has_end = video_after is None, image is not None
         self.b_end.setToolTip(END_TIP if video_after is None else
-                              f"This clip ends at the first frame of video #{T.short_id(video_after)}; remove that video "
-                              "to give it an end image of its own")
+                              f"This clip ends at the first frame of video #{T.short_id(video_after)}; remove that "
+                              "video to give it an end image of its own")
         if video_after is not None:
             self.end_text.setText(f"first frame of video #{T.short_id(video_after)}"
                                   + (" (own end image not used)" if image is not None else ""))
@@ -1040,11 +1046,13 @@ class VideoCard(_ClipCardBase):
         head.addStretch(1)
         self.b_more, acts = more_menu(self, self.nid, (
             ("edit", "pen", "Edit range…", "Edit range… (or choose another file)", None),
-            ("branch", "split", "Branch", S.tip("Branch: another continuation from the same point", "branch"), S.keys("branch")),
+            ("branch", "split", "Branch", S.tip("Branch: another continuation from the same point", "branch"),
+             S.keys("branch")),
             None,
             ("freeze_toggle", "lock", "Freeze", FREEZE_TIP.replace("this clip", "this video"), None),
             None,
-            ("delete", "trash", "Delete…", "Delete this video and everything after it (asks first)", S.keys("graph_delete"))),
+            ("delete", "trash", "Delete…", "Delete this video and everything after it (asks first)",
+             S.keys("graph_delete"))),
             tip="More actions for this video: edit its range, branch, freeze, delete")
         head.addWidget(self.b_more)
         self.more_actions = acts

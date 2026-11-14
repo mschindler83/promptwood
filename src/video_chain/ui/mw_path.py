@@ -224,8 +224,8 @@ class PathMixin:
                                       "A clip that leads into a real video hands over at the video's start")
                 elif handover is not None:
                     card.set_handover(f"frame {handover + 1} of {total} ({handover / chain.FPS:.2f} s)", True, True,
-                                      f"The clips after it start from this frame; the last {total - 1 - handover} frames "
-                                      "are left out of the path")
+                                      f"The clips after it start from this frame; the last {total - 1 - handover} "
+                                      "frames are left out of the path")
                 else:
                     card.set_handover("last frame", bool(n.made), n.end_at is not None,
                                       "" if n.made else "Make the clip first, then choose an earlier frame if its "
@@ -308,13 +308,15 @@ class PathMixin:
         num = f" #{T.short_id(sel)}" if is_clip else ""
         self.b_branch.setToolTip(S.tip(f"Branch: another continuation from the same point as clip{num}", "branch"))
         self.b_variant.setToolTip(S.tip(f"Variant of clip{num}: same prompt, other seed", "variant"))
-        self.b_delete.setToolTip(S.tip(f"Delete clip{num} (the one in the inspector) and everything after it", "graph_delete"))
+        self.b_delete.setToolTip(S.tip(f"Delete clip{num} (the one in the inspector) and everything after it",
+                                       "graph_delete"))
         self.b_play_path.setEnabled(all_done and idle)
         self.b_export.setEnabled(all_done and idle)
         fn = self.tree.nodes.get(self.focus) if has and self.focus else None
         self.b_play_clip.setEnabled(bool(fn and fn.made))
         self.b_export_clip.setEnabled(bool(fn and fn.made) and idle and self.state(fn.id) == "done")
-        self.b_export_clip.setToolTip(f"Save clip #{T.short_id(fn.id)} on its own (as made, or upscaled)" if fn and fn.made
+        self.b_export_clip.setToolTip(f"Save clip #{T.short_id(fn.id)} on its own (as made, or upscaled)"
+                                      if fn and fn.made
                                       else "The clip in the inspector is not made yet" if fn else
                                       "Show a clip in the inspector first")
         self.b_play_clip.setToolTip(f"Play clip #{T.short_id(fn.id)}, the one in the inspector" if fn and fn.made else
@@ -340,8 +342,9 @@ class PathMixin:
                   self.comfy_url, self.ref_size, self.ref_hint, self.b_ref_add, self.b_ref_create,
                   self.b_ref_start,
                   self.b_ref_del, self.b_ref_crop, self.b_char_new, self.b_char_rename, self.b_char_del, self.char_desc,
-                  self.char_lead, self.b_voice_file, self.b_voice_del, self.dialogue_lang, self.speed, self.style_prefix,
-                  self.style_suffix, self.prompt_format, self.lora_triggers, self.veda, self.b_ai_edit, self.b_ai_create,
+                  self.char_lead, self.b_voice_file, self.b_voice_del, self.dialogue_lang, self.speed,
+                  self.style_prefix, self.style_suffix, self.prompt_format, self.lora_triggers, self.veda,
+                  self.b_ai_edit, self.b_ai_create,
                   self.b_film_cast):                # (storyboard and the film buttons: below, with the busy check)
             w.setEnabled(idle)
         self.aspect.setEnabled(idle and self.project is not None and T.size_origin(self.project, self.tree) == "aspect")
