@@ -45,6 +45,7 @@ from .lora_stack import LORA_MAX, LORA_MIN, LoraStack, fill_lora_combo, lora_lab
 from .swap_dialog import SwapDialog
 from .mentions import MentionHelper
 from .cast_strip import CastStrip
+from .clip_inputs import KIND_NAMES, ChipRow, ModelPromptDialog, chip_specs
 from .timeline import Block, Timeline
 from .storyboard import Storyboard
 from .face_crop import FaceCropDialog
@@ -557,6 +558,8 @@ class PromptCard(QFrame):
     action = Signal(str, str)                  # action, node id
     keyframe = Signal(str, str, object)        # keyframe action, node id, {"index", "at"}
     play = Signal(str)
+    leadChanged = Signal(str, bool)            # node id, the lead switch (the lead chip)
+    modelPrompt = Signal(str)                  # node id: show the exact prompt the model gets
 
     def __init__(self, node: T.Node, parent=None, names=lambda: []):
         super().__init__(parent)
@@ -614,6 +617,10 @@ class PromptCard(QFrame):
         self.faces.setWordWrap(True)
         self.faces.hide()
         v.addWidget(self.faces)
+        self.chips = ChipRow(self)                 # what the clip is made with, in model order (set_inputs)
+        self.chips.leadToggled.connect(lambda on: self.leadChanged.emit(self.nid, on))
+        self.chips.promptWanted.connect(lambda: self.modelPrompt.emit(self.nid))
+        v.addWidget(self.chips)
         foot = QHBoxLayout()
         self.words = label("", level="tertiary")
         foot.addWidget(self.words)
@@ -878,6 +885,8 @@ class PromptCard(QFrame):
                          "speed": self.cam_speed.currentData()})
         if cam:
             ov["camera"] = cam
+        if self.ov.get("lead") is False:          # (the lead chip's switch, not a widget here)
+            ov["lead"] = False
         self._enable_camera()
         self.ov = ov
         self.overridesChanged.emit(self.nid, ov)
@@ -941,6 +950,9 @@ class PromptCard(QFrame):
                   self.sound_over, self.b_refine, self.b_speak):
             w.setEnabled(edit)
         self._enable_speak()
+        for b in self.chips.chips:                 # (the lead chip is an own setting of the clip)
+            if b.isCheckable():
+                b.setEnabled(edit)
         for w in self.buttons:
             w.setEnabled(self._on)
         self.steps.setEnabled(edit and not self.steps_locked)
@@ -972,6 +984,13 @@ class PromptCard(QFrame):
     def set_faces(self, text: str):
         self.faces.setText(text)
         self.faces.setVisible(bool(text))
+
+    def set_inputs(self, specs: list[dict] | None):
+        """The chips under the prompt (clip_inputs.chip_specs; None: none)."""
+        self.chips.set_specs(specs)
+        for b in self.chips.chips:
+            if b.isCheckable():
+                b.setEnabled(not self.edit.isReadOnly())
 
     def set_veda(self, on: bool):
         self.veda_mark.setVisible(bool(on))
@@ -1567,7 +1586,7 @@ class MainWindow(QMainWindow):
         sv.addLayout(airow)
         proj_v.addWidget(sw)
 
-        bar, _ = section_bar("Cast", left)
+        bar, _ = section_bar("Cast & references", left)
         cast_v.addWidget(bar)
         iw = QWidget()
         iv = QVBoxLayout(iw)
@@ -1577,24 +1596,38 @@ class MainWindow(QMainWindow):
         self.cast_list.setIconSize(QSize(40, 40))
         self.cast_list.setFixedHeight(110)
         self.cast_list.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.cast_list.setToolTip("The characters of this video. In a prompt write @Name (typing @ offers the "
-                                  "names): the clip is made with exactly the faces it mentions. A clip that "
-                                  "mentions nobody uses the lead's face.")
+        self.cast_list.setToolTip("The characters of this video and the references for places, objects and a "
+                                  "style. In a prompt write @Name (typing @ offers the names): the clip is made "
+                                  "with exactly the faces and pictures it mentions. A clip that mentions nobody "
+                                  "uses the lead's face.")
         self.cast_list.currentRowChanged.connect(lambda _r: self._show_character())
         self.cast_list.itemDoubleClicked.connect(lambda _i: self._rename_character())
         iv.addWidget(self.cast_list)
         crow = QHBoxLayout()
-        self.b_char_new = QPushButton("New…")
-        self.b_char_new.setToolTip("A new character: a name to mention as @Name, then its face pictures")
-        self.b_char_new.clicked.connect(self._new_character)
+        self.b_char_new = QPushButton("New")
+        self.b_char_new.setToolTip("A new entry: a person (a character with face pictures, a voice, can be the "
+                                   "lead) or a place, object or style (whole pictures); a name to mention as @Name")
+        new_menu = QMenu(self.b_char_new)
+        for kind in T.CAST_KINDS:
+            act = new_menu.addAction(f"{KIND_NAMES[kind]}…")
+            act.triggered.connect(lambda _=False, k=kind: self._new_character(k))
+        self.b_char_new.setMenu(new_menu)
+        self.char_kind = QComboBox()
+        for kind in T.CAST_KINDS:
+            self.char_kind.addItem(KIND_NAMES[kind], kind)
+        self.char_kind.setToolTip("What the selected entry is. A person has face pictures (cropped to the face), can "
+                                  "have a voice and be the lead; a place, object or style is sent with its whole "
+                                  "pictures and is named as what it is in the prompt")
+        self.char_kind.activated.connect(lambda _i: self._character_kind_changed())
         self.b_char_rename = QPushButton("Rename…")
         self.b_char_rename.setToolTip("Rename the character; every @mention in the prompts is renamed too")
         self.b_char_rename.clicked.connect(self._rename_character)
         self.b_char_del = QPushButton("Remove")
-        self.b_char_del.setToolTip("Remove the character and its face pictures")
+        self.b_char_del.setToolTip("Remove the selected entry and its pictures")
         self.b_char_del.clicked.connect(self._remove_character)
         crow.addWidget(self.b_char_new)
         crow.addWidget(self.b_char_rename)
+        crow.addWidget(self.char_kind)
         crow.addStretch(1)
         crow.addWidget(self.b_char_del)
         iv.addLayout(crow)
@@ -1606,7 +1639,9 @@ class MainWindow(QMainWindow):
         self.char_lead = QCheckBox("Lead: clips that mention nobody get this face")
         self.char_lead.toggled.connect(self._character_lead_changed)
         iv.addWidget(self.char_lead)
-        vrow = QHBoxLayout()
+        self._voice_row = QWidget()
+        vrow = QHBoxLayout(self._voice_row)
+        vrow.setContentsMargins(0, 0, 0, 0)
         self.char_voice = label("Voice: none", level="tertiary")
         self.char_voice.setToolTip("A character with a voice speaks its lines with it: write the line in quotes in "
                                    "the sentence of its @Name, e.g. @Anna looks up and says \"Good morning.\" "
@@ -1638,7 +1673,7 @@ class MainWindow(QMainWindow):
         for b in (self.b_voice_file, self.b_voice_clip, self.b_voice_tts, self.b_voice_clone, self.b_voice_play,
                   self.b_voice_del):
             vrow.addWidget(b)
-        iv.addLayout(vrow)
+        iv.addWidget(self._voice_row)
         self.refs = QListWidget()
         self.refs.setViewMode(QListWidget.IconMode)
         self.refs.setIconSize(QSize(64, 64))
@@ -1668,7 +1703,8 @@ class MainWindow(QMainWindow):
         self.b_ref_crop.clicked.connect(self._recrop_reference)
         self.refs.itemDoubleClicked.connect(lambda _i: self._recrop_reference())
         self.refs.currentRowChanged.connect(lambda _r: self._update_cast_buttons())
-        rrow.addWidget(label("Add face:", level="tertiary"))
+        self.ref_add_label = label("Add face:", level="tertiary")
+        rrow.addWidget(self.ref_add_label)
         for b in (self.b_ref_add, self.b_ref_create, self.b_ref_start, self.b_ref_clip):
             rrow.addWidget(b)
         rrow.addStretch(1)
@@ -1914,6 +1950,18 @@ class MainWindow(QMainWindow):
         self.style_suffix = QLineEdit()
         self.style_suffix.setPlaceholderText("optional")
         self.style_suffix.setToolTip("Put after every prompt. Changing it makes every generated clip again")
+        self.prompt_format = QComboBox()
+        self.prompt_format.addItem("Official H3", "h3")
+        self.prompt_format.addItem("Classic", "classic")
+        self.prompt_format.setToolTip(
+            "<p><b>Official H3</b>: the prompts are written in MiniMax H3's official formats (a header line for a "
+            "start / end frame; with pictures or sounds the six sections of the reference format, each person, place, "
+            "object and style named as &lt;Subject N&gt; and tied to its pictures).<br><b>Classic</b>: the app's "
+            "earlier format (the prompt as written, with sentences that tie each name to its pictures); projects "
+            "made before the official format keep it.<br>Changing it marks the made clips as changed: they are kept, "
+            "making them again is your choice.</p>")
+        self.prompt_format.currentIndexChanged.connect(self._prompt_format_changed)
+        c.addRow("Prompt format", self.prompt_format)
         c.addRow("Style before", self.style_prefix)
         c.addRow("Style after", self.style_suffix)
         for w in (self.style_prefix, self.style_suffix):
@@ -2893,7 +2941,8 @@ class MainWindow(QMainWindow):
         self._show_storyboard()
 
     def show_film_cast(self):
-        """A table: the film's characters by scene (face ●, voice ♪), along the clips the film plays."""
+        """A table: the film's characters and references by scene (face ●, picture ◆, voice ♪), along the clips the
+        film plays."""
         if self.film is None:
             return
         if not self._save_tree():
@@ -2909,7 +2958,7 @@ class MainWindow(QMainWindow):
         table.setHorizontalHeaderLabels([f"{k}  {title}" for k, (title, _m) in enumerate(rows, start=1)])
         table.setVerticalHeaderLabels([f"@{n}" for n in names])
         table.setEditTriggers(QTableWidget.NoEditTriggers)
-        sym = {"face": "●", "voice": "♪", "face+voice": "●♪"}
+        sym = {"face": "●", "voice": "♪", "face+voice": "●♪", "picture": "◆"}
         for c, (_title, marks) in enumerate(rows):
             for r, n in enumerate(names):
                 item = QTableWidgetItem(sym.get(marks.get(n, ""), ""))
@@ -2917,7 +2966,7 @@ class MainWindow(QMainWindow):
                 table.setItem(r, c, item)
         table.resizeColumnsToContents()
         v.addWidget(table)
-        v.addWidget(label("● face   ♪ speaks with its voice", level="tertiary"))
+        v.addWidget(label("● face   ◆ picture (a place, object or style)   ♪ speaks with its voice", level="tertiary"))
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         buttons.rejected.connect(dlg.reject)
         v.addWidget(buttons)
@@ -3227,6 +3276,8 @@ class MainWindow(QMainWindow):
             ident = o.get("identity") or {}
             self.ref_size.setCurrentIndex(max(0, self.ref_size.findData(ident.get("size", "match"))))
             self.ref_hint.setChecked(bool(ident.get("hint", True)))
+            self.prompt_format.setCurrentIndex(max(0, self.prompt_format.findData("h3" if T.is_h3(o) else "classic")))
+            self._update_hint_enabled()
             self.dialogue_lang.setCurrentText(ident.get("language") or "English")
             topt = TTS.options(o)
             self.tts_provider.setCurrentIndex(max(0, self.tts_provider.findData(topt["provider"])))
@@ -3313,6 +3364,40 @@ class MainWindow(QMainWindow):
         self._update_cards()
         if not self._report_remade(before, "Style text changed"):
             self.status.setText("Style text changed.")
+
+    def _prompt_format_changed(self, *_):
+        """Official H3 / Classic: how the prompts are written for the model. Made clips are kept (CHANGED)."""
+        fmt = self.prompt_format.currentData()
+        if self._loading or self.tree is None or fmt == ("h3" if T.is_h3(self.tree) else "classic"):
+            return
+        if self.running:
+            self._loading = True
+            try:
+                self.prompt_format.setCurrentIndex(self.prompt_format.findData("h3" if T.is_h3(self.tree)
+                                                                               else "classic"))
+            finally:
+                self._loading = False
+            self.status.setText("Wait until generating has finished.")
+            return
+        before = self._done_clips()
+        T.set_prompt_format(self.tree, fmt)
+        self._update_hint_enabled()
+        self._changed()
+        self._update_cards()
+        name = "Official H3" if fmt == "h3" else "Classic"
+        if not self._report_remade(before, f"Prompt format: {name}"):
+            self.status.setText(f"Prompt format: {name}.")
+
+    def _update_hint_enabled(self):
+        """The "Tie each person to their face" switch is only for the classic format (the official one always
+        ties each subject to its pictures)."""
+        h3 = self.tree is not None and T.is_h3(self.tree)
+        self.ref_hint.setEnabled(not self.running and not h3)
+        self.ref_hint.setToolTip("The official H3 format always ties each person (and place, object, style) to its "
+                                 "pictures in the prompt; this switch is for the classic format" if h3 else
+                                 "With @mentions: \"Anna has exactly the face of the person in <Picture 1>.\" "
+                                 "and that the pictures only show who the people are. Without: "
+                                 f"\"{REF_HINT}\"")
 
     def _lora_triggers_changed(self, on: bool):
         if self._loading or self.tree is None or self.running:
@@ -3813,22 +3898,56 @@ class MainWindow(QMainWindow):
             return False
         return True
 
-    def _new_character(self):
+    def _ref_word(self, c: dict | None = "selected") -> str:
+        """How the pictures of a cast entry are called: "face picture" for a person (and for none: a picture then
+        goes to the lead or a new person), "picture" for a place, object or style."""
+        c = self._selected_character() if c == "selected" else c
+        return "picture" if c is not None and T.kind_of(c) != "person" else "face picture"
+
+    def _new_character(self, kind: str = "person"):
         if not self._cast_edit_ok():
             return
-        name, ok = QInputDialog.getText(self, "New character", "Name (you mention it in prompts as @Name):",
-                                        text=T.next_character_name(self.tree))
+        person = kind == "person"
+        name, ok = QInputDialog.getText(self, "New character" if person else f"New {kind}",
+                                        "Name (you mention it in prompts as @Name):",
+                                        text=T.next_character_name(self.tree) if person else KIND_NAMES[kind])
         if not ok:
             return
         try:
-            c = T.add_character(self.project, self.tree, name)
+            c = T.add_character(self.project, self.tree, name, kind=kind)
         except ValueError as e:
-            self.status.setText(f"Could not add the character: {e}")
+            self.status.setText(f"Could not add the {'character' if person else kind}: {e}")
             return
         self._show_references(select=c["name"])
         self._write_tree()
         self._changed()
-        self.status.setText(f"@{c['name']} added. Now add a face: Image…, Start image or Selected clip.")
+        self.status.setText(f"@{c['name']} added. Now add a face: Image…, Start image or Selected clip." if person else
+                            f"@{c['name']} added ({kind}). Now add a picture: Image…, Start image or Selected clip.")
+
+    def _character_kind_changed(self):
+        """The kind of the selected entry was chosen (person, place, object, style)."""
+        c = self._selected_character()
+        kind = self.char_kind.currentData()
+        if c is None or self._loading or kind == T.kind_of(c):
+            return
+        if not self._cast_edit_ok():
+            self._show_character()
+            return
+        before = self._done_clips()
+        try:
+            T.set_kind(self.tree, c["name"], kind)
+        except ValueError as e:
+            self.status.setText(f"Could not change @{c['name']}: {e}.")
+            self._show_character()                 # (the combo back to its kind)
+            return
+        self._show_references(select=c["name"])
+        self._write_tree()
+        self._changed()
+        if not self._report_remade(before, f"@{c['name']} is a {kind} now"):
+            self.status.setText(f"@{c['name']} is a {kind} now" + (
+                "." if kind == "person" else
+                (" (no longer the lead)" if c.get("lead") else "") + "; its pictures stay as they are (Whole "
+                "picture gives a cropped one its whole picture again)."))
 
     def _rename_character(self):
         c = self._selected_character()
@@ -3874,12 +3993,13 @@ class MainWindow(QMainWindow):
         if c is None or not self._cast_edit_ok():
             return
         users = self._mentioning(c["name"])
-        text = (f"Remove @{c['name']} and its {len(c['images'])} face picture{'s' if len(c['images']) != 1 else ''}"
+        text = (f"Remove @{c['name']} and its {len(c['images'])} {self._ref_word(c)}{'s' if len(c['images']) != 1 else ''}"
                 + (" and its voice?" if c.get("voice") else "?"))
         if users:
             text += (f" {len(users)} clip{'s mention' if len(users) != 1 else ' mentions'} @{c['name']}; "
                      "they cannot be made until their prompts are changed.")
-        if QMessageBox.question(self, "Remove character", text) != QMessageBox.Yes:
+        if QMessageBox.question(self, "Remove character" if T.kind_of(c) == "person" else f"Remove {T.kind_of(c)}",
+                                text) != QMessageBox.Yes:
             return
         before = self._done_clips()
         T.remove_character(self.project, self.tree, c["name"])
@@ -3907,7 +4027,12 @@ class MainWindow(QMainWindow):
         if c is None or self._loading or bool(c.get("lead")) == on or not self._cast_edit_ok():
             return
         before = self._done_clips()
-        T.update_character(self.tree, c["name"], lead=on)
+        try:
+            T.update_character(self.tree, c["name"], lead=on)
+        except ValueError as e:
+            self.status.setText(f"Could not change the lead: {e}.")
+            self._show_character()
+            return
         self._show_references(select=c["name"])
         self._write_tree()
         self._changed()
@@ -3953,8 +4078,10 @@ class MainWindow(QMainWindow):
         if self.project is None:
             self.status.setText("Open or create a project folder first.")
             return
-        f = pick_image(self, "Reference image (best a close-up of the face)", self.qs, None, self._picker_places(),
-                       self.project_images())
+        c = self._selected_character()
+        title = ("Reference image (best a close-up of the face)" if self._ref_word(c) == "face picture" else
+                 f"Picture of @{c['name']} (a {T.kind_of(c)}; the whole picture is used)")
+        f = pick_image(self, title, self.qs, None, self._picker_places(), self.project_images())
         if f:
             self.add_reference(f)
 
@@ -3966,7 +4093,7 @@ class MainWindow(QMainWindow):
             self.add_reference(str(self.project / T.START_FILE))
 
     def reference_from_node(self, nid: str, which: str) -> bool:
-        """A clip's first (videos only) or last frame as a face reference."""
+        """A clip's first (videos only) or last frame as a face reference (a picture of a place, object, style)."""
         node = self.tree.nodes.get(nid) if self.tree else None
         rel = (node.made or {}).get("first" if which == "first" else "frame") if node else None
         if not rel:
@@ -4002,7 +4129,8 @@ class MainWindow(QMainWindow):
         return self.edit_image(mode="create", dialog=dialog, character=c["name"] if c else None)
 
     def add_reference(self, path: str, crop="ask") -> bool:
-        """A face picture for the selected character (none selected: the lead, or a new character). crop: "ask"
+        """A face picture for the selected character (none selected: the lead, else the first person, else a new
+        character); for a selected place, object or style a picture (always whole: no crop window). crop: "ask"
         opens the crop window, else the square (x, y, side) or None (the whole picture)."""
         if self.project is None:
             self.status.setText("Open or create a project folder first.")
@@ -4014,15 +4142,19 @@ class MainWindow(QMainWindow):
             self.status.setText(f"Not an image: {Path(path).name}")
             return False
         target = self._selected_character()
-        owner = target or T.lead_of(self.tree) or (T.cast_of(self.tree) or [None])[0]
+        owner = target or T.lead_of(self.tree) or next((c for c in T.cast_of(self.tree)
+                                                        if T.kind_of(c) == "person"), None)
+        word = self._ref_word(owner)
         if owner is not None and len(owner["images"]) >= T.MAX_PICTURES_PER_CHARACTER:
-            self.status.setText(f"@{owner['name']} has {T.MAX_PICTURES_PER_CHARACTER} face pictures already; remove "
-                                "one first (or select another character).")
+            self.status.setText(f"@{owner['name']} has {T.MAX_PICTURES_PER_CHARACTER} {word}s already; remove "
+                                f"one first (or select another {'character' if word == 'face picture' else 'entry'}).")
             return False
         if len(T.all_pictures(self.tree)) >= T.MAX_CAST_PICTURES:
-            self.status.setText(f"The cast has {T.MAX_CAST_PICTURES} face pictures, the most the model takes; "
+            self.status.setText(f"The cast has {T.MAX_CAST_PICTURES} pictures, the most the model takes; "
                                 "remove one first.")
             return False
+        if word == "picture":                      # a place, object or style: the whole picture, no crop window
+            crop = None
         if crop == "ask":
             who = f"@{target['name']}" if target else (f"@{T.lead_of(self.tree)['name']}" if T.lead_of(self.tree)
                                                        else "a new character")
@@ -4035,15 +4167,16 @@ class MainWindow(QMainWindow):
         try:
             rel = T.add_reference(self.project, Path(path), self.tree, target["name"] if target else None, crop=crop)
         except (ValueError, OSError, RuntimeError) as e:
-            self.status.setText(f"Could not add the face: {e}")
+            self.status.setText(f"Could not add the {'face' if word == 'face picture' else 'picture'}: {e}")
             return False
         owner = next(c["name"] for c in T.cast_of(self.tree) if rel in c["images"])
         self._show_references(select=owner)
         self._write_tree()
         self._changed()
-        self.status.setText(f"Face added to @{owner}." if owner in known else
+        what = "Face" if word == "face picture" else "Picture"
+        self.status.setText(f"{what} added to @{owner}." if owner in known else
                             f"New character @{owner} with this face (rename it with Rename…).")
-        self._report_remade(before, f"Face added to @{owner}")
+        self._report_remade(before, f"{what} added to @{owner}")
         return True
 
     def _recrop_reference(self):
@@ -4052,7 +4185,9 @@ class MainWindow(QMainWindow):
             return
         rel = item.data(Qt.UserRole)
         full = self.project / T.source_of(rel)
-        crop = self.crop_face(str(full if full.is_file() else self.project / rel), "Crop the face picture again")
+        whole = self._ref_word() == "picture"      # a place, object or style: its whole picture again, no window
+        crop = None if whole else self.crop_face(str(full if full.is_file() else self.project / rel),
+                                                 "Crop the face picture again")
         if crop is False:
             return
         before = self._done_clips()
@@ -4066,8 +4201,9 @@ class MainWindow(QMainWindow):
         self._show_references(select=c["name"] if c else None)
         self._write_tree()
         self._changed()
-        if not self._report_remade(before, "Face picture cropped"):
-            self.status.setText("Face picture cropped.")
+        what = "Whole picture used" if whole else "Face picture cropped"
+        if not self._report_remade(before, what):
+            self.status.setText(f"{what}.")
 
     def _remove_reference(self):
         item = self.refs.currentItem()
@@ -4076,10 +4212,11 @@ class MainWindow(QMainWindow):
         rel = item.data(Qt.UserRole)
         before = self._done_clips()
         made = [n for n in before if n in self.tree.nodes and not self.tree.nodes[n].is_video
-                and rel in T.clip_cast(self.tree.options, self.tree.nodes[n].prompt)["images"]]
+                and rel in T.node_cast(self.tree.options, self.tree.nodes[n])["images"]]
+        word = self._ref_word()
         if made and QMessageBox.question(
-                self, "Remove face picture",
-                f"Remove this face picture? {len(made)} made clip{'s use' if len(made) != 1 else ' uses'} it and "
+                self, f"Remove {word}",
+                f"Remove this {word}? {len(made)} made clip{'s use' if len(made) != 1 else ' uses'} it and "
                 f"will count as CHANGED.") != QMessageBox.Yes:
             return
         T.remove_picture(self.project, self.tree, rel)
@@ -4088,7 +4225,7 @@ class MainWindow(QMainWindow):
         self._show_references(select=c["name"] if c else None)
         self._write_tree()
         self._changed()
-        self._report_remade(before, "Face picture removed")
+        self._report_remade(before, f"{word.capitalize()} removed")
 
     def _show_references(self, select: str | None = None):
         """The cast list (keeps the selected character), then the selected one's fields and pictures."""
@@ -4100,8 +4237,12 @@ class MainWindow(QMainWindow):
         for k, c in enumerate(cast):
             pm = self._pixmap(self.project / c["images"][0]) if self.project and c["images"] else None
             n = len(c["images"])
-            text = (f"@{c['name']}   {n} face{'s' if n != 1 else ''}" if n else f"@{c['name']}   no face yet") + \
-                ("   · voice" if c.get("voice") else "") + ("   · lead" if c.get("lead") else "")
+            if T.kind_of(c) == "person":
+                text = (f"@{c['name']}   {n} face{'s' if n != 1 else ''}" if n else f"@{c['name']}   no face yet") + \
+                    ("   · voice" if c.get("voice") else "") + ("   · lead" if c.get("lead") else "")
+            else:
+                text = (f"@{c['name']}   {n} picture{'s' if n != 1 else ''}" if n else
+                        f"@{c['name']}   no picture yet") + f"   · {T.kind_of(c)}"
             item = QListWidgetItem(QIcon(pm) if pm else QIcon(), text)
             item.setData(Qt.UserRole, c["name"])
             item.setToolTip((c.get("desc") or "") + (f" ({len(self._mentioning(c['name']))} clips mention it)"))
@@ -4122,8 +4263,12 @@ class MainWindow(QMainWindow):
                     "drift. Add a face (Image…, Start image, Selected clip, or a video's Edit range…) or New… "
                     "for a named character.")
         else:
-            text = (f"{len(cast)} character{'s' if len(cast) != 1 else ''}. Write @Name in a prompt (typing @ "
-                    "offers the names): the clip is made with exactly those faces. "
+            people = sum(1 for c in cast if T.kind_of(c) == "person")
+            others = len(cast) - people
+            text = (f"{people} character{'s' if people != 1 else ''}"
+                    + (f" and {others} reference{'s' if others != 1 else ''} (places, objects, style)" if others
+                       else "") + ". Write @Name in a prompt (typing @ offers the names): the clip is made with "
+                    "exactly those faces" + (" and pictures" if others else "") + ". "
                     + (f"Clips that mention nobody get @{lead['name']}'s face. " if lead and lead["images"] else
                        "Clips that mention nobody get no face. ")
                     + "A character with a voice speaks its lines in quotes with it (\"...\" in the sentence of "
@@ -4136,8 +4281,10 @@ class MainWindow(QMainWindow):
         try:
             self.char_desc.setText(c.get("desc", "") if c else "")
             self.char_lead.setChecked(bool(c and c.get("lead")))
+            self.char_kind.setCurrentIndex(max(0, self.char_kind.findData(T.kind_of(c))))
         finally:
             self._loading = was
+        self._show_kind_wording(c)
         v = (c or {}).get("voice")
         el = ((c or {}).get("tts") or {}).get("eleven")
         long = f"; cloned from {T.clone_secs(v):.1f} s" if v and v.get("ref") else ""
@@ -4154,11 +4301,45 @@ class MainWindow(QMainWindow):
         self._update_ref_start_button()
         self._update_cast_buttons()
 
+    def _show_kind_wording(self, c: dict | None):
+        """The cast panel for the selected entry's kind: a person has face pictures (cropped), a voice and the lead
+        switch; a place, object or style has (whole) pictures only."""
+        person = c is None or T.kind_of(c) == "person"
+        self._voice_row.setVisible(person)
+        self.char_lead.setVisible(person)
+        self.ref_add_label.setText("Add face:" if person else "Add picture:")
+        if person:
+            self.refs.setToolTip("Face pictures of the selected character (up to 3, e.g. front and side): best a "
+                                 "sharp close-up of the face, without the scene around it")
+            self.b_ref_add.setToolTip("Add an image file as a face picture of the selected character")
+            self.b_ref_create.setToolTip("Create a face picture with AI (the Create image window); there “Add as "
+                                         "face reference” adds a result to the selected character")
+            self.b_ref_del.setToolTip("Remove the selected face picture")
+            self.b_ref_crop.setText("Crop…")
+            self.b_ref_crop.setToolTip("Crop the selected face picture again (from the full picture it came from)")
+        else:
+            k = T.kind_of(c)
+            self.refs.setToolTip(f"Pictures of @{c['name']} (a {k}; up to {T.MAX_PICTURES_PER_CHARACTER}): the whole "
+                                 "picture is sent, nothing is cropped")
+            self.b_ref_add.setToolTip(f"Add an image file as a picture of @{c['name']} (the whole picture)")
+            self.b_ref_create.setToolTip(f"Create a picture of @{c['name']} with AI (the Create image window); there "
+                                         "the Add button adds a result to it")
+            self.b_ref_del.setToolTip("Remove the selected picture")
+            self.b_ref_crop.setText("Whole picture")
+            self.b_ref_crop.setToolTip("Use the whole picture again for the selected one (if it was cropped as a "
+                                       "face before)")
+        self.char_desc.setPlaceholderText("Description (optional), e.g. woman, 30s, grey knit sweater" if person else
+                                          {"place": "Description (optional), e.g. a small sunny kitchen",
+                                           "object": "Description (optional), e.g. a red vintage bicycle",
+                                           "style": "Description (optional), e.g. hand-drawn watercolour look"
+                                           }[T.kind_of(c)])
+
     def _update_cast_buttons(self):
         """The cast buttons that need a selected character, voice or face picture (and no run)."""
         c = self._selected_character()
         idle = self.project is not None and not self.running
         v = bool(c and c.get("voice"))
+        self.char_kind.setEnabled(idle and c is not None)
         for w in (self.b_char_rename, self.b_char_del, self.char_desc, self.char_lead, self.b_voice_file,
                   self.b_voice_tts):
             w.setEnabled(idle and c is not None)
@@ -4760,9 +4941,12 @@ class MainWindow(QMainWindow):
             edits.append((str(png), f"{what} · {words[:48]}{'…' if len(words) > 48 else ''}" if words else what))
         faces = []
         for c in T.cast_of(self.tree):
+            word = "face" if T.kind_of(c) == "person" else T.kind_of(c)
             for k, rel in enumerate(c["images"], start=1):
-                faces.append((str(p / rel), f"@{c['name']}" + (f" · face {k}" if len(c["images"]) > 1 else "")))
-        kinds = [("Start image", start), ("Image edits & new images", edits), ("Cast faces", faces),
+                faces.append((str(p / rel), f"@{c['name']}" + (f" · {word} {k}" if len(c["images"]) > 1 else
+                                                                "" if word == "face" else f" · {word}")))
+        group = "Cast faces" if all(T.kind_of(c) == "person" for c in T.cast_of(self.tree)) else "Cast & references"
+        kinds = [("Start image", start), ("Image edits & new images", edits), (group, faces),
                  ("Clip frames", clips), ("Video frames", videos), ("End images", ends)]
         kinds = [(name, items) for name, items in kinds if items]
         everything = [x for _n, items in kinds for x in items]
@@ -4854,20 +5038,23 @@ class MainWindow(QMainWindow):
         self._update_track_buttons()
         start = self._start_image_there()
         self.b_ref_start.setEnabled(start and not self.running)
-        self.b_ref_start.setToolTip("Add the start image as a face reference" if start else
-                                    "The project has no start image")
+        ref = "face reference" if self._ref_word() == "face picture" else \
+            f"picture of @{self._selected_character()['name']}"
+        self.b_ref_start.setToolTip(f"Add the start image as a {ref}" if start else "The project has no start image")
         nid = self.tree.selected if self.tree else None
         node = self.tree.nodes.get(nid) if self.tree and nid else None
         made = node is not None and bool(node.made)
         self.b_ref_clip.setEnabled(made and not self.running)
         if made:
             what = (f"the first frame of video #{nid[1:]}" if node.is_video else f"the last frame of clip #{nid[1:]}")
-            tip = f"Add {what} as a face reference"
+            tip = f"Add {what} as a {ref}"
         else:
             tip = "Select a converted video or a made clip"
-        self.b_ref_clip.setToolTip(tip + ". For any frame of a video: Edit range… → Add as face picture…")
+        self.b_ref_clip.setToolTip(tip + ". For any frame of a video: Edit range… → Add as "
+                                   + ("face picture…" if ref == "face reference" else ref))
         has_sound = node is not None and bool((node.made or {}).get("video"))
-        self.b_voice_clip.setEnabled(has_sound and self._selected_character() is not None and not self.running)
+        self.b_voice_clip.setEnabled(has_sound and self._ref_word() == "face picture"
+                                     and self._selected_character() is not None and not self.running)
         self.b_voice_clip.setToolTip(
             f"Set the voice from the sound of {'video' if node.is_video else 'clip'} #{nid[1:]}: choose the part "
             "of it, with or without its background music" if has_sound
@@ -5040,6 +5227,77 @@ class MainWindow(QMainWindow):
             parts.append("⚡ Veda")
         return " · ".join(parts)
 
+    def _clip_inputs(self, n: T.Node, checker: T.Checker | None = None) -> dict | None:
+        """T.clip_inputs of a generated clip (None: it cannot be worked out now, e.g. an unreadable start image)."""
+        if self.project is None or self.tree is None or n.is_video:
+            return None
+        try:
+            return T.clip_inputs(self.project, self.tree, n.id, checker)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _sent_guess(self, n: T.Node, use: dict) -> str:
+        """The prompt the model gets, from the clip alone (when clip_inputs cannot be worked out)."""
+        words = T.lora_trigger_words([p for p, _s in T.node_loras(n)]) \
+            if self.tree.options.get("lora_triggers", True) and T.node_loras(n) else []
+        sounds = [None] * (T.audio_mentioned(T.full_prompt(self.tree.options, n.prompt)) + len(use.get("voices") or []))
+        cont = (n.overrides or {}).get("source_sound") \
+            if T.source_sound_span(self.tree, n) is not None and not (n.overrides or {}).get("sound_over") else None
+        try:
+            return T.model_prompt(self.tree.options, n, {"lora_triggers": words, "audio_refs": sounds,
+                                                         "source_sound": cont,
+                                                         "camera": CAM.clean((n.overrides or {}).get("camera"))})
+        except Exception:  # noqa: BLE001
+            return n.prompt.strip()
+
+    def _lead_off(self, n: T.Node) -> str | None:
+        """The lead's name when the clip's lead switch is off and the clip would get the lead with it on (its
+        prompt mentions nobody), so its chip can switch it on again; else None."""
+        lead = T.lead_of(self.tree)
+        if T.lead_on(n) or lead is None:
+            return None
+        use = T.clip_cast(self.tree.options, n.prompt, voices=not T.sound_given(n), lead=True)
+        mentioned = {c["name"] for c in T.mentions(self.tree.options, T.full_prompt(self.tree.options, n.prompt))[0]}
+        return lead["name"] if any(c["name"] == lead["name"] for c in use["characters"]) \
+            and lead["name"] not in mentioned else None
+
+    def set_clip_lead(self, nid: str, on: bool):
+        """The lead chip of a clip: switch its lead on / off (overrides "lead"), like its other own settings."""
+        node = self.tree.nodes.get(nid) if self.tree is not None else None
+        if node is None or node.is_video or self.running or T.lead_on(node) == bool(on):
+            return
+        if node.frozen:
+            self.status.setText(f"Clip #{nid[1:]} is frozen; unfreeze it first.")
+            self._update_cards()
+            return
+        lead = T.lead_of(self.tree)
+        T.set_lead_on(node, bool(on))
+        card = next((c for c in self.cards if c.nid == nid), None)
+        if isinstance(card, PromptCard):
+            card.ov = dict(node.overrides or {})
+        before = self._done_clips()
+        self._changed()
+        self._update_cards()
+        who = f"@{lead['name']}" if lead else "the lead"
+        if not self._report_remade(before, f"Clip #{nid[1:]}: lead {'on' if on else 'off'}"):
+            self.status.setText(f"Clip #{nid[1:]} is made with {who} again (its prompt mentions nobody)." if on else
+                                f"Clip #{nid[1:]} is made without {who}.")
+
+    def show_model_prompt(self, nid: str) -> QDialog | None:
+        """The Model prompt window of a clip: the exact text the model gets and its numbered pictures / sounds.
+        Returns the dialog (kept modeless and not run in tests: _dialogs_modeless)."""
+        node = self.tree.nodes.get(nid) if self.tree is not None else None
+        info = self._clip_inputs(node) if node is not None else None
+        if info is None:
+            self.status.setText("The model prompt cannot be worked out now (is the start image readable?).")
+            return None
+        dlg = ModelPromptDialog(self, nid, info)
+        self._model_prompt_dialog = dlg            # (tests look at it)
+        if not getattr(self, "_dialogs_modeless", False):
+            dlg.exec()
+            dlg.deleteLater()
+        return dlg
+
     def _faces_text(self, use: dict) -> str:
         """Which faces (and voices) a clip is made with, for its card ('' without a cast); with spoken lines, who
         says each one (as the app reads it: the voice it gets)."""
@@ -5052,14 +5310,22 @@ class MainWindow(QMainWindow):
             text += "\nLines: " + " · ".join(said)
         return text
 
+    @staticmethod
+    def _seen_line(chars: list[dict]) -> str:
+        """"Faces: @Anna · Pictures: @Kitchen" for the cast entries a clip sends pictures of ('' for none)."""
+        faces = [f"@{c['name']}" for c in chars if c["images"] and T.kind_of(c) == "person"]
+        pics = [f"@{c['name']}" for c in chars if c["images"] and T.kind_of(c) != "person"]
+        return " · ".join(([("Faces: " + ", ".join(faces))] if faces else [])
+                          + ([("Pictures: " + ", ".join(pics))] if pics else []))
+
     def _cast_line(self, use: dict) -> str:
         if use["mode"] == "voices":
-            faces = [f"@{c['name']}" for c in use["characters"] if c["images"]]
+            seen = self._seen_line(use["characters"])
             voices = [f"@{c['name']}" for c in use["characters"]
                       if c.get("voice") and c["voice"]["file"] in use["voices"]]
-            return (("Faces: " + ", ".join(faces) + " · ") if faces else "") + "Voices: " + ", ".join(voices)
+            return ((seen + " · ") if seen else "") + "Voices: " + ", ".join(voices)
         if use["mode"] == "mention":
-            return "Faces: " + ", ".join(f"@{c['name']}" for c in use["characters"])
+            return self._seen_line(use["characters"])
         if use["mode"] == "lead":
             return f"Faces: @{use['characters'][0]['name']} (the lead; the prompt mentions nobody)"
         if use["mode"] == "tags":
@@ -5131,6 +5397,8 @@ class MainWindow(QMainWindow):
             parts.append(f"{ov['steps']} steps")
         if CAM.describe(ov.get("camera")):
             parts.append("🎥 " + CAM.describe(ov.get("camera")))
+        if ov.get("lead") is False:
+            parts.append("no lead")
         if ov.get("source_sound") == "previous":
             parts.append("repeats the sound before" + over)
         elif T.track_id(n) is not None:
@@ -5173,6 +5441,8 @@ class MainWindow(QMainWindow):
             card.action.connect(self.node_action)
             card.keyframe.connect(self.keyframe_action)
             card.play.connect(self._play_node)
+            card.leadChanged.connect(self.set_clip_lead)
+            card.modelPrompt.connect(self.show_model_prompt)
             self._fit_card(card)
             self.card_stack.addWidget(card)
             self.cards.append(card)
@@ -5289,7 +5559,7 @@ class MainWindow(QMainWindow):
                         T.path_cuts(self.tree, path_nodes, bool(self.tree.options.get("keep_repeated")),
                                     planned=True)))
         self._update_timeline(path_nodes, cuts)
-        t = 0.0
+        t, checker = 0.0, None
         for k, card in enumerate(self.cards):
             n = self.tree.nodes.get(card.nid)
             if n is None:
@@ -5331,17 +5601,12 @@ class MainWindow(QMainWindow):
                 card.words.setText(card.words.text().split(" + ")[0] +
                                    (" + style" if T.full_prompt(self.tree.options, "x") != "x" else ""))
                 use = T.node_cast(self.tree.options, n)
-                words = T.lora_trigger_words([p for p, _s in T.node_loras(n)]) \
-                    if self.tree.options.get("lora_triggers", True) and T.node_loras(n) else []
-                sounds = [None] * (T.audio_mentioned(T.full_prompt(self.tree.options, n.prompt))
-                                   + len(use.get("voices") or []))
-                cont = (n.overrides or {}).get("source_sound") \
-                    if T.source_sound_span(self.tree, n) is not None and not (n.overrides or {}).get("sound_over") \
-                    else None
-                sent = T.model_prompt(self.tree.options, n, {"lora_triggers": words, "audio_refs": sounds,
-                                                             "source_sound": cont,
-                                                             "camera": CAM.clean((n.overrides or {}).get("camera"))})
+                if checker is None and self.project is not None:
+                    checker = T.Checker(self.project, self.tree)     # (one for all cards: it caches the hashes)
+                info = self._clip_inputs(n, checker)
+                sent = info["prompt"] if info is not None else self._sent_guess(n, use)
                 card.edit.setToolTip("Sent to the model: " + sent if sent != n.prompt.strip() else "")
+                card.set_inputs(chip_specs(info, self._lead_off(n)) if info is not None else None)
                 card.set_faces(self._faces_text(use))
                 card.set_tracks([(tr["id"], tr["name"]) for tr in T.tracks(self.tree)])
                 avail, info, max_guide, rep_ok = self._source_sound_text(n)
@@ -5441,7 +5706,7 @@ class MainWindow(QMainWindow):
                   self.b_ref_start,
                   self.b_ref_del, self.b_ref_crop, self.b_char_new, self.b_char_rename, self.b_char_del, self.char_desc,
                   self.char_lead, self.b_voice_file, self.b_voice_del, self.dialogue_lang, self.speed, self.style_prefix,
-                  self.style_suffix, self.lora_triggers, self.veda, self.b_ai_edit, self.b_ai_create, self.storyboard,
+                  self.style_suffix, self.prompt_format, self.lora_triggers, self.veda, self.b_ai_edit, self.b_ai_create, self.storyboard,
                   self.b_film_gen, self.b_film_play, self.b_film_export, self.b_film_cast):
             w.setEnabled(idle)
         self.aspect.setEnabled(idle and self.project is not None and T.size_origin(self.project, self.tree) == "aspect")
@@ -5454,6 +5719,7 @@ class MainWindow(QMainWindow):
         self._turbo_widgets()                      # after the loop: turbo locks the steps fields again
         self._update_ref_start_button()            # after the loop too: they depend on the selection
         self._update_cast_buttons()
+        self._update_hint_enabled()                # (only for the classic format)
 
     def select(self, nid):
         if self.tree is None:
@@ -5939,8 +6205,7 @@ class MainWindow(QMainWindow):
             except Exception as e:  # noqa: BLE001  (ComfyUI down: the llama.cpp model still refines)
                 comfy, err = None, str(e)
             return CombinedRefiner(comfy, llama, err)
-        cast = [{"name": c["name"], "desc": c.get("desc", ""), "voice": bool(c.get("voice"))}
-                for c in T.cast_of(self.tree)] if self.tree is not None and kind in ("video", "video_h3") else []
+        cast = T.refiner_cast(self.tree) if self.tree is not None and kind in ("video", "video_h3") else []
         dlg = RefineDialog(self, text, kind, connect, self.qs, start_comfy=self.start_comfy, cast=cast,
                            pictures=pictures or [], seconds=seconds, start_image=start_image)
         try:
@@ -5997,7 +6262,8 @@ class MainWindow(QMainWindow):
                     self._node_frame(n) if not n.is_video else self.project / n.made["frame"])
         for c in T.cast_of(self.tree):
             for k, rel in enumerate(c["images"], start=1):
-                add(f"Face of @{c['name']}" + (f" ({k})" if len(c["images"]) > 1 else ""), self.project / rel)
+                add(("Face" if T.kind_of(c) == "person" else "Picture") + f" of @{c['name']}"
+                    + (f" ({k})" if len(c["images"]) > 1 else ""), self.project / rel)
         first = None
         if start:
             first = str(self.project / T.START_FILE) if (self.project / T.START_FILE).is_file() else None
@@ -6044,7 +6310,8 @@ class MainWindow(QMainWindow):
                     return False
                 c = self._selected_character()
                 record_use(png, {"kind": "ref", "file": c["images"][-1]})
-                return (f"Added as a face of @{c['name']} (the Cast tab, Alt+2); mention it in prompts as "
+                return (f"Added as a {'face' if T.kind_of(c) == 'person' else 'picture'} of @{c['name']} (the Cast "
+                        "tab, Alt+2); mention it in prompts as "
                         f"@{c['name']}." + (f" {self.status.text()}" if "CHANGED" in self.status.text() else ""))
             ok = self.set_image(png, confirm=True) if kind == "start" else \
                 bool(target) and self.set_end_image(target, png)
@@ -6078,7 +6345,8 @@ class MainWindow(QMainWindow):
                               use_triggers=bool(self.tree.options.get("lora_triggers", True)))
         self._edit_switch = switch
         if character:
-            dlg.b_use_ref.setText(f"Add as face of @{character}")
+            pc = T.character(self.tree, character)
+            dlg.b_use_ref.setText(f"Add as {'face' if T.kind_of(pc) == 'person' else 'picture'} of @{character}")
         if dialog:
             dlg.exec()
             dlg.deleteLater()
@@ -6487,6 +6755,9 @@ class MainWindow(QMainWindow):
         dlg = VideoRangeDialog(self, f if Path(f).is_file() else "", src["start"], src["end"],
                                canvas=self._canvas_for(f, rot, nid), settings=self.qs, on_reference=self.add_reference,
                                rotate=rot, canvas_for=lambda file, r: self._canvas_for(file, r, nid))
+        sel = self._selected_character()
+        if sel is not None and T.kind_of(sel) != "person":
+            dlg.set_reference_kind(sel["name"], T.kind_of(sel))
         if dlg.exec() != QDialog.Accepted or not dlg.file:
             return
         self.set_video_range(nid, dlg.file, dlg.start, dlg.end, dlg.rotate)
@@ -6716,10 +6987,12 @@ class MainWindow(QMainWindow):
             export_one = m.addAction("Export this video…" if node is not None and node.is_video else
                                      "Export this clip…")
             export_one.setEnabled(bool(self.tree.nodes[nid].made) and self.state(nid) == "done")
+            ref = "face reference" if self._ref_word() == "face picture" else \
+                f"picture of @{self._selected_character()['name']}"
             if node is not None and node.is_video:
-                ref_first = m.addAction("Add first frame as face reference")
+                ref_first = m.addAction(f"Add first frame as {ref}")
                 ref_first.setEnabled(bool(node.made))
-            ref_last = m.addAction("Add last frame as face reference")
+            ref_last = m.addAction(f"Add last frame as {ref}")
             ref_last.setEnabled(bool(node is not None and node.made))
             gen = m.addAction("Generate the path to here")
             if self.film is not None:
@@ -6799,6 +7072,8 @@ class MainWindow(QMainWindow):
             return None
         pictures = []
         for c in T.cast_of(self.tree):
+            if T.kind_of(c) != "person":            # (a head swap takes faces)
+                continue
             for k, rel in enumerate(c["images"], start=1):
                 if (self.project / rel).is_file():
                     pictures.append((f"Face of @{c['name']}" + (f" ({k})" if len(c["images"]) > 1 else ""),

@@ -1,5 +1,6 @@
 """Who appears in which clip of the selected path: one row per character, one column per clip.
-● face, ♪ speaks with its voice, ○ the lead's face (the prompt mentions nobody), · mentioned without a face."""
+● face, ◆ picture (a place, object or style), ♪ speaks with its voice, ○ the lead's face (the prompt mentions
+nobody), · mentioned without a face / picture."""
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
@@ -26,13 +27,14 @@ def cast_cells(options: dict, nodes: list) -> dict[tuple[str, str], tuple[str, s
             if name == lead:
                 mark, what = "○", ["the lead's face (the prompt mentions nobody)"]
             else:
-                mark = ("●" if name in shown else "") + ("♪" if name in talking else "")
+                person = T.kind_of(c) == "person"
+                mark = (("●" if person else "◆") if name in shown else "") + ("♪" if name in talking else "")
                 if name in shown:
-                    what.append("face")
+                    what.append("face" if person else f"picture ({T.kind_of(c)})")
                 if name in talking:
                     what.append("speaks with its voice")
                 if not mark and name in mentioned:
-                    mark, what = "·", ["mentioned, but no face picture is sent"]
+                    mark, what = "·", [f"mentioned, but no {'face picture' if person else 'picture'} is sent"]
             if mark:
                 out[(name, n.id)] = (mark, f"@{name} in #{n.id[1:]}: {', '.join(what)}")
     return out
@@ -55,8 +57,9 @@ class CastStrip(QTableWidget):
         self.verticalHeader().setDefaultSectionSize(20)
         self.horizontalHeader().sectionClicked.connect(self._clicked)
         self.cellClicked.connect(lambda _r, c: self._clicked(c))
-        self.setToolTip("Who appears in which clip: ● face, ♪ speaks with its voice, ○ the lead (the prompt "
-                        "mentions nobody), · mentioned without a face. Click a clip to show its card.")
+        self.setToolTip("Who and what appears in which clip: ● face, ◆ picture (a place, object or style), ♪ speaks "
+                        "with its voice, ○ the lead (the prompt mentions nobody), · mentioned without a face or "
+                        "picture. Click a clip to show its card.")
         self._ids: list[str] = []
 
     def show_path(self, options: dict, nodes: list) -> None:

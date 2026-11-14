@@ -230,6 +230,7 @@ class VideoRangeDialog(QDialog):
                               "square by hand) and add it to the character selected in the Cast; clips that "
                               "mention that character get this face")
         self.b_ref.clicked.connect(self.reference_here)
+        self.face = True                              # set_reference_kind: a person's face, else a whole picture
         self.b_ref.setVisible(on_reference is not None)
         rrow.addWidget(self.b_ref)
         v.addLayout(rrow)
@@ -377,6 +378,14 @@ class VideoRangeDialog(QDialog):
         self.buttons.button(QDialogButtonBox.Ok).setEnabled(on and self.frames() >= 1)
 
     # ---- face picture
+    def set_reference_kind(self, name: str, kind: str) -> None:
+        """The Cast's selected entry is a place, object or style (not "person"): its pictures are whole frames."""
+        self.face = kind == "person"
+        if not self.face:
+            self.b_ref.setText(f"Add as picture of @{name}")
+            self.b_ref.setToolTip(f"Add the whole frame at the playhead as a picture of @{name} (a {kind}); clips "
+                                  "that mention it get this picture")
+
     def reference_here(self) -> bool:
         """The frame at the playhead at the source's size (turned as set), handed to on_reference (which opens the
         crop window)."""
@@ -396,8 +405,10 @@ class VideoRangeDialog(QDialog):
                 self.summary.setText(f"Could not read the frame at {fmt(t)}.")
                 return False
             ok = bool(self.on_reference(str(png)))
-        self.summary.setText(f"The face from the frame at {fmt(t)} was added (see the Cast tab, Alt+2)." if ok
-                             else f"The frame at {fmt(t)} was not added as a face picture.")
+        what = "face picture" if self.face else "picture"
+        self.summary.setText((f"The face from the frame at {fmt(t)} was added (see the Cast tab, Alt+2)." if self.face
+                              else f"The frame at {fmt(t)} was added as a picture (see the Cast tab, Alt+2).") if ok
+                             else f"The frame at {fmt(t)} was not added as a {what}.")
         return ok
 
     # ---- range

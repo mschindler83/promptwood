@@ -4046,3 +4046,145 @@ def test_clone_a_voice_at_elevenlabs(app, win, tmp_path, image, monkeypatch):
     wait(app, lambda: not win._tts_busy, timeout=30)
     assert "Anna (video-chain)" in asked[-1] and "replaces it" in asked[-1]
     assert T.character(win.tree, "Anna")["tts"]["eleven"]["id"] == "clone3"
+
+
+def _chips(win, nid):
+    card = next(c for c in win.cards if c.nid == nid)
+    return card, card.chips.texts()
+
+
+def test_cast_kinds_in_the_window(app, win, tmp_path, image, monkeypatch):
+    """New ▸ Place…: a place gets whole pictures (no crop window), no voice controls, no lead; its kind can be
+    changed, and the core's refusals are shown in the status line."""
+    new_project(win, tmp_path, image, ("a",))
+    menu = win.b_char_new.menu()
+    assert [a.text() for a in menu.actions()] == ["Person…", "Place…", "Object…", "Style…"]
+    asked = []
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: (asked.append(a[1]), ("Kitchen", True))[1])
+    menu.actions()[1].trigger()
+    assert asked == ["New place"] and "@Kitchen added (place)" in win.status.text()
+    c = T.character(win.tree, "Kitchen")
+    assert T.kind_of(c) == "place" and c["lead"] is False and win.char_kind.currentData() == "place"
+    assert win._voice_row.isHidden() and win.char_lead.isHidden()
+    assert win.ref_add_label.text() == "Add picture:" and "whole picture" in win.refs.toolTip()
+    assert win.b_ref_crop.text() == "Whole picture"
+
+    def no_crop(*_a, **_k):
+        raise AssertionError("no crop window for a place")
+    monkeypatch.setattr(win, "crop_face", no_crop)
+    room = tmp_path / "room.png"
+    Image.new("RGB", (120, 90), (90, 90, 200)).save(room)
+    assert win.add_reference(str(room))
+    rel = T.character(win.tree, "Kitchen")["images"][0]
+    assert Image.open(win.project / rel).size == (120, 90)                         # the whole picture
+    assert win.status.text().startswith("Picture added to @Kitchen")
+    assert win.cast_list.item(0).text() == "@Kitchen   1 picture   · place"
+    monkeypatch.delattr(win, "crop_face")
+    # a person again: the voice controls come back
+    win.char_kind.setCurrentIndex(win.char_kind.findData("person"))
+    win._character_kind_changed()
+    assert T.kind_of(T.character(win.tree, "Kitchen")) == "person" and not win._voice_row.isHidden()
+    assert win.ref_add_label.text() == "Add face:" and win.b_ref_crop.text() == "Crop…"
+    import subprocess
+    speech = tmp_path / "v.wav"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=200:duration=3",
+                    str(speech)], check=True)
+    T.set_voice(win.project, win.tree, "Kitchen", speech)
+    win.char_kind.setCurrentIndex(win.char_kind.findData("object"))
+    win._character_kind_changed()                                                  # refused: it has a voice
+    assert "Could not change @Kitchen" in win.status.text() and "has a voice" in win.status.text()
+    assert T.kind_of(T.character(win.tree, "Kitchen")) == "person" and win.char_kind.currentData() == "person"
+    assert T.load(win.project).options["cast"][0].get("kind") is None
+
+
+def test_clip_chips_and_the_model_prompt(app, win, tmp_path, image, monkeypatch):
+    """The chips under a clip's prompt, in the order the model gets its inputs; the lead chip switches the clip's
+    lead; the Model prompt window shows exactly what the model gets."""
+    ids = new_project(win, tmp_path, image, ("A cat jumps.",))
+    flush(app, win)
+    card, chips = _chips(win, ids[0])
+    assert chips == ["Start frame", "fl2va · classic"] and not card.chips.isHidden()
+    assert card.chips.chips[0].toolTip() == "The clip starts exactly from this frame (start.png)."
+    # the official format: a person, a place and the start frame numbered after their pictures
+    win.prompt_format.setCurrentIndex(win.prompt_format.findData("h3"))
+    p = win.project
+    for k, name in enumerate(("a1", "a2", "k")):
+        Image.new("RGB", (64, 80), (200 - 10 * k, 150, 130)).save(tmp_path / f"{name}.png")
+    T.add_character(p, win.tree, "Anna", tmp_path / "a1.png", desc="woman, 30s")
+    T.add_picture(p, win.tree, "Anna", tmp_path / "a2.png")
+    T.add_character(p, win.tree, "Kitchen", tmp_path / "k.png", desc="a small sunny kitchen", kind="place")
+    win._show_references()
+    type_prompt(win, ids[0], "@Anna walks into @Kitchen.")
+    flush(app, win)
+    card, chips = _chips(win, ids[0])
+    assert chips == ["Start frame · Picture 4", "@Anna · face ×2", "@Kitchen · place", "ref2va · official"]
+    tips = [b.toolTip() for b in card.chips.chips]
+    assert "<Picture 4>" in tips[0] and "<Picture 1> and <Picture 2>" in tips[1] and "<Picture 3>" in tips[2]
+    info = T.clip_inputs(p, win.tree, ids[0])
+    assert card.edit.toolTip() == "Sent to the model: " + info["prompt"]
+    win._dialogs_modeless = True
+    card.chips.b_prompt.click()
+    dlg = win._model_prompt_dialog
+    assert dlg.text.toPlainText() == info["prompt"] and dlg.text.isReadOnly()
+    assert dlg.inputs.text().splitlines() == ["<Picture 1> — @Anna (ref1.png)", "<Picture 2> — @Anna (ref2.png)",
+                                              "<Picture 3> — @Kitchen (ref3.png)",
+                                              "<Picture 4> — start frame (start.png)"]
+    dlg.b_copy.click()
+    assert QApplication.clipboard().text() == info["prompt"]
+    dlg.deleteLater()
+    # the implicit lead: a checkable chip; off, the clip has no lead pictures and the chip stays to switch it on
+    type_prompt(win, ids[0], "She waves.")
+    flush(app, win)
+    card, chips = _chips(win, ids[0])
+    assert chips == ["Start frame · Picture 3", "@Anna · lead", "ref2va · official"]
+    lead = card.chips.chips[1]
+    assert lead.isCheckable() and lead.isChecked() and lead.isEnabled()
+    lead.click()
+    assert win.tree.nodes[ids[0]].overrides == {"lead": False} and "without @Anna" in win.status.text()
+    flush(app, win)
+    card, chips = _chips(win, ids[0])
+    assert chips == ["Start frame", "@Anna · lead off", "fl2va · official"]
+    assert not card.chips.chips[1].isChecked()
+    s = T.Checker(p, win.tree).settings(ids[0])
+    assert "refs" not in s and "frame_pictures" not in s and "no lead" in card.settings_toggle.text()
+    card.cam_move.setCurrentIndex(card.cam_move.findData("pan-left"))              # another own setting: kept
+    assert win.tree.nodes[ids[0]].overrides == {"camera": {"move": "pan-left"}, "lead": False}
+    card.cam_move.setCurrentIndex(0)
+    flush(app, win)
+    assert T.load(p).nodes[ids[0]].overrides == {"lead": False}                    # saved
+    card, _chips_now = _chips(win, ids[0])
+    card.chips.chips[1].click()                                                     # on again: as before
+    assert win.tree.nodes[ids[0]].overrides == {}
+    flush(app, win)
+    assert _chips(win, ids[0])[1] == ["Start frame · Picture 3", "@Anna · lead", "ref2va · official"]
+    assert T.Checker(p, win.tree).settings(ids[0])["frame_pictures"] == ["start"]
+
+
+def test_prompt_format_choice(app, win, tmp_path, image):
+    """Project → Prompt format switches options["prompt_format"]; the official format disables the face hint; a
+    project file from before the setting opens as classic."""
+    new_project(win, tmp_path, image, ("a",))
+    assert win.prompt_format.currentData() == "classic" and win.ref_hint.isEnabled()      # (the tests' default)
+    win.prompt_format.setCurrentIndex(win.prompt_format.findData("h3"))
+    assert win.tree.options["prompt_format"] == "h3" and not win.ref_hint.isEnabled()
+    assert "official H3 format always ties" in win.ref_hint.toolTip()
+    win._update_buttons()                                                           # (the idle loop keeps it off)
+    assert not win.ref_hint.isEnabled()
+    flush(app, win)
+    assert T.load(win.project).options["prompt_format"] == "h3"
+    win.prompt_format.setCurrentIndex(win.prompt_format.findData("classic"))
+    assert win.tree.options["prompt_format"] == "classic" and win.ref_hint.isEnabled()
+    old = tmp_path / "old"
+    d = T.Tree().to_json()
+    del d["options"]["prompt_format"]                                               # saved before the setting
+    old.mkdir()
+    (old / T.TREE_FILE).write_text(json.dumps(d))
+    win.open_project(old)
+    assert win.tree.options["prompt_format"] == "classic" and win.prompt_format.currentData() == "classic"
+    assert win.ref_hint.isEnabled()
+    new = tmp_path / "new"
+    t = T.Tree()
+    T.set_prompt_format(t, "h3")
+    T.save(new, t)
+    win.open_project(new)
+    assert win.prompt_format.currentData() == "h3" and not win.ref_hint.isEnabled()
