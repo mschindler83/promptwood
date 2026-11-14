@@ -347,6 +347,7 @@ def test_gguf_models_are_found_off_the_gui_thread(app, tmp_path, monkeypatch):
 
 
 # ------------------------------------------------------------------ MWB-36: what a change said about CHANGED clips
+from PySide6.QtWidgets import QMessageBox  # noqa: E402
 from ui_helpers import crop_accepted, flush, image, new_project, run_and_wait, silent_player, win  # noqa: E402,F401
 
 
@@ -421,3 +422,35 @@ def test_tts_session_marks_busy_and_never_leaves_it_stuck(app, tmp_path):
         assert not w._tts_busy                                   # (it never started: not busy for ever)
     finally:
         w.close()
+
+
+# ------------------------------------------------------------------ UX-18: a Clip menu and Help -> About
+def _menu(win, title):
+    return next(a.menu() for a in win.menuBar().actions() if a.text().replace("&", "") == title)
+
+
+def test_clip_menu_offers_the_clip_actions(app, win, tmp_path, image, monkeypatch):
+    titles = [a.text().replace("&", "") for a in win.menuBar().actions()]
+    assert titles.index("Clip") == titles.index("View") + 1
+    clip = _menu(win, "Clip")
+    clip.aboutToShow.emit()
+    assert not any(a.isEnabled() for a in clip.actions() if not a.isSeparator())      # no project: nothing to act on
+    ids = new_project(win, tmp_path, image, ("a",))
+    clip.aboutToShow.emit()
+    by = {a.text().split("\t")[0]: a for a in clip.actions() if not a.isSeparator()}
+    assert by["Continue from here"].isEnabled() and by["Branch (another continuation)"].isEnabled()
+    assert "Ctrl+N" in by["Continue from here"].text()                                 # the key is shown, not bound twice
+    got = []
+    monkeypatch.setattr(win, "node_action", lambda action, nid: got.append((action, nid)))
+    by["Branch (another continuation)"].trigger()
+    assert got == [("branch", win.target_id())] and got[0][1] == ids[0]
+
+
+def test_help_has_about(app, win, monkeypatch):
+    help_ = _menu(win, "Help")
+    texts = [a.text() for a in help_.actions()]
+    assert "About Promptwood" in texts
+    shown = []
+    monkeypatch.setattr(QMessageBox, "about", lambda parent, title, text: shown.append((title, text)))
+    next(a for a in help_.actions() if a.text() == "About Promptwood").trigger()
+    assert shown and "Promptwood" in shown[0][1]
