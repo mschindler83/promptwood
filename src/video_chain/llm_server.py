@@ -315,10 +315,25 @@ class _Adopted:
 _LIVE: "weakref.WeakSet[LlamaServer]" = weakref.WeakSet()
 
 
+def _libc_prctl():
+    """libc's prctl, looked up once in the parent (None where there is none)."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        import ctypes
+        return ctypes.CDLL(None, use_errno=True).prctl
+    except (OSError, AttributeError):
+        return None
+
+
+_PRCTL = _libc_prctl()
+
+
 def _die_with_parent() -> None:
-    """In the child, before exec: the kernel sends SIGTERM when the parent thread ends (Linux prctl)."""
-    import ctypes
-    ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGTERM, 0, 0, 0)       # 1 = PR_SET_PDEATHSIG
+    """In the child, before exec: the kernel sends SIGTERM when the parent thread ends (Linux prctl). Only the call
+    itself happens here: loading a library between fork and exec can deadlock a child of a threaded app."""
+    if _PRCTL is not None:
+        _PRCTL(1, signal.SIGTERM, 0, 0, 0)                     # 1 = PR_SET_PDEATHSIG
 
 
 class _Spawner:

@@ -77,3 +77,20 @@ def test_stop_takes_a_grace(monkeypatch):
     srv.proc = object()
     srv.stop()
     assert seen == [(True, 2), (True, 20)]
+
+
+def test_the_child_side_of_pdeathsig_loads_no_library(monkeypatch):
+    """Between fork and exec (preexec_fn) a child of a threaded app must not dlopen anything (a lock another thread
+    held at the fork would deadlock it): prctl is looked up in the parent, the child only calls it."""
+    import ctypes
+    from video_chain import llm_server as L
+    if not hasattr(L, "_die_with_parent"):
+        pytest.skip("no PDEATHSIG on this platform")
+
+    def no_dlopen(*a, **k):
+        raise AssertionError("ctypes.CDLL called in the child")
+    monkeypatch.setattr(ctypes, "CDLL", no_dlopen)
+    calls = []
+    monkeypatch.setattr(L, "_PRCTL", lambda *a: calls.append(a) or 0, raising=False)
+    L._die_with_parent()
+    assert calls and calls[0][0] == 1                 # PR_SET_PDEATHSIG
