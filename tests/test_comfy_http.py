@@ -224,7 +224,7 @@ def test_a_job_connects_the_socket_before_queueing_and_cancels_a_lost_queue(serv
 
 def test_refine_and_seedvr_save_through_save():
     import inspect
-    for fn in (C._refine, C._seedvr_job):
+    for fn in (C.ComfyGenerator.refine, C.ComfyGenerator._seedvr_job):
         assert ".part.mp4" not in inspect.getsource(fn) and "_save(" in inspect.getsource(fn)
 
 

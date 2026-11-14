@@ -26,8 +26,9 @@ import uuid
 from collections.abc import Sequence
 from pathlib import Path
 
-from .comfy import (SUBFOLDER, ComfyError, ComfyGenerator, ComfyJobFailed, _combo_options, build_moss_workflow,
-                    build_qwen21_workflow, is_qwen21_name, pick_moss_files, pick_qwen21_files)
+from .comfy import (ComfyError, ComfyGenerator, build_moss_workflow, build_qwen21_workflow, is_qwen21_name,
+                    pick_moss_files, pick_qwen21_files)
+from .comfy.wfb import QWEN_SHIFT, SUBFOLDER, loader_clip, loader_unet, loader_vae, lora_chain, low_name
 
 logger = logging.getLogger(__name__)
 
@@ -72,10 +73,6 @@ FAMILIES = {
 }
 
 
-def _low(n: str) -> str:
-    return n.lower().replace("-", "_")
-
-
 def pick_files(unets: list[str], ckpts: list[str], clips: list[str], vaes: list[str], loras: list[str]) -> dict:
     """The model files of every family ComfyUI lists: {family: {"models": [names, best first], ...} or
     {"missing": reason}}."""
@@ -83,29 +80,29 @@ def pick_files(unets: list[str], ckpts: list[str], clips: list[str], vaes: list[
 
     def first(names, *keys):
         for k in keys:
-            hit = [n for n in names if k in _low(n)]
+            hit = [n for n in names if k in low_name(n)]
             if hit:
                 return sorted(hit, key=len)[0]
         return None
     # Krea-2: the official Turbo build first, then other Krea-2 diffusion models (fine-tunes)
-    krea = [u for u in unets if "krea2" in _low(u) or "krea_2" in _low(u)]
-    krea.sort(key=lambda u: (0 if "krea2_turbo_fp8_scaled" in _low(u) else 1 if "krea2_turbo" in _low(u) else 2, u))
+    krea = [u for u in unets if "krea2" in low_name(u) or "krea_2" in low_name(u)]
+    krea.sort(key=lambda u: (0 if "krea2_turbo_fp8_scaled" in low_name(u) else 1 if "krea2_turbo" in low_name(u) else 2, u))
     te = first(clips, "qwen3vl_4b_fp8", "qwen3vl_4b", "qwen_3_vl_4b")
     vae = first(vaes, "qwen_image_vae")
     style = first(loras, "krea2_style_reference")
     out["krea2"] = ({"models": krea, "clip": te, "vae": vae, "style": style} if krea and te and vae else
                     {"missing": "Krea-2 Turbo (krea2_turbo_fp8_scaled) and its text encoder qwen3vl_4b"})
     # Qwen-Image 2512 (and other Qwen-Image generation models; not the edit models)
-    qwen = [u for u in unets if "qwen" in _low(u) and "edit" not in _low(u) and not is_qwen21_name(u)
-            and ("qwen_image" in _low(u) or "qwenimage" in _low(u))]
-    qwen.sort(key=lambda u: (0 if "qwen_image_2512" in _low(u) else 1 if "2512" in u else 2, u))
+    qwen = [u for u in unets if "qwen" in low_name(u) and "edit" not in low_name(u) and not is_qwen21_name(u)
+            and ("qwen_image" in low_name(u) or "qwenimage" in low_name(u))]
+    qwen.sort(key=lambda u: (0 if "qwen_image_2512" in low_name(u) else 1 if "2512" in u else 2, u))
     qte = first(clips, "qwen_2.5_vl_7b")
-    light = sorted([lo for lo in loras if "qwen_image_2512_lightning" in _low(lo)], key=len)
+    light = sorted([lo for lo in loras if "qwen_image_2512_lightning" in low_name(lo)], key=len)
     edit = first(unets, "qwen_image_edit_2511", "qwen_image_edit")
     out["edit2511"] = ({"models": [edit]} if edit and qte and vae else
                        {"missing": "Qwen-Image-Edit 2511 (qwen_image_edit_2511_*), qwen_2.5_vl_7b and qwen_image_vae"})
-    edit_light = sorted([lo for lo in loras if "qwen_image_edit" in _low(lo) and "lightning" in _low(lo)
-                         and ("2511" in lo if edit and "2511" in edit else True) and "4steps" in _low(lo)], key=len)
+    edit_light = sorted([lo for lo in loras if "qwen_image_edit" in low_name(lo) and "lightning" in low_name(lo)
+                         and ("2511" in lo if edit and "2511" in edit else True) and "4steps" in low_name(lo)], key=len)
     out["qwen"] = ({"models": qwen, "clip": qte, "vae": vae, "lightning4": next((lo for lo in light if "4steps" in lo), None),
                     "lightning8": next((lo for lo in light if "8steps" in lo), None), "edit": edit,
                     "edit_lightning": edit_light[0] if edit_light else None}
@@ -121,7 +118,7 @@ def pick_files(unets: list[str], ckpts: list[str], clips: list[str], vaes: list[
     out["moss"] = moss or {"missing": "MOSS-Image (moss_image_sft_int8_convrot, qwen3.5_9b_w4a8_gptq and "
                                       "flux2-vae_small from huggingface.co/Comfy-Org/MOSS-Image)"}
     # FLUX.3 Image Klein
-    f3 = [u for u in unets if "flux3_image_klein" in _low(u)]
+    f3 = [u for u in unets if "flux3_image_klein" in low_name(u)]
     f3te = first(clips, "qwen3vl_4b_int8", "qwen3vl_4b_fp8", "qwen3vl_4b")
     f3vae = first(vaes, "flux2_vae", "flux2-vae")
     out["flux3"] = ({"base": next((u for u in sorted(f3) if "base" in u.lower()), None),
@@ -131,33 +128,25 @@ def pick_files(unets: list[str], ckpts: list[str], clips: list[str], vaes: list[
                                 "flux-3-image-klein, then download it (flux3-image-klein-*-int8-convrot, "
                                 "qwen3vl_4b_int8_convrot, flux2-vae)"})
     # FLUX.1 dev
-    f1 = [u for u in unets if ("flux1" in _low(u) or "flux_dev" in _low(u) or "flux1_dev" in _low(u))
-          and "schnell" not in _low(u) and "fill" not in _low(u) and "kontext" not in _low(u)]
-    f1.sort(key=lambda u: (0 if "krea" in _low(u) else 1, u))
+    f1 = [u for u in unets if ("flux1" in low_name(u) or "flux_dev" in low_name(u) or "flux1_dev" in low_name(u))
+          and "schnell" not in low_name(u) and "fill" not in low_name(u) and "kontext" not in low_name(u)]
+    f1.sort(key=lambda u: (0 if "krea" in low_name(u) else 1, u))
     t5 = first(clips, "t5xxl_fp8", "t5xxl")
     cl = first(clips, "clip_l")
     ae = next((v for v in sorted(vaes, key=len) if Path(v).name == "ae.safetensors"), None)
     out["flux1"] = ({"models": f1, "t5": t5, "clip_l": cl, "vae": ae} if f1 and t5 and cl and ae else
                     {"missing": "FLUX.1 dev with t5xxl, clip_l and ae.safetensors"})
     # Chroma1-HD (and its Flash build for Fast); T5-XXL and FLUX.1's VAE
-    ch = [u for u in unets if "chroma" in _low(u) and "radiance" not in _low(u)]
-    flash = sorted([u for u in ch if "flash" in _low(u)], key=lambda u: ("fp8" not in _low(u), u))
-    hd = sorted([u for u in ch if "flash" not in _low(u)], key=lambda u: ("hd" not in _low(u), "fp8" not in _low(u), u))
+    ch = [u for u in unets if "chroma" in low_name(u) and "radiance" not in low_name(u)]
+    flash = sorted([u for u in ch if "flash" in low_name(u)], key=lambda u: ("fp8" not in low_name(u), u))
+    hd = sorted([u for u in ch if "flash" not in low_name(u)], key=lambda u: ("hd" not in low_name(u), "fp8" not in low_name(u), u))
     out["chroma"] = ({"models": hd or flash, "hd": hd[0] if hd else None, "flash": flash[0] if flash else None,
                       "t5": t5, "vae": ae} if ch and t5 and ae else
                      {"missing": "Chroma1-HD (Chroma1-HD*.safetensors) with t5xxl and ae.safetensors"})
     # Illustrious / SDXL checkpoints
-    sd = [c for c in ckpts if any(k in _low(c) for k in ("illustr", "noob", "sdxl", "pony"))]
+    sd = [c for c in ckpts if any(k in low_name(c) for k in ("illustr", "noob", "sdxl", "pony"))]
     out["sdxl"] = {"models": sorted(sd)} if sd else {"missing": "an Illustrious (SDXL) checkpoint"}
     return out
-
-
-def _lora_chain(wf: dict, model: list, loras: list[tuple[str, float]], prefix: str = "lora") -> list:
-    for k, (name, strength) in enumerate(loras):
-        wf[f"{prefix}{k}"] = {"class_type": "LoraLoaderModelOnly",
-                              "inputs": {"model": model, "lora_name": name, "strength_model": float(strength)}}
-        model = [f"{prefix}{k}", 0]
-    return model
 
 
 def build_create_workflow(*, family: str, files: dict, model: str, prompt: str, negative: str, width: int,
@@ -169,16 +158,15 @@ def build_create_workflow(*, family: str, files: dict, model: str, prompt: str, 
     wf: dict = {}
     save = {"class_type": "SaveImage", "inputs": {"images": ["decode", 0], "filename_prefix": prefix}}
     if family == "krea2":
-        wf["unet"] = {"class_type": "UNETLoader", "inputs": {"unet_name": model, "weight_dtype": "default"}}
-        wf["clip"] = {"class_type": "CLIPLoader", "inputs": {"clip_name": files["clip"], "type": "krea2",
-                                                             "device": "default"}}
-        wf["vae"] = {"class_type": "VAELoader", "inputs": {"vae_name": files["vae"]}}
+        wf["unet"] = loader_unet(model)
+        wf["clip"] = loader_clip(files["clip"], "krea2")
+        wf["vae"] = loader_vae(files["vae"])
         wf["latent"] = {"class_type": "EmptyLatentImage", "inputs": {"width": w, "height": h, "batch_size": 1}}
-        m = _lora_chain(wf, ["unet", 0], loras)
+        m = lora_chain(wf, ["unet", 0], loras)
         if refs:                                   # Image Style Reference (Krea-2 Turbo)
             if not files.get("style"):
                 raise ComfyError("the Krea-2 style reference LoRA (krea2_style_reference.safetensors) is missing")
-            m = _lora_chain(wf, m, [(files["style"], 1.0)], "style")
+            m = lora_chain(wf, m, [(files["style"], 1.0)], "style")
             wf["shift"] = {"class_type": "ModelSamplingFlux", "inputs": {"model": m, "max_shift": 1.15,
                                                                          "base_shift": 0.5, "width": w, "height": h}}
             pics = {f"image{k + 1}": [f"ref{k}", 0] for k in range(len(refs[:3]))}
@@ -217,24 +205,23 @@ def build_create_workflow(*, family: str, files: dict, model: str, prompt: str, 
             if not files.get("edit"):
                 raise ComfyError("Qwen-Image-Edit 2511 is missing (needed for pictures as references)")
             model = files["edit"]
-        wf["unet"] = {"class_type": "UNETLoader", "inputs": {"unet_name": model, "weight_dtype": "default"}}
-        wf["clip"] = {"class_type": "CLIPLoader", "inputs": {"clip_name": files["clip"], "type": "qwen_image",
-                                                             "device": "default"}}
-        wf["vae"] = {"class_type": "VAELoader", "inputs": {"vae_name": files["vae"]}}
+        wf["unet"] = loader_unet(model)
+        wf["clip"] = loader_clip(files["clip"], "qwen_image")
+        wf["vae"] = loader_vae(files["vae"])
         wf["latent"] = {"class_type": "EmptySD3LatentImage", "inputs": {"width": w, "height": h, "batch_size": 1}}
-        m = _lora_chain(wf, ["unet", 0], loras)
+        m = lora_chain(wf, ["unet", 0], loras)
         light = {"fast": files.get("lightning4"), "balanced": files.get("lightning8")}.get(quality)
         if refs and quality != "best" and files.get("edit_lightning"):    # the edit model's Lightning LoRA
-            m = _lora_chain(wf, m, [(files["edit_lightning"], 1.0)], "lightning")
+            m = lora_chain(wf, m, [(files["edit_lightning"], 1.0)], "lightning")
             steps, cfg = 4, 1.0
         elif refs:
             steps, cfg = 40, 4.0
         elif light:
-            m = _lora_chain(wf, m, [(light, 1.0)], "lightning")
+            m = lora_chain(wf, m, [(light, 1.0)], "lightning")
             steps, cfg = (4 if quality == "fast" else 8), 1.0
         else:
             steps, cfg = 50, 4.0
-        wf["shift"] = {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": m, "shift": 3.1}}
+        wf["shift"] = {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": m, "shift": QWEN_SHIFT}}
         if refs:
             wf["cfgnorm"] = {"class_type": "CFGNorm", "inputs": {"model": ["shift", 0], "strength": 1.0}}
             pics = {f"image{k + 1}": [f"ref{k}", 0] for k in range(len(refs[:3]))}
@@ -254,11 +241,11 @@ def build_create_workflow(*, family: str, files: dict, model: str, prompt: str, 
                         "inputs": {"model": sampler_model, "seed": seed, "steps": steps, "cfg": cfg,
                                    "sampler_name": "euler", "scheduler": "simple", "positive": ["pos", 0],
                                    "negative": ["neg", 0], "latent_image": ["latent", 0], "denoise": 1.0}}
-    elif family == "qwen21":                       # ComfyUI's Qwen-Image 2.1 templates (see comfy.py)
+    elif family == "qwen21":                       # ComfyUI's Qwen-Image 2.1 templates (see comfy/image_edit.py)
         return build_qwen21_workflow(files=files, prompt=prompt, seed=seed, quality=quality, prefix=prefix,
                                      save_as="create_save", images=list(refs[:3]), size=(w, h), negative=negative,
                                      loras=loras, model=model)
-    elif family == "moss":                         # ComfyUI's MOSS-Image templates (see comfy.py)
+    elif family == "moss":                         # ComfyUI's MOSS-Image templates (see comfy/image_edit.py)
         return build_moss_workflow(files=files, prompt=prompt, seed=seed, prefix=prefix, save_as="create_save",
                                    images=list(refs[:3]), size=(w, h), negative=negative, loras=loras, model=model)
     elif family == "flux3":
@@ -268,12 +255,11 @@ def build_create_workflow(*, family: str, files: dict, model: str, prompt: str, 
             (files.get("base") if quality == "best" else files.get("distilled")) or (files.get("models") or [model])[0]
         base = "base" in unet.lower()
         steps, cfg = (50, 3.5) if base else (16, 1.0)
-        wf["unet"] = {"class_type": "UNETLoader", "inputs": {"unet_name": unet, "weight_dtype": "default"}}
-        wf["clip"] = {"class_type": "CLIPLoader", "inputs": {"clip_name": files["clip"], "type": "flux3",
-                                                             "device": "default"}}
-        wf["vae"] = {"class_type": "VAELoader", "inputs": {"vae_name": files["vae"]}}
+        wf["unet"] = loader_unet(unet)
+        wf["clip"] = loader_clip(files["clip"], "flux3")
+        wf["vae"] = loader_vae(files["vae"])
         wf["latent"] = {"class_type": "EmptyFlux2LatentImage", "inputs": {"width": w, "height": h, "batch_size": 1}}
-        m = _lora_chain(wf, ["unet", 0], loras)
+        m = lora_chain(wf, ["unet", 0], loras)
         wf["pos"] = {"class_type": "CLIPTextEncode", "inputs": {"clip": ["clip", 0], "text": prompt}}
         wf["neg"] = {"class_type": "CLIPTextEncode", "inputs": {"clip": ["clip", 0], "text": negative or ""}}
         pos, neg = ["pos", 0], ["neg", 0]
@@ -291,11 +277,11 @@ def build_create_workflow(*, family: str, files: dict, model: str, prompt: str, 
                                    "scheduler": "simple", "positive": pos, "negative": neg,
                                    "latent_image": ["latent", 0], "denoise": 1.0}}
     elif family == "flux1":
-        wf["unet"] = {"class_type": "UNETLoader", "inputs": {"unet_name": model, "weight_dtype": "default"}}
+        wf["unet"] = loader_unet(model)
         wf["clip"] = {"class_type": "DualCLIPLoader", "inputs": {"clip_name1": files["clip_l"], "clip_name2": files["t5"],
                                                                  "type": "flux", "device": "default"}}
-        wf["vae"] = {"class_type": "VAELoader", "inputs": {"vae_name": files["vae"]}}
-        m = _lora_chain(wf, ["unet", 0], loras)
+        wf["vae"] = loader_vae(files["vae"])
+        m = lora_chain(wf, ["unet", 0], loras)
         wf["pos0"] = {"class_type": "CLIPTextEncode", "inputs": {"clip": ["clip", 0], "text": prompt}}
         wf["pos"] = {"class_type": "FluxGuidance", "inputs": {"conditioning": ["pos0", 0], "guidance": 3.5}}
         wf["neg"] = ({"class_type": "CLIPTextEncode", "inputs": {"clip": ["clip", 0], "text": negative}}
@@ -317,13 +303,12 @@ def build_create_workflow(*, family: str, files: dict, model: str, prompt: str, 
         flash = quality == "fast" and bool(files.get("flash")) and model in (files.get("hd"), None, files.get("flash"))
         unet = files["flash"] if flash else (model or files.get("hd") or files["flash"])
         flash = flash or unet == files.get("flash")
-        wf["unet"] = {"class_type": "UNETLoader", "inputs": {"unet_name": unet, "weight_dtype": "default"}}
-        wf["clip0"] = {"class_type": "CLIPLoader", "inputs": {"clip_name": files["t5"], "type": "chroma",
-                                                              "device": "default"}}
+        wf["unet"] = loader_unet(unet)
+        wf["clip0"] = loader_clip(files["t5"], "chroma")
         wf["clip"] = {"class_type": "T5TokenizerOptions", "inputs": {"clip": ["clip0", 0], "min_padding": 0,
                                                                      "min_length": 0}}
-        wf["vae"] = {"class_type": "VAELoader", "inputs": {"vae_name": files["vae"]}}
-        m = _lora_chain(wf, ["unet", 0], loras)
+        wf["vae"] = loader_vae(files["vae"])
+        m = lora_chain(wf, ["unet", 0], loras)
         wf["shift"] = {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": m, "shift": 1.0}}
         wf["pos"] = {"class_type": "CLIPTextEncode", "inputs": {"clip": ["clip", 0], "text": prompt}}
         wf["neg"] = {"class_type": "CLIPTextEncode", "inputs": {"clip": ["clip", 0], "text": negative or CHROMA_NEGATIVE}}

@@ -13,6 +13,7 @@ import pytest
 from fake_comfy import FakeComfy
 
 from video_chain import comfy as C
+from video_chain.comfy import loras
 
 NODES = Path(__file__).resolve().parents[1] / "comfy_nodes" / "video_chain_nodes"
 sys.path.insert(0, str(NODES))
@@ -49,7 +50,7 @@ def test_the_header_is_read_once_for_all_three_checks(tmp_path, monkeypatch):
     f = safetensors(tmp_path / "x.safetensors", ["blocks.0.attn.qkv_proj.w", "blocks.0.mlp.fc1.w"])
     reads = []
     real = C._read_safetensors_keys
-    monkeypatch.setattr(C, "_read_safetensors_keys", lambda p: reads.append(p) or real(p))
+    monkeypatch.setattr(loras, "_read_safetensors_keys", lambda p: reads.append(p) or real(p))   # (where it is used)
     C._safetensors_keys.cache_clear()
     assert C.is_h3_lora(f) and not C.is_qwen_lora(f) and not C.is_turbo_lora(f)
     assert len(reads) == 1

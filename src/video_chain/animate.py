@@ -10,7 +10,9 @@ import math
 import uuid
 from pathlib import Path
 
-from .comfy import SUBFOLDER, ComfyError, ComfyGenerator, ComfyJobFailed, _combo_options, save_video
+from .comfy import ComfyError, ComfyGenerator
+from .comfy.wfb import (FPS, SUBFOLDER, combo_options, loader_clip, loader_unet, loader_vae, lora_node,
+                        save_video)
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +69,7 @@ def pick_animate_files(unets, clips, vaes, loras, visions) -> dict:
 
 def build_animate_workflow(*, files: dict, video: str, mask: str, reference: str, frames: int,
                            src_size: tuple[int, int], gen: tuple[int, int], prompt: str, seed: int, prefix: str,
-                           fps: float = 24.0, feather: int = 12, grow: int = 10, pose: dict | None = None,
+                           fps: float = FPS, feather: int = 12, grow: int = 10, pose: dict | None = None,
                            keep_pose: bool = False, body: bool = True, lock: dict | None = None) -> dict:
     """video / mask / reference: uploaded names (the clip, its head mask, the new person's picture); frames: the
     clip's frame count; src_size: its size; gen: the size the head is made at. pose: uploaded DWPose videos of an
@@ -78,17 +80,12 @@ def build_animate_workflow(*, files: dict, video: str, mask: str, reference: str
     W, H = gen
     sw, sh = src_size
     wf: dict = {
-        "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": files["unet"], "weight_dtype": "default"}},
-        "lora_speed": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["unet", 0],
-                                                                       "lora_name": files["lightx2v"],
-                                                                       "strength_model": 1.0}},
-        "lora_light": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["lora_speed", 0],
-                                                                       "lora_name": files["relight"],
-                                                                       "strength_model": 1.0}},
+        "unet": loader_unet(files["unet"]),
+        "lora_speed": lora_node(["unet", 0], files["lightx2v"], 1.0),
+        "lora_light": lora_node(["lora_speed", 0], files["relight"], 1.0),
         "shift": {"class_type": "ModelSamplingSD3", "inputs": {"model": ["lora_light", 0], "shift": SHIFT}},
-        "clip": {"class_type": "CLIPLoader", "inputs": {"clip_name": files["clip"], "type": "wan",
-                                                         "device": "default"}},
-        "vae": {"class_type": "VAELoader", "inputs": {"vae_name": files["vae"]}},
+        "clip": loader_clip(files["clip"], "wan"),
+        "vae": loader_vae(files["vae"]),
         "vision": {"class_type": "CLIPVisionLoader", "inputs": {"clip_name": files["vision"]}},
         "pos": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["clip", 0], "text": prompt or DEFAULT_PROMPT}},
         "neg": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["clip", 0], "text": NEGATIVE}},
@@ -223,7 +220,7 @@ def face_lock_nodes(wf: dict, images: list, lock: dict) -> list:
     return ["lock", 0]
 
 
-def build_faceswap_workflow(*, video: str, lock: dict, prefix: str, fps: float = 24.0) -> dict:
+def build_faceswap_workflow(*, video: str, lock: dict, prefix: str, fps: float = FPS) -> dict:
     """Face only: the clip's face swapped frame by frame (no Animate; every motion is the clip's own)."""
     wf = {"src": {"class_type": "LoadVideo", "inputs": {"file": video}},
           "src_parts": {"class_type": "GetVideoComponents", "inputs": {"video": ["src", 0]}}}
@@ -248,8 +245,8 @@ class ComfyAnimator(ComfyGenerator):
         # the face swap pass (Promptwood's node; HyperSwap, GPEN optional)
         info = self._object_info(FACE_NODE)
         info = info.get("input", {}).get("required", {}) if info else {}
-        swappers = [n for n in _combo_options(info.get("swapper")) if "hyperswap" in n.lower()]
-        enhancers = [n for n in _combo_options(info.get("enhancer")) if n != "none"]
+        swappers = [n for n in combo_options(info.get("swapper")) if "hyperswap" in n.lower()]
+        enhancers = [n for n in combo_options(info.get("enhancer")) if n != "none"]
         if not self._object_info(FACE_NODE):
             self.face_missing, self.face_files = f"this ComfyUI has no {FACE_NODE} node ({FACE_HELP})", {}
         elif not swappers:
@@ -277,7 +274,7 @@ class ComfyAnimator(ComfyGenerator):
                                  Path(local), same_size=False)
 
     def replace(self, video: Path, mask: Path, reference: Path, out: Path, seed: int, frames: int,
-                src_size: tuple[int, int], size: str = "480p", prompt: str = "", fps: float = 24.0,
+                src_size: tuple[int, int], size: str = "480p", prompt: str = "", fps: float = FPS,
                 pose: dict | None = None, keep_pose: dict | None = None, body: bool = True,
                 lock: list[Path] | None = None, enhance: float = 0.8) -> dict:
         """Draw the person of `reference` into the head mask of `video`; the result (the clip's size, frames and
@@ -326,7 +323,7 @@ class ComfyAnimator(ComfyGenerator):
         return {"swapper": self.face_files["swapper"], "enhancer": self.face_files.get("enhancer") or "none",
                 "enhance": float(enhance), "persons": persons}
 
-    def face_only(self, video: Path, out: Path, persons: list[Path], fps: float = 24.0,
+    def face_only(self, video: Path, out: Path, persons: list[Path], fps: float = FPS,
                   enhance: float = 0.8) -> dict:
         """Face only: the clip's face swapped frame by frame with HyperSwap (all motion is the clip's own)."""
         if self.face_missing:
