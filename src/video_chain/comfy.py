@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -474,6 +475,7 @@ class ComfyGenerator:
         self.log, self.progress, self.timeout = log, progress, timeout
         self.client_id = uuid.uuid4().hex
         self.current: str | None = None          # prompt id being rendered
+        self._cancelled = threading.Event()      # Stop was pressed: _wait gives up (a queued job has no history)
         # HyperFlow's patch stays on ComfyUI's cached H3 model and breaks the turbo LoRA's adapters after it
         # (measured: HyperFlow -> Turbo fails, every other order gives the very same clips): the models are
         # unloaded only for that switch. None: not known (another process may have used HyperFlow).
@@ -660,6 +662,7 @@ class ComfyGenerator:
         on its way (or after a lost answer) can still cancel the job ComfyUI may have accepted."""
         pid = str(uuid.uuid4())
         self.current = pid
+        self._cancelled.clear()
         self.node_times, self._running_node = {}, None
         res = self._json("POST", "/prompt", {"prompt": wf, "client_id": self.client_id, "prompt_id": pid})
         if res.get("node_errors"):
@@ -673,6 +676,7 @@ class ComfyGenerator:
         pid = self.current
         if not pid:
             return
+        self._cancelled.set()
         for path, payload in (("/queue", {"delete": [pid]}), ("/interrupt", {"prompt_id": pid})):
             try:
                 self._json("POST", path, payload, timeout=10)
@@ -903,6 +907,8 @@ class ComfyGenerator:
         last_poll = 0.0
         poll_errors = 0
         while time.monotonic() < end:
+            if self._cancelled.is_set():
+                raise ComfyJobFailed("stopped")
             if ws is not None:
                 try:
                     raw = ws.recv()

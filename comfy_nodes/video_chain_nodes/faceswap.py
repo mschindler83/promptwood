@@ -183,10 +183,11 @@ class FaceSwapper:
         pasted = paste_back(frame, out, box_mask(512), m)
         return (frame.astype(np.float32) * (1 - blend) + pasted.astype(np.float32) * blend).round().astype(np.uint8)
 
-    def run(self, frames, identity, enhance: float = 0.0, progress=None, out=None):
+    def run(self, frames, identity, enhance: float = 0.0, progress=None, out=None, total: int | None = None):
         """Swap the face of one person through the frames (followed from frame to frame: the nearest face, the
         search widening while the face is lost, the largest face again after LOST frames); frames without that
         face stay as they are. out(k, frame) takes each frame as it is done (else they are returned as a list).
+        total is the number of frames when frames is a generator (for progress).
         Returns (frames or None, how many were swapped)."""
         last, kept, done, gap = None, [], 0, 0
         for k, f in enumerate(frames):
@@ -213,5 +214,5 @@ class FaceSwapper:
             else:
                 kept.append(f)
             if progress is not None:
-                progress(k + 1, len(frames))
+                progress(k + 1, total if total is not None else len(frames))
         return (None if out is not None else kept), done

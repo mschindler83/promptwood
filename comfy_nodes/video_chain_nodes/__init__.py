@@ -105,7 +105,7 @@ class VideoChainFaceSwap:
             def put(k, f):
                 result[k] = torch.from_numpy(f).float() / 255.0
             _none, done = fs.run(frames(), identity, enhance if enh else 0.0,
-                                 progress=lambda k, n: bar.update_absolute(k, images.shape[0]), out=put)
+                                 progress=lambda k, n: bar.update_absolute(k, images.shape[0]), out=put, total=images.shape[0])
         finally:
             _SWAPPERS.clear()                                    # (its models leave the GPU with the job)
         if done == 0:

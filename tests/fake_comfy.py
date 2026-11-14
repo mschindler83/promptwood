@@ -129,9 +129,11 @@ class FakeComfy:
         self.veda = True                           # the Veda node and its two predictors
         self.seedvr_jobs: list[str] = []           # the model of every SeedVR2 job
         self.audio_refs = True                     # MiniMaxH3ReferenceToVideo takes reference sounds
+        self.hold = False                          # jobs stay queued: no history until it is cleared (a busy ComfyUI)
         self.fail_next: str | None = None          # the next job fails with this message (once)
         self.refine_answer: str | None = None      # the prompt refiner's raw answer (None: "REFINED <prompt>")
         self.prompts, self.calls, self.history = [], [], {}
+        self.prompts_deleted: list[str] = []       # ids removed with /queue delete while held
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -438,7 +440,9 @@ class FakeComfy:
                 if u.path == "/prompt":
                     fake.prompts.append(payload["prompt"])
                     pid = f"p{len(fake.prompts)}"
-                    if fake.fail_with or fake.fail_next:
+                    if fake.hold:
+                        pass                                   # queued behind another job: no history yet
+                    elif fake.fail_with or fake.fail_next:
                         msg, fake.fail_next = fake.fail_with or fake.fail_next, None
                         fake.history[pid] = {"outputs": {}, "status": {"status_str": "error", "completed": False,
                                              "messages": [["execution_error", {"exception_type": "RuntimeError",
@@ -448,6 +452,8 @@ class FakeComfy:
                                              "status": {"status_str": "success", "completed": True}}
                     return self._send(200, {"prompt_id": pid, "number": 1, "node_errors": {}})
                 if u.path in ("/free", "/interrupt", "/queue"):
+                    if u.path == "/queue" and fake.hold:
+                        fake.prompts_deleted.extend(payload.get("delete", []))
                     fake.calls.append(("BODY", u.path, payload))
                     return self._send(200, {})
                 return self._send(404, {"error": "not found"})
