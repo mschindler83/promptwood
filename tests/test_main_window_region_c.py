@@ -13,7 +13,7 @@ from PySide6.QtCore import QTimer  # noqa: E402
 from PySide6.QtGui import QCloseEvent  # noqa: E402
 from PySide6.QtWidgets import QMessageBox  # noqa: E402
 
-from test_ui import (FAKE, app, crop_accepted, image, new_project, run_and_wait,  # noqa: E402,F401
+from ui_helpers import (FAKE, app, crop_accepted, image, new_project, run_and_wait,  # noqa: E402,F401
                      settings, silent_player, wait, win)
 from video_chain.ui.generator_state import Job  # noqa: E402
 from video_chain import tree as T  # noqa: E402
@@ -343,7 +343,7 @@ def test_find_lora_walks_the_folders_once(app, win, tmp_path, monkeypatch):
 
 # ---------------------------------------------------------------- MWC-23: the canvas of a video being edited
 def _video_window(app, win, tmp_path):
-    from test_ui import make_real_video
+    from ui_helpers import make_real_video
     src = make_real_video(tmp_path / "real.mp4")
     win.open_project(tmp_path / "proj")
     win.node_action("delete", "n1")

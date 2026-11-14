@@ -3,7 +3,7 @@ import os
 
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
-from test_ui import app, crop_accepted, image, silent_player, win  # noqa: E402,F401
+from ui_helpers import app, crop_accepted, image, silent_player, win  # noqa: E402,F401
 from video_chain import tree as T  # noqa: E402
 
 
@@ -38,7 +38,7 @@ def test_film_save_error_at_open_is_reported(win, tmp_path, image, monkeypatch):
 
 def test_joined_seconds_of_the_film_is_asked_off_the_ui_thread(app, win, tmp_path, image, monkeypatch):
     import threading
-    from test_ui import wait
+    from ui_helpers import wait
     from video_chain import chain, film as F
     assert win.create_project(tmp_path / "p", str(image))
     seen = []
@@ -77,7 +77,7 @@ def test_export_dialog_hands_its_answers_over_as_one_request(app, tmp_path):
 
 
 def test_a_failing_trigger_scan_says_so_in_the_log(app, win, tmp_path, image, monkeypatch):
-    from test_ui import wait
+    from ui_helpers import wait
     from video_chain import triggers
     assert win.create_project(tmp_path / "p", str(image))
 

@@ -8,7 +8,7 @@ from pathlib import Path  # noqa: E402
 import pytest  # noqa: E402
 from PySide6.QtWidgets import QMessageBox  # noqa: E402
 
-from test_ui import (app, crop_accepted, image, silent_player, win)  # noqa: E402,F401
+from ui_helpers import (app, crop_accepted, image, silent_player, win)  # noqa: E402,F401
 from video_chain import tree as T  # noqa: E402
 
 

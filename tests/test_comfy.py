@@ -225,7 +225,7 @@ def test_lora_found_through_a_link(tmp_path):
 
 
 def test_h3_lora_detection(tmp_path):
-    from test_ui import H3_KEYS, write_lora
+    from ui_helpers import H3_KEYS, write_lora
     write_lora(tmp_path / "peft.safetensors", H3_KEYS)
     write_lora(tmp_path / "kohya.safetensors", ["lora_unet_blocks_3_attn_qkv_proj.lora_down.weight",
                                                 "lora_unet_blocks_3_mlp_fc1.lora_down.weight"])
@@ -241,7 +241,7 @@ def test_h3_lora_detection(tmp_path):
 
 
 def test_find_h3_loras_in_folders_and_links(tmp_path):
-    from test_ui import H3_KEYS, write_lora
+    from ui_helpers import H3_KEYS, write_lora
     root = tmp_path / "loras"
     write_lora(root / "MiniMax H3" / "b.safetensors", H3_KEYS)
     write_lora(root / "a.safetensors", H3_KEYS)
@@ -353,7 +353,7 @@ def test_turbo_workflow_and_generation(server, start, tmp_path):
 
 
 def test_turbo_lora_detection(tmp_path):
-    from test_ui import H3_KEYS, write_lora
+    from ui_helpers import H3_KEYS, write_lora
     write_lora(tmp_path / "minimax_h3_turbo_v9.safetensors", H3_KEYS)
     write_lora(tmp_path / "fast.safetensors", H3_KEYS + ["final_layer.linear.lora_A.weight"])
     write_lora(tmp_path / "normal.safetensors", H3_KEYS)

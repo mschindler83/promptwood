@@ -4,7 +4,7 @@ import os
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
 from video_chain import chain, tree as T
-from test_ui import app, flush, image, new_project, win  # noqa: F401  (fixtures)
+from ui_helpers import app, flush, image, new_project, win  # noqa: F401  (fixtures)
 
 
 def _made_clip(win, nid):
