@@ -38,6 +38,11 @@ FRAME_CHOICES = [17 * n + 5 for n in range(4, 22)]
 IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff)"
 
 
+def app_cache_dir() -> Path:
+    """The folder of this app's logs and caches (the llama.cpp server's log, the speech takes' scratch files)."""
+    return Path.home() / ".cache" / "video-chain"
+
+
 def find_gguf_models(roots=LLM_MODEL_DIRS) -> list[Path]:
     """GGUF chat language models in the model folders (Hugging Face cache layout: the snapshots' links): those
     with a vision projector next to them or a chat / instruct name; not the projectors, imatrix files, or GGUF

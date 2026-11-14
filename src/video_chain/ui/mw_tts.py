@@ -10,7 +10,7 @@ from .speak_dialog import SpeakLinesDialog
 from .tts_dialog import VoiceTtsDialog
 from .widgets import safe_emit
 from . import speak_dialog as SPD, tts_dialog as TD
-from .ui_logic import DEFAULT_COMFY_URL, plural
+from .ui_logic import DEFAULT_COMFY_URL, app_cache_dir, plural
 
 
 class TtsMixin:
@@ -58,7 +58,7 @@ class TtsMixin:
     def local_tts(self) -> "TTS.LocalTTS":
         """The app's Qwen3-TTS worker (started on demand; stop_tts unloads it)."""
         if self._tts_local is None:
-            d = Path.home() / ".cache" / "video-chain"
+            d = app_cache_dir()
             d.mkdir(parents=True, exist_ok=True)
             self._tts_local = TTS.LocalTTS(log=d / "tts-worker.log")
         url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL).rstrip("/")
@@ -70,7 +70,7 @@ class TtsMixin:
         """The app's Fish S2 Pro worker (started on demand; stop_tts unloads it). Before it starts, the refiner's
         llama.cpp server is stopped (its RAM and VRAM) and ComfyUI unloads its models when VRAM is short."""
         if self._tts_fish is None:
-            d = Path.home() / ".cache" / "video-chain"
+            d = app_cache_dir()
             d.mkdir(parents=True, exist_ok=True)
             self._tts_fish = TTS.FishTTS(log=d / "fish-worker.log", helper=self.local_tts())
         url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL).rstrip("/")

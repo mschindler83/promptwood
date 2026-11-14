@@ -428,7 +428,7 @@ class PromptCard(_ClipCardBase):
         sb.addWidget(self.mix_row)
         sb.addWidget(self.src_sound_info)
         shared.link.addRow("Sound", self.sound_box)
-        self._link = shared.link
+        self.link_form = shared.link
         shared.link.setRowVisible(self.sound_box, True)           # (the sound choice in it only when there is one)
         self._max_guide = 0
 
@@ -759,14 +759,14 @@ class PromptCard(_ClipCardBase):
         """The clip's own settings that are set (not a clip's defaults: no overrides, no keyframes, hand-over at
         the last frame) and whose control the Simple view hides. The seed is not one: every clip has one."""
         ov, names = self.ov, []
-        for key, name, target in (("loras", "LoRAs", (self._link, self.loras)),
-                                  ("guide", "Carry-over", (self._link, self.guide)),
-                                  ("continue", "Continue", (self._link, self.cont)), ("steps", "Steps", self.steps)):
+        for key, name, target in (("loras", "LoRAs", (self.link_form, self.loras)),
+                                  ("guide", "Carry-over", (self.link_form, self.guide)),
+                                  ("continue", "Continue", (self.link_form, self.cont)), ("steps", "Steps", self.steps)):
             if ov.get(key) and self.view.is_advanced(target):
                 names.append(name)
-        if self.keys.items and self.view.is_advanced((self._link, self.keys_row)):
+        if self.keys.items and self.view.is_advanced((self.link_form, self.keys_row)):
             names.append("Keyframes")
-        if self._has_hand and self.view.is_advanced((self._link, self.hand_row)):
+        if self._has_hand and self.view.is_advanced((self.link_form, self.hand_row)):
             names.append("Hand-over")
         if ov.get("sound_over") == "mix" and ov.get("sound_mix_level") and self.view.is_advanced(self.mix_level_box):
             names.append("Sound level")
@@ -919,7 +919,7 @@ class PromptCard(_ClipCardBase):
             ok = d is None or d == cur or track or (available if d is True else repeat)
             model.item(k).setEnabled(ok)
         some = available or repeat or bool(cur) or self.src_sound.count() > len(SOUND_MODES)
-        self._link.setRowVisible(self.sound_box, True)   # (always: Speak the lines)
+        self.link_form.setRowVisible(self.sound_box, True)   # (always: Speak the lines)
         self.src_sound.setVisible(some)
         self.src_sound.setEnabled(not self.edit.isReadOnly() and some)
         self._enable_speak()

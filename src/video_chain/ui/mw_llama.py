@@ -5,14 +5,14 @@ import logging
 import os
 import threading
 import time
-from pathlib import Path
 from collections.abc import Callable
 from dataclasses import dataclass
 
 from .. import comfy as CMF, llm_server as LLM, runpod as RP, triggers, tts as TTS
 from . import dialogs as D
 from .widgets import safe_emit
-from .ui_logic import CLOSE_GRACE, DEFAULT_COMFY_URL, LLM_DEFAULT_SERVER, UNLOAD_TIMEOUT, VRAM_POLL_SECONDS
+from .ui_logic import (
+    CLOSE_GRACE, DEFAULT_COMFY_URL, LLM_DEFAULT_SERVER, UNLOAD_TIMEOUT, VRAM_POLL_SECONDS, app_cache_dir)
 
 
 @dataclass
@@ -49,7 +49,7 @@ class LlamaMixin:
         if cur is None or (cur.server, cur.model, cur.port, cur.cpu_moe, cur.mmproj) != key:
             if cur is not None:
                 cur.stop(wait=False)
-            self._llama = LLM.LlamaServer(*key, log_dir=Path.home() / ".cache" / "video-chain")
+            self._llama = LLM.LlamaServer(*key, log_dir=app_cache_dir())
         url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL).rstrip("/")
         self._llama.before_launch = lambda llama=self._llama: self._room_for_llama(llama, url)
         return self._llama
@@ -57,7 +57,7 @@ class LlamaMixin:
     def _end_leftover_llama(self):
         """At start-up: a llama-server an earlier run left behind (it crashed; found by its pid file) holds RAM and
         VRAM nobody knows about; it is ended, in the background. Nothing else is touched."""
-        log_dir = Path.home() / ".cache" / "video-chain"
+        log_dir = app_cache_dir()
         server, port = self.llm_server.text().strip() or LLM_DEFAULT_SERVER, self.llm_port.value()
 
         def work():

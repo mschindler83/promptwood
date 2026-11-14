@@ -306,7 +306,7 @@ class InspectorMixin:
         elif action in ("sound", "carry", "loras") and card is not None:
             w = {"sound": card.src_sound, "carry": card.guide, "loras": card.loras}[action]
             if action != "sound":
-                self.view.reveal((card._link, w))         # (an advanced setting: shown in Simple until a switch)
+                self.view.reveal((card.link_form, w))         # (an advanced setting: shown in Simple until a switch)
             self.focus_clip(nid)
             w.setFocus(Qt.OtherFocusReason)
 

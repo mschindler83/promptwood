@@ -275,7 +275,7 @@ class AudioMixin:
             return None
         dlg = self._track_dialog(file, name=name, title="Import an audio track")
         if not file:
-            dlg._choose()
+            dlg.choose()
             if not dlg.file:
                 dlg.deleteLater()
                 return None
