@@ -125,7 +125,7 @@ class SourceMixin(ImageEditHost):
         if not self.source:
             return
         img = upright(self.source)
-        dlg = MaskPainterDialog(self, img, self.mask)
+        dlg = MaskPainterDialog(self, img, self.mask, settings=self.qs)
         try:
             if dlg.exec() == QDialog.DialogCode.Accepted:
                 self.set_mask(dlg.mask if mask_area(dlg.mask) > 0 else None)

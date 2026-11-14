@@ -213,7 +213,7 @@ class NodeMixin(MainWindowHost):
         if node.is_video:
             self.status.setText("Variants are for generated clips; a real video stays as it is.")
             return
-        dlg = VariantsDialog(self, node)
+        dlg = VariantsDialog(self, node, settings=self.qs)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self.create_variants(node.id, dlg.count.value(), dlg.generate.isChecked(),
                                  strength_steps=dlg.strength_steps(), keep_seed=dlg.keep_seed())
@@ -428,7 +428,8 @@ class NodeMixin(MainWindowHost):
             others = [i for i in ids if i != kid and i in tree.nodes]
             return bool(self.keep_only(kid, others))
         dlg = CompareDialog(self, items, keep, player=player,
-                            title=f"Compare {len(ids)} clips from the same point as #{T.short_id(nid)}")
+                            title=f"Compare {len(ids)} clips from the same point as #{T.short_id(nid)}",
+                            settings=self.qs)
         if player:
             dlg.exec()
             dlg.deleteLater()                       # its video players

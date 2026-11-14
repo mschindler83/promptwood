@@ -268,3 +268,61 @@ def test_the_fields_of_the_window_have_accessible_names_and_their_labels_are_bud
         assert any(lab.text() == "Folder" and lab.buddy() is w.project_edit for lab in w.findChildren(QLabel))
     finally:
         w.close()
+
+
+# ------------------------------------------------------------------ UX-12: every dialog keeps its size in the settings it gets
+def _dialog_factories(tmp_path, q):
+    from PySide6.QtGui import QImage
+
+    from video_chain import tree as T
+    from video_chain.ui import clip_dialogs as CD
+    from video_chain.ui.face_crop import FaceCropDialog
+    from video_chain.ui.mask_painter import MaskPainterDialog
+    from video_chain.ui.project_dialogs import ExportDialog, NewProjectDialog, VariantsDialog
+    img = QImage(64, 48, QImage.Format.Format_RGB32)
+    img.fill(0x808080)
+    png = tmp_path / "f.png"
+    img.save(str(png))
+    clip = tmp_path / "c.mp4"
+    clip.write_bytes(b"")
+    info = {"fps": 24.0, "frames": 10, "duration": 10 / 24, "width": 64, "height": 48}
+    return {
+        "new": lambda: NewProjectDialog(None, str(tmp_path), q),
+        "variants": lambda: VariantsDialog(None, T.Node("n1", None, "a cat", overrides={}), settings=q),
+        "export": lambda: ExportDialog(None, str(tmp_path / "x.mp4"), (832, 480), {}, settings=q),
+        "handover": lambda: CD.HandoverDialog(None, clip, "t", settings=q),
+        "compare": lambda: CD.CompareDialog(None, [("a", "A", "", clip), ("b", "B", "", clip)], lambda n: None,
+                                            player=False, settings=q),
+        "split": lambda: CD.SplitDialog(None, clip, 10, (64, 48), 0.0, 1.0, "t", settings=q),
+        "frame": lambda: CD.VideoFrameDialog(None, clip, "t", info, settings=q),
+        "mask": lambda: MaskPainterDialog(None, img, settings=q),
+        "face": lambda: FaceCropDialog(None, png, None, settings=q),
+    }
+
+
+def test_the_dialogs_remember_their_size(app, tmp_path, monkeypatch):
+    from PySide6.QtCore import QSettings
+
+    from video_chain.ui import clip_dialogs as CD
+    monkeypatch.setattr(CD.VideoFrameDialog, "_grab", lambda self: None)
+    q = QSettings(str(tmp_path / "g.ini"), QSettings.IniFormat)
+    factories = _dialog_factories(tmp_path, q)
+    for name, make in factories.items():
+        first = make()
+        first.resize(647, 433)
+        first.done(0)
+        assert q.value(f"geometry/{name}") is not None, name
+        again = make()
+        assert (again.width(), again.height()) == (647, 433), name
+        again.done(0)
+
+
+def test_the_preferences_remember_their_size(app, tmp_path):
+    from video_chain.ui.main_window import MainWindow
+    w = MainWindow(settings(tmp_path), command=FAKE)
+    try:
+        w.prefs.resize(691, 457)
+        w.prefs.done(0)
+        assert w.qs.value("geometry/prefs") is not None
+    finally:
+        w.close()

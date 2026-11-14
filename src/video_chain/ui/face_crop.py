@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, QSettings, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QHBoxLayout, QPushButton, QVBoxLayout, QWidget
 
@@ -14,7 +14,7 @@ from .. import chain, media
 from .. import faces as F
 from .theme import theme
 from .dialogs import button_row
-from .widgets import fit_size, label, smooth_scaled
+from .widgets import fit_size, label, remember_geometry, smooth_scaled
 
 MIN_SIDE = 32
 SMALL_SIDE = 160           # below this the face picture is soft for the model
@@ -185,10 +185,11 @@ class FaceCropDialog(QDialog):
     the face …") and "Use this crop" waits until it is ready."""
 
     def __init__(self, parent, image_path: Path, model: Path | None, title: str = "Crop the face",
-                 crop: tuple[int, int, int] | None = None):
+                 crop: tuple[int, int, int] | None = None, settings: QSettings | None = None):
         super().__init__(parent)
         self.setWindowTitle(title)
         fit_size(self, 820, 640)
+        remember_geometry(self, settings, "face")
         # one PNG for the view, the detector and the crop: ffmpeg turns a rotated (EXIF) photo upright, as it
         # does when the face picture is written, so the square lands where it is shown
         self._tmp = media.scratch("crop")

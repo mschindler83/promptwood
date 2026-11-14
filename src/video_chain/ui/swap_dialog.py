@@ -403,7 +403,7 @@ class SwapDialog(QDialog):
             return
         try:
             dlg = FaceCropDialog(self, self.ref_png, self.detector, "Crop to the head (with hair and chin)",
-                                 self.ref_crop)
+                                 self.ref_crop, settings=self.qs)
         except ValueError:
             return
         try:

@@ -219,7 +219,7 @@ class EndsMixin(MainWindowHost):
         need = max([int((c.overrides or {}).get("guide") or 0) for c in self.tree.children(nid)
                     if not c.is_video] + [1])
         dlg = HandoverDialog(self, self.project / node.made["video"], f"Hand-over frame of clip #{T.short_id(nid)}",
-                             T.handover_index(self.tree, node), min_frame=max(1, need - 1))
+                             T.handover_index(self.tree, node), min_frame=max(1, need - 1), settings=self.qs)
         try:
             if dlg.exec() != QDialog.DialogCode.Accepted:
                 return
@@ -309,7 +309,7 @@ class EndsMixin(MainWindowHost):
     def _frame_dialog(self, video: str, title: str):
         """The dialog that picks one frame of a video (None, reported, when the video cannot be read)."""
         try:
-            return VideoFrameDialog(self, Path(video), title, self._known_info(video))
+            return VideoFrameDialog(self, Path(video), title, self._known_info(video), settings=self.qs)
         except (RuntimeError, OSError) as e:
             self._report_error(f"Cannot read {Path(video).name}: {e}")
             return None

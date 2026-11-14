@@ -401,7 +401,7 @@ class InspectorMixin(MainWindowHost):
         if info is None:
             self.status.setText("The model prompt cannot be worked out now (is the start image readable?).")
             return None
-        dlg = ModelPromptDialog(self, nid, info)
+        dlg = ModelPromptDialog(self, nid, info, settings=self.qs)
         self._model_prompt_dialog = dlg            # (tests look at it)
         if self.modal_dialogs:
             dlg.exec()

@@ -310,7 +310,7 @@ class CastMixin(MainWindowHost):
         """The crop window: the square (x, y, side), None for the whole picture, or False (cancelled)."""
         try:
             dlg = FaceCropDialog(QApplication.activeModalWidget() or self, Path(path), self.face_detector(), title,
-                                 crop)                # over the video / image window it was opened from
+                                 crop, settings=self.qs)                # over the video / image window it was opened from
         except ValueError as e:
             self.status.setText(str(e))
             return False

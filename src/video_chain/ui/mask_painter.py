@@ -5,7 +5,7 @@ Erase tool) takes it away; Ctrl + wheel changes the brush. The mask is kept at t
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QPointF, QRect, QRectF, QSettings, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen
 from PySide6.QtWidgets import (QButtonGroup, QDialog, QHBoxLayout, QPushButton, 
                                QSlider, QVBoxLayout, QWidget)
@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QButtonGroup, QDialog, QHBoxLayout, QPushButton,
 from . import shortcuts as S
 from .dialogs import button_row, confirm
 from .theme import theme, with_alpha
-from .widgets import fit_size, label, smooth_scaled, shortcut
+from .widgets import fit_size, label, remember_geometry, smooth_scaled, shortcut
 
 MASK_COLOUR = QColor(255, 40, 40, 120)
 UNDO_STEPS = 30                 # steps kept; each holds only the area it changed (Clear and Invert: the whole mask)
@@ -263,10 +263,11 @@ class MaskPainterDialog(QDialog):
     """Paint a mask over image (a QImage at its own size). .mask: the result (Format_Grayscale8)."""
     size: QSlider  # type: ignore[assignment]   # (the brush size; the name shadows QWidget.size(), never called here)
 
-    def __init__(self, parent, image: QImage, mask: QImage | None = None):
+    def __init__(self, parent, image: QImage, mask: QImage | None = None, settings: QSettings | None = None):
         super().__init__(parent)
         self.setWindowTitle("Paint the part to draw anew")
         fit_size(self, 1100, 800)
+        remember_geometry(self, settings, "mask")
         v = QVBoxLayout(self)
         v.addWidget(label("Paint over what should change (red). The rest stays exactly as it is. Left mouse "
                           "paints, right mouse erases; Ctrl + wheel or [ and ]: brush size; B / E: paint / erase; Ctrl+Z: undo, "

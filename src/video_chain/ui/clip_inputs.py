@@ -7,13 +7,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSettings, Qt, Signal
 from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QPlainTextEdit, QPushButton,
                                QToolButton, QVBoxLayout, QWidget)
 
 from .. import chain, tree as T
 from .dialogs import button_row
-from .widgets import fit_size, FlowBox, label
+from .widgets import fit_size, FlowBox, label, remember_geometry
 
 KIND_NAMES = {"person": "Person", "place": "Place", "object": "Object", "style": "Style"}
 FORMAT_NAMES = {"h3": "official", "classic": "classic"}
@@ -200,9 +200,10 @@ def inputs_list(info: dict) -> str:
 class ModelPromptDialog(QDialog):
     """Read-only: the exact prompt of a clip (selectable, Copy) and the numbered pictures / sounds."""
 
-    def __init__(self, parent, nid: str, info: dict):
+    def __init__(self, parent, nid: str, info: dict, settings: QSettings | None = None):
         super().__init__(parent)
         self.setWindowTitle(f"Model prompt · clip #{T.short_id(nid)}")
+        remember_geometry(self, settings, "modelPrompt")
         v = QVBoxLayout(self)
         v.addWidget(label(f"{info['model']} · {'official H3 format' if info['format'] == 'h3' else 'classic format'}"
                           f" · {info['seconds']:.2f} s", level="secondary"))

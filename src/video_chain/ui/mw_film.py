@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
 from .workers import run_in_background
 from .. import chain, film as F, tree as T
 from . import dialogs as D, shortcuts as S
-from .widgets import format_time, label
+from .widgets import format_time, label, remember_geometry
 from .mw_host import MainWindowHost
 
 
@@ -338,6 +338,7 @@ class FilmMixin(MainWindowHost):
         names, rows = F.cast_by_scene(self.film)
         dlg = QDialog(self)
         dlg.setWindowTitle("Cast in the film")
+        remember_geometry(dlg, self.qs, "filmCast")
         v = QVBoxLayout(dlg)
         if not names:
             v.addWidget(label("The film has no characters yet (the Cast & references tab, " + S.keys("tab_cast")

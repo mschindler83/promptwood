@@ -19,7 +19,7 @@ from .guide import EngineBanner, GuidePanel, NextHint
 from .storyboard import Storyboard
 from .timeline import Timeline
 from .view_mode import AdvancedNote, row_widget
-from .widgets import guard_wheel, icon_button, label, label_for, section_bar, shortcut, timer
+from .widgets import guard_wheel, icon_button, label, label_for, remember_geometry, section_bar, shortcut, timer
 from .mw_support import FileDrop, _CurrentStack
 from .preview import Preview, StartTile
 from .ui_logic import (
@@ -73,6 +73,7 @@ class BuildMixin(MainWindowHost):
         shared.sound_w, shared.sound_v = _panel()
         self.prefs = QDialog(self)
         self.prefs.setWindowTitle("Preferences")
+        remember_geometry(self.prefs, self.qs, "prefs")
         shared.prefs_v = QVBoxLayout(self.prefs)
         self._build_project_panel(shared)
         self._build_start_image(shared)
