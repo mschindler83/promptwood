@@ -13,9 +13,11 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from . import triggers
+
 WIDTH = 320                      # pixels wide (CivitAI's server scales)
 MAX_BYTES = 4 * 2**20            # a small still is ~50 kB; more is not a still
-HOSTS = ("civitai.com", "civitai.red")
+HOSTS = tuple(site.split("//", 1)[1] for site in triggers.SITES)    # (one list, in triggers.py)
 LEVELS = ("None", "Soft", "Mature", "X")       # CivitAI's ratings, mildest first
 USER_AGENT = "video-chain (LoRA example pictures)"
 _SIZE = re.compile(r"/(original=true|width=\d+)[^/]*/")
@@ -46,6 +48,17 @@ def _ours(url: str) -> bool:
         return False
     host = (u.hostname or "").lower()
     return u.scheme == "https" and any(host == h or host.endswith("." + h) for h in HOSTS)
+
+
+class _OursOnly(urllib.request.HTTPRedirectHandler):
+    """A redirect is followed only to CivitAI's own picture server (checked before the next request is made)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return super().redirect_request(req, fp, code, msg, headers, newurl) if _ours(newurl) else None
+
+
+def _open(req, timeout: float):
+    return urllib.request.build_opener(_OursOnly).open(req, timeout=timeout)
 
 
 def still_url(item: dict, width: int = WIDTH) -> str | None:
@@ -98,7 +111,7 @@ def fetch(item: dict, db=None, timeout: float = 20.0) -> Path | None:
         return None
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "image/*"})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with _open(req, timeout) as r:
             if not _ours(r.geturl()):
                 raise OSError("the picture was redirected away from CivitAI")
             kind = str(r.headers.get("Content-Type") or "").lower()

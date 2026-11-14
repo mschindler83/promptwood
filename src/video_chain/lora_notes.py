@@ -63,6 +63,16 @@ def clean_example(prompt) -> str:
     return " ".join(s.split()).strip(" ,")
 
 
+_FORGED = re.compile(r"(?i)end\s+of\s+data|the\s+user'?s\s+own\s+remarks|end\s+of\s+the\s+lora\s+material")
+
+
+def _defang(text, n: int = 0) -> str:
+    """Text from CivitAI (anyone may write it) for a prompt: on one line, cut to n characters (0: not cut), and
+    without the phrases the prompts use as their own markers (the end of the DATA block, the user's remarks)."""
+    s = _FORGED.sub("...", " ".join(str(text or "").split()))
+    return s[:n].strip() if n else s
+
+
 def _cut(text: str, n: int) -> str:
     text = text.strip()
     if len(text) <= n:
@@ -201,16 +211,17 @@ def material(details: dict | None, words: list[str] | None = None, path: str = "
     d = _sound(details)
     v, m = d["version"], d["model"]
     inner = v.get("model") if isinstance(v.get("model"), dict) else {}
-    name = str(m.get("name") or inner.get("name") or Path(path).stem or "LoRA")
-    words = [str(w) for w in (words if words is not None else v.get("trainedWords") or []) if str(w).strip()]
-    about = ". ".join(x for x in (plain(v.get("description")), plain(m.get("description"))) if x)
-    tags = ", ".join(str(t) for t in (m.get("tags") or [])[:8] if t)
-    prompts = [clean_example(p["prompt"]) for p in triggers.example_prompts(d)]
+    name = _defang(m.get("name") or inner.get("name") or Path(path).stem or "LoRA")
+    words = [w for w in (_defang(w, 80) for w in (words if words is not None else v.get("trainedWords") or []))
+             if w]
+    about = _defang(". ".join(x for x in (plain(v.get("description")), plain(m.get("description"))) if x))
+    tags = ", ".join(t for t in (_defang(t, 40) for t in (m.get("tags") or [])[:8]) if t)
+    prompts = [_defang(clean_example(p["prompt"])) for p in triggers.example_prompts(d)]
     pool = _distinct([p for p in prompts if p], POOL)
     examples = pool[:NOTE_EXAMPLES]
     if not (words or about or examples):
         return None
-    return {"name": " ".join(name.split())[:80], "base": str(v.get("baseModel") or ""), "words": words,
+    return {"name": " ".join(name.split())[:80], "base": _defang(v.get("baseModel"), 80), "words": words,
             "about": about, "tags": tags, "examples": examples, "pool": pool, "settings": settings_of(d, path),
             "stamp": f"{NOTE_VERSION}:{d.get('fetched') or 0}:{len(pool)}"}
 
@@ -307,18 +318,19 @@ def save_user(db, path: str, note: str | None = None, remarks: str | None = None
     """Keep the user's own text on a LoRA. note: their version of the note (None: as it is; "": none, so the
     language model writes one again at the next refine). remarks: their remarks for the refiner (None: as they
     are). False when it cannot be kept (the file's hash is not known yet: it was never looked at)."""
-    n = dict(db.note(path) or {})
-    n.setdefault("note", "")
     if note is not None:
         note = "\n".join(" ".join(x.split()) for x in note.strip().splitlines() if x.strip())[:NOTE_CHARS]
-        if note != str(n.get("note") or "").strip() or not note:
+
+    def change(current):
+        n = dict(current or {})
+        n.setdefault("note", "")
+        if note is not None and (note != str(n.get("note") or "").strip() or not note):
             n.update(note=note, edited=bool(note), made=time.time())
             n.pop("stamp", None)
-    if remarks is not None:
-        n["remarks"] = " ".join(remarks.split())[:REMARK_CHARS]
-    if not n.get("note") and not n.get("remarks"):
-        return db.set_note(path, None)
-    return db.set_note(path, n)
+        if remarks is not None:
+            n["remarks"] = " ".join(remarks.split())[:REMARK_CHARS]
+        return n if n.get("note") or n.get("remarks") else None
+    return db.update_note(path, change)
 
 
 def _bare(path: str) -> dict:
@@ -358,9 +370,15 @@ def make_notes(paths: list[str], complete: Callable[[str, str, int], str], db=No
             note = clean_note(complete(system, user, NOTE_TOKENS))
         except Exception:  # noqa: BLE001  (the refine goes on with the example prompts alone)
             continue
-        remarks = note_of(db, p, mat)["remarks"]                      # (the user's remarks stay)
-        if note and db.set_note(p, {"note": note, "stamp": mat["stamp"], "made": time.time(),
-                                    **({"remarks": remarks} if remarks else {})}):
+        if not note:
+            continue
+
+        def change(current, note=note, mat=mat):
+            if (current or {}).get("edited") and str(current.get("note") or "").strip():
+                return triggers.KEEP                                  # (the user wrote one meanwhile: theirs stays)
+            remarks = str((current or {}).get("remarks") or "").strip()   # (the user's remarks stay)
+            return {"note": note, "stamp": mat["stamp"], "made": time.time(), **({"remarks": remarks} if remarks else {})}
+        if db.update_note(p, change):
             made += 1
     return made
 

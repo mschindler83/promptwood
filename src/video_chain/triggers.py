@@ -189,7 +189,11 @@ def _tag_guess(meta: dict) -> list[str] | None:
     return words or None
 
 
-def sha256_of(path: str | Path, stop: Callable[[], bool] = lambda: False) -> str | None:
+def _never() -> bool:
+    return False
+
+
+def sha256_of(path: str | Path, stop: Callable[[], bool] = _never) -> str | None:
     h = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(8 << 20), b""):
@@ -215,12 +219,38 @@ def key_rejected() -> bool:
     return bool(key) and key in _REJECTED
 
 
-def _get_json(path: str, timeout: float, use_key: bool = True) -> dict | None:
+RETRY_WAIT_MAX = 30.0       # seconds to wait for a "slow down" (429 / 503 Retry-After) at most
+
+
+def _pause(seconds: float, stop: Callable[[], bool] = _never) -> None:
+    """Wait (sleep) in short steps so that a stop ends the wait."""
+    end = time.monotonic() + max(0.0, seconds)
+    while (left := end - time.monotonic()) > 0 and not stop():
+        time.sleep(min(0.25, left))
+
+
+def _kw(stop) -> dict:
+    """{"stop": stop} unless it is the default (a replacement of _get_json need not know it)."""
+    return {} if stop is _never else {"stop": stop}
+
+
+def _retry_after(e: urllib.error.HTTPError) -> float:
+    try:
+        wait = float((e.headers or {}).get("Retry-After") or 2)
+    except (TypeError, ValueError, AttributeError):
+        wait = 2.0
+    return min(max(wait, 0.0), RETRY_WAIT_MAX)
+
+
+def _get_json(path: str, timeout: float, use_key: bool = True,
+              stop: Callable[[], bool] = _never) -> dict | None:
     """A CivitAI API answer: of the chosen site, else of the other (when the first cannot be asked or does not
-    know what is asked for: a LoRA may be listed on one only); None when none knows it (404). OSError when no site
-    could be asked.
+    know what is asked for: a LoRA may be listed on one only); None only when every site answered that it does not
+    know it (404). OSError when a site could not be asked (offline, rate limited, server error) and none had it:
+    "not known" must never come from a failed request.
     The key goes only to CivitAI's own sites: as an unredirected header (a redirect elsewhere does not carry it).
-    A rejected key (401 / 403): asked once more without it."""
+    A rejected key (401 / 403): asked once more without it. A 429 (slow down): waits (Retry-After, at most
+    RETRY_WAIT_MAX s) and asks that site once more."""
     last: Exception | None = None
     key = api_key() if use_key else ""
     if key in _REJECTED:
@@ -230,31 +260,43 @@ def _get_json(path: str, timeout: float, use_key: bool = True) -> dict | None:
         req = urllib.request.Request(f"{base}{path}", headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
         if key:
             req.add_unredirected_header("Authorization", f"Bearer {key}")
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                data = json.loads(r.read(MAX_ANSWER).decode("utf-8", "replace"))
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
-                unknown = True                          # (the other site may know it)
-                continue
-            if e.code in (401, 403) and key:
-                _REJECTED.add(key)                      # (not sent again: one request per lookup, not two)
-                try:
-                    return _get_json(path, timeout, use_key=False)
-                except OSError as e2:
-                    raise KeyRejected(f"CivitAI rejected the API key ({e.code}) and could not be asked without "
-                                      f"it: {e2}") from e2
-            last = e
-            continue
-        except (OSError, ValueError) as e:
-            last = e
+        data = None
+        for attempt in (0, 1):
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as r:
+                    data = json.loads(r.read(MAX_ANSWER).decode("utf-8", "replace"))
+                break
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    unknown = True                      # (the other site may know it)
+                    break
+                if e.code == 429 and not attempt and not stop():
+                    _pause(_retry_after(e), stop)
+                    continue
+                if e.code in (401, 403) and key:
+                    _REJECTED.add(key)                  # (not sent again: one request per lookup, not two)
+                    try:
+                        return _get_json(path, timeout, use_key=False, stop=stop)
+                    except OSError as e2:
+                        raise KeyRejected(f"CivitAI rejected the API key ({e.code}) and could not be asked "
+                                          f"without it: {e2}") from e2
+                last = e
+                break
+            except (OSError, ValueError) as e:
+                last = e
+                break
+        if data is None:
             continue
         if isinstance(data, dict) and not data.get("error"):
             return data
         unknown = True
-    if unknown:
-        return None
-    raise OSError(f"CivitAI could not be asked: {last}")
+    if last is not None:                                # (a site failed: that is not "unknown")
+        raise OSError(f"CivitAI could not be asked: {last}")
+    return None if unknown else _no_site()
+
+
+def _no_site():
+    raise OSError("CivitAI could not be asked")
 
 
 EXAMPLE_PAGE = 200          # gallery pictures per request (CivitAI's maximum)
@@ -274,7 +316,7 @@ def _slim(item: dict) -> dict:
 
 
 def gallery(version_id: int, timeout: float = 20.0, gap: float = REQUEST_GAP, pages: int = EXAMPLE_PAGES,
-            want: int = EXAMPLE_PROMPTS) -> tuple[list[dict], int, bool]:
+            want: int = EXAMPLE_PROMPTS, stop: Callable[[], bool] = _never) -> tuple[list[dict], int, bool]:
     """The pictures and videos users posted with a LoRA version (the gallery on its CivitAI page: the creator's
     examples and everyone else's), of all time, the most liked first; only those that tell their prompt, each
     prompt once. -> (the pictures, how many were looked at, complete). The gallery is read page by page until it
@@ -284,11 +326,13 @@ def gallery(version_id: int, timeout: float = 20.0, gap: float = REQUEST_GAP, pa
             "&period=AllTime&nsfw=X&withMeta=true")
     out, seen, looked, cursor = [], set(), 0, None
     for page in range(max(1, pages)):
+        if page and stop():
+            return out, looked, False
         if page and gap:
-            time.sleep(gap)
+            _pause(gap, stop)
         try:
             data = _get_json(base + (f"&cursor={urllib.parse.quote(str(cursor), safe='')}" if cursor else ""),
-                             timeout)
+                             timeout, **_kw(stop))
         except (OSError, ValueError, TypeError):
             if not page:
                 raise
@@ -308,14 +352,17 @@ def gallery(version_id: int, timeout: float = 20.0, gap: float = REQUEST_GAP, pa
     return out[:want], looked, True
 
 
-def civitai_lookup(sha: str, timeout: float = 20.0, gap: float = REQUEST_GAP) -> dict | None:
+def civitai_lookup(sha: str, timeout: float = 20.0, gap: float = REQUEST_GAP,
+                   stop: Callable[[], bool] = _never) -> dict | None:
     """CivitAI's model version for a file hash: {"words", "model", "url", "details"}; None when CivitAI does not
     know it. details = {"version": the version as CivitAI gives it, "model": the model page (description, tags,
     creator, license; its other versions only as id / name / base model), "examples": the pictures of its
     gallery that tell their prompt (see gallery: generation data with prompt, negative prompt, seed, settings),
     "examples_seen": how many gallery pictures were looked at}. The model page and the examples are optional (a
     failed request leaves them out). Raises OSError when the version could not be asked (offline, server error)."""
-    data = _get_json(f"/api/v1/model-versions/by-hash/{sha}", timeout)
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", str(sha)):
+        raise ValueError(f"not a SHA-256: {sha!r}")
+    data = _get_json(f"/api/v1/model-versions/by-hash/{sha}", timeout, **_kw(stop))
     if data is None:
         return None
     model = data.get("model") or {}
@@ -323,8 +370,8 @@ def civitai_lookup(sha: str, timeout: float = 20.0, gap: float = REQUEST_GAP) ->
     details: dict = {"version": data, "fetched": time.time(), "complete": True}
     if mid:
         try:
-            time.sleep(gap)
-            page = _get_json(f"/api/v1/models/{int(mid)}", timeout)
+            _pause(gap, stop)
+            page = _get_json(f"/api/v1/models/{int(mid)}", timeout, **_kw(stop))
             if page:
                 page = dict(page)
                 page["modelVersions"] = [{"id": v.get("id"), "name": v.get("name"), "baseModel": v.get("baseModel")}
@@ -334,8 +381,8 @@ def civitai_lookup(sha: str, timeout: float = 20.0, gap: float = REQUEST_GAP) ->
             details["complete"] = False                # (asked again with the next scan)
     if data.get("id"):
         try:
-            time.sleep(gap)
-            details["examples"], details["examples_seen"], whole = gallery(int(data["id"]), timeout, gap)
+            _pause(gap, stop)
+            details["examples"], details["examples_seen"], whole = gallery(int(data["id"]), timeout, gap, stop=stop)
             if not whole:
                 details["complete"] = False
         except (OSError, ValueError, TypeError):
@@ -362,6 +409,9 @@ def example_prompts(details: dict | None) -> list[dict]:
                     "seed": meta.get("seed"), "steps": meta.get("steps"), "cfg": meta.get("cfgScale"),
                     "sampler": meta.get("sampler"), "image": it.get("url") or ""})
     return out
+
+
+KEEP = object()        # update_note: leave the note as it is
 
 
 class TriggerDB:
@@ -465,6 +515,16 @@ class TriggerDB:
             return True
         except OSError:
             return False
+
+    def update_note(self, path: str, change: Callable[[dict | None], object]) -> bool:
+        """Read, change and write a LoRA's note under one lock, so that two writers (the user's save and a
+        background note job) cannot overwrite each other. change(current note or None) returns the new note
+        (None: forget it) or KEEP (write nothing). False when nothing was written."""
+        with self._lock:
+            new = change(self.note(path))
+            if new is KEEP:
+                return False
+            return self.set_note(path, new)
 
     def _save_details(self, sha: str, details: dict, target: Path | None = None):
         import tempfile
@@ -570,7 +630,7 @@ class TriggerDB:
                 return time.time() - float(rec["checked"]) > RECHECK_DAYS * 86400
             return True
 
-    def scan(self, paths: list[str], online: bool = True, stop: Callable[[], bool] = lambda: False,
+    def scan(self, paths: list[str], online: bool = True, stop: Callable[[], bool] = _never,
              lookup: Callable[[str], dict | None] = civitai_lookup, gap: float = REQUEST_GAP,
              progress: Callable[[int, int, str], None] | None = None) -> dict:
         """Look at LoRA files not known yet (header; then CivitAI by hash). Returns counts
@@ -623,7 +683,7 @@ class TriggerDB:
                         flush()
                         continue
                 if asked and gap:
-                    time.sleep(gap)
+                    _pause(gap, stop)
                 asked = True
                 n["looked"] += 1
                 if progress:
@@ -632,7 +692,7 @@ class TriggerDB:
                     except Exception:  # noqa: BLE001  (a window that is gone: the scan goes on)
                         pass
                 try:
-                    hit = lookup(sha)
+                    hit = lookup(sha) if lookup is not civitai_lookup else civitai_lookup(sha, stop=stop)
                 except OSError:
                     n["failed"] += 1
                     failed_in_a_row += 1
