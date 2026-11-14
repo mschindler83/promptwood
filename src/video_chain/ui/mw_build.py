@@ -336,7 +336,9 @@ class BuildMixin(MainWindowHost):
         self.dialogue_lang.activated.connect(self._identity_changed)          # a finished choice, not each key
         self.tts_provider.currentIndexChanged.connect(self._tts_changed)
         self.eleven_model.currentIndexChanged.connect(self._tts_changed)
-        self.dialogue_lang.lineEdit().editingFinished.connect(self._identity_changed)
+        edit_box = self.dialogue_lang.lineEdit()
+        assert edit_box is not None
+        edit_box.editingFinished.connect(self._identity_changed)
 
     def _build_tracks_panel(self, shared):
         """Build the audio tracks."""
@@ -374,8 +376,8 @@ class BuildMixin(MainWindowHost):
         for w in (self.b_track_add, self.b_track_clip):
             trow.addWidget(w)
         trow.addStretch(1)
-        for w in (self.b_track_cut, self.b_track_play, self.b_track_del):
-            trow.addWidget(w)
+        for track_button in (self.b_track_cut, self.b_track_play, self.b_track_del):
+            trow.addWidget(track_button)
         tv.addLayout(trow)
         self.track_info = label("", level="tertiary")
         self.track_info.setWordWrap(True)

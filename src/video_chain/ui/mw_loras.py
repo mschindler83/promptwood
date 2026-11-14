@@ -268,7 +268,7 @@ class LorasMixin(MainWindowHost):
         if now - miss.get((key, comfy_dir), -1e9) < 30:
             return None                              # (looked for a moment ago: not there)
         try:
-            for root in CMF.comfy_lora_roots(Path(comfy_dir) if comfy_dir else None):
+            for root in (CMF.comfy_lora_roots(Path(comfy_dir)) if comfy_dir else []):
                 for f in sorted(Path(root).rglob("*.safetensors")):
                     if key in f.name.lower():
                         self._lora_hits = {**self._lora_hits, (key, comfy_dir): (str(f), now)}

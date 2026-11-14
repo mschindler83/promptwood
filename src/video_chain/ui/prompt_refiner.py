@@ -295,10 +295,10 @@ class RefineDialog(QDialog):
         self.pics_title.setVisible(show_pics)
         for i in range(self.pics_row.count()):
             item = self.pics_row.itemAt(i)
-            w = item.widget() if item is not None else None
-            if w is not None:
-                w.setVisible(show_pics)
-                w.setEnabled(see)
+            pic = item.widget() if item is not None else None
+            if pic is not None:
+                pic.setVisible(show_pics)
+                pic.setEnabled(see)
         self.pics_title.setText("Pictures the model sees (click to switch on / off)" if see else
                                 "Pictures (this model cannot see them)")
         self._update_buttons()

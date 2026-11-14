@@ -5,6 +5,7 @@ window with the exact text the model reads. Both show tree.clip_inputs; nothing 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QPlainTextEdit, QPushButton,
@@ -46,7 +47,7 @@ def chip_specs(info: dict, lead_off: str | None = None) -> list[dict]:
     """The chips of a clip from tree.clip_inputs, in the order the model gets the inputs: [{"text", "tip",
     "variant": "" | "neutral", "lead": None | True | False}] (lead: the checkable chip of the implicit lead).
     lead_off: the lead's name when the clip's lead switch is off and it would get the lead otherwise."""
-    out = []
+    out: list[dict[str, Any]] = []
     for which in ("start", "end"):
         chip = _frame_chip(which, info[which])
         if chip:

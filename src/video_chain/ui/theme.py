@@ -301,16 +301,16 @@ class ThemeManager:
     def apply(self, app: QApplication) -> None:
         if self._fonts is None:
             fams = []
-            for f in ("InterVariable.ttf", "JetBrainsMono-Variable.ttf"):
-                fid = QFontDatabase.addApplicationFont(str(THEME_DIR / "fonts" / f))
+            for font_file in ("InterVariable.ttf", "JetBrainsMono-Variable.ttf"):
+                fid = QFontDatabase.addApplicationFont(str(THEME_DIR / "fonts" / font_file))
                 names = QFontDatabase.applicationFontFamilies(fid) if fid >= 0 else []
                 fams.append(names[0] if names else "")
             self._fonts = (fams[0], fams[1])
-        fams = self._fonts
-        if fams[0]:
-            self.theme.uiFamily = fams[0]
-        if fams[1]:
-            self.theme.monoFamily = fams[1]
+        ui_family, mono_family = self._fonts
+        if ui_family:
+            self.theme.uiFamily = ui_family
+        if mono_family:
+            self.theme.monoFamily = mono_family
         app.setStyle(QStyleFactory.create("Fusion"))
         t = self.theme
         f = QFont(t.uiFamily)

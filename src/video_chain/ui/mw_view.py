@@ -13,7 +13,8 @@ from PySide6.QtWidgets import QApplication, QLineEdit, QPlainTextEdit
 from .. import tree as T
 from . import shortcuts as S
 from .clip_cards import PromptCard
-from .ui_logic import COMFY_START_TIMEOUT, DEFAULT_COMFY_LAUNCHER, LAYOUTS, LAYOUT_VERSION, project_setting_changes
+from .ui_logic import (COMFY_START_TIMEOUT, DEFAULT_COMFY_LAUNCHER, LAYOUTS, LAYOUT_VERSION, as_dict,
+                       project_setting_changes)
 from .mw_host import MainWindowHost
 from .qsvalue import qs_value
 
@@ -212,7 +213,7 @@ class ViewMixin(MainWindowHost):
         if self.tree is None:
             return []
         ctl = self._project_controls()
-        return [name for key, name in project_setting_changes(self.tree.options)
+        return [name for key, name in project_setting_changes(as_dict(self.tree.options))
                 if self.view.is_advanced(ctl[key])]
 
     def _update_adv_note(self):
@@ -241,7 +242,8 @@ class ViewMixin(MainWindowHost):
         m.addAction("Quit", self.close).setShortcut(S.sequence("quit"))
         v = self.menuBar().addMenu("&View")
         for k, name in enumerate(("Clips", "Cast & references", "Sounds")):
-            a = v.addAction(f"{name} (left)", lambda _=False, k=k: self._show_left_tab(k))
+            a = v.addAction(f"{name} (left)")
+            a.triggered.connect(lambda _=False, k=k: self._show_left_tab(k))
             a.setShortcut(S.sequence(("tab_clips", "tab_cast", "tab_sounds")[k]))
         v.addAction("Log", self.show_log).setShortcut(S.sequence("log"))
         v.addAction("Getting started", lambda: self.show_guide(True))
@@ -254,7 +256,9 @@ class ViewMixin(MainWindowHost):
         self.act_left.toggled.connect(self._show_left)   # (the panel is built later, in _build)
         for name in ("edit", "write", "watch"):
             row = S.SHORTCUTS[[s.id for s in S.SHORTCUTS].index(f"layout_{name}")]
-            v.addAction(row.text, lambda _=False, n=name: self.apply_layout(n)).setShortcut(S.sequence(row.id))
+            layout_action = v.addAction(row.text)
+            layout_action.triggered.connect(lambda _=False, n=name: self.apply_layout(n))
+            layout_action.setShortcut(S.sequence(row.id))
         v.addAction("Reset layout", lambda: self.apply_layout("edit"))
         v.addSeparator()
         group = QActionGroup(self)                  # (the view itself is made in __init__, after the menu)

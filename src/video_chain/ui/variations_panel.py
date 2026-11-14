@@ -7,6 +7,7 @@ import hashlib
 import html
 import json
 import re
+from typing import cast
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
@@ -420,12 +421,12 @@ class VariationsPanel(QFrame):
         for key, text, tip in (("order", "In order", "Every combination in turn; the next Generate continues there"),
                                ("shuffle", "Shuffled", "Every combination once, in a random order"),
                                ("random", "Random", "Free random picks (values with a higher weight come more often)")):
-            b = QPushButton(text)
-            b.setCheckable(True)
-            b.setToolTip(tip)
-            b.setAutoDefault(False)
-            self.modes.addButton(b)
-            self.mode_buttons[key] = b
+            mode_button = QPushButton(text)
+            mode_button.setCheckable(True)
+            mode_button.setToolTip(tip)
+            mode_button.setAutoDefault(False)
+            self.modes.addButton(mode_button)
+            self.mode_buttons[key] = mode_button
             orow.addWidget(b)
         self.mode_buttons["order"].setChecked(True)
         self.modes.buttonClicked.connect(lambda _b: self._rebuild())
@@ -452,7 +453,7 @@ class VariationsPanel(QFrame):
                               "Generate stopped")
         for w in (self.all, self.next):
             w.toggled.connect(lambda *_: self._refresh())
-        self.count.valueChanged.connect(lambda *_: (self.next.setChecked(True), self._refresh()))
+        self.count.valueChanged.connect(self._count_changed)
         arow.addWidget(self.all)
         arow.addWidget(self.next)
         arow.addWidget(self.count)
@@ -501,7 +502,7 @@ class VariationsPanel(QFrame):
         for w in (self.on, self.repeat, self.count, self.all, self.next):
             w.blockSignals(True)
         self.on.setChecked(bool(st.get("on")))
-        self.mode_buttons.get(st.get("mode"), self.mode_buttons["order"]).setChecked(True)
+        self.mode_buttons.get(st.get("mode") or "", self.mode_buttons["order"]).setChecked(True)
         self.repeat.setValue(_to_int(st.get("repeat"), 1, 1, 50))
         self.count.setValue(_to_int(st.get("count"), 4, 1, 1000))
         (self.next if st.get("amount") == "next" else self.all).setChecked(True)
@@ -509,7 +510,7 @@ class VariationsPanel(QFrame):
             w.blockSignals(False)
         saved = st.get("positions") if isinstance(st.get("positions"), dict) else {}
         if not keep_positions:
-            self.positions = dict(saved)
+            self.positions = dict(saved or {})
         elif saved:
             self.positions = {**saved, **self.positions} if self.positions else dict(saved)
         self._rebuild()
@@ -676,10 +677,14 @@ class VariationsPanel(QFrame):
         return True
 
     # ---- showing
+    def _count_changed(self, *_) -> None:
+        self.next.setChecked(True)
+        self._refresh()
+
     def _rebuild(self):
         while self.cards_box.count():
             it = self.cards_box.takeAt(0)
-            w = it.widget()                        # (after setParent(None) the item no longer knows it)
+            w = it.widget() if it is not None else None                        # (after setParent(None) the item no longer knows it)
             if w is not None:
                 w.hide()
                 w.setParent(None)
@@ -704,9 +709,10 @@ class VariationsPanel(QFrame):
         if focus:
             self._typing_in = None
             for i in range(self.cards_box.count()):
-                card = self.cards_box.itemAt(i).widget()
-                if card is not None and card.var.name == focus:
-                    card.add.setFocus()
+                item = self.cards_box.itemAt(i)
+                found = cast("VariableCard | None", item.widget() if item is not None else None)
+                if found is not None and found.var.name == focus:
+                    found.add.setFocus()
         self._refresh()
 
     def _remember_typing(self, name: str):

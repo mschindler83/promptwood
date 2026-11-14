@@ -48,6 +48,7 @@ def waveform(path: str | Path, duration: float, columns: int = PEAKS, rate: int 
         while True:
             if cancelled():
                 return []
+            assert proc.stdout is not None
             data = proc.stdout.read(step * 4 * 64)
             if not data:
                 break
@@ -250,8 +251,8 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
         self.clean_info.setWordWrap(True)
         if voice:
             mrow = QHBoxLayout()
-            for w in (self.b_clean, self.b_clean_play, self.use_clean):
-                mrow.addWidget(w)
+            for control in (self.b_clean, self.b_clean_play, self.use_clean):
+                mrow.addWidget(control)
             mrow.addWidget(self.clean_info, 1)
             v.addLayout(mrow)
 

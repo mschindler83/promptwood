@@ -438,20 +438,20 @@ class ImagePickerDialog(QDialog):
         else:
             imgs.sort(key=lambda e: e.name.lower())
         dir_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DirIcon)
-        for e in dirs:
-            it = QListWidgetItem(dir_icon, e.name)
-            it.setData(Qt.ItemDataRole.UserRole, ("dir", e.path))
+        for ent in dirs:
+            it = QListWidgetItem(dir_icon, ent.name)
+            it.setData(Qt.ItemDataRole.UserRole, ("dir", ent.path))
             it.setSizeHint(self._cell())
             self.grid.addItem(it)
         blank = self._blank_icon()
-        for e in imgs:
-            it = QListWidgetItem(blank, e.name)
-            it.setData(Qt.ItemDataRole.UserRole, ("img", e.path))
-            it.setToolTip(e.name)
+        for ent in imgs:
+            it = QListWidgetItem(blank, ent.name)
+            it.setData(Qt.ItemDataRole.UserRole, ("img", ent.path))
+            it.setToolTip(ent.name)
             it.setSizeHint(self._cell())
             self.grid.addItem(it)
-            self._items[e.path] = it
-            self._pool.submit(self._make_thumb, gen, e.path)   # file details are read there (network shares)
+            self._items[ent.path] = it
+            self._pool.submit(self._make_thumb, gen, ent.path)   # file details are read there (network shares)
         n = len(imgs)
         self.setWindowTitle(f"{self.windowTitle().split(' — ')[0]} — {folder.name or folder} ({n} {self.noun})")
 
@@ -592,11 +592,11 @@ class ImagePickerDialog(QDialog):
             except RuntimeError:                       # (closed)
                 pass
             return
-        img, size = read_scaled(path, self.preview.size())
+        img, full = read_scaled(path, self.preview.size())
         if not img.isNull():
             self.preview.setPixmap(QPixmap.fromImage(img))
         mb, when = file_facts(path)
-        dims = f"{size.width()}×{size.height()}" if size.isValid() else "?"
+        dims = f"{full.width()}×{full.height()}" if full.isValid() else "?"
         caption = item.data(Qt.ItemDataRole.UserRole + 2)
         self.info.setText((f"{caption}\n" if caption else "") + f"{Path(path).name}\n{dims} px · {mb:.1f} MB · {when}")
         self.buttons.button(QDialogButtonBox.StandardButton.Open).setEnabled(True)

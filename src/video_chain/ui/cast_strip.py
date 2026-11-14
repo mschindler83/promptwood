@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QAbstractItemView, QHeaderView, QTableWidget, QTab
 from .. import tree as T
 
 
-def cast_cells(options: dict, nodes: list) -> dict[tuple[str, str], tuple[str, str]]:
+def cast_cells(options: T.Options, nodes: list) -> dict[tuple[str, str], tuple[str, str]]:
     """{(character name, node id): (mark, tooltip)} for the clips of a path (videos have none)."""
     out: dict[tuple[str, str], tuple[str, str]] = {}
     for n in nodes:

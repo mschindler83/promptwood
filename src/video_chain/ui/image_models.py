@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
+from typing import Any
 
 from PySide6.QtCore import Qt, QTimer
 
@@ -114,7 +115,8 @@ class ModelsMixin(ImageEditHost):
             try:
                 if connect is None:
                     raise RuntimeError("no image creator")
-                sig.families.emit(connect(None).files, "")
+                creator: Any = connect(None)
+                sig.families.emit(creator.files, "")
             except Exception as e:  # noqa: BLE001
                 safe_emit(sig.families, {}, str(e))
         threading.Thread(target=work, daemon=True).start()

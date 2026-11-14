@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 
-from typing import cast
+from typing import Any, cast
 
 from PySide6.QtCore import QEvent, QObject, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (QColor, QFont, QFontInfo, QImage, QKeySequence, QPainter, QPixmap, QShortcut,
@@ -207,7 +207,8 @@ class VideoView(QWidget):
         self._img = QImage()
         self._raw = QImage()                       # (CPU: the frame before the turn)
         self.rotation = 0
-        self._out = None                           # (GPU, turnable: the VideoOutput item)
+        self._out: QObject | None = None           # (GPU, turnable: the VideoOutput item)
+        self.sink: Any                             # (what a QMediaPlayer paints into)
         self._shown: tuple | None = None           # (the frame, the size) -> the frame scaled to fit, for painting
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         if self.gpu:
@@ -215,6 +216,7 @@ class VideoView(QWidget):
             lay.setContentsMargins(0, 0, 0, 0)
             if self.turnable:
                 self.widget = self._quick_output()
+                assert self._out is not None               # (_quick_output)
                 self.sink = self._out.property("videoSink")
             else:
                 from PySide6.QtMultimediaWidgets import QVideoWidget
@@ -245,7 +247,7 @@ class VideoView(QWidget):
         from PySide6.QtQml import QQmlComponent
         from PySide6.QtQuickWidgets import QQuickWidget
         view = QQuickWidget(self)
-        view.setResizeMode(QQuickWidget.SizeRootObjectToView)
+        view.setResizeMode(QQuickWidget.ResizeMode.SizeRootObjectToView)
         view.setClearColor(QColor(0, 0, 0))
         comp = QQmlComponent(view.engine())
         comp.setData(self.QML, QUrl())
@@ -263,6 +265,7 @@ class VideoView(QWidget):
             raise RuntimeError("this video view was not made turnable")
         self.rotation = int(degrees) % 360
         if self.gpu:
+            assert self._out is not None
             self._out.setProperty("orientation", self.rotation)      # (clockwise, as Qt's documentation says)
         else:
             self._turn()

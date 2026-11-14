@@ -8,6 +8,8 @@ Convention (the words are in widgets.TERMS):
   buttons (`add_action`), a destructive one says so (`destructive=True`)."""
 from __future__ import annotations
 
+from typing import overload
+
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QMessageBox, QPushButton
 
 
@@ -30,6 +32,12 @@ def failed(parent, title: str, what: str, exc) -> None:
     warn(parent, title, f"Could not {what}: {exc}")
 
 
+@overload
+def button_row(dialog: QDialog, ok_text: str, *, cancel_text: str = ..., enabled: bool = ..., accept=...
+               ) -> tuple[QDialogButtonBox, QPushButton]: ...
+@overload
+def button_row(dialog: QDialog, ok_text: None = ..., *, cancel_text: str = ..., enabled: bool = ..., accept=...
+               ) -> tuple[QDialogButtonBox, None]: ...
 def button_row(dialog: QDialog, ok_text: str | None = None, *, cancel_text: str = "Cancel",
                enabled: bool = True, accept=None) -> tuple[QDialogButtonBox, QPushButton | None]:
     """The buttons of a dialog, wired to it. With ok_text: that action button (Ok role: what it does, in words) and

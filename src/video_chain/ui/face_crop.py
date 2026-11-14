@@ -86,6 +86,7 @@ class CropView(QWidget):
         s, ox, oy = self._frame()
         target = QRectF(ox, oy, self.image.width() * s, self.image.height() * s)
         self._ensure_shown()
+        assert self._shown is not None                 # (_ensure_shown)
         p.drawImage(target.topLeft(), self._shown)
         x, y, side = self.crop
         box = self._to_widget(x, y, side, side)
@@ -254,6 +255,7 @@ class FaceCropDialog(QDialog):
                 why = F.available(model)
                 if why is None and not self._closed:
                     try:
+                        assert model is not None                  # (available() said it is there)
                         faces = F.detect(png, model)
                     except Exception as e:  # noqa: BLE001
                         why = f"the face detector failed: {e}"

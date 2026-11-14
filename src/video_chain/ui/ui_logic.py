@@ -254,7 +254,7 @@ def project_setting_changes(o: dict) -> list[tuple[str, str]]:
     for k, name in (("prefix", "Style before"), ("suffix", "Style after")):
         if (style.get(k) or "").strip():
             out.append(("style_" + k, name))
-    if T.is_h3(o) != (d["prompt_format"] == "h3"):
+    if T.is_h3(cast(T.Options, o)) != (d["prompt_format"] == "h3"):
         out.append(("prompt_format", "Prompt format"))
     if bool(o.get("lora_triggers", d["lora_triggers"])) != d["lora_triggers"]:
         out.append(("lora_triggers", "LoRA trigger words"))

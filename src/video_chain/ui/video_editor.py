@@ -504,6 +504,7 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
             self.player.setVideoOutput(self.video.sink)
             self._attach_player(self.player)
         self.player_error = ""
+        assert self.player is not None and self.video is not None
         self.player.setSource(QUrl.fromLocalFile(self.file))
         self.stack.setCurrentWidget(self.video)
 
@@ -523,7 +524,7 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
                 self.canvas = self.canvas_for(self.file, self.rotate) or self.canvas
             except Exception:  # noqa: BLE001  (the size stays as it was)
                 pass
-        if self.player is not None:
+        if self.player is not None and self.video is not None:
             self.video.set_rotation(self.rotate)
         self._show_info()
 

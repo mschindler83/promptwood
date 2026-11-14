@@ -206,8 +206,8 @@ class CompareDialog(QDialog):
         close, _none = button_row(self)
         v.addWidget(close)
         shortcut(QKeySequence("Space"), self, self.toggle)
-        for w in (self.b_play, self.b_restart, self.slider, self.loop, self.sound):
-            w.setEnabled(bool(self.players))
+        for control in (self.b_play, self.b_restart, self.slider, self.loop, self.sound):
+            control.setEnabled(bool(self.players))
         if self.players:
             for p in self.players:                   # the longest clip sets the slider's range
                 p.durationChanged.connect(lambda _d: self.slider.setRange(

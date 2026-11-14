@@ -178,7 +178,7 @@ class LoraWindow(QDialog):
         self._gen = 0                              # (answers of an earlier page or LoRA are dropped)
         self._closed = threading.Event()
         self._kept_of: dict = {}                   # (is a kept still on disk? per example: looked up once)
-        self._ctx: tuple | None = None                           # (details, info, mat, k) of the LoRA shown
+        self._ctx: tuple[dict | None, dict, dict | None, dict] | None = None                           # (details, info, mat, k) of the LoRA shown
         self._pending: str | None = None           # the LoRA chosen in the list, shown when the arrow keys rest
         self._reverting = False
         self._find_timer, self._pick_timer = QTimer(self), QTimer(self)
@@ -533,7 +533,8 @@ class LoraWindow(QDialog):
                 self.strengths[self.path] = value
                 self.state.setText(f"{self.title.text()}: strength set to {value:.2f} in this prompt's LoRAs.")
                 if self._ctx is not None:          # (only the How tab changes: what is typed in the note stays)
-                    self.how.setHtml(self._how_html(self.path, *self._ctx[:3], self._ctx[3]))
+                    details, info, mat, k = self._ctx
+                    self.how.setHtml(self._how_html(self.path, details, info, mat, k))
             else:
                 self.state.setText("The strength could not be set (the LoRA is not in the stack, or the clip "
                                    "cannot be changed now).")

@@ -154,7 +154,10 @@ class ComparePlayer(QWidget):
         self._result_cancel = threading.Event()          # stops the running decode of the result
         self._events = [self._cancel, self._result_cancel]
         events = self._events                            # (a list, so the destroyed hook sees the current ones)
-        self.destroyed.connect(lambda *_: [e.set() for e in events])
+        def stop_loading(*_) -> None:
+            for e in events:
+                e.set()
+        self.destroyed.connect(stop_loading)
         self._t0 = 0.0                                   # when playing started (monotonic) and at which frame
         self._k0 = 0
         self._shown_k = -1

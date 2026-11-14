@@ -132,7 +132,8 @@ class _Lane(QWidget):
                 th = r.height() - 18
                 tw = min(r.width() - 6, th * b.pixmap.width() / max(1, b.pixmap.height()))
                 pm = self.thumb(b, max(1, round(tw)), max(1, round(th)), self.devicePixelRatioF())
-                p.drawPixmap(QRectF(r.left() + 3, r.top() + 15, tw, th), pm, QRectF(pm.rect()))
+                if pm is not None:
+                    p.drawPixmap(QRectF(r.left() + 3, r.top() + 15, tw, th), pm, QRectF(pm.rect()))
             if b.lead_secs > 0:                     # the carry-over: repeated from the clip before
                 lw = min(r.width() / 2, b.lead_secs * self.px_per_sec)
                 p.setBrush(QBrush(with_alpha(t.textTertiary, 0.5), Qt.BrushStyle.BDiagPattern))

@@ -44,7 +44,7 @@ class _Step(QWidget):
         for b in buttons:
             h.addWidget(b, 0, Qt.AlignmentFlag.AlignTop)
         self.buttons = buttons
-        self.done = None
+        self.done: bool | None = None
         self.set_done(False)
 
     def set_done(self, on: bool):

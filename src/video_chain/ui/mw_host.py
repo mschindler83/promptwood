@@ -43,6 +43,7 @@ if TYPE_CHECKING:
         _lora_misses: dict
         _lora_scan_gen: int
         _path_end: str | None
+        FROZEN_LOCKED: set[str]
         _worker_bound: WorkerBinding | None
         _edit_switch: ModelSwitch | None
         _film_queue: list[str] | None
