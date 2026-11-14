@@ -344,3 +344,18 @@ def test_gguf_models_are_found_off_the_gui_thread(app, tmp_path, monkeypatch):
         assert w.llm_on.isChecked()                            # a model was found and nothing was saved: on
     finally:
         w.close()
+
+
+# ------------------------------------------------------------------ MWB-36: what a change said about CHANGED clips
+from ui_helpers import crop_accepted, flush, image, new_project, run_and_wait, silent_player, win  # noqa: E402,F401
+
+
+def test_remade_note_holds_what_a_change_said_about_changed_clips(app, win, tmp_path, image):
+    ids = new_project(win, tmp_path, image, ("a", "b"))
+    run_and_wait(app, win, win.generate_path)
+    win.steps.setValue(20)
+    win._options_settled()
+    assert "CHANGED" in win._remade_note and "2 made clips" in win._remade_note
+    win.steps.setValue(28)                                  # set back: the clips are done again, none is CHANGED
+    win._options_settled()
+    assert win._remade_note == ""
