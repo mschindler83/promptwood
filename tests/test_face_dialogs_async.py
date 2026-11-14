@@ -129,3 +129,58 @@ def test_swap_closed_while_reference_is_prepared(app, tmp_path, stubbed):
         app.processEvents()
         time.sleep(0.01)
     assert dlg.ref is None                                          # the late answer was dropped
+
+
+def test_head_size_repaints_the_player(app, tmp_path):
+    dlg = _swap_dialog(tmp_path, app)
+    dlg.heads = {"size": (160, 90), "track": [(60, 20, 100, 70)] * 6, "boxes": [], "frames": 6, "found": 6, "fps": 24}
+    seen = []
+    dlg.player.refresh = lambda: seen.append(1)
+    dlg.head_size.setValue(1.4)
+    assert seen
+    dlg.done(0)
+
+
+def test_head_size_without_a_track_does_not_fail(app, tmp_path):
+    dlg = _swap_dialog(tmp_path, app)
+    dlg.heads = {"size": (160, 90), "track": [], "boxes": [], "frames": 6, "found": 0, "fps": 24}
+    dlg.head_size.setValue(1.4)                                    # (used to raise "no face")
+    dlg.done(0)
+
+
+def test_swap_start_hook_failure_is_reported(app, tmp_path):
+    dlg = _swap_dialog(tmp_path, app)
+    dlg.heads = {"size": (160, 90), "track": [], "boxes": [], "frames": 6, "found": 0, "fps": 24}
+    dlg.ref = str(tmp_path / "r.png")
+    dlg.method.setCurrentIndex(dlg.method.findData("face"))
+    dlg._update()
+
+    def boom():
+        raise RuntimeError("no way")
+    dlg.on_start = boom
+    dlg.generate()
+    assert not dlg._busy and "no way" in dlg.state.text()
+    dlg.done(0)
+
+
+def test_swap_finished_with_a_thin_record(app, tmp_path):
+    dlg = _swap_dialog(tmp_path, app)
+    loaded = []
+    dlg.player.load_result = loaded.append
+    dlg._finished((tmp_path / "o.mp4", {}, 6), "")                 # a record without gen_size / windows
+    assert loaded and "Done" in dlg.state.text()
+    dlg.done(0)
+
+
+def test_swap_close_with_a_result_asks(app, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    dlg = _swap_dialog(tmp_path, app)
+    dlg.result = (tmp_path / "o.mp4", {}, 6)
+    finished = []
+    dlg.finished.connect(finished.append)
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.No)
+    dlg.reject()
+    assert finished == []                                           # kept open
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    dlg.reject()
+    assert finished == [0]

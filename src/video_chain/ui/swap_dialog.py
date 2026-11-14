@@ -15,16 +15,16 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLineEdit,
-                               QProgressBar, QPushButton, QVBoxLayout)
+                               QMessageBox, QProgressBar, QPushButton, QVBoxLayout)
 
 from .. import chain, swap
 from ..animate import DEFAULT_PROMPT, SIZES, gen_size, window_count
+from .compare_player import ComparePlayer
+from .widgets import FrameTile, guard_wheel, label
 
 METHODS = (("animate+lock", "Head + face lock (Animate, then face swap)"), ("animate", "Head only (Animate)"),
            ("face", "Face only (face swap, the clip's own motion)"),
            ("h3", "Head swap with H3 (head swap LoRA, the clip as guide)"))
-from .compare_player import ComparePlayer
-from .widgets import FrameTile, guard_wheel, label
 
 
 def letterbox(src: str, dest, size: int, crop: tuple[int, int, int] | None = None) -> bool:
@@ -182,7 +182,7 @@ class SwapDialog(QDialog):
         form.addRow("", self.sharpen)
         self.size = QComboBox()
         for key in SIZES:
-            self.size.addItem({"480p": "480p (faster)", "720p": "720p (sharper, slower)"}[key], key)
+            self.size.addItem({"480p": "480p (faster)", "720p": "720p (sharper, slower)"}.get(key, key), key)
         self.size.setCurrentIndex(max(0, self.size.findData(settings.value("swapSize", "480p", type=str)
                                                             if settings else "480p")))
         self.size.setToolTip("The size the new head is made at (only the head area: the rest of the clip keeps "
@@ -289,6 +289,7 @@ class SwapDialog(QDialog):
         if self.heads is not None:
             w, h = self.heads["size"]
             self.boxes = swap.head_boxes(self.heads["track"], w, h, self.head_size.value())
+            self.player.refresh()                         # the red head area is drawn at the new size
     
     def _draw_head(self, k: int, img: QImage):
         """The head area of frame k onto the original's picture (stored size)."""
@@ -477,12 +478,16 @@ class SwapDialog(QDialog):
     def generate(self):
         if not self.b_gen.isEnabled():
             return
+        if self.on_start is not None:
+            try:
+                self.on_start()
+            except Exception as e:  # noqa: BLE001  (a hook that fails must not leave the window half started)
+                self.state.setText(f"Cannot start: {e}")
+                return
         if self.qs is not None:
             for k, v in (("swapSize", self.size.currentData()), ("swapMethod", self.method.currentData()),
                          ("swapBody", self.body.isChecked()), ("swapSharpen", self.sharpen.isChecked())):
                 self.qs.setValue(k, v)
-        if self.on_start is not None:
-            self.on_start()
         self._busy, self._cancel = True, False
         out_dir = self.project / swap.SWAPS_DIR
         stem = f"swap_{self.nid}_{time.strftime('%Y%m%d-%H%M%S')}_{uuid.uuid4().hex[:6]}"
@@ -630,8 +635,9 @@ class SwapDialog(QDialog):
             elif meta.get("method") == "h3":
                 text = f"Done: {n} frames re-rendered by H3 with the head swap LoRA (the clip's own sound)."
             else:
-                text = (f"Done: {n} frames, made at {meta['gen_size'][0]}×{meta['gen_size'][1]} in "
-                        f"{meta['windows']} part{'s' if meta['windows'] != 1 else ''}"
+                gen, windows = meta.get("gen_size") or ("?", "?"), meta.get("windows")
+                text = (f"Done: {n} frames, made at {gen[0]}×{gen[1]}"
+                        + (f" in {windows} part{'s' if windows != 1 else ''}" if windows else "")
                         + (f" (stored motion used: {', '.join(meta['pose_cached'])})" if meta.get("pose_cached")
                            else "")
                         + ("; its motion is stored for the next try" if meta.get("pose_made") else "")
@@ -641,6 +647,14 @@ class SwapDialog(QDialog):
             self.show_head.setChecked(False)
             self.player.load_result(out)
         self._update()
+
+    def reject(self):
+        """Close: a made result is kept only with "Use this"; ask before it is dropped."""
+        if self.result is not None and not self._busy and QMessageBox.question(
+                self, "Replace a person", "Close without using the result? It stays in the project's swaps folder "
+                "but the video keeps playing its own clip.") != QMessageBox.Yes:
+            return
+        super().reject()
 
     def done(self, r):
         self._closed = True
