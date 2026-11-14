@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from .. import h3_prompt as _h3
 from .consts import DIALOGUE, MENTION, SAID_BY, SPEECH_TAG
 from .cast import _in_lines, _unmention, character, kind_of
+from .schema import CastEntry, Options
 
 
 _FEMALE = re.compile(r"\b(woman|women|girl|female|lady|mother|mom|mum|wife|daughter|sister|grandmother|frau|"
@@ -41,14 +43,14 @@ def without_speech_tags(text: str) -> str:
     return "".join(out) + text[pos:]
 
 
-def gender_of(c: dict) -> str | None:
+def gender_of(c: CastEntry) -> str | None:
     """'f' / 'm' from a character's description (woman, man, girl ...), else None."""
     desc = c.get("desc") or ""
     f, m = bool(_FEMALE.search(desc)), bool(_MALE.search(desc))
     return "f" if f and not m else "m" if m and not f else None
 
 
-def dialogue(options: dict, text: str, default: dict | None = None) -> list[dict]:
+def dialogue(options: Options, text: str, default: CastEntry | None = None) -> list[dict[str, Any]]:
     """The spoken lines of a prompt, [{"start", "end", "line", "speaker": character or None}]. Who says a line,
     looking at the words since the sentence began (or since the line before, in the same sentence):
     - a "she" / "he" there, the last one: the last-mentioned character of that gender (from its description);
@@ -59,16 +61,20 @@ def dialogue(options: dict, text: str, default: dict | None = None) -> list[dict
     text = text or ""
     spans = [(m.start(), m.end(), next(g for g in m.groups() if g is not None).strip())
              for m in DIALOGUE.finditer(text)]
-    masked = list(text)
+    chars = list(text)
     for a, b, line in spans:
-        masked[a:b] = "x" * (b - a)                 # sentence ends inside a quote do not count ...
+        chars[a:b] = "x" * (b - a)                  # sentence ends inside a quote do not count ...
         if line[-1:] in (".", "!", "?"):
-            masked[b - 1] = "."                     # ... but a line that ends one ends its sentence
-    masked = "".join(masked)
+            chars[b - 1] = "."                      # ... but a line that ends one ends its sentence
+    masked = "".join(chars)
     inside = _in_lines(text)
-    marks = [(m.start(), character(options, m.group(1))) for m in MENTION.finditer(text) if not inside(m.start())]
-    marks = [(pos, c) for pos, c in marks if c is not None and kind_of(c) == "person"]
-    out, prev_end = [], 0
+    marks: list[tuple[int, CastEntry]] = []
+    for m in MENTION.finditer(text):
+        c = None if inside(m.start()) else character(options, m.group(1))
+        if c is not None and kind_of(c) == "person":
+            marks.append((m.start(), c))
+    out: list[dict[str, Any]] = []
+    prev_end = 0
     for a, b, line in spans:
         if not line:
             prev_end = b
@@ -77,7 +83,8 @@ def dialogue(options: dict, text: str, default: dict | None = None) -> list[dict
         seg = max(cut, prev_end - 1)                # the words that lead up to this line
         after = [masked.find(e, b) for e in (". ", "! ", "? ", "\n")]
         stop = min([x for x in after if x >= 0] or [len(text)])
-        who = None
+        who: CastEntry | None = None
+        g: str | None
         pron = [m for m in _PRONOUN.finditer(masked, seg + 1, a)]
         if pron:
             g = "f" if pron[-1].group(1).lower() in ("she", "sie") else "m"
@@ -135,9 +142,10 @@ def refine_problems(original: str, refined: str) -> list[str]:
     return out
 
 
-def _picture_tags(found: list[dict]) -> tuple[dict, list[str]]:
+def _picture_tags(found: list[CastEntry]) -> tuple[dict[str, str], list[str]]:
     """<Picture> tags per character (numbered in order of their first mention) and the pictures in that order."""
-    tags, images = {}, []
+    tags: dict[str, str] = {}
+    images: list[str] = []
     for c in found:
         if c["images"]:
             first = len(images) + 1
@@ -151,7 +159,7 @@ def _subject_token(subj: dict[str, int], sid: dict[str, int], name: str) -> str:
     return f"<Subject {subj[name]}>" + (f" (S{sid[name]})" if name in sid else "")
 
 
-def _body_with_speakers(options: dict, text: str, lines: list[dict], subj: dict[str, int], sid: dict[str, int],
+def _body_with_speakers(options: Options, text: str, lines: list[dict[str, Any]], subj: dict[str, int], sid: dict[str, int],
                         audio_no: dict[str, int], lang: str) -> str:
     """The prompt text with @Names as <Subject N> and each spoken line as <d>[Language] ...</d>, led by who says it
     (and by the voice timbre reference the first time a voiced speaker speaks)."""
@@ -198,7 +206,7 @@ def _body_with_speakers(options: dict, text: str, lines: list[dict], subj: dict[
     return body
 
 
-def _voiced_prompt(options: dict, text: str, found: list[dict], lines: list[dict], n_sounds: int,
+def _voiced_prompt(options: Options, text: str, found: list[CastEntry], lines: list[dict[str, Any]], n_sounds: int,
                    implicit: bool) -> tuple[str, list[str], list[str]]:
     """MiniMax's structured reference format (the only one a voice took effect with in the tests): subjects,
     <Audio N> as the voice-timbre reference of a speaker (S1, S2 ... in speaking order), each line as
@@ -214,7 +222,7 @@ def _voiced_prompt(options: dict, text: str, found: list[dict], lines: list[dict
         if sp is not None and sp["name"] in subj and sp["name"] not in order:
             order.append(sp["name"])
     sid = {n: k for k, n in enumerate(order, start=1)}
-    voiced = [n for n in order if character(options, n).get("voice")]
+    voiced = [n for n in order if (character(options, n) or {}).get("voice")]
     audio_no = {n: n_sounds + k for k, n in enumerate(voiced, start=1)}
 
     body = _body_with_speakers(options, text, lines, subj, sid, audio_no, lang)
@@ -251,13 +259,13 @@ def _voiced_prompt(options: dict, text: str, found: list[dict], lines: list[dict
         "detailed_description:\n" + detail,
         "overall_soundscape:\nThe natural sound of the scene; the spoken lines are clear.",
         "non_diegetic_music:\n" + ("N/A" if not n_sounds else "As the sound references above say.")])
-    return prompt, images, [character(options, n)["voice"]["file"] for n in voiced]
+    return prompt, images, [(character(options, n) or {})["voice"]["file"] for n in voiced]
 
 
 PICTURES_NOTE = "The pictures only show who the people are; the scene, pose and framing come from the video."
 
 
-def _kept(c: dict) -> str:
+def _kept(c: CastEntry) -> str:
     """The retention reason of a cast entry with pictures (classic structured format)."""
     k, n = kind_of(c), c["name"]
     return {"person": f"{n}'s face and identity are retained.", "place": f"the layout and look of {n} are retained.",
@@ -265,7 +273,7 @@ def _kept(c: dict) -> str:
             "style": f"the visual style of {n} is retained."}[k]
 
 
-def _pictures_note(found: list[dict]) -> str:
+def _pictures_note(found: list[CastEntry]) -> str:
     """The classic sentence that keeps face pictures from setting the scene ('' when no person has pictures; with
     places, objects or styles it speaks of the face pictures only, theirs do set the scene)."""
     shown = [c for c in found if c.get("images")]
