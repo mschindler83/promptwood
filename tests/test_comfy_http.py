@@ -172,9 +172,9 @@ def _done(server):
     server.history["p1"] = {"outputs": {}, "status": {"status_str": "success", "completed": True}}
 
 
-def _quiet(g, pid):
+def _quiet(g, pid, ws=None):
     try:
-        g._wait(pid, None)
+        g._wait(pid, ws)
     except C.ComfyError:
         pass
 
@@ -226,3 +226,41 @@ def test_refine_and_seedvr_save_through_save():
     import inspect
     for fn in (C._refine, C._seedvr_job):
         assert ".part.mp4" not in inspect.getsource(fn) and "_save(" in inspect.getsource(fn)
+
+
+class DeadWs(ScriptedWs):
+    """A socket that is gone: every recv() raises."""
+    def __init__(self):
+        super().__init__([])
+
+    def recv(self):
+        raise ConnectionResetError("gone")
+
+
+def test_a_failed_reconnect_waits_and_does_not_reuse_the_dead_socket(server):
+    server.hold = True
+    g = C.ComfyGenerator(server.url, timeout=30)
+    g.log = lambda *a: None
+    first = DeadWs()
+    calls = []
+    g._connect_ws = lambda: calls.append(1) or (first if len(calls) == 1 else None)
+    pid = g._queue({"1": {"class_type": "X", "inputs": {}}})
+    t = threading.Thread(target=lambda: _quiet(g, pid, ScriptedWs(["drop"])), daemon=True)
+    t.start()
+    time.sleep(3.0)
+    g.interrupt()
+    t.join(5)
+    assert len(calls) <= 3                         # one reconnect after the drop, then one every 10 s
+    assert first.closed                            # the socket the wait opened itself is closed at the end
+
+
+def test_a_replaced_socket_of_the_wait_is_closed(server):
+    g = C.ComfyGenerator(server.url, timeout=10)
+    g.log = lambda *a: None
+    g._sleep = lambda s: time.sleep(0.01)
+    a = DeadWs()
+    b = ScriptedWs([{"type": "execution_success", "data": {"prompt_id": "p1"}}], on_end=lambda: _done(server))
+    socks = [a, b]
+    g._connect_ws = lambda: socks.pop(0)
+    g._wait("p1", ScriptedWs(["drop"]))
+    assert a.closed and b.closed

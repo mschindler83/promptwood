@@ -1062,8 +1062,13 @@ class ComfyGenerator:
                 else:
                     self._sleep(0.5)
                     if not finished and time.monotonic() >= reconnect_at:
-                        ws = own_ws = self._connect_ws() or own_ws
-                        reconnect_at = time.monotonic() + 10 if ws is None else float("inf")
+                        new = self._connect_ws()
+                        if new is None:                      # (the dropped socket is never used again)
+                            reconnect_at = time.monotonic() + 10
+                        else:
+                            self._close_ws(own_ws)           # (one this wait opened before, now dead)
+                            ws = own_ws = new
+                            reconnect_at = float("inf")
                 every = POLL_SECONDS if ws is not None and not finished else POLL_SECONDS_NO_WS
                 if finished:
                     every = 0.5
@@ -1089,11 +1094,15 @@ class ComfyGenerator:
             raise ComfyError(f"ComfyUI did not finish within {self.timeout / 60:.0f} min")
         finally:
             self._node_clock(None)                           # (the last node's time, also when the job failed)
-            if own_ws is not None:
-                try:
-                    own_ws.close()
-                except Exception:  # noqa: BLE001
-                    pass
+            self._close_ws(own_ws)
+
+    @staticmethod
+    def _close_ws(ws) -> None:
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:  # noqa: BLE001  (a socket that is gone already)
+                pass
 
 
 # ----------------------------------------------------------------------------- image edit (Qwen Image Edit)
