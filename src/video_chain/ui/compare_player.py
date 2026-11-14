@@ -168,6 +168,8 @@ class ComparePlayer(QWidget):
         self.stepper = FrameStepper(self, fps, context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self.stepper.stepped.connect(self.pause)         # (a step by hand stops the playing)
         self.slider, self.time = self.stepper.slider, self.stepper.label
+        self.b_back, self.b_prev = self.stepper.b_back_s, self.stepper.b_back1       # (second / frame back and on)
+        self.b_next, self.b_fwd = self.stepper.b_fwd1, self.stepper.b_fwd_s
         self.slider.setEnabled(False)
         self.stepper.valueChanged.connect(self._show)
         v.addWidget(self.stepper)

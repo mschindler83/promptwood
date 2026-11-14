@@ -16,7 +16,9 @@ from __future__ import annotations
 import json
 import random
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
 from PySide6.QtCore import QSettings, QSize, QTimer, Qt
 from PySide6.QtGui import QImage, QKeySequence, QPixmap
@@ -48,6 +50,30 @@ from .widgets import FrameTile, fit_size, guard_wheel, icon_button, label, short
 from .qsvalue import qs_value
 
 
+@dataclass
+class ImageEditServices:
+    """What the image dialog gets from the app: the calls it makes out (connect to ComfyUI, use a result, start
+    ComfyUI, refine a prompt ...) and the app's data it shows (LoRAs, places, the start image's aspect, options).
+    connect and on_use are required; every other field has a harmless default."""
+    connect: Callable[[Callable | None], object] | None = None       # connect(progress) -> a ComfyImageEditor
+    on_use: Callable[[str, str], bool] | None = None                 # on_use(kind 'start' | 'end', png) -> bool
+    settings: QSettings | None = None
+    places: list[tuple[str, str]] | None = None
+    start_comfy: Callable[[], bool] | None = None
+    on_start: Callable[[], None] | None = None                      # called (GUI thread) before each Generate
+    known_loras: list[tuple[str, str]] | None = None
+    lora_dir: str = ""
+    uses: Callable[[ResultRecord], list[str]] | None = None          # where a result is used (words)
+    refine: Callable[..., str | list[str] | None] | None = None      # refine(text, kind) -> new text or None
+    connect_create: Callable[[Callable | None], object] | None = None
+    family_loras: dict[str, list] | None = field(default=None)
+    start_aspect: float | None = None
+    mode: str = "edit"
+    check_lora: Callable[[str | None], bool | None] | None = None    # False if ComfyUI cannot load the LoRA
+    use_triggers: bool = True
+    collections: Callable[[], list] | None = None                   # () -> the project's pictures by kind
+
+
 class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, LorasMixin, SamplingMixin, PresetsMixin,
                       QDialog):
     """sources: [(label, path)] offered as the image to edit; end_target: the clip a result can become the end
@@ -55,24 +81,34 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
     on_use(kind 'start' | 'end', png) -> bool; start_comfy() -> bool."""
 
     def __init__(self, parent, project: Path, sources: list[tuple[str, str]], source: str | None,
-                 end_target: str | None, connect: Callable[[Callable | None], object], on_use: Callable[[str, str],
-                                                                                                        bool],
-                 settings: QSettings | None = None, places: list[tuple[str, str]] | None = None,
-                 start_comfy: Callable[[], bool] | None = None, on_start: Callable[[], None] | None = None,
-                 known_loras: list[tuple[str, str]] | None = None, lora_dir: str = "",
-                 uses: Callable[[ResultRecord], list[str]] | None = None, refine: Callable[...,
-                                                                                           str | list[str] | None] | None = None,
-                 connect_create: Callable[[Callable | None], object] | None = None, family_loras: dict[str,
-                                                                                                       list] | None = None,
-                 start_aspect: float | None = None, mode: str = "edit",
-                 check_lora: Callable[[str | None], bool | None] | None = None,
-                 use_triggers: bool = True, collections: Callable[[], list] | None = None):
+                 end_target: str | None, connect: Callable[[Callable | None], object] | None = None,
+                 on_use: Callable[[str, str], bool] | None = None, settings: QSettings | None = None,
+                 places: list[tuple[str, str]] | None = None, start_comfy: Callable[[], bool] | None = None,
+                 on_start: Callable[[], None] | None = None, known_loras: list[tuple[str, str]] | None = None,
+                 lora_dir: str = "", uses: Callable[[ResultRecord], list[str]] | None = None,
+                 refine: Callable[..., str | list[str] | None] | None = None,
+                 connect_create: Callable[[Callable | None], object] | None = None,
+                 family_loras: dict[str, list] | None = None, start_aspect: float | None = None, mode: str = "edit",
+                 check_lora: Callable[[str | None], bool | None] | None = None, use_triggers: bool = True,
+                 collections: Callable[[], list] | None = None, *, services: ImageEditServices | None = None):
+        """What the dialog is for (project, the images to offer, the one chosen, the clip it ends) is given as
+        arguments; everything it calls out to or is told by the app is one ImageEditServices (`services`). The
+        single keyword arguments after end_target are the older way to give the same and still work."""
         super().__init__(parent)
+        if services is None:
+            services = ImageEditServices(
+                connect=connect, on_use=on_use, settings=settings, places=places, start_comfy=start_comfy,
+                on_start=on_start, known_loras=known_loras, lora_dir=lora_dir, uses=uses, refine=refine,
+                connect_create=connect_create, family_loras=family_loras, start_aspect=start_aspect, mode=mode,
+                check_lora=check_lora, use_triggers=use_triggers, collections=collections)
+        if services.connect is None or services.on_use is None:
+            raise TypeError("ImageEditDialog needs connect and on_use (in services or as arguments)")
+        self.services = services
         self.setWindowTitle("Edit an image with AI")
         fit_size(self, 1240, 820)
-        self._init_state(project, connect, on_use, end_target, settings, places, start_comfy, on_start, known_loras,
-                         lora_dir, uses, refine, connect_create, family_loras, start_aspect, check_lora,
-                         use_triggers, collections)
+        self._init_state(project, end_target, services)
+        known_loras, lora_dir, family_loras, mode = (services.known_loras, services.lora_dir, services.family_loras,
+                                                     services.mode)
         top = QHBoxLayout(self)
         left = QVBoxLayout()
         left.setSpacing(6)
@@ -94,16 +130,12 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         self._restore(source, sources, mode)
 
     # ---- building the window
-    def _init_state(self, project: Path, connect: Callable[[Callable | None], object],
-                    on_use: Callable[[str, str], bool], end_target: str | None, settings: QSettings | None,
-                    places: list[tuple[str, str]] | None, start_comfy: Callable[[], bool] | None,
-                    on_start: Callable[[], None] | None, known_loras: list[tuple[str, str]] | None, lora_dir: str,
-                    uses: Callable[[ResultRecord], list[str]] | None,
-                    refine: Callable[..., str | list[str] | None] | None,
-                    connect_create: Callable[[Callable | None], object] | None,
-                    family_loras: dict[str, list] | None, start_aspect: float | None,
-                    check_lora: Callable[[str | None], bool | None] | None, use_triggers: bool,
-                    collections: Callable[[], list] | None):
+    def _init_state(self, project: Path, end_target: str | None, svc: ImageEditServices):
+        connect, on_use = cast("Callable[[Callable | None], object]", svc.connect), cast("Callable[[str, str], bool]", svc.on_use)
+        settings, places, start_comfy, on_start = svc.settings, svc.places, svc.start_comfy, svc.on_start
+        known_loras, lora_dir, uses, refine = svc.known_loras, svc.lora_dir, svc.uses, svc.refine
+        connect_create, family_loras, start_aspect = svc.connect_create, svc.family_loras, svc.start_aspect
+        check_lora, use_triggers, collections = svc.check_lora, svc.use_triggers, svc.collections
         self.project, self.connect_editor, self.on_use = Path(project), connect, on_use
         self.end_target, self.qs, self.places, self.start_comfy = end_target, settings, places or [], start_comfy
         self.on_start = on_start                         # called (GUI thread) before each Generate

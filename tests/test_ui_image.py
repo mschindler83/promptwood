@@ -803,6 +803,7 @@ def test_replace_a_person_in_a_real_video(app, tmp_path, image, monkeypatch):
         # without a face detector: Face only and H3 still work (the clip's own frames), the Animate methods not
         monkeypatch.setattr(w, "face_detector", lambda: None)
         nodet = w.replace_person(v, dialog=False)
+        assert wait(app, lambda: nodet.heads is not None, timeout=20)      # (the clip is read in a worker)
         assert nodet.heads is not None and nodet.heads["frames"] == n and not nodet.boxes
         nodet.set_reference(str(image))
         wait(app, lambda: not nodet.ref_busy, timeout=20)

@@ -241,3 +241,23 @@ def test_a_value_change_rebuilds_only_the_card_it_belongs_to(app, monkeypatch):
     assert now[1] is others[1] and now[0] is not others[0]          # (the other card stays as it was)
     assert [v.text for v in p.variable("x").values][-1] == "f" and len(now[0].pills.findChildren(VP.Pill)) == 6
     assert "6" in p.summary.text()
+
+
+def test_the_image_dialog_takes_its_services_as_one_object_and_the_old_keywords_still_work(app, tmp_path):
+    from PySide6.QtCore import QSettings
+
+    from video_chain.ui.image_edit import ImageEditDialog, ImageEditServices
+    q = QSettings(str(tmp_path / "t.ini"), QSettings.IniFormat)
+    used = []
+    svc = ImageEditServices(connect=lambda p: None, on_use=lambda k, p: used.append(k) or True, settings=q,
+                            lora_dir="/loras", use_triggers=False, start_aspect=1.5, mode="edit")
+    dlg = ImageEditDialog(None, tmp_path, [], None, None, services=svc)
+    assert dlg.lora_dir == "/loras" and dlg.use_triggers is False and dlg.start_aspect == 1.5 and dlg.qs is q
+    assert dlg.on_use("start", "x") is True and used == ["start"]
+    dlg.reject()
+    old = ImageEditDialog(None, tmp_path, [], None, None, lambda p: None, lambda k, p: False, q, lora_dir="/x",
+                          use_triggers=True)
+    assert old.lora_dir == "/x" and old.use_triggers is True and old.services.lora_dir == "/x"
+    old.reject()
+    with pytest.raises(TypeError):
+        ImageEditDialog(None, tmp_path, [], None, None)
