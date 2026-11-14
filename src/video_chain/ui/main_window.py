@@ -525,6 +525,7 @@ class _Bridge(QObject):
     comfy = Signal(bool)                       # ComfyUI reachable
     loras = Signal(list, bool)                 # H3 LoRAs found in ComfyUI's LoRA folders, report them
     triggers = Signal(dict)                    # the trigger word scan finished (its counts)
+    trigger_progress = Signal(int, int, str)   # the scan asks CivitAI about the k-th of n LoRAs (its file name)
     copied = Signal(str, str)                  # Save as: target folder, error ('' = done)
     converted = Signal(str, object, str, str, str)  # video node id, record or None, error, token, project
     llm_room = Signal(str)                     # ComfyUI's models were unloaded for the llama.cpp server (why)
@@ -898,7 +899,6 @@ class PromptCard(QFrame):
             "freely), and the exact sound is put into it afterwards. Nothing in the picture follows the sound: good "
             "for music, a background or a voice-over.<br><b>Off</b>: the reference model hears the sound and makes "
             "the picture to it (lips in sync), which often keeps the body still.</p>")
-        sb.addWidget(self.src_sound)
         self.sound_mix = QCheckBox("Keep the clip's own sound too (mix both)")
         self.sound_mix.setToolTip(MIX_TIP)
         self.mix_level = QSpinBox()
@@ -920,13 +920,14 @@ class PromptCard(QFrame):
         self.mix_row = QWidget()
         self.mix_row.setLayout(mrow)
         self._model_sound = True                                # the project's sound is on (the model makes one)
+        sb.addWidget(self.src_sound)
         self.b_speak = QPushButton("Speak the lines (text to speech)")
         self.b_speak.setToolTip(SPEAK_TIP)
         self.b_speak.clicked.connect(lambda: self.action.emit("speak", self.nid))
         sb.addWidget(self.b_speak)
         sb.addWidget(self.sound_over)
-        sb.addWidget(self.src_sound_info)
         sb.addWidget(self.mix_row)
+        sb.addWidget(self.src_sound_info)
         link.addRow("Sound", self.sound_box)
         self._link = link
         link.setRowVisible(self.sound_box, True)           # (the sound choice in it only when there is one)
@@ -1006,9 +1007,9 @@ class PromptCard(QFrame):
             w_.currentIndexChanged.connect(self._ov_changed)
         self.src_sound.currentIndexChanged.connect(self._sound_toggled)
         self.sound_over.toggled.connect(self._sound_toggled)
-        self.loras.changed.connect(self._ov_changed)
         self.sound_mix.toggled.connect(self._sound_toggled)
         self.mix_level.valueChanged.connect(self._ov_changed)
+        self.loras.changed.connect(self._ov_changed)
         self.length.currentIndexChanged.connect(self._ov_changed)
         self.steps.valueChanged.connect(self._ov_changed)
 
@@ -1054,10 +1055,10 @@ class PromptCard(QFrame):
             k = self.src_sound.findData(self.ov.get("source_sound") or None)
             self.src_sound.setCurrentIndex(max(k, 0))
             self.sound_over.setChecked(bool(self.ov.get("sound_over")))
-            cam = CAM.clean(self.ov.get("camera")) or {}
             self.sound_mix.setChecked(self.ov.get("sound_over") == "mix")
             self.mix_level.setValue(round(float(self.ov.get("sound_mix_level") or 0)))
             self._show_mix()
+            cam = CAM.clean(self.ov.get("camera")) or {}
             self.cam_move.setCurrentIndex(max(0, self.cam_move.findData(cam.get("move"))))
             self.cam_amp.setCurrentIndex(max(0, self.cam_amp.findData(cam.get("amplitude"))))
             self.cam_speed.setCurrentIndex(max(0, self.cam_speed.findData(cam.get("speed"))))
@@ -1200,8 +1201,8 @@ class PromptCard(QFrame):
                   self.sound_over, self.b_refine, self.b_speak, self.b_mention, self.b_camera, self.b_examples):
             w.setEnabled(edit)
         self._enable_speak()
-        for b in self.chips.chips:                 # (the lead chip is an own setting of the clip)
         self._show_mix()
+        for b in self.chips.chips:                 # (the lead chip is an own setting of the clip)
             if b.isCheckable():
                 b.setEnabled(edit)
         for w in self.buttons:
@@ -1259,9 +1260,9 @@ class PromptCard(QFrame):
             names.append("Keyframes")
         if self._has_hand and self.view.is_advanced((self._link, self.hand_row)):
             names.append("Hand-over")
-        return names
         if ov.get("sound_over") == "mix" and ov.get("sound_mix_level") and self.view.is_advanced(self.mix_level_box):
             names.append("Sound level")
+        return names
 
     def _update_note(self):
         self.adv_note.set_active(self.advanced_active())
@@ -1314,12 +1315,12 @@ class PromptCard(QFrame):
             self.sound_over.blockSignals(True)         # (no sound: nothing to lay over; off when one is chosen again)
             self.sound_over.setChecked(False)
             self.sound_over.blockSignals(False)
-        if self.src_sound.currentData() is True and not self.sound_over.isChecked() \
         if not self.sound_over.isChecked() and self.sound_mix.isChecked():
             self.sound_mix.blockSignals(True)          # (not laid over: nothing to mix it into)
             self.sound_mix.setChecked(False)
             self.sound_mix.blockSignals(False)
         self._show_mix()
+        if self.src_sound.currentData() is True and not self.sound_over.isChecked() \
                 and not self.guide.currentData() and self._max_guide:
             k = self.guide.findData(self._max_guide)
             if k >= 0:
@@ -1378,7 +1379,6 @@ class PromptCard(QFrame):
         self.src_sound_info.setVisible(bool(cur) and bool(info))
         self.sound_over.setVisible(bool(cur))
         self.sound_over.setEnabled(not self.edit.isReadOnly())
-
         self._model_sound = bool(model_sound)
         self._show_mix()
 
@@ -1394,6 +1394,7 @@ class PromptCard(QFrame):
         self.sound_mix.setEnabled(edit and (self._model_sound or mix))
         self.sound_mix.setToolTip(MIX_TIP if self._model_sound else MIX_OFF_TIP)
         self.mix_level.setEnabled(edit)
+
     def _enable_guide(self):
         on = not self.edit.isReadOnly()
         has = bool(self.guide.currentData())
@@ -1757,6 +1758,7 @@ class MainWindow(QMainWindow):
         self.bridge.comfy.connect(self._comfy_state)
         self.bridge.loras.connect(self._loras_found)
         self.bridge.triggers.connect(self._triggers_found)
+        self.bridge.trigger_progress.connect(self._trigger_progress)
         self._trigger_scan = None
         self.bridge.copied.connect(self._copied)
         self.bridge.converted.connect(self._converted)
@@ -2338,14 +2340,17 @@ class MainWindow(QMainWindow):
         self.comfy_autostart.setToolTip("If ComfyUI is not running when you generate, start it with the command "
                                         "above and begin as soon as it answers")
         a.addRow("", self.comfy_autostart)
-        self.triggers_online = QCheckBox("Look up LoRA trigger words on CivitAI")
+        self.triggers_online = QCheckBox("Look up LoRAs on CivitAI (trigger words, example prompts)")
         self.triggers_online.setChecked(True)
         self.triggers_online.setToolTip("In the background, after each LoRA scan: LoRAs are looked up on CivitAI by their "
                                         "file hash (this tells CivitAI which LoRA files you have, nothing else). "
                                         "Found trigger words are kept in ~/.local/share/video-chain/"
-                                        "lora_triggers.json, everything else CivitAI tells (descriptions, example "
-                                        "prompts, base model, files, license) next to it in civitai/. Right-click a "
-                                        "LoRA for its CivitAI details.")
+                                        "lora_triggers.json, everything else CivitAI tells next to it in civitai/: "
+                                        "descriptions, base model, files, license, and the prompts and settings of "
+                                        "the pictures in the LoRA's gallery (up to 2000 pictures are looked at per "
+                                        "LoRA, so the first lookup of many LoRAs takes a while; the status line "
+                                        "says where it is). The prompt refiner uses them to write for a LoRA. "
+                                        "Right-click a LoRA to see all that is known about it.")
         self.llm_on = QCheckBox("Prompt refiner: also a llama.cpp server (GGUF language models)")
         self.llm_on.setToolTip("For language models ComfyUI cannot run (GGUF, e.g. Huihui Qwen3-VL-30B-A3B "
                                "abliterated). The app starts llama-server when you refine with such a model and "
@@ -2387,6 +2392,16 @@ class MainWindow(QMainWindow):
         a.addRow("", self.video_gpu)
         self.triggers_online.toggled.connect(lambda on: on and self._scan_triggers())
         a.addRow("", self.triggers_online)
+        self.civitai_site = QComboBox()
+        from .. import triggers as _trg
+        for s_ in _trg.SITES:
+            self.civitai_site.addItem(s_.split("//", 1)[1], s_)
+        self.civitai_site.setToolTip("CivitAI has two sites that share their LoRAs: civitai.com and civitai.red. "
+                                     "The one chosen here is asked first and is where links open (a LoRA's page, a "
+                                     "gallery picture). The other is asked too when the first does not know a LoRA "
+                                     "or cannot be reached.")
+        self.civitai_site.currentIndexChanged.connect(self._civitai_site_changed)
+        a.addRow("CivitAI site", self.civitai_site)
         crow = QHBoxLayout()
         self.civitai_key = QLineEdit()
         self.civitai_key.setEchoMode(QLineEdit.Password)
@@ -2814,7 +2829,8 @@ class MainWindow(QMainWindow):
             # cast: how the pictures are sent
             (self._tts_form, self.ref_size), self.ref_hint, (self._tts_form, self._eleven_row),
             # preferences: ComfyUI's technical part (the address, start command and auto start stay), RunPod
-            (a, self._comfy_dir_row), (a, self.comfy_cleanup), (a, self.triggers_online), (a, self.llm_on),
+            (a, self._comfy_dir_row), (a, self.comfy_cleanup), (a, self.triggers_online), (a, self.civitai_site),
+            (a, self.llm_on),
             (a, self.llm_server), (a, self._gguf_row), (a, self.llm_cpu_moe), (a, self._civitai_row),
             (a, self._keep_row), *self._runpod_section,
             # the log, the GPU's memory
@@ -2992,6 +3008,11 @@ class MainWindow(QMainWindow):
         self.comfy_cleanup.setChecked(q.value("comfyCleanup", True, type=bool))
         self.comfy_autostart.setChecked(q.value("comfyAutoStart", True, type=bool))
         self.triggers_online.setChecked(q.value("loraTriggersOnline", True, type=bool))
+        from .. import triggers
+        self.civitai_site.blockSignals(True)
+        self.civitai_site.setCurrentIndex(max(0, self.civitai_site.findData(
+            triggers.set_site(q.value("civitaiSite", "", type=str)))))
+        self.civitai_site.blockSignals(False)
         self.llm_on.setChecked(q.value("llmServerOn", self.llm_model.count() > 0, type=bool))  # on when one is found
         self.llm_server.setText(q.value("llmServer", LLM_DEFAULT_SERVER, type=str))
         saved = q.value("llmModel", "", type=str)
@@ -3035,6 +3056,7 @@ class MainWindow(QMainWindow):
         q.setValue("comfyCleanup", self.comfy_cleanup.isChecked())
         q.setValue("comfyAutoStart", self.comfy_autostart.isChecked())
         q.setValue("loraTriggersOnline", self.triggers_online.isChecked())
+        q.setValue("civitaiSite", self.civitai_site.currentData())
         q.setValue("videoGpu", self.video_gpu.isChecked())
         q.setValue("llmServerOn", self.llm_on.isChecked())
         q.setValue("llmServer", self.llm_server.text().strip())
@@ -3079,6 +3101,7 @@ class MainWindow(QMainWindow):
             a.setShortcut(QKeySequence(f"Alt+{k + 1}"))
         v.addAction("Log", self.show_log).setShortcut(QKeySequence("Alt+L"))
         v.addAction("Getting started", lambda: self.show_guide(True))
+        v.addAction("LoRAs (example prompts, pictures, what is known)…", lambda: self.show_loras())
         v.addSeparator()
         self.act_left = v.addAction("Left panel (clips, cast & references, sounds)")
         self.act_left.setCheckable(True)
@@ -3998,7 +4021,8 @@ class MainWindow(QMainWindow):
             counts = {}
             try:
                 from .. import triggers
-                counts = triggers.db().scan(paths, online=online, stop=stop.is_set)
+                counts = triggers.db().scan(paths, online=online, stop=stop.is_set,
+                                            progress=bridge.trigger_progress.emit)
             except Exception:  # noqa: BLE001
                 counts = {}
             try:
@@ -4399,6 +4423,25 @@ class MainWindow(QMainWindow):
             dlg.cleanup()
             self.stop_tts("the voice window was closed")
 
+    def _civitai_site_changed(self, *_):
+        """The CivitAI site asked first and linked to (kept at once; LoRAs neither site was asked about yet are
+        looked up with the next scan)."""
+        from .. import triggers
+        chosen = triggers.set_site(self.civitai_site.currentData())
+        self.qs.setValue("civitaiSite", chosen)
+        self.status.setText(f"CivitAI: {chosen.split('//', 1)[1]} is asked first and is where links open.")
+        for card in self.cards:
+            if isinstance(card, PromptCard):
+                card.loras.refresh_triggers()
+        if self.triggers_online.isChecked():
+            self._scan_triggers()
+
+    def _trigger_progress(self, k: int, n: int, name: str):
+        """The background lookup says where it is (one line per LoRA asked; it reads a LoRA's whole gallery)."""
+        if not self.running:                       # (a run's own status lines stay)
+            self.status.setText(f"CivitAI: reading up on LoRA {k} of {n} ({name}): trigger words, description "
+                                "and the prompts of its gallery …")
+
     def _triggers_found(self, counts: dict):
         self._trigger_scan = None
         for card in self.cards:
@@ -4413,9 +4456,9 @@ class MainWindow(QMainWindow):
             self.status.setText("CivitAI rejected your API key: LoRAs are looked up without it. Check or renew the "
                                 "key in the settings (CivitAI → Account settings → API Keys).")
         elif counts.get("looked"):
-            self.status.setText(f"LoRA trigger words: looked up {counts['looked']} LoRA"
-                                f"{'s' if counts['looked'] != 1 else ''} on CivitAI, {counts.get('found', 0)} with "
-                                "trigger words" + (f", {counts['failed']} could not be asked (offline?)"
+            self.status.setText(f"CivitAI: looked up {counts['looked']} LoRA"
+                                f"{'s' if counts['looked'] != 1 else ''} (trigger words, descriptions, gallery "
+                                f"prompts), {counts.get('found', 0)} with trigger words" + (f", {counts['failed']} could not be asked (offline?)"
                                                    if counts.get("failed") else "") + ".")
 
     # ---- the cast (characters with face pictures, @Name in prompts)
@@ -6332,6 +6375,7 @@ class MainWindow(QMainWindow):
                 card.set_faces(self._faces_text(use))
                 card.set_tracks([(tr["id"], tr["name"]) for tr in T.tracks(self.tree)])
                 avail, info, max_guide, rep_ok = self._source_sound_text(n)
+                model_sound = bool(self.tree.options.get("audio", True))     # (no sound of its own: nothing to mix)
                 if info and (n.overrides or {}).get("sound_over") and (n.overrides or {}).get("source_sound"):
                     info = (info.replace(" exactly as it is.", " exactly as it is,").replace(" exactly as recorded.",
                                                                                             " exactly as recorded,")
@@ -6377,7 +6421,6 @@ class MainWindow(QMainWindow):
 
     def _update_buttons(self):
         has = self.tree is not None
-                model_sound = bool(self.tree.options.get("audio", True))     # (no sound of its own: nothing to mix)
         sel = self.target_id() if has else None     # the actions work on the clip in the inspector
         is_clip = bool(has and sel and sel != START and sel in self.tree.nodes)
         idle = not self.running
@@ -6466,6 +6509,15 @@ class MainWindow(QMainWindow):
         node.prompt = made if isinstance(made, str) and " ".join(made.split()) == text else text
         self._failures.pop(nid, None)              # (edited: what went wrong before may no longer apply)
         self._changed()
+
+    def show_loras(self, current: str | None = None):
+        """The LoRA window: every LoRA the app offers, with what is known of each (its gallery's prompts with their
+        pictures, the prompt refiner's note, the settings its examples were made with)."""
+        from .lora_window import LoraWindow
+        LoraWindow(self, self.known_loras(), current=current, settings=self.qs).exec()
+        for card in self.cards:
+            if isinstance(card, PromptCard):
+                card.loras.refresh_triggers()
 
     def known_loras(self) -> list[tuple[str, str]]:
         """(path, label) of the LoRAs to offer: every H3 LoRA in ComfyUI's LoRA folders, then LoRAs from

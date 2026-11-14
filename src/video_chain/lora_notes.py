@@ -20,7 +20,8 @@ from pathlib import Path
 from typing import Callable
 
 NOTE_VERSION = 1            # raised when notes are asked for differently: every note is made once more
-NOTE_EXAMPLES = 20          # example prompts a note is written from
+NOTE_EXAMPLES = 20          # example prompts a note is written from (the most liked, each kind once)
+POOL = 150                  # example prompts of one LoRA a refine chooses from (those nearest to the user's prompt)
 NOTE_EXAMPLE_CHARS = 500
 NOTE_ABOUT_CHARS = 2500
 NOTE_TOKENS = 450           # a note is ~120 words
@@ -189,7 +190,8 @@ def settings_text(s: dict) -> str:
 
 
 def material(details: dict | None, words: list[str] | None = None, path: str = "") -> dict | None:
-    """One LoRA's facts for the refiner: {"name", "base", "words", "about", "examples", "settings", "stamp"};
+    """One LoRA's facts for the refiner: {"name", "base", "words", "about", "examples" (the most liked, for the
+    note), "pool" (all different ones, most liked first), "settings", "stamp"};
     None when nothing is known that helps writing a prompt (no trigger word, no text, no example)."""
     from . import triggers
     d = _sound(details)
@@ -200,12 +202,35 @@ def material(details: dict | None, words: list[str] | None = None, path: str = "
     about = ". ".join(x for x in (plain(v.get("description")), plain(m.get("description"))) if x)
     tags = ", ".join(str(t) for t in (m.get("tags") or [])[:8] if t)
     prompts = [clean_example(p["prompt"]) for p in triggers.example_prompts(d)]
-    examples = _distinct([p for p in prompts if p], NOTE_EXAMPLES)
+    pool = _distinct([p for p in prompts if p], POOL)
+    examples = pool[:NOTE_EXAMPLES]
     if not (words or about or examples):
         return None
     return {"name": " ".join(name.split())[:80], "base": str(v.get("baseModel") or ""), "words": words,
-            "about": about, "tags": tags, "examples": examples, "settings": settings_of(d, path),
-            "stamp": f"{NOTE_VERSION}:{d.get('fetched') or 0}:{len(examples)}"}
+            "about": about, "tags": tags, "examples": examples, "pool": pool, "settings": settings_of(d, path),
+            "stamp": f"{NOTE_VERSION}:{d.get('fetched') or 0}:{len(pool)}"}
+
+
+def examples(details: dict | None) -> list[dict]:
+    """A LoRA's gallery pictures that tell their prompt, for showing (the most liked first, each prompt once):
+    [{"prompt" (as posted), "clean" (as the refiner reads it), "negative", "settings" (text), "likes", "user",
+    "item" (CivitAI's record: id, url, type, rating …)}]."""
+    out, seen = [], set()
+    for it in _sound(details)["examples"]:
+        meta = it.get("meta") if isinstance(it, dict) else None
+        prompt = str(meta.get("prompt") or "").strip() if isinstance(meta, dict) else ""
+        if not prompt or prompt in seen:
+            continue
+        seen.add(prompt)
+        stats = it.get("stats") if isinstance(it.get("stats"), dict) else {}
+        likes = sum(int(v) for k in ("likeCount", "heartCount") if (v := _num(stats.get(k))) is not None)
+        sett = ", ".join(f"{label} {meta[k]}" for k, label in (("steps", "steps"), ("cfgScale", "CFG"),
+                                                              ("sampler", "sampler"), ("seed", "seed"))
+                         if meta.get(k) not in (None, "") and len(str(meta[k])) <= 40)
+        out.append({"prompt": prompt, "clean": clean_example(prompt),
+                    "negative": str(meta.get("negativePrompt") or "").strip(), "settings": sett, "likes": likes,
+                    "user": str(it.get("username") or ""), "item": it})
+    return out
 
 
 # ---- the note: a language model's summary of one LoRA's material
@@ -310,7 +335,35 @@ GUIDE_HEAD = ("The result is made with the LoRAs below (add-on models that respo
               "written where the user's prompt has them; do not add or remove them (the app adds missing ones).")
 
 
-def _one(mat: dict, note: str, budget: int) -> str:
+_COMMON = frozenset("the and with for from that this are was has have her his its their she they you into over "
+                    "under near very while then there here out off all one two".split())
+
+
+def nearest(mat: dict, prompt: str, n: int) -> list[str]:
+    """n of a LoRA's example prompts for a refine: the most liked one, then those that share the most words with
+    the user's prompt (they show how this LoRA is prompted for such a thing; the trigger words and the words most
+    examples share do not count), then the next most liked."""
+    pool = mat.get("pool") or mat["examples"]
+    if n <= 0 or not pool:
+        return []
+    sets = [_words(p) for p in pool]
+    often = Counter(w for ws in sets for w in ws)       # the LoRA's own words (in most examples) tell nothing
+    skip = _COMMON | {w for t in mat["words"] for w in _words(t)} | \
+        ({w for w, k in often.items() if k * 2 > len(pool)} if len(pool) >= 4 else set())
+    mine = _words(prompt) - skip
+    rest = list(enumerate(pool[1:], 1))
+    scored = []
+    for rank, p in rest:
+        w = sets[rank] - skip
+        hit = len(w & mine)
+        if hit >= 2:
+            scored.append((-hit / (len(w) ** 0.5), rank, p))
+    near = [p for _s, _r, p in sorted(scored)[:n - 1]]
+    fill = [p for _r, p in rest if p not in near]
+    return ([pool[0]] + near + fill)[:n]
+
+
+def _one(mat: dict, note: str, budget: int, prompt: str = "") -> str:
     lines = [f"LoRA \"{mat['name']}\"" + (f" (for {mat['base']})" if mat.get("base") else "") + ":"]
     if mat["words"]:
         lines.append("Trigger words: " + ", ".join(mat["words"][:12]))
@@ -321,7 +374,7 @@ def _one(mat: dict, note: str, budget: int) -> str:
     sett = settings_text(mat.get("settings") or {})
     used = sum(len(x) + 1 for x in lines)
     examples = []
-    for p in mat["examples"][:GUIDE_EXAMPLES + (0 if note else 1)]:
+    for p in nearest(mat, prompt, GUIDE_EXAMPLES + (0 if note else 1)):
         p = _cut(p, GUIDE_EXAMPLE_CHARS)
         if examples and used + len(p) + 6 > budget:
             break
@@ -334,8 +387,9 @@ def _one(mat: dict, note: str, budget: int) -> str:
     return text if len(text) <= budget + 200 else _cut(text, budget + 200)
 
 
-def guidance(paths: list[str], db=None) -> str:
-    """The part of a refine's instruction about these LoRAs ("" when nothing is known of any of them)."""
+def guidance(paths: list[str], db=None, prompt: str = "") -> str:
+    """The part of a refine's instruction about these LoRAs ("" when nothing is known of any of them). prompt: the
+    user's prompt; the example prompts shown are those nearest to it (see nearest)."""
     from . import triggers
     db = db or triggers.db()
     known = []
@@ -350,28 +404,68 @@ def guidance(paths: list[str], db=None) -> str:
     if not known:
         return ""
     budget = max(600, (GUIDE_CHARS - len(GUIDE_HEAD)) // len(known))
-    return GUIDE_HEAD + "\n\n" + "\n\n".join(_one(m, n, budget) for m, n in known) + "\n\nEnd of the LoRA material."
+    return GUIDE_HEAD + "\n\n" + "\n\n".join(_one(m, n, budget, prompt) for m, n in known) + "\n\nEnd of the LoRA material."
 
 
 def summary(paths: list[str], db=None) -> dict:
     """For the refine window: {"known": names of the LoRAs something is known of, "notes": how many have a current
-    note, "missing": how many notes a refine would write first, "settings": [(name, settings text)]}."""
+    note, "missing": how many notes a refine would write first, "settings": [(name, settings text)], "loras":
+    one of what_is_known per LoRA of the stack (also those nothing is known of)}."""
     from . import triggers
     db = db or triggers.db()
-    out = {"known": [], "notes": 0, "missing": 0, "settings": []}
+    out = {"known": [], "notes": 0, "missing": 0, "settings": [], "loras": []}
     for p in list(dict.fromkeys(paths))[:MAX_LORAS]:
-        try:
-            mat = material(db.details(p), db.words(p), p)
-        except Exception:  # noqa: BLE001
-            mat = None
-        if not mat:
+        k = what_is_known(p, db)
+        out["loras"].append(k)
+        if not k["known"]:
             continue
-        out["known"].append(mat["name"])
-        if (db.note(p) or {}).get("stamp") == mat["stamp"]:
-            out["notes"] += 1
-        elif worth_a_note(mat):
-            out["missing"] += 1
-        text = settings_text(mat.get("settings") or {})
-        if text:
-            out["settings"].append((mat["name"], text))
+        out["known"].append(k["name"])
+        out["notes"] += k["note"]
+        out["missing"] += k["note_missing"]
+        if k["settings"]:
+            out["settings"].append((k["name"], k["settings"]))
     return out
+
+
+def what_is_known(path: str, db=None) -> dict:
+    """What the app has on one LoRA, for showing: {"path", "name", "base", "known" (anything that helps a prompt),
+    "words", "prompts" (different example prompts), "pictures" (gallery pictures that tell their prompt; two may
+    tell nearly the same one), "seen" (gallery pictures looked at), "note" (a current one),
+    "note_missing" (a refine would write it first), "settings" (text), "looked_up" (CivitAI was asked),
+    "on_civitai" (it knows the file)}."""
+    from . import triggers
+    db = db or triggers.db()
+    out = {"path": str(path), "name": Path(path).stem, "base": "", "known": False, "words": [], "prompts": 0,
+           "pictures": 0, "seen": 0, "note": False, "note_missing": False, "settings": "", "looked_up": False, "on_civitai": False}
+    try:
+        info = db.info(path)
+        details = db.details(path)
+        out["looked_up"] = info is not None and info.get("source") != "tags" or bool(details)
+        out["on_civitai"] = bool(details)
+        mat = material(details, db.words(path), path)
+        seen = (details or {}).get("examples_seen")
+        out["seen"] = seen if isinstance(seen, int) else 0
+        out["pictures"] = len(examples(details))
+    except Exception:  # noqa: BLE001  (a file that cannot be read: shown as not known)
+        return out
+    if not mat:
+        return out
+    current = (db.note(path) or {}).get("stamp") == mat["stamp"]
+    out.update(name=mat["name"], base=mat["base"], known=True, words=list(mat["words"]), prompts=len(mat["pool"]),
+               note=current, note_missing=not current and worth_a_note(mat),
+               settings=settings_text(mat.get("settings") or {}))
+    return out
+
+
+def known_text(k: dict) -> str:
+    """One LoRA's what_is_known in a few words: "212 prompts, note" / "trigger words only" / "nothing known"."""
+    if not k.get("known"):
+        return "nothing known"
+    parts = []
+    if k["prompts"]:
+        parts.append(f"{k['prompts']} prompt{'s' if k['prompts'] != 1 else ''}")
+    if k["note"]:
+        parts.append("note")
+    if not parts:
+        parts.append("trigger words only" if k["words"] else "description only")
+    return ", ".join(parts)

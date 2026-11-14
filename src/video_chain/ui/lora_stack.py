@@ -267,8 +267,8 @@ class LoraStack(QWidget):
         if info and info.get("base_model"):
             text += f"  · base model {info['base_model']}"
         lab.setText(text)
-        lab.setToolTip(tip + "\nRight-click the LoRA to change them or to see all CivitAI says about it "
-                       "(description, example prompts)")
+        lab.setToolTip(tip + "\nRight-click the LoRA to change them or to see all that is known about it "
+                       "(example prompts with their pictures, description)")
 
     def refresh_triggers(self):
         for w, b, _s in self.rows:
@@ -288,11 +288,12 @@ class LoraStack(QWidget):
         a_edit = menu.addAction("Change the trigger words…")
         a_reset = menu.addAction("Use the found trigger words again")
         menu.addSeparator()
-        a_details = menu.addAction("CivitAI details (description, example prompts)…")
+        a_details = menu.addAction("About this LoRA (example prompts with pictures, what the app knows)…")
         chosen = menu.exec(button.mapToGlobal(pos))
         if chosen is not None and chosen is a_details:
-            from .lora_details import LoraDetailsDialog
-            LoraDetailsDialog(path, self.window()).exec()
+            from .lora_window import LoraWindow
+            LoraWindow(self.window(), self.known, current=path).exec()
+            self.refresh_triggers()
             return
         try:
             if chosen is not None and chosen is a_take:

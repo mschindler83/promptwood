@@ -131,23 +131,18 @@ def test_civitai_details_are_kept(tmp_path, monkeypatch):
     os.environ["QT_QPA_PLATFORM"] = "offscreen"
     from PySide6.QtWidgets import QApplication
     app = QApplication.instance() or QApplication([])
-    from video_chain.ui.lora_details import LoraDetailsDialog, clean_html
+    from video_chain.ui.lora_details import clean_html, details_html
     assert "<img" not in clean_html(d["version"]["description"]) and "Use 0.8" in clean_html(d["version"]["description"])
     assert "file:" not in clean_html('<a title="x"href="file:///etc">x</a>')     # (no space before href)
     dirty = clean_html("<p style='background:url(file:///x)'>a</p><table background='/etc/x'><tr><td>b</td></tr></table>"
                        "<a href='javascript:x()'>c</a><a href=\"https://civitai.com/m\">d</a>")
     assert "style" not in dirty and "background" not in dirty and "javascript" not in dirty
     assert 'href="https://civitai.com/m"' in dirty
-    dlg = LoraDetailsDialog(str(p), details=d)
-    text = dlg.view.toPlainText()
+    page = details_html(d, TR.example_prompts(d))
     for want in ("Walk", "Wan Video 14B t2v", "Use 0.8.", "a woman walks, w4lk", "a man runs, w4lk", "motion",
-                 "walk.safetensors"):
-        assert want in text, want
-    from PySide6.QtCore import QUrl
-    dlg._link(QUrl("copy:0"))
-    assert app.clipboard().text() == "a man runs, w4lk" and "Copied" in dlg.note.text()
-    empty = LoraDetailsDialog(str(p), details={})
-    assert "nothing" in empty.view.toPlainText()
+                 "walk.safetensors", "copy:0"):
+        assert want in page, want
+    assert "a man runs" not in details_html(d)       # (the LoRA window shows the prompts with their pictures)
 
 
 def test_civitai_api_key(tmp_path, monkeypatch):
@@ -220,3 +215,111 @@ def test_partial_details_keep_earlier_parts_and_gone_loras_are_not_reasked(tmp_p
     assert d["model"] == {"description": "d"} and d["examples"] == [1] and db.needs_lookup(str(p))
     db.scan([str(p)], lookup=lambda s: None, gap=0)              # deleted on CivitAI: not asked on every scan
     assert not db.needs_lookup(str(p))
+
+
+def test_the_whole_gallery_is_read(monkeypatch):
+    """The gallery of a LoRA's page (everyone's pictures, of all time) is read page by page; kept are the pictures
+    that tell their prompt, each prompt once, without whole workflows in their generation data."""
+    asked = []
+    pages = {None: ([{"url": "a", "meta": {"prompt": "one", "comfy": "x" * 9000, "steps": 20}}, {"url": "b", "meta": None},
+                     {"url": "c", "meta": {"prompt": "one"}}, "broken"], "feed:2"),
+             "feed:2": ([], "c|3"),                                  # (an empty page can still have a next one)
+             "c|3": ([{"url": "d", "meta": {"prompt": "two"}}, {"url": "e", "meta": {"seed": 1}}], None)}
+
+    def get(path, timeout):
+        asked.append(path)
+        cursor = TR.urllib.parse.unquote(path.split("&cursor=")[1]) if "&cursor=" in path else None
+        items, nxt = pages[cursor]
+        return {"items": items, "metadata": {"nextCursor": nxt} if nxt else {}}
+    monkeypatch.setattr(TR, "_get_json", get)
+    items, looked, whole = TR.gallery(7, gap=0)
+    assert [i["url"] for i in items] == ["a", "d"] and looked == 6 and whole and len(asked) == 3
+    assert items[0]["meta"] == {"prompt": "one", "steps": 20}                    # (the workflow is left out)
+    for want in ("modelVersionId=7", "limit=200", "period=AllTime", "withMeta=true", "sort=Most%20Reactions"):
+        assert want in asked[0], want                # (without period CivitAI gives only the last year)
+    assert asked[2].endswith("&cursor=c%7C3")
+    assert TR.gallery(7, gap=0, want=1)[0] == items[:1]                          # enough prompts: no further page
+    assert len(TR.gallery(7, gap=0, pages=2)[0]) == 1                            # the request limit
+
+    def fails_later(path, timeout):
+        if "&cursor=" in path:
+            raise OSError("rate limited")
+        return get(path, timeout)
+    monkeypatch.setattr(TR, "_get_json", fails_later)
+    items, looked, whole = TR.gallery(7, gap=0)
+    assert [i["url"] for i in items] == ["a"] and not whole                      # what was read is kept
+
+    def down(path, timeout):
+        raise OSError("offline")
+    monkeypatch.setattr(TR, "_get_json", down)
+    with pytest.raises(OSError):
+        TR.gallery(7, gap=0)
+
+
+def test_the_chosen_site_is_asked_first_and_the_other_too(monkeypatch):
+    """civitai.com is the default; the settings (or $VIDEO_CHAIN_CIVITAI_SITE) choose civitai.red. The chosen site
+    is asked first and linked to; the other is asked when the first does not know what is asked or is down."""
+    import io
+    import urllib.error
+    monkeypatch.delenv("VIDEO_CHAIN_CIVITAI_SITE", raising=False)
+    monkeypatch.setattr(TR, "_SITE", None)
+    monkeypatch.setattr(TR, "api_key", lambda: "")
+    assert TR.site() == "https://civitai.com" and TR.sites() == ["https://civitai.com", "https://civitai.red"]
+    asked, answers = [], {}
+
+    class Answer:
+        def __init__(self, data):
+            self.data = data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n):
+            return json.dumps(self.data).encode()
+
+    def urlopen(req, timeout):
+        asked.append(req.full_url)
+        host = req.full_url.split("/")[2]
+        what = answers.get(host, 404)
+        if isinstance(what, int):
+            raise urllib.error.HTTPError(req.full_url, what, "x", {}, io.BytesIO(b""))
+        if isinstance(what, Exception):
+            raise what
+        return Answer(what)
+    monkeypatch.setattr(TR.urllib.request, "urlopen", urlopen)
+    answers.update({"civitai.red": {"id": 9}})                       # only .red knows it
+    assert TR._get_json("/api/v1/x", 5) == {"id": 9}
+    assert asked == ["https://civitai.com/api/v1/x", "https://civitai.red/api/v1/x"]
+    asked.clear()
+    assert TR.set_site("civitai.red") == "https://civitai.red" and TR.sites()[0] == "https://civitai.red"
+    assert TR._get_json("/api/v1/x", 5) == {"id": 9} and asked == ["https://civitai.red/api/v1/x"]
+    answers.clear()                                                  # neither knows it: unknown, not an error
+    assert TR._get_json("/api/v1/x", 5) is None
+    answers.update({"civitai.red": OSError("down"), "civitai.com": {"id": 1}})
+    assert TR._get_json("/api/v1/x", 5) == {"id": 1}
+    answers.update({"civitai.com": 500})                             # one down, one failing: could not be asked
+    with pytest.raises(OSError):
+        TR._get_json("/api/v1/x", 5)
+    answers.update({"civitai.com": 404})                             # one down, the other does not know: unknown
+    assert TR._get_json("/api/v1/x", 5) is None
+    # links go to the chosen site
+    assert TR.on_site("https://civitai.com/models/3?modelVersionId=7") == "https://civitai.red/models/3?modelVersionId=7"
+    assert TR.on_site("https://example.org/civitai.com/x") == "https://example.org/civitai.com/x"
+    from video_chain import lora_pictures as LP
+    assert LP.page_url({"id": 5}) == "https://civitai.red/images/5"
+    assert TR.set_site("https://evil.example") == "https://civitai.com" and TR.set_site(None) == "https://civitai.com"
+    monkeypatch.setenv("VIDEO_CHAIN_CIVITAI_SITE", "https://civitai.red/")
+    assert TR.site() == "https://civitai.red"
+
+
+def test_loras_unknown_on_one_site_are_asked_again(tmp_path):
+    db = TR.TriggerDB(tmp_path / "db.json")
+    p = lora(tmp_path / "loras" / "x.safetensors", {"x": "1"})
+    db.scan([str(p)], lookup=lambda s: None, gap=0)
+    assert not db.needs_lookup(str(p))
+    sha = TR.sha256_of(p)
+    del db.data["by_sha"][sha]["both_sites"]                         # checked when only one site was asked
+    assert db.needs_lookup(str(p))

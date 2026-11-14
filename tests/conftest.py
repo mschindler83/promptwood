@@ -41,6 +41,8 @@ def own_trigger_db(tmp_path, monkeypatch):
     for name in ("get_password", "set_password", "delete_password"):
         monkeypatch.setattr(keyring, name, getattr(mem, name))
     monkeypatch.setattr(triggers, "_API_KEY", None)
+    monkeypatch.delenv("VIDEO_CHAIN_CIVITAI_SITE", raising=False)
+    monkeypatch.setattr(triggers, "_SITE", None)             # (the default site, whatever a test before chose)
 
 
 def pytest_sessionfinish(session, exitstatus):

@@ -11,8 +11,14 @@ each path is cached by (size, date).
 
 Everything CivitAI tells about a LoRA is kept too (details_path(): one JSON file per hash next to the database): the
 model version (base model, description, files, images), the model page (its description, often with sample prompts,
-tags, creator, license) and the generation data of its example images (prompts, seeds, settings; text only, no
-pictures are downloaded). Next to it, <hash>.note.json: the prompt refiner's own note on the LoRA (lora_notes.py). LoRAs whose files name their trigger are looked up for these details as well."""
+tags, creator, license) and the generation data of the pictures in its gallery, the creator's and other users'
+(prompts, seeds, settings; text only: the lookup loads no picture. The LoRA window loads small stills of the
+pictures it shows, lora_pictures.py). Next to it, <hash>.note.json: the prompt refiner's own note on the LoRA
+(lora_notes.py). LoRAs whose files name their trigger are looked up for these details as well.
+
+CivitAI has two sites, civitai.com and civitai.red (SITES). The one chosen in the settings (site(); civitai.com
+unless chosen otherwise) is asked first and linked to; the other is asked when the first does not know a LoRA or
+cannot be reached."""
 from __future__ import annotations
 
 import hashlib
@@ -22,12 +28,46 @@ import re
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Callable
 
 RECHECK_DAYS = 30
-SITES = ("https://civitai.com", "https://civitai.red")    # the same site; .red answers too when .com does not
+SITES = ("https://civitai.com", "https://civitai.red")    # CivitAI's two sites (the first is the default)
+_SITE: str | None = None
+
+
+def site() -> str:
+    """The CivitAI site to ask first and to link to: $VIDEO_CHAIN_CIVITAI_SITE, else the one chosen in the
+    settings (set_site), else civitai.com. Always one of SITES."""
+    for wanted in (os.environ.get("VIDEO_CHAIN_CIVITAI_SITE", ""), _SITE or ""):
+        wanted = wanted.strip().lower().rstrip("/")
+        for s in SITES:
+            if wanted and wanted in (s, s.split("//", 1)[1]):
+                return s
+    return SITES[0]
+
+
+def set_site(name: str | None) -> str:
+    """Choose the site (its address or just "civitai.red"; None / unknown: the default); the one now used."""
+    global _SITE
+    _SITE = str(name or "") or None
+    return site()
+
+
+def sites() -> list[str]:
+    """The sites in the order they are asked: the chosen one, then the other."""
+    first = site()
+    return [first] + [s for s in SITES if s != first]
+
+
+def on_site(url: str) -> str:
+    """A link to a CivitAI page as a link to the chosen site (the two show the same pages)."""
+    for s in SITES:
+        if url and (url == s or url.startswith(s + "/")):
+            return site() + url[len(s):]
+    return url
 REQUEST_GAP = 1.0                                          # seconds between lookups (be gentle to the API)
 USER_AGENT = "video-chain (LoRA trigger lookup)"
 
@@ -176,15 +216,18 @@ def key_rejected() -> bool:
 
 
 def _get_json(path: str, timeout: float, use_key: bool = True) -> dict | None:
-    """A CivitAI API answer (the first site that answers); None for 404. OSError when no site could be asked.
+    """A CivitAI API answer: of the chosen site, else of the other (when the first cannot be asked or does not
+    know what is asked for: a LoRA may be listed on one only); None when none knows it (404). OSError when no site
+    could be asked.
     The key goes only to CivitAI's own sites: as an unredirected header (a redirect elsewhere does not carry it).
     A rejected key (401 / 403): asked once more without it."""
     last: Exception | None = None
     key = api_key() if use_key else ""
     if key in _REJECTED:
         key = ""
-    for site in SITES:
-        req = urllib.request.Request(f"{site}{path}", headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+    unknown = False
+    for base in sites():
+        req = urllib.request.Request(f"{base}{path}", headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
         if key:
             req.add_unredirected_header("Authorization", f"Bearer {key}")
         try:
@@ -192,7 +235,8 @@ def _get_json(path: str, timeout: float, use_key: bool = True) -> dict | None:
                 data = json.loads(r.read(MAX_ANSWER).decode("utf-8", "replace"))
         except urllib.error.HTTPError as e:
             if e.code == 404:
-                return None
+                unknown = True                          # (the other site may know it)
+                continue
             if e.code in (401, 403) and key:
                 _REJECTED.add(key)                      # (not sent again: one request per lookup, not two)
                 try:
@@ -205,20 +249,71 @@ def _get_json(path: str, timeout: float, use_key: bool = True) -> dict | None:
         except (OSError, ValueError) as e:
             last = e
             continue
-        return data if isinstance(data, dict) and not data.get("error") else None
+        if isinstance(data, dict) and not data.get("error"):
+            return data
+        unknown = True
+    if unknown:
+        return None
     raise OSError(f"CivitAI could not be asked: {last}")
 
 
-EXAMPLE_IMAGES = 100        # example images whose generation data (prompts) is kept
-DETAILS_VERSION = 2         # raised when the details asked for change: every LoRA is asked once more
-                            # (2: the example images' generation data, which CivitAI sends only with withMeta=true)
+EXAMPLE_PAGE = 200          # gallery pictures per request (CivitAI's maximum)
+EXAMPLE_PAGES = 10          # requests per LoRA at most: the 2000 most liked pictures and videos of its gallery
+EXAMPLE_PROMPTS = 300       # different prompts kept per LoRA (the gallery is read until it has that many)
+META_VALUE = 4000           # a longer value in a picture's generation data is left out (a whole workflow)
+DETAILS_VERSION = 3         # raised when the details asked for change: every LoRA is asked once more
+                            # (2: the example images' generation data, which CivitAI sends only with withMeta=true;
+                            #  3: the whole gallery of all time, not only the last year's first 100 pictures)
+
+
+def _slim(item: dict) -> dict:
+    """A gallery picture as it is kept: its generation data without values that are whole workflows."""
+    meta = {k: v for k, v in item["meta"].items()
+            if k in ("prompt", "negativePrompt") or len(json.dumps(v, default=str)) <= META_VALUE}
+    return {**item, "meta": meta}
+
+
+def gallery(version_id: int, timeout: float = 20.0, gap: float = REQUEST_GAP, pages: int = EXAMPLE_PAGES,
+            want: int = EXAMPLE_PROMPTS) -> tuple[list[dict], int, bool]:
+    """The pictures and videos users posted with a LoRA version (the gallery on its CivitAI page: the creator's
+    examples and everyone else's), of all time, the most liked first; only those that tell their prompt, each
+    prompt once. -> (the pictures, how many were looked at, complete). The gallery is read page by page until it
+    ends, `want` prompts are found or `pages` requests were made. complete is False when a later page could not
+    be asked (what was read so far is returned). Raises OSError when the first page could not be asked."""
+    base = (f"/api/v1/images?modelVersionId={int(version_id)}&limit={EXAMPLE_PAGE}&sort=Most%20Reactions"
+            "&period=AllTime&nsfw=X&withMeta=true")
+    out, seen, looked, cursor = [], set(), 0, None
+    for page in range(max(1, pages)):
+        if page and gap:
+            time.sleep(gap)
+        try:
+            data = _get_json(base + (f"&cursor={urllib.parse.quote(str(cursor), safe='')}" if cursor else ""),
+                             timeout)
+        except (OSError, ValueError, TypeError):
+            if not page:
+                raise
+            return out, looked, False
+        items = (data or {}).get("items")
+        for it in items if isinstance(items, list) else []:
+            looked += 1
+            meta = it.get("meta") if isinstance(it, dict) else None
+            prompt = str(meta.get("prompt") or "").strip() if isinstance(meta, dict) else ""
+            if prompt and prompt not in seen:
+                seen.add(prompt)
+                out.append(_slim(it))
+        meta = (data or {}).get("metadata")
+        cursor = meta.get("nextCursor") if isinstance(meta, dict) else None
+        if not cursor or len(out) >= want:
+            break
+    return out[:want], looked, True
 
 
 def civitai_lookup(sha: str, timeout: float = 20.0, gap: float = REQUEST_GAP) -> dict | None:
     """CivitAI's model version for a file hash: {"words", "model", "url", "details"}; None when CivitAI does not
     know it. details = {"version": the version as CivitAI gives it, "model": the model page (description, tags,
-    creator, license; its other versions only as id / name / base model), "examples": the example images (their
-    generation data: prompt, negative prompt, seed, settings)}. The model page and the examples are optional (a
+    creator, license; its other versions only as id / name / base model), "examples": the pictures of its
+    gallery that tell their prompt (see gallery: generation data with prompt, negative prompt, seed, settings),
+    "examples_seen": how many gallery pictures were looked at}. The model page and the examples are optional (a
     failed request leaves them out). Raises OSError when the version could not be asked (offline, server error)."""
     data = _get_json(f"/api/v1/model-versions/by-hash/{sha}", timeout)
     if data is None:
@@ -240,14 +335,13 @@ def civitai_lookup(sha: str, timeout: float = 20.0, gap: float = REQUEST_GAP) ->
     if data.get("id"):
         try:
             time.sleep(gap)
-            imgs = _get_json(f"/api/v1/images?modelVersionId={int(data['id'])}&limit={EXAMPLE_IMAGES}"
-                             "&sort=Most%20Reactions&nsfw=X&withMeta=true", timeout)
-            if imgs and isinstance(imgs.get("items"), list):
-                details["examples"] = imgs["items"]
+            details["examples"], details["examples_seen"], whole = gallery(int(data["id"]), timeout, gap)
+            if not whole:
+                details["complete"] = False
         except (OSError, ValueError, TypeError):
             details["complete"] = False
     return {"words": _clean(data.get("trainedWords") or []), "model": str(model.get("name") or ""),
-            "url": f"https://civitai.com/models/{mid}?modelVersionId={data.get('id')}" if mid else "",
+            "url": f"{SITES[0]}/models/{mid}?modelVersionId={data.get('id')}" if mid else "",   # (shown: on_site)
             "details": details}
 
 
@@ -408,6 +502,8 @@ class TriggerDB:
             out = self._info(f, rec)
             if out is not None and rec.get("base_model"):
                 out["base_model"] = rec["base_model"]
+            if out is not None and out.get("url"):
+                out["url"] = on_site(out["url"])
             return out
 
     @staticmethod
@@ -469,16 +565,27 @@ class TriggerDB:
                     return True                                         # were kept,
                 return bool(key) and not rec.get("asked_with_key")   # and once with an API key
             if rec.get("checked"):
+                if not rec.get("both_sites"):      # not known when only one site was asked: the other may know it
+                    return True
                 return time.time() - float(rec["checked"]) > RECHECK_DAYS * 86400
             return True
 
     def scan(self, paths: list[str], online: bool = True, stop: Callable[[], bool] = lambda: False,
-             lookup: Callable[[str], dict | None] = civitai_lookup, gap: float = REQUEST_GAP) -> dict:
+             lookup: Callable[[str], dict | None] = civitai_lookup, gap: float = REQUEST_GAP,
+             progress: Callable[[int, int, str], None] | None = None) -> dict:
         """Look at LoRA files not known yet (header; then CivitAI by hash). Returns counts
-        {"looked", "found", "unknown", "failed"}."""
+        {"looked", "found", "unknown", "failed"}. progress(k, n, file name): the k-th of about n LoRAs is being
+        asked on CivitAI now (n: those to ask as far as known before hashing; a copy of a known LoRA is not)."""
         n = {"looked": 0, "found": 0, "unknown": 0, "failed": 0, "new": 0}
         asked, dirty, failed_in_a_row = False, 0, 0
         key = api_key() if online else ""                  # (once, outside the lock)
+        total = 0
+        if online and progress:
+            for path in paths:
+                try:
+                    total += os.path.isfile(path) and self.needs_lookup(path, key)
+                except (OSError, ValueError, TypeError, AttributeError):
+                    pass
 
         def flush(force=False):
             nonlocal dirty
@@ -519,6 +626,11 @@ class TriggerDB:
                     time.sleep(gap)
                 asked = True
                 n["looked"] += 1
+                if progress:
+                    try:
+                        progress(n["looked"], max(total, n["looked"]), Path(path).name)
+                    except Exception:  # noqa: BLE001  (a window that is gone: the scan goes on)
+                        pass
                 try:
                     hit = lookup(sha)
                 except OSError:
@@ -531,6 +643,7 @@ class TriggerDB:
                 with self._lock:
                     rec = self.data["by_sha"].setdefault(sha, {})
                     rec["checked"] = time.time()
+                    rec["both_sites"] = True
                     if hit is None:
                         n["unknown"] += 1
                         if rec.get("civitai") is not None:    # known before, gone now: not asked on every scan
@@ -555,6 +668,8 @@ class TriggerDB:
                                         for part in ("model", "examples"):
                                             if part not in new and part in prev:
                                                 new[part] = prev[part]
+                                        if len(prev.get("examples") or []) > len(new.get("examples") or []):
+                                            new["examples"] = prev["examples"]     # (a gallery read only in part)
                                     except (OSError, ValueError):
                                         pass
                                 self._save_details(sha, new)

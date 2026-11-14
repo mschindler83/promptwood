@@ -11,7 +11,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QIcon, QImage, QKeySequence, QPixmap, QShortcut, QTextCursor
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLineEdit, QPlainTextEdit,
-                               QPushButton, QSpinBox, QTextBrowser, QToolButton, QVBoxLayout)
+                               QPushButton, QSpinBox, QTextBrowser, QToolButton, QVBoxLayout, QWidget)
 
 from ..tree import refine_problems
 from .theme import repolish
@@ -41,6 +41,7 @@ class _Sig(QObject):
     result = Signal(str, str)             # text, error
     ideas = Signal(object, str)           # [idea dicts], error
     loras = Signal(object)                # lora_notes.summary of the LoRA stack
+    told = Signal(str)                    # the LoRA part of the instruction a refine was given
     progress = Signal(str)                # what is being done before the answer (a LoRA is read up on)
 
 
@@ -80,6 +81,7 @@ class RefineDialog(QDialog):
         self._sig.ideas.connect(self._ideas_ready)
         self._sig.loras.connect(self._loras_known)
         self._sig.progress.connect(self._progress)
+        self._sig.told.connect(self._was_told)
         self.ideas: list[dict] = []
         self._chosen_ideas: list[str] | None = None
         v = QVBoxLayout(self)
@@ -112,8 +114,24 @@ class RefineDialog(QDialog):
         self.use_loras.setChecked(self.qs.value("refinerLoraKnowledge", True, type=bool) if self.qs is not None
                                   else True)
         self.use_loras.toggled.connect(self._remember_loras)
-        self.use_loras.hide()                     # (shown when something is known of a LoRA in the stack)
-        v.addWidget(self.use_loras)
+        self.b_loras = QToolButton()
+        self.b_loras.setProperty("role", "textButton")
+        self.b_loras.setText("What the model is told…")
+        self.b_loras.setToolTip("Open the LoRA window: word for word what the language model is told about these "
+                                "LoRAs, their example prompts with the pictures they made, and everything else "
+                                "that is known of them")
+        self.b_loras.setAutoRaise(True)
+        self.b_loras.setCursor(Qt.PointingHandCursor)
+        self.b_loras.clicked.connect(lambda: self.show_loras())
+        self._lora_row = QWidget()
+        lrow = QHBoxLayout(self._lora_row)
+        lrow.setContentsMargins(0, 0, 0, 0)
+        lrow.addWidget(self.use_loras)
+        lrow.addWidget(self.b_loras)
+        lrow.addStretch(1)
+        self._lora_row.hide()                     # (shown when the prompt has LoRAs)
+        self._told = ""                           # the LoRA part of the last instruction, word for word
+        v.addWidget(self._lora_row)
         row = QHBoxLayout()
         left, right = QVBoxLayout(), QVBoxLayout()
         self.original_title = label("Your prompt", level="tertiary")
@@ -374,39 +392,93 @@ class RefineDialog(QDialog):
 
     # ---- the LoRAs the result is made with
     def _loras_known(self, info: dict):
-        """Offer what is known of the stack's LoRAs (lora_notes.summary; called once the files are read)."""
-        names = info.get("known") or []
-        if not names:
+        """Say what is known of the stack's LoRAs (lora_notes.summary; called once their files are read): each
+        with its number of example prompts and whether it has a note. Writing for them is offered when something
+        is known of one."""
+        each = info.get("loras") or []
+        if not each:
             return
-        shown = ", ".join(names[:3]) + (f" and {len(names) - 3} more" if len(names) > 3 else "")
-        self.use_loras.setText(f"Write for the LoRA{'s' if len(names) > 1 else ''}: {shown}")
-        tip = ("The model is told what is known of these LoRAs: their trigger words, what their creators say and "
-               "prompts that work with them (from CivitAI), and takes their wording where it fits your prompt. It "
-               "never takes the content of those prompts.")
-        if info.get("missing"):
-            tip += (f"\n\nThe first answer takes longer: the model reads up on {info['missing']} LoRA"
-                    f"{'s' if info['missing'] > 1 else ''} first and keeps a note on each (once per LoRA).")
-        if info.get("settings"):
-            tip += "\n\nSettings its example pictures were made with:\n" + "\n".join(
-                f"{n}: {t}" for n, t in info["settings"])
+        from ..lora_notes import known_text
+        names = info.get("known") or []
+        parts = [f"{k['name']} ({known_text(k)})" for k in each[:3]]
+        shown = ", ".join(parts) + (f" and {len(each) - 3} more" if len(each) > 3 else "")
+        self.use_loras.setEnabled(bool(names))
+        if names:
+            self.use_loras.setText(f"Write for the LoRA{'s' if len(each) > 1 else ''}: {shown}")
+            tip = ("The model is told what is known of these LoRAs: their trigger words, what their creators say "
+                   "and prompts that work with them (from their CivitAI galleries; the most liked one and those "
+                   "nearest to your prompt), and takes their wording where it fits your prompt. It never takes "
+                   "the content of those prompts. “What the model is told…” shows it word for word.")
+            if info.get("missing"):
+                tip += (f"\n\nThe first answer takes longer: the model reads up on {info['missing']} LoRA"
+                        f"{'s' if info['missing'] > 1 else ''} first and keeps a note on each (once per LoRA).")
+            if info.get("settings"):
+                tip += "\n\nSettings its example pictures were made with:\n" + "\n".join(
+                    f"{n}: {t}" for n, t in info["settings"])
+        else:
+            self.use_loras.setText(f"LoRA{'s' if len(each) > 1 else ''}: {shown}")
+            tip = ("Nothing is known of this prompt's LoRAs that helps writing for them (no trigger words, no "
+                   "description, no example prompts), so the model is told nothing about them. They are looked "
+                   "up on CivitAI in the background when that is on in the settings.")
         self.use_loras.setToolTip(tip)
-        self.use_loras.show()
+        self._lora_row.show()
+
+    def _was_told(self, text: str):
+        self._told = text
+
+    def show_loras(self):
+        """The LoRA window for this prompt's LoRAs: what the model was told at the last refine (before the first
+        one: what it will be told, without the notes still to write), and the examples behind it."""
+        from .. import lora_notes
+        from .lora_window import LoraWindow
+        on = self.use_loras.isEnabled() and self.use_loras.isChecked()
+        told, title = self._told, "What the language model was told"
+        if not told and on:
+            try:
+                told = lora_notes.guidance(self.loras, prompt=self.original.toPlainText())
+            except Exception:  # noqa: BLE001
+                told = ""
+            title = "What the language model will be told"
+        LoraWindow(self, self.loras, current=self.loras[0] if self.loras else None, settings=self.qs,
+                   prompt=self.original.toPlainText(), told=told if on or self._told else "",
+                   told_title=title).exec()
+        self._refresh_loras()
+
+    def _refresh_loras(self):
+        """Read again what is known of the LoRAs (a note was written or forgotten)."""
+        sig, loras = self._sig, list(self.loras)
+        if not loras:
+            return
+
+        def work():
+            try:
+                from .. import lora_notes
+                sig.loras.emit(lora_notes.summary(loras))
+            except Exception:  # noqa: BLE001
+                pass
+        threading.Thread(target=work, daemon=True).start()
 
     def _remember_loras(self, on: bool):
         if self.qs is not None:
             self.qs.setValue("refinerLoraKnowledge", bool(on))
 
-    def _lora_guide(self):
+    def _lora_guide(self, text: str = ""):
         """-> a function for the worker thread: the LoRA part of the instruction ("" when off or nothing is
-        known). The model first writes the notes that are missing (see lora_notes.make_notes)."""
-        paths = list(self.loras) if self.use_loras.isVisibleTo(self) and self.use_loras.isChecked() else []
+        known), with the example prompts nearest to `text`. The model first writes the notes that are missing
+        (lora_notes.make_notes). What it is told is kept for "What the model is told…"."""
+        paths = list(self.loras) if (not self._lora_row.isHidden() and self.use_loras.isEnabled()
+                                     and self.use_loras.isChecked()) else []
         refiner, model, sig = self.refiner, self.model.currentData(), self._sig
 
         def guide() -> str:
             if not paths:
+                try:
+                    sig.told.emit("")
+                except RuntimeError:
+                    pass
                 return ""
+            from .. import lora_notes
             try:
-                from .. import lora_notes
                 if hasattr(refiner, "complete"):
                     def said(name, i, n):
                         try:
@@ -419,9 +491,16 @@ class RefineDialog(QDialog):
                         sig.progress.emit("")
                     except RuntimeError:
                         pass
-                return lora_notes.guidance(paths)
+                told = lora_notes.guidance(paths, prompt=text)
             except Exception:  # noqa: BLE001  (the LoRAs' data cannot be read: a plain refine)
-                return ""
+                told = ""
+            try:
+                sig.told.emit(told)
+                if told:
+                    sig.loras.emit(lora_notes.summary(paths))      # (a note may be new: the counts say so)
+            except Exception:  # noqa: BLE001
+                pass
+            return told
         return guide
 
     def _progress(self, text: str):
@@ -521,7 +600,7 @@ class RefineDialog(QDialog):
         self._pending = ask
         sig, refiner, seed, cast = self._sig, self.refiner, random.randint(0, 2**31 - 1), self.cast
         turns, pics = list(self.turns[:self.base + 1]), self.chosen_pictures()
-        clip, guide = self._clip(), self._lora_guide()
+        clip, guide = self._clip(), self._lora_guide(text)
 
         def work():
             try:
@@ -596,7 +675,7 @@ class RefineDialog(QDialog):
         repolish(self.state)
         sig, refiner, seed, cast, pics = self._sig, self.refiner, random.randint(0, 2**31 - 1), self.cast, \
             self.chosen_pictures()
-        guide = self._lora_guide()
+        guide = self._lora_guide(bullets)
 
         def work():
             try:

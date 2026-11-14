@@ -132,11 +132,16 @@ def test_guidance_for_a_refine(tmp_path):
     db.set_note(p, {"note": "Does: ink.", "stamp": LN.material(db.details(p), db.words(p), p)["stamp"], "made": 1})
     noted = LN.guidance([p], db)
     assert "Does: ink." in noted and "Its creator says" not in noted and noted.count('\n- "') == LN.GUIDE_EXAMPLES
-    assert LN.summary([p], db) == {"known": ["Ink Sketch"], "notes": 1, "missing": 0, "settings": [
-        ("Ink Sketch", "LoRA strength 0.7-0.8, steps 24-26, CFG 4.5, sampler Euler a")]}
+    info = LN.summary([p], db)
+    assert (info["known"], info["notes"], info["missing"]) == (["Ink Sketch"], 1, 0) and info["settings"] == [
+        ("Ink Sketch", "LoRA strength 0.7-0.8, steps 24-26, CFG 4.5, sampler Euler a")]
+    k = info["loras"][0]
+    assert k["prompts"] == 6 and k["note"] and k["on_civitai"] and LN.known_text(k) == "6 prompts, note"
     # an unknown LoRA is left out; none known: nothing is told
     other = str(lora(tmp_path / "loras" / "other.safetensors"))
     assert LN.guidance([other, p], db) == noted and LN.guidance([other], db) == "" and LN.guidance([], db) == ""
+    assert LN.known_text(LN.what_is_known(other, db)) == "nothing known"
+    assert LN.known_text({"known": True, "prompts": 0, "note": False, "words": ["w"]}) == "trigger words only"
     # many LoRAs share the room
     many = []
     for i in range(8):
@@ -194,13 +199,15 @@ def test_refine_window_reads_up_on_the_loras_once(tmp_path):
         app.processEvents()
     dlg = RefineDialog(None, "a fox", "image", lambda: Fake(), loras=[str(p)])
     wait_idle(dlg)
-    assert not dlg.use_loras.isHidden() and dlg.use_loras.isChecked()
-    assert dlg.use_loras.text() == "Write for the LoRA: Ink Sketch"
+    assert not dlg._lora_row.isHidden() and dlg.use_loras.isEnabled() and dlg.use_loras.isChecked()
+    assert dlg.use_loras.text() == "Write for the LoRA: Ink Sketch (6 prompts)"      # what is known, in numbers
     assert "reads up on 1 LoRA" in dlg.use_loras.toolTip() and "LoRA strength 0.7-0.8" in dlg.use_loras.toolTip()
     dlg.refine()
     wait_idle(dlg)
     assert notes == ["llama:/m/q.gguf"] and db.note(str(p))["note"].startswith("Does: A loose ink sketch")
     assert calls[-1]["loras"].startswith(LN.GUIDE_HEAD) and "Does: A loose ink sketch style." in calls[-1]["loras"]
+    assert dlg._told == calls[-1]["loras"]                          # kept word for word, to be shown
+    assert dlg.use_loras.text() == "Write for the LoRA: Ink Sketch (6 prompts, note)"
     dlg.refine()                                                    # the note is there now: not asked again
     wait_idle(dlg)
     assert len(notes) == 1 and "Wording: tags." in calls[-1]["loras"]
@@ -211,13 +218,14 @@ def test_refine_window_reads_up_on_the_loras_once(tmp_path):
     dlg.use_loras.setChecked(False)                                 # switched off: a plain refine
     dlg.refine()
     wait_idle(dlg)
-    assert "loras" not in calls[-1]
-    # no LoRA known (or none in the stack): the option is not offered, nothing is passed
+    assert "loras" not in calls[-1] and dlg._told == ""
+    # a LoRA nothing is known of: said so, not offered; no LoRA in the stack: no line at all; nothing is passed
     other = lora(tmp_path / "loras" / "unknown.safetensors", {"y": "2"})
     for stack in ([str(other)], []):
         d2 = RefineDialog(None, "a fox", "image", lambda: Fake(), loras=stack)
         wait_idle(d2)
-        assert d2.use_loras.isHidden()
+        assert d2._lora_row.isHidden() == (not stack) and (not stack or not d2.use_loras.isEnabled())
+        assert not stack or d2.use_loras.text() == "LoRA: unknown (nothing known)"
         d2.refine()
         wait_idle(d2)
         assert "loras" not in calls[-1] and len(notes) == 1
@@ -229,3 +237,193 @@ def test_details_page_shows_the_note_and_the_settings():
                         "LoRA strength 0.7-0.8, steps 24-26")
     assert "Does: ink &lt;b&gt;.<br>Wording: tags." in page and "LoRA strength 0.7-0.8, steps 24-26" in page
     assert "How to prompt it" not in details_html(details(), [])
+
+
+def test_a_refine_gets_the_examples_nearest_to_the_prompt(tmp_path):
+    d = details(8)
+    db, p = db_with(tmp_path, d)
+    mat = LN.material(db.details(p), db.words(p), p)
+    assert len(mat["pool"]) == 8 and mat["examples"] == mat["pool"][:LN.NOTE_EXAMPLES]
+    top = mat["pool"][0]
+    near = LN.nearest(mat, "ink4sketch, a lighthouse seen from the sea in a storm", 3)
+    assert near[0] == top and "lighthouse in a storm" in near[1]     # the most liked, then the nearest
+    assert near[2] == mat["pool"][1]                                 # then the next most liked
+    # words every example shares (the trigger, the style) do not make one "near"; no prompt: the most liked
+    assert LN.nearest(mat, "ink4sketch, loose ink sketch, cross-hatching", 3) == mat["pool"][:3]
+    assert LN.nearest(mat, "", 3) == mat["pool"][:3] and LN.nearest(mat, "x", 0) == []
+    text = LN.guidance([p], db, prompt="oranges at a market stall")
+    assert "market stall full of oranges" in text and "oranges" not in LN.guidance([p], db)
+
+
+def test_lookup_says_where_it_is(tmp_path):
+    db = TR.TriggerDB(tmp_path / "db.json")
+    paths = [str(lora(tmp_path / "loras" / f"l{i}.safetensors", {"n": str(i)})) for i in range(3)]
+    said = []
+    db.scan(paths, lookup=lambda sha: None, gap=0, progress=lambda *a: said.append(a))
+    assert said == [(1, 3, "l0.safetensors"), (2, 3, "l1.safetensors"), (3, 3, "l2.safetensors")]
+    said.clear()
+    db.scan(paths, lookup=lambda sha: None, gap=0, progress=lambda *a: said.append(a))
+    assert said == []                                               # nothing to ask: nothing said
+
+    def broken(*a):
+        raise RuntimeError("the window is gone")
+    more = [str(lora(tmp_path / "loras" / "l9.safetensors", {"n": "9"}))]
+    assert db.scan(more, lookup=lambda sha: None, gap=0, progress=broken)["looked"] == 1
+
+
+def test_gallery_pictures_are_small_stills_from_civitai_only(tmp_path, monkeypatch):
+    from video_chain import lora_pictures as LP
+    db = TR.TriggerDB(tmp_path / "db.json")
+    pic = {"id": 5, "type": "image", "nsfwLevel": "None",
+           "url": "https://image.civitai.com/k/uu-id/original=true/5.jpeg"}
+    vid = {"id": 6, "type": "video", "nsfwLevel": "Mature", "url": "https://image.civitai.com/k/uu/original=true/6.mp4",
+           "thumbnail": {"url": "https://image.civitai.com/k/uu/anim=false,transcode=true/6.jpeg"}}
+    assert LP.still_url(pic) == "https://image.civitai.com/k/uu-id/width=320/5.jpeg"
+    assert LP.still_url(vid) == vid["thumbnail"]["url"] and LP.is_video(vid) and not LP.is_video(pic)
+    assert LP.still_url({**vid, "thumbnail": None}) is None          # a video is never loaded itself
+    for bad in ("http://image.civitai.com/a/width=1/x.jpg", "https://evil.example/civitai.com/x.jpg",
+                "https://civitai.com.evil.example/x.jpg", "file:///etc/passwd", ""):
+        assert LP.still_url({"id": 1, "url": bad}) is None, bad
+    assert LP.page_url(pic) == "https://civitai.com/images/5" and LP.page_url({"id": "x"}) is None
+    assert LP.level(pic) == "None" and LP.level(vid) == "Mature" and LP.level({}) == "X"
+    assert LP.level({"nsfw": False}) == "None"
+    assert LP.allowed(pic, "safe") and not LP.allowed(vid, "safe") and LP.allowed(vid, "all")
+    assert not LP.allowed(pic, "off")
+    asked = []
+
+    class Answer:
+        def __init__(self, kind="image/jpeg", data=b"JPEG", url="https://image.civitai.com/x"):
+            self.headers, self._data, self._url = {"Content-Type": kind}, data, url
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def geturl(self):
+            return self._url
+
+        def read(self, n):
+            return self._data[:n]
+    answers = [Answer()]
+
+    def urlopen(req, timeout):
+        asked.append((req.full_url, dict(req.header_items())))
+        return answers[0]
+    monkeypatch.setattr(LP.urllib.request, "urlopen", urlopen)
+    f = LP.fetch(pic, db)
+    assert f == tmp_path / "civitai" / "pictures" / "5.jpg" and f.read_bytes() == b"JPEG"
+    assert asked[0][0].endswith("/width=320/5.jpeg") and "Authorization" not in asked[0][1]     # (no API key)
+    assert LP.fetch(pic, db) == f and len(asked) == 1               # kept: loaded once
+    assert LP.kept(db) == (1, 4)
+    for wrong in (Answer(kind="video/mp4"), Answer(data=b""), Answer(data=b"x" * (LP.MAX_BYTES + 5)),
+                  Answer(url="https://elsewhere.example/x.jpg")):
+        answers[0] = wrong
+        try:
+            LP.fetch(vid, db)
+            raise AssertionError("kept something that is not a small picture from CivitAI")
+        except OSError:
+            pass
+    assert LP.fetch({"id": 7, "url": "https://elsewhere.example/x.jpg"}, db) is None
+    assert LP.forget(db) == 1 and LP.kept(db) == (0, 0)
+
+
+def test_lora_window_shows_what_is_known(tmp_path):
+    from PySide6.QtGui import QImage
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from video_chain.ui.lora_window import PER_PAGE, LoraWindow
+    d = details(7)
+    d["examples_seen"] = 40
+    for i, it in enumerate(d["examples"]):
+        if isinstance(it, dict):
+            it.update({"id": 100 + i, "type": "video" if i == 1 else "image", "username": f"user{i}",
+                       "nsfwLevel": "X" if i == 2 else "None", "stats": {"likeCount": 50 - i, "heartCount": 1},
+                       "url": f"https://image.civitai.com/k/u/original=true/{i}.jpeg"})
+    db, p = db_with(tmp_path, d)
+    other = str(lora(tmp_path / "loras" / "unknown.safetensors", {"y": "2"}))
+    still = tmp_path / "still.png"
+    QImage(32, 24, QImage.Format_RGB32).save(str(still))
+    loaded = []
+
+    def fetch(item):
+        loaded.append(item["id"])
+        if item["id"] == 103:
+            raise OSError("CivitAI answered 500")
+        return still
+    told = LN.guidance([p], db, prompt="oranges at a market stall")
+    from PySide6.QtCore import QSettings
+    qs = QSettings(str(tmp_path / "s.ini"), QSettings.IniFormat)
+    w = LoraWindow(None, [(p, "inksketch_v2"), (other, "unknown")], current=p, settings=qs, db=db, fetch=fetch,
+                   prompt="oranges at a market stall", told=told)
+
+    def settle(until=lambda: True):
+        end = time.time() + 5
+        while time.time() < end and not until():
+            app.processEvents()
+            time.sleep(0.01)
+        app.processEvents()
+    settle(lambda: len(w._known_of) == 2 and len(loaded) >= 6)
+    # the list: every LoRA with what is known of it
+    assert w.list.item(0).text() == "inksketch_v2\n   7 prompts" and "nothing known" in w.list.item(1).text()
+    assert "2 LoRAs: 1 with example prompts (7 prompts), 0 with a note, 1 nothing known of." == w.total.text()
+    assert w.title.text() == "Ink Sketch"
+    assert "7 different example prompts (8 gallery pictures tell theirs, of 40 looked at)" in w.facts.text()
+    assert "writes its note at the next refine" in w.facts.text()
+    # the examples: one page of cards, the ones told to the model first and marked
+    assert len(w.cards) == PER_PAGE and w.page_label.text() == "Page 1 of 1"
+    marked = [c for c in w.cards if c.ex["told"]]
+    assert len(marked) == LN.GUIDE_EXAMPLES + 1 and w.cards[:len(marked)] == marked
+    assert any("market stall full of oranges" in c.ex["prompt"] for c in marked)
+    card = w.cards[0]
+    assert "(loose ink sketch:1.3)" in card.prompt.text() and "<lora" in card.prompt.text()      # as posted
+    # pictures: safe only by default (the X-rated one and none else is held back), a video shows its still
+    by_id = {c.ex["item"]["id"]: c for c in w.cards}
+    assert "rated X" in by_id[102].picture.text() and 102 not in loaded
+    assert not by_id[100].picture.pixmap().isNull() and by_id[100].picture.text() == ""
+    assert "gave no picture" in by_id[101].picture.text() and 101 not in loaded     # (a video without a still)
+    assert "Could not be loaded (CivitAI answered 500)" in by_id[103].picture.text()
+    w.pictures.setCurrentIndex(w.pictures.findData("all"))
+    settle(lambda: 102 in loaded)
+    assert qs.value("loraPictures") == "all"
+    loaded.clear()
+    w.pictures.setCurrentIndex(w.pictures.findData("off"))
+    settle()
+    assert not loaded and all(c.picture.text() == "Pictures are off" for c in w.cards)
+    # finding, sorting, copying
+    w.find.setText("fox dawn")
+    assert len(w.cards) == 1 and "1 of 8 match" in w.count.text()
+    w.cards[0].copied.emit(w.cards[0].ex["clean"])
+    assert app.clipboard().text().startswith("ink4sketch, loose ink sketch of a red fox") and "Copied" in w.state.text()
+    w.find.setText("")
+    w.sort.setCurrentIndex(w.sort.findData("near"))
+    assert "market stall full of oranges" in w.cards[1].ex["prompt"]            # (the most liked, then the nearest)
+    # how to prompt it: words, counted settings, the note (none yet), word for word what the refiner is told
+    how = w.how.toPlainText()
+    for want in ("ink4sketch", "from CivitAI", "LoRA strength 0.7-0.8", "Not written yet", "Prompts that work with it"):
+        assert want in how, want
+    assert "A loose ink sketch style" in w.about.toPlainText() and "red fox" not in w.about.toPlainText()
+    assert w.told_view.toPlainText() == told and w.tabs.currentWidget() is w.told_view
+    # a note shows, and can be forgotten
+    db.set_note(p, {"note": "Does: ink.\nWording: tags.", "stamp": LN.material(db.details(p), db.words(p), p)["stamp"]})
+    w.show_lora(p)
+    assert "Does: ink." in w.how.toPlainText() and "the refiner has a note" in w.facts.text()
+    from PySide6.QtCore import QUrl
+    w._link(QUrl("forget:note"))
+    assert db.note(p) is None and "Not written yet" in w.how.toPlainText()
+    # a LoRA nothing is known of says so
+    w.show_lora(other)
+    assert "CivitAI was not asked about this file yet" in w.facts.text()
+    db.scan([other], lookup=lambda sha: None, gap=0)
+    w.show_lora(other)
+    assert "CivitAI does not know this file" in w.facts.text() and not w.cards
+    assert "No example prompts" in w.count.text() and "Nothing:" in w.how.toPlainText()
+    w.done(0)
+    # without a prompt and without anything told: no such tab, no nearest sorting; an empty list does not break
+    w2 = LoraWindow(None, [p], db=db, fetch=fetch, settings=qs)
+    assert w2.told_view is None and w2.sort.count() == 1 and w2.title.text() == "Ink Sketch"
+    w2.done(0)
+    w3 = LoraWindow(None, [], db=db, fetch=fetch)
+    assert w3.title.text() == "No LoRA"
+    w3.done(0)
