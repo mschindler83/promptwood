@@ -147,6 +147,13 @@ def chip_specs(info: dict, lead_off: str | None = None) -> list[dict]:
             text, tip = f"♪ sound {snd['n']}", (f"The sound reference the prompt names as <Audio {snd['n']}>"
                                                  + (f" ({name})." if name else " (it is missing)."))
         out.append({"text": text, "tip": tip, "variant": "", "lead": None})
+    ss = (info.get("settings") or {}).get("source_sound")
+    if isinstance(ss, dict) and ss.get("overlay"):     # not an input of the model, but the clip's sound all the same
+        out.append({"text": "♪ mixed in" if ss.get("mix") else "♪ laid over", "variant": "neutral", "lead": None,
+                    "tip": "The clip's Sound setting is mixed with the sound the model makes, after the clip is made; "
+                           "the model does not hear it." if ss.get("mix") else
+                           "The clip's Sound setting is put into the clip after it is made, instead of the model's "
+                           "sound; the model does not hear it."})
     model = info["model"]
     out.append({"text": model_chip_text(info), "variant": "neutral", "lead": None, "model": True,
                 "tip": ("Made with MiniMax H3's reference model (ref2va): it gets the pictures and sounds above. "

@@ -123,6 +123,13 @@ SPEAK_TIP = ("<p>Speak this clip's lines (\"...\" after @Name, e.g. @Anna says \
              "listen, and use the best take. The words can be changed there too, to try other sentences."
              "<br>Who speaks (Qwen3-TTS on this computer, or ElevenLabs with your API key) is set in the Cast & "
              "references tab, under Text to speech; the API key in Settings.</p>")
+MIX_TIP = ("<p>What you hear: the given sound exactly as it is, plus the sound the model makes for this clip "
+           "(steps, voices, the sound of the room). Good when music or a background goes on and the clip should "
+           "still sound alive, e.g. the real video's music under the new clip's footsteps.<br>The model does not hear "
+           "the given sound, so its own sound may not follow its rhythm.<br>A clip already made with the sound laid "
+           "over is made again (only the given sound was kept).</p>")
+MIX_OFF_TIP = ("'Generate sound' is off in the project's clip settings, so the model makes no sound to mix with; the "
+               "given sound is laid over alone.")
 FREEZE_TIP = ("Freeze: keep this clip as it is made, and every clip before it. They count as done whatever "
               "the project's settings say (size, speed LoRA, steps …), are not made again and cannot be "
               "edited; the clips after it follow the settings as before. Click again to unfreeze")
@@ -892,12 +899,34 @@ class PromptCard(QFrame):
             "for music, a background or a voice-over.<br><b>Off</b>: the reference model hears the sound and makes "
             "the picture to it (lips in sync), which often keeps the body still.</p>")
         sb.addWidget(self.src_sound)
+        self.sound_mix = QCheckBox("Keep the clip's own sound too (mix both)")
+        self.sound_mix.setToolTip(MIX_TIP)
+        self.mix_level = QSpinBox()
+        self.mix_level.setRange(*chain.MIX_LEVELS)
+        self.mix_level.setSuffix(" dB")
+        self.mix_level.setToolTip("How loud the given sound is in the mix: 0 dB is as recorded, below 0 quieter "
+                                  "(e.g. music behind the clip's voices), above 0 louder. The clip's own sound "
+                                  "stays as the model made it.")
+        mrow = QHBoxLayout()
+        mrow.setContentsMargins(18, 0, 0, 0)                    # (indented: a choice of the box above it)
+        mrow.setSpacing(6)
+        mrow.addWidget(self.sound_mix, 1)
+        lrow = QHBoxLayout()
+        lrow.setSpacing(4)
+        lrow.addWidget(label("Level", level="secondary"))
+        lrow.addWidget(self.mix_level)
+        self.mix_level_box = row_widget(lrow)
+        mrow.addWidget(self.mix_level_box)
+        self.mix_row = QWidget()
+        self.mix_row.setLayout(mrow)
+        self._model_sound = True                                # the project's sound is on (the model makes one)
         self.b_speak = QPushButton("Speak the lines (text to speech)")
         self.b_speak.setToolTip(SPEAK_TIP)
         self.b_speak.clicked.connect(lambda: self.action.emit("speak", self.nid))
         sb.addWidget(self.b_speak)
         sb.addWidget(self.sound_over)
         sb.addWidget(self.src_sound_info)
+        sb.addWidget(self.mix_row)
         link.addRow("Sound", self.sound_box)
         self._link = link
         link.setRowVisible(self.sound_box, True)           # (the sound choice in it only when there is one)
@@ -968,7 +997,9 @@ class PromptCard(QFrame):
         self.adv_note = AdvancedNote(self.view)
         v.addWidget(self.adv_note)
         self.view.advanced(self.seed_label, self.seed, self.b_seed, self.veda_mark, self.steps_label, self.steps,
-                           (link, self.loras), (link, self.guide), (link, self.keys_row), (link, self.hand_row))
+                           (link, self.loras), (link, self.guide), (link, self.keys_row), (link, self.hand_row),
+                           self.mix_level_box)
+        self._show_mix()
         self._show_settings(PromptCard.settings_open)
         self.guide.currentIndexChanged.connect(self._ov_changed)
         for w_ in (self.cam_move, self.cam_amp, self.cam_speed):
@@ -976,6 +1007,8 @@ class PromptCard(QFrame):
         self.src_sound.currentIndexChanged.connect(self._sound_toggled)
         self.sound_over.toggled.connect(self._sound_toggled)
         self.loras.changed.connect(self._ov_changed)
+        self.sound_mix.toggled.connect(self._sound_toggled)
+        self.mix_level.valueChanged.connect(self._ov_changed)
         self.length.currentIndexChanged.connect(self._ov_changed)
         self.steps.valueChanged.connect(self._ov_changed)
 
@@ -1002,7 +1035,7 @@ class PromptCard(QFrame):
     def set_choices(self, project_frames: int, project_steps: int, known: list[tuple[str, str]]):
         """Fill the setting widgets (without emitting changes). known: (path, label) of the LoRAs to offer."""
         widgets = (self.loras, self.length, self.steps, self.guide, self.src_sound, self.sound_over, self.cam_move,
-                   self.cam_amp, self.cam_speed)
+                   self.cam_amp, self.cam_speed, self.sound_mix, self.mix_level)
         for w in widgets:
             w.blockSignals(True)
         try:
@@ -1022,6 +1055,9 @@ class PromptCard(QFrame):
             self.src_sound.setCurrentIndex(max(k, 0))
             self.sound_over.setChecked(bool(self.ov.get("sound_over")))
             cam = CAM.clean(self.ov.get("camera")) or {}
+            self.sound_mix.setChecked(self.ov.get("sound_over") == "mix")
+            self.mix_level.setValue(round(float(self.ov.get("sound_mix_level") or 0)))
+            self._show_mix()
             self.cam_move.setCurrentIndex(max(0, self.cam_move.findData(cam.get("move"))))
             self.cam_amp.setCurrentIndex(max(0, self.cam_amp.findData(cam.get("amplitude"))))
             self.cam_speed.setCurrentIndex(max(0, self.cam_speed.findData(cam.get("speed"))))
@@ -1051,7 +1087,9 @@ class PromptCard(QFrame):
         if self.src_sound.currentData():
             ov["source_sound"] = self.src_sound.currentData()
             if self.sound_over.isChecked():
-                ov["sound_over"] = True
+                ov["sound_over"] = "mix" if self.sound_mix.isChecked() else True
+                if self.sound_mix.isChecked() and self.mix_level.value():
+                    ov["sound_mix_level"] = self.mix_level.value()
         cam = CAM.clean({"move": self.cam_move.currentData(), "amplitude": self.cam_amp.currentData(),
                          "speed": self.cam_speed.currentData()})
         if cam:
@@ -1163,6 +1201,7 @@ class PromptCard(QFrame):
             w.setEnabled(edit)
         self._enable_speak()
         for b in self.chips.chips:                 # (the lead chip is an own setting of the clip)
+        self._show_mix()
             if b.isCheckable():
                 b.setEnabled(edit)
         for w in self.buttons:
@@ -1221,6 +1260,8 @@ class PromptCard(QFrame):
         if self._has_hand and self.view.is_advanced((self._link, self.hand_row)):
             names.append("Hand-over")
         return names
+        if ov.get("sound_over") == "mix" and ov.get("sound_mix_level") and self.view.is_advanced(self.mix_level_box):
+            names.append("Sound level")
 
     def _update_note(self):
         self.adv_note.set_active(self.advanced_active())
@@ -1274,6 +1315,11 @@ class PromptCard(QFrame):
             self.sound_over.setChecked(False)
             self.sound_over.blockSignals(False)
         if self.src_sound.currentData() is True and not self.sound_over.isChecked() \
+        if not self.sound_over.isChecked() and self.sound_mix.isChecked():
+            self.sound_mix.blockSignals(True)          # (not laid over: nothing to mix it into)
+            self.sound_mix.setChecked(False)
+            self.sound_mix.blockSignals(False)
+        self._show_mix()
                 and not self.guide.currentData() and self._max_guide:
             k = self.guide.findData(self._max_guide)
             if k >= 0:
@@ -1309,11 +1355,12 @@ class PromptCard(QFrame):
         finally:
             self.src_sound.blockSignals(False)
 
-    def set_source_sound(self, available: bool, info: str, max_guide: int = 0, repeat: bool = False):
+    def set_source_sound(self, available: bool, info: str, max_guide: int = 0, repeat: bool = False,
+                         model_sound: bool = True):
         """The 'Sound' row: shown for a clip after another clip (or when it is set). available: a real video comes
         before it (its sound can be continued); repeat: there is a clip before it (its sound can be repeated); info:
         where the sound comes from; max_guide: the longest carry-over that fits (set when the video's sound is
-        switched on)."""
+        switched on); model_sound: the project's sound is on (a sound laid over can be mixed with the model's)."""
         self._max_guide = max_guide
         cur = self.src_sound.currentData()
         model = self.src_sound.model()
@@ -1332,6 +1379,21 @@ class PromptCard(QFrame):
         self.sound_over.setVisible(bool(cur))
         self.sound_over.setEnabled(not self.edit.isReadOnly())
 
+        self._model_sound = bool(model_sound)
+        self._show_mix()
+
+    def _show_mix(self):
+        """The mix choice only under a checked 'Lay the sound over', its level only in a mix (and in Advanced); with
+        the project's sound off the model makes nothing to mix with, so it cannot be chosen (one set stays
+        visible, so it can be taken back)."""
+        over = self.sound_over.isChecked() and bool(self.src_sound.currentData())
+        mix = over and self.sound_mix.isChecked()
+        self.mix_row.setVisible(over)
+        self.view.show(self.mix_level_box, mix)
+        edit = not self.edit.isReadOnly()
+        self.sound_mix.setEnabled(edit and (self._model_sound or mix))
+        self.sound_mix.setToolTip(MIX_TIP if self._model_sound else MIX_OFF_TIP)
+        self.mix_level.setEnabled(edit)
     def _enable_guide(self):
         on = not self.edit.isReadOnly()
         has = bool(self.guide.currentData())
@@ -6044,7 +6106,9 @@ class MainWindow(QMainWindow):
     def _own_parts(self, n: T.Node) -> list[str]:
         """A clip's own LoRA / strength / length / steps in a few words."""
         ov, parts = n.overrides or {}, []
-        over = " (laid over)" if ov.get("source_sound") and ov.get("sound_over") else ""
+        over = "" if not (ov.get("source_sound") and ov.get("sound_over")) else " (laid over)" \
+            if not T.sound_mixed(n, (self.tree.options if self.tree else {}).get("audio", True)) else \
+            " (mixed with the clip's own sound" + (f", {T.mix_level(n):+g} dB" if T.mix_level(n) else "") + ")"
         for p, st in T.node_loras(n):
             parts.append(f"{lora_label(p)[:18]} ×{st:g}")
         if "frames" in ov:
@@ -6271,9 +6335,11 @@ class MainWindow(QMainWindow):
                 if info and (n.overrides or {}).get("sound_over") and (n.overrides or {}).get("source_sound"):
                     info = (info.replace(" exactly as it is.", " exactly as it is,").replace(" exactly as recorded.",
                                                                                             " exactly as recorded,")
-                            + " Laid over: the clip is made without it (full motion, no lip sync) and gets it "
-                              "afterwards; it may be shorter than 2 s.")
-                card.set_source_sound(avail, info, max_guide, rep_ok)
+                            + (" Laid over: the clip is made without it (full motion, no lip sync) and gets it "
+                               "afterwards; it may be shorter than 2 s." if not T.sound_mixed(n, model_sound) else
+                               " Mixed in: the clip is made without it (full motion, no lip sync), then it is mixed "
+                               "with the sound the model made for the clip; it may be shorter than 2 s."))
+                card.set_source_sound(avail, info, max_guide, rep_ok, model_sound)
                 card.set_summary(" · ".join(self._own_parts(n)))
                 card.set_veda(self.veda_used(n))
                 end = self.project / n.end_image if n.end_image else None
@@ -6311,6 +6377,7 @@ class MainWindow(QMainWindow):
 
     def _update_buttons(self):
         has = self.tree is not None
+                model_sound = bool(self.tree.options.get("audio", True))     # (no sound of its own: nothing to mix)
         sel = self.target_id() if has else None     # the actions work on the clip in the inspector
         is_clip = bool(has and sel and sel != START and sel in self.tree.nodes)
         idle = not self.running

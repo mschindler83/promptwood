@@ -389,6 +389,35 @@ def replace_audio(video: Path, wav: Path) -> None:
         tmp.unlink(missing_ok=True)
 
 
+MIX_LIMIT = 0.891       # the mix's peak limit (-1 dBFS): room for the AAC encoder's overshoot, so nothing clips
+MIX_LEVELS = (-18, 6)   # the given sound's level in a mix, in dB (0: as recorded)
+
+
+def mix_audio(video: Path, wav: Path, level_db: float = 0.0) -> None:
+    """Put this sound into a clip together with the clip's own sound (e.g. the real video's music goes on while the
+    model's steps and voices of the new clip stay): both at their own level (no normalising, which would halve
+    each), the given one changed by level_db, then a lookahead limiter (delay compensated, so the sound stays in
+    sync) so that two loud sounds together cannot clip. As replace_audio: 48 kHz stereo AAC, the picture copied, the
+    sound cut or padded with silence to the clip's length. A clip without a sound of its own (the project's sound
+    is off, or the generator wrote none) just gets the given sound, as with replace_audio."""
+    video = Path(video)
+    if not probe(video)["audio"]:
+        replace_audio(video, wav)
+        return
+    level = min(max(float(level_db), MIX_LEVELS[0]), MIX_LEVELS[1])
+    fmt = "aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo"
+    graph = (f"[0:a:0]{fmt},apad[own];[1:a:0]{fmt},volume={level:.2f}dB,apad[given];"
+             f"[own][given]amix=inputs=2:duration=first:normalize=0,"
+             f"alimiter=limit={MIX_LIMIT}:level=false:latency=true[mix]")
+    tmp = video.with_name(video.stem + ".part" + video.suffix)
+    try:
+        _run(["ffmpeg", "-v", "error", "-y", "-i", str(video), "-i", str(wav), "-filter_complex", graph,
+              "-map", "0:v:0", "-map", "[mix]", "-c:v", "copy", "-c:a", "aac", "-b:a", "256k", "-shortest", str(tmp)])
+        tmp.replace(video)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def cut_frames(video: Path, out: Path, first: int, count: int, fps: int = FPS) -> bool:
     """Frames first .. first+count-1 of a chain clip (and their sound) as a clip of their own, nearly lossless.
     Returns whether it has sound."""
@@ -647,6 +676,10 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
                                       "pad": float(source_sound.get("pad") or 0.0)})
         if source_sound.get("overlay"):                # laid over the made clip; the model never hears it
             s["source_sound"]["overlay"] = True
+            if source_sound.get("mix"):                # and mixed with the model's own sound (only then recorded)
+                s["source_sound"]["mix"] = True
+                if source_sound.get("mix_level"):      # the given sound's level in the mix, dB (0 is not recorded)
+                    s["source_sound"]["mix_level"] = round(float(source_sound["mix_level"]), 2)
     if lora_triggers:                           # the LoRAs' trigger words put before the prompt
         s["lora_triggers"] = [str(w) for w in lora_triggers]
     if veda:                                    # made with Veda sparse attention (a large clip, see veda_useful)

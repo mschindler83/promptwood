@@ -2701,6 +2701,56 @@ def test_audio_tracks_in_the_window(app, win, tmp_path, image):
     assert first.src_sound.currentText() == "Audio track: (removed)" and "was removed" in first.src_sound_info.text()
 
 
+def test_mix_the_laid_over_sound_with_the_clips_own(app, win, tmp_path, image):
+    """'Keep the clip's own sound too' shows only under 'Lay the sound over', stores sound_over "mix" (and a level
+    other than 0, an advanced setting), comes back on a rebuilt card, says so in the summary, the sound text and a
+    chip; with the project's sound off it cannot be chosen."""
+    import subprocess
+    src = tmp_path / "song.wav"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=f=500:d=12", str(src)], check=True)
+    ids = new_project(win, tmp_path, image, ("one", "two"))
+    tid = win.add_track(str(src), 2.0, 9.0, "Song")
+    flush(app, win)
+    card = lambda: next(c for c in win.cards if c.nid == ids[0])            # noqa: E731
+    card().src_sound.setCurrentIndex(card().src_sound.findData(f"track:{tid}"))
+    flush(app, win)
+    assert not card().mix_row.isVisibleTo(card())                             # not laid over: no mix choice
+    card().sound_over.setChecked(True)
+    flush(app, win)
+    c = card()
+    assert c.mix_row.isVisibleTo(c) and not c.sound_mix.isChecked() and not c.mix_level_box.isVisibleTo(c)
+    assert c.sound_mix.isEnabled() and "steps, voices" in c.sound_mix.toolTip()
+    assert any(ch.text() == "♪ laid over" for ch in c.chips.chips)
+    c.sound_mix.setChecked(True)
+    flush(app, win)
+    assert win.tree.nodes[ids[0]].overrides["sound_over"] == "mix"
+    assert "sound_mix_level" not in win.tree.nodes[ids[0]].overrides
+    c = card()                                                                # rebuilt: still mixed
+    assert c.sound_over.isChecked() and c.sound_mix.isChecked() and c.mix_level_box.isVisibleTo(c)
+    assert "(mixed with the clip's own sound)" in c.settings_toggle.text() and "Mixed in" in c.src_sound_info.text()
+    assert any(ch.text() == "♪ mixed in" for ch in c.chips.chips) and "<Audio" not in c.edit.toolTip()
+    assert c.advanced_active() == []
+    c.mix_level.setValue(-6)
+    flush(app, win)
+    assert win.tree.nodes[ids[0]].overrides["sound_mix_level"] == -6
+    c = card()
+    assert c.mix_level.value() == -6 and "-6 dB" in c.settings_toggle.text()
+    assert c.advanced_active() == ["Sound level"]
+    win.set_simple(True)
+    c = card()
+    assert c.sound_mix.isVisibleTo(c) and not c.mix_level_box.isVisibleTo(c) and not c.adv_note.isHidden()
+    win.set_simple(False)
+    card().sound_over.setChecked(False)                                       # not laid over: the mix goes too
+    flush(app, win)
+    ov = win.tree.nodes[ids[0]].overrides
+    assert "sound_over" not in ov and "sound_mix_level" not in ov and not card().sound_mix.isChecked()
+    win.audio.setChecked(False)                                               # the model makes no sound
+    card().sound_over.setChecked(True)
+    flush(app, win)
+    c = card()
+    assert c.mix_row.isVisibleTo(c) and not c.sound_mix.isEnabled() and "Generate sound" in c.sound_mix.toolTip()
+
+
 def test_start_node_opens_the_project_tab(app, win, tmp_path, image):
     """A click on the Start node shows the start image settings (the inspector's Project tab)."""
     from video_chain.ui.graph import START

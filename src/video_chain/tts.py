@@ -585,6 +585,7 @@ def apply_lines(project: Path, tree: T.Tree, nid: str, r: dict) -> dict:
     node = tree.nodes[nid]
     ov = dict(node.overrides or {})
     ov.pop("sound_over", None)                      # the picture is made to it (lips in sync)
+    ov.pop("sound_mix_level", None)
     # (before anything is changed: lines longer than a clip can be refuse the whole thing)
     frames = frames_for(r["secs"], int(ov.get("frames", tree.options.get("frames", 73))))
     for name, text in (r.get("texts") or {}).items():

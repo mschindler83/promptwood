@@ -59,7 +59,8 @@ from . import h3_prompt as _h3
 TREE_FILE = "tree.json"
 START_FILE = "start.png"
 NO_LORA = "none"                   # old override value: this node without any LoRA
-OVERRIDE_KEYS = ("loras", "frames", "steps", "guide", "source_sound", "sound_over", "camera", "lead")
+OVERRIDE_KEYS = ("loras", "frames", "steps", "guide", "source_sound", "sound_over", "sound_mix_level", "camera",
+                 "lead")
 _OLD_LORA_KEYS = ("lora", "strength", "extra_loras")
 AI, VIDEO = "ai", "video"
 GUIDE_CHOICES = (5, 22, 39)        # motion guide lengths on H3's 17n+5 grid
@@ -1120,6 +1121,24 @@ def sound_given(node: Node) -> bool:
     return not node.is_video and bool(ov.get("source_sound")) and not ov.get("sound_over")
 
 
+def sound_mixed(node: Node, model_sound: bool = True) -> bool:
+    """The clip's given sound is laid over and mixed with the sound the model makes for it (overrides "sound_over":
+    "mix"), not put in instead of it. model_sound: the project's sound is on; without it the model makes none, so
+    the given sound simply replaces the silent clip's (as a plain overlay, recorded as one)."""
+    ov = node.overrides or {}
+    return not node.is_video and bool(ov.get("source_sound")) and ov.get("sound_over") == "mix" and bool(model_sound)
+
+
+def mix_level(node: Node) -> float:
+    """The given sound's level in the mix in dB (overrides "sound_mix_level"; 0: as recorded), within
+    chain.MIX_LEVELS."""
+    try:
+        db = float((node.overrides or {}).get("sound_mix_level") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return min(max(db, chain.MIX_LEVELS[0]), chain.MIX_LEVELS[1])
+
+
 def lead_on(node: Node) -> bool:
     """The clip may get the lead's pictures when its prompt mentions nobody (overrides "lead": False switches that
     off for this clip)."""
@@ -1942,6 +1961,8 @@ class Checker:
             if not node.is_video and (node.overrides or {}).get("source_sound") else None
         if span is not None and (node.overrides or {}).get("sound_over"):
             span = {**span, "overlay": True}       # laid over the clip afterwards: the plain model, no lip sync
+            if base is not None and sound_mixed(node, base.get("audio", True)):   # and mixed with the model's sound
+                span.update({"mix": True}, **({"mix_level": mix_level(node)} if mix_level(node) else {}))
         return None if base is None else node_settings(base, self.tree.options, node, self.audio_pool(),
                                                        self.picture_sha, source_sound=span,
                                                        frames_given=plain_frames(self.project, self.tree, node))
@@ -3029,7 +3050,9 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
                                            f"({', '.join(numbered)})")
                     generator.generate(model_prompt(tree.options, node, settings, start=plain[0], end=plain[1]),
                                        send, new_video, new_frame, node.seed, settings=call)
-                    if sound is not None and new_video.exists():
+                    if sound is not None and new_video.exists() and settings["source_sound"].get("mix"):
+                        chain.mix_audio(new_video, sound, settings["source_sound"].get("mix_level") or 0.0)
+                    elif sound is not None and new_video.exists():
                         chain.replace_audio(new_video, sound)    # exactly the recorded speech, not a remake
                 if not new_video.exists() or not new_frame.exists():
                     raise RuntimeError(f"the generator did not write the clip of {nid}")
@@ -3310,10 +3333,15 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
                 generator.refine(project / node.made["video"], prompt, target, node.seed, (w, h),
                                  made_frames(node) or _clip_frames(project, node), loras, first, last,
                                  sparse=SOL_TAU if fast_attention else None, strength=strength)
-                if s.get("source_sound") and not sound_file(project, s["source_sound"]).is_file():
+                draft = project / node.made["video"]
+                if (s.get("source_sound") or {}).get("mix") and chain.audio_seconds(draft):
+                    wav = tmp / f"{node.id}_sound.wav"     # the made clip's mix of both sounds, exactly
+                    chain.to_wav(draft, wav)
+                    chain.replace_audio(target, wav)
+                elif s.get("source_sound") and not sound_file(project, s["source_sound"]).is_file():
                     log(f"[{k}/{len(order)}] {node.id}: the video file of its sound is missing "
                         f"({Path(s['source_sound']['file']).name}); the refined copy keeps the model's sound")
-                if s.get("source_sound") and sound_file(project, s["source_sound"]).is_file():
+                elif s.get("source_sound"):
                     wav = tmp / f"{node.id}_sound.wav"     # the recorded sound, as in the clip
                     chain.to_wav(sound_file(project, s["source_sound"]), wav, s["source_sound"]["start"],
                                  s["source_sound"]["secs"], s["source_sound"].get("loop"),

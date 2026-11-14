@@ -509,6 +509,68 @@ def test_lay_the_sound_over(project, tmp_path):
     assert T.Checker(project, t).status(a.id) == "changed"
 
 
+def _band(path: Path, hz: float) -> float:
+    """The amplitude of the sine at hz in a file's sound (first channel, 16 kHz)."""
+    import numpy as np
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-vn", "-af", "pan=mono|c0=c0", "-ar", "16000",
+                          "-f", "f32le", "-"], capture_output=True, check=True).stdout
+    x = np.frombuffer(raw, np.float32)
+    spec = np.abs(np.fft.rfft(x * np.hanning(len(x)))) / (len(x) / 4)
+    k = round(hz * len(x) / 16000)
+    return float(spec[k - 3:k + 4].max())
+
+
+def test_mix_the_sound_with_the_clips_own(project, tmp_path):
+    """'Keep the clip's own sound too': made exactly like a plain overlay (same prompt, same plain model, no sound
+    reference), then the track part is mixed with the model's own sound instead of replacing it; recorded as "mix"
+    (the level only when not 0). A plain overlay's record is unchanged; with the project's sound off the mix is not
+    recorded (nothing to mix with)."""
+    with_start(project, tmp_path)
+    src = _two_tones(tmp_path / "song.mp3")
+    t = T.load(project)
+    t.options["frames"] = 24
+    tid = T.add_track(project, t, src, 3.0, 8.0, "Song")["id"]
+    a = t.add(None, "she dances")
+    a.overrides = {"source_sound": f"track:{tid}", "sound_over": True}
+    over = T.Checker(project, t).settings(a.id)
+    assert over["source_sound"]["overlay"] is True and "mix" not in over["source_sound"]
+    a.overrides = {"source_sound": f"track:{tid}", "sound_over": "mix"}
+    mixed = T.Checker(project, t).settings(a.id)
+    assert mixed["source_sound"] == {**over["source_sound"], "mix": True}
+    assert {k: v for k, v in mixed.items() if k != "source_sound"} == {k: v for k, v in over.items()
+                                                                        if k != "source_sound"}
+    assert T.model_prompt(t.options, a, mixed) == T.model_prompt(t.options, a, over)
+    assert not T.uses_ref_model(mixed) and not T.sound_given(a) and T.source_sound_problems(t, [a.id], project) == []
+    T.save(project, t)
+    gen = FakeGenerator(frames=17, size=None)
+    T.run_tree(gen, project, [a.id], log=lambda _m: None)
+    call = gen.calls[-1]
+    assert not (call["settings"].get("audio_paths") or []) and "<Audio" not in call["prompt"]
+    t = T.load(project)
+    rec = t.nodes[a.id].made["settings"]
+    assert rec["source_sound"]["mix"] is True and "mix_level" not in rec["source_sound"]
+    video = project / t.nodes[a.id].made["video"]
+    assert _band(video, 300) > 0.06 and _band(video, 1200) > 0.2     # the model's 300 Hz (a 1/8 sine), the track's 1200
+    assert chain.probe(video)["frames"] == t.nodes[a.id].made["frames"]
+    assert T.Checker(project, t).status(a.id) == "done"
+
+    class Mute(FakeGenerator):                                         # a refine whose own sound is lost
+        def refine(self, draft, prompt, out, *a, **kw):
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(draft), "-c:v", "libx264", "-an", str(out)],
+                           check=True)
+    T.refine_path(Mute(), project, a.id, "2k", tmp_path / "2k.mp4", log=lambda _m: None, single=True)
+    assert _band(tmp_path / "2k.mp4", 300) > 0.06 and _band(tmp_path / "2k.mp4", 1200) > 0.2   # the made mix
+    t.nodes[a.id].overrides["sound_mix_level"] = -6.0                 # the track quieter in the mix: made again
+    assert T.Checker(project, t).settings(a.id)["source_sound"]["mix_level"] == -6.0
+    assert T.Checker(project, t).status(a.id) == "changed"
+    t.nodes[a.id].overrides.pop("sound_mix_level")
+    t.nodes[a.id].overrides["sound_over"] = True                      # only the track again: made again
+    assert T.Checker(project, t).status(a.id) == "changed"
+    t.nodes[a.id].overrides["sound_over"] = "mix"
+    t.options["audio"] = False                                        # no sound from the model: a plain overlay
+    assert "mix" not in T.Checker(project, t).settings(a.id)["source_sound"]
+
+
 def make_split_source(path: Path, size="160x90") -> Path:
     """A synthetic video, red on the left half and blue on the right (one second, 30 fps): shows a turn."""
     subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"color=red:s={size}:r=30:d=1",
