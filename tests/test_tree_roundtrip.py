@@ -70,3 +70,21 @@ def test_the_face_pictures_of_an_older_project_become_person1():
     assert "images" not in t.options["identity"] and "mode" not in t.options["identity"]
     old["options"]["identity"] = {"images": ["refs/a.png"], "mode": "off"}
     assert T.Tree.from_json(old).options["cast"][0]["lead"] is False
+
+
+def test_remove_later_moves_the_files_only_after_the_tree_is_saved(tmp_path):
+    """A crash between the move and the save must not leave tree.json listing clips whose files are in old/."""
+    from video_chain import chain
+    t = T.Tree()
+    a = t.add(None, "a")
+    T.save(tmp_path, t)
+    (tmp_path / "nodes").mkdir()
+    clip = tmp_path / "nodes" / f"{a.id}.mp4"
+    clip.write_bytes(b"clip")
+    a.made = {"prompt": "a", "seed": 1, "settings": {}, "video": f"nodes/{a.id}.mp4", "frame": f"nodes/{a.id}.png"}
+    T.save(tmp_path, t)
+    t.remove(a.id, tmp_path, later=True)
+    assert clip.exists()                                   # not yet: tree.json still lists the clip
+    T.save(tmp_path, t)
+    assert not clip.exists() and (tmp_path / chain.OLD_DIR / "nodes" / clip.name).read_bytes() == b"clip"
+    T.save(tmp_path, t)                                    # (nothing is moved twice)

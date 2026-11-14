@@ -240,6 +240,7 @@ def save(project: Path, tree: Tree) -> None:
         finally:
             tmp.unlink(missing_ok=True)
             tmp.with_name(tmp.name + ".bak").unlink(missing_ok=True)
+    tree.retire_removed(project)                  # (the files of clips removed with later=True, now that tree.json is safe)
 
 
 def _old_record(s: dict | None) -> dict | None:
