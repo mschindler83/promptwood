@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from ..tts import FishTTS, LocalTTS
     from .cast_strip import CastStrip
     from .clip_cards import PromptCard, VideoCard
-    from .generator_state import ComfyModel, Job, ModelState, ModelSwitch, WorkerBinding
+    from .generator_state import ComfyModel, ComfyService, Job, ModelState, ModelSwitch, WorkerBinding
     from .graph import GraphView
     from .guide import EngineBanner, GuidePanel, NextHint
     from .mw_support import _CurrentStack
@@ -69,6 +69,7 @@ if TYPE_CHECKING:
         _cmp_memo: dict | None
         _comfy_dir_row: QWidget
         _comfy_form: QFormLayout
+        comfy: ComfyService
         _comfy_model: ComfyModel | None
         _comfy_starting: float
         _comfy_timer: QTimer

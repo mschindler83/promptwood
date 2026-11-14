@@ -279,7 +279,7 @@ class VideosMixin(MainWindowHost):
 
         def before():                               # GUI thread: the clip model makes room
             self._qwen_timer.stop()
-            switch.prepare(self._comfy_model)
+            switch.prepare(self.comfy.model)
             if self.worker_alive and not self.running:
                 self._quit_worker(free=False)
 

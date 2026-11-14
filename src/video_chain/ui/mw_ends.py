@@ -57,9 +57,9 @@ class EndsMixin(MainWindowHost):
         finally:
             # the llama.cpp model goes with the window: it slows image / clip generation down while it is loaded
             self.stop_llama("the prompt refiner was closed")
-            if dlg.refined_any and not self.running and self._comfy_model != ComfyModel.QWEN:
+            if dlg.refined_any and not self.running and self.comfy.model != ComfyModel.QWEN:
                 # a language model is in ComfyUI now: unloaded before the next clips, idle time as usual
-                self._comfy_model = ComfyModel.LLM
+                self.comfy.language_model_loaded()
                 if self.keep_loaded.isChecked():
                     self._qwen_timer.start(self.idle_minutes.value() * 60_000)
                 self._update_model_label()
@@ -118,7 +118,7 @@ class EndsMixin(MainWindowHost):
         def before_edit():                          # GUI thread, before each Generate
             self._qwen_timer.stop()
             self.stop_llama("its memory is needed for the image")
-            switch.prepare(self._comfy_model)       # (the clip model is unloaded once, before the first image)
+            switch.prepare(self.comfy.model)       # (the clip model is unloaded once, before the first image)
             if self.worker_alive and not self.running:
                 self._quit_worker(free=False)               # its model goes now; it is started again for clips
 
@@ -191,8 +191,8 @@ class EndsMixin(MainWindowHost):
         it is unloaded now."""
         sw = self._edit_switch
         if sw is not None and sw.loaded:          # an image job connected (also when it finished after closing)
-            self._comfy_model = ComfyModel.QWEN
-        if self._comfy_model != ComfyModel.QWEN or self.running:
+            self.comfy.model = ComfyModel.QWEN
+        if self.comfy.model != ComfyModel.QWEN or self.running:
             return
         if self.keep_loaded.isChecked():
             self._qwen_timer.start(self.idle_minutes.value() * 60_000)

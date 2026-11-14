@@ -65,6 +65,31 @@ WorkerBinding = ComfyBinding | RunpodBinding
 
 
 @dataclass
+class ComfyService:
+    """What this app has loaded in ComfyUI (the model it last used, None: nothing) and whether the worker's next quit
+    unloads it. One place for what mw_comfy, mw_generator, mw_ends and mw_llama each used to set by hand (MWC-13)."""
+    model: ComfyModel | None = None
+    quit_frees: bool = True         # the worker's next quit unloads the clip model
+
+    def holds_clip(self) -> bool:
+        """The generator worker holds the clip model."""
+        return self.model in CLIP_MODELS
+
+    def holds_image(self) -> bool:
+        """An editing window's model (image edit, language model) is loaded in ComfyUI: it has to be unloaded."""
+        return self.model in IMAGE_MODELS
+
+    def forget(self) -> None:
+        """Nothing of this app is loaded in ComfyUI any more."""
+        self.model = None
+
+    def language_model_loaded(self) -> None:
+        """The prompt refiner's language model is in ComfyUI now (the image model stays the one to unload)."""
+        if self.model != ComfyModel.QWEN:
+            self.model = ComfyModel.LLM
+
+
+@dataclass
 class ModelSwitch:
     """ComfyUI changing from the clip model to the model of an editing window (an image edit, a replaced person):
     the clip model is unloaded once, before the first job of the window, and the window says when its own model was

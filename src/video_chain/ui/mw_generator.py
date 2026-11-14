@@ -15,7 +15,7 @@ from .workers import run_in_background
 from .. import comfy as CMF, runpod as RP, tree as T
 from ..__main__ import COMFY_DOWN
 from .generator_state import (
-    CLIP_MODELS, ByeEvent, ComfyBinding, ComfyModel, ErrorEvent, IMAGE_MODELS, IdleEvent, Job, LoadingEvent, ModelState,
+    ByeEvent, ComfyBinding, ComfyModel, ErrorEvent, IdleEvent, Job, LoadingEvent, ModelState,
     NodeEvent, Phase, PlanEvent, RunpodBinding, StartEvent, StepEvent, WorkerBinding, event_problem)
 from .ui_logic import CLOUD_KILL_GRACE_MS, DEFAULT_COMFY_URL, KILL_GRACE_MS, fmt_left, plural, time_left
 from .mw_host import MainWindowHost
@@ -285,9 +285,9 @@ class GeneratorMixin(MainWindowHost):
         self._worker_idle = False
         self.stop_llama("its RAM and VRAM are needed for the clips")
         cmd = {"cmd": "run", "tree": str(self.project), "targets": self._job.targets,
-               "free_first": self._comfy_model in IMAGE_MODELS}          # an image edit model is loaded: unload it
-        if self._comfy_model in CLIP_MODELS:                        # earlier workers: was HyperFlow last?
-            cmd["last_hyperflow"] = self._comfy_model == ComfyModel.H3_HYPERFLOW
+               "free_first": self.comfy.holds_image()}          # an image edit model is loaded: unload it
+        if self.comfy.holds_clip():                        # earlier workers: was HyperFlow last?
+            cmd["last_hyperflow"] = self.comfy.model == ComfyModel.H3_HYPERFLOW
         if self._job.refine:                                       # export refined: re-render the path's clips
             cmd.update({"cmd": "refine", "target": self._job.targets[0], **self._job.refine})
         if self._cloud_worker:                                     # the local ComfyUI is not touched
@@ -299,7 +299,7 @@ class GeneratorMixin(MainWindowHost):
         self._qwen_timer.stop()
         hyper = bool((self.tree.options.get("hyperflow") or {}).get("on")) and not self._job.refine \
             if self.tree is not None else False
-        self._comfy_model = ComfyModel.H3_HYPERFLOW if hyper else ComfyModel.H3
+        self.comfy.model = ComfyModel.H3_HYPERFLOW if hyper else ComfyModel.H3
         self._write_job(cmd)
         self._update_model_label()
 
@@ -314,7 +314,7 @@ class GeneratorMixin(MainWindowHost):
         """Ask an idle worker to quit (free: and unload the model); killed if it does not go."""
         if self.proc is None:
             return
-        self._quit_frees = free
+        self.comfy.quit_frees = free
         self._worker_leaving = True                       # no new job for it (a new worker starts instead)
         if self.proc.state() == QProcess.ProcessState.Running:
             self.proc.write(b'{"cmd": "quit", "free": true}\n' if free else b'{"cmd": "quit"}\n')
@@ -455,8 +455,8 @@ class GeneratorMixin(MainWindowHost):
         self._worker_leaving = True
         if self._job is not None and self._job.sent and self._phase != Phase.DONE:
             self._replace_worker = True               # our job crossed its goodbye: a new worker takes it
-        if self._comfy_model in CLIP_MODELS and (ev.get("reason") == "idle" or self._quit_frees):
-            self._comfy_model = None                       # it unloaded the clip model
+        if self.comfy.holds_clip() and (ev.get("reason") == "idle" or self.comfy.quit_frees):
+            self.comfy.forget()                       # it unloaded the clip model
         if ev.get("reason") == "idle" and not self.running:
             self.status.setText("The model was unloaded after the idle time.")
 

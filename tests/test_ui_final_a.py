@@ -242,3 +242,32 @@ def test_the_context_menu_has_one_dispatch(app):
     src = (UI / "mw_nodes.py").read_text(encoding="utf-8")
     ctx = src[src.index("    def _context("):]
     assert "elif chosen is" not in ctx and "chosen is play" not in ctx
+
+
+# ------------------------------------------------------------------ MWC-13: which model ComfyUI holds is one object
+def test_comfy_service_knows_which_model_is_loaded():
+    from video_chain.ui.generator_state import ComfyModel, ComfyService
+    c = ComfyService()
+    assert not c.holds_clip() and not c.holds_image()
+    c.model = ComfyModel.H3_HYPERFLOW
+    assert c.holds_clip() and not c.holds_image()
+    c.language_model_loaded()                       # a refined prompt: the language model is there now
+    assert c.model is ComfyModel.LLM and c.holds_image()
+    c.model = ComfyModel.QWEN
+    c.language_model_loaded()                       # the image model stays the one to unload
+    assert c.model is ComfyModel.QWEN
+    c.forget()
+    assert c.model is None
+
+
+def test_window_keeps_the_model_in_its_comfy_service(app, tmp_path):
+    from video_chain.ui.generator_state import ComfyModel
+    from video_chain.ui.main_window import MainWindow
+    w = MainWindow(settings(tmp_path), command=FAKE)
+    try:
+        w.comfy.model = ComfyModel.QWEN
+        assert w._comfy_model == "qwen"                # (the old name still reads it)
+        w._comfy_model = "h3"
+        assert w.comfy.model is ComfyModel.H3
+    finally:
+        w.close()

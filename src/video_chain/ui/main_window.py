@@ -23,7 +23,7 @@ from .video_editor import VideoRangeDialog  # noqa: F401
 from .ui_logic import Problem
 from .view_mode import ViewMode
 from .clip_cards import PromptCard, VideoCard
-from .generator_state import ComfyModel, Job, ModelState, ModelSwitch, Phase, WorkerBinding
+from .generator_state import ComfyModel, ComfyService, Job, ModelState, ModelSwitch, Phase, WorkerBinding
 from .mw_audio import AudioMixin
 from .mw_build import BuildMixin
 from .mw_cast import CastMixin
@@ -132,8 +132,7 @@ class MainWindow(BuildMixin, GeneratorMixin, ComfyMixin, ExportMixin, VideosMixi
         # the model this app last used in ComfyUI ("h3" clips, "qwen" image edits, None: none / unloaded). ComfyUI
         # is asked to unload only when it changes: switching models frees the other one first instead of letting
         # both fight over the memory; the same model again is used as it is (no reload)
-        self._comfy_model: ComfyModel | None = None
-        self._quit_frees = True                 # the worker's next quit unloads the model
+        self.comfy = ComfyService()             # what is loaded in ComfyUI (the model, whether a quit unloads it)
         self._qwen_timer = timer(self, self._qwen_idle, single=True)
         self._join_lock = threading.Lock()      # joins run one after another (play after generating + export)
         self._save_timer = timer(self, self._save_tree, 400, single=True)
@@ -173,6 +172,15 @@ class MainWindow(BuildMixin, GeneratorMixin, ComfyMixin, ExportMixin, VideosMixi
     FROZEN_LOCKED = {"end_image", "end_video", "end_ai", "end_clear", "revert", "refine", "speak", "handover",
                      "handover_clear", "edit", "split", "swap", "swap_undo", "video", "keyframe", "start_own",
                      "start_own_clear"}
+    @property
+    def _comfy_model(self) -> ComfyModel | None:
+        """The model ComfyUI holds for this app (comfy.model; the old name stays for callers and tests)."""
+        return self.comfy.model
+
+    @_comfy_model.setter
+    def _comfy_model(self, model: ComfyModel | str | None) -> None:
+        self.comfy.model = ComfyModel(model) if model is not None else None
+
     _trigger_scan_online = True                 # the running trigger word scan may ask CivitAI
     _left_w = 0                                 # the width of the left panel (kept while it is hidden)
     _shared_sent = None                         # the shared settings last written into the film's other scenes
