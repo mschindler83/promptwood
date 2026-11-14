@@ -2618,7 +2618,7 @@ class MainWindow(QMainWindow):
             self.status.setText(f"The film cannot be joined yet: {error}.")
             return
         try:
-            secs = chain.probe(Path(path))["frames"] / 24
+            secs = chain.joined_seconds(Path(path))
         except Exception:  # noqa: BLE001
             secs = 0.0
         if purpose == "play":
@@ -6954,7 +6954,7 @@ class MainWindow(QMainWindow):
             with lock:
                 try:
                     joined = T.join_path(project, tree, nid, out)
-                    secs = chain.probe(joined)["frames"] / 24           # not in the GUI thread (network shares)
+                    secs = chain.joined_seconds(joined)             # not in the GUI thread (network shares)
                     bridge.joined.emit((joined, secs, T.path_spans(tree, nid)), None, purpose, pre, str(project))
                 except Exception as e:  # noqa: BLE001
                     bridge.joined.emit(None, str(e), purpose, pre, str(project))

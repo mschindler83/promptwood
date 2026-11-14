@@ -170,3 +170,12 @@ def test_recorded_cast_names_the_kind_of_a_non_person():
     s = chain.settings_dict(cast=[{"name": "Anna", "desc": "woman"}, {"name": "Hall", "desc": "", "kind": "place"}],
                             **kw)
     assert s["cast"][1] == {"name": "Hall", "desc": "", "kind": "place"}
+
+
+def test_joined_seconds_reads_the_container(tmp_path):
+    """The length of a joined video without decoding it (Play path on a joined path must not count frames)."""
+    import subprocess
+    v = tmp_path / "a.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=64x64:rate=24", "-frames:v", "48",
+                    "-pix_fmt", "yuv420p", str(v)], check=True)
+    assert abs(chain.joined_seconds(v) - 2.0) < 1e-6 and chain.probe(v)["frames"] == 48

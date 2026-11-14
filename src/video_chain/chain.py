@@ -299,6 +299,13 @@ def probe_source(path: Path) -> dict:
             "audio": any(s.get("codec_type") == "audio" for s in streams)}
 
 
+def joined_seconds(path: Path) -> float:
+    """How long a video the app joined is, from its container (no decoding: counting the frames of a long path
+    took seconds on every "Play path", although the join itself was reused)."""
+    info = probe_source(path)
+    return info["frames"] / FPS if info["frames"] else info["duration"]
+
+
 ROTATIONS = (0, 90, 180, 270)                         # a real video turned clockwise by this many degrees
 _ROTATE_VF = {90: "transpose=clock", 180: "hflip,vflip", 270: "transpose=cclock"}
 
