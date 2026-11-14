@@ -70,7 +70,10 @@ def _alive(owner: weakref.ref[QObject] | None) -> bool:
 
 def post(owner: QObject | None, fn: Callable[[], None]) -> bool:
     """From any thread: call fn on the GUI thread (not when the owner is gone). True when it was handed over."""
-    ref = weakref.ref(owner) if owner is not None else None
+    return _post(weakref.ref(owner) if owner is not None else None, fn)
+
+
+def _post(ref: weakref.ref[QObject] | None, fn: Callable[[], None]) -> bool:
     if not _alive(ref):
         return False
 
@@ -93,6 +96,7 @@ def run_in_background(fn: Callable[[], Any], *, on_done: Callable[[Any], None],
     `latest` was asked for a newer answer. Call it from the GUI thread."""
     _the_relay()                              # (made here: its thread is the GUI thread)
     ticket = latest.ticket() if latest is not None else 0
+    ref = weakref.ref(owner) if owner is not None else None     # (a waiting answer must not keep the window alive)
 
     def stale() -> bool:
         return latest is not None and not latest.current(ticket)
@@ -108,13 +112,13 @@ def run_in_background(fn: Callable[[], Any], *, on_done: Callable[[Any], None],
                     log.warning("background work failed: %s: %s", type(e).__name__, e, exc_info=e)
                 else:
                     on_error(e)
-            post(owner, failed)
+            _post(ref, failed)
             return
 
         def done() -> None:
             if not stale():
                 on_done(result)
-        post(owner, done)
+        _post(ref, done)
     t = threading.Thread(target=work, daemon=True, name=name)
     t.start()
     return t
