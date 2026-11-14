@@ -3725,6 +3725,7 @@ def test_prompt_variations_in_the_create_window(app, tmp_path, image, monkeypatc
     from fake_comfy import FakeComfy
 
     from video_chain import presets
+    from video_chain import variations as V
     from video_chain.ui.main_window import MainWindow
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
     server = FakeComfy(tmp_path / "comfy")
@@ -3745,8 +3746,7 @@ def test_prompt_variations_in_the_create_window(app, tmp_path, image, monkeypatc
         assert panel.names() == ["animal", "place", "mood"]                  # cards for the placeholders
         panel.on.setChecked(True)
         cards = [panel.cards_box.itemAt(i).widget() for i in range(panel.cards_box.count())]
-        cards[0].add.setText("cat, dog")                                     # comma list at once
-        cards[0].add.returnPressed.emit()
+        cards[0].add_values(V.split_values("cat, dog"))                      # a list at once
         app.processEvents()
         cards = [panel.cards_box.itemAt(i).widget() for i in range(panel.cards_box.count())]
         cards[1].add_values(["forest"])
@@ -3778,7 +3778,7 @@ def test_prompt_variations_in_the_create_window(app, tmp_path, image, monkeypatc
         dlg.prompt.setPlainText("something else")
         dlg._prompt_again()
         assert dlg.prompt.toPlainText() == "a {animal} in the {place}, {?mood|{mood} light}"
-        panel._remove("rename:place:where")                                   # renamed in the prompt too
+        panel._rename("place", "where")                                  # renamed in the prompt too
         assert "{where}" in dlg.prompt.toPlainText() and panel.variable("where") is not None
         lora = tmp_path / "w.safetensors"
         lora.write_bytes(b"x")
