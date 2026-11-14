@@ -300,14 +300,20 @@ def refine_path(generator: RefineGenerator, project: Path, nid: str, size: str, 
     return out
 
 
-def join_path(project: Path, tree: Tree, nid: str, out: Path | None = None, persist: bool = False) -> Path:
+def join_path(project: Path, tree: Tree, nid: str, out: Path | None = None, persist: bool = False,
+              remix: bool = True, remixed: list[str] | None = None) -> Path:
     """Join the clips from the start to nid into one video (paths/<id>.mp4 unless out is given).
     Every clip on the path must be done. A clip whose sound is due to be mixed again is remixed first (in tree;
-    persist: also saved; a window saves its own tree, so by default a remix not saved is simply done again later).
+    persist: also saved; a window saves its own tree, so by default a remix not saved is simply done again later;
+    remix=False: not at all, for a caller that did it itself; remixed: a list the ids remixed are appended to, so
+    the caller knows to save the tree).
     A kept join is reused while every clip file is unchanged (by date: a remixed clip is joined again)."""
     project = Path(project)
     path = tree.path_to(nid)
-    remix_sounds(project, tree, [n.id for n in path], persist=persist)
+    if remix:
+        done = remix_sounds(project, tree, [n.id for n in path], persist=persist)
+        if remixed is not None:
+            remixed.extend(done)
     checker = Checker(project, tree)
     missing = [n.id for n in path if checker.status(n.id) != "done"]
     if missing:
