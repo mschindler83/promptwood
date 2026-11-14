@@ -111,6 +111,21 @@ def own_log_handlers():
 
 
 @pytest.fixture(autouse=True)
+def no_unanswered_dialogs(monkeypatch):
+    """A message box a test does not answer fails it at once: offscreen nobody can click it, so the run would
+    otherwise wait for ever. A test that expects one patches QMessageBox.question (etc.) itself."""
+    from PySide6.QtWidgets import QMessageBox
+
+    def guard(kind):
+        def box(parent, title, text, *a, **k):
+            raise AssertionError(f"QMessageBox.{kind}({title!r}) opened: answer it in the test "
+                                 f"(monkeypatch QMessageBox.{kind}). Text: {str(text)[:200]!r}")
+        return staticmethod(box)
+    for kind in ("question", "warning", "critical", "information"):
+        monkeypatch.setattr(QMessageBox, kind, guard(kind))
+
+
+@pytest.fixture(autouse=True)
 def stop_leftover_timers():
     """A window a test leaves open must not keep ticking (GPU / ComfyUI checks) into the next tests."""
     yield
