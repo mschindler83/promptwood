@@ -34,7 +34,8 @@ import urllib.request
 from pathlib import Path
 from typing import Callable
 
-from . import net
+from . import keys, net
+from .h3_prompt import contains_word
 
 logger = logging.getLogger(__name__)
 
@@ -89,11 +90,10 @@ def api_key() -> str:
     if env:
         return env
     if _API_KEY is None:
-        try:
-            import keyring
-            _API_KEY = (keyring.get_password(KEYRING_SERVICE, KEYRING_USER) or "").strip()
-        except Exception:  # noqa: BLE001  (no keyring now, e.g. locked: no key this time, asked again later)
+        found = keys.read_key(KEYRING_SERVICE, KEYRING_USER)
+        if found is None:                       # (no keyring now, e.g. locked: no key this time, asked again later)
             return ""
+        _API_KEY = found
     return _API_KEY
 
 
@@ -103,18 +103,7 @@ def set_api_key(key: str | None) -> None:
     global _API_KEY
     key = (key or "").strip()
     _REJECTED.discard(key)                              # (a key saved anew gets another chance)
-    try:
-        import keyring
-        import keyring.errors
-        if key:
-            keyring.set_password(KEYRING_SERVICE, KEYRING_USER, key)
-        else:
-            try:
-                keyring.delete_password(KEYRING_SERVICE, KEYRING_USER)
-            except keyring.errors.PasswordDeleteError:
-                pass
-    except Exception as e:  # noqa: BLE001
-        raise RuntimeError(f"the system keyring is not available ({e})") from e
+    keys.set_key(KEYRING_SERVICE, KEYRING_USER, key)
     _API_KEY = key
 
 
@@ -782,7 +771,7 @@ def stack_words(paths: list[str], lookup: Callable[[str], list[str]] | None = No
 def with_triggers(prompt: str, words: list[str]) -> str:
     """The prompt with the trigger words in front (those it does not contain yet). In MiniMax's structured
     format they go at the start of the shot description."""
-    missing = [w for w in words if not re.search(r"(?<!\w)" + re.escape(w.lower()) + r"(?!\w)", (prompt or "").lower())]
+    missing = [w for w in words if not contains_word(prompt, w)]
     if not missing:
         return prompt
     lead = ", ".join(missing)

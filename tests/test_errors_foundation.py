@@ -147,3 +147,52 @@ def test_the_two_nms_copies_agree():
     boxes = np.hstack([xy, xy + rng.uniform(10, 60, (40, 2))])
     scores = rng.uniform(0, 1, 40)
     assert list(faces._nms(boxes, scores)) == list(node._nms(boxes, scores))
+
+
+# ---- keys and contains_word (LLM-24)
+def test_contains_word_matches_whole_words_only():
+    from video_chain.h3_prompt import contains_word
+    assert contains_word("an ink4sketch fox", "Ink4Sketch")
+    assert contains_word("ink, sketch", "ink")
+    assert not contains_word("pinkish", "ink")
+    assert not contains_word("ink_sketch", "ink")
+    assert not contains_word("", "ink") and not contains_word(None, "ink")
+
+
+def test_keys_roundtrip_and_remove(monkeypatch):
+    from video_chain import keys
+    keys.set_key("svc", "user", "  abc ")
+    assert keys.get_key("svc", "user") == "abc"
+    keys.set_key("svc", "user", "")
+    assert keys.get_key("svc", "user") == ""
+    keys.set_key("svc", "user", None)              # (removing what is not there is fine)
+
+
+def test_keys_without_a_keyring(monkeypatch):
+    import keyring
+
+    from video_chain import keys
+
+    def boom(*a):
+        raise RuntimeError("locked")
+    monkeypatch.setattr(keyring, "get_password", boom)
+    monkeypatch.setattr(keyring, "set_password", boom)
+    assert keys.read_key("svc", "user") is None and keys.get_key("svc", "user") == ""
+    with pytest.raises(RuntimeError, match="keyring is not available"):
+        keys.set_key("svc", "user", "x")
+
+
+def test_the_three_key_modules_use_keys(monkeypatch):
+    from video_chain import keys, runpod, triggers, tts
+    seen = []
+    monkeypatch.setattr(keys, "read_key", lambda s, u: seen.append((s, u)) or "k")
+    monkeypatch.setattr(keys, "set_key", lambda s, u, k: seen.append((s, u, k)))
+    for var in ("RUNPOD_API_KEY", "ELEVENLABS_API_KEY", "CIVITAI_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    assert tts.eleven_key() == "k"          # (runpod.api_key is faked by conftest in every test)
+    monkeypatch.setattr(triggers, "_API_KEY", None)
+    assert triggers.api_key() == "k"
+    runpod.set_api_key("r")
+    tts.set_eleven_key("e")
+    triggers.set_api_key("c")
+    assert len(seen) == 5

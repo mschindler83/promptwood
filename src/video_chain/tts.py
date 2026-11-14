@@ -33,7 +33,7 @@ import uuid
 import wave
 from pathlib import Path
 
-from . import chain, config, net
+from . import chain, config, keys, net
 from . import tree as T
 from .llm_server import rotate_log
 
@@ -280,30 +280,12 @@ class LocalTTS:
 def eleven_key() -> str:
     """$ELEVENLABS_API_KEY, else the key kept in the system keyring; "" without one."""
     env = os.environ.get("ELEVENLABS_API_KEY", "").strip()
-    if env:
-        return env
-    try:
-        import keyring
-        return (keyring.get_password(KEYRING_SERVICE, KEYRING_USER) or "").strip()
-    except Exception:  # noqa: BLE001  (no keyring now)
-        return ""
+    return env or keys.get_key(KEYRING_SERVICE, KEYRING_USER)
 
 
 def set_eleven_key(key: str | None) -> None:
     """Keep the ElevenLabs API key in the system keyring (empty: remove it). RuntimeError: no keyring."""
-    key = (key or "").strip()
-    try:
-        import keyring
-        import keyring.errors
-        if key:
-            keyring.set_password(KEYRING_SERVICE, KEYRING_USER, key)
-        else:
-            try:
-                keyring.delete_password(KEYRING_SERVICE, KEYRING_USER)
-            except keyring.errors.PasswordDeleteError:
-                pass
-    except Exception as e:  # noqa: BLE001
-        raise RuntimeError(f"the system keyring is not available ({e})") from e
+    keys.set_key(KEYRING_SERVICE, KEYRING_USER, key)
 
 
 class ElevenLabs:

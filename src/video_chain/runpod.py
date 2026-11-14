@@ -37,7 +37,7 @@ from pathlib import Path, PurePosixPath
 from .comfy import (SEEDVR_FULL_VRAM, SEEDVR_METHODS, SEEDVR_NODES, SEEDVR_PRECISION_FULL, SUBFOLDER, ComfyError,
                     ComfyGenerator)
 
-from . import net
+from . import keys, net
 
 logger = logging.getLogger(__name__)
 
@@ -90,30 +90,12 @@ class RunpodError(RuntimeError):
 def api_key() -> str:
     """$RUNPOD_API_KEY, else the key kept in the system keyring; "" without one."""
     env = os.environ.get("RUNPOD_API_KEY", "").strip()
-    if env:
-        return env
-    try:
-        import keyring
-        return (keyring.get_password(KEYRING_SERVICE, KEYRING_USER) or "").strip()
-    except Exception:  # noqa: BLE001  (no keyring now)
-        return ""
+    return env or keys.get_key(KEYRING_SERVICE, KEYRING_USER)
 
 
 def set_api_key(key: str | None) -> None:
     """Keep the RunPod API key in the system keyring (empty: remove it). RuntimeError: no keyring."""
-    key = (key or "").strip()
-    try:
-        import keyring
-        import keyring.errors
-        if key:
-            keyring.set_password(KEYRING_SERVICE, KEYRING_USER, key)
-        else:
-            try:
-                keyring.delete_password(KEYRING_SERVICE, KEYRING_USER)
-            except keyring.errors.PasswordDeleteError:
-                pass
-    except Exception as e:  # noqa: BLE001
-        raise RuntimeError(f"the system keyring is not available ({e})") from e
+    keys.set_key(KEYRING_SERVICE, KEYRING_USER, key)
 
 
 # ----------------------------------------------------------------------------- REST API v2
