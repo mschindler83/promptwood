@@ -25,6 +25,7 @@ from ..animate import DEFAULT_PROMPT, SIZES, gen_size, window_count
 from .compare_player import ComparePlayer
 from .dialogs import confirm
 from .face_crop import FaceCropDialog
+from .image_common import SEED_MAX
 from .image_picker import pick_image
 from .imageio import upright
 from .theme import theme
@@ -33,6 +34,9 @@ from .qsvalue import qs_value
 
 log = logging.getLogger(__name__)
 
+SIZE_LABELS = {"480p": "480p (faster)", "720p": "720p (sharper, slower)"}   # a size without a label shows its key
+DEFAULT_SIZE = "480p"
+SHARPEN_STRENGTH = 0.8                    # the face restoration (GPEN) after the swap: 80 %
 METHODS = (("animate+lock", "Head + face lock (Animate, then face swap)"), ("animate", "Head only (Animate)"),
            ("face", "Face only (face swap, the clip's own motion)"),
            ("h3", "Head swap with H3 (head swap LoRA, the clip as guide)"))
@@ -187,9 +191,9 @@ class SwapDialog(QDialog):
         form.addRow("", self.sharpen)
         self.size = QComboBox()
         for key in SIZES:
-            self.size.addItem({"480p": "480p (faster)", "720p": "720p (sharper, slower)"}.get(key, key), key)
-        self.size.setCurrentIndex(max(0, self.size.findData(qs_value(settings, "swapSize", "480p", str)
-                                                            if settings else "480p")))
+            self.size.addItem(SIZE_LABELS.get(key, key), key)
+        self.size.setCurrentIndex(max(0, self.size.findData(qs_value(settings, "swapSize", DEFAULT_SIZE, str)
+                                                            if settings else DEFAULT_SIZE)))
         self.size.setToolTip("The size the new head is made at (only the head area: the rest of the clip keeps "
                              "its own size and sharpness)")
         form.addRow("Made at", self.size)
@@ -489,13 +493,13 @@ class SwapDialog(QDialog):
         assert self.heads is not None and self.ref is not None      # (Generate is enabled only then)
         boxes, (w, h), fps = list(self.boxes), self.heads["size"], self.heads["fps"]
         n, clip, ref = self.heads["frames"], self.clip, self.ref
-        size, prompt, seed = self.size.currentData(), self.prompt.text().strip(), random.randint(1, 2**31 - 1)
+        size, prompt, seed = self.size.currentData(), self.prompt.text().strip(), random.randint(1, SEED_MAX)
         scale, connect = self.head_size.value(), self.connect
         project, source = self.project, self.source
         ref_png = self.ref_png
         crop = self.ref_crop if self.head_crop.isChecked() else None
         method, body = self.method.currentData(), self.body.isChecked()
-        enhance = 0.8 if self.sharpen.isChecked() else 0.0
+        enhance = SHARPEN_STRENGTH if self.sharpen.isChecked() else 0.0
         persons = next(([Path(ref)] + [Path(x) for x in g if x != ref] for g in self.groups if ref in g),
                        [Path(ref)])[:4]
         self.bar.setRange(0, 0)

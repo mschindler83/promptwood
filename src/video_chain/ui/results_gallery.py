@@ -20,6 +20,8 @@ from .theme import theme
 from .widgets import FlowBox, label, safe_emit, smooth_scaled
 
 THUMB_DECODE = 400                    # thumbnails are decoded once at this size (the gallery's largest)
+BADGE_MARGIN, BADGE_HEIGHT = 5, 16     # the pills on a thumbnail (tag, IN USE, star): distance from the edge, height
+STAR_HIT = (30, BADGE_MARGIN + BADGE_HEIGHT + 5)   # the star's click area (width, height): the pill and some room
 RUN_GAP = 15 * 60                     # older results without a run id: the same prompt within 15 min is one run
 
 MODEL_TAGS = {"krea2": "K2", "qwen": "Q", "qwen21": "Q2.1", "moss": "MOSS", "flux3": "F3", "flux1": "F1",
@@ -122,7 +124,7 @@ def badged(pix: QPixmap, size: QSize, tag: str, fav: bool, in_use: bool, selecte
 
     def pill(text: str, x: int, y: int, bg: QColor, fg: QColor, right: bool = False) -> None:
         w = fm.horizontalAdvance(text) + 10
-        box = QRect(x - w if right else x, y, w, 16)
+        box = QRect(x - w if right else x, y, w, BADGE_HEIGHT)
         path = QPainterPath()
         path.addRoundedRect(box, 8, 8)
         p.fillPath(path, bg)
@@ -130,11 +132,11 @@ def badged(pix: QPixmap, size: QSize, tag: str, fav: bool, in_use: bool, selecte
         p.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
     dark = t.hudBg
     if tag:
-        pill(tag, 5, size.height() - 21, dark, t.overlayInk)
+        pill(tag, BADGE_MARGIN, size.height() - BADGE_MARGIN - BADGE_HEIGHT, dark, t.overlayInk)
     if in_use:
-        pill("IN USE", 5, 5, t.accent, t.onAccent)
+        pill("IN USE", BADGE_MARGIN, BADGE_MARGIN, t.accent, t.onAccent)
     if fav:
-        pill("★", size.width() - 5, 5, t.hudBg, t.warning, right=True)
+        pill("★", size.width() - BADGE_MARGIN, BADGE_MARGIN, t.hudBg, t.warning, right=True)
     if selected:
         p.setPen(QPen(t.accent, 3))
         p.setBrush(Qt.BrushStyle.NoBrush)
@@ -277,7 +279,7 @@ class Thumb(QWidget):
         p.end()
 
     def _star_hit(self, pos) -> bool:
-        return pos.x() > self.width() - 30 and pos.y() < 26
+        return pos.x() > self.width() - STAR_HIT[0] and pos.y() < STAR_HIT[1]
 
     def mousePressEvent(self, e):                # noqa: N802
         if e.button() == Qt.MouseButton.LeftButton:

@@ -20,6 +20,11 @@ from .imageio import upright
 from .widgets import safe_emit
 
 
+def _even(n: int) -> int:
+    """The size the video codecs and the edit model take: an even number of pixels."""
+    return n // 2 * 2
+
+
 def variation_meta(job, prompt: str, key: str) -> dict:
     """The record keys of a result made from a variation (job: variations.Job; prompt: the template)."""
     return {"template": prompt, "variation": {"values": job.combo, "step": job.step, "index": job.index, "key": key}}
@@ -152,7 +157,7 @@ class EditWorker(GenerateWorker):
                     self.skipped.append(Path(src).name)   # (a folder's unreadable file: the next one)
                     continue
                 if p.keep_size:
-                    size = (img.width() // 2 * 2, img.height() // 2 * 2)
+                    size = (_even(img.width()), _even(img.height()))
             kept = edits.keep_source(p.edits, src)           # the original stays with its results
             entry = [kept, None, 0]
             self._copies.append(entry)
