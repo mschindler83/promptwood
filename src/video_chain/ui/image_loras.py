@@ -12,6 +12,7 @@ from ..edits import LORA_FAMILY
 from ..triggers import stack_words
 from .lora_stack import lora_label
 from .image_host import ImageEditHost
+from .ui_logic import qs_value
 
 
 
@@ -63,7 +64,7 @@ class LorasMixin(ImageEditHost):
 
     def _remembered_loras(self) -> list[dict]:
         try:
-            items = json.loads(self.qs.value(self._lora_key(), "[]", type=str)) if self.qs is not None else []
+            items = json.loads(qs_value(self.qs, self._lora_key(), "[]", str)) if self.qs is not None else []
         except ValueError:
             items = []
         return [it for it in items if isinstance(it, dict) and it.get("path") and Path(it["path"]).is_file()]

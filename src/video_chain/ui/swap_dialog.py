@@ -24,6 +24,7 @@ from .compare_player import ComparePlayer
 from .dialogs import confirm
 from .theme import theme
 from .widgets import fit_size, FrameTile, guard_wheel, label, safe_emit
+from .ui_logic import qs_value
 
 METHODS = (("animate+lock", "Head + face lock (Animate, then face swap)"), ("animate", "Head only (Animate)"),
            ("face", "Face only (face swap, the clip's own motion)"),
@@ -113,7 +114,7 @@ class SwapDialog(QDialog):
         self.head_size = QDoubleSpinBox()
         self.head_size.setRange(0.7, 2.0)
         self.head_size.setSingleStep(0.05)
-        self.head_size.setValue(float(settings.value("swapHeadSize", 1.0, type=float)) if settings else 1.0)
+        self.head_size.setValue(float(qs_value(settings, "swapHeadSize", 1.0, float)) if settings else 1.0)
         self.head_size.setToolTip("The head area around the found face: larger takes in more hair, the ears and "
                                   "the neck; everything outside it stays as it is")
         self.head_size.valueChanged.connect(self._resize_heads)
@@ -175,13 +176,13 @@ class SwapDialog(QDialog):
         self.method.currentIndexChanged.connect(lambda *_: (self._forget_auto_details(), self._update()))
         form.addRow("Method", self.method)
         self.body = QCheckBox("Follow the body pose")
-        self.body.setChecked(settings.value("swapBody", True, type=bool) if settings else True)
+        self.body.setChecked(qs_value(settings, "swapBody", True, bool) if settings else True)
         self.body.setToolTip("On: the body skeleton (DWPose) drives Animate too. Off: only the face motion; the "
                              "body stays as in the clip anyway (only the head is drawn anew): better when the body "
                              "is in unusual poses DWPose gets wrong")
         form.addRow("", self.body)
         self.sharpen = QCheckBox("Sharpen the face (GPEN)")
-        self.sharpen.setChecked(settings.value("swapSharpen", True, type=bool) if settings else True)
+        self.sharpen.setChecked(qs_value(settings, "swapSharpen", True, bool) if settings else True)
         self.sharpen.setToolTip("Face restoration after the face swap (GPEN-BFR-512, 80 %): a sharper face")
         form.addRow("", self.sharpen)
         self.size = QComboBox()

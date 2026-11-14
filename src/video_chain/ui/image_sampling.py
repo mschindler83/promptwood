@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QGridLayout, QHBoxLayou
 from ..imagegen import FAMILIES, SAMPLERS, SCHEDULERS, default_sampling
 from .widgets import guard_wheel, icon_button, label
 from .image_host import ImageEditHost
+from .ui_logic import qs_value
 
 
 
@@ -118,7 +119,7 @@ class SamplingMixin(ImageEditHost):
             saved = {}
             if self.qs is not None and fam:
                 try:
-                    saved = json.loads(self.qs.value(self._sampling_key(), "{}", type=str) or "{}")
+                    saved = json.loads(qs_value(self.qs, self._sampling_key(), "{}", str) or "{}")
                 except ValueError:
                     saved = {}
             self.set_sampling(saved if isinstance(saved, dict) else {})

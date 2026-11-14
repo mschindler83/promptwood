@@ -13,6 +13,7 @@ from .theme import repolish
 from .widgets import format_time, safe_emit
 from .project_dialogs import ExportDialog
 from .mw_host import MainWindowHost
+from .ui_logic import qs_value
 
 
 class ExportMixin(MainWindowHost):
@@ -115,7 +116,7 @@ class ExportMixin(MainWindowHost):
         swapped = sum(1 for n in path if T.swapped_video(n))
         dlg = ExportDialog(self, default, (base["width"], base["height"]) if base else None, ready, swapped,
                            strength, method, denoise, cloud=True if RP.api_key() else None,
-                           cloud_on=self.qs.value("exportCloud", False, type=bool), simple=self.simple)
+                           cloud_on=qs_value(self.qs, "exportCloud", False, bool), simple=self.simple)
         if single is not None:
             dlg.setWindowTitle(f"Export {'video' if path[0].is_video else 'clip'} #{T.short_id(single)}")
         try:

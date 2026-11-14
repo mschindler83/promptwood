@@ -14,7 +14,7 @@ from .lora_stack import fill_lora_combo, lora_label, lora_path
 from .widgets import safe_emit
 from . import ui_logic as UL
 from .clip_cards import PromptCard
-from .ui_logic import MAX_RECENT_LORAS, REMIX_DELAY_MS, STEPS_TIP, label_loras, plural
+from .ui_logic import MAX_RECENT_LORAS, REMIX_DELAY_MS, STEPS_TIP, label_loras, plural, qs_value
 from .mw_host import MainWindowHost
 
 
@@ -38,7 +38,7 @@ class LorasMixin(MainWindowHost):
         out = label_loras(self.h3_loras)
         listed = {p for p, _ in out} | {os.path.realpath(p) for p, _ in out}
         try:
-            recent = json.loads(self.qs.value("recentLoras", "[]", type=str))
+            recent = json.loads(qs_value(self.qs, "recentLoras", "[]", str))
         except ValueError:
             recent = []
         cands = ([p for n in self.tree.nodes.values() for p, _st in T.node_loras(n)] if self.tree else []) + recent
@@ -162,7 +162,7 @@ class LorasMixin(MainWindowHost):
 
     def _remember_lora(self, path: str):
         try:
-            recent = json.loads(self.qs.value("recentLoras", "[]", type=str))
+            recent = json.loads(qs_value(self.qs, "recentLoras", "[]", str))
         except ValueError:
             recent = []
         recent = [path] + [r for r in recent if r != path]

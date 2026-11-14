@@ -17,7 +17,7 @@ from . import dialogs as D
 from .graph import START
 from .widgets import safe_emit
 from .project_dialogs import NewProjectDialog
-from .ui_logic import plural
+from .ui_logic import plural, qs_value
 from .mw_host import MainWindowHost
 
 
@@ -239,7 +239,7 @@ class ProjectMixin(MainWindowHost):
             return False
         if not (folder / T.TREE_FILE).exists() and not tree.nodes:
             try:                                 # a new project starts with the last used settings
-                last = json.loads(self.qs.value("lastOptions", "{}", type=str))
+                last = json.loads(qs_value(self.qs, "lastOptions", "{}", str))
                 tree.options.update({k: v for k, v in last.items()
                                      if k in T.DEFAULT_OPTIONS and k not in ("identity", "cast", "style",
                                                                              "audio_refs")})

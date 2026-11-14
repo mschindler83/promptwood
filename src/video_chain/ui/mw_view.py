@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QApplication, QLineEdit, QPlainTextEdit
 from .. import tree as T
 from . import shortcuts as S
 from .clip_cards import PromptCard
-from .ui_logic import COMFY_START_TIMEOUT, DEFAULT_COMFY_LAUNCHER, LAYOUTS, LAYOUT_VERSION, project_setting_changes
+from .ui_logic import COMFY_START_TIMEOUT, DEFAULT_COMFY_LAUNCHER, LAYOUTS, LAYOUT_VERSION, project_setting_changes, qs_value
 from .mw_host import MainWindowHost
 
 
@@ -77,7 +77,7 @@ class ViewMixin(MainWindowHost):
     # ------------------------------------------------------------------ guided start
     def _guide_store(self) -> dict:
         try:
-            d = json.loads(self.qs.value("guideChoices", "{}", type=str) or "{}")
+            d = json.loads(qs_value(self.qs, "guideChoices", "{}", str) or "{}")
         except ValueError:
             d = {}
         return d if isinstance(d, dict) else {}
@@ -307,7 +307,7 @@ class ViewMixin(MainWindowHost):
         """The layout of the last session; the default one if there is none, it was saved by an older version or
         it is damaged."""
         try:
-            d = json.loads(self.qs.value("layout", "", type=str) or "{}")
+            d = json.loads(qs_value(self.qs, "layout", "", str) or "{}")
             split, center = d["split"], d["center"]
             ok = (d.get("v") == LAYOUT_VERSION and len(split) == 3 and len(center) == 2
                   and all(isinstance(x, int) and x >= 0 for x in split + center)

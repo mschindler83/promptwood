@@ -45,6 +45,7 @@ from .lora_stack import LoraStack
 from .results_gallery import InfoCard, ResultGallery, ResultView, ThumbLoader
 from .variations_panel import PlaceholderHighlighter, VariationsPanel
 from .widgets import FrameTile, fit_size, guard_wheel, icon_button, label, shortcut
+from .ui_logic import qs_value
 
 
 class _FamiliesSignal(QObject):
@@ -346,7 +347,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
             "its trigger words. The seed, prompt and every other setting stay the same, so the LoRAs can be "
             "compared side by side.<br>With more results (or variations), each one is made with every LoRA in "
             "turn.</p>")
-        self.lora_each.setChecked(self.qs is not None and self.qs.value("loraEach", False, type=bool))
+        self.lora_each.setChecked(self.qs is not None and qs_value(self.qs, "loraEach", False, bool))
         self.lora_each.toggled.connect(lambda on: self.qs is not None and self.qs.setValue("loraEach", on))
         self.lora_each.toggled.connect(lambda _on: self._variations_changed())
         self.loras.changed.connect(lambda: self._variations_changed())
@@ -583,13 +584,13 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
     def _restore(self, source: str | None, sources: list[tuple[str, str]], mode: str):
         """What the user had last time: sizes, variations, view, the image to edit, the mode; then the first look."""
         if self.qs is not None:
-            self.thumb_size.setValue(self.qs.value("resultsThumb", 200, type=int))
+            self.thumb_size.setValue(qs_value(self.qs, "resultsThumb", 200, int))
             try:
-                self.variations.set_state(json.loads(self.qs.value("promptVariations", "{}", type=str) or "{}"))
+                self.variations.set_state(json.loads(qs_value(self.qs, "promptVariations", "{}", str) or "{}"))
             except ValueError:
                 pass
         self._load_results()
-        self.set_view(self.qs.value("resultsView", "single", type=str) if self.qs is not None else "single",
+        self.set_view(qs_value(self.qs, "resultsView", "single", str) if self.qs is not None else "single",
                       remember=False)
         if source:
             i = self.src_combo.findData(source)

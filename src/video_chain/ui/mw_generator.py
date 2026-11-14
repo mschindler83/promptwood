@@ -16,7 +16,7 @@ from ..__main__ import COMFY_DOWN
 from .widgets import safe_emit
 from .generator_state import (
     CLIP_MODELS, ComfyBinding, ComfyModel, IMAGE_MODELS, Job, ModelState, Phase, RunpodBinding, WorkerBinding)
-from .ui_logic import CLOUD_KILL_GRACE_MS, DEFAULT_COMFY_URL, KILL_GRACE_MS, fmt_left, plural, time_left
+from .ui_logic import CLOUD_KILL_GRACE_MS, DEFAULT_COMFY_URL, KILL_GRACE_MS, fmt_left, plural, time_left, qs_value
 from .mw_host import MainWindowHost
 
 
@@ -65,11 +65,11 @@ class GeneratorMixin(MainWindowHost):
         export: GPU, volume, fallback, SeedVR2 size); a change needs a new worker."""
         refine = self._refine or {}
         if refine.get("cloud"):
-            return RunpodBinding(self.qs.value("runpodGpu", RP.DEFAULT_GPU, type=str),
-                                 self.qs.value("runpodVolume", "", type=str).strip(),
-                                 self.qs.value("runpodFallback", True, type=bool),
+            return RunpodBinding(qs_value(self.qs, "runpodGpu", RP.DEFAULT_GPU, str),
+                                 qs_value(self.qs, "runpodVolume", "", str).strip(),
+                                 qs_value(self.qs, "runpodFallback", True, bool),
                                  CMF.SEEDVR_METHODS.get(refine.get("method"), "7b"),
-                                 self.qs.value("runpodWithoutVolume", True, type=bool))
+                                 qs_value(self.qs, "runpodWithoutVolume", True, bool))
         return ComfyBinding((self.comfy_url.text().strip() or DEFAULT_COMFY_URL), self.comfy_dir.text().strip(),
                             self.comfy_cleanup.isChecked())
 

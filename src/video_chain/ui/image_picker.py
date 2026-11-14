@@ -23,6 +23,7 @@ from .. import media
 from .imageio import file_facts, read_scaled
 from .theme import icon, theme
 from .widgets import fit_size, format_time, icon_button, label, safe_emit
+from .ui_logic import qs_value
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mts", ".m2ts", ".wmv", ".flv", ".mpg", ".mpeg"}
@@ -245,7 +246,7 @@ class ImagePickerDialog(QDialog):
         self.buttons.button(QDialogButtonBox.StandardButton.Open).setEnabled(False)
         v.addWidget(self.buttons)
 
-        self.zoom.setValue(self.qs.value("pickerZoom", 150, type=int))
+        self.zoom.setValue(qs_value(self.qs, "pickerZoom", 150, int))
         self.zoom.valueChanged.connect(self._zoomed)
         self._zoomed(self.zoom.value())
         self._fill_places()
@@ -271,7 +272,7 @@ class ImagePickerDialog(QDialog):
     def favorites(self) -> list[str]:
         """The favorite folders (shared by every kind of browser), in the order they were added."""
         try:
-            return [d for d in json.loads(self.qs.value("pickerFavorites", "[]", type=str)) if isinstance(d, str)]
+            return [d for d in json.loads(qs_value(self.qs, "pickerFavorites", "[]", str)) if isinstance(d, str)]
         except ValueError:
             return []
 
@@ -307,7 +308,7 @@ class ImagePickerDialog(QDialog):
 
     def _recent_dirs(self) -> list[str]:
         try:
-            return [d for d in json.loads(self.qs.value("pickerRecent", "[]", type=str)) if isinstance(d, str)]
+            return [d for d in json.loads(qs_value(self.qs, "pickerRecent", "[]", str)) if isinstance(d, str)]
         except ValueError:
             return []
 
