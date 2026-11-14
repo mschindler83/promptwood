@@ -369,3 +369,13 @@ def test_the_mask_painter_and_the_gallery_take_their_colours_from_the_theme():
     # the mask's own data colours stay literal: the red tint of the drawn area and the black / white of the mask itself
     assert all("MASK_COLOUR" in ln or "erase" in ln for ln in mask), mask
     assert [ln for ln in (ui / "results_gallery.py").read_text().splitlines() if literal.search(ln)] == []
+
+
+def test_the_audio_editor_and_the_speak_dialog_say_range_not_part():
+    import re
+
+    from test_ui_shared import _shown_strings
+    ui = Path(__file__).parent.parent / "src" / "video_chain" / "ui"
+    bad = [f"{n}:{line}: {s[:50]}" for n in ("audio_editor.py", "speak_dialog.py", "video_editor.py", "tts_dialog.py")
+           for line, s in _shown_strings(ui / n) if re.search(r"\bparts?\b", s) and not s.startswith("part")]
+    assert not bad, bad

@@ -91,7 +91,7 @@ class SpeakLinesDialog(QDialog):
         hint = label("Say how a line is spoken in square brackets: [angry] at its start, [laughs] or "
                      "[whispering] in the middle. Any words work; the clip's picture never sees them. A lively "
                      "voice sample gives the tones more room than a very calm one." if tags else
-                     "The tone (calm, angry, whispering …) comes from the voice sample: a voice set from a part "
+                     "The tone (calm, angry, whispering …) comes from the voice sample: a voice set from a range "
                      "where the speaker sounds like that speaks its lines like that. Punctuation is heard too "
                      "(! ? …). [Tags] in a line are left out (Fish S2 Pro hears them)." if provider == "local" else
                      "The tone comes from the ElevenLabs voice and from the punctuation of the line (! ? …); its "
