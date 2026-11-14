@@ -9,12 +9,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSettings, QSize, Qt, Signal
+from PySide6.QtCore import QObject, QSettings, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QIcon, QImage, QImageReader, QPixmap
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QMenu, QSlider, QSplitter, QStyle, QVBoxLayout, QWidget)
@@ -146,6 +147,12 @@ class ImagePickerDialog(QDialog):
         self.resize(1100, 700)
         self.qs = settings or QSettings()
         self._gen = 0
+        self._lock = threading.Lock()                  # the pool's threads share the cache and the counters
+        self._zoom_px = 0
+        self._zoom_save = QTimer(self)
+        self._zoom_save.setSingleShot(True)
+        self._zoom_save.setInterval(400)
+        self._zoom_save.timeout.connect(lambda: self.qs.setValue("pickerZoom", self._zoom_px))
         self._pool = ThreadPoolExecutor(max_workers=THREADS)
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self.desktop_thumbs = Path(desktop_thumbs) if desktop_thumbs else None
@@ -412,7 +419,12 @@ class ImagePickerDialog(QDialog):
         dirs = sorted((e for e in entries if e.is_dir() and not e.name.startswith(".")), key=lambda e: e.name.lower())
         imgs = [e for e in entries if e.is_file() and Path(e.name).suffix.lower() in self.exts]
         if self.sort.currentData() == "date":
-            imgs.sort(key=lambda e: e.stat().st_mtime, reverse=True)
+            def mtime(e):
+                try:
+                    return e.stat().st_mtime
+                except OSError:                       # (gone since the listing: sorted last, still shown)
+                    return 0.0
+            imgs.sort(key=mtime, reverse=True)
         else:
             imgs.sort(key=lambda e: e.name.lower())
         dir_icon = self.style().standardIcon(QStyle.SP_DirIcon)
@@ -441,9 +453,10 @@ class ImagePickerDialog(QDialog):
             key = (path, st.st_mtime_ns, st.st_size)
         except OSError:
             return
-        img = self._cache.get(key)
+        with self._lock:
+            img = self._cache.get(key)
         if img is not None:
-            self.stats["memory"] += 1
+            self._count("memory")
         if img is None and self.cache_dir is not None:          # local disk: no network read
             f = _cache_file(self.cache_dir, path, st)
             if f.is_file():
@@ -451,19 +464,19 @@ class ImagePickerDialog(QDialog):
                 if img.isNull():
                     img = None
                 else:
-                    self.stats["disk"] += 1
+                    self._count("disk")
                     os.utime(f)                                  # recently used: kept when pruning
         if img is None and self.desktop_thumbs is not None:     # the file manager's thumbnail
             img = _desktop_thumbnail(self.desktop_thumbs, path, st)
             if img.isNull():
                 img = None
             else:
-                self.stats["desktop"] += 1
+                self._count("desktop")
         if img is None:                                          # read the image (over the network)
             if gen != self._gen:
                 return
             img = _thumbnail(path)
-            self.stats["read"] += 1
+            self._count("read")
             if not img.isNull() and self.cache_dir is not None:
                 f = _cache_file(self.cache_dir, path, st)
                 try:
@@ -473,10 +486,15 @@ class ImagePickerDialog(QDialog):
                         tmp.replace(f)
                 except OSError:
                     pass
-        self._cache[key] = img
-        while len(self._cache) > 600:                  # a huge folder must not keep every thumbnail in memory
-            self._cache.popitem(last=False)
+        with self._lock:
+            self._cache[key] = img
+            while len(self._cache) > 600:              # a huge folder must not keep every thumbnail in memory
+                self._cache.popitem(last=False)
         self._thumbs.ready.emit(gen, path, img)
+
+    def _count(self, what: str) -> None:
+        with self._lock:
+            self.stats[what] += 1
 
     def _thumb_ready(self, gen: int, path: str, img: QImage):
         if gen != self._gen or path not in self._items:
@@ -510,7 +528,8 @@ class ImagePickerDialog(QDialog):
         self.grid.setGridSize(QSize(cell.width() + 6, cell.height() + 6))
         for i in range(self.grid.count()):
             self.grid.item(i).setSizeHint(cell)
-        self.qs.setValue("pickerZoom", px)
+        self._zoom_px = px
+        self._zoom_save.start()                         # (written once the slider rests, not at every tick)
 
     # ---- selection
     def _selected(self, item, _prev=None):
@@ -613,6 +632,9 @@ class ImagePickerDialog(QDialog):
 
     def done(self, r):
         self._gen += 1                           # pending thumbnails are dropped
+        if self._zoom_save.isActive():           # a zoom change still waiting to be written
+            self._zoom_save.stop()
+            self.qs.setValue("pickerZoom", self._zoom_px)
         self._pool.shutdown(wait=False, cancel_futures=True)
         super().done(r)
 

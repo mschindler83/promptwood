@@ -202,3 +202,58 @@ def test_result_record_is_written_atomically(app, tmp_path, monkeypatch):
         time.sleep(0.02)
     assert any(f.parent.name == IE.EDITS_DIR and f.suffix == ".json" and f.stem.startswith("edit_") for f in written)
     dlg.reject()
+
+
+def test_picker_sort_by_date_survives_an_unreadable_entry(app, tmp_path, monkeypatch):
+    from PIL import Image
+
+    from video_chain.ui import image_picker as IP
+    for n in ("a.png", "b.png"):
+        Image.new("RGB", (8, 8), "red").save(tmp_path / n)
+    real = os.scandir
+
+    class Entry:
+        def __init__(self, e):
+            self._e = e
+            self.name, self.path = e.name, e.path
+
+        def is_dir(self):
+            return self._e.is_dir()
+
+        def is_file(self):
+            return self._e.is_file()
+
+        def stat(self):
+            if self.name == "a.png":
+                raise OSError("gone")
+            return self._e.stat()
+    monkeypatch.setattr(IP.os, "scandir", lambda p: [Entry(e) for e in real(p)])
+    q = QSettings(str(tmp_path / "s.ini"), QSettings.IniFormat)
+    dlg = IP.ImagePickerDialog(None, "x", str(tmp_path), q, cache_dir=None, desktop_thumbs=None)
+    dlg.sort.setCurrentIndex(dlg.sort.findData("date"))
+    dlg.open_folder(tmp_path)
+    assert {Path(p).name for p in dlg._items} == {"a.png", "b.png"}
+    dlg.deleteLater()
+
+
+def test_picker_zoom_is_saved_once_it_settles(app, tmp_path):
+    from video_chain.ui import image_picker as IP
+    writes = []
+
+    class Q(QSettings):
+        def setValue(self, k, v):
+            if k == "pickerZoom":
+                writes.append(v)
+            super().setValue(k, v)
+    q = Q(str(tmp_path / "z.ini"), QSettings.IniFormat)
+    dlg = IP.ImagePickerDialog(None, "x", str(tmp_path), q, cache_dir=None, desktop_thumbs=None)
+    writes.clear()
+    for v in (120, 130, 140, 150, 160):
+        dlg.zoom.setValue(v)
+    assert writes == []
+    end = time.time() + 3
+    while not writes and time.time() < end:
+        app.processEvents()
+        time.sleep(0.02)
+    assert writes == [160]
+    dlg.deleteLater()
