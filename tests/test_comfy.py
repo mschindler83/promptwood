@@ -1,5 +1,6 @@
 """ComfyGenerator against a fake ComfyUI server (synthetic clips; no ComfyUI, no GPU)."""
 import shutil
+import time
 
 import pytest
 from fake_comfy import FakeComfy
@@ -7,6 +8,7 @@ from PIL import Image
 
 from video_chain import chain
 from video_chain import comfy as C
+from video_chain.comfy import seedvr
 
 if not shutil.which("ffmpeg"):
     pytest.skip("ffmpeg not installed", allow_module_level=True)
@@ -1073,7 +1075,7 @@ def test_seedvr2_long_clip_in_pieces_within_ram(server, tmp_path, monkeypatch):
                     "-i", "color=white:s=64x36:r=24:d=2", "-f", "lavfi", "-i", "sine=frequency=440:duration=4",
                     "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]", "-map", "[v]", "-map", "2:a",
                     "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(draft)], check=True)
-    monkeypatch.setattr(C, "SEEDVR_RAM_BUDGET", C.SEEDVR_FRAME_COPIES * 128 * 72 * 3 * 4 * 33)   # 33 at 128x72
+    monkeypatch.setattr(seedvr, "SEEDVR_RAM_BUDGET", C.SEEDVR_FRAME_COPIES * 128 * 72 * 3 * 4 * 33)   # 33 at 128x72
     gen = C.ComfyGenerator(server.url)
     gen.generate("x", None, tmp_path / "c.mp4", tmp_path / "c.png", 1, settings())    # an H3 clip before
     server.calls.clear()
@@ -1088,7 +1090,7 @@ def test_seedvr2_long_clip_in_pieces_within_ram(server, tmp_path, monkeypatch):
     r = subprocess.run(["ffmpeg", "-v", "error", "-i", str(out), "-vf", "scale=1:1", "-f", "rawvideo", "-pix_fmt",
                         "gray", "-"], capture_output=True, check=True).stdout
     assert r[0] < 160 and r[-1] > 230 and all(b >= a - 3 for a, b in zip(r, r[1:]))  # gray -> white, no jumps back
-    monkeypatch.setattr(C, "SEEDVR_RAM_MIN", 0)
+    monkeypatch.setattr(seedvr, "SEEDVR_RAM_MIN", 0)
     server.ram_free = C.SEEDVR_RAM_RESERVE + C.SEEDVR_FRAME_COPIES * 128 * 72 * 3 * 4 * 65   # measured: 65 frames
     server.seedvr_jobs.clear()
     gen.seedvr(draft, out, (128, 72))
@@ -1247,7 +1249,7 @@ def test_seedvr2_timing_per_node_and_transfer(server, tmp_path, monkeypatch):
     import subprocess
     gen = C.ComfyGenerator(server.url)
     clock = iter([0.0, 2.0, 2.5])
-    monkeypatch.setattr(C.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(time, "monotonic", lambda: next(clock))
     gen.node_times, gen._running_node = {}, None
     for node in ("enc", "sample", None):
         gen.handle_message({"type": "executing", "data": {"node": node, "prompt_id": "p"}}, "p")

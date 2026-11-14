@@ -4,6 +4,7 @@ from fake_comfy import FakeComfy
 
 from video_chain import animate as A
 from video_chain import comfy as C
+from video_chain.comfy import prompt_refiner
 from video_chain import imagegen as G
 
 
@@ -68,7 +69,7 @@ def test_complete_and_refine_prompt_share_the_model_question(server, monkeypatch
         return "answer"
     monkeypatch.setattr(C.ComfyPromptRefiner, "_ask_text", ask)
     monkeypatch.setattr(gen, "_begin_job", lambda: None)
-    monkeypatch.setattr(C, "build_refine_prompt_workflow", lambda **k: {"gen": {"inputs": {}}})
+    monkeypatch.setattr(prompt_refiner, "build_refine_prompt_workflow", lambda **k: {"gen": {"inputs": {}}})
     assert gen.complete("s", "u") == "answer"
     assert gen.refine_prompt("p", "image") == "answer"
     assert len(asked) == 2

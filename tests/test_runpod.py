@@ -287,12 +287,13 @@ def test_cloud_upscaler_removes_everything_on_the_pod_and_uses_its_ram(tmp_path)
         fs = FakeSession(server.url, pod_ram)
         gen = RP.CloudUpscaler(fs, log=lambda _m: None)
         out = tmp_path / "up.mp4"
-        old_min = C.SEEDVR_RAM_MIN
-        C.SEEDVR_RAM_MIN = 0
+        from video_chain.comfy import seedvr as SV      # (the module that reads it)
+        old_min = SV.SEEDVR_RAM_MIN
+        SV.SEEDVR_RAM_MIN = 0
         try:
             gen.seedvr(draft, out, (128, 72))
         finally:
-            C.SEEDVR_RAM_MIN = old_min
+            SV.SEEDVR_RAM_MIN = old_min
         info = chain.probe(out)
         assert (info["width"], info["height"], info["frames"], info["audio"]) == (128, 72, 96, True)
         assert len(server.seedvr_jobs) == 4                               # pieces from the pod's RAM, not the host's
