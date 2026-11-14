@@ -59,3 +59,18 @@ def test_a_failed_comfyui_unload_is_said_in_the_log(win, monkeypatch):
     monkeypatch.setattr(CMF, "free_models", lambda url, timeout=10: False)
     win._make_room(9000, "http://127.0.0.1:1", "the language model")
     assert "did not unload" in win.log.toPlainText()
+
+
+def test_export_dialog_hands_its_answers_over_as_one_request(app, tmp_path):
+    from video_chain.ui.project_dialogs import ExportDialog, ExportRequest
+    dlg = ExportDialog(None, str(tmp_path / "x"), (672, 384), {"1080p": True}, swapped=2, strength="natural",
+                       method="seedvr2_3b", denoise=True)
+    req = dlg.request()
+    assert isinstance(req, ExportRequest)
+    assert req.out == tmp_path / "x.mp4" and req.size == dlg.size.currentData()
+    assert req.method == "seedvr2_3b" and req.denoise is True and req.cloud is False
+    assert req.swapped is True                       # (replaced-person videos exist and the box is checked)
+    dlg.swapped.setChecked(False)
+    assert dlg.request().swapped is False
+    assert ExportDialog(None, str(tmp_path / "y"), (672, 384), {}).request().swapped is False
+    dlg.deleteLater()

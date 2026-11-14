@@ -118,21 +118,17 @@ class ExportMixin:
         try:
             if dlg.exec() != QDialog.Accepted:
                 return
-            out, size, fast = dlg.target(), dlg.size.currentData(), dlg.fast.isChecked()
-            refine_swapped = bool(swapped) and dlg.swapped.isChecked()
-            strength, method = dlg.strength.currentData(), dlg.method.currentData()
-            denoise = dlg.denoise.isChecked()
-            cloud = dlg.on_cloud()
+            req = dlg.request()
         finally:
             dlg.deleteLater()
-        if size != "made":
-            self.qs.setValue("refineStrength", strength)
-            self.qs.setValue("exportUpscaler", method)
-            self.qs.setValue("exportDenoise", denoise)
-            if method != "refine":
-                self.qs.setValue("exportCloud", cloud)
-        self.export(out, size, fast, refine_swapped, strength, method, single, denoise and method != "refine",
-                    cloud=cloud and method != "refine")
+        if req.size != "made":
+            self.qs.setValue("refineStrength", req.strength)
+            self.qs.setValue("exportUpscaler", req.method)
+            self.qs.setValue("exportDenoise", req.denoise)
+            if req.method != "refine":
+                self.qs.setValue("exportCloud", req.cloud)
+        self.export(req.out, req.size, req.fast, req.swapped, req.strength, req.method, single,
+                    req.denoise and req.method != "refine", cloud=req.cloud and req.method != "refine")
 
     def export(self, out: Path, size: str = "made", fast_attention: bool = False,
                refine_swapped: bool = False, strength: str = "natural", method: str = "seedvr2_7b",

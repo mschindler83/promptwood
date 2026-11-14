@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from dataclasses import dataclass
 
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import (
@@ -193,6 +194,19 @@ class VariantsDialog(QDialog):
         self.ok.setEnabled(not (same and self.same_seed.isChecked()))
 
 
+@dataclass
+class ExportRequest:
+    """What the export dialog asked for."""
+    out: Path
+    size: str                # "made", "1080p" or "2k"
+    fast: bool               # Sol-Attn for the refine
+    swapped: bool            # upscale videos with a replaced person too
+    strength: str
+    method: str              # "seedvr2_7b", "seedvr2_3b" or "refine"
+    denoise: bool
+    cloud: bool
+
+
 class ExportDialog(QDialog):
     """Where to save a path, and at which size: as made (quick: the clips are joined), or at 1080p / 2K, upscaled in
     ComfyUI by SeedVR2 (restores the clips as made) or re-rendered by the Open-H3 refine (draws detail anew); every
@@ -287,6 +301,7 @@ class ExportDialog(QDialog):
                              "of 267 s per 3 s clip, PSNR 33 dB against exact attention (side by side practically the "
                              "same; skin texture very slightly smoother). Off: exact attention")
         f.addRow("", self.fast)
+        self.swapped_count = swapped
         self.swapped = QCheckBox(f"Upscale the video{'s' if swapped != 1 else ''} with a replaced person too")
         self.swapped.setToolTip("A video whose person was replaced was made at the generation size. On: it is "
                                 "upscaled like a generated clip (SeedVR2 restores it; the refine re-renders it with "
@@ -362,3 +377,9 @@ class ExportDialog(QDialog):
     def target(self) -> Path:
         f = self.file.text().strip()
         return Path(os.path.expanduser(f if f.lower().endswith(".mp4") else f + ".mp4"))
+
+    def request(self) -> ExportRequest:
+        """The dialog's answers in one piece."""
+        return ExportRequest(self.target(), self.size.currentData(), self.fast.isChecked(),
+                             bool(self.swapped_count) and self.swapped.isChecked(), self.strength.currentData(),
+                             self.method.currentData(), self.denoise.isChecked(), self.on_cloud())
