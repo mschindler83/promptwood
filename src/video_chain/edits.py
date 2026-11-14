@@ -8,7 +8,7 @@ import json
 import time
 import uuid
 from pathlib import Path
-from typing import TypedDict
+from typing import TypedDict, cast
 
 from . import media
 from .comfy import EDIT_MODELS
@@ -106,7 +106,7 @@ def read_meta(png: str | Path) -> ResultRecord | None:
         meta = json.loads(Path(png).with_suffix(".json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    return meta if isinstance(meta, dict) else None
+    return cast(ResultRecord, meta) if isinstance(meta, dict) else None
 
 
 def write_meta(meta_file: Path, meta: ResultRecord | dict) -> None:
@@ -132,13 +132,13 @@ def record_use(png: str | Path, use: dict) -> None:
 def how_made(meta: ResultRecord) -> str:
     """The model and quality a result was made with, in words (for the result's facts)."""
     if meta.get("mode") == "create":
-        fam = FAMILIES.get(meta.get("family"), {})
+        fam = FAMILIES.get(meta.get("family") or "", {})
         return f"{fam.get('label', '')} {fam.get('qualities', {}).get(meta.get('quality'), '')}"
     if meta.get("edit_model") == "qwen21":
         return f"{EDIT_MODELS['qwen21']} {FAMILIES['qwen21']['qualities'].get(meta.get('quality'), '')}"
     if meta.get("edit_model") == "moss":
         return f"{EDIT_MODELS['moss']} {MOSS_EDIT_QUALITIES['standard']}"
-    return QUALITY_TEXT.get(meta.get("quality"), "")
+    return QUALITY_TEXT.get(meta.get("quality") or "", "")
 
 
 def lora_note(mode: str, family: dict | None, fam: str, edit_model: str, family_loras: dict) -> str:

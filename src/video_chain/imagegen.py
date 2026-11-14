@@ -25,6 +25,7 @@ import threading
 import uuid
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 from .comfy import (ComfyError, ComfyGenerator, build_moss_workflow, build_qwen21_workflow, is_qwen21_name,
                     pick_moss_files, pick_qwen21_files)
@@ -41,7 +42,7 @@ CHROMA_NEGATIVE = ("This low quality greyscale unfinished sketch is inaccurate a
                    "with excessive bloom. It has a toony aesthetic with bold outlines and flat colors.")
 CHROMA_FLASH_STEPS = 12
 
-FAMILIES = {
+FAMILIES: dict[str, dict[str, Any]] = {
     "krea2": {"label": "Krea-2 Turbo", "pixels": 1024 * 1024, "multiple": 16, "negative": False,
               "qualities": {"standard": "Turbo, 8 steps"}, "refs": 3,
               "ref_text": "Style reference: the new image takes the look of the pictures"},
@@ -149,7 +150,14 @@ def pick_files(unets: list[str], ckpts: list[str], clips: list[str], vaes: list[
     return out
 
 
-def build_create_workflow(*, family: str, files: dict, model: str, prompt: str, negative: str, width: int,
+def _model_file(name: str | None) -> str:
+    """The model file a family's workflow loads; ComfyError when none is known (no model file of the family)."""
+    if not name:
+        raise ComfyError("ComfyUI lists no model file for this picture model")
+    return name
+
+
+def build_create_workflow(*, family: str, files: dict, model: str | None, prompt: str, negative: str, width: int,
                           height: int, seed: int, quality: str, loras: list[tuple[str, float]], refs: list[str],
                           ref_strength: float, prefix: str, quality_tags: bool = True) -> dict:
     """The API workflow for one new image (refs: uploaded picture names; ref_strength: for image to image, how far
@@ -158,7 +166,7 @@ def build_create_workflow(*, family: str, files: dict, model: str, prompt: str, 
     wf: dict = {}
     save = {"class_type": "SaveImage", "inputs": {"images": ["decode", 0], "filename_prefix": prefix}}
     if family == "krea2":
-        wf["unet"] = loader_unet(model)
+        wf["unet"] = loader_unet(_model_file(model))
         wf["clip"] = loader_clip(files["clip"], "krea2")
         wf["vae"] = loader_vae(files["vae"])
         wf["latent"] = {"class_type": "EmptyLatentImage", "inputs": {"width": w, "height": h, "batch_size": 1}}
@@ -205,7 +213,7 @@ def build_create_workflow(*, family: str, files: dict, model: str, prompt: str, 
             if not files.get("edit"):
                 raise ComfyError("Qwen-Image-Edit 2511 is missing (needed for pictures as references)")
             model = files["edit"]
-        wf["unet"] = loader_unet(model)
+        wf["unet"] = loader_unet(_model_file(model))
         wf["clip"] = loader_clip(files["clip"], "qwen_image")
         wf["vae"] = loader_vae(files["vae"])
         wf["latent"] = {"class_type": "EmptySD3LatentImage", "inputs": {"width": w, "height": h, "batch_size": 1}}
@@ -251,8 +259,9 @@ def build_create_workflow(*, family: str, files: dict, model: str, prompt: str, 
     elif family == "flux3":
         # the chosen file decides: a base model samples like the template's base (50 steps, cfg 3.5), a distilled one
         # like the distilled template (16 steps, cfg 1); 'best' / 'fast' pick the other kind if no file was chosen
-        unet = model if model in (files.get("models") or []) else \
-            (files.get("base") if quality == "best" else files.get("distilled")) or (files.get("models") or [model])[0]
+        unet = _model_file(model if model in (files.get("models") or []) else
+                           (files.get("base") if quality == "best" else files.get("distilled"))
+                           or (files.get("models") or [model])[0])
         base = "base" in unet.lower()
         steps, cfg = (50, 3.5) if base else (16, 1.0)
         wf["unet"] = loader_unet(unet)
@@ -277,7 +286,7 @@ def build_create_workflow(*, family: str, files: dict, model: str, prompt: str, 
                                    "scheduler": "simple", "positive": pos, "negative": neg,
                                    "latent_image": ["latent", 0], "denoise": 1.0}}
     elif family == "flux1":
-        wf["unet"] = loader_unet(model)
+        wf["unet"] = loader_unet(_model_file(model))
         wf["clip"] = {"class_type": "DualCLIPLoader", "inputs": {"clip_name1": files["clip_l"], "clip_name2": files["t5"],
                                                                  "type": "flux", "device": "default"}}
         wf["vae"] = loader_vae(files["vae"])
@@ -520,7 +529,7 @@ class ComfyImageCreator(ComfyGenerator):
             names.append((name, float(strength)))
         uploads: list[tuple[str, Path]] = []
         try:
-            ref_names = []
+            ref_names: list[str] = []
             for r in list(refs)[:FAMILIES[family]["refs"]]:
                 ref_names.append(self.upload(Path(r)))
                 uploads.append((ref_names[-1], Path(r)))

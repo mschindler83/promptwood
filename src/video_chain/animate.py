@@ -9,6 +9,7 @@ import logging
 import math
 import uuid
 from pathlib import Path
+from typing import Any
 
 from .comfy import ComfyError, ComfyGenerator
 from .comfy.wfb import (FPS, SUBFOLDER, combo_options, loader_clip, loader_unet, loader_vae, lora_node,
@@ -123,7 +124,7 @@ def build_animate_workflow(*, files: dict, video: str, mask: str, reference: str
                                                                    "color": "0, 0, 0"}},
     }
     pose = dict(pose or {})
-    inputs = {}
+    inputs: dict[str, list | None] = {}
     for name in ("pose", "face"):
         if name == "pose" and not body:        # no body skeleton: DWPose's body pass is not run at all
             del wf["dw_pose"]
@@ -247,6 +248,7 @@ class ComfyAnimator(ComfyGenerator):
         info = info.get("input", {}).get("required", {}) if info else {}
         swappers = [n for n in combo_options(info.get("swapper")) if "hyperswap" in n.lower()]
         enhancers = [n for n in combo_options(info.get("enhancer")) if n != "none"]
+        self.face_files: dict[str, Any]
         if not self._object_info(FACE_NODE):
             self.face_missing, self.face_files = f"this ComfyUI has no {FACE_NODE} node ({FACE_HELP})", {}
         elif not swappers:
