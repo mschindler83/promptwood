@@ -94,3 +94,36 @@ def test_a_lora_page_is_read_off_the_gui_thread_and_a_newer_choice_wins(app, tmp
     assert w._loaded == other and w.path == other           # the older answer arrived later and was dropped
     assert all(t is not threading.main_thread() for _p, t in seen)
     w.done(0)
+
+
+def test_the_frame_window_probes_a_picked_file_in_a_worker(app, tmp_path, monkeypatch):
+    import threading
+
+    from video_chain import chain
+    from video_chain.ui.clip_dialogs import VideoFrameDialog
+    from waiting import wait
+    seen = []
+
+    def probe(p):
+        seen.append(threading.current_thread())
+        return {"fps": 24, "duration": 2.0, "frames": 48, "width": 128, "height": 72}
+    monkeypatch.setattr(chain, "probe_source", probe)
+    monkeypatch.setattr(VideoFrameDialog, "_grab", lambda self: None)
+    dlg = VideoFrameDialog(None, tmp_path / "v.mp4", "frame")
+    assert not dlg.ready and not dlg.buttons.button(dlg.buttons.StandardButton.Ok).isEnabled()
+    assert wait(app, lambda: dlg.ready)
+    assert dlg.frames == 48 and dlg.fps == 24 and dlg.slider.maximum() == 47
+    assert seen and all(t is not threading.main_thread() for t in seen)
+    assert dlg.buttons.button(dlg.buttons.StandardButton.Ok).isEnabled()
+    dlg.reject()
+
+
+def test_the_frame_window_says_when_the_file_cannot_be_read(app, tmp_path, monkeypatch):
+    from video_chain import chain
+    from video_chain.ui.clip_dialogs import VideoFrameDialog
+    from waiting import wait
+    monkeypatch.setattr(chain, "probe_source", lambda p: (_ for _ in ()).throw(RuntimeError("not a video")))
+    dlg = VideoFrameDialog(None, tmp_path / "v.mp4", "frame")
+    assert wait(app, lambda: "could not be read" in dlg.note.text())
+    assert not dlg.ready and not dlg.buttons.button(dlg.buttons.StandardButton.Ok).isEnabled()
+    dlg.reject()

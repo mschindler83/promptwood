@@ -548,6 +548,7 @@ def test_end_image_from_a_video_frame(app, win, tmp_path, image, monkeypatch):
                     "-vf", "geq=lum='5*N':cb=128:cr=128", "-c:v", "libx264", "-crf", "0", "-pix_fmt", "yuv444p",
                     str(vid)], check=True)
     dlg = VideoFrameDialog(None, vid, "frame")
+    assert wait(app, lambda: dlg.ready)                                    # (a picked file is probed in a worker)
     assert dlg.frames == 48 and dlg.fps == 24
     def exact(k):                                                          # ffmpeg's decode of exactly frame k
         ref = tmp_path / f"ref{k}.png"
@@ -566,6 +567,7 @@ def test_end_image_from_a_video_frame(app, win, tmp_path, image, monkeypatch):
     assert card.b_end_video.isEnabled()
 
     def fake_exec(d):
+        assert wait(app, lambda: d.ready)
         d.slider.setValue(20)
         return QDialog.Accepted
     monkeypatch.setattr(M.VideoFrameDialog, "exec", fake_exec)
