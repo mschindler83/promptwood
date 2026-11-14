@@ -7,6 +7,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 from PySide6.QtCore import QProcess, QProcessEnvironment, QTimer
 
@@ -14,9 +15,12 @@ from .workers import run_in_background
 from .. import comfy as CMF, runpod as RP, tree as T
 from ..__main__ import COMFY_DOWN
 from .generator_state import (
-    CLIP_MODELS, ComfyBinding, ComfyModel, IMAGE_MODELS, Job, ModelState, Phase, RunpodBinding, WorkerBinding)
+    CLIP_MODELS, ByeEvent, ComfyBinding, ComfyModel, ErrorEvent, IMAGE_MODELS, IdleEvent, Job, LoadingEvent, ModelState,
+    NodeEvent, Phase, PlanEvent, RunpodBinding, StartEvent, StepEvent, WorkerBinding, event_problem)
 from .ui_logic import CLOUD_KILL_GRACE_MS, DEFAULT_COMFY_URL, KILL_GRACE_MS, fmt_left, plural, time_left
 from .mw_host import MainWindowHost
+
+log = logging.getLogger(__name__)
 from .qsvalue import qs_value
 
 
@@ -413,14 +417,18 @@ class GeneratorMixin(MainWindowHost):
                 self.tree.nodes[nid].end_at = n.end_at   # a clip made again hands over at its last frame again
         self._tree_stamp = self._stamp()            # the generator wrote it; this window is up to date
 
-    def _event(self, ev: dict):
+    def _event(self, ev: Any):
         """One event of the worker ('@@ {json}' line): the handler of its kind, then the plugins hear it."""
-        handler = getattr(self, "_ev_" + str(ev.get("e")), None)
-        if handler is not None:
-            handler(ev)
+        why = event_problem(ev)
+        if why is not None:                            # (checked once here: the handlers index the fields they need)
+            log.warning("ignoring a worker event: %s", why)
+        else:
+            handler = getattr(self, "_ev_" + str(ev.get("e")), None)
+            if handler is not None:
+                handler(ev)
         self.plugins.emit("run_event", ev)             # (the plugins hear it once the app has handled it)
 
-    def _ev_loading(self, ev: dict):
+    def _ev_loading(self, ev: LoadingEvent):
         self._worker_idle = False
         self.status.setText("Starting a RunPod pod …" if ev.get("what") == "runpod" else "Connecting to ComfyUI …")
         self.progress.setRange(0, 0)
@@ -432,7 +440,7 @@ class GeneratorMixin(MainWindowHost):
                             "Connected to ComfyUI.")
         self._model_state = ModelState.LOADED
 
-    def _ev_idle(self, ev: dict):
+    def _ev_idle(self, ev: IdleEvent):
         self._worker_idle = True
         self._idle_since = time.monotonic()
         self._idle_timeout = ev.get("timeout")
@@ -442,7 +450,7 @@ class GeneratorMixin(MainWindowHost):
             self._job_finished()
         self._update_model_label()
 
-    def _ev_bye(self, ev: dict):
+    def _ev_bye(self, ev: ByeEvent):
         self._worker_idle = False
         self._worker_leaving = True
         if self._job is not None and self._job.sent and self._phase != Phase.DONE:
@@ -452,18 +460,15 @@ class GeneratorMixin(MainWindowHost):
         if ev.get("reason") == "idle" and not self.running:
             self.status.setText("The model was unloaded after the idle time.")
 
-    def _ev_start(self, ev: dict):
+    def _ev_start(self, ev: StartEvent):
         self.status.setText(f"{ev.get('nodes', 0)} clips to make at {ev['width']}×{ev['height']}, "
                             f"{ev['frames']} frames each.")
 
-    def _ev_plan(self, ev: dict):
+    def _ev_plan(self, ev: PlanEvent):
         self._plan = list(ev.get("make", []))
 
-    def _ev_node(self, ev: dict):
-        nid, st = ev.get("id"), ev.get("state")
-        if not isinstance(nid, str) or not isinstance(st, str):
-            logging.getLogger(__name__).warning("ignoring a node event without id or state: %r", ev)
-            return
+    def _ev_node(self, ev: NodeEvent):
+        nid, st = ev["id"], ev["state"]
         if st == "generating":
             self._made_now.add(nid)
             self.live[nid] = "generating"
@@ -485,9 +490,9 @@ class GeneratorMixin(MainWindowHost):
         if st == "generating":
             self.graph.reveal(nid)
 
-    def _ev_step(self, ev: dict):
+    def _ev_step(self, ev: StepEvent):
         nid = ev.get("id")
-        if not (nid and ev.get("n")):
+        if not (nid and ev["n"]):
             return
         frac = ev["i"] / ev["n"]
         self.progress_of[nid] = frac
@@ -526,7 +531,7 @@ class GeneratorMixin(MainWindowHost):
     def _ev_joining(self, ev: dict):
         self.status.setText("Joining the refined clips …")
 
-    def _ev_error(self, ev: dict):
+    def _ev_error(self, ev: ErrorEvent):
         self._error = ev.get("msg", "error")
         if self._job is None:                      # after the job (e.g. a RunPod pod that could not be ended)
             self.status.setText(f"Warning: {self._error}")

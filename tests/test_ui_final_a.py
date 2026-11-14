@@ -165,3 +165,42 @@ def test_a_check_that_fails_is_said_not_swallowed(app, tmp_path, monkeypatch, ca
         assert any("could not be checked" in p.text for p in ps)      # the card says it, not only the log
     finally:
         w.close()
+
+
+# ------------------------------------------------------------------ MWC-8: worker events are checked once, at the boundary
+import logging  # noqa: E402
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("ev", [
+    {"e": "start", "nodes": 2},                                   # no size
+    {"e": "start", "width": "wide", "height": 2, "frames": 3},    # a text where a number belongs
+    {"e": "step", "id": "n1", "i": 1},                            # no n
+    {"e": "node", "state": "generating"},
+    {"e": "plan", "make": "n1"},
+    ["not", "an", "event"],
+])
+def test_a_malformed_worker_event_is_ignored_with_one_warning(app, tmp_path, caplog, ev):
+    from video_chain.ui.main_window import MainWindow
+    w = MainWindow(settings(tmp_path), command=FAKE)
+    try:
+        before = w.status.text()
+        with caplog.at_level(logging.WARNING):
+            w._event(ev)
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1 and "worker event" in warnings[0].getMessage()
+        assert w.status.text() == before and not w.live
+    finally:
+        w.close()
+
+
+def test_a_good_worker_event_reaches_its_handler(app, tmp_path):
+    from video_chain.ui.main_window import MainWindow
+    w = MainWindow(settings(tmp_path), command=FAKE)
+    try:
+        w._event({"e": "start", "nodes": 2, "width": 640, "height": 360, "frames": 73})
+        assert w.status.text() == "2 clips to make at 640×360, 73 frames each."
+        w._event({"e": "somethingnew", "x": 1})                  # an unknown kind is not an error
+    finally:
+        w.close()

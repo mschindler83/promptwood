@@ -36,8 +36,8 @@ def test_frozen_clip_menu_disables_what_it_refuses(app, win, tmp_path, image, mo
 
 def test_malformed_node_event_is_ignored_with_one_warning(app, win, caplog):
     with caplog.at_level(logging.WARNING):
-        win._ev_node({"e": "node", "state": "generating"})
-        win._ev_node({"e": "node", "id": "abc"})
+        win._event({"e": "node", "state": "generating"})
+        win._event({"e": "node", "id": "abc"})
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 2 and "node event" in warnings[0].getMessage()
     assert not win.live
