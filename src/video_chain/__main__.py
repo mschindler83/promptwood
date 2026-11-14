@@ -5,8 +5,8 @@ The LoRA must be in one of ComfyUI's LoRA folders.
 """
 from __future__ import annotations
 
-import logging
 import argparse
+import logging
 import json
 import os
 import select
@@ -17,7 +17,7 @@ import traceback
 from pathlib import Path
 from typing import Callable
 
-from . import chain
+from . import chain, logs
 from . import tree as treemod
 
 logger = logging.getLogger(__name__)
@@ -127,6 +127,7 @@ def _printer(enabled: bool):
 
 def main(argv: list[str] | None = None) -> int:
     a = parse_args(argv)
+    logs.setup(to_file=False)                  # (stderr only: the GUI that starts this keeps it)
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")      # (the events do not depend on the locale)
     except (AttributeError, ValueError, OSError):

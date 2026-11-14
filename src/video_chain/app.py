@@ -99,6 +99,9 @@ def install_signal_handlers(app, window):
 def main(argv: list[str] | None = None) -> int:
     import os
 
+    from . import logs
+    logs.setup()
+
     from PySide6.QtCore import QLoggingCategory, QSettings
     # "Play videos on the GPU" (settings; read before Qt's media backend loads, so a change needs a restart): GPU =
     # hardware decoding and Qt's GPU video surface (smooth, but NVIDIA's EGL driver crashed once with a full GPU);
