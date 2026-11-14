@@ -47,6 +47,15 @@ class Node:
     def is_video(self) -> bool:
         return self.kind == VIDEO
 
+    def made_dict(self) -> dict[str, Any]:
+        """The made record as a plain dict ({} for a clip not made yet), for reading it by a key that is a variable
+        or a name from outside (a TypedDict allows only literal keys)."""
+        return cast(dict[str, Any], self.made or {})
+
+    def source_dict(self) -> dict[str, Any]:
+        """The source of a real video as a plain dict ({} for a clip)."""
+        return cast(dict[str, Any], self.source or {})
+
 
 def short_id(nid: str) -> str:
     """The number shown for a clip id ("n3" -> "3", as in "clip #3"): the id without its one prefix letter."""
