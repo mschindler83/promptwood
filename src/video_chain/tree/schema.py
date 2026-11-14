@@ -100,6 +100,7 @@ class Track(TypedDict, total=False):
     source: str
     start: float
     end: float
+    tts: dict[str, Any]                 # a track made by speak_lines: {"clip", "provider", "language", "lines"}
 
 
 class Options(TypedDict, total=False):

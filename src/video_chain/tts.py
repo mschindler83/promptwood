@@ -42,10 +42,12 @@ import urllib.request
 import uuid
 import wave
 from pathlib import Path
+from typing import IO, Any, cast
 
 from . import chain, config, keys, media, net
 from . import tree as T
 from .llm_server import rotate_log
+from .tree.schema import CastEntry
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +89,7 @@ PROVIDERS = {"local": "Qwen3-TTS (local)", "fish": "Fish S2 Pro (local, tone tag
 DEFAULT_OPTIONS = {"provider": "local", "eleven_model": "eleven_multilingual_v2"}
 # How lines are spoken (the Speak the lines window; kept in the project as options["tts"]["speak"]):
 # takes: how many versions are made to choose from; delivery: how steady or lively; speed: how fast.
-SPEAK_DEFAULTS = {"takes": 3, "delivery": "natural", "speed": 1.0}
+SPEAK_DEFAULTS: dict[str, Any] = {"takes": 3, "delivery": "natural", "speed": 1.0}
 DELIVERIES = {"steady": "Steady (even, fewest slips)", "natural": "Natural",
               "lively": "Lively (more varied, more slips)"}
 # tones offered in the Speak the lines window (as [tag]; any other words work too)
@@ -120,7 +122,7 @@ def options(tree_or_options) -> dict:
 
 def speak_options(tree_or_options=None, given: dict | None = None) -> dict:
     """How lines are spoken: the project's settings (or `given`), cleaned up."""
-    o = given if given is not None else (options(tree_or_options).get("speak") or {})
+    o: dict[str, Any] = given if given is not None else (options(tree_or_options).get("speak") or {})
     o = {**SPEAK_DEFAULTS, **(o if isinstance(o, dict) else {})}
     try:
         takes, speed = int(o["takes"]), float(o["speed"])
@@ -200,13 +202,13 @@ class LocalTTS:
                "PYTHONUNBUFFERED": "1", "TOKENIZERS_PARALLELISM": "false"}
         if self.log:
             rotate_log(Path(self.log))
-        err = open(self.log, "ab") if self.log else subprocess.DEVNULL
+        err: int | IO[bytes] = open(self.log, "ab") if self.log else subprocess.DEVNULL
         try:
             self.proc = subprocess.Popen(self._command(), stdin=subprocess.PIPE,
                                          stdout=subprocess.PIPE, stderr=err, env=env, cwd=tempfile.gettempdir(),
                                          text=True, bufsize=1)
         finally:
-            if err is not subprocess.DEVNULL:
+            if not isinstance(err, int):
                 err.close()
         self._answers = queue.Queue()
         threading.Thread(target=self._read, args=(self.proc, self._answers), daemon=True).start()
@@ -254,6 +256,7 @@ class LocalTTS:
             self._seq += 1
             seq = self._seq
             try:
+                assert p.stdin is not None          # (stdin=PIPE)
                 p.stdin.write(json.dumps({**r, "id": seq}) + "\n")
                 p.stdin.flush()
             except (OSError, ValueError):       # (it died, or was stopped, before it read the request)
@@ -269,6 +272,7 @@ class LocalTTS:
         if p is None or p.poll() is not None:
             return False
         try:
+            assert p.stdin is not None
             p.stdin.write(json.dumps({"cmd": "quit"}) + "\n")
             p.stdin.flush()
             p.wait(timeout=10)
@@ -450,7 +454,7 @@ class ElevenLabs:
             except urllib.error.HTTPError as e:
                 if e.code == 429 and not attempt:        # slow down: wait as told (at most 30 s), ask once more
                     try:
-                        wait = float((e.headers or {}).get("Retry-After") or 2)
+                        wait = float((e.headers.get("Retry-After") if e.headers is not None else None) or 2)
                     except (TypeError, ValueError):
                         wait = 2.0
                     _pause(min(max(wait, 0.0), 30.0))
@@ -506,7 +510,7 @@ class ElevenLabs:
               lang: str | None = None, seed: int | None = None, settings: dict | None = None) -> float:
         """A line in the voice as 48 kHz WAV at out; returns its length. settings: ElevenLabs' voice_settings for
         this line (stability, speed ...), over the voice's own."""
-        body = {"text": text, "model_id": model}
+        body: dict[str, Any] = {"text": text, "model_id": model}
         if settings:
             body["voice_settings"] = dict(settings)
         if seed is not None:
@@ -597,12 +601,19 @@ def line_problems(tree: T.Tree, node: T.Node, provider: str) -> list[str]:
     return list(dict.fromkeys(out))
 
 
+def _speaker(d: dict[str, Any]) -> CastEntry:
+    """The speaker of a clip line (line_problems has made sure there is one)."""
+    c = d["speaker"]
+    assert c is not None
+    return c
+
+
 def _set_voice_fields(tree: T.Tree, name: str, **fields) -> None:
     """Fields kept with a character's voice (its transcript) or in its "tts" entry (its ElevenLabs voice)."""
-    cast = []
+    cast: list[CastEntry] = []
     for c in T.cast_of(tree):
         if c["name"] == name:
-            c = dict(c)
+            c = copy.copy(c)
             if "text" in fields and c.get("voice"):
                 c["voice"] = {**c["voice"], "text": fields["text"]}
             if "eleven" in fields:
@@ -678,7 +689,7 @@ def _tempo(wav: Path, speed: float) -> None:
 
 
 def render_lines(project: Path, tree: T.Tree, nid: str, eng, log=lambda _m: None, take: int = 0,
-                 speak: dict | None = None, lines: list[str] | None = None) -> dict:
+                 speak: dict | None = None, lines: list[str] | None = None) -> dict[str, Any]:
     """Speak the clip's lines, each in its speaker's voice, into one new WAV in refs/ (see join_lines). Reads the
     tree only (call it with a copy from a worker thread; apply_lines puts the result in). Returns {"file", "secs",
     "lines": [{"name", "line"}], "texts": {name: what its voice sample says, transcribed now}, "provider",
@@ -692,11 +703,11 @@ def render_lines(project: Path, tree: T.Tree, nid: str, eng, log=lambda _m: None
         raise TtsError("a real video keeps its own sound")
     base = node.prompt
     if lines is not None:
-        said = [clean_line(x) for x in lines]
-        if not all(said):
+        cleaned = [clean_line(x) for x in lines]
+        if not all(cleaned):
             raise TtsError("a line is empty")
         try:
-            new = T.replace_lines(base, said)
+            new = T.replace_lines(base, cleaned)
         except ValueError as e:
             raise TtsError(str(e)) from None
         node = copy.copy(node)                      # (the tree is only read: the changed prompt is the take's)
@@ -708,7 +719,7 @@ def render_lines(project: Path, tree: T.Tree, nid: str, eng, log=lambda _m: None
     opts = options(tree)
     how = speak_options(tree, speak)
     speed = how["speed"] if abs(how["speed"] - 1.0) >= 0.005 else None
-    extra = {}                                      # (only what is not the default: engines without it still work)
+    extra: dict[str, Any] = {}                      # (only what is not the default: engines without it still work)
     if eng.name == "elevenlabs":
         stab = (_ELEVEN_V3_STABILITY if "v3" in opts["eleven_model"] else _ELEVEN_STABILITY)[how["delivery"]]
         vs = {**({"stability": stab} if stab is not None else {}), **({"speed": speed} if speed else {})}
@@ -718,25 +729,25 @@ def render_lines(project: Path, tree: T.Tree, nid: str, eng, log=lambda _m: None
         temp = (_FISH_TEMPERATURE if eng.name == "fish" else _LOCAL_TEMPERATURE)[how["delivery"]]
         if temp is not None:
             extra["temperature"] = temp
-    lines = clip_lines(tree, node)
+    clip = clip_lines(tree, node)
     refs = project / T.REFS_DIR
     refs.mkdir(parents=True, exist_ok=True)
     texts: dict[str, str] = {}
-    voice_files = {d["speaker"]["name"]: d["speaker"]["voice"]["file"] for d in lines
-                   if eng.name != "elevenlabs" and d["speaker"].get("voice")}
+    voice_files = {_speaker(d)["name"]: _speaker(d)["voice"]["file"] for d in clip
+                   if eng.name != "elevenlabs" and _speaker(d).get("voice")}
     if eng.name != "elevenlabs":                    # every transcript first (Whisper, then the TTS model)
-        for d in lines:
-            c = d["speaker"]
-            if not c["voice"].get("text") and c["name"] not in texts:
+        for d in clip:
+            c = _speaker(d)
+            if not c.get("voice", {}).get("text") and c["name"] not in texts:
                 log(f"transcribing the voice sample of @{c['name']} (once)")
                 texts[c["name"]] = eng.transcribe(project / T.clone_file(c["voice"]), LANGUAGES.get(lang))
     with media.scratch("tts") as tmp:
-        parts = []
-        for k, d in enumerate(lines):
-            c = d["speaker"]
+        parts: list[Path] = []
+        for k, d in enumerate(clip):
+            c = _speaker(d)
             raw = Path(tmp) / f"line{k}_raw.wav"
             seed = (node.seed + k + 7919 * int(take)) % 2_000_000_000
-            log(f"speaking line {k + 1} of {len(lines)} (@{c['name']}): {d['line'][:60]}")
+            log(f"speaking line {k + 1} of {len(clip)} (@{c['name']}): {d['line'][:60]}")
             said = spoken_text(d["line"], eng.name, opts["eleven_model"])
             if not said:
                 raise TtsError(f"a line of @{c['name']} has nothing to say besides its [tags]")
@@ -752,18 +763,18 @@ def render_lines(project: Path, tree: T.Tree, nid: str, eng, log=lambda _m: None
             parts.append(part)
         rel = f"{T.REFS_DIR}/tts_{uuid.uuid4().hex[:8]}.wav"
         secs = join_lines(parts, project / rel)
-    return {"file": rel, "secs": round(secs, 3), "lines": [{"name": d["speaker"]["name"], "line": d["line"]}
-                                                           for d in lines],
+    return {"file": rel, "secs": round(secs, 3), "lines": [{"name": _speaker(d)["name"], "line": d["line"]}
+                                                           for d in clip],
             "texts": texts, "voice_files": voice_files, "provider": eng.name, "language": lang, "prompt": node.prompt,
             "base_prompt": base, "take": int(take), "speak": how}
 
 
-def apply_lines(project: Path, tree: T.Tree, nid: str, r: dict) -> dict:
+def apply_lines(project: Path, tree: T.Tree, nid: str, r: dict[str, Any]) -> dict:
     """Make rendered lines (render_lines) the clip's sound: a new audio track it plays, the picture made to it (lips
     in sync); the clip is made longer when the lines need it; its earlier spoken-lines track goes when no other clip
     plays it; the voice transcripts are kept. Returns {"track", "secs", "frames": new length or None, "lines": n}."""
     node = tree.nodes[nid]
-    ov = dict(node.overrides or {})
+    ov: dict[str, Any] = dict(node.overrides or {})
     ov.pop("sound_over", None)                      # the picture is made to it (lips in sync)
     ov.pop("sound_mix_level", None)
     # (before anything is changed: lines longer than a clip can be refuse the whole thing)
@@ -779,16 +790,16 @@ def apply_lines(project: Path, tree: T.Tree, nid: str, r: dict) -> dict:
     tid = "t" + uuid.uuid4().hex[:6]
     while tid in have:
         tid = "t" + uuid.uuid4().hex[:6]
-    entry = {"id": tid, "name": f"Lines of clip #{T.short_id(nid)}", "file": r["file"], "secs": r["secs"],
+    entry: T.schema.Track = {"id": tid, "name": f"Lines of clip #{T.short_id(nid)}", "file": r["file"], "secs": r["secs"],
              "source": str(Path(project) / r["file"]), "start": 0.0, "end": r["secs"],
              "tts": {"clip": nid, "provider": r["provider"], "language": r["language"], "lines": r["lines"]}}
     tree.options["tracks"] = T.tracks(tree) + [entry]
     ov["source_sound"] = T.TRACK_PREFIX + tid
     if frames:
         ov["frames"] = frames
-    node.overrides = ov
-    if old_tr and (old_tr.get("tts") or {}).get("clip") == nid and not [u for u in T.track_users(tree, old)
-                                                                         if u != nid]:
+    node.overrides = cast(T.schema.Overrides, ov)
+    if old and old_tr and (old_tr.get("tts") or {}).get("clip") == nid \
+            and not [u for u in T.track_users(tree, old) if u != nid]:
         T.remove_track(project, tree, old)
     return {"track": tid, "secs": r["secs"], "frames": frames, "lines": len(r["lines"])}
 

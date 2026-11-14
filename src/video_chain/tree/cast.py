@@ -39,7 +39,7 @@ def _migrate_cast(options: Options, has_cast: bool) -> None:
                              "lead": ident.get("mode") == "reference"}] if images else [])
     for k in ("images", "mode"):
         ident.pop(k, None)
-    options["identity"] = {**DEFAULT_OPTIONS["identity"], **ident}   # type: ignore[dict-item]  # (DEFAULT_OPTIONS is a plain dict of objects)
+    options["identity"] = {**DEFAULT_OPTIONS["identity"], **ident}
     cast: list[CastEntry] = []
     for c in options.get("cast") or []:
         if isinstance(c, dict) and isinstance(c.get("name"), str) and c["name"]:
