@@ -67,6 +67,7 @@ from .widgets import FrameTile, VideoView, guard_wheel, icon_button, label, sect
 from .view_mode import AdvancedNote, ViewMode, row_widget
 from .problems import EXAMPLES, ProblemBox, add_example, camera_menu_items, insert_at_cursor
 from .guide import EngineBanner, GuidePanel, NextHint
+from . import shortcuts as S
 
 try:                                            # (the player is optional: Preview says so when it is missing)
     from PySide6.QtMultimedia import QMediaPlayer
@@ -2952,19 +2953,20 @@ class MainWindow(QMainWindow):
                     self.turbo_lora.currentIndexChanged, self.turbo_steps.valueChanged,
                     self.turbo_strength.valueChanged, self.clip_cfg.valueChanged):
             sig.connect(self._options_changed)
-        for keys, fn in (("Ctrl+N", lambda: self.node_action("continue", self.target_id())),
-                         ("Ctrl+Shift+V", lambda: self.node_action("video", self.target_id())),
-                         ("Ctrl+B", lambda: self.node_action("branch", self.target_id())),
-                         ("Ctrl+D", lambda: self.node_action("variant", self.target_id())),
-                         ("Ctrl+Return", self.generate_path), ("Ctrl+Shift+Return", self.generate_all),
-                         ("Alt+Left", lambda: self._step_focus(-1)), ("Alt+Right", lambda: self._step_focus(1))):
-            QShortcut(QKeySequence(keys), self, activated=fn)
+        for sid, fn in (("continue", lambda: self.node_action("continue", self.target_id())),
+                        ("add_video", lambda: self.node_action("video", self.target_id())),
+                        ("branch", lambda: self.node_action("branch", self.target_id())),
+                        ("variant", lambda: self.node_action("variant", self.target_id())),
+                        ("generate", self.generate_path), ("generate_all", self.generate_all),
+                        ("prev_clip", lambda: self._step_focus(-1)), ("next_clip", lambda: self._step_focus(1))):
+            QShortcut(S.sequence(sid), self, activated=fn)
         for w in (*self._panels, self.prefs):
             guard_wheel(w)
         # plain keys act only while the graph (or a child) has the focus: in a list or a combo, Delete / F are theirs
         self.graph.setFocusPolicy(Qt.StrongFocus)
-        for key, fn in (("Delete", lambda: self.node_action("delete", self.target_id())), ("F", self.graph.fit)):
-            sc = QShortcut(QKeySequence(key), self.graph, activated=fn)
+        for sid, fn in (("graph_delete", lambda: self.node_action("delete", self.target_id())),
+                        ("graph_fit", self.graph.fit)):
+            sc = QShortcut(S.sequence(sid), self.graph, activated=fn)
             sc.setContext(Qt.WidgetWithChildrenShortcut)
         self._register_advanced()
         self._show_view()
@@ -3244,15 +3246,15 @@ class MainWindow(QMainWindow):
     def _build_menu(self):
         m = self.menuBar().addMenu("&File")
         self.act_new = m.addAction("New project…", self.new_project)
-        self.act_new.setShortcut(QKeySequence("Ctrl+Shift+N"))
+        self.act_new.setShortcut(S.sequence("new_project"))
         self.act_open = m.addAction("Open project…", self._choose_project)
-        self.act_open.setShortcut(QKeySequence("Ctrl+O"))
+        self.act_open.setShortcut(S.sequence("open"))
         self.recent_file_menu = m.addMenu("Recent projects")
         m.addSeparator()
         self.act_save = m.addAction("Save", self.save_project)
-        self.act_save.setShortcut(QKeySequence("Ctrl+S"))
+        self.act_save.setShortcut(S.sequence("save"))
         self.act_save_as = m.addAction("Save as…", self.save_project_as)
-        self.act_save_as.setShortcut(QKeySequence("Ctrl+Shift+S"))
+        self.act_save_as.setShortcut(S.sequence("save_as"))
         m.addSeparator()
         self.act_close = m.addAction("Close project", self.close_project)
         m.addAction("Show project folder", self._open_dir)
@@ -3260,24 +3262,23 @@ class MainWindow(QMainWindow):
         self.act_ai_create = m.addAction("Create a new image with AI…",
                                          lambda: self.edit_image(start=True, mode="create"))
         m.addSeparator()
-        m.addAction("Quit", self.close).setShortcut(QKeySequence("Ctrl+Q"))
+        m.addAction("Quit", self.close).setShortcut(S.sequence("quit"))
         v = self.menuBar().addMenu("&View")
         for k, name in enumerate(("Clips", "Cast & references", "Sounds")):
             a = v.addAction(f"{name} (left)", lambda _=False, k=k: self._show_left_tab(k))
-            a.setShortcut(QKeySequence(f"Alt+{k + 1}"))
-        v.addAction("Log", self.show_log).setShortcut(QKeySequence("Alt+L"))
+            a.setShortcut(S.sequence(("tab_clips", "tab_cast", "tab_sounds")[k]))
+        v.addAction("Log", self.show_log).setShortcut(S.sequence("log"))
         v.addAction("Getting started", lambda: self.show_guide(True))
         v.addAction("LoRAs (example prompts, pictures, what is known)…", lambda: self.show_loras())
         v.addSeparator()
         self.act_left = v.addAction("Left panel (clips, cast & references, sounds)")
         self.act_left.setCheckable(True)
         self.act_left.setChecked(True)
-        self.act_left.setShortcut(QKeySequence("Ctrl+Alt+B"))
+        self.act_left.setShortcut(S.sequence("left_panel"))
         self.act_left.toggled.connect(lambda on: self._show_left(on))   # (the panel is built later, in _build)
-        for name, key, tip in (("edit", "Ctrl+Alt+1", "Layout: Edit (big viewer)"),
-                               ("write", "Ctrl+Alt+2", "Layout: Write (wide prompt)"),
-                               ("watch", "Ctrl+Alt+3", "Layout: Watch (viewer and timeline only)")):
-            v.addAction(tip, lambda _=False, n=name: self.apply_layout(n)).setShortcut(QKeySequence(key))
+        for name in ("edit", "write", "watch"):
+            row = S.SHORTCUTS[[s.id for s in S.SHORTCUTS].index(f"layout_{name}")]
+            v.addAction(row.text, lambda _=False, n=name: self.apply_layout(n)).setShortcut(S.sequence(row.id))
         v.addAction("Reset layout", lambda: self.apply_layout("edit"))
         v.addSeparator()
         group = QActionGroup(self)                  # (the view itself is made in __init__, after the menu)
@@ -3288,21 +3289,17 @@ class MainWindow(QMainWindow):
             group.addAction(a)
             a.triggered.connect(lambda _=False, on=simple: self.set_simple(on))
         st = self.menuBar().addMenu("&Settings")
-        st.addAction("Preferences…", self.show_prefs).setShortcut(QKeySequence("Ctrl+,"))
+        st.addAction("Preferences…", self.show_prefs).setShortcut(S.sequence("preferences"))
         h = self.menuBar().addMenu("&Help")
         h.addAction("Getting started", lambda: self.show_guide(True))
-        h.addAction("Keyboard shortcuts…", self.show_shortcuts)
+        h.addAction("Keyboard shortcuts…", self.show_shortcuts).setShortcut(S.sequence("shortcuts"))
         h.addAction("Show the log", self.show_log)
 
     def show_shortcuts(self):
-        """The shortcuts of the menus, read from the menu itself (so the list cannot go out of date)."""
-        lines = []
-        for top in self.menuBar().actions():
-            menu = top.menu()
-            for a in (menu.actions() if menu else []):
-                if not a.shortcut().isEmpty():
-                    lines.append(f"{a.shortcut().toString(QKeySequence.NativeText)}   {a.text().rstrip('…')}")
-        QMessageBox.information(self, "Keyboard shortcuts", "\n".join(lines))
+        """Help → Keyboard shortcuts: the table every window binds from (not modal: it stays beside the work)."""
+        dlg = S.shortcuts_dialog(self)
+        dlg.setAttribute(Qt.WA_DeleteOnClose)
+        dlg.open()
 
     def apply_layout(self, name: str):
         """A layout preset, as shares of the window: 'edit' (the default: a big viewer), 'write' (a wide inspector

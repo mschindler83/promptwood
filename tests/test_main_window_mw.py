@@ -311,3 +311,38 @@ def test_opening_a_project_puts_the_focus_on_the_graph(app, win, tmp_path, image
     win.project_edit.setFocus()
     new_project(win, tmp_path, image, ("a",))
     wait(app, lambda: win.focusWidget() is win.graph)
+
+
+# ---------------------------------------------------------------- UX-17 / UMD-30: one table of shortcuts
+def test_help_shows_the_shortcut_table_and_f1_opens_it(app, win, monkeypatch):
+    from PySide6.QtGui import QKeySequence
+    from PySide6.QtWidgets import QDialog, QTextBrowser
+    from video_chain.ui import shortcuts as S
+    shown = []
+    monkeypatch.setattr(QDialog, "exec", lambda self: shown.append(self) or 0)
+    monkeypatch.setattr(QDialog, "open", lambda self: shown.append(self))
+    monkeypatch.setattr(QDialog, "show", lambda self: shown.append(self))
+    act = next(a for a in win.menuBar().findChildren(type(win.act_open)) if a.text().startswith("Keyboard shortcuts"))
+    assert act.shortcut() == QKeySequence("F1")
+    act.trigger()
+    assert shown and shown[0].windowTitle() == "Keyboard shortcuts"
+    html = shown[0].findChild(QTextBrowser).toHtml()
+    assert "Ctrl+Return" in html and "Alt+L" in html
+
+
+def test_every_menu_shortcut_comes_from_the_table(app, win):
+    from video_chain.ui import shortcuts as S
+    table = {S.sequence(s.id).toString() for s in S.SHORTCUTS if " / " not in s.keys}
+    seen = []
+    for top in win.menuBar().actions():
+        menu = top.menu()
+        for a in (menu.actions() if menu else []):
+            if not a.shortcut().isEmpty():
+                seen.append(a.shortcut().toString())
+    assert seen and all(k in table for k in seen), [k for k in seen if k not in table]
+
+
+def test_the_graph_keys_are_in_the_table():
+    from video_chain.ui import shortcuts as S
+    ids = {s.id for s in S.SHORTCUTS}
+    assert {"graph_delete", "graph_fit"} <= ids
