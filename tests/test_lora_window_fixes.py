@@ -4,6 +4,7 @@ import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QToolButton
 
 from test_lora_notes import db_with, details, lora
@@ -239,3 +240,62 @@ def test_a_running_refine_can_be_stopped():
     dlg._update_buttons()
     assert dlg.b_stop.isHidden()
     dlg.reject()
+
+
+def test_mention_popup_keys_only_swallowed_when_something_is_inserted():
+    from PySide6.QtCore import QEvent, QModelIndex
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtWidgets import QPlainTextEdit
+    from video_chain.ui.mentions import MentionHelper
+    edit = QPlainTextEdit()
+    helper = MentionHelper(edit, lambda: ["Anna", "Anton"])
+    popup = helper.completer.popup()
+    helper._fill(["Anna", "Anton"])
+    popup.show()
+    popup.setCurrentIndex(QModelIndex())                     # (nothing chosen)
+    assert popup.isVisible()
+
+    def press(k, mod=Qt.NoModifier):
+        return helper.eventFilter(edit, QKeyEvent(QEvent.KeyPress, k, mod))
+    assert press(Qt.Key_Return) is False and press(Qt.Key_Tab) is False
+    assert press(Qt.Key_Backtab, Qt.ShiftModifier) is False
+    popup.hide()
+
+
+def test_trigger_words_are_trimmed_and_the_stack_is_not_rebuilt_for_the_same_items():
+    from video_chain.ui.lora_stack import LoraStack, clean_words
+    assert clean_words(" one, two ,, three  ,") == ["one", "two", "three"]
+    stack = LoraStack()
+    items = [{"path": "/x/a.safetensors", "strength": 1.0}]
+    stack.set_items([], items)
+    first = stack.rows[0][0]
+    stack.set_items([], [dict(i) for i in items])
+    assert stack.rows[0][0] is first                         # (same list: the rows stay)
+    stack.set_items([], [{"path": "/x/a.safetensors", "strength": 0.5}])
+    assert stack.rows[0][0] is not first and stack.rows[0][2].value() == 0.5
+
+
+def test_camera_menu_parses_each_token_once(monkeypatch):
+    from video_chain import camera as CAM
+    from video_chain.ui import problems
+    calls = []
+    real = CAM.parse
+    monkeypatch.setattr(CAM, "parse", lambda t: (calls.append(t), real(t))[1])
+    problems.camera_menu_items()
+    assert len(calls) <= 2 * len(CAM.tokens())             # (one here, one in label(): was ~40x)
+
+
+def test_problem_box_rebuild_leaves_no_old_rows():
+    from video_chain.ui.problems import ProblemBox
+    box = ProblemBox()
+    box.set_items([{"text": "a", "action": "x", "button": "Fix"}, {"text": "b", "error": True}])
+    box.set_items([{"text": "c"}])
+    app.processEvents()
+    assert [t.text() for t, _b in box.rows] == ["c"] and box.v.count() == 1
+    assert len(box.findChildren(__import__("PySide6.QtWidgets", fromlist=["QLabel"]).QLabel)) == 2    # mark + text
+
+
+def test_description_html_drops_remote_loaders():
+    from video_chain.ui.lora_details import clean_html
+    out = clean_html('<link rel="stylesheet" href="http://x/y.css"><meta http-equiv="refresh" content="0"><p>hi</p>')
+    assert "<link" not in out and "<meta" not in out and "<p>hi</p>" in out

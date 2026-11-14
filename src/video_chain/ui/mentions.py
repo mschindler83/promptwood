@@ -126,11 +126,12 @@ class MentionHelper(QObject):
 
     def eventFilter(self, obj, ev):
         if obj is self.edit and ev.type() == QEvent.KeyPress and self.completer.popup().isVisible():
-            if ev.key() in (Qt.Key_Enter, Qt.Key_Return, Qt.Key_Tab, Qt.Key_Backtab):
+            if ev.key() in (Qt.Key_Enter, Qt.Key_Return, Qt.Key_Tab):
                 idx = self.completer.popup().currentIndex()
-                if idx.isValid():
+                if idx.isValid():                  # (nothing chosen: the key does what it does without the list)
                     self._insert(idx.data(INSERT))
-                return True
+                    return True
+                return False
             if ev.key() == Qt.Key_Escape:
                 self.completer.popup().hide()
                 return True

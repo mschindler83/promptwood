@@ -11,7 +11,7 @@ def clean_html(text: str) -> str:
     """CivitAI's description HTML without pictures, scripts, styles and embedded frames."""
     s = str(text or "")
     s = re.sub(r"(?is)<(script|style|iframe|object|embed)\b.*?</\1\s*>", "", s)
-    s = re.sub(r"(?is)<(img|iframe|video|source|embed)\b[^>]*>", "", s)
+    s = re.sub(r"(?is)<(img|iframe|video|source|embed|link|meta|base)\b[^>]*>", "", s)
     s = re.sub(r"(?i)\son\w+\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", "", s)
     # no styles or backgrounds (they could name local files), and links only to the web
     s = re.sub(r"(?i)(?<![\w-])(style|background|src)\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", "", s)
@@ -80,10 +80,10 @@ def details_html(details: dict, prompts: list[dict] | None = None, note: str = "
                    "data back, at least without an API key: set yours in the settings; the LoRA's page on CivitAI may show them). Sample prompts in the descriptions above "
                    "are kept.</i></p>")
     for i, p in enumerate(prompts):
-        settings = ", ".join(f"{k} {p[k]}" for k in ("seed", "steps", "cfg", "sampler") if p.get(k) not in (None, ""))
+        gen = ", ".join(f"{k} {p[k]}" for k in ("seed", "steps", "cfg", "sampler") if p.get(k) not in (None, ""))
         out.append(f"<p><a href='copy:{i}'>[copy]</a> {e(p['prompt'])}"
                    + (f"<br><span style='color:gray'>negative: {e(p['negative'])}</span>" if p.get("negative") else "")
-                   + (f"<br><span style='color:gray'>{e(settings)}</span>" if settings else "") + "</p>")
+                   + (f"<br><span style='color:gray'>{e(gen)}</span>" if gen else "") + "</p>")
     files = v.get("files") or []
     if files:
         out.append("<h3>Files</h3><ul>" + "".join(
