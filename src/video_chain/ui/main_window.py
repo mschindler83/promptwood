@@ -92,6 +92,16 @@ LLM_MODEL_DIRS = (config.hf_cache(), Path.home() / ".cache" / "huggingface" / "h
 CLOSE_GRACE = 3.0          # seconds llama-server gets to end after SIGTERM when the window closes
 CHAT_HINTS = ("instruct", "chat", "-it-", "-it.", "_it_", "abliterated", "uncensored")
 MAX_RECENT = 10
+MAX_RECENT_LORAS = 12      # LoRAs kept in the "recent" list of the pickers
+COMFY_START_TIMEOUT = 180  # seconds ComfyUI is given to come up after it was started
+KILL_GRACE_MS = 8000       # how long the generator process may take to end after Stop
+CLOUD_KILL_GRACE_MS = 60000  # the same for a cloud worker: it ends its pod first
+QWIDGETSIZE_MAX = 16777215   # Qt's "no maximum width"
+CARD_MIN_WIDTH = 300         # the narrowest an inspector card is made
+THUMB_CACHE_MAX = 400        # timeline thumbnails kept
+TIMELINE_THUMB_HEIGHT = 48
+DEFAULT_SIZE = (672, 384)    # a clip's size when nothing says another (width, height)
+ASPECT_TOLERANCE = 0.05      # an end image this far from the canvas' aspect ratio is cut to it
 # H3's 17n+5 frame grid from 3 s to 15 s (362 frames = 15.1 s, the top of its trained range of ~124-362)
 FRAME_CHOICES = [17 * n + 5 for n in range(4, 22)]
 IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff)"
@@ -682,14 +692,22 @@ def plain_problem(raw: str, nid: str) -> str:
     return t if t.endswith((".", "?", "!")) else t + "."
 
 
+
+def speed_mode(o: dict) -> str:
+    """Which speed mode the project's options switch on: "turbo", "hyperflow", "pika" or "normal"."""
+    for mode in ("turbo", "hyperflow", "pika"):
+        if (o.get(mode) or {}).get("on"):
+            return mode
+    return "normal"
+
+
 def project_setting_changes(o: dict) -> list[tuple[str, str]]:
     """The project's settings (tree.options) that differ from a new project's (tree.DEFAULT_OPTIONS) and change how
     its clips are made: [(key, name shown)]. A setting that has no effect now (the steps in a speed mode with its
     own, the ElevenLabs model with local text to speech) is left out. ui keys, not option keys: see
     MainWindow._project_controls."""
     d, out = T.DEFAULT_OPTIONS, []
-    mode = ("turbo" if (o.get("turbo") or {}).get("on") else "hyperflow" if (o.get("hyperflow") or {}).get("on")
-            else "pika" if (o.get("pika") or {}).get("on") else "normal")
+    mode = speed_mode(o)
     if mode == "normal" and int(o.get("steps", d["steps"])) != d["steps"]:
         out.append(("steps", "Steps"))
     if mode != "normal":
@@ -1924,7 +1942,7 @@ class MainWindow(QMainWindow):
         self._model_state = ""
         self._joins = 0                         # path joins still running
         self._converts: dict[str, str] = {}     # video node -> token of its conversion in progress
-        self._kill_timer = QTimer(self, singleShot=True, interval=8000, timeout=self._kill)
+        self._kill_timer = QTimer(self, singleShot=True, interval=KILL_GRACE_MS, timeout=self._kill)
         self.bridge = _Bridge()
         self.bridge.joined.connect(self._joined)
         self.bridge.film.connect(self._film_joined)
@@ -1945,7 +1963,7 @@ class MainWindow(QMainWindow):
         self.bridge.spoken.connect(self._lines_spoken)
         self.bridge.eleven_models.connect(self._fill_eleven_models)
         self.bridge.eleven_cloned.connect(self._eleven_cloned)
-        self.bridge.tts_log.connect(lambda m: (self.log.appendPlainText("TTS: " + m), self.status.setText(m + "…")))
+        self.bridge.tts_log.connect(self._tts_log)
         self._tts_local: TTS.LocalTTS | None = None
         self._tts_busy = False
         self._uses_cache: tuple | None = None        # (tree, uses_index(tree)) until something changes
@@ -2100,8 +2118,8 @@ class MainWindow(QMainWindow):
                                   "style. In a prompt write @Name (typing @ offers the names): the clip is made "
                                   "with exactly the faces and pictures it mentions. A clip that mentions nobody "
                                   "uses the lead's face.")
-        self.cast_list.currentRowChanged.connect(lambda _r: self._show_character())
-        self.cast_list.itemDoubleClicked.connect(lambda _i: self._rename_character())
+        self.cast_list.currentRowChanged.connect(self._show_character)
+        self.cast_list.itemDoubleClicked.connect(self._rename_character)
         iv.addWidget(self.cast_list)
         crow = QHBoxLayout()
         self.b_char_new = QPushButton("New")
@@ -2118,7 +2136,7 @@ class MainWindow(QMainWindow):
         self.char_kind.setToolTip("What the selected entry is. A person has face pictures (cropped to the face), can "
                                   "have a voice and be the lead; a place, object or style is sent with its whole "
                                   "pictures and is named as what it is in the prompt")
-        self.char_kind.activated.connect(lambda _i: self._character_kind_changed())
+        self.char_kind.activated.connect(self._character_kind_changed)
         self.b_char_rename = QPushButton("Rename…")
         self.b_char_rename.setToolTip("Rename the character; every @mention in the prompts is renamed too")
         self.b_char_rename.clicked.connect(self._rename_character)
@@ -2201,8 +2219,8 @@ class MainWindow(QMainWindow):
         self.b_ref_crop = QPushButton("Crop…")
         self.b_ref_crop.setToolTip("Crop the selected face picture again (from the full picture it came from)")
         self.b_ref_crop.clicked.connect(self._recrop_reference)
-        self.refs.itemDoubleClicked.connect(lambda _i: self._recrop_reference())
-        self.refs.currentRowChanged.connect(lambda _r: self._update_cast_buttons())
+        self.refs.itemDoubleClicked.connect(self._recrop_reference)
+        self.refs.currentRowChanged.connect(self._update_cast_buttons)
         self.ref_add_label = label("Add face:", level="tertiary")
         rrow.addWidget(self.ref_add_label)
         for b in (self.b_ref_add, self.b_ref_create, self.b_ref_start, self.b_ref_clip):
@@ -2276,8 +2294,8 @@ class MainWindow(QMainWindow):
         self.track_list.setToolTip("Audio tracks: music, speech or a background the clips play as their own sound "
                                    "(a clip's Sound: “Audio track: …”), on from clip to clip. "
                                    "Double-click to cut it again")
-        self.track_list.itemDoubleClicked.connect(lambda _i: self._recut_track())
-        self.track_list.currentRowChanged.connect(lambda _r: self._update_track_buttons())
+        self.track_list.itemDoubleClicked.connect(self._recut_track)
+        self.track_list.currentRowChanged.connect(self._update_track_buttons)
         tv.addWidget(self.track_list)
         trow = QHBoxLayout()
         self.b_track_add = QPushButton("Import…")
@@ -2318,10 +2336,10 @@ class MainWindow(QMainWindow):
         self.sounds.setToolTip("Sound references: sounds the model listens to (a voice, a sound to copy, a beat). "
                                "In a clip's prompt the first one is <Audio 1>, the second "
                                "<Audio 2> ... Double-click to listen")
-        self.sounds.itemDoubleClicked.connect(lambda _i: self._play_sound())
+        self.sounds.itemDoubleClicked.connect(self._play_sound)
         FileDrop(self.sounds.viewport(), lambda files: [self.add_sound(f) for f in files],
                  lambda: self.project is not None)
-        self.sounds.currentRowChanged.connect(lambda _r: self._update_sound_buttons())
+        self.sounds.currentRowChanged.connect(self._update_sound_buttons)
         av.addWidget(self.sounds)
         arow = QHBoxLayout()
         self.b_sound_add = QPushButton("File…")
@@ -2579,7 +2597,7 @@ class MainWindow(QMainWindow):
                                   "ComfyUI held nearly all GPU memory; if the app crashes when playing, switch it "
                                   "off. Off: decoded and drawn on the CPU: never crashes, but lags with big clips. "
                                   "(The before / after comparison is always drawn on the CPU.)")
-        self.video_gpu.toggled.connect(lambda on: self._video_gpu_changed(on))
+        self.video_gpu.toggled.connect(self._video_gpu_changed)
         a.addRow("", self.video_gpu)
         self.triggers_online.toggled.connect(lambda on: on and self._scan_triggers())
         a.addRow("", self.triggers_online)
@@ -2601,8 +2619,8 @@ class MainWindow(QMainWindow):
                                     "CivitAI. ($CIVITAI_API_KEY wins when it is set.)")
         b_key = QPushButton("Save key")
         b_key.setAutoDefault(False)
-        b_key.clicked.connect(lambda: self._save_civitai_key())
-        self.civitai_key.returnPressed.connect(lambda: self._save_civitai_key())    # (Enter saves too)
+        b_key.clicked.connect(self._save_civitai_key)
+        self.civitai_key.returnPressed.connect(self._save_civitai_key)    # (Enter saves too)
         crow.addWidget(self.civitai_key, 1)
         crow.addWidget(b_key)
         self._civitai_row = row_widget(crow)
@@ -2616,8 +2634,8 @@ class MainWindow(QMainWindow):
                                    "a project; sent only to ElevenLabs. ($ELEVENLABS_API_KEY wins when it is set.)")
         b_ekey = QPushButton("Save key")
         b_ekey.setAutoDefault(False)
-        b_ekey.clicked.connect(lambda: self._save_eleven_key())
-        self.eleven_key.returnPressed.connect(lambda: self._save_eleven_key())
+        b_ekey.clicked.connect(self._save_eleven_key)
+        self.eleven_key.returnPressed.connect(self._save_eleven_key)
         erow.addWidget(self.eleven_key, 1)
         erow.addWidget(b_ekey)
         a.addRow("ElevenLabs API key", erow)
@@ -2655,8 +2673,8 @@ class MainWindow(QMainWindow):
                                    "project; sent only to RunPod. ($RUNPOD_API_KEY wins when it is set.)")
         b_rkey = QPushButton("Save key")
         b_rkey.setAutoDefault(False)
-        b_rkey.clicked.connect(lambda: self._save_runpod_key())
-        self.runpod_key.returnPressed.connect(lambda: self._save_runpod_key())
+        b_rkey.clicked.connect(self._save_runpod_key)
+        self.runpod_key.returnPressed.connect(self._save_runpod_key)
         rrow.addWidget(self.runpod_key, 1)
         rrow.addWidget(b_rkey)
         r.addRow("RunPod API key", rrow)
@@ -2694,8 +2712,7 @@ class MainWindow(QMainWindow):
                      level="tertiary")
         note.setWordWrap(True)
         r.addRow("", note)
-        for w_ in (self.runpod_gpu,):
-            w_.currentTextChanged.connect(lambda *_: self._runpod_changed())
+        self.runpod_gpu.currentTextChanged.connect(lambda *_: self._runpod_changed())
         self.runpod_fallback.toggled.connect(lambda *_: self._runpod_changed())
         self.runpod_without_volume.toggled.connect(lambda *_: self._runpod_changed())
         self.runpod_volume.editingFinished.connect(self._runpod_changed)
@@ -2828,7 +2845,7 @@ class MainWindow(QMainWindow):
         self.timeline = Timeline()
         self.timeline.clicked.connect(self.focus_clip)
         self.timeline.activated.connect(self._play_node)
-        self.timeline.menu.connect(lambda nid, pos: self._context(nid, pos))
+        self.timeline.menu.connect(self._context)
         pv.addWidget(self.timeline)
         pv.addStretch(1)
         # the inspector's Clip tab: the card of the clip in focus (one at a time; the path's other cards wait in
@@ -2984,7 +3001,7 @@ class MainWindow(QMainWindow):
         self._model_timer = QTimer(self, interval=20000, timeout=self._update_model_label)
         self._model_timer.start()
 
-        self.start_tile.clicked.connect(lambda _t: self._choose_image())
+        self.start_tile.clicked.connect(self._choose_image)
         for lst in (self.refs, self.cast_list):          # pictures dropped on the cast are faces / pictures of it
             FileDrop(lst.viewport(), lambda files: [self.add_reference(f) for f in files],
                      lambda: self.project is not None)
@@ -3185,7 +3202,7 @@ class MainWindow(QMainWindow):
 
     def _update_engine_banner(self):
         """The banner while the video engine is not reachable (the connection state the app polls anyway)."""
-        starting = bool(self._comfy_starting and time.monotonic() - self._comfy_starting < 180)
+        starting = bool(self._comfy_starting and time.monotonic() - self._comfy_starting < COMFY_START_TIMEOUT)
         self.engine_banner.set_state(starting, self._engine_can_start())
         self.engine_banner.setVisible(self.comfy_up is False)
 
@@ -3318,7 +3335,7 @@ class MainWindow(QMainWindow):
         self.act_left.setCheckable(True)
         self.act_left.setChecked(True)
         self.act_left.setShortcut(S.sequence("left_panel"))
-        self.act_left.toggled.connect(lambda on: self._show_left(on))   # (the panel is built later, in _build)
+        self.act_left.toggled.connect(self._show_left)   # (the panel is built later, in _build)
         for name in ("edit", "write", "watch"):
             row = S.SHORTCUTS[[s.id for s in S.SHORTCUTS].index(f"layout_{name}")]
             v.addAction(row.text, lambda _=False, n=name: self.apply_layout(n)).setShortcut(S.sequence(row.id))
@@ -4193,9 +4210,7 @@ class MainWindow(QMainWindow):
             self.eleven_model.setCurrentIndex(self.eleven_model.findData(topt["eleven_model"]))
             self.view.show((self._tts_form, self._eleven_row), topt["provider"] == "elevenlabs")
             turbo = o.get("turbo") or {}
-            self.speed.setCurrentIndex(self.speed.findData(
-                "turbo" if turbo.get("on") else "hyperflow" if (o.get("hyperflow") or {}).get("on")
-                else "pika" if (o.get("pika") or {}).get("on") else "normal"))
+            self.speed.setCurrentIndex(self.speed.findData(speed_mode(o)))
             self.turbo_steps.setValue(int(turbo.get("steps", 6)))
             self.turbo_strength.setValue(float(turbo.get("strength", 1.0)))
             self._cfg_mode = self.speed.currentData()
@@ -4418,6 +4433,11 @@ class MainWindow(QMainWindow):
                   f"ComfyUI's models were unloaded for {what} (it needs about {gb(need)} of VRAM, "
                   f"{gb(free)} was free" + (f", now {gb(now)}" if now is not None else "") +
                   "); the clip model loads again before the next clips.")
+
+    def _tts_log(self, message: str):
+        """A step of text to speech: in the log, and in the status line while it works."""
+        self.log.appendPlainText("TTS: " + message)
+        self.status.setText(message + "…")
 
     def _llm_room_made(self, msg: str):
         self._comfy_model = None                    # (nothing of this app is loaded in ComfyUI any more)
@@ -4706,7 +4726,7 @@ class MainWindow(QMainWindow):
                f" and made its sound (track “{T.track_of(self.tree, done['track'])['name']}”); the picture is made "
                "to it, lips in sync.")
         if done["frames"]:
-            msg += f" The clip is now {done['frames'] / 24:.1f} s long, so the lines fit."
+            msg += f" The clip is now {done['frames'] / chain.FPS:.1f} s long, so the lines fit."
         if r.get("prompt") != node.prompt:
             msg += " (The prompt was changed meanwhile: speak again if its lines changed.)"
         self.status.setText(msg)
@@ -6240,7 +6260,7 @@ class MainWindow(QMainWindow):
     def badge(self, n: T.Node) -> str:
         """Short text for a clip's own settings, shown on its node ('' = all project defaults)."""
         if n.is_video:
-            return ("🔒 frozen · " if n.frozen else "") + f"real video · {T.clip_length(self.tree, n) / 24:.1f} s"
+            return ("🔒 frozen · " if n.frozen else "") + f"real video · {T.clip_length(self.tree, n) / chain.FPS:.1f} s"
         ov, parts = n.overrides or {}, self._own_parts(n)
         if ov.get("guide"):
             parts.append(f"carry-over {ov['guide']}")
@@ -6254,7 +6274,7 @@ class MainWindow(QMainWindow):
             parts.insert(0, "🔒 frozen")
         k = T.handover_index(self.tree, n)
         if k is not None:
-            parts.append(f"hands over at {k / 24:.1f} s")
+            parts.append(f"hands over at {k / chain.FPS:.1f} s")
         if self.veda_used(n):
             parts.append("⚡ Veda")
         return " · ".join(parts)
@@ -6585,12 +6605,19 @@ class MainWindow(QMainWindow):
                     "recorded", guide=max(fits, default=0),
                     tail=" Write in the prompt what happens; the words come from the video.")
 
+    def _sound_suffix(self, n: T.Node, ov: dict) -> str:
+        """" (laid over)" / " (mixed with the clip's own sound, +3 dB)" after the name of a sound, or ""."""
+        if not (ov.get("source_sound") and ov.get("sound_over")):
+            return ""
+        if not T.sound_mixed(n, (self.tree.options if self.tree else {}).get("audio", True)):
+            return " (laid over)"
+        level = f", {T.mix_level(n):+g} dB" if T.mix_level(n) else ""
+        return f" (mixed with the clip's own sound{level})"
+
     def _own_parts(self, n: T.Node) -> list[str]:
         """A clip's own LoRA / strength / length / steps in a few words."""
         ov, parts = n.overrides or {}, []
-        over = "" if not (ov.get("source_sound") and ov.get("sound_over")) else " (laid over)" \
-            if not T.sound_mixed(n, (self.tree.options if self.tree else {}).get("audio", True)) else \
-            " (mixed with the clip's own sound" + (f", {T.mix_level(n):+g} dB" if T.mix_level(n) else "") + ")"
+        over = self._sound_suffix(n, ov)
         for p, st in T.node_loras(n):
             parts.append(f"{lora_label(p)[:18]} ×{st:g}")
         if "frames" in ov:
@@ -6665,8 +6692,8 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _fit_card(card):
         """A card in the inspector takes its width (it had a fixed width in a row)."""
-        card.setMinimumWidth(300)
-        card.setMaximumWidth(16777215)
+        card.setMinimumWidth(CARD_MIN_WIDTH)
+        card.setMaximumWidth(QWIDGETSIZE_MAX)
 
     def _show_focus(self):
         card = next((c for c in self.cards if c.nid == self.focus), None)
@@ -6743,9 +6770,9 @@ class MainWindow(QMainWindow):
                 cache = self.__dict__.setdefault("_tl_thumbs", {})
                 key = pm.cacheKey()
                 if key not in cache:
-                    if len(cache) > 400:
+                    if len(cache) > THUMB_CACHE_MAX:
                         cache.clear()
-                    cache[key] = pm.scaledToHeight(48, Qt.SmoothTransformation)
+                    cache[key] = pm.scaledToHeight(TIMELINE_THUMB_HEIGHT, Qt.SmoothTransformation)
                 pm = cache[key]
             what = (Path(n.source["file"]).name if n.is_video else (n.prompt or "(no prompt yet)"))
             tip = (f"{'Video' if n.is_video else 'Clip'} #{T.short_id(n.id)} · {secs:.1f} s · {self.state(n.id)}\n"
@@ -7107,7 +7134,7 @@ class MainWindow(QMainWindow):
         except ValueError:
             recent = []
         recent = [path] + [r for r in recent if r != path]
-        self.qs.setValue("recentLoras", json.dumps(recent[:12]))
+        self.qs.setValue("recentLoras", json.dumps(recent[:MAX_RECENT_LORAS]))
 
     def _overrides_changed(self, nid: str, ov: dict):
         if self.tree and nid in self.tree.nodes and not self.tree.nodes[nid].frozen:
@@ -7962,7 +7989,7 @@ class MainWindow(QMainWindow):
         canvas = self._canvas_for()
         if image is not None and canvas:
             img = QImage(image)
-            if abs(img.width() / img.height() - canvas[0] / canvas[1]) > 0.05 * canvas[0] / canvas[1]:
+            if abs(img.width() / img.height() - canvas[0] / canvas[1]) > ASPECT_TOLERANCE * canvas[0] / canvas[1]:
                 msg += (f" Its shape ({img.width()}×{img.height()}) differs from the clip's ({canvas[0]}×{canvas[1]}):"
                         " H3 crops it to the middle.")
         self.status.setText(msg + " Keep it reachable by motion from what comes before it, or the video model cuts to it.")
@@ -8668,7 +8695,7 @@ class MainWindow(QMainWindow):
                 self._report_error(f"Cannot read video #{T.short_id(nid)}: {e}")
                 return None
             key = node.made.get("key") or {}
-            size = (int(key.get("width") or 0) or 672, int(key.get("height") or 0) or 384)
+            size = (int(key.get("width") or 0) or DEFAULT_SIZE[0], int(key.get("height") or 0) or DEFAULT_SIZE[1])
             dlg = SplitDialog(self, clip, frames, size, node.source["start"], node.source["end"],
                               f"Split video #{T.short_id(nid)}")
             try:
@@ -9172,7 +9199,7 @@ class MainWindow(QMainWindow):
                 args.append("--runpod-no-fallback")
             if volume and without_volume:
                 args.append("--runpod-without-volume")
-            self._kill_timer.setInterval(60000)        # (time to terminate the pod on Stop)
+            self._kill_timer.setInterval(CLOUD_KILL_GRACE_MS)        # (time to terminate the pod on Stop)
         else:
             url, comfy_dir, cleanup = self._worker_bound
             args = pre + ["--serve", "--events", "--idle-minutes", f"{minutes:g}", "--comfy-url", url]
@@ -9180,7 +9207,7 @@ class MainWindow(QMainWindow):
                 args += ["--comfy-dir", os.path.expanduser(comfy_dir)]
             if not cleanup:
                 args.append("--keep-comfy-copies")
-            self._kill_timer.setInterval(8000)
+            self._kill_timer.setInterval(KILL_GRACE_MS)
         self.log.appendPlainText("$ " + " ".join([program, *args]))
         self.status.setText("Starting …")
         self.proc.start(program, args)
@@ -9430,8 +9457,10 @@ class MainWindow(QMainWindow):
                     item.update()
                 card = next((c for c in self.cards if c.nid == nid), None)
                 if card is not None:
-                    card.set_progress(ev["i"], ev["n"], f"{round(100 * frac)} %" + (
-                        f" · {fmt_left(left)} left" if left is not None else "") if upscaling else None)
+                    text = None
+                    if upscaling:
+                        text = f"{round(100 * frac)} %" + (f" · {fmt_left(left)} left" if left is not None else "")
+                    card.set_progress(ev["i"], ev["n"], text)
         elif e == "note":                              # what the generator is doing now (e.g. a SeedVR2 piece)
             self._clip_note = str(ev.get("text") or "")
             if self._model_state == "loading":         # (preparing the RunPod pod: each step in the status bar)
@@ -9572,7 +9601,7 @@ class MainWindow(QMainWindow):
         """ComfyUI is down: start it (if allowed) and generate targets once it answers. False: not started."""
         if not self.comfy_autostart.isChecked():
             return False
-        if not (self._comfy_starting and time.monotonic() - self._comfy_starting < 180):
+        if not (self._comfy_starting and time.monotonic() - self._comfy_starting < COMFY_START_TIMEOUT):
             if not self.start_comfy():
                 return False
         self._waiting_comfy = list(targets)
@@ -9598,7 +9627,7 @@ class MainWindow(QMainWindow):
                     QTimer.singleShot(0, lambda: self._start(targets, refine))
                 else:
                     self._film_queue = None
-            elif not (self._comfy_starting and time.monotonic() - self._comfy_starting < 180):
+            elif not (self._comfy_starting and time.monotonic() - self._comfy_starting < COMFY_START_TIMEOUT):
                 self._waiting_comfy = None
                 self._film_queue = None
                 self.status.setText("ComfyUI did not start within 3 minutes; see its own log.")
@@ -9608,7 +9637,7 @@ class MainWindow(QMainWindow):
     def _update_comfy_label(self):
         if self.comfy_up:
             text, sev = "Video engine: running", ""
-        elif self._comfy_starting and time.monotonic() - self._comfy_starting < 180:
+        elif self._comfy_starting and time.monotonic() - self._comfy_starting < COMFY_START_TIMEOUT:
             text, sev = "Video engine: starting …", "warning"
         elif self.comfy_up is False:
             text, sev = "Video engine: not running", "warning"
@@ -9733,7 +9762,7 @@ class MainWindow(QMainWindow):
                 e.ignore()
                 return
         elif self._joins or self._converts or self._copying:
-            what = ("copied (Save as)" if self._copying else "converted" if self._converts else "joined")
+            what = "copied (Save as)" if self._copying else "converted" if self._converts else "joined"
             if not D.confirm(self, "Quit while working?", f"A video is being {what}. Quit anyway? What is not "
                                  "finished is lost."):
                 e.ignore()
