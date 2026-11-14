@@ -332,6 +332,152 @@ def remix_sounds(project: Path, tree: Tree, nids: list[str], checker: Checker | 
     return out
 
 
+def _check_run(project: Path, tree: Tree, checker: Checker, todo: list[str]) -> None:
+    """Everything a run needs is there (LoRAs, videos, pictures) and fits (frames, cast, sound): raises if not."""
+    missing = [lo for lo in loras_needed(tree, checker, todo) if not Path(lo).is_file()]
+    if missing:
+        raise FileNotFoundError(f"LoRA not found: {missing[0]}")
+    gone = [nid for nid in todo if tree.nodes[nid].is_video and not Path(tree.nodes[nid].source["file"]).is_file()]
+    if gone:
+        raise FileNotFoundError(f"video file not found: {tree.nodes[gone[0]].source['file']}")
+    problem = guide_problem(tree, checker, todo)
+    if problem:
+        raise ValueError(problem)
+    no_end = missing_end_images(project, tree, todo)
+    if no_end:
+        raise FileNotFoundError(f"the end image of clip #{short_id(no_end[0])} is missing")
+    no_key = missing_keyframes(project, tree, todo)
+    if no_key:
+        raise FileNotFoundError(f"a keyframe picture of clip #{short_id(no_key[0])} is missing")
+    problem = keyframe_problem(tree, checker, todo)
+    if problem:
+        raise ValueError(problem)
+    faces = cast_problems(project, tree, todo) + source_sound_problems(tree, todo, project)
+    if faces:
+        raise ValueError(faces[0])
+
+
+def _generator_call(project: Path, node: Node, settings: dict) -> dict:
+    """The settings handed to generator.generate: the clip's settings with the files its pictures and sounds are."""
+    call = dict(settings)
+    if node.keyframes:
+        call["keyframes"] = [{"image": str(project / k["image"]), "frame_idx": keyframe_frame(k["at"])}
+                             for k in node.keyframes]
+    if settings.get("refs"):               # the generator gets the files; the record keeps names + hashes
+        call["ref_paths"] = [str(project / r["file"]) for r in settings["refs"]]
+    if settings.get("audio_refs"):
+        call["audio_paths"] = [str(project / a["file"]) for a in settings["audio_refs"]]
+    return call
+
+
+def _record_made(project: Path, tree: Tree, node: Node, settings: dict, *, new_video: Path, new_frame: Path,
+                 own: Path | None, made_n: int, start_sha: str | None, end_key, key_key, guide_from,
+                 log: Callable[[str], None]) -> list[Path]:
+    """Write the record of the clip just made (node.made). Returns the pictures of the previous version that go to
+    old/ (its end image and keyframes, when they are no longer the clip's)."""
+    nid = node.id
+    old: list[Path] = []
+    old_end = (node.made or {}).get("end_image")
+    old_keys = {k.get("image") for k in (node.made or {}).get("keyframes") or [] if isinstance(k, dict)}
+    cut = chain.hard_cuts(new_video) if node.keyframes or end_image_used(tree, node) else []
+    node.made = {"prompt": node.prompt, "seed": node.seed, "settings": settings,
+                 "overrides": copy.deepcopy(node.overrides or {}), "end_image": node.end_image,
+                 "keyframes": copy.deepcopy(node.keyframes),
+                 "start_sha1": start_sha, "video": f"nodes/{new_video.name}",
+                 "frame": f"nodes/{new_frame.name}", "frames": made_n}
+    if own is not None:
+        node.made["own_sound"] = f"nodes/{own.name}"   # (a sound-only change mixes again: remix_sound)
+    if old_end and old_end != node.end_image and _in_ends(project, old_end):
+        old.append(project / old_end)          # the end image of the previous version
+    for rel in old_keys - {k["image"] for k in node.keyframes} - {None}:
+        if _in_ends(project, rel):
+            old.append(project / rel)          # keyframe pictures of the previous version
+    if cut:
+        node.made["cuts"] = cut                # hard cuts H3 made (a keyframe / end it could not reach)
+        log(f"{nid}: the clip cuts at {', '.join(f'{c / chain.FPS:.2f} s' for c in cut)} "
+            "(a keyframe or the end image is probably too far from what comes before it)")
+    if end_key is not None:
+        node.made["end_key"] = end_key
+    if key_key is not None:
+        node.made["keyframe_key"] = key_key
+    if guide_from is not None:
+        node.made["guide_from"] = guide_from
+    if node.end_at is not None:
+        # a new take: the frame chosen in the old one means nothing here; it hands over at its last
+        # frame until a frame of this take is chosen
+        log(f"{nid}: made again, it hands over at its last frame again (choose a frame of the new take)")
+        node.end_at = None
+    return old
+
+
+def _make_ai_clip(generator: chain.Generator, project: Path, tree: Tree, node: Node, checker: Checker,
+                  k: int, total: int, emit: Callable[[dict], None],
+                  log: Callable[[str], None]) -> tuple[list[Path], list[Path]]:
+    """Generate one clip and write its record. Returns (its new files, the files of the previous version that go
+    to old/ besides the clip's own)."""
+    nid = node.id
+    nodes_dir = project / "nodes"
+    start = checker.start_frame(node)
+    log(f"[{k}/{total}] {nid}: generating (seed {node.seed}) from "
+        f"{start.name if start else 'nothing (no start frame)'}")
+    send = start                                 # what H3 gets: a start picture prepared for the canvas
+    if start is not None and node.parent is None:   # (the record keeps the picture's own hash)
+        base = checker.base() or {}
+        if base.get("width") and base.get("height"):
+            send = prepared_start(project, base["width"], base["height"], start)
+    emit({"e": "node", "id": nid, "state": "generating", "k": k, "n": total})
+    # a new clip gets new file names: nothing is overwritten, a failed or stopped generation keeps the
+    # previous clip and its record, and a still-open old file (SMB) does not stop anything
+    new_video, new_frame = new_clip_files(project, nid)
+    settings = checker.settings(nid)
+    start_sha = checker.sha(start)
+    end_key = checker.end_key(node)
+    key_key = checker.keyframe_key(node)
+    guide_from = checker.guide_from(node)
+    call = _generator_call(project, node, settings)
+    own = None
+    try:
+        with media.scratch("job", dir=str(nodes_dir)) as tmp:
+            guides, end_image = _guides(project, tree, node, settings, Path(tmp))
+            if guides:
+                call["guides"] = guides
+            if end_image is not None:
+                call["end_image"] = str(end_image)
+            sound = None
+            if settings.get("source_sound"):   # the real video's sound after its range: the soundtrack
+                sound = Path(tmp) / "source_sound.wav"
+                ss = settings["source_sound"]
+                given_sound(project, node, ss, sound)
+                if not ss.get("overlay"):  # the model makes the picture to it (lip sync)
+                    call["audio_paths"] = list(call.get("audio_paths") or []) + [str(sound)]
+            plain = (send is not None and not any(g.get("at") == "start" for g in guides),
+                     end_image is not None)        # what the workflow really gets as plain frames
+            numbered = settings.get("frame_pictures") or []
+            if ("start" in numbered and not plain[0]) or ("end" in numbered and not plain[1]):
+                raise RuntimeError(f"clip #{short_id(nid)}: its frames are not the ones its settings number "
+                                   f"({', '.join(numbered)})")
+            generator.generate(model_prompt(tree.options, node, settings, start=plain[0], end=plain[1]),
+                               send, new_video, new_frame, node.seed, settings=call)
+            if sound is not None and new_video.exists() and settings["source_sound"].get("overlay"):
+                own = chain.keep_own_sound(new_video)    # the model's sound, before it is replaced / mixed
+            if sound is not None and new_video.exists() and settings["source_sound"].get("mix"):
+                chain.mix_audio(new_video, sound, settings["source_sound"].get("mix_level") or 0.0)
+            elif sound is not None and new_video.exists():
+                chain.replace_audio(new_video, sound)    # exactly the recorded speech, not a remake
+        if not new_video.exists() or not new_frame.exists():
+            raise RuntimeError(f"the generator did not write the clip of {nid}")
+        made_n = chain.probe(new_video)["frames"]      # the real count (hand-over frames, joins)
+    except BaseException:
+        for f in (new_video, new_frame, own):
+            if f is not None:
+                _unlink(f)
+        raise
+    old = _record_made(project, tree, node, settings, new_video=new_video, new_frame=new_frame, own=own,
+                       made_n=made_n, start_sha=start_sha, end_key=end_key, key_key=key_key,
+                       guide_from=guide_from, log=log)
+    return [new_video, new_frame] + ([own] if own is not None else []), old
+
+
 def run_tree(generator: chain.Generator, project: Path, targets: list[str],
              events: Callable[[dict], None] | None = None, log: Callable[[str], None] = print) -> list[str]:
     """Make what the target paths need. Saves tree.json after every clip, so a stop keeps finished clips."""
@@ -355,27 +501,7 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
         log(f"{nid}: sound mixed again from its kept own sound (no new generation)")
         checker = Checker(project, tree)
     todo = plan(tree, checker, targets)
-    missing = [lo for lo in loras_needed(tree, checker, todo) if not Path(lo).is_file()]
-    if missing:
-        raise FileNotFoundError(f"LoRA not found: {missing[0]}")
-    gone = [nid for nid in todo if tree.nodes[nid].is_video and not Path(tree.nodes[nid].source["file"]).is_file()]
-    if gone:
-        raise FileNotFoundError(f"video file not found: {tree.nodes[gone[0]].source['file']}")
-    problem = guide_problem(tree, checker, todo)
-    if problem:
-        raise ValueError(problem)
-    no_end = missing_end_images(project, tree, todo)
-    if no_end:
-        raise FileNotFoundError(f"the end image of clip #{short_id(no_end[0])} is missing")
-    no_key = missing_keyframes(project, tree, todo)
-    if no_key:
-        raise FileNotFoundError(f"a keyframe picture of clip #{short_id(no_key[0])} is missing")
-    problem = keyframe_problem(tree, checker, todo)
-    if problem:
-        raise ValueError(problem)
-    faces = cast_problems(project, tree, todo) + source_sound_problems(tree, todo, project)
-    if faces:
-        raise ValueError(faces[0])
+    _check_run(project, tree, checker, todo)
     for nid in sorted(on_paths - set(todo), key=lambda i: tree.depth(i)):
         emit({"e": "node", "id": nid, "state": "reused"})
     emit({"e": "plan", "make": todo})
@@ -394,99 +520,8 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
             node.made = make_video(project, node, checker.base())
             new_files = [project / node.made[x] for x in ("video", "frame", "first")]
         else:
-            start = checker.start_frame(node)
-            log(f"[{k}/{len(todo)}] {nid}: generating (seed {node.seed}) from "
-                f"{start.name if start else 'nothing (no start frame)'}")
-            send = start                                 # what H3 gets: a start picture prepared for the canvas
-            if start is not None and node.parent is None:   # (the record keeps the picture's own hash)
-                base = checker.base() or {}
-                if base.get("width") and base.get("height"):
-                    send = prepared_start(project, base["width"], base["height"], start)
-            emit({"e": "node", "id": nid, "state": "generating", "k": k, "n": len(todo)})
-            # a new clip gets new file names: nothing is overwritten, a failed or stopped generation keeps the
-            # previous clip and its record, and a still-open old file (SMB) does not stop anything
-            new_video, new_frame = new_clip_files(project, nid)
-            settings = checker.settings(nid)
-            start_sha = checker.sha(start)
-            end_key = checker.end_key(node)
-            key_key = checker.keyframe_key(node)
-            guide_from = checker.guide_from(node)
-            call = dict(settings)
-            own = None
-            if node.keyframes:
-                call["keyframes"] = [{"image": str(project / k["image"]), "frame_idx": keyframe_frame(k["at"])}
-                                     for k in node.keyframes]
-            if settings.get("refs"):               # the generator gets the files; the record keeps names + hashes
-                call["ref_paths"] = [str(project / r["file"]) for r in settings["refs"]]
-            if settings.get("audio_refs"):
-                call["audio_paths"] = [str(project / a["file"]) for a in settings["audio_refs"]]
-            try:
-                with media.scratch("job", dir=str(nodes_dir)) as tmp:
-                    guides, end_image = _guides(project, tree, node, settings, Path(tmp))
-                    if guides:
-                        call["guides"] = guides
-                    if end_image is not None:
-                        call["end_image"] = str(end_image)
-                    sound = None
-                    if settings.get("source_sound"):   # the real video's sound after its range: the soundtrack
-                        sound = Path(tmp) / "source_sound.wav"
-                        ss = settings["source_sound"]
-                        given_sound(project, node, ss, sound)
-                        if not ss.get("overlay"):  # the model makes the picture to it (lip sync)
-                            call["audio_paths"] = list(call.get("audio_paths") or []) + [str(sound)]
-                    plain = (send is not None and not any(g.get("at") == "start" for g in guides),
-                             end_image is not None)        # what the workflow really gets as plain frames
-                    numbered = settings.get("frame_pictures") or []
-                    if ("start" in numbered and not plain[0]) or ("end" in numbered and not plain[1]):
-                        raise RuntimeError(f"clip #{short_id(nid)}: its frames are not the ones its settings number "
-                                           f"({', '.join(numbered)})")
-                    generator.generate(model_prompt(tree.options, node, settings, start=plain[0], end=plain[1]),
-                                       send, new_video, new_frame, node.seed, settings=call)
-                    if sound is not None and new_video.exists() and settings["source_sound"].get("overlay"):
-                        own = chain.keep_own_sound(new_video)    # the model's sound, before it is replaced / mixed
-                    if sound is not None and new_video.exists() and settings["source_sound"].get("mix"):
-                        chain.mix_audio(new_video, sound, settings["source_sound"].get("mix_level") or 0.0)
-                    elif sound is not None and new_video.exists():
-                        chain.replace_audio(new_video, sound)    # exactly the recorded speech, not a remake
-                if not new_video.exists() or not new_frame.exists():
-                    raise RuntimeError(f"the generator did not write the clip of {nid}")
-                made_n = chain.probe(new_video)["frames"]      # the real count (hand-over frames, joins)
-            except BaseException:
-                for f in (new_video, new_frame, own):
-                    if f is not None:
-                        _unlink(f)
-                raise
-            old_end = (node.made or {}).get("end_image")
-            old_keys = {k.get("image") for k in (node.made or {}).get("keyframes") or [] if isinstance(k, dict)}
-            cut = chain.hard_cuts(new_video) if node.keyframes or end_image_used(tree, node) else []
-            node.made = {"prompt": node.prompt, "seed": node.seed, "settings": settings,
-                         "overrides": copy.deepcopy(node.overrides or {}), "end_image": node.end_image,
-                         "keyframes": copy.deepcopy(node.keyframes),
-                         "start_sha1": start_sha, "video": f"nodes/{new_video.name}",
-                         "frame": f"nodes/{new_frame.name}", "frames": made_n}
-            if own is not None:
-                node.made["own_sound"] = f"nodes/{own.name}"   # (a sound-only change mixes again: remix_sound)
-            if old_end and old_end != node.end_image and _in_ends(project, old_end):
-                old.append(project / old_end)          # the end image of the previous version
-            for rel in old_keys - {k["image"] for k in node.keyframes} - {None}:
-                if _in_ends(project, rel):
-                    old.append(project / rel)          # keyframe pictures of the previous version
-            if cut:
-                node.made["cuts"] = cut                # hard cuts H3 made (a keyframe / end it could not reach)
-                log(f"{nid}: the clip cuts at {', '.join(f'{c / chain.FPS:.2f} s' for c in cut)} "
-                    "(a keyframe or the end image is probably too far from what comes before it)")
-            if end_key is not None:
-                node.made["end_key"] = end_key
-            if key_key is not None:
-                node.made["keyframe_key"] = key_key
-            if guide_from is not None:
-                node.made["guide_from"] = guide_from
-            new_files = [new_video, new_frame] + ([own] if own is not None else [])
-            if node.end_at is not None:
-                # a new take: the frame chosen in the old one means nothing here; it hands over at its last
-                # frame until a frame of this take is chosen
-                log(f"{nid}: made again, it hands over at its last frame again (choose a frame of the new take)")
-                node.end_at = None
+            new_files, older = _make_ai_clip(generator, project, tree, node, checker, k, len(todo), emit, log)
+            old += older
         save(project, tree)
         for f in old:                              # the previous version is never deleted: it goes to old/
             if f not in new_files and not chain.keep_aside(project, f):
