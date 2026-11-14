@@ -40,7 +40,6 @@ from .mw_path import PathMixin
 from .mw_project import ProjectMixin
 from .mw_settings import SettingsMixin
 from .mw_state import StateMixin
-from .mw_support import _Bridge
 from .mw_tts import TtsMixin
 from .mw_videos import VideosMixin
 from .mw_view import ViewMixin
@@ -103,28 +102,8 @@ class MainWindow(BuildMixin, GeneratorMixin, ComfyMixin, ExportMixin, VideosMixi
         self._joins = 0                         # path joins still running
         self._converts: dict[str, str] = {}     # video node -> token of its conversion in progress
         self._kill_timer = timer(self, self._kill, KILL_GRACE_MS, single=True)
-        self.bridge = _Bridge()
-        self.bridge.joined.connect(self._joined)
-        self.bridge.film.connect(self._film_joined)
-        self.bridge.duplicated.connect(self._scene_duplicated)
         self._film_queue: list[str] | None = None    # Generate film: the scenes still to make
-        self.bridge.comfy.connect(self._comfy_state)
-        self.bridge.checked.connect(self._checked)
-        self.bridge.loras.connect(self._loras_found)
-        self.bridge.triggers.connect(self._triggers_found)
-        self.bridge.trigger_progress.connect(self._trigger_progress)
         self._trigger_scan = None
-        self.bridge.copied.connect(self._copied)
-        self.bridge.converted.connect(self._converted)
-        self.bridge.remixed.connect(self._remixed)
-        self.bridge.room_made.connect(self._room_made)
-        self.bridge.freed.connect(self._comfy_freed)
-        self.bridge.exported.connect(self._clip_copied)
-        self.bridge.spoken.connect(self._lines_spoken)
-        self.bridge.eleven_models.connect(self._fill_eleven_models)
-        self.bridge.eleven_cloned.connect(self._eleven_cloned)
-        self.bridge.tts_log.connect(self._tts_log)
-        self.bridge.log.connect(lambda text: self.log.appendPlainText(text))
         self._tts_local: TTS.LocalTTS | None = None
         self._tts_fish: TTS.FishTTS | None = None
         self._tts_busy = False

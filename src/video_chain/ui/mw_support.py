@@ -1,7 +1,7 @@
 """Small Qt helpers of the main window: drop target, the signals worker threads send, a stack as big as its page."""
 from __future__ import annotations
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject
 from PySide6.QtWidgets import QComboBox, QStackedWidget, QWidget
 
 from .ui_logic import frames_text
@@ -47,29 +47,6 @@ class FileDrop(QObject):
                 self.on_files(files)
                 return True
         return False
-
-
-class _Bridge(QObject):
-    joined = Signal(object, object, str, str, str)  # path or None, error or None, purpose, status prefix, project
-    film = Signal(object, object, str)               # the joined film or None, error or None, 'play' / 'export'
-    duplicated = Signal(object, object, str)         # (scene id, title) or None, error or None, film folder
-    comfy = Signal(bool)                       # ComfyUI reachable
-    checked = Signal(int, list, list)          # Generate's pre-flight: its number, what is missing, empty prompts
-    loras = Signal(list, bool)                 # H3 LoRAs found in ComfyUI's LoRA folders, report them
-    triggers = Signal(dict)                    # the trigger word scan finished (its counts)
-    trigger_progress = Signal(int, int, str)   # the scan asks CivitAI about the k-th of n LoRAs (its file name)
-    copied = Signal(str, str)                  # Save as: target folder, error ('' = done)
-    converted = Signal(str, object, str, str, str)  # video node id, record or None, error, token, project
-    remixed = Signal(object, str, str)         # [(clip id, its new record)], error ('' = done), project
-    exported = Signal(str, str, str)           # a single clip was copied out: its id, the file, error ('' = done)
-    freed = Signal(bool)                       # ComfyUI's answer to "unload your models" (True: done)
-    # ComfyUI's models were unloaded for a model of this app (the llama.cpp server, text to speech)
-    room_made = Signal(str)
-    spoken = Signal(str, object, str, str)     # clip id, rendered lines (tts.render_lines) or None, error, project
-    log = Signal(str)                          # a line for the log from a worker thread
-    tts_log = Signal(str)                      # a step of text to speech
-    eleven_models = Signal(object, str)        # ElevenLabs' TTS models or None, error
-    eleven_cloned = Signal(str, object, str, str)   # character, cloned voice (tts.clone_sample) or None, error, project
 
 
 class _CurrentStack(QStackedWidget):

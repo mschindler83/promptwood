@@ -89,3 +89,10 @@ def test_post_runs_a_call_on_the_gui_thread_from_a_worker():
     run_in_background(fn, on_done=out.append, owner=owner)
     assert wait(app, lambda: out and len(lines) == 3)
     assert [i for i, _ in lines] == [0, 1, 2] and all(t is threading.main_thread() for _, t in lines)
+
+
+def test_post_from_the_gui_thread_runs_at_once():
+    from video_chain.ui.workers import post
+    seen, owner = [], QWidget()
+    assert post(owner, lambda: seen.append(1)) is True
+    assert seen == [1]

@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
-import threading
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -12,12 +12,14 @@ from PySide6.QtWidgets import QFileDialog
 
 from .. import chain, comfy as CMF, imagegen, tree as T
 from .lora_stack import fill_lora_combo, lora_label, lora_path
-from .widgets import safe_emit
 from . import ui_logic as UL
 from .clip_cards import PromptCard
 from .ui_logic import MAX_RECENT_LORAS, REMIX_DELAY_MS, STEPS_TIP, label_loras, plural
 from .mw_host import MainWindowHost
 from .qsvalue import qs_value
+from .workers import run_in_background
+
+log = logging.getLogger(__name__)
 
 
 class LorasMixin(MainWindowHost):
@@ -100,32 +102,29 @@ class LorasMixin(MainWindowHost):
         def work():
             for f in files:
                 chain.file_signature(f)               # cached by (path, size, date) for the clip states
-        threading.Thread(target=work, daemon=True).start()
+        run_in_background(work, on_done=lambda _r: None, owner=self)
 
     def scan_loras(self, report: bool = False):
         """Find the H3 LoRAs in ComfyUI's LoRA folders (header reads only), in the background. report: say in the
         status bar how many were found."""
-        comfy_dir, bridge = Path(os.path.expanduser(self.comfy_dir.text().strip() or UL.DEFAULT_COMFY_DIR)), self.bridge
+        comfy_dir = Path(os.path.expanduser(self.comfy_dir.text().strip() or UL.DEFAULT_COMFY_DIR))
         self._scanned_at = time.monotonic()
         self._lora_scan_gen = self._lora_scan_gen + 1
         gen = self._lora_scan_gen
 
         def work():
-            try:
-                roots = CMF.comfy_lora_roots(comfy_dir)
-                found = [(p, n, "turbo" if CMF.is_turbo_lora(Path(p)) else "h3") for p, n in CMF.find_h3_loras(roots)]
-                found += [(p, n, "qwen") for p, n in CMF.find_qwen_loras(roots)]
-                for fam, items in imagegen.find_image_loras(roots).items():
-                    found += [(p, n, fam) for p, n in items]
-            except Exception:  # noqa: BLE001
-                return                           # keep the lists found before (a folder may be offline)
-            if gen != self._lora_scan_gen:
-                return                           # a newer scan was started (e.g. another ComfyUI folder)
-            try:
-                safe_emit(bridge.loras, found, report)
-            except RuntimeError:                 # (the window was closed meanwhile)
-                pass
-        threading.Thread(target=work, daemon=True).start()
+            roots = CMF.comfy_lora_roots(comfy_dir)
+            found = [(p, n, "turbo" if CMF.is_turbo_lora(Path(p)) else "h3") for p, n in CMF.find_h3_loras(roots)]
+            found += [(p, n, "qwen") for p, n in CMF.find_qwen_loras(roots)]
+            for fam, items in imagegen.find_image_loras(roots).items():
+                found += [(p, n, fam) for p, n in items]
+            return found
+
+        def done(found):
+            if gen == self._lora_scan_gen:           # (a newer scan was started: e.g. another ComfyUI folder)
+                self._loras_found(found, report)
+        # (a failed scan keeps the lists found before: a folder may be offline)
+        run_in_background(work, on_done=done, on_error=lambda e: log.info("LoRA scan failed: %s", e), owner=self)
 
     def _loras_found(self, found: list, report: bool = False):
         self.h3_loras = [(p, n) for p, n, kind in found if kind == "h3"]

@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from .generator_state import ComfyModel, Job, ModelState, ModelSwitch, WorkerBinding
     from .graph import GraphView
     from .guide import EngineBanner, GuidePanel, NextHint
-    from .mw_support import _Bridge, _CurrentStack
+    from .mw_support import _CurrentStack
     from .plugin_host import PluginHost
     from .preview import Preview, StartTile
     from .storyboard import Storyboard
@@ -174,7 +174,6 @@ if TYPE_CHECKING:
         b_voice_file: QPushButton
         b_voice_play: QToolButton
         b_voice_tts: QPushButton
-        bridge: _Bridge
         card_stack: _CurrentStack
         cards: list[PromptCard | VideoCard]
         cast_list: QListWidget

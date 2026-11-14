@@ -11,7 +11,7 @@ import weakref
 from collections.abc import Callable
 from typing import Any
 
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QObject, Qt, QThread, Signal
 from PySide6.QtWidgets import QApplication
 from shiboken6 import isValid
 
@@ -69,7 +69,8 @@ def _alive(owner: weakref.ref[QObject] | None) -> bool:
 
 
 def post(owner: QObject | None, fn: Callable[[], None]) -> bool:
-    """From any thread: call fn on the GUI thread (not when the owner is gone). True when it was handed over."""
+    """From any thread: call fn on the GUI thread (at once when already there; not when the owner is gone). True when
+    it was handed over."""
     return _post(weakref.ref(owner) if owner is not None else None, fn)
 
 
@@ -81,7 +82,11 @@ def _post(ref: weakref.ref[QObject] | None, fn: Callable[[], None]) -> bool:
         if _alive(ref):
             fn()
     try:
-        _the_relay().call.emit(call)
+        relay = _the_relay()
+        if QThread.currentThread() is relay.thread():       # (already on the GUI thread: like a direct connection)
+            call()
+            return True
+        relay.call.emit(call)
     except RuntimeError:                      # (the application is shutting down)
         return False
     return True
@@ -104,8 +109,8 @@ def run_in_background(fn: Callable[[], Any], *, on_done: Callable[[Any], None],
     def work() -> None:
         try:
             result = fn()
-        except Exception as e:  # noqa: BLE001 - every failure of a worker goes to the caller or the log
-            def failed(e: Exception = e) -> None:
+        except BaseException as e:  # noqa: BLE001 - whatever ends a worker goes to the caller or the log
+            def failed(e: BaseException = e) -> None:
                 if stale():
                     return
                 if on_error is None:

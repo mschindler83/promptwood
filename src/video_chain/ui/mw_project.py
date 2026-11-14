@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import threading
 import time
 from pathlib import Path
 from typing import cast
@@ -13,10 +12,10 @@ from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QInputDialog, QLineEdit, QMessageBox, QPlainTextEdit
 
+from .workers import run_in_background
 from .. import film as F, tree as T
 from . import dialogs as D
 from .graph import START
-from .widgets import safe_emit
 from .project_dialogs import NewProjectDialog
 from .ui_logic import plural
 from .mw_host import MainWindowHost
@@ -113,7 +112,7 @@ class ProjectMixin(MainWindowHost):
         self._save_timer.stop()
         if not self._write_tree():
             return
-        source, bridge = (self.film.root if self.film else self.project), self.bridge
+        source = self.film.root if self.film else self.project
         scene_rel = os.path.relpath(self.project, source)       # the scene to continue in, inside the copy
         self._copy_scene = scene_rel
         cur = self.film.scene_of(self.project) if self.film else None
@@ -141,12 +140,12 @@ class ProjectMixin(MainWindowHost):
                         os.symlink(os.path.relpath(target / T.REFS_DIR, d), d / T.REFS_DIR, target_is_directory=True)
                     if (d / T.TREE_FILE).is_file():
                         T.save(d, T.load(d))
-                safe_emit(bridge.copied, str(target), "")
-            except BaseException as e:  # noqa: BLE001  (the answer ends "copying")
+            except BaseException:  # noqa: BLE001  (the answer ends "copying")
                 if not existed:                       # a half copy would block the next try
                     shutil.rmtree(target, ignore_errors=True)
-                safe_emit(bridge.copied, str(target), str(e))
-        threading.Thread(target=work, daemon=True).start()
+                raise
+        run_in_background(work, on_done=lambda _r: self._copied(str(target), ""),
+                          on_error=lambda e: self._copied(str(target), str(e)), owner=self)
 
     def _copied(self, target: str, error: str):
         source, self._copying = self._copying, None
