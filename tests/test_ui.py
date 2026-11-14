@@ -1672,6 +1672,7 @@ def test_style_text_in_the_window(app, win, tmp_path, image):
     run_and_wait(app, win, win.generate_path)
     made = T.load(win.project).nodes[ids[0]].made["settings"]
     assert made["prompt_prefix"] == "cinematic," and made["prompt_suffix"] == "slow motion"
+    wait(app, lambda: not win._joins)                                    # (a join still running blocks leaving)
     win.close_project()
     win.open_project(tmp_path / "proj2")                                 # a new project starts without it
     assert win.style_prefix.text() == "" and (win.tree.options.get("style") or {}).get("prefix", "") == ""
