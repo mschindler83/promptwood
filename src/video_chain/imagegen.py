@@ -18,8 +18,10 @@ Which model files a family uses is found in ComfyUI's lists (pick_files); a fami
 offered with the reason (e.g. FLUX.3 needs its gated download)."""
 from __future__ import annotations
 
-import logging
 import json
+import logging
+import math
+import os
 import re
 import threading
 import uuid
@@ -448,7 +450,6 @@ def default_sampling(family: str, files: dict, model: str | None, quality: str, 
 
 def size_for(family: str, aspect: float) -> tuple[int, int]:
     """Width x height for a family at an aspect ratio (w/h): its trained pixel count, its size multiple."""
-    import math
     f = FAMILIES[family]
     m = f["multiple"]
     w = math.sqrt(f["pixels"] * aspect)
@@ -565,7 +566,6 @@ MAX_HEADER = 16 * 2**20                            # a LoRA's safetensors header
 
 def lora_file_family(path: str) -> str | None:
     """lora_family of a .safetensors file (header only, cached by path, size and date)."""
-    import os
     try:
         st = os.stat(path)
     except OSError:
@@ -597,7 +597,6 @@ def find_image_loras(roots: list[Path]) -> dict[str, list[tuple[str, str]]]:
     """The image-model LoRAs in ComfyUI's LoRA folders by family ('flux1', 'sdxl', 'krea2', 'qwen21', 'moss'; Qwen
     2512 / Edit ones are found by comfy.find_qwen_loras), as (path, name in its folder), sorted by name. LoRAs the
     workflows apply themselves (speed, style reference, MOSS's edit LoRA) and control LoRAs are left out."""
-    import os
     out: dict[str, list[tuple[str, str]]] = {"flux1": [], "sdxl": [], "krea2": [], "qwen21": [], "moss": []}
     own = ("style_reference", "moss_image_edit", "control", "turbo", "lightning", "_steps")
     seen = set()

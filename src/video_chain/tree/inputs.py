@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
+from ..triggers import with_triggers
 from .. import camera as _camera
 from .. import chain
 from .. import h3_prompt as _h3
@@ -31,7 +32,6 @@ def model_prompt(options: Options, node: Node, settings: dict | None, *, start: 
     frame the settings number ("frame_pictures") counts as given anyway."""
     if is_h3(options):
         return _h3_model_prompt(options, node, settings or {}, start, end)
-    from ..triggers import with_triggers
     prompt = _camera.apply(node.prompt, (settings or {}).get("camera"))    # #tokens and the clip's camera move
     ss = (settings or {}).get("source_sound")
     given = bool(ss) and not (isinstance(ss, dict) and ss.get("overlay"))      # (then without the voices)

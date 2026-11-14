@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Callable, Protocol
 
+from ..triggers import with_triggers
 from .. import camera as _camera
 from .. import chain
 from .. import h3_prompt as _h3
@@ -180,7 +181,6 @@ def _refine_clip(generator: RefineGenerator, project: Path, node: Node, target: 
         made_prompt = _h3.split_sound_sections(made_prompt)[0]   # (the camera sentence before them)
     made_prompt = _camera.apply(made_prompt, s.get("camera"))
     prompt = " ".join(x for x in (s.get("prompt_prefix", ""), made_prompt, s.get("prompt_suffix", "")) if x)
-    from ..triggers import with_triggers
     prompt = with_triggers(prompt, list(s.get("lora_triggers") or []))   # as the clip was made
     loras = ([(s["lora"], s.get("strength", 1.0))] if s.get("lora") else []) + \
         [(e["lora"], e.get("strength", 1.0)) for e in s.get("extra_loras") or []]
