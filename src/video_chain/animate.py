@@ -237,8 +237,7 @@ class ComfyAnimator(ComfyGenerator):
     """Wan 2.2 Animate in ComfyUI: replace() draws a new head into a clip."""
 
     def _check_models(self):
-        def combo(node, field):
-            return _combo_options(self._object_info(node).get("input", {}).get("required", {}).get(field))
+        combo = self._combo
         self.files = pick_animate_files(combo("UNETLoader", "unet_name"), combo("CLIPLoader", "clip_name"),
                                         combo("VAELoader", "vae_name"), combo("LoraLoaderModelOnly", "lora_name"),
                                         combo("CLIPVisionLoader", "clip_name"))
@@ -263,22 +262,7 @@ class ComfyAnimator(ComfyGenerator):
     def _run_outputs(self, wf: dict, outs: dict[str, Path], uploads: list[tuple[str, Path]]) -> None:
         """Queue a workflow, wait, download what its save nodes wrote ({node: local file}); clean up after."""
         try:
-            ws = self._connect_ws()
-            try:
-                self._queue(wf)
-                entry = self._wait(self.current, ws)
-            except ComfyJobFailed:
-                raise
-            except BaseException:                # (also a stop by KeyboardInterrupt / SystemExit: cancel the job)
-                self.interrupt()
-                raise
-            finally:
-                if ws is not None:
-                    try:
-                        ws.close()
-                    except Exception as e:  # noqa: BLE001
-                        logger.debug("closing the websocket: %s", e)
-                self.current = None
+            entry = self._run_workflow(wf)
             for node, dest in outs.items():
                 f = self._first_file((entry.get("outputs") or {}).get(node))
                 if f is None:

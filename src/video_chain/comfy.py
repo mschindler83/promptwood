@@ -58,6 +58,18 @@ _UPLOADS: dict[tuple[str, str], int] = {}     # (ComfyUI url, name there) -> job
 _UPLOADS_LOCK = threading.Lock()
 
 
+def free_models(url: str, unload_models: bool = True, timeout: float = 10, opener=None) -> bool:
+    """POST ComfyUI's /free (the one place that knows it; the app's windows call this too): unload_models False drops
+    only the cached results. True when ComfyUI took it, False when it did not (it is not reachable, or refused)."""
+    try:
+        net.request_json(url.rstrip("/") + "/free", payload={"unload_models": bool(unload_models), "free_memory": True},
+                         method="POST", timeout=timeout, opener=opener or net.urlopen)
+        return True
+    except (net.NetError, ValueError) as e:
+        logger.warning("ComfyUI /free failed: %s", e)
+        return False
+
+
 class ComfyError(RuntimeError):
     pass
 
@@ -665,21 +677,17 @@ class ComfyGenerator:
 
     def free(self) -> bool:
         """Ask ComfyUI to unload its models and free the memory; False (and a log line) if that failed."""
-        try:
-            self._json("POST", "/free", {"unload_models": True, "free_memory": True})
-            return True
-        except ComfyError as e:
-            self.log(f"ComfyUI could not unload its models: {e}")
-            return False
+        ok = free_models(self.url, unload_models=True, opener=self._open)
+        if not ok:
+            self.log("ComfyUI could not unload its models")
+        return ok
 
     def free_cache(self) -> bool:
         """Ask ComfyUI to drop its cached results (the last job's frames), keeping the models loaded."""
-        try:
-            self._json("POST", "/free", {"unload_models": False, "free_memory": True})
-            return True
-        except ComfyError as e:
-            self.log(f"ComfyUI could not drop its cache: {e}")
-            return False
+        ok = free_models(self.url, unload_models=False, opener=self._open)
+        if not ok:
+            self.log("ComfyUI could not drop its cache")
+        return ok
 
     def _save(self, f: dict, dest: Path) -> None:
         """Download a result into dest, written under a temporary name first (never a truncated file)."""
@@ -773,16 +781,16 @@ class ComfyGenerator:
             return self._wait(self.current, ws)
         except ComfyJobFailed:
             raise
-        except Exception:
+        except BaseException:                    # (also a stop by KeyboardInterrupt / SystemExit: cancel the job)
             self.interrupt()
             raise
         finally:
-            if ws is not None:
-                try:
-                    ws.close()
-                except Exception as e:  # noqa: BLE001
-                    logger.debug("closing the websocket: %s", e)
+            self._close_ws(ws)
             self.current = None
+
+    def _combo(self, node: str, field: str) -> list[str]:
+        """The values ComfyUI offers for a combo input of a node (empty when it has none)."""
+        return _combo_options(self._object_info(node).get("input", {}).get("required", {}).get(field))
 
     def interrupt(self) -> None:
         """Stop the clip being rendered (and drop it from the queue)."""
@@ -2453,13 +2461,11 @@ class ComfyPromptRefiner(ComfyGenerator):
         uploads = [(self.upload(Path(picture)), Path(picture))]
         try:
             wf = build_describe_face_workflow(image=uploads[0][0], model=models[0], seed=seed)
-            entry = self._run_workflow(wf)
+            text = self._ask_text(wf)
         finally:
             if self.cleanup:
                 self._drop_uploads(uploads)
-        out = (entry.get("outputs") or {}).get("show") or {}
-        text = (out.get("text") or [""])[0]
-        text = " ".join(clean_refined(text if isinstance(text, str) else str(text)).split()).strip().strip('"')
+        text = " ".join(clean_refined(text).split()).strip().strip('"')
         if not text:
             raise ComfyError("the vision model gave no face description")
         return text[:600]
@@ -2472,6 +2478,10 @@ class ComfyPromptRefiner(ComfyGenerator):
         wf = build_refine_prompt_workflow(prompt=user, kind="image", model=model, seed=seed,
                                           temperature=temperature)
         wf["gen"]["inputs"].update({"system_prompt": system, "prompt": user, "max_length": int(max_tokens)})
+        return self._ask_text(wf)
+
+    def _ask_text(self, wf: dict) -> str:
+        """Run a text workflow (a language model; its answer is shown by the "show" node) and return that text raw."""
         entry = self._run_workflow(wf)
         text = (((entry.get("outputs") or {}).get("show") or {}).get("text") or [""])[0]
         return text if isinstance(text, str) else str(text)
@@ -2493,13 +2503,11 @@ class ComfyPromptRefiner(ComfyGenerator):
             wf = build_refine_prompt_workflow(prompt=prompt, kind=kind, model=model, seed=seed, hint=hint, cast=cast,
                                               seconds=seconds if kind == "video_h3" else None, start=start,
                                               image=uploads[0][0] if uploads else None, loras=loras)
-            entry = self._run_workflow(wf)
+            text = self._ask_text(wf)
         finally:
             if uploads and self.cleanup:
                 self._drop_uploads(uploads)
-        out = (entry.get("outputs") or {}).get("show") or {}
-        text = (out.get("text") or [""])[0]
-        text = clean_refined(text if isinstance(text, str) else str(text), lines=kind == "video_h3")
+        text = clean_refined(text, lines=kind == "video_h3")
         if not text:
             raise ComfyError("the language model gave no answer")
         return text

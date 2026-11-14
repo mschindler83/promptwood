@@ -504,8 +504,7 @@ class ComfyImageCreator(ComfyGenerator):
     """Makes new images in ComfyUI (see build_create_workflow)."""
 
     def _check_models(self):
-        def combo(node, field):
-            return _combo_options(self._object_info(node).get("input", {}).get("required", {}).get(field))
+        combo = self._combo
         self.files = pick_files(combo("UNETLoader", "unet_name"), combo("CheckpointLoaderSimple", "ckpt_name"),
                                 combo("CLIPLoader", "clip_name"), combo("VAELoader", "vae_name"),
                                 combo("LoraLoaderModelOnly", "lora_name"))
@@ -547,22 +546,7 @@ class ComfyImageCreator(ComfyGenerator):
                                        quality_tags=quality_tags)
             sp = {k: v for k, v in (sampling or {}).items() if v is not None}
             used_sampling = apply_sampling(wf, sp.get("steps"), sp.get("cfg"), sp.get("sampler"), sp.get("scheduler"))
-            ws = self._connect_ws()
-            try:
-                self._queue(wf)
-                entry = self._wait(self.current, ws)
-            except ComfyJobFailed:
-                raise
-            except BaseException:                # (also a stop by KeyboardInterrupt / SystemExit: cancel the job)
-                self.interrupt()
-                raise
-            finally:
-                if ws is not None:
-                    try:
-                        ws.close()
-                    except Exception as e:  # noqa: BLE001
-                        logger.debug("closing the websocket: %s", e)
-                self.current = None
+            entry = self._run_workflow(wf)
             out = self._first_file((entry.get("outputs") or {}).get("create_save"))
             if out is None:
                 raise ComfyError("ComfyUI finished without the image")

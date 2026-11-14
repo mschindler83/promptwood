@@ -191,8 +191,8 @@ def test_a_failed_unload_is_logged_and_does_not_count(server, monkeypatch):
     g = C.ComfyGenerator(server.url, log=logs.append)
 
     def boom(*a, **k):
-        raise C.ComfyUnavailable("down")
-    monkeypatch.setattr(g, "_json", boom)
+        raise OSError("down")
+    monkeypatch.setattr(g, "_open", boom)        # (free goes through comfy.free_models, which asks via _open)
     assert g.free() is False
     assert any("unload" in str(m) for m in logs)
 
