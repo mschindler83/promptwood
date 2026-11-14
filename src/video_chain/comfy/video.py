@@ -42,6 +42,10 @@ def default_audio_key(i: int) -> str:
     return f"ref_audios.ref_audio_{i}"
 
 
+def default_video_key(i: int) -> str:
+    return f"ref_videos.ref_video_{i}"
+
+
 def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, height: int, frames: int, steps: int,
                    loras: Sequence[tuple[str, float]], audio: bool, prefix: str, refs: Sequence[str] = (),
                    ref_size: str = "match", ref_key: Callable[[int], str] | None = None,
@@ -50,7 +54,8 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
                    pika: tuple[str, float] | None = None, audio_refs: Sequence[str] = (),
                    audio_key: Callable[[int], str] | None = None, start_pin: int = 1,
                    recipe: dict | None = None, veda: str | None = None,
-                   keyframes: Sequence[tuple[str, int]] = (), frame_refs: Sequence[str] = ()) -> dict:
+                   keyframes: Sequence[tuple[str, int]] = (), frame_refs: Sequence[str] = (),
+                   ref_videos: Sequence[str] = (), video_key: Callable[[int], str] | None = None) -> dict:
     """The API-format workflow for one clip (image = the uploaded start image, as LoadImage names it; None: a
     clip without a start frame).
 
@@ -75,6 +80,12 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
     reference images); MiniMaxH3ReferenceToVideo gets them with the audio VAE, the prompt says what each one is for
     (a voice, a soundtrack to copy, a beat).
 
+    With ref_videos (uploaded short clips, <Video 1> ... in the prompt; the end of the clip before that this clip
+    continues): the ref2va model too; each goes in through LoadVideo + GetVideoComponents, its pictures only. Its
+    soundtrack (ref_video_audios) is NOT wired: the node would give it an <Audio j> of its own right before the
+    <Video k>, which would renumber the sounds and voices the prompt names. The node keeps a reference video's
+    first 17n+5 frames, at most the clip's length, so the caller sends exactly such a length.
+
     With turbo (ComfyUI name of the turbo LoRA, strength): ComfyUI-MiniMax-H3-Turbo's loader (it handles the
     pruned model's adaln layers) right after the model, the other LoRAs after it, and its own sampler.
 
@@ -94,10 +105,11 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
     LoRAs), _sampling and _output."""
     ref_key = ref_key or default_ref_key
     audio_key = audio_key or default_audio_key
+    video_key = video_key or default_video_key
     guided = {g.get("at") for g in guides}
     use_start = image is not None and "start" not in guided
     use_end = end_image is not None and "end" not in guided
-    has_refs = bool(refs or audio_refs)
+    has_refs = bool(refs or audio_refs or ref_videos)
     _check_combination(has_refs=has_refs, frame_refs=frame_refs, use_start=use_start, use_end=use_end,
                        turbo=turbo, hyperflow=hyperflow, pika=pika, recipe=recipe)
     wf = _skeleton(seed=seed, frames=frames, prefix=prefix, turbo=turbo, ref_model=has_refs)
@@ -111,7 +123,8 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
     if has_refs:
         latent, positive = _conditioning_refs(wf, **cond, refs=refs, ref_size=ref_size, ref_key=ref_key,
                                               audio_refs=audio_refs, audio_key=audio_key, frame_refs=frame_refs,
-                                              start_pin=start_pin)
+                                              start_pin=start_pin, ref_videos=ref_videos,
+                                              video_key=video_key)
     else:
         latent, positive = _conditioning_plain(wf, **cond)
     positive = _guides(wf, positive, latent, guides, audio)
@@ -159,7 +172,8 @@ def _skeleton(*, seed: int, frames: int, prefix: str, turbo, ref_model: bool) ->
 def _conditioning_refs(wf: dict, *, prompt: str, width: int, height: int, frames: int, use_start: bool,
                        use_end: bool, refs: Sequence[str], ref_size: str, ref_key: Callable[[int], str],
                        audio_refs: Sequence[str], audio_key: Callable[[int], str], frame_refs: Sequence[str],
-                       start_pin: int) -> tuple[list, list]:
+                       start_pin: int, ref_videos: Sequence[str] = (),
+                       video_key: Callable[[int], str] = None) -> tuple[list, list]:
     """The reference model: MiniMaxH3ReferenceToVideo with the pictures and sounds, the start frame pinned at 0 and
     the end frame at -1 by MiniMaxH3AddGuide. Returns (latent, positive) as node outputs."""
     inputs = {"clip": ["clip", 0], "vae": ["vae", 0], "prompt": prompt, "width": int(width),
@@ -169,6 +183,10 @@ def _conditioning_refs(wf: dict, *, prompt: str, width: int, height: int, frames
         inputs[ref_key(i)] = [f"ref{i}", 0]
     for i, f in enumerate([f for f in ("start", "end") if f in frame_refs], start=len(refs)):
         inputs[ref_key(i)] = [f, 0]                # the same LoadImage the guide pins
+    for i, clip in enumerate(ref_videos):          # pictures only (see build_workflow: no ref_video_audios)
+        wf[f"rvideo{i}"] = {"class_type": "LoadVideo", "inputs": {"file": clip}}
+        wf[f"rvparts{i}"] = {"class_type": "GetVideoComponents", "inputs": {"video": [f"rvideo{i}", 0]}}
+        inputs[video_key(i)] = [f"rvparts{i}", 0]
     for i, sound in enumerate(audio_refs):
         wf[f"aref{i}"] = {"class_type": "LoadAudio", "inputs": {"audio": sound}}
         inputs[audio_key(i)] = [f"aref{i}", 0]

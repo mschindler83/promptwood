@@ -132,6 +132,7 @@ class FakeComfy:
         self.view_truncate = 0                     # the next n downloads end before their Content-Length
         self.junk: set[str] = set()                # these POST paths answer with a non-JSON page (HTTP 200)
         self.hold = False                          # jobs stay queued: no history until it is cleared (a busy ComfyUI)
+        self.video_refs = True                     # ... and reference videos (with their soundtracks)
         self.fail_next: str | None = None          # the next job fails with this message (once)
         self.refine_answer: str | None = None      # the prompt refiner's raw answer (None: "REFINED <prompt>")
         self.prompts, self.calls, self.history = [], [], {}
@@ -215,6 +216,10 @@ class FakeComfy:
             opt = {"ref_images": ["COMFY_AUTOGROW_V3", {"template": {"prefix": "ref_image_", "min": 0, "max": 9}}]}
             if self.audio_refs:
                 opt["ref_audios"] = ["COMFY_AUTOGROW_V3", {"template": {"prefix": "ref_audio_", "min": 0, "max": 3}}]
+            if self.video_refs:                    # (the real node's Autogrow names, nodes_minimax_h3.py)
+                opt["ref_videos"] = ["COMFY_AUTOGROW_V3", {"template": {"prefix": "ref_video_", "min": 0, "max": 3}}]
+                opt["ref_video_audios"] = ["COMFY_AUTOGROW_V3",
+                                           {"template": {"prefix": "ref_video_audio_", "min": 0, "max": 3}}]
             return {node: {"input": {"required": {}, "optional": opt}}}
         if node == "VideoChainLanczosScale":
             return {node: {"input": {"required": {}}}} if self.scale_node else {}
@@ -354,6 +359,11 @@ class FakeComfy:
                     assert self.audio_refs and wf[v[0]]["class_type"] == "LoadAudio"
                     assert (self.root / "input" / wf[v[0]]["inputs"]["audio"]).is_file(), "sound not uploaded"
                     assert cond["audio_vae"] == ["audio_vae", 0]
+                if k.startswith("ref_videos."):     # a reference video: the pictures of an uploaded clip
+                    assert self.video_refs and wf[v[0]]["class_type"] == "GetVideoComponents" and v[1] == 0
+                    load = wf[wf[v[0]]["inputs"]["video"][0]]
+                    assert load["class_type"] == "LoadVideo" and (self.root / "input" / load["inputs"]["file"]).is_file()
+                assert not k.startswith("ref_video_audios.") or self.video_refs
         else:
             cond = wf["cond"]["inputs"]
             assert ("first_frame" in cond) == ("start" in wf) and ("last_frame" in cond) == ("end" in wf)

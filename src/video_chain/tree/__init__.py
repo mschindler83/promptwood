@@ -7,6 +7,9 @@ last-frame input), one right after it starts from the video's last frame. So rea
 chained in any order. A generated clip can lead into at most one video (its end can only match one).
 With a motion guide (override "guide": 5, 22 or 39 frames) a generated clip gets the last frames of the clip
 before and the first frames of a following video (with their sound) instead of a single frame at each end.
+In the h3 prompt format a generated clip after another clip (or a real video) can also continue it (override
+"continue": n frames): the last n frames of the clip before go to the reference model as <Video 1> and the prompt
+says the clip continues it ("video continuation"); the pinned frames stay as they are.
 A generated clip with no video after it can have an end image of its own (Node.end_image, a copy in ends/): the
 frame H3 steers the clip's end to. It is not a frame of the chain, so nothing is cut when the path is joined.
 Middle keyframes (Node.keyframes: [{"image": ends/..., "at": seconds, "note": text}]) pin pictures at moments inside
@@ -65,6 +68,7 @@ from .consts import (  # noqa: F401
     AI,
     VIDEO,
     GUIDE_CHOICES,
+    CONTINUE_CHOICES,
     DEFAULT_FRAMES,
     DEFAULT_OPTIONS,
     PROMPT_FORMATS,
@@ -83,6 +87,7 @@ from .consts import (  # noqa: F401
     PICTURE_TAG,
     DIALOGUE,
     SAID_BY,
+    SPEECH_TAG,
     VOICE_MAX_SECS,
     VOICE_REF_MAX_SECS,
     WRONG_TAG,
@@ -170,6 +175,8 @@ from .prompts import (  # noqa: F401
     _FEMALE,
     _MALE,
     _PRONOUN,
+    without_tags,
+    without_speech_tags,
     gender_of,
     dialogue,
     replace_lines,
@@ -253,6 +260,8 @@ from .audio_tracks import (  # noqa: F401
     uses_ref_model,
     source_video,
     source_sound_span,
+    _continued_sound,
+    joined_sound_start,
     _join_lead,
     tracks,
     track_of,
@@ -274,6 +283,9 @@ from .audio_tracks import (  # noqa: F401
     _soundtrack_sentence)
 from .inputs import (  # noqa: F401
     model_prompt,
+    continue_frames,
+    frames_before,
+    continue_choices,
     frame_numbers,
     _h3_model_prompt,
     plain_frames,
@@ -299,6 +311,7 @@ from .engine import (  # noqa: F401
     ensure_handovers,
     _clip_frames,
     _guides,
+    _continuation,
     guide_problem,
     given_sound,
     _SOUND_OVERRIDES,

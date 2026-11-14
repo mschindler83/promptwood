@@ -7,9 +7,9 @@ from typing import TYPE_CHECKING, Callable
 from .. import camera as _camera
 from .. import chain
 from .. import h3_prompt as _h3
-from .consts import DEFAULT_FRAMES, MAX_CAST_PICTURES
+from .consts import CONTINUE_CHOICES, DEFAULT_FRAMES, MAX_CAST_PICTURES
 from .model import Node, Tree
-from .timeline import full_prompt
+from .timeline import clip_length, full_prompt, handover_index, made_frames
 from .files import node_loras
 from .cast import audio_mentioned, is_h3
 from .clipcast import _language, _resolver, clip_cast, lead_on
@@ -73,13 +73,14 @@ def _h3_model_prompt(options: dict, node: Node, s: dict, start: bool, end: bool)
         soundtrack = len(s.get("audio_refs") or []) + 1
         extra.append(_soundtrack_sentence(ss, soundtrack))
     frames = int(s.get("frames") or (node.overrides or {}).get("frames") or options.get("frames", DEFAULT_FRAMES))
+    continues = 1 if s.get("continue") else None     # the only reference video: <Video 1>
     return _h3.compose(h["body"], start=start, end=end, seconds=frames / chain.FPS, subjects=h["subjects"],
                        frame_pictures=frame_numbers(len(use["images"]), s.get("frame_pictures")),
                        sounds=h["sounds"], soundtrack=soundtrack, lines=h["lines"], language=_language(options),
                        lead_implicit=h["lead_implicit"], triggers=list(s.get("lora_triggers") or []),
                        extra=[x for x in extra if x], soundscape=h["soundscape"], music=h["music"],
-                       resolve=_resolver(options),
-                       reference=bool(use["images"] or use["voices"] or h["sounds"] or soundtrack))
+                       resolve=_resolver(options), continues=continues,
+                       reference=bool(use["images"] or use["voices"] or h["sounds"] or soundtrack or continues))
 
 
 def plain_frames(project: Path, tree: Tree, node: Node) -> tuple[bool, bool]:
@@ -107,7 +108,9 @@ def node_settings(base: dict, options: dict, node: Node, audio_pool: list[dict] 
     In the h3 format (is_h3) it also records "prompt_format": "h3", the cast entries the prompt describes (also
     without pictures: their descriptions are in it), and "frame_pictures": frames_given = plain_frames (start,
     end) that are also sent as numbered reference pictures: with the reference model only, after the subject
-    pictures, within MAX_CAST_PICTURES (the end frame's number goes first, then the start frame's)."""
+    pictures, within MAX_CAST_PICTURES (the end frame's number goes first, then the start frame's), and
+    "continue": {"frames": n} for a clip that continues the clip before (continue_frames; it takes the reference
+    model, so its frames are numbered too)."""
     ov = node.overrides or {}
     n_audio = 0 if node.is_video else audio_mentioned(full_prompt(options, node.prompt))
     given = source_sound is not None and not source_sound.get("overlay")       # (then without the voices)
@@ -147,12 +150,42 @@ def node_settings(base: dict, options: dict, node: Node, audio_pool: list[dict] 
     s["prompt_format"] = "h3"
     if use["record"]:
         s["cast"] = [dict(c) for c in use["record"]]
-    if (refs or sounds or given) and not use["h3"]["structured"]:     # the reference model: frames get numbers
+    cont = continue_frames(options, node)
+    if cont:
+        s["continue"] = {"frames": cont}
+    if (refs or sounds or given or cont) and not use["h3"]["structured"]:     # the reference model: numbered frames
         room = max(0, MAX_CAST_PICTURES - len(refs))
         frames = [f for f, on in zip(("start", "end"), frames_given) if on][:room]
         if frames:
             s["frame_pictures"] = frames
     return s
+
+
+def continue_frames(options: dict, node: Node) -> int:
+    """How many frames of the end of the clip before a clip is shown as <Video 1> (override "continue"); 0: none,
+    also in the classic format (its prompt cannot say what the video is) and for a first clip (nothing before it)."""
+    if node.is_video or node.parent is None or not is_h3(options):
+        return 0
+    return int((node.overrides or {}).get("continue") or 0)
+
+
+def frames_before(tree: Tree, node: Node) -> int:
+    """Frames of the clip before a node that lead into it: up to its hand-over frame (its made length, else its
+    length setting / the video's range)."""
+    parent = tree.nodes[node.parent]
+    n = made_frames(parent) or clip_length(tree, parent)
+    k = handover_index(tree, parent, n)
+    return k + 1 if k is not None else n
+
+
+def continue_choices(tree: Tree, node: Node) -> list[int]:
+    """The continuation lengths that fit a clip: no longer than what the clip before hands over with, and no longer
+    than the clip itself (the node cuts a longer reference video to the target's frame count, keeping its START,
+    so the end that matters would be lost)."""
+    if node.is_video or node.parent is None:
+        return []
+    have, own = frames_before(tree, node), clip_length(tree, node)
+    return [c for c in CONTINUE_CHOICES if c <= have and c <= own]
 
 
 def veda_for(options: dict, width: int, height: int, frames: int) -> bool:

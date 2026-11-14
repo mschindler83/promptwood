@@ -20,7 +20,7 @@ from .cast import (
     kind_of,
     lead_of,
     mentions)
-from .prompts import _picture_tags, _pictures_note, _voiced_prompt, dialogue
+from .prompts import _picture_tags, _pictures_note, _voiced_prompt, dialogue, without_speech_tags
 
 
 _KIND_WORD = {"person": "person", "place": "place", "object": "object", "style": "visual style"}
@@ -102,6 +102,7 @@ def clip_cast(options: dict, prompt: str, voices: bool = True, lead: bool = True
     None:    no face pictures (no cast, or no lead).
     In the h3 format (is_h3) the same modes pick the same kind of pictures, but the text is written by
     h3_prompt.compose (see _h3_cast; model_prompt adds the clip's frames, camera, notes and soundtrack)."""
+    prompt = without_speech_tags(prompt)          # (how a line is spoken is for text to speech only)
     if is_h3(options):
         return _h3_cast(options, prompt, voices, lead)
     text = full_prompt(options, prompt)

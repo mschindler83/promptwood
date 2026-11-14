@@ -207,6 +207,19 @@ class Checker:
         rev = parent.made.get("sound_rev")              # its sound built again in place: the guide hears the new one
         return None if v is None else v + (f"@{k}" if k is not None else "") + (f"~s{rev}" if rev else "")
 
+    def continue_from(self, node: Node) -> str | None:
+        """The clip a continuation's reference video is cut from (its file name: every new clip gets a new one,
+        and its hand-over frame, where the cut ends), or None for a clip that does not continue the one before."""
+        s = self.settings(node.id)
+        if node.parent is None or not s or not s.get("continue"):
+            return None
+        parent = self.tree.nodes[node.parent]
+        v = (parent.made or {}).get("video")
+        if v is None:
+            return None
+        k = handover_index(self.tree, parent)
+        return v + (f"@{k}" if k is not None else "")
+
     def _files_there(self, node: Node) -> bool:
         m = node.made
         if not m or not m.get("video") or not m.get("frame") or (node.is_video and not m.get("first")):
@@ -237,7 +250,8 @@ class Checker:
               or m.get("start_sha1") != self.sha(self.start_frame(node))
               or m.get("end_key") != self.end_key(node)
               or m.get("keyframe_key") != self.keyframe_key(node)
-              or m.get("guide_from") != self.guide_from(node)):
+              or m.get("guide_from") != self.guide_from(node)
+              or m.get("continue_from") != self.continue_from(node)):
             st = "changed"
         else:
             st = "done"
@@ -315,6 +329,8 @@ class Checker:
             return "its keyframes changed"
         if m.get("guide_from") != self.guide_from(node):
             return "the clip its carry-over comes from changed"
+        if m.get("continue_from") != self.continue_from(node):
+            return "the clip it continues changed"
         return "something it depends on changed"
 
 

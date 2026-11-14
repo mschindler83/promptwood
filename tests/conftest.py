@@ -142,6 +142,18 @@ def stop_leftover_timers():
 
 
 @pytest.fixture(autouse=True)
+def no_plugins(monkeypatch):
+    """The app's own tests run without plugins, whatever is installed next to it (a plugin test switches them on
+    for its own made-up plugin)."""
+    from video_chain import plugins
+    monkeypatch.setenv(plugins.OFF, "1")
+    monkeypatch.delenv(plugins.ENV, raising=False)
+    plugins.reset()
+    yield
+    plugins.reset()
+
+
+@pytest.fixture(autouse=True)
 def own_trigger_db(tmp_path, monkeypatch):
     monkeypatch.setenv("VIDEO_CHAIN_TRIGGERS", str(tmp_path / "lora_triggers.json"))
     monkeypatch.setenv("VIDEO_CHAIN_PRESETS", str(tmp_path / "lora_presets.json"))

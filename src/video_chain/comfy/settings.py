@@ -53,6 +53,7 @@ class ClipSettings(TypedDict, total=False):
     ref_size: str              # DEFAULT_REF_SIZE
     ref_hint: bool             # True: the prompt gets the sentence that ties the person to <Picture 1>
     audio_paths: list[str]     # reference sounds
+    ref_videos: list[str]      # reference videos (the end of the clip before: a continuation), pictures only
     frame_pictures: list[str]  # "start" and / or "end": that frame is also a reference picture
     prompt_format: str         # "h3": the prompt ties the pictures itself
     refs: list                 # (check_speed only: tells that the clip has references)

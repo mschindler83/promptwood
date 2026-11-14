@@ -12,7 +12,8 @@ Which format (compose):
     start + end      FL2VA_HEADER (S.SS = `seconds` with two decimals, Shot N = the last [Shot N] of the body)
     end frame only   L2VA_HEADER
   reference format (MiniMaxH3ReferenceToVideo, ref2va model): when a subject has pictures or a voice, the prompt
-  names sounds (`sounds` > 0) or a soundtrack is reused (`soundtrack`), or `reference=True`. Six sections:
+  names sounds (`sounds` > 0), a soundtrack is reused (`soundtrack`), the clip continues a reference video
+  (`continues`), or `reference=True`. Six sections:
   subject_definitions, summary, retention_analysis, detailed_description, overall_soundscape, non_diegetic_music.
   There only ref_images get <Picture N> labels; a frame pinned with MiniMaxH3AddGuide is unseen by the text
   encoder. So a start / end frame that is ALSO sent as a reference picture has a number (`frame_pictures`) and is
@@ -61,6 +62,10 @@ The contract with the caller (tree.py), compose(body, ...):
   seconds     the clip's length (FL2VA / L2VA headers need it).
   sounds      the highest <Audio N> the user's text names itself (tree.audio_mentioned).
   soundtrack  the <Audio N> that is the clip's complete audio track, reused 1:1 (its sentence comes in `extra`).
+  continues   the <Video k> the clip continues (the END of the clip before, sent as a reference video, picture
+              only: it adds no <Audio N>): "video continuation" in the task types, <Video k> defined as the source
+              video, a retention line, and [Shot 1] opens with "The shot continues directly from the end of
+              <Video k>." A start frame of such a clip IS that video's last frame, and is called so.
   lead_implicit  subjects[0] is the lead used without being mentioned: "The person in the video is <Subject 1>."
               before [Shot 1].
   triggers    LoRA trigger words: right after "[Shot 1] " (after the start-frame sentence), those the body does not
@@ -86,6 +91,13 @@ SECTIONS = ("subject_definitions", "summary", "retention_analysis", "detailed_de
 FIELDS = ("integrated_multimodal_description", "overall_soundscape", "non_diegetic_music")
 TASK_ORDER = ("keyframe completion", "reference generation", "video editing", "video continuation", "audio reuse",
               "audio reference")                                    # the guide's order
+# a clip that continues the clip before (shown to the model as <Video k>): worded by the guide's 2.3, 4.1 and 5.3
+CONTINUE_DEF = ("<Video {k}> is the source video for the target video continuation; the target video continues "
+                "directly from its end.")
+CONTINUE_KEEP = ("<Video {k}> (continuation source, its end): fully_preserved - the subjects, scene, motion and camera "
+                 "movement at its end carry on directly into [Shot 1].")
+CONTINUE_SUMMARY = "The target video continues directly from the end of <Video {k}>."
+CONTINUE_SHOT = "The shot continues directly from the end of <Video {k}>."
 KINDS = ("person", "place", "object", "style")
 DEFAULT_SOUNDSCAPE = "Natural ambient sound that fits the scene."
 MUSIC_IN_SHOTS = "As described in the shots."
@@ -202,10 +214,11 @@ def header(start: bool, end: bool, seconds: float | None = None, shot: int = 1) 
     return L2VA_HEADER.format(n=shot, s=f"{float(seconds):.2f}")
 
 
-def task_types(*, keyframe: bool = False, subjects: bool = False, reuse: bool = False, audio: bool = False) -> str:
+def task_types(*, keyframe: bool = False, subjects: bool = False, reuse: bool = False, audio: bool = False,
+               continuation: bool = False) -> str:
     """'[keyframe completion + reference generation + audio reference]': in the guide's order, without repeats."""
-    have = {"keyframe completion": keyframe, "reference generation": subjects, "audio reuse": reuse,
-            "audio reference": audio}
+    have = {"keyframe completion": keyframe, "reference generation": subjects, "video continuation": continuation,
+            "audio reuse": reuse, "audio reference": audio}
     types = [t for t in TASK_ORDER if have.get(t)] or ["reference generation"]
     return "[" + " + ".join(types) + "]"
 
@@ -356,7 +369,8 @@ def compose(body: str, *, start: bool = False, end: bool = False, seconds: float
             soundtrack: int | None = None, lines: Iterable = (), language: str = "English",
             lead_implicit: bool = False, triggers: Iterable[str] = (), extra: Iterable[str] = (),
             soundscape: str | None = None, music: str | None = None,
-            resolve: Callable[[str], str | None] | None = None, reference: bool | None = None) -> str:
+            resolve: Callable[[str], str | None] | None = None, reference: bool | None = None,
+            continues: int | None = None) -> str:
     """The prompt the model gets (see the module docstring for the contract)."""
     text = body or ""
     if is_structured(text):
@@ -372,8 +386,9 @@ def compose(body: str, *, start: bool = False, end: bool = False, seconds: float
     if resolve is None:
         low = {s.name.lower(): s.name for s in subs}
         resolve = lambda w: low.get(w.lower())       # noqa: E731
-    if reference is None:
-        reference = bool(sounds or soundtrack or any(s.pictures or s.voice for s in subs))
+    cont = int(continues) if continues else None
+    if reference is None or cont:                    # (a reference video needs the reference model)
+        reference = bool(cont or reference or sounds or soundtrack or any(s.pictures or s.voice for s in subs))
     sid = speaker_ids(lns)
     audio_no = voice_numbers(subs, lns, sounds) if reference else {}
     subj_no = {s.name: k for k, s in enumerate(subs, start=1)}
@@ -410,6 +425,11 @@ def compose(body: str, *, start: bool = False, end: bool = False, seconds: float
     start, end = start or p_start is not None, end or p_end is not None
     opening = (f"The shot begins from <Picture {p_start}>." if p_start is not None
                else "The video begins exactly from the given start frame." if start else "")
+    if cont:                                         # the start frame is the last frame of <Video k>: one story
+        vid = f"<Video {cont}>"
+        opening = _join(CONTINUE_SHOT.format(k=cont),
+                        f"It begins from <Picture {p_start}>, the last frame of {vid}." if p_start is not None else
+                        f"It begins exactly from the given start frame, the last frame of {vid}." if start else "")
     closing = (f"The shot ends on <Picture {p_end}>." if p_end is not None
                else "The video ends exactly on the given end frame." if end else "")
     shot1 = rest
@@ -445,13 +465,17 @@ def compose(body: str, *, start: bool = False, end: bool = False, seconds: float
             where = ", ".join(f"[Shot {x}]" for x in shots_of(k))
             keep.append(f"<Subject {k}> (appears in {where}): fully_preserved - {reason}")
     if p_start is not None:
-        defs.append(f"<Picture {p_start}> is the first frame of [Shot 1].")
+        defs.append(f"<Picture {p_start}> is the first frame of [Shot 1]"
+                    + (f" and the last frame of <Video {cont}>." if cont else "."))
         keep.append(f"<Picture {p_start}> ([Shot 1] first frame): fully_preserved - the target video begins exactly "
                     "from this picture.")
     if p_end is not None:
         defs.append(f"<Picture {p_end}> is the last frame of [Shot {n}].")
         keep.append(f"<Picture {p_end}> ([Shot {n}] last frame): fully_preserved - the target video ends exactly on "
                     "this picture.")
+    if cont:                                         # (the node's order: pictures, videos, then the audio)
+        defs.append(CONTINUE_DEF.format(k=cont))
+        keep.append(CONTINUE_KEEP.format(k=cont))
     defs += [f"<Audio {k}> is a sound reference, used as the description says." for k in range(1, sounds + 1)]
     keep += [f"<Audio {k}>: reference - it is used as the description says, without copying the original signal."
              for k in range(1, sounds + 1)]
@@ -468,16 +492,18 @@ def compose(body: str, *, start: bool = False, end: bool = False, seconds: float
     shown = [f"<Subject {subj_no[s.name]}>" for s in subs if s.kind != "style"]
     styles = [f"<Subject {subj_no[s.name]}>" for s in subs if s.kind == "style"]
     summary = [task_types(keyframe=p_start is not None or p_end is not None, subjects=bool(subs),
-                          reuse=bool(soundtrack), audio=bool(sounds or voiced))]
-    summary.append(f"The target video shows {_listing(shown)}." if shown
-                   else "The target video follows the detailed description.")
+                          reuse=bool(soundtrack), audio=bool(sounds or voiced), continuation=bool(cont))]
+    it = "It" if cont else "The target video"
+    if cont:                                         # (as the guide begins an edit's summary with its source)
+        summary.append(CONTINUE_SUMMARY.format(k=cont))
+    summary.append(f"{it} shows {_listing(shown)}." if shown else f"{it} follows the detailed description.")
     if styles:
         summary.append(f"It is in the visual style of {_listing(styles)}.")
     summary += [f"{token(v)} speaks with the voice timbre of <Audio {audio_no[v]}>." for v in voiced]
     if soundtrack:
         summary.append(f"<Audio {soundtrack}> is reused 1:1 as its complete audio track.")
     if p_start is not None:
-        summary.append(f"It begins from <Picture {p_start}>.")
+        summary.append(f"It begins from <Picture {p_start}>" + (f", the last frame of <Video {cont}>." if cont else "."))
     if p_end is not None:
         summary.append(f"It ends on <Picture {p_end}>.")
 

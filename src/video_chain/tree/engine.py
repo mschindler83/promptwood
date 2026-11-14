@@ -65,6 +65,8 @@ def clip_inputs(project: Path, tree: Tree, nid: str, checker: Checker | None = N
      "subjects": [{"name", "kind", "pictures": [N ...], "files": [rel ...], "lead": True for the implicit lead,
                    "voice": its <Audio N> or None}]  (in subject order: <Subject 1> ... in the h3 format),
      "pictures": [{"n": N, "file": rel or Path, "what": "@Anna" | "start frame" | "end frame"}]  (ref_images order),
+     "videos":   [{"n": 1, "what": "end of clip #3" | "end of video #2", "frames": n, "node": its id}]  (<Video N>:
+                 the clip before's end it continues, "continue"; picture only, so it adds no <Audio N>),
      "sounds":   [{"n": N, "file": rel or None, "what": "sound" | "voice of @Anna" | "soundtrack"}]  (<Audio N>),
      "prompt": what the model gets, "settings": the settings it is made with (Checker.settings)}
     picture: the <Picture N> a frame has as a reference picture (h3 + reference model); a frame without one is
@@ -92,9 +94,14 @@ def clip_inputs(project: Path, tree: Tree, nid: str, checker: Checker | None = N
     for f, d, what in (("start", start, "start frame"), ("end", end, "end frame")):
         if d["picture"] is not None:
             pictures.append({"n": d["picture"], "file": d["file"], "what": what})
+    videos = []
+    if (s.get("continue") or {}).get("frames") and node.parent is not None:
+        p = tree.nodes[node.parent]
+        videos.append({"n": 1, "what": f"end of {'video' if p.is_video else 'clip'} #{short_id(p.id)}",
+                       "frames": int(s["continue"]["frames"]), "node": p.id})
     return {"format": "h3" if is_h3(tree) else "classic", "model": "ref2va" if uses_ref_model(s) else "fl2va",
             "seconds": int(s.get("frames") or clip_length(tree, node)) / chain.FPS, "start": start, "end": end,
-            "subjects": subjects, "pictures": pictures, "sounds": sounds,
+            "subjects": subjects, "pictures": pictures, "videos": videos, "sounds": sounds,
             "prompt": model_prompt(tree.options, node, s, start=plain[0], end=plain[1]), "settings": s}
 
 
@@ -225,9 +232,34 @@ def _guides(project: Path, tree: Tree, node: Node, settings: dict, tmp: Path) ->
     return guides, end_image
 
 
+def _continuation(project: Path, tree: Tree, node: Node, settings: dict, tmp: Path) -> Path | None:
+    """The reference video of a clip that continues the clip before (settings "continue"): that clip's last n
+    frames up to its hand-over frame, cut to a short clip of their own as a carry-over is (chain.cut_frames; its
+    sound stays in the file, but only the pictures are wired). None without a continuation."""
+    n = int((settings.get("continue") or {}).get("frames") or 0)
+    if not n or node.parent is None:
+        return None
+    parent = tree.nodes[node.parent]
+    clip, have = project / parent.made["video"], _clip_frames(project, parent)
+    k = handover_index(tree, parent, have)
+    if k is not None:                               # it hands over earlier: the frames up to that one
+        have = k + 1
+    what = f"{'video' if parent.is_video else 'clip'} #{short_id(parent.id)}"
+    if have < n:
+        raise ValueError(f"{what} ({have} frames) is shorter than the {n}-frame continuation of clip "
+                         f"#{short_id(node.id)}")
+    if n > int(settings["frames"]):
+        raise ValueError(f"clip #{short_id(node.id)} ({settings['frames']} frames) is shorter than its {n}-frame "
+                         "continuation; make it longer or the continuation shorter")
+    out = tmp / "continue_from.mp4"
+    chain.cut_frames(clip, out, have - n, n)
+    return out
+
+
 def guide_problem(tree: Tree, checker: Checker, todo: list[str]) -> str | None:
-    """Why a motion guide of a clip to be made cannot work (a neighbour shorter than the guide, a clip too short
-    for its guides), or None. Checked before anything is made, with the lengths the clips will have."""
+    """Why a motion guide or a continuation of a clip to be made cannot work (a neighbour shorter than the guide or
+    the continuation, a clip too short for its guides or its continuation), or None. Checked before anything is
+    made, with the lengths the clips will have."""
     def length(n: Node) -> int:
         if n.is_video and n.id in todo:             # converted again: the current range
             return chain.range_frames(n.source["start"], n.source["end"])
@@ -236,6 +268,18 @@ def guide_problem(tree: Tree, checker: Checker, todo: list[str]) -> str | None:
     for nid in todo:
         node = tree.nodes[nid]
         s = checker.settings(nid) if not node.is_video else None
+        cont = int(((s or {}).get("continue") or {}).get("frames") or 0)
+        if cont and node.parent is not None:
+            other = tree.nodes[node.parent]
+            n = length(other)
+            k = handover_index(tree, other, n)
+            n = k + 1 if k is not None else n
+            what = f"{'video' if other.is_video else 'clip'} #{short_id(other.id)}"
+            if n < cont:
+                return f"{what} ({n} frames) is shorter than the {cont}-frame continuation of clip #{short_id(nid)}"
+            if cont > int(s["frames"]):
+                return (f"clip #{short_id(nid)} ({s['frames']} frames) is shorter than its {cont}-frame "
+                        "continuation; make it longer or the continuation shorter")
         guide = int((s or {}).get("guide") or 0)
         if not guide:
             continue
@@ -384,7 +428,7 @@ def _generator_call(project: Path, node: Node, settings: dict) -> dict:
 
 
 def _record_made(project: Path, tree: Tree, node: Node, settings: dict, *, new_video: Path, new_frame: Path,
-                 own: Path | None, made_n: int, start_sha: str | None, end_key, key_key, guide_from,
+                 own: Path | None, made_n: int, start_sha: str | None, end_key, key_key, guide_from, continue_from=None,
                  log: Callable[[str], None]) -> list[Path]:
     """Write the record of the clip just made (node.made). Returns the pictures of the previous version that go to
     old/ (its end image and keyframes, when they are no longer the clip's)."""
@@ -415,6 +459,8 @@ def _record_made(project: Path, tree: Tree, node: Node, settings: dict, *, new_v
         node.made["keyframe_key"] = key_key
     if guide_from is not None:
         node.made["guide_from"] = guide_from
+    if continue_from is not None:
+        node.made["continue_from"] = continue_from
     if node.end_at is not None:
         # a new take: the frame chosen in the old one means nothing here; it hands over at its last
         # frame until a frame of this take is chosen
@@ -447,6 +493,7 @@ def _make_ai_clip(generator: chain.Generator, project: Path, tree: Tree, node: N
     end_key = checker.end_key(node)
     key_key = checker.keyframe_key(node)
     guide_from = checker.guide_from(node)
+    continue_from = checker.continue_from(node)
     call = _generator_call(project, node, settings)
     own = None
     try:
@@ -454,6 +501,9 @@ def _make_ai_clip(generator: chain.Generator, project: Path, tree: Tree, node: N
             guides, end_image = _guides(project, tree, node, settings, Path(tmp))
             if guides:
                 call["guides"] = guides
+            ref_video = _continuation(project, tree, node, settings, Path(tmp))
+            if ref_video is not None:          # <Video 1>: the end of the clip before
+                call["ref_videos"] = [str(ref_video)]
             if end_image is not None:
                 call["end_image"] = str(end_image)
             sound = None
@@ -487,7 +537,7 @@ def _make_ai_clip(generator: chain.Generator, project: Path, tree: Tree, node: N
         raise
     old = _record_made(project, tree, node, settings, new_video=new_video, new_frame=new_frame, own=own,
                        made_n=made_n, start_sha=start_sha, end_key=end_key, key_key=key_key,
-                       guide_from=guide_from, log=log)
+                       guide_from=guide_from, continue_from=continue_from, log=log)
     return [new_video, new_frame] + ([own] if own is not None else []), old
 
 

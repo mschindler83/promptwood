@@ -159,6 +159,21 @@ GUIDE_TIP = ("How much this clip takes over from the clip before it (and from a 
              "only: it starts at that frame. 5-39 frames: those frames, with their sound, are put into this clip, so "
              "motion and voice carry over; they are left out when the path is played or exported")
 GUIDE_TEXT = [(None, "last frame only"), (5, "5 frames (0.2 s)"), (22, "22 frames (0.9 s)"), (39, "39 frames (1.6 s)")]
+CONTINUE_TIP = ("Continue the clip before: the model is shown the end of the clip before (as <Video 1>) and the prompt "
+                "tells it to continue it, so motion, camera and scene carry on. Carry-over is different: it fixes the "
+                "first frames of this clip exactly; this shows the model the clip before as a reference. It uses the "
+                "reference model, so the clip takes longer to make. New: whether it helps has not been tested here "
+                "yet. (ComfyUI describes reference videos as 2-15 s long; shorter ones are taken too.)")
+CONTINUE_CLASSIC_TIP = ("Continue the clip before needs the official prompt format (Project → Prompt format): only that "
+                        "prompt can tell the model what the reference video is.")
+CONTINUE_FIRST_TIP = "The first clip has no clip before it to continue."
+CONTINUE_SHORT_TIP = ("The clip before or this clip is shorter than the shortest continuation (22 frames, 0.9 s): "
+                      "there is nothing that fits.")
+
+
+def continue_text(frames: int) -> str:
+    """A continuation length in words: 'last 1.6 s (39 frames)'."""
+    return f"last {frames / 24:.1f} s ({frames} frames)"
 
 
 def fmt_time(seconds: float) -> str:
@@ -970,6 +985,12 @@ class PromptCard(QFrame):
             self.guide.addItem(text, n)
         self.guide.setToolTip(GUIDE_TIP)
         link.addRow("Carry-over", self.guide)
+        self.cont = QComboBox()                  # continue the clip before: its end as <Video 1> (h3 format)
+        self.cont.addItem("off", None)
+        self.cont.setToolTip(CONTINUE_TIP)
+        self._cont_choices: list[int] = []       # the lengths that fit (tree.continue_choices)
+        self._cont_why = CONTINUE_FIRST_TIP      # why it cannot be used ('': it can)
+        link.addRow("Continue", self.cont)
         crow = QHBoxLayout()
         crow.setSpacing(6)
         self.cam_move = QComboBox()
@@ -1115,11 +1136,12 @@ class PromptCard(QFrame):
         self.adv_note = AdvancedNote(self.view)
         v.addWidget(self.adv_note)
         self.view.advanced(self.seed_label, self.seed, self.b_seed, self.veda_mark, self.steps_label, self.steps,
-                           (link, self.loras), (link, self.guide), (link, self.keys_row), (link, self.hand_row),
-                           self.mix_level_box)
+                           (link, self.loras), (link, self.guide), (link, self.cont), (link, self.keys_row),
+                           (link, self.hand_row), self.mix_level_box)
         self._show_mix()
         self._show_settings(PromptCard.settings_open)
         self.guide.currentIndexChanged.connect(self._ov_changed)
+        self.cont.currentIndexChanged.connect(self._ov_changed)
         for w_ in (self.cam_move, self.cam_amp, self.cam_speed):
             w_.currentIndexChanged.connect(self._ov_changed)
         self.src_sound.currentIndexChanged.connect(self._sound_toggled)
@@ -1146,6 +1168,7 @@ class PromptCard(QFrame):
         self.edit.textChanged.connect(self._text)
         self.seed.valueChanged.connect(lambda s: self.seedChanged.emit(self.nid, s))
         self.guide.currentIndexChanged.connect(lambda *_: self._enable_guide())
+        self.cont.currentIndexChanged.connect(lambda *_: self._enable_cont())
         guard_wheel(self)
         self._words()
         self._restyle()
@@ -1153,7 +1176,7 @@ class PromptCard(QFrame):
     def set_choices(self, project_frames: int, project_steps: int, known: list[tuple[str, str]]):
         """Fill the setting widgets (without emitting changes). known: (path, label) of the LoRAs to offer."""
         widgets = (self.loras, self.length, self.steps, self.guide, self.src_sound, self.sound_over, self.cam_move,
-                   self.cam_amp, self.cam_speed, self.sound_mix, self.mix_level)
+                   self.cam_amp, self.cam_speed, self.sound_mix, self.mix_level, self.cont)
         for w in widgets:
             w.blockSignals(True)
         try:
@@ -1171,6 +1194,7 @@ class PromptCard(QFrame):
                 self.guide.addItem(f"{self.ov['guide']} frames", self.ov["guide"])
                 g = self.guide.count() - 1
             self.guide.setCurrentIndex(g)
+            self._fill_cont()
             k = self.src_sound.findData(self.ov.get("source_sound") or None)
             self.src_sound.setCurrentIndex(max(k, 0))
             self.sound_over.setChecked(bool(self.ov.get("sound_over")))
@@ -1204,6 +1228,8 @@ class PromptCard(QFrame):
             ov["steps"] = self.steps.value()
         if self.guide.currentData():
             ov["guide"] = self.guide.currentData()
+        if self.cont.currentData():
+            ov["continue"] = self.cont.currentData()
         if self.src_sound.currentData():
             ov["source_sound"] = self.src_sound.currentData()
             if self.sound_over.isChecked():
@@ -1334,6 +1360,7 @@ class PromptCard(QFrame):
         self.steps.setEnabled(edit and not self.steps_locked)
         self._enable_camera()
         self._enable_guide()
+        self._enable_cont()
         self._enable_end()
         self._enable_hand()
         self.b_compare.setEnabled(self._on and self._can_compare)
@@ -1377,7 +1404,8 @@ class PromptCard(QFrame):
         the last frame) and whose control the Simple view hides. The seed is not one: every clip has one."""
         ov, names = self.ov, []
         for key, name, target in (("loras", "LoRAs", (self._link, self.loras)),
-                                  ("guide", "Carry-over", (self._link, self.guide)), ("steps", "Steps", self.steps)):
+                                  ("guide", "Carry-over", (self._link, self.guide)),
+                                  ("continue", "Continue", (self._link, self.cont)), ("steps", "Steps", self.steps)):
             if ov.get(key) and self.view.is_advanced(target):
                 names.append(name)
         if self.keys.items and self.view.is_advanced((self._link, self.keys_row)):
@@ -1437,6 +1465,39 @@ class PromptCard(QFrame):
         has nothing to carry over."""
         self._guide_useful = bool(useful)
         self._enable_guide()
+
+    def set_continue(self, choices: list[int], why: str = ""):
+        """The continuation lengths that fit this clip (tree.continue_choices) and why it cannot continue the clip
+        before ('': it can; else in words: the classic format, a first clip). A set value stays choosable, so it can
+        be taken back."""
+        self._cont_choices = list(choices)
+        self._cont_why = why or ("" if choices else CONTINUE_SHORT_TIP)
+        self._fill_cont()
+        self._enable_cont()
+
+    def _fill_cont(self):
+        """The Continue choices: off, the lengths that fit, and the clip's own value if it does not fit (any more)."""
+        cur = (getattr(self, "ov", None) or {}).get("continue") or None
+        fits = [] if self._cont_why else self._cont_choices
+        want = [None] + fits + ([cur] if cur and cur not in fits else [])
+        if [self.cont.itemData(k) for k in range(self.cont.count())] == want and self.cont.currentData() == cur:
+            return
+        self.cont.blockSignals(True)
+        try:
+            self.cont.clear()
+            for c in want:
+                self.cont.addItem("off" if c is None else continue_text(c) + ("" if c in fits or self._cont_why else " (does not fit)"),
+                                  c)
+            self.cont.setCurrentIndex(max(0, self.cont.findData(cur)))
+        finally:
+            self.cont.blockSignals(False)
+
+    def _enable_cont(self):
+        on = not self.edit.isReadOnly()
+        has = bool(self.cont.currentData())
+        self.cont.setEnabled(on and (not self._cont_why or has))   # a set value can always be taken back
+        self.cont.setToolTip(CONTINUE_TIP if not self._cont_why else
+                             self._cont_why + (" It is set: choose 'off' to take it back." if has else ""))
 
     def _sound_toggled(self, *_):
         """With the video's sound the picture should continue too: no carry-over yet -> the longest one that fits
@@ -1945,6 +2006,7 @@ class MainWindow(QMainWindow):
         self.bridge.eleven_cloned.connect(self._eleven_cloned)
         self.bridge.tts_log.connect(lambda m: (self.log.appendPlainText("TTS: " + m), self.status.setText(m + "…")))
         self._tts_local: TTS.LocalTTS | None = None
+        self._tts_fish: TTS.FishTTS | None = None
         self._tts_busy = False
         self._uses_cache: tuple | None = None        # (tree, uses_index(tree)) until something changes
         self._first_shown = False
@@ -1980,6 +2042,9 @@ class MainWindow(QMainWindow):
         self._gpu_timer = QTimer(self, interval=4000, timeout=self._poll_gpu)
         self._comfy_timer = QTimer(self, interval=4000, timeout=self._poll_comfy)
         self._build()
+        from .plugin_host import PluginHost      # separately installed features (plugins.py); none: nothing added
+        self.plugins = PluginHost(self)          # (before the settings: they open the last project, and the
+        self.plugins.start()                     # plugins hear that)
         self._load_settings()
         self._end_leftover_llama()
         self._gpu_timer.start()
@@ -2228,8 +2293,11 @@ class MainWindow(QMainWindow):
         for k, text in TTS.PROVIDERS.items():
             self.tts_provider.addItem(text, k)
         self.tts_provider.setToolTip("Who speaks the lines with text to speech (Speak the lines on a clip, TTS… for a "
-                                     "voice): Qwen3-TTS on this computer, cloning each character's voice sample, or "
-                                     "ElevenLabs with your API key (Settings), in each character's ElevenLabs voice")
+                                     "voice): Qwen3-TTS on this computer, cloning each character's voice sample; "
+                                     "Fish S2 Pro on this computer, cloning it too and taking the tone from [tags] "
+                                     "in a line (\"[angry] Lass mich!\"; about 19 GB of VRAM, its licence allows "
+                                     "non-commercial use only); or ElevenLabs with your API key (Settings), in each "
+                                     "character's ElevenLabs voice (its v3 models hear [tags] too)")
         irow.addRow("Text to speech", self.tts_provider)
         mrow = QHBoxLayout()
         self.eleven_model = QComboBox()
@@ -4105,6 +4173,7 @@ class MainWindow(QMainWindow):
                                         "fixed." if film.problem else ""))
         if tree.recovered_from is not None:
             self._tell_recovered(folder, tree.recovered_from)
+        self.plugins.emit("project_opened", folder)
         return True
 
     def _focus_graph(self):
@@ -4570,14 +4639,37 @@ class MainWindow(QMainWindow):
                                                                    TTS.TtsError, "speak the lines after the run")
         return self._tts_local
 
+    def fish_tts(self) -> "TTS.FishTTS":
+        """The app's Fish S2 Pro worker (started on demand; stop_tts unloads it). Before it starts, the refiner's
+        llama.cpp server is stopped (its RAM and VRAM) and ComfyUI unloads its models when VRAM is short."""
+        if self._tts_fish is None:
+            d = Path.home() / ".cache" / "video-chain"
+            d.mkdir(parents=True, exist_ok=True)
+            self._tts_fish = TTS.FishTTS(log=d / "fish-worker.log", helper=self.local_tts())
+        url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL).rstrip("/")
+        self._tts_fish.helper = self.local_tts()
+        self._tts_fish.before_launch = lambda _w: self._room_for_fish(url)
+        return self._tts_fish
+
+    def _room_for_fish(self, url: str) -> None:
+        """(a worker thread) Room for Fish S2 Pro: the llama.cpp server goes (it may hold many GB of RAM as well as
+        VRAM), then ComfyUI is asked to unload its models (_make_room)."""
+        cur = getattr(self, "_llama", None)
+        if cur is not None and cur.stop(wait=True):
+            self.bridge.tts_log.emit("stopped the llama.cpp server: Fish S2 Pro needs its RAM and VRAM")
+        self._make_room(TTS.FISH_VRAM_MB, url, "Fish S2 Pro", TTS.TtsError, "speak the lines after the run")
+
     def stop_tts(self, why: str = "") -> bool:
-        stopped = bool(self._tts_local is not None and self._tts_local.stop())
-        if stopped and why:
-            self.log.appendPlainText(f"Stopped Qwen3-TTS ({why}).")
+        stopped = False
+        for w, what in ((self._tts_local, "Qwen3-TTS"), (self._tts_fish, "Fish S2 Pro")):
+            if w is not None and w.stop():
+                stopped = True
+                if why:
+                    self.log.appendPlainText(f"Stopped {what} ({why}).")
         return stopped
 
     def _tts_engine(self):
-        return TTS.engine(self.tree, self.local_tts())
+        return TTS.engine(self.tree, self.local_tts(), self.fish_tts())
 
     def _speak_engine(self, nid: str):
         """The engine a clip's lines can be spoken with now, or None (the status line says why not)."""
@@ -4592,7 +4684,7 @@ class MainWindow(QMainWindow):
             return None
         eng = self._tts_engine()
         bad = TTS.line_problems(self.tree, node, eng.name) + eng.problems(
-            transcribe=eng.name == "local" and TTS.needs_transcript(self.tree, node))
+            transcribe=eng.name in ("local", "fish") and TTS.needs_transcript(self.tree, node))
         if bad:
             self.status.setText(f"Cannot speak the lines of clip #{nid[1:]}: " + "; ".join(bad) + ".")
             return None
@@ -4615,6 +4707,7 @@ class MainWindow(QMainWindow):
             self, f"#{nid[1:]}", [{"name": d["speaker"]["name"], "line": d["line"]}
                                   for d in TTS.clip_lines(self.tree, self.tree.nodes[nid])],
             eng.name, TTS.speak_options(self.tree),
+            tags=TTS.takes_tags(eng.name, TTS.options(self.tree)["eleven_model"]),
             play=lambda path, title: self.preview.open(Path(path), title),
             render=render,
             file=lambda r: project / r["file"])
@@ -4647,7 +4740,7 @@ class MainWindow(QMainWindow):
             self._tts_busy = False
             self._update_buttons()
             dlg.deleteLater()
-            if eng.name == "local":
+            if eng.name in ("local", "fish"):
                 self.stop_tts("the lines window was closed")
         return used
 
@@ -4687,7 +4780,7 @@ class MainWindow(QMainWindow):
             except BaseException as e:  # noqa: BLE001  (the answer ends "busy")
                 self.bridge.spoken.emit(nid, None, str(e) or type(e).__name__, str(project))
             finally:
-                if eng.name == "local":
+                if eng.name in ("local", "fish"):
                     eng.stop()                      # (unloaded right after: its VRAM back for ComfyUI)
         threading.Thread(target=work, daemon=True).start()
         return True
@@ -6824,6 +6917,9 @@ class MainWindow(QMainWindow):
                     step = "Its sound is mixed again from the kept sounds (no new generation)."
                 card.set_revert(T.changed_inputs(self.tree, n.id) if st == "changed" else [])
                 card.set_guide_useful(n.parent is not None or vc is not None)
+                card.set_continue(T.continue_choices(self.tree, n),
+                                  CONTINUE_FIRST_TIP if n.parent is None else
+                                  "" if T.is_h3(self.tree) else CONTINUE_CLASSIC_TIP)
                 handover = T.handover_index(self.tree, n)
                 total = T.made_frames(n) or T.clip_length(self.tree, n)
                 if vc is not None:
@@ -8539,8 +8635,12 @@ class MainWindow(QMainWindow):
             keep_path = m.addAction("Keep only this path, delete all other branches")
             keep_path.setEnabled(bool(self.tree.others_than_path(nid)))
             delete = m.addAction("Delete (with everything after it)")
+        extra = self.plugins.context_actions(m, nid) if nid != START else {}     # (the plugins' clip actions)
         chosen = self._exec_menu(m, pos.toPoint() if hasattr(pos, "toPoint") else pos)
         if chosen is None:
+            return
+        if chosen in extra:
+            QTimer.singleShot(0, extra[chosen])
             return
         # run it later: this is still inside the node's mouse handler, and the action may rebuild the graph
         # (deleting that very node)
@@ -9487,10 +9587,19 @@ class MainWindow(QMainWindow):
             if self._job is None:                      # after the job (e.g. a RunPod pod that could not be ended)
                 self.status.setText(f"Warning: {self._error}")
                 self.log.appendPlainText(f"Warning: {self._error}")
+        self.plugins.emit("run_event", ev)             # (the plugins hear it once the app has handled it)
+
+    def _tell_plugins_finished(self, result: int):
+        try:
+            self.plugins.emit("run_finished", result)
+        except RuntimeError:                           # the window was closed before the timer fired
+            pass
 
     def _job_finished(self, code: int = 0):
         """End of a job: the worker reported idle again (code 0), or the worker ended (its exit code)."""
         ok = self._phase == "done" and code == 0 and not self._error
+        result = 0 if ok else (int(code) or 1)           # (told to the plugins once the window is up to date)
+        QTimer.singleShot(0, lambda: self._tell_plugins_finished(result))
         refine = (self._job or {}).get("refine")         # an export at a refined size
         for nid in [n for n, s in self.live.items() if s == "generating"]:
             if refine:                                   # an export never touches the clip itself, only its upscaled
