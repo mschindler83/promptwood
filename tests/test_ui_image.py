@@ -309,6 +309,9 @@ def test_prompt_refiner_on_the_card(app, win, tmp_path, image, monkeypatch):
         def chosen(self):
             return "A man walks slowly towards the camera; footsteps on gravel."
 
+        def chosen_ideas(self):
+            return None
+
         def deleteLater(self):
             pass
     monkeypatch.setattr(PR, "RefineDialog", FakeDialog)
