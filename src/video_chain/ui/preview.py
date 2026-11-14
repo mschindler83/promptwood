@@ -67,6 +67,7 @@ class Preview(QWidget):
         self.b_play = icon_button("play", "Play / pause")
         self.b_play.setEnabled(False)
         self.slider = QSlider(Qt.Orientation.Horizontal)
+        self.slider.setAccessibleName("Position in the video")
         self.slider.setEnabled(False)
         self.time = label("0:00.0 / 0:00.0", level="tertiary", type_="mono")
         row.addWidget(self.b_play)

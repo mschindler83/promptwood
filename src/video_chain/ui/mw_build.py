@@ -1045,6 +1045,7 @@ class BuildMixin(MainWindowHost):
         self.b_stop.setEnabled(False)
         self.b_stop.clicked.connect(self.stop)
         self.progress = QProgressBar()
+        self.progress.setAccessibleName("Progress of the run")
         self.progress.setFixedWidth(220)
         self.progress.setRange(0, 1000)
         self.status = label("Open or create a project folder.", role="statusText")

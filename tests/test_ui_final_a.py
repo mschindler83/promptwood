@@ -483,3 +483,12 @@ def test_the_context_menu_is_shown_greyed_while_generating(app, win, tmp_path, i
     monkeypatch.setattr(type(win), "running", property(lambda self: True))
     win._context(ids[0], win.pos())
     assert seen and not any(seen.values())
+
+
+# ------------------------------------------------------------------ MWA-31: the progress bars and the preview slider have names
+def test_bars_and_the_preview_slider_have_accessible_names(app, win, tmp_path, image):
+    ids = new_project(win, tmp_path, image, ("a",))
+    assert win.progress.accessibleName() == "Progress of the run"
+    assert win.preview.slider.accessibleName() == "Position in the video"
+    card = next(c for c in win.cards if c.nid == ids[0])
+    assert card.bar.accessibleName() == "Progress of this clip"
