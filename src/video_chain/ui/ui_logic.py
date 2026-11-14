@@ -4,7 +4,7 @@ from __future__ import annotations
 import copy
 from collections import Counter
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 
 from .. import chain, config, llm_server as LLM, tree as T, tts as TTS
 from .graph import START
@@ -267,6 +267,11 @@ def project_setting_changes(o: dict) -> list[tuple[str, str]]:
     if topt["provider"] == "elevenlabs" and topt["eleven_model"] != TTS.DEFAULT_OPTIONS["eleven_model"]:
         out.append(("eleven_model", "ElevenLabs model (Cast & references)"))
     return out
+
+
+def as_dict(typed: Any) -> dict[str, Any]:
+    """A TypedDict (an Options, MadeRecord ...) as the plain dict it is, for keys that are variables."""
+    return cast(dict[str, Any], typed)
 
 
 CARD_WIDTH = 330                           # a card's width in a row; the header must fit it

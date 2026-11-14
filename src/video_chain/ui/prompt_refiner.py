@@ -6,6 +6,8 @@ from __future__ import annotations
 import html
 import random
 import threading
+from collections.abc import Callable
+from typing import Any
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal
@@ -27,11 +29,6 @@ LIKE_EXAMPLE = ("Rewrite my prompt in the manner of this example prompt, which i
                 "\"{example}\"")
 KIND_TEXT = {"video": "video clip prompt", "video_h3": "video clip prompt", "image": "image prompt",
              "edit": "edit instruction"}
-
-
-def refine_button(tip: str = "Refine this prompt with a language model (ComfyUI)") -> "QPushButton":
-    b = icon_button("gen", tip)
-    return b
 
 
 SETUP_HINT = ("More models: set up a local language model (llama.cpp, GGUF files) in the main window under "
@@ -57,6 +54,7 @@ class RefineDialog(QDialog):
     starts from (kind "video_h3": the refiner fits the action to the length and anchors on that frame).
     loras: the paths of the LoRAs the result is made with; the model is told what is known of them (lora_notes:
     their creators' words and prompts that work with them), and writes a note on each once."""
+    connect: Callable  # type: ignore[assignment]   # (shadows QObject.connect, which this dialog never uses)
 
     def __init__(self, parent, text: str, kind: str, connect, settings=None, start_comfy=None, cast=None,
                  pictures=None, seconds: float | None = None, start_image=None, loras=None):
@@ -67,7 +65,7 @@ class RefineDialog(QDialog):
         self.setWindowTitle(f"Refine the {KIND_TEXT.get(kind, 'prompt')}")
         fit_size(self, 1100, 680)
         self.kind, self.connect, self.qs, self.start_comfy = kind, connect, settings, start_comfy
-        self.refiner = None
+        self.refiner: Any = None                  # (the connected refiner)
         self._connecting = False
         self._retries = 0                         # (more tries to connect: ComfyUI is starting)
         self.refined_any = False                  # a refine ran (its model is loaded in ComfyUI now)
@@ -181,7 +179,7 @@ class RefineDialog(QDialog):
         self.count.setValue(5)
         self.count.setSuffix(" ideas")
         self.count.setToolTip("How many different ideas (one answer: the model keeps them apart)")
-        self.count.valueChanged.connect(lambda v: self.ideas_mode() and self.b_refine.setText(f"Make {v} ideas"))
+        self.count.valueChanged.connect(self._ideas_count_changed)
         hrow.addWidget(self.count)
         self.b_all = QPushButton("Generate all")
         self.b_all.setToolTip("Put all ideas into the image window's Variations as {idea}: one Generate makes one "
@@ -221,7 +219,8 @@ class RefineDialog(QDialog):
 
     # ---- what the chosen model can do
     def current_model(self) -> dict:
-        return next((m for m in (self.refiner.models if self.refiner else [])
+        models: list[dict] = self.refiner.models if self.refiner else []
+        return next((m for m in models
                      if m["file"] == self.model.currentData()), {})
 
     def chatting(self) -> bool:
@@ -229,6 +228,10 @@ class RefineDialog(QDialog):
 
     def seeing(self) -> bool:
         return bool(self.current_model().get("vision"))
+
+    def _ideas_count_changed(self, v: int) -> None:
+        if self.ideas_mode():
+            self.b_refine.setText(f"Make {v} ideas")
 
     def ideas_mode(self) -> bool:
         return self.b_mode_ideas.isChecked() and self.ideas_possible()
@@ -291,7 +294,8 @@ class RefineDialog(QDialog):
         show_pics = chat                              # (only a conversation model can be shown pictures)
         self.pics_title.setVisible(show_pics)
         for i in range(self.pics_row.count()):
-            w = self.pics_row.itemAt(i).widget()
+            item = self.pics_row.itemAt(i)
+            w = item.widget() if item is not None else None
             if w is not None:
                 w.setVisible(show_pics)
                 w.setEnabled(see)
@@ -303,7 +307,7 @@ class RefineDialog(QDialog):
     def _show_pictures(self):
         while self.pics_row.count():
             it = self.pics_row.takeAt(0)
-            w = it.widget()                        # (after setParent(None) the item no longer knows it)
+            w = it.widget() if it is not None else None                        # (after setParent(None) the item no longer knows it)
             if w is not None:
                 w.setParent(None)
                 w.deleteLater()

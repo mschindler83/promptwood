@@ -8,6 +8,7 @@ from PySide6.QtGui import QImage, QImageReader
 from .. import chain, swap, tree as T
 from . import dialogs as D, image_picker as IP, image_edit as IE
 from .graph import START
+from .ui_logic import as_dict
 from .image_edit import EDITS_DIR, project_edits, uses_of
 from .mw_host import MainWindowHost
 
@@ -15,7 +16,7 @@ from .mw_host import MainWindowHost
 class StateMixin(MainWindowHost):
     """The tree's state: saving, change marks, the start image."""
 
-    def _uses(self, meta: dict) -> list[str]:
+    def _uses(self, meta: IE.ResultRecord) -> list[str]:
         """Where an image-edit result is used (the AI image window asks for every result of a reload): the index of
         the project's end images and face pictures is built once until something changes (UIM-26)."""
         if self._uses_cache is None or self._uses_cache[0] is not self.tree:
@@ -150,8 +151,9 @@ class StateMixin(MainWindowHost):
             m = n.made or {}
             if n.is_video:
                 for key, what in (("first", "first frame"), ("frame", "last frame")):
-                    if m.get(key) and (p / m[key]).is_file():
-                        videos.append((str(p / m[key]), f"Video #{T.short_id(n.id)} · {what}"))
+                    rel = as_dict(m).get(key)
+                    if rel and (p / rel).is_file():
+                        videos.append((str(p / rel), f"Video #{T.short_id(n.id)} · {what}"))
                 continue
             if m.get("frame") and (p / m["frame"]).is_file():
                 clips.append((str(p / m["frame"]), f"Clip #{T.short_id(n.id)} · last frame"))
@@ -275,7 +277,7 @@ class StateMixin(MainWindowHost):
         node = self.tree.nodes.get(nid) if self.tree and nid else None
         made = node is not None and bool(node.made)
         self.b_ref_clip.setEnabled(made and not self.running)
-        if made:
+        if made and node is not None and nid is not None:
             what = (f"the first frame of video #{T.short_id(nid)}" if node.is_video else f"the last frame of clip "
                                                                                          f"#{T.short_id(nid)}")
             tip = f"Add {what} as a {ref}"
@@ -288,7 +290,7 @@ class StateMixin(MainWindowHost):
                                      and self._selected_character() is not None and not self.running)
         self.b_voice_clip.setToolTip(
             f"Set the voice from the sound of {'video' if node.is_video else 'clip'} #{T.short_id(nid)}: choose the "
-            "part of it, with or without its background music" if has_sound
+            "part of it, with or without its background music" if has_sound and node is not None and nid is not None
             else "Select a made clip or a converted video with the voice")
 
     def _show_start_image(self):

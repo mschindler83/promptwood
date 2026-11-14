@@ -10,9 +10,9 @@ import threading
 
 from PySide6.QtCore import QObject, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QFontMetrics, QImage, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLineEdit,
+from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
                                QListView, QListWidget, QListWidgetItem, QPushButton,
-                               QStyledItemDelegate, QVBoxLayout, QWidget)
+                               QStyledItemDelegate, QToolButton, QVBoxLayout, QWidget)
 
 from .. import tree as T
 from .dialogs import add_action, button_row, failed
@@ -161,7 +161,8 @@ def initials(name: str) -> str:
 def elide_lines(text: str, fm: QFontMetrics, width: int, lines: int) -> str:
     """The text broken into at most `lines` lines of `width` pixels (anywhere: LoRA names have few spaces), the
     last one shortened with an ellipsis."""
-    out, rest = [], text
+    out: list[str] = []
+    rest = text
     while rest and len(out) < lines - 1:
         n = len(rest)
         while n > 1 and fm.horizontalAdvance(rest[:n]) > width:
@@ -197,7 +198,8 @@ class LoraPickerDialog(QDialog):
         from .lora_window import SHOW
         self.setWindowTitle(title)
         fit_size(self, 1000, 740)
-        self.known, self.file_dir, self._chosen = list(known), file_dir, None
+        self.known, self.file_dir = list(known), file_dir
+        self._chosen: str | None = None
         self.qs = settings if settings is not None else getattr(parent, "qs", None)
         try:
             self.db = db or triggers.db()
@@ -318,7 +320,8 @@ class LoraPickerDialog(QDialog):
         if self._closed.is_set():
             return
         area = self.list.viewport().rect()
-        seen, later = [], []
+        seen: list = []
+        later: list = []
         for path, it in self._items.items():
             if it.isHidden() or it.data(self.COVER) is not None:
                 continue
@@ -482,6 +485,12 @@ def pick_lora(parent, known, current=None, used=None, file_dir: str = "") -> str
         dlg.deleteLater()
 
 
+class _LoraRow(QWidget):
+    """One LoRA of the stack: its picker button, strength and remove button (the widgets are set by _add_row)."""
+    trigger_label: QLabel
+    remove_button: QToolButton
+
+
 class LoraStack(QWidget):
     """A list of LoRAs: rows of (LoRA, strength, remove) and '+ LoRA'; a row's LoRA button and '+ LoRA' open the
     LoRA picker (search, full names, other files). items() -> [{"path", "strength"}] in order. None by default."""
@@ -495,7 +504,7 @@ class LoraStack(QWidget):
         super().__init__(parent)
         self.known: list[tuple[str, str]] = []
         self.file_dir = ""
-        self.rows: list[tuple[QWidget, QPushButton, QDoubleSpinBox]] = []
+        self.rows: list[tuple[_LoraRow, QPushButton, QDoubleSpinBox]] = []
         self.use_prompt: Callable[[str], None] | None = None     # set by the owner: put a text into the prompt these LoRAs are for
         self.v = QVBoxLayout(self)
         self.v.setContentsMargins(0, 0, 0, 0)
@@ -605,7 +614,7 @@ class LoraStack(QWidget):
 
     def refresh_triggers(self):
         for w, b, _s in self.rows:
-            if getattr(w, "trigger_label", None) is not None:
+            if hasattr(w, "trigger_label"):
                 self._show_trigger(w.trigger_label, b.property("path"))
 
     def _trigger_menu(self, button: QPushButton, pos):
@@ -649,7 +658,7 @@ class LoraStack(QWidget):
         self.changed.emit()
 
     def _add_row(self, path: str, strength: float):
-        w = QWidget(self)
+        w = _LoraRow(self)
         outer = QVBoxLayout(w)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)

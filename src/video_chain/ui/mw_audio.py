@@ -42,6 +42,7 @@ class AudioMixin(MainWindowHost):
                      "this character (the old voice stays in your account).")
         if not D.confirm(self, "Clone the voice at ElevenLabs", text):
             return
+        assert self.tree is not None and self.project is not None
         snap, project = copy.deepcopy(self.tree), self.project
         self._tts_busy = True
         try:
@@ -129,10 +130,11 @@ class AudioMixin(MainWindowHost):
 
     def _voice_from_selected(self):
         nid = self.tree.selected if self.tree else None
-        node = self.tree.nodes.get(nid) if nid else None
-        if node is None or not (node.made or {}).get("video"):
+        node = self.tree.nodes.get(nid) if self.tree and nid else None
+        if nid is None or node is None or not (node.made or {}).get("video"):
             self.status.setText("Select a made clip or a converted video first.")
             return
+        assert self.project is not None and node.made is not None
         what = f"{'video' if node.is_video else 'clip'} #{T.short_id(nid)}"
         self._choose_voice_part(str(self.project / node.made["video"]), label=f"sound of {what}")
 
@@ -207,10 +209,11 @@ class AudioMixin(MainWindowHost):
 
     def _sound_from_selected(self):
         nid = self.tree.selected if self.tree else None
-        node = self.tree.nodes.get(nid) if nid else None
-        if node is None or not (node.made or {}).get("video"):
+        node = self.tree.nodes.get(nid) if self.tree and nid else None
+        if nid is None or node is None or not (node.made or {}).get("video"):
             self.status.setText("Select a made clip or a converted video first.")
             return
+        assert self.project is not None and node.made is not None
         what = f"{'Video' if node.is_video else 'Clip'} #{T.short_id(nid)}"
         self.add_sound(str(self.project / node.made["video"]), name=f"sound of {what.lower()}")
 
@@ -312,10 +315,11 @@ class AudioMixin(MainWindowHost):
         if node is None or not (node.made or {}).get("video"):
             self.status.setText("Select a made clip or a converted video first.")
             return
+        assert self.project is not None and node.made is not None
         what = f"{'video' if node.is_video else 'clip'} #{T.short_id(node.id)}"
         self.import_track(str(self.project / node.made["video"]), name=f"sound of {what}")
 
-    def _selected_track(self) -> dict | None:
+    def _selected_track(self) -> T.Track | None:
         item = self.track_list.currentItem()
         return T.track_of(self.tree, item.data(Qt.ItemDataRole.UserRole)) if item is not None and self.tree else None
 
@@ -361,7 +365,7 @@ class AudioMixin(MainWindowHost):
         if self._write_tree():
             self._drop_unused_tracks()
         self._changed()
-        self.status.setText(f"Audio track “{T.track_of(self.tree, tid)['name']}” "
+        self.status.setText(f"Audio track “{(T.track_of(self.tree, tid) or {}).get('name')}” "
                             + ("renamed." if same else "cut again."))
         self._report_remade(before, "Audio track cut again")
         return True
@@ -425,8 +429,10 @@ class AudioMixin(MainWindowHost):
 
     def _show_tracks(self, select: str | None = None):
         cur = select or (self.track_list.currentItem().data(Qt.ItemDataRole.UserRole) if self.track_list.currentItem() else None)
-        trs = T.tracks(self.tree) if self.tree else []
-        sig = ([(tr["id"], tr["name"], tr["file"], len(T.track_users(self.tree, tr["id"]))) for tr in trs], cur)
+        tree = self.tree
+        trs = T.tracks(tree) if tree is not None else []
+        sig = ([(tr["id"], tr["name"], tr["file"], len(T.track_users(tree, tr["id"]))) for tr in trs], cur) \
+            if tree is not None else ([], cur)
         if sig == self._tracks_shown and select is None:
             self._update_track_buttons()
             return
@@ -445,7 +451,7 @@ class AudioMixin(MainWindowHost):
             "Shared by all scenes of the film.")
         self._update_track_buttons()
 
-    def _fill_tracks(self, trs: list[dict], cur: str | None):
+    def _fill_tracks(self, trs: list[T.Track], cur: str | None):
         self.track_list.clear()
         for tr in trs:
             assert self.tree is not None
@@ -470,7 +476,8 @@ class AudioMixin(MainWindowHost):
         self.b_track_clip.setEnabled(idle and has)
         self.b_track_clip.setToolTip(f"Import the sound of {'video' if node.is_video else 'clip'} "
                                      f"#{T.short_id(node.id)} "
-                                     "and cut it" if has else "Select a made clip or a converted video")
+                                     "and cut it" if node is not None and has else
+                                     "Select a made clip or a converted video")
         for b in (self.b_track_cut, self.b_track_del):
             b.setEnabled(idle and sel)
         self.b_track_play.setEnabled(sel)
@@ -516,7 +523,8 @@ class AudioMixin(MainWindowHost):
         self.b_sound_clip.setEnabled(idle and room and has)
         self.b_sound_clip.setToolTip(
             (f"Add the sound of {'video' if node.is_video else 'clip'} #{T.short_id(nid)} (its first seconds), e.g. "
-             "to keep a voice from an earlier clip" if has else "Select a made clip or a converted video")
+             "to keep a voice from an earlier clip" if node is not None and nid is not None and has
+             else "Select a made clip or a converted video")
             if room else f"There are already {T.MAX_AUDIO_REFS} sounds or {T.AUDIO_REF_TOTAL:g} s; remove one first")
         sel = 0 <= self.sounds.currentRow() < len(refs)
         self.b_sound_del.setEnabled(idle and sel)

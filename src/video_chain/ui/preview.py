@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtWidgets import QHBoxLayout, QSlider, QStackedWidget, QVBoxLayout, QWidget
@@ -9,10 +10,13 @@ from PySide6.QtWidgets import QHBoxLayout, QSlider, QStackedWidget, QVBoxLayout,
 from .theme import icon
 from .widgets import FrameTile, VideoView, format_time, icon_button, label
 
-try:                                            # (the player is optional: Preview says so when it is missing)
+if TYPE_CHECKING:
     from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
-except ImportError:                             # pragma: no cover
-    QAudioOutput = QMediaPlayer = None
+else:
+    try:                                        # (the player is optional: Preview says so when it is missing)
+        from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+    except ImportError:                         # pragma: no cover
+        QAudioOutput = QMediaPlayer = None
 
 
 class StartTile(FrameTile):
@@ -44,7 +48,7 @@ class Preview(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.player = None
+        self.player: QMediaPlayer | None = None
         self.video: VideoView | None = None
         self.audio = None
         v = QVBoxLayout(self)
@@ -117,6 +121,7 @@ class Preview(QWidget):
             return
         if not self._ensure_player():
             return
+        assert self.player is not None and self.video is not None       # (_ensure_player)
         self.player.stop()
         self.player.setSource(QUrl())
         self.opened.emit(str(path))
@@ -140,7 +145,8 @@ class Preview(QWidget):
         if self.player is not None:
             self.player.stop()
             self.player.setSource(QUrl())
-            self.video.clear()
+            if self.video is not None:
+                self.video.clear()
             self.stack.setCurrentWidget(self.placeholder)
             self.name.setText("")
             self.slider.setValue(0)
@@ -150,6 +156,7 @@ class Preview(QWidget):
             self.moved.emit(-1.0)
 
     def _pos(self, ms):
+        assert self.player is not None
         if self.player.source().isEmpty():
             return
         self.moved.emit(ms / 1000)

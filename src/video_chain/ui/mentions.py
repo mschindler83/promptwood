@@ -9,7 +9,7 @@ from typing import Callable
 from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtGui import (QFont, QStandardItem, QStandardItemModel, QSyntaxHighlighter, QTextCharFormat,
                            QTextCursor)
-from PySide6.QtWidgets import QCompleter, QPlainTextEdit
+from PySide6.QtWidgets import QAbstractItemView, QCompleter, QPlainTextEdit
 
 from .. import camera as CAM
 from .. import tree as T
@@ -77,7 +77,7 @@ class MentionHelper(QObject):
         return "#", _TYPING_CAM.search(block)
 
     def _update(self):
-        popup = self.completer.popup()
+        popup = self._popup()
         kind, m = self._typed() if self.edit.hasFocus() else (self._kind, None)
         self._kind = kind                           # (what the list now shows: _fill and _insert go by it)
         names = (self.names() if kind == "@" else CAM.tokens()) if m is not None else []
@@ -119,18 +119,23 @@ class MentionHelper(QObject):
         cur = self.edit.textCursor()
         cur.movePosition(QTextCursor.MoveOperation.Left, QTextCursor.MoveMode.KeepAnchor, len(m.group(1) or ""))
         insert_spaced(self.edit, name, cur, space_before=False, focus=False)
-        self.completer.popup().hide()
+        self._popup().hide()
+
+    def _popup(self) -> QAbstractItemView:
+        popup = self.completer.popup()
+        assert popup is not None
+        return popup
 
     def eventFilter(self, obj, ev):
-        if obj is self.edit and ev.type() == QEvent.Type.KeyPress and self.completer.popup().isVisible():
+        if obj is self.edit and ev.type() == QEvent.Type.KeyPress and self._popup().isVisible():
             if ev.key() in (Qt.Key.Key_Enter, Qt.Key.Key_Return, Qt.Key.Key_Tab):
-                idx = self.completer.popup().currentIndex()
+                idx = self._popup().currentIndex()
                 if idx.isValid():                  # (nothing chosen: the key does what it does without the list)
                     self._insert(idx.data(INSERT))
                     return True
                 return False
             if ev.key() == Qt.Key.Key_Escape:
-                self.completer.popup().hide()
+                self._popup().hide()
                 return True
         return False
 
