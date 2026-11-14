@@ -68,7 +68,8 @@ def test_material_has_distinct_examples_and_counted_settings():
     assert all("<lora" not in p and ":1.3" not in p and "BREAK" not in p for p in m["examples"])
     assert "alert" not in m["about"] and m["about"].startswith("Best at 0.7-0.9. A loose ink sketch style")
     # this LoRA's own strength (by its version id), not the other LoRA's 1.5
-    assert m["settings"] == {"count": 9, "strength": "0.7-0.8", "steps": "24-26", "cfg": "4.5", "sampler": "Euler a"}
+    assert m["settings"] == {"count": 9, "strength": "0.7-0.8", "strength_mid": 0.8, "steps": "24-26",
+                             "cfg": "4.5", "sampler": "Euler a"}
     assert LN.settings_text(m["settings"]) == "LoRA strength 0.7-0.8, steps 24-26, CFG 4.5, sampler Euler a"
     # the strength from <lora:name:w> tags when CivitAI lists no resources
     d = details(4)
@@ -401,17 +402,46 @@ def test_lora_window_shows_what_is_known(tmp_path):
     assert "market stall full of oranges" in w.cards[1].ex["prompt"]            # (the most liked, then the nearest)
     # how to prompt it: words, counted settings, the note (none yet), word for word what the refiner is told
     how = w.how.toPlainText()
-    for want in ("ink4sketch", "from CivitAI", "LoRA strength 0.7-0.8", "Not written yet", "Prompts that work with it"):
+    for want in ("ink4sketch", "from CivitAI", "LoRA strength 0.7-0.8", "Usual strength: 0.80",
+                 "Prompts that work with it"):
         assert want in how, want
+    assert "none yet" in w.note_title.text() and w.note_edit.toPlainText() == ""
+    assert not w.b_save.isEnabled() and not w.b_rewrite.isEnabled()
+    assert "Use as my prompt" not in [b.text() for c in w.cards for b in c.findChildren(type(w.b_save))]
     assert "A loose ink sketch style" in w.about.toPlainText() and "red fox" not in w.about.toPlainText()
     assert w.told_view.toPlainText() == told and w.tabs.currentWidget() is w.told_view
     # a note shows, and can be forgotten
     db.set_note(p, {"note": "Does: ink.\nWording: tags.", "stamp": LN.material(db.details(p), db.words(p), p)["stamp"]})
     w.show_lora(p)
-    assert "Does: ink." in w.how.toPlainText() and "the refiner has a note" in w.facts.text()
-    from PySide6.QtCore import QUrl
-    w._link(QUrl("forget:note"))
-    assert db.note(p) is None and "Not written yet" in w.how.toPlainText()
+    assert w.note_edit.toPlainText() == "Does: ink.\nWording: tags." and "the refiner has a note" in w.facts.text()
+    assert "written by the language model" in w.note_title.text() and "Does: ink." in w.how.toPlainText()
+    # ... be changed: the user's version stays, also when CivitAI tells something new; own remarks are told too
+    w.note_edit.setPlainText("Does: ink, best for animals.")
+    w.remarks_edit.setPlainText("never write   'portrait' with it")
+    assert w.b_save.isEnabled()
+    w.save_note()
+    assert "yours" in w.note_title.text() and "Kept." in w.state.text() and not w.b_save.isEnabled()
+    told_now = LN.guidance([p], db)
+    assert "Does: ink, best for animals." in told_now and "Does: ink.\n" not in told_now
+    assert "The user's own remarks on this LoRA (follow them): never write 'portrait' with it" in told_now
+    assert "never write 'portrait'" in w.how.toPlainText()           # (shown word for word in the window too)
+    settle(lambda: "your note, your remarks" in w.list.item(0).text())
+    assert w.list.item(0).text() == "inksketch_v2\n   7 prompts, your note, your remarks"
+    db._save_details(TR.sha256_of(p), {**d, "fetched": 5000.0})
+    assert LN.note_of(db, p, LN.material(db.details(p), db.words(p), p))["note"] == "Does: ink, best for animals."
+    assert LN.make_notes([p], lambda *a: "Does: the model's.", db=db) == 0          # the user's is not replaced
+    # ... or handed back to the model: the note goes, the remarks stay, the next refine writes a new one
+    w.save_note(forget=True)
+    assert w.note_edit.toPlainText() == "" and w.remarks_edit.toPlainText() == "never write 'portrait' with it"
+    assert LN.make_notes([p], lambda *a: "Does: the model's.", db=db) == 1
+    kept = db.note(p)
+    assert kept["note"] == "Does: the model's." and kept["remarks"] == "never write 'portrait' with it"
+    assert not kept.get("edited")
+    w.show_lora(p)
+    w.remarks_edit.setPlainText("")
+    w.note_edit.setPlainText("")
+    w.save_note()
+    assert db.note(p) is None                                        # nothing of one's own left: nothing kept
     # a LoRA nothing is known of says so
     w.show_lora(other)
     assert "CivitAI was not asked about this file yet" in w.facts.text()
@@ -427,3 +457,121 @@ def test_lora_window_shows_what_is_known(tmp_path):
     w3 = LoraWindow(None, [], db=db, fetch=fetch)
     assert w3.title.text() == "No LoRA"
     w3.done(0)
+
+
+def test_user_remarks_on_a_lora_nothing_else_is_known_of(tmp_path):
+    db = TR.TriggerDB(tmp_path / "db.json")
+    p = str(lora(tmp_path / "loras" / "mine.safetensors"))
+    assert not LN.save_user(db, p, remarks="x")                      # not looked at yet: no hash to keep it by
+    db.scan([p], lookup=lambda sha: None, gap=0)
+    assert LN.guidance([p], db) == ""
+    assert LN.save_user(db, p, remarks="  a slider: strong   values look burnt ")
+    text = LN.guidance([p], db)
+    assert 'LoRA "mine":' in text and "The user's own remarks on this LoRA (follow them): a slider: strong values look burnt" in text
+    assert "is written by the user and is an instruction to follow" in LN.GUIDE_HEAD
+    k = LN.what_is_known(p, db)
+    assert k["known"] and k["remarks"] and LN.known_text(k) == "your remarks"
+    assert LN.save_user(db, p, note="Does: x.\n\n  Wording:   y. ") and db.note(p)["note"] == "Does: x.\nWording: y."
+    assert db.note(p)["edited"] and LN.known_text(LN.what_is_known(p, db)) == "your note, your remarks"
+    assert LN.save_user(db, p, note="", remarks="") and db.note(p) is None
+
+
+def test_lora_window_acts_on_the_prompt_it_was_opened_for(tmp_path):
+    from PySide6.QtWidgets import QApplication, QPushButton
+    app = QApplication.instance() or QApplication([])
+    from PySide6.QtCore import QUrl
+    from video_chain.ui.lora_stack import LoraStack
+    from video_chain.ui.lora_window import LoraWindow
+    db, p = db_with(tmp_path, details(7))
+    other = str(lora(tmp_path / "loras" / "unknown.safetensors", {"y": "2"}))
+    stack = LoraStack()
+    stack.set_items([], [{"path": p, "strength": 1.0}, {"path": other, "strength": 0.5}])
+    changes, used, adapted = [], [], []
+    stack.changed.connect(lambda: changes.append(stack.strengths()))
+    stack.use_prompt = used.append
+    args = stack.window_args()
+    assert args["strengths"] == {p: 1.0, other: 0.5} and args["use_prompt"] is not None
+
+    def buttons(w):
+        return [b.text() for b in w.cards[0].findChildren(QPushButton)]
+    w = LoraWindow(None, [p, other], current=p, db=db, fetch=lambda item: None, adapt=adapted.append, **args)
+    # the usual strength of its examples, one click away
+    assert "This prompt uses it at 1.00." in w.how.toPlainText() and "Set its strength to 0.80" in w.how.toPlainText()
+    w._link(QUrl("strength:0.80"))
+    assert changes[-1][p] == 0.8 and "strength set to 0.80" in w.state.text()
+    assert "This prompt uses it at 0.80, the usual strength of its examples." in w.how.toPlainText()
+    w.show_lora(other)                                               # nothing counted: nothing offered
+    assert "strength" not in w.how.toPlainText().lower().replace("lora strength", "")
+    w.show_lora(p)
+    # an example into the prompt (as plain wording), or the prompt rewritten in its manner; the window closes
+    assert buttons(w)[:2] == ["Use as my prompt", "Rewrite mine like this"]
+    w.cards[0].used.emit(w.cards[0].ex["clean"])
+    assert used == [w.cards[0].ex["clean"]] and "<lora" not in used[0] and w.result() == LoraWindow.Accepted
+    w2 = LoraWindow(None, [p], current=p, db=db, fetch=lambda item: None, adapt=adapted.append)
+    assert buttons(w2)[0] == "Rewrite mine like this"
+    w2.cards[1].adapted.emit(w2.cards[1].ex["clean"])
+    assert adapted == [w2.cards[1].ex["clean"]] and w2.result() == LoraWindow.Accepted
+    # a stack that cannot be changed now (a run): shown, not offered
+    stack.setEnabled(False)
+    locked = stack.window_args()
+    assert locked["set_strength"] is None and locked["use_prompt"] is None and not stack.set_strength(p, 0.3)
+    w3 = LoraWindow(None, [p], current=p, db=db, fetch=lambda item: None, **locked)
+    assert "its examples usually use" not in w3.how.toPlainText()    # (0.80 is the usual one)
+    assert "Use as my prompt" not in buttons(w3) and "Rewrite mine like this" not in buttons(w3)
+    for x in (w, w2, w3):
+        x.done(0)
+
+
+def test_refine_window_starts_from_or_rewrites_like_an_example(tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from video_chain.ui import lora_window, prompt_refiner
+    from video_chain.ui.prompt_refiner import RefineDialog
+    db = TR.db()
+    p = lora(tmp_path / "loras" / "inksketch_v2.safetensors")
+    db.scan([str(p)], lookup=lambda sha: {"words": ["ink4sketch"], "model": "", "url": "", "details": details()},
+            gap=0)
+    asks = []
+
+    class Fake:
+        models = [{"file": "llama:/m/q.gguf", "label": "Q", "chat": True}]
+
+        def chat(self, prompt, kind, turns, ask, pictures=(), cast=None, seed=0, **more):
+            asks.append((list(turns), ask))
+            return "ink4sketch, my fox, cross-hatching"
+    opened = []
+
+    class Window:
+        """Stands in for the LoRA window: the user presses a button of the first example, the window closes."""
+        press = "adapt"
+
+        def __init__(self, parent, loras, **k):
+            opened.append(k)
+            self.k = k
+
+        def exec(self):
+            self.k[self.press and ("adapt" if self.press == "adapt" else "use_prompt")]("ink4sketch, an example")
+    monkeypatch.setattr(lora_window, "LoraWindow", Window)
+
+    def wait_idle(dlg):
+        end = time.time() + 5
+        while (dlg._busy or not dlg.model.isEnabled()) and time.time() < end:
+            app.processEvents()
+        app.processEvents()
+    dlg = RefineDialog(None, "a fox", "image", lambda: Fake(), loras=[str(p)])
+    wait_idle(dlg)
+    dlg.show_loras()                                                 # "Rewrite mine like this"
+    wait_idle(dlg)
+    assert opened[-1]["prompt"] == "a fox" and opened[-1]["told_title"] == "What the language model will be told"
+    assert asks[-1] == ([], prompt_refiner.LIKE_EXAMPLE.format(example="ink4sketch, an example"))
+    assert "take nothing of the example's content" in asks[-1][1]
+    assert dlg.out.toPlainText() == "ink4sketch, my fox, cross-hatching"
+    Window.press = "use"
+    dlg.show_loras()                                                 # "Use as my prompt": a version to go on from
+    wait_idle(dlg)
+    assert dlg.out.toPlainText() == "ink4sketch, an example" and len(dlg.turns) == 2 and dlg.base == 1
+    assert opened[-1]["told_title"] == "What the language model was told"
+    dlg.hint.setText("at night")
+    dlg.refine()
+    wait_idle(dlg)
+    assert asks[-1][0][-1][1] == "ink4sketch, an example" and asks[-1][1] == "at night"

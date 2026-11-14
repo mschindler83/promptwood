@@ -17,6 +17,10 @@ from ..tree import refine_problems
 from .theme import repolish
 from .widgets import guard_wheel, icon_button, label
 
+LIKE_EXAMPLE = ("Rewrite my prompt in the manner of this example prompt, which is known to work with the LoRA: take "
+                "its wording, its structure and its level of detail. Keep what my prompt is about (my subjects, my "
+                "cast, the place and what happens) and take nothing of the example's content. The example: "
+                "\"{example}\"")
 KIND_TEXT = {"video": "video clip prompt", "video_h3": "video clip prompt", "image": "image prompt",
              "edit": "edit instruction"}
 
@@ -439,10 +443,31 @@ class RefineDialog(QDialog):
             except Exception:  # noqa: BLE001
                 told = ""
             title = "What the language model will be told"
+        wanted: list[str] = []                     # (an example to rewrite like: asked once the window is closed)
+        idle = not self._busy and self.refiner is not None and not self.ideas_mode()
         LoraWindow(self, self.loras, current=self.loras[0] if self.loras else None, settings=self.qs,
                    prompt=self.original.toPlainText(), told=told if on or self._told else "",
-                   told_title=title).exec()
+                   told_title=title, use_prompt=self._use_example if idle else None,
+                   adapt=wanted.append if idle else None).exec()
         self._refresh_loras()
+        if wanted:
+            self.refine(LIKE_EXAMPLE.format(example=wanted[0]))
+
+    def _use_example(self, text: str):
+        """An example prompt from the LoRA window as the version to go on from (it can be edited, changed further
+        by the model, or taken with Use this)."""
+        if self.chatting():                        # a version of the conversation: the next message goes on from it
+            self._capture_edit()
+            self.turns = self.turns[:self.base + 1] + [("start from an example prompt of the LoRA", text)]
+            self.base = len(self.turns) - 1
+            self._edited = {k: v for k, v in self._edited.items() if k < self.base}
+            self._render()
+        self.out.setPlainText(text)
+        self._mode_changed()
+        self.state.setText("The example is in the field on the right: edit it, have it changed further, or press "
+                           "Use this.")
+        self.state.setProperty("severity", "")
+        repolish(self.state)
 
     def _refresh_loras(self):
         """Read again what is known of the LoRAs (a note was written or forgotten)."""

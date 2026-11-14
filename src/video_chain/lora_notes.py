@@ -26,6 +26,7 @@ NOTE_EXAMPLE_CHARS = 500
 NOTE_ABOUT_CHARS = 2500
 NOTE_TOKENS = 450           # a note is ~120 words
 NOTE_CHARS = 1200
+REMARK_CHARS = 600          # the user's own remarks on a LoRA
 GUIDE_CHARS = 5000          # all LoRAs together in a refine's instruction (~1200 tokens)
 GUIDE_EXAMPLES = 3          # example prompts per LoRA in a refine (with a note; without one: one more)
 GUIDE_EXAMPLE_CHARS = 350
@@ -149,7 +150,8 @@ def _sound(details) -> dict:
 
 def settings_of(details: dict | None, file_name: str = "") -> dict:
     """The settings the example images were made with: {"strength", "steps", "cfg" (ranges as text), "sampler"
-    (the most used), "count" (examples with generation data)}; only what the data gives."""
+    (the most used), "strength_mid" (the usual strength as a number), "count" (examples with generation data)};
+    only what the data gives."""
     d = _sound(details)
     v = d["version"]
     names = {Path(file_name).stem.lower()} if file_name else set()
@@ -174,6 +176,8 @@ def settings_of(details: dict | None, file_name: str = "") -> dict:
     out = {"count": count}
     if len(strength) >= 2:
         out["strength"] = _span(strength, 2)
+        mid = sorted(strength)[len(strength) // 2]         # the usual strength: the middle one, in steps of 0.05
+        out["strength_mid"] = round(round(mid / 0.05) * 0.05, 2)
     if len(steps) >= 2:
         out["steps"] = _span(steps)
     if len(cfg) >= 2:
@@ -288,6 +292,41 @@ def clean_note(text) -> str:
     return _cut("\n".join(out), NOTE_CHARS) if out else ""
 
 
+def note_of(db, path: str, mat: dict | None) -> dict:
+    """What is kept on a LoRA besides CivitAI's data: {"note": the note in force ("" when there is none or the
+    model's note is out of date: CivitAI told something new since), "remarks": the user's own remarks for the
+    refiner, "edited": the note is the user's (written or changed by hand; it stays until the user changes it)}."""
+    n = db.note(path) or {}
+    text = str(n.get("note") or "").strip()
+    edited = bool(n.get("edited")) and bool(text)
+    current = bool(text) and (edited or (mat is not None and n.get("stamp") == mat["stamp"]))
+    return {"note": text if current else "", "remarks": str(n.get("remarks") or "").strip(), "edited": edited}
+
+
+def save_user(db, path: str, note: str | None = None, remarks: str | None = None) -> bool:
+    """Keep the user's own text on a LoRA. note: their version of the note (None: as it is; "": none, so the
+    language model writes one again at the next refine). remarks: their remarks for the refiner (None: as they
+    are). False when it cannot be kept (the file's hash is not known yet: it was never looked at)."""
+    n = dict(db.note(path) or {})
+    n.setdefault("note", "")
+    if note is not None:
+        note = "\n".join(" ".join(x.split()) for x in note.strip().splitlines() if x.strip())[:NOTE_CHARS]
+        if note != str(n.get("note") or "").strip() or not note:
+            n.update(note=note, edited=bool(note), made=time.time())
+            n.pop("stamp", None)
+    if remarks is not None:
+        n["remarks"] = " ".join(remarks.split())[:REMARK_CHARS]
+    if not n.get("note") and not n.get("remarks"):
+        return db.set_note(path, None)
+    return db.set_note(path, n)
+
+
+def _bare(path: str) -> dict:
+    """The material of a LoRA nothing is known of (the user's remarks on it are still told)."""
+    return {"name": Path(path).stem or "LoRA", "base": "", "words": [], "about": "", "tags": "", "examples": [],
+            "pool": [], "settings": {"count": 0}, "stamp": "bare"}
+
+
 def worth_a_note(mat: dict | None) -> bool:
     """A note says more than the material itself only when there is something to read: several example prompts or
     a description of some length."""
@@ -306,7 +345,7 @@ def make_notes(paths: list[str], complete: Callable[[str, str, int], str], db=No
     todo = []
     for p in list(dict.fromkeys(paths))[:MAX_LORAS]:
         mat = material(db.details(p), db.words(p), p)
-        if worth_a_note(mat) and (db.note(p) or {}).get("stamp") != mat["stamp"]:
+        if worth_a_note(mat) and not note_of(db, p, mat)["note"]:     # (the user's own note is never replaced)
             todo.append((p, mat))
     made = 0
     for i, (p, mat) in enumerate(todo):
@@ -319,7 +358,9 @@ def make_notes(paths: list[str], complete: Callable[[str, str, int], str], db=No
             note = clean_note(complete(system, user, NOTE_TOKENS))
         except Exception:  # noqa: BLE001  (the refine goes on with the example prompts alone)
             continue
-        if note and db.set_note(p, {"note": note, "stamp": mat["stamp"], "made": time.time()}):
+        remarks = note_of(db, p, mat)["remarks"]                      # (the user's remarks stay)
+        if note and db.set_note(p, {"note": note, "stamp": mat["stamp"], "made": time.time(),
+                                    **({"remarks": remarks} if remarks else {})}):
             made += 1
     return made
 
@@ -332,7 +373,9 @@ GUIDE_HEAD = ("The result is made with the LoRAs below (add-on models that respo
               "what the user asks for. Never take the subjects, people, places or events of the example prompts, "
               "never add content the user did not ask for, and keep the format required above even when the "
               "examples are written differently (e.g. as comma-separated tags). Leave trigger words exactly as "
-              "written where the user's prompt has them; do not add or remove them (the app adds missing ones).")
+              "written where the user's prompt has them; do not add or remove them (the app adds missing ones). "
+              "One exception: a line that begins \"The user's own remarks\" is written by the user and is an "
+              "instruction to follow.")
 
 
 _COMMON = frozenset("the and with for from that this are was has have her his its their she they you into over "
@@ -363,7 +406,7 @@ def nearest(mat: dict, prompt: str, n: int) -> list[str]:
     return ([pool[0]] + near + fill)[:n]
 
 
-def _one(mat: dict, note: str, budget: int, prompt: str = "") -> str:
+def _one(mat: dict, note: str, budget: int, prompt: str = "", remarks: str = "") -> str:
     lines = [f"LoRA \"{mat['name']}\"" + (f" (for {mat['base']})" if mat.get("base") else "") + ":"]
     if mat["words"]:
         lines.append("Trigger words: " + ", ".join(mat["words"][:12]))
@@ -371,6 +414,8 @@ def _one(mat: dict, note: str, budget: int, prompt: str = "") -> str:
         lines.append(note)
     elif mat.get("about"):
         lines.append("Its creator says: " + _cut(mat["about"], GUIDE_ABOUT_CHARS))
+    if remarks:
+        lines.append("The user's own remarks on this LoRA (follow them): " + remarks)
     sett = settings_text(mat.get("settings") or {})
     used = sum(len(x) + 1 for x in lines)
     examples = []
@@ -398,13 +443,16 @@ def guidance(paths: list[str], db=None, prompt: str = "") -> str:
             mat = material(db.details(p), db.words(p), p)
         except Exception:  # noqa: BLE001  (a details file that cannot be read: this LoRA goes without)
             mat = None
-        if mat and (mat["examples"] or mat.get("about") or mat["words"]):
-            n = db.note(p) or {}
-            known.append((mat, n.get("note", "") if n.get("stamp") == mat["stamp"] else ""))
+        try:
+            n = note_of(db, p, mat)
+        except Exception:  # noqa: BLE001
+            n = {"note": "", "remarks": ""}
+        if mat or n["remarks"] or n["note"]:               # (the user's own words on a LoRA are told too)
+            known.append((mat or _bare(p), n))
     if not known:
         return ""
     budget = max(600, (GUIDE_CHARS - len(GUIDE_HEAD)) // len(known))
-    return GUIDE_HEAD + "\n\n" + "\n\n".join(_one(m, n, budget, prompt) for m, n in known) + "\n\nEnd of the LoRA material."
+    return GUIDE_HEAD + "\n\n" + "\n\n".join(_one(m, n["note"], budget, prompt, n["remarks"]) for m, n in known) + "\n\nEnd of the LoRA material."
 
 
 def summary(paths: list[str], db=None) -> dict:
@@ -430,13 +478,15 @@ def summary(paths: list[str], db=None) -> dict:
 def what_is_known(path: str, db=None) -> dict:
     """What the app has on one LoRA, for showing: {"path", "name", "base", "known" (anything that helps a prompt),
     "words", "prompts" (different example prompts), "pictures" (gallery pictures that tell their prompt; two may
-    tell nearly the same one), "seen" (gallery pictures looked at), "note" (a current one),
-    "note_missing" (a refine would write it first), "settings" (text), "looked_up" (CivitAI was asked),
+    tell nearly the same one), "seen" (gallery pictures looked at), "note" (one in force),
+    "edited" (it is the user's), "remarks" (the user has own remarks on it), "note_missing" (a refine would write
+    the note first), "settings" (text), "strength" (the usual one of its examples, or None), "looked_up" (CivitAI was asked),
     "on_civitai" (it knows the file)}."""
     from . import triggers
     db = db or triggers.db()
     out = {"path": str(path), "name": Path(path).stem, "base": "", "known": False, "words": [], "prompts": 0,
-           "pictures": 0, "seen": 0, "note": False, "note_missing": False, "settings": "", "looked_up": False, "on_civitai": False}
+           "pictures": 0, "seen": 0, "note": False, "note_missing": False, "settings": "", "looked_up": False,
+           "on_civitai": False, "edited": False, "remarks": False, "strength": None}
     try:
         info = db.info(path)
         details = db.details(path)
@@ -448,12 +498,18 @@ def what_is_known(path: str, db=None) -> dict:
         out["pictures"] = len(examples(details))
     except Exception:  # noqa: BLE001  (a file that cannot be read: shown as not known)
         return out
+    try:
+        n = note_of(db, path, mat)
+    except Exception:  # noqa: BLE001
+        n = {"note": "", "remarks": "", "edited": False}
+    out.update(note=bool(n["note"]), edited=n["edited"], remarks=bool(n["remarks"]))
     if not mat:
+        out["known"] = out["note"] or out["remarks"]         # (the user's own words on it are told)
         return out
-    current = (db.note(path) or {}).get("stamp") == mat["stamp"]
     out.update(name=mat["name"], base=mat["base"], known=True, words=list(mat["words"]), prompts=len(mat["pool"]),
-               note=current, note_missing=not current and worth_a_note(mat),
-               settings=settings_text(mat.get("settings") or {}))
+               note_missing=not n["note"] and worth_a_note(mat),
+               settings=settings_text(mat.get("settings") or {}),
+               strength=(mat.get("settings") or {}).get("strength_mid"))
     return out
 
 
@@ -465,7 +521,9 @@ def known_text(k: dict) -> str:
     if k["prompts"]:
         parts.append(f"{k['prompts']} prompt{'s' if k['prompts'] != 1 else ''}")
     if k["note"]:
-        parts.append("note")
+        parts.append("your note" if k.get("edited") else "note")
+    if k.get("remarks"):
+        parts.append("your remarks")
     if not parts:
         parts.append("trigger words only" if k["words"] else "description only")
     return ", ".join(parts)

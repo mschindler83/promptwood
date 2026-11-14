@@ -5,8 +5,10 @@ for the chosen one:
  * Examples: the pictures and videos users posted with it on CivitAI, each with the prompt that made it, its
    settings and likes; searchable; a prompt is copied with one click. Pictures are small stills loaded from CivitAI
    when shown (lora_pictures; switched with "Pictures": off / safe only / all) and kept on disk.
- * How to prompt it: the trigger words and where they come from, the settings its examples were made with, the
-   prompt refiner's note, and exactly what the refiner is told about this LoRA.
+ * How to prompt it: the trigger words and where they come from, the settings its examples were made with (the
+   usual strength can be set in the prompt's LoRAs with one click), exactly what the refiner is told about this
+   LoRA, the prompt refiner's note (it can be edited) and the user's own remarks for the refiner.
+An example can be put into the prompt the window was opened for, or the prompt rewritten in its manner.
  * About: what its creator writes on CivitAI.
 Opened from the refine window it also shows what the language model was told (the whole text) and marks the example
 prompts that were part of it."""
@@ -41,8 +43,10 @@ class _Sig(QObject):
 class ExampleCard(QFrame):
     """One gallery picture: its still, the prompt that made it, its settings."""
     copied = Signal(str)
+    used = Signal(str)                       # put this example into the prompt
+    adapted = Signal(str)                    # rewrite the prompt in this example's manner
 
-    def __init__(self, ex: dict, told: bool, parent=None):
+    def __init__(self, ex: dict, told: bool, parent=None, can_use: bool = False, can_adapt: bool = False):
         super().__init__(parent)
         self.ex = ex
         self.setProperty("role", "notice")
@@ -77,6 +81,21 @@ class ExampleCard(QFrame):
         line.setWordWrap(True)
         v.addWidget(line)
         row = QHBoxLayout()
+        if can_use and ex["clean"]:
+            b_use = QPushButton("Use as my prompt")
+            b_use.setToolTip("Put this example into your prompt in place of what is there (Ctrl+Z in the prompt "
+                             "takes it back), as plain wording: without <lora:…> tags and (word:1.2) weights\n\n"
+                             + ex["clean"])
+            b_use.clicked.connect(lambda: self.used.emit(ex["clean"]))
+            row.addWidget(b_use)
+        if can_adapt and ex["clean"]:
+            b_adapt = QPushButton("Rewrite mine like this")
+            b_adapt.setProperty("variant", "primary")
+            b_adapt.setToolTip("The language model rewrites your prompt in the manner of this example (its wording, "
+                               "structure and level of detail) and keeps what yours is about: your subjects, your "
+                               "cast and what happens. Nothing of the example's content is taken.")
+            b_adapt.clicked.connect(lambda: self.adapted.emit(ex["clean"]))
+            row.addWidget(b_adapt)
         b_copy = QPushButton("Copy prompt")
         b_copy.setToolTip("Copy this prompt as it was posted (with its weights and LoRA tags)")
         b_copy.clicked.connect(lambda: self.copied.emit(ex["prompt"]))
@@ -117,10 +136,14 @@ class LoraWindow(QDialog):
     """loras: [(path, label)] or paths, the LoRAs to list. current: the one shown first. prompt: the user's
     prompt (from the refine window: examples can be sorted by nearness to it). told: the LoRA part of the
     instruction the language model got (or will get), shown word for word. fetch(item) -> the local file of a
-    gallery picture's still (lora_pictures.fetch; tests give their own)."""
+    gallery picture's still (lora_pictures.fetch; tests give their own).
+    What the window may do where it was opened from (each None: not offered): use_prompt(text) puts an example
+    into the prompt; adapt(example) has the prompt rewritten in the example's manner (the window closes);
+    strengths {path: strength} of the LoRAs in the prompt's stack and set_strength(path, value) -> bool."""
 
     def __init__(self, parent=None, loras=(), current: str | None = None, settings=None, prompt: str = "",
-                 told: str = "", told_title: str = "What the language model was told", fetch=None, db=None):
+                 told: str = "", told_title: str = "What the language model was told", fetch=None, db=None,
+                 use_prompt=None, adapt=None, strengths: dict | None = None, set_strength=None):
         super().__init__(parent)
         self.setWindowTitle("LoRAs: what is known of them")
         self.resize(1180, 780)
@@ -128,6 +151,8 @@ class LoraWindow(QDialog):
         self.db = db or triggers.db()
         self.fetch = fetch or (lambda item: lora_pictures.fetch(item, self.db))
         self.prompt_text, self.told = prompt or "", told or ""
+        self.use_prompt, self.adapt, self.set_strength = use_prompt, adapt, set_strength
+        self.strengths = dict(strengths or {})
         self.loras = [(str(x), Path(str(x)).stem) if isinstance(x, (str, Path)) else (str(x[0]), str(x[1]))
                       for x in loras]
         if current and str(current) not in [p for p, _l in self.loras]:
@@ -235,10 +260,43 @@ class LoraWindow(QDialog):
         ev.addLayout(nav)
         self.tabs.addTab(ex, "Examples")
         # -- how to prompt it / about / told
+        how = QWidget()
+        hv = QVBoxLayout(how)
         self.how = QTextBrowser()
         self.how.setOpenLinks(False)
         self.how.anchorClicked.connect(self._link)
-        self.tabs.addTab(self.how, "How to prompt it")
+        hv.addWidget(self.how, 3)
+        self.note_title = label("", level="tertiary")
+        self.note_title.setWordWrap(True)
+        hv.addWidget(self.note_title)
+        self.note_edit = QPlainTextEdit()
+        self.note_edit.setPlaceholderText("How to prompt this LoRA. Empty: the language model writes a note at the "
+                                          "next refine with this LoRA.")
+        self.note_edit.setToolTip("The note the prompt refiner is given on this LoRA. Change it or write your own: "
+                                  "yours stays until you change it, also when CivitAI tells something new.")
+        hv.addWidget(self.note_edit, 2)
+        hv.addWidget(label("Your own remarks for the prompt refiner (it follows them; they stay when the note is "
+                           "written again)", level="tertiary"))
+        self.remarks_edit = QPlainTextEdit()
+        self.remarks_edit.setPlaceholderText("e.g. “works best in close-ups”, “never write ‘portrait’ with it”, "
+                                             "“put the trigger word at the very start”")
+        self.remarks_edit.setMaximumHeight(72)
+        hv.addWidget(self.remarks_edit, 1)
+        nrow = QHBoxLayout()
+        self.b_save = QPushButton("Save note and remarks")
+        self.b_save.clicked.connect(lambda: self.save_note())
+        self.b_rewrite = QPushButton("Let the model write the note again")
+        self.b_rewrite.setToolTip("Forget this note (yours or the model's); the language model writes a new one at "
+                                  "the next refine with this LoRA. Your remarks stay.")
+        self.b_rewrite.clicked.connect(lambda: self.save_note(forget=True))
+        nrow.addWidget(self.b_save)
+        nrow.addWidget(self.b_rewrite)
+        nrow.addStretch(1)
+        hv.addLayout(nrow)
+        self.note_edit.textChanged.connect(self._note_buttons)
+        self.remarks_edit.textChanged.connect(self._note_buttons)
+        self._saved = {"note": "", "remarks": ""}
+        self.tabs.addTab(how, "How to prompt it")
         self.about = QTextBrowser()
         self.about.setOpenLinks(False)
         self.about.anchorClicked.connect(self._link)
@@ -354,6 +412,21 @@ class LoraWindow(QDialog):
         for e in self.examples:
             e["told"] = e["clean"] in told
         self.how.setHtml(self._how_html(path, details, info, mat, k))
+        n = lora_notes.note_of(self.db, path, mat)
+        self._saved = {"note": n["note"], "remarks": n["remarks"]}
+        for edit, text in ((self.note_edit, n["note"]), (self.remarks_edit, n["remarks"])):
+            edit.blockSignals(True)
+            edit.setPlainText(text)
+            edit.blockSignals(False)
+        self.note_title.setText(
+            "The prompt refiner's note: yours (it stays as you wrote it)" if n["edited"] else
+            "The prompt refiner's note, written by the language model from the creator's text and the most liked "
+            "example prompts (you can change it)" if n["note"] else
+            "The prompt refiner's note: none yet; the language model writes it at the next refine with this LoRA "
+            "(you can write your own)" if k["note_missing"] else
+            "The prompt refiner's note: none (too little is known for the model to write one; you can write your "
+            "own)")
+        self._note_buttons()
         self.about.setHtml(details_html(details, None) if details else
                            "<p>CivitAI has told nothing about this LoRA.</p>")
         self._refill()
@@ -374,20 +447,19 @@ class LoraWindow(QDialog):
                    + (e(k["settings"]) + f" <span style='color:gray'>(counted over "
                       f"{(mat or {}).get('settings', {}).get('count', 0)} pictures: the usual range, not a rule)</span>"
                       if k["settings"] else "<i>the examples do not tell</i>") + "</p>")
-        note = self.db.note(path) or {}
-        current = bool(mat) and note.get("stamp") == mat["stamp"]
-        out.append("<h3>The prompt refiner's note</h3>")
-        if note.get("note") and current:
-            out.append("<p>" + "<br>".join(e(x) for x in note["note"].splitlines()) + "</p><p style='color:gray'>"
-                       "Written by the language model from the creator's text and the most liked example prompts. "
-                       "<a href='forget:note'>Forget it</a> (it is written again at the next refine).</p>")
-        elif k["note_missing"]:
-            out.append("<p><i>Not written yet. The language model writes it at the next refine with this LoRA "
-                       "(once), from the creator's text and the most liked example prompts.</i></p>")
-        else:
-            out.append("<p><i>None: there is too little to read (fewer than 3 example prompts and no description "
-                       "of some length).</i></p>")
-        guide = lora_notes.guidance([path], self.db, prompt=self.prompt_text) if mat else ""
+        usual, now = k.get("strength"), self.strengths.get(path)
+        if usual is not None and now is not None:
+            if abs(now - usual) < 0.005:
+                out.append(f"<p>This prompt uses it at {now:.2f}, the usual strength of its examples.</p>")
+            elif self.set_strength is not None:
+                out.append(f"<p>This prompt uses it at {now:.2f}. <a href='strength:{usual:.2f}'>Set its strength "
+                           f"to {usual:.2f}</a>, the usual one of its examples.</p>")
+            else:
+                out.append(f"<p>This prompt uses it at {now:.2f}; its examples usually use {usual:.2f}.</p>")
+        elif usual is not None:
+            out.append(f"<p style='color:gray'>Usual strength: {usual:.2f}"
+                       + (" (this LoRA is not in the prompt's stack)" if self.strengths else "") + ".</p>")
+        guide = lora_notes.guidance([path], self.db, prompt=self.prompt_text)
         out.append("<h3>What the prompt refiner is told about this LoRA</h3>")
         if guide:
             out.append("<p style='color:gray'>Word for word, when this is the only LoRA of the prompt (with more "
@@ -400,13 +472,54 @@ class LoraWindow(QDialog):
 
     def _link(self, url: QUrl):
         s = url.toString()
-        if s == "forget:note" and self.path:
-            self.db.set_note(self.path, None)
-            self.state.setText("The note is forgotten; it is written again at the next refine with this LoRA.")
-            self.show_lora(self.path)
-            self._read_all()
+        if s.startswith("strength:") and self.path and self.set_strength is not None:
+            try:
+                value = float(s[9:])
+            except ValueError:
+                return
+            if self.set_strength(self.path, value):
+                self.strengths[self.path] = value
+                self.state.setText(f"{self.title.text()}: strength set to {value:.2f} in this prompt's LoRAs.")
+                self.show_lora(self.path)
+            else:
+                self.state.setText("The strength could not be set (the LoRA is not in the stack, or the clip "
+                                   "cannot be changed now).")
         elif url.scheme() in ("http", "https"):
             QDesktopServices.openUrl(url)
+
+    # ---- the note and the user's remarks
+    def _note_buttons(self):
+        changed = (self.note_edit.toPlainText().strip() != self._saved["note"]
+                   or self.remarks_edit.toPlainText().strip() != self._saved["remarks"])
+        self.b_save.setEnabled(bool(self.path) and changed)
+        self.b_rewrite.setEnabled(bool(self.path) and bool(self._saved["note"]))
+
+    def save_note(self, forget: bool = False):
+        """Keep the note as edited and the remarks (forget: no note, so the model writes one again)."""
+        if not self.path:
+            return
+        note = "" if forget else self.note_edit.toPlainText()
+        same = not forget and note.strip() == self._saved["note"]
+        ok = lora_notes.save_user(self.db, self.path, None if same else note, self.remarks_edit.toPlainText())
+        if not ok:
+            self.state.setText("Could not be kept: the app has not looked at this LoRA file yet (it does so in the "
+                               "background after a LoRA scan). Try again in a moment.")
+            return
+        self.state.setText("The note is forgotten; the language model writes a new one at the next refine with "
+                           "this LoRA. Your remarks stay." if forget else
+                           "Kept. The prompt refiner is given this from the next refine on.")
+        self.show_lora(self.path)
+        self._read_all()
+
+    def _use(self, text: str):
+        if self.use_prompt is not None:
+            self.use_prompt(text)
+            self.accept()
+
+    def _adapt(self, text: str):
+        if self.adapt is not None:
+            self.accept()
+            self.adapt(text)
 
     # ---- the examples
     def show_mode(self) -> str:
@@ -441,8 +554,11 @@ class LoraWindow(QDialog):
             self.box_v.takeAt(0)
         mode = self.show_mode()
         for i, ex in enumerate(self.shown[self.page * PER_PAGE:(self.page + 1) * PER_PAGE]):
-            card = ExampleCard(ex, bool(ex.get("told")), self.box)
+            card = ExampleCard(ex, bool(ex.get("told")), self.box, can_use=self.use_prompt is not None,
+                               can_adapt=self.adapt is not None)
             card.copied.connect(self._copy)
+            card.used.connect(self._use)
+            card.adapted.connect(self._adapt)
             self.cards.append(card)
             self.box_v.addWidget(card)
             item = ex["item"]

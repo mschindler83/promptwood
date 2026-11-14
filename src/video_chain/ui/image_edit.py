@@ -434,6 +434,7 @@ class ImageEditDialog(QDialog):
         self.loras = LoraStack(self)
         self.loras.file_dir = lora_dir
         self.loras.picked.connect(self._lora_picked)
+        self.loras.use_prompt = self._use_example      # (the LoRA window: an example prompt into this one)
         self.loras.changed.connect(self._remember_loras)
         self.loras.changed.connect(lambda: self._fill_presets())
         self.loras.filled.connect(lambda: self._fill_presets())      # (also the LoRAs remembered for this family)
@@ -2060,6 +2061,11 @@ class ImageEditDialog(QDialog):
                 else []:
             if str(f) not in needed and f.stat().st_mtime < time.time() - 5:
                 f.unlink(missing_ok=True)
+
+    def _use_example(self, text: str):
+        """An example prompt from the LoRA window replaces the prompt (one step Ctrl+Z takes back)."""
+        from .prompt_refiner import replace_text
+        replace_text(self.prompt, text)
 
     def prompt_kind(self) -> str:
         return "image" if self.mode() == "create" else "edit"

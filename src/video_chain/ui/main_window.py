@@ -833,6 +833,7 @@ class PromptCard(QFrame):
         self.loras.setToolTip("LoRAs: add-ons that teach the model a look, a person or a motion. The LoRAs of this "
                               "clip and their strengths (none: the base model)")
         self.loras.picked.connect(lambda p: self.lora_picked.emit(self.nid, p))
+        self.loras.use_prompt = self._use_example      # (the LoRA window: an example prompt into this clip's)
         self.length = QComboBox()
         self.length.setToolTip("Length of this clip")
         self.steps = QSpinBox()
@@ -1191,6 +1192,11 @@ class PromptCard(QFrame):
         if n:
             self.bar.setValue(round(100 * i / n))
             self.step.setText(text if text is not None else f"step {i} / {n}")
+
+    def _use_example(self, text: str):
+        """An example prompt from the LoRA window replaces the description (one step Ctrl+Z takes back)."""
+        if not self.edit.isReadOnly():
+            replace_text(self.edit, text)
 
     def set_editable(self, on: bool):
         """on: nothing runs (the card can be used); a frozen clip's own inputs stay locked anyway."""
@@ -6514,7 +6520,9 @@ class MainWindow(QMainWindow):
         """The LoRA window: every LoRA the app offers, with what is known of each (its gallery's prompts with their
         pictures, the prompt refiner's note, the settings its examples were made with)."""
         from .lora_window import LoraWindow
-        LoraWindow(self, self.known_loras(), current=current, settings=self.qs).exec()
+        card = next((c for c in self.cards if c.nid == self.focus and isinstance(c, PromptCard)), None)
+        more = card.loras.window_args() if card is not None else {}    # (the clip in focus: its LoRAs, its prompt)
+        LoraWindow(self, self.known_loras(), current=current, settings=self.qs, **more).exec()
         for card in self.cards:
             if isinstance(card, PromptCard):
                 card.loras.refresh_triggers()

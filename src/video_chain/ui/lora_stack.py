@@ -186,6 +186,7 @@ class LoraStack(QWidget):
         self.known: list[tuple[str, str]] = []
         self.file_dir = ""
         self.rows: list[tuple[QWidget, QPushButton, QDoubleSpinBox]] = []
+        self.use_prompt = None                     # set by the owner: put a text into the prompt these LoRAs are for
         self.v = QVBoxLayout(self)
         self.v.setContentsMargins(0, 0, 0, 0)
         self.v.setSpacing(4)
@@ -270,6 +271,24 @@ class LoraStack(QWidget):
         lab.setToolTip(tip + "\nRight-click the LoRA to change them or to see all that is known about it "
                        "(example prompts with their pictures, description)")
 
+    def strengths(self) -> dict[str, float]:
+        return {b.property("path"): round(s.value(), 2) for _w, b, s in self.rows}
+
+    def set_strength(self, path: str, value: float) -> bool:
+        """Set a LoRA's strength as if typed (the owner hears `changed`); False when it is not in the stack or
+        the stack cannot be changed now."""
+        for _w, b, spin in self.rows:
+            if b.property("path") == path and self._enabled:
+                spin.setValue(max(LORA_MIN, min(LORA_MAX, float(value))))
+                return True
+        return False
+
+    def window_args(self) -> dict:
+        """What the LoRA window may do for this stack: set a strength, put an example into its prompt."""
+        on = self._enabled
+        return {"strengths": self.strengths(), "set_strength": self.set_strength if on else None,
+                "use_prompt": self.use_prompt if on else None}
+
     def refresh_triggers(self):
         for w, b, _s in self.rows:
             if getattr(w, "trigger_label", None) is not None:
@@ -292,7 +311,7 @@ class LoraStack(QWidget):
         chosen = menu.exec(button.mapToGlobal(pos))
         if chosen is not None and chosen is a_details:
             from .lora_window import LoraWindow
-            LoraWindow(self.window(), self.known, current=path).exec()
+            LoraWindow(self.window(), self.known, current=path, **self.window_args()).exec()
             self.refresh_triggers()
             return
         try:
