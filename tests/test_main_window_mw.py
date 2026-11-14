@@ -150,3 +150,69 @@ def test_the_new_project_dialog_picks_images_with_the_windows_settings(app, win,
     d._choose_image()
     assert got == [win.qs]
     d.deleteLater()
+
+
+# ---------------------------------------------------------------- media errors are RuntimeErrors
+def test_split_video_survives_an_unreadable_clip(app, win, tmp_path, monkeypatch):
+    from test_ui import make_real_video
+    from video_chain import chain, media
+    src = make_real_video(tmp_path / "real.mp4")
+    win.open_project(tmp_path / "proj")
+    win.node_action("delete", "n1")
+    v = win.add_video(None, str(src), 0.0, 1.5)
+    wait(app, lambda: not win._converts)
+    win.tree.nodes[v].made.pop("frames", None)
+
+    def broken(path):
+        raise media.MediaError("ffprobe could not read it")
+    monkeypatch.setattr(chain, "probe", broken)
+    assert win.split_video(v) is None                # (no dialog, no traceback)
+    assert "ffprobe could not read it" in win.status.text()
+
+
+# ---------------------------------------------------------------- TST-3: one exception never leaves the window busy
+class _Boom(BaseException):
+    """Not an Exception: what `except Exception` in a worker does not catch."""
+
+
+def test_a_failing_conversion_does_not_leave_the_window_busy(app, win, tmp_path, monkeypatch):
+    from test_ui import make_real_video
+    src = make_real_video(tmp_path / "real.mp4")
+    monkeypatch.setattr(T, "make_video", lambda *a, **k: (_ for _ in ()).throw(_Boom()))
+    win.open_project(tmp_path / "proj")
+    win.node_action("delete", "n1")
+    v = win.add_video(None, str(src), 0.0, 1.5)
+    assert v
+    wait(app, lambda: not win._converts)
+    assert win.live.get(v) != "converting"
+
+
+def test_a_failing_remix_does_not_leave_the_window_busy(app, win, tmp_path, image, monkeypatch):
+    ids = new_project(win, tmp_path, image, ("a",))
+    monkeypatch.setattr(T.Checker, "remix_due", lambda self, nid: True)
+    monkeypatch.setattr(T, "remix_sounds", lambda *a, **k: (_ for _ in ()).throw(_Boom()))
+    win._start_remix()
+    assert win._remixing
+    wait(app, lambda: not win._remixing)
+    assert win._joins == 0
+
+
+def test_a_failing_join_does_not_leave_the_window_busy(app, win, tmp_path, image, monkeypatch):
+    new_project(win, tmp_path, image, ("a",))
+    wait(app, lambda: not win._joins)
+    monkeypatch.setattr(T, "join_path", lambda *a, **k: (_ for _ in ()).throw(_Boom()))
+    win.join_selected("play")
+    wait(app, lambda: not win._joins)
+
+
+def test_speaking_does_not_stay_busy_when_it_cannot_start(app, win, tmp_path, image, monkeypatch):
+    ids = new_project(win, tmp_path, image, ("a",))
+    class Eng:
+        name = "local"
+        def stop(self):
+            pass
+    monkeypatch.setattr(win, "_speak_engine", lambda nid: Eng())
+    monkeypatch.setattr(win, "_update_buttons", lambda: (_ for _ in ()).throw(RuntimeError("broken")))
+    with pytest.raises(RuntimeError):
+        win.speak_clip(ids[0])
+    assert win._tts_busy is False

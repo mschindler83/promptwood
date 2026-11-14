@@ -3432,7 +3432,7 @@ class MainWindow(QMainWindow):
         def work():
             try:
                 bridge.film.emit((F.join_film(film, target, keep=out is None), root), None, purpose)
-            except Exception as e:  # noqa: BLE001
+            except BaseException as e:  # noqa: BLE001  (whatever ends the job: the busy flag is reset by the answer)
                 bridge.film.emit((None, root), str(e), purpose)
         threading.Thread(target=work, daemon=True).start()
 
@@ -3683,7 +3683,7 @@ class MainWindow(QMainWindow):
             try:
                 sc = F.Film.load(root).duplicate(sid)
                 bridge.duplicated.emit((sc.id, sc.title), None, str(root))
-            except Exception as e:  # noqa: BLE001
+            except BaseException as e:  # noqa: BLE001  (the answer ends "copying")
                 bridge.duplicated.emit(None, str(e), str(root))
         threading.Thread(target=work, daemon=True).start()
 
@@ -3905,7 +3905,7 @@ class MainWindow(QMainWindow):
                     if (d / T.TREE_FILE).is_file():
                         T.save(d, T.load(d))
                 bridge.copied.emit(str(target), "")
-            except Exception as e:  # noqa: BLE001
+            except BaseException as e:  # noqa: BLE001  (the answer ends "copying")
                 if not existed:                       # a half copy would block the next try
                     shutil.rmtree(target, ignore_errors=True)
                 bridge.copied.emit(str(target), str(e))
@@ -4546,9 +4546,9 @@ class MainWindow(QMainWindow):
             render=render,
             file=lambda r: project / r["file"])
         self._tts_busy = True
-        self._update_buttons()
         used = False
         try:
+            self._update_buttons()
             ok = run_speak_dialog(dlg)
             how = dlg.speak_values()
             if TTS.speak_options(self.tree) != how:     # how lines are spoken is kept with the project
@@ -4600,15 +4600,19 @@ class MainWindow(QMainWindow):
             return False
         snap, project = copy.deepcopy(self.tree), self.project
         self._tts_busy = True
-        self._update_buttons()
-        self.status.setText(f"Speaking the lines of clip #{nid[1:]} ({TTS.PROVIDERS[eng.name]})…")
+        try:
+            self._update_buttons()
+            self.status.setText(f"Speaking the lines of clip #{nid[1:]} ({TTS.PROVIDERS[eng.name]})…")
+        except BaseException:
+            self._tts_busy = False                  # (it never started: not busy for ever)
+            raise
 
         def work():
             try:
                 r = TTS.render_lines(project, snap, nid, eng, log=self.bridge.tts_log.emit)
                 self.bridge.spoken.emit(nid, r, "", str(project))
-            except Exception as e:  # noqa: BLE001
-                self.bridge.spoken.emit(nid, None, str(e), str(project))
+            except BaseException as e:  # noqa: BLE001  (the answer ends "busy")
+                self.bridge.spoken.emit(nid, None, str(e) or type(e).__name__, str(project))
             finally:
                 if eng.name == "local":
                     eng.stop()                      # (unloaded right after: its VRAM back for ComfyUI)
@@ -5256,15 +5260,19 @@ class MainWindow(QMainWindow):
             return
         snap, project = copy.deepcopy(self.tree), self.project
         self._tts_busy = True
-        self._update_buttons()
-        self.status.setText(f"Cloning the voice of @{name} at ElevenLabs…")
+        try:
+            self._update_buttons()
+            self.status.setText(f"Cloning the voice of @{name} at ElevenLabs…")
+        except BaseException:
+            self._tts_busy = False                  # (it never started: not busy for ever)
+            raise
 
         def work():
             try:
                 self.bridge.eleven_cloned.emit(name, TTS.clone_sample(project, snap, name, TTS.ElevenLabs()), "",
                                                str(project))
-            except Exception as e:  # noqa: BLE001
-                self.bridge.eleven_cloned.emit(name, None, str(e), str(project))
+            except BaseException as e:  # noqa: BLE001  (the answer ends "busy")
+                self.bridge.eleven_cloned.emit(name, None, str(e) or type(e).__name__, str(project))
         threading.Thread(target=work, daemon=True).start()
 
     def _eleven_cloned(self, name: str, voice, err: str, project: str):
@@ -8026,7 +8034,7 @@ class MainWindow(QMainWindow):
             try:
                 made = T.make_video(project, work_node, base)
                 bridge.converted.emit(nid, made, "", token, str(project))
-            except Exception as e:  # noqa: BLE001
+            except BaseException as e:  # noqa: BLE001  (the answer ends "converting")
                 bridge.converted.emit(nid, None, str(e), token, str(project))
         threading.Thread(target=work, daemon=True).start()
         self.refresh()
@@ -8059,8 +8067,8 @@ class MainWindow(QMainWindow):
                 error = ""
                 try:
                     T.remix_sounds(project, tree, order, T.Checker(project, tree), persist=False)
-                except Exception as e:  # noqa: BLE001  (the ones remixed before it are still taken)
-                    error = str(e)
+                except BaseException as e:  # noqa: BLE001  (the ones remixed before it are still taken)
+                    error = str(e) or type(e).__name__
                 done = [n for n in order if (tree.nodes[n].made or {}).get("sound_rev") != revs[n]]
                 bridge.remixed.emit([(n, copy.deepcopy(tree.nodes[n].made)) for n in done], error, str(project))
         threading.Thread(target=work, daemon=True).start()
@@ -8594,7 +8602,11 @@ class MainWindow(QMainWindow):
             return None
         if at is None:
             clip = self.project / node.made["video"]
-            frames = int(node.made.get("frames") or chain.probe(clip)["frames"])
+            try:
+                frames = int(node.made.get("frames") or chain.probe(clip)["frames"])
+            except (OSError, RuntimeError) as e:       # (media.MediaError is a RuntimeError)
+                self.status.setText(f"Cannot read video #{nid[1:]}: {e}")
+                return None
             key = node.made.get("key") or {}
             size = (int(key.get("width") or 0) or 672, int(key.get("height") or 0) or 384)
             dlg = SplitDialog(self, clip, frames, size, node.source["start"], node.source["end"],
@@ -8661,8 +8673,8 @@ class MainWindow(QMainWindow):
                     joined = T.join_path(project, tree, nid, out)
                     secs = chain.joined_seconds(joined)             # not in the GUI thread (network shares)
                     result = ((joined, secs, T.path_spans(tree, nid)), None)
-                except Exception as e:  # noqa: BLE001
-                    result = (None, str(e))
+                except BaseException as e:  # noqa: BLE001  (the answer ends "joining")
+                    result = (None, str(e) or type(e).__name__)
                 try:
                     bridge.joined.emit(*result, purpose, pre, str(project))
                 except RuntimeError:                 # (the window was closed meanwhile)
