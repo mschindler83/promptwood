@@ -25,6 +25,7 @@ class NodeMixin(MainWindowHost):
         if self.tree is None or self._wait_note():
             return
         if action in ("take", "take_clear") and self.film is not None:
+            assert self.project is not None
             cur = self.film.scene_of(self.project)
             if cur is not None and nid:
                 try:
@@ -98,6 +99,7 @@ class NodeMixin(MainWindowHost):
         if action == "refine" and node is not None and not node.is_video:
             card = self._card_of(node.id, PromptCard)
             if card is not None:
+                assert self.project is not None
                 ck = T.Checker(self.project, self.tree)
                 start = ck.start_frame(node)
                 end = T.end_image_used(self.tree, node)
@@ -257,6 +259,7 @@ class NodeMixin(MainWindowHost):
             assert self.project is not None
             T.copy_video(self.project, self.tree, vc, target)
         try:
+            assert self.project is not None
             T.copy_end_image(self.project, self.tree, source, target)
             T.copy_keyframes(self.project, self.tree, source, target)
         except (OSError, RuntimeError, ValueError) as e:
@@ -523,6 +526,7 @@ class NodeMixin(MainWindowHost):
             ref_last.setEnabled(bool(node is not None and node.made))
             gen = m.addAction("Generate the path to here")
             if self.film is not None:
+                assert self.project is not None
                 cur = self.film.scene_of(self.project)
                 if cur is not None and cur.take == nid:
                     acts[m.addAction("Clear the scene's ending (the film plays its selected path)")] = "take_clear"

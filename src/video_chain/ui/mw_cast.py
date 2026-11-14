@@ -42,7 +42,7 @@ class CastMixin(MainWindowHost):
     def _cast_names(self) -> list[str]:
         return [c["name"] for c in T.cast_of(self.tree)] if self.tree is not None else []
 
-    def _selected_character(self) -> dict | None:
+    def _selected_character(self) -> T.CastEntry | None:
         item = self.cast_list.currentItem()
         return T.character(self.tree, item.data(Qt.ItemDataRole.UserRole)) if item is not None and self.tree else None
 
@@ -73,7 +73,7 @@ class CastMixin(MainWindowHost):
             return False
         return True
 
-    def _ref_word(self, c: dict | None = _SELECTED) -> str:
+    def _ref_word(self, c: T.CastEntry | None = _SELECTED) -> str:
         """How the pictures of a cast entry are called: "face picture" for a person (and for none: a picture then
         goes to the lead or a new person), "picture" for a place, object or style."""
         c = self._selected_character() if c is _SELECTED else c
@@ -83,6 +83,7 @@ class CastMixin(MainWindowHost):
         if not self._cast_edit_ok():
             return
         person = kind == "person"
+        assert self.tree is not None
         name, ok = QInputDialog.getText(self, "New character" if person else f"New {kind}",
                                         "Name (you mention it in prompts as @Name):",
                                         text=T.next_character_name(self.tree) if person else KIND_NAMES[kind])
@@ -260,8 +261,8 @@ class CastMixin(MainWindowHost):
     def _reference_from_selected(self):
         """The selected video's first frame, or a generated clip's last frame."""
         nid = self.tree.selected if self.tree else None
-        node = self.tree.nodes.get(nid) if nid else None
-        if node is None or not node.made:
+        node = self.tree.nodes.get(nid) if self.tree and nid else None
+        if node is None or nid is None or not node.made:
             self.status.setText("Select a converted video or a made clip first.")
             return
         self.reference_from_node(nid, "first" if node.is_video else "last")
@@ -271,7 +272,7 @@ class CastMixin(MainWindowHost):
             self.status.setText("Open or create a project folder first.")
             return
         c = self._selected_character()
-        title = ("Reference image (best a close-up of the face)" if self._ref_word(c) == "face picture" else
+        title = ("Reference image (best a close-up of the face)" if c is None or self._ref_word(c) == "face picture" else
                  f"Picture of @{c['name']} (a {T.kind_of(c)}; the whole picture is used)")
         f = IP.pick_image(self, title, self.qs, None, self._picker_places(), self.project_images())
         if f:
@@ -292,7 +293,7 @@ class CastMixin(MainWindowHost):
             self.status.setText("That clip is not made yet.")
             return False
         assert self.project is not None
-        if self.add_reference(str(self.project / rel)):
+        if self.add_reference(str(self.project / str(rel))):
             if not self._remade_note:                                          # keep the CHANGED count
                 self.status.setText(f"The {which} frame of #{T.short_id(nid)}: {self.status.text()}")
             return True
@@ -333,6 +334,7 @@ class CastMixin(MainWindowHost):
         if not QImageReader(str(path)).canRead():      # (the header only: the picture is not decoded)
             self.status.setText(f"Not an image: {Path(path).name}")
             return False
+        assert self.tree is not None
         target = self._selected_character()
         owner = target or T.lead_of(self.tree) or next((c for c in T.cast_of(self.tree)
                                                         if T.kind_of(c) == "person"), None)
@@ -348,8 +350,8 @@ class CastMixin(MainWindowHost):
         if word == "picture":                      # a place, object or style: the whole picture, no crop window
             crop = None
         if crop == "ask":
-            who = f"@{target['name']}" if target else (f"@{T.lead_of(self.tree)['name']}" if T.lead_of(self.tree)
-                                                       else "a new character")
+            lead = T.lead_of(self.tree)
+            who = f"@{target['name']}" if target else (f"@{lead['name']}" if lead else "a new character")
             crop = self.crop_face(path, f"Face picture of {who}")
             if crop is False:
                 self.status.setText("Face not added.")
@@ -361,18 +363,18 @@ class CastMixin(MainWindowHost):
         except (ValueError, OSError, RuntimeError) as e:
             self._report_error(f"Could not add the {'face' if word == 'face picture' else 'picture'}: {e}")
             return False
-        owner = next((c["name"] for c in T.cast_of(self.tree) if rel in c["images"]), None)
-        if owner is None:
+        owner_name = next((c["name"] for c in T.cast_of(self.tree) if rel in c["images"]), None)
+        if owner_name is None:
             self._report_error("The picture was added, but no character has it: look at the cast list.")
             self._show_references()
             return False
-        self._show_references(select=owner)
+        self._show_references(select=owner_name)
         self._write_tree()
         self._changed()
         what = "Face" if word == "face picture" else "Picture"
-        self._say(f"{what} added to @{owner}." if owner in known else
-                            f"New character @{owner} with this face (rename it with Rename…).")
-        self._report_remade(before, f"{what} added to @{owner}")
+        self._say(f"{what} added to @{owner_name}." if owner_name in known else
+                  f"New character @{owner_name} with this face (rename it with Rename…).")
+        self._report_remade(before, f"{what} added to @{owner_name}")
         return True
 
     def _recrop_reference(self):
@@ -409,6 +411,7 @@ class CastMixin(MainWindowHost):
             return
         rel = item.data(Qt.ItemDataRole.UserRole)
         before = self._done_clips()
+        assert self.tree is not None
         made = [n for n in before if n in self.tree.nodes and not self.tree.nodes[n].is_video
                 and rel in T.node_cast(self.tree.options, self.tree.nodes[n])["images"]]
         word = self._ref_word()
@@ -500,14 +503,14 @@ class CastMixin(MainWindowHost):
         self.refs.clear()
         for k, rel in enumerate(c["images"] if c else [], start=1):
             pm = self._pixmap(self.project / rel) if self.project else None
-            item = QListWidgetItem(QIcon(pm) if pm else QIcon(), f"{c['name']} {k}")
+            item = QListWidgetItem(QIcon(pm) if pm else QIcon(), f"{c['name'] if c else ''} {k}")
             item.setData(Qt.ItemDataRole.UserRole, rel)
             item.setToolTip(rel)
             self.refs.addItem(item)
         self._update_ref_start_button()
         self._update_cast_buttons()
 
-    def _show_kind_wording(self, c: dict | None):
+    def _show_kind_wording(self, c: T.CastEntry | None):
         """The cast panel for the selected entry's kind: a person has face pictures (cropped), a voice and the lead
         switch; a place, object or style has (whole) pictures only."""
         person = c is None or T.kind_of(c) == "person"
@@ -524,6 +527,7 @@ class CastMixin(MainWindowHost):
             self.b_ref_crop.setText("Crop…")
             self.b_ref_crop.setToolTip("Crop the selected face picture again (from the full picture it came from)")
         else:
+            assert c is not None                   # (person is False: an entry is selected)
             k = T.kind_of(c)
             self.refs.setToolTip(f"Pictures of @{c['name']} (a {k}; up to {T.MAX_PICTURES_PER_CHARACTER}): the whole "
                                  "picture is sent, nothing is cropped")

@@ -137,6 +137,7 @@ class FilmMixin(MainWindowHost):
         if self.film is None or self.film.path(sid) != self.project:
             self._film_queue = None                # could not open the scene (the status says why)
             return
+        assert self.tree is not None
         take = self.film.take_of(sid, self.tree)
         self._start([take])
         if not self.running and self._waiting_comfy is None:

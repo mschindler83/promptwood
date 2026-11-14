@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     import threading
     from typing import Any
 
-    from PySide6.QtCore import QSettings, QTimer
+    from PySide6.QtCore import QProcess, QSettings, QTimer
     from PySide6.QtGui import QAction, QPixmap
     from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFormLayout, QLabel, QLineEdit, QListWidget, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSpinBox, QSplitter, QTabWidget, QToolButton, QWidget
     from pathlib import Path
@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from ..film import Film
     from ..llm_server import LlamaServer
     from ..tree.model import Tree
+    from ..tts import FishTTS, LocalTTS
     from .cast_strip import CastStrip
     from .clip_cards import PromptCard, VideoCard
     from .generator_state import ComfyModel, ModelState, Phase
@@ -33,6 +34,23 @@ if TYPE_CHECKING:
     from .view_mode import AdvancedNote, ViewMode
 
     class MainWindowHost(QMainWindow):
+        _check_gen: int
+        _comfy_polling: bool
+        _eleven_voices: list | None
+        _first_shown: bool
+        _gpu_proc: QProcess | None
+        _lora_hits: dict
+        _lora_misses: dict
+        _lora_scan_gen: int
+        _path_end: str | None
+        _shared_sent: str | None
+        _tracks_shown: tuple | None
+        _tree_stamp: tuple | None
+        _tts_fish: FishTTS | None
+        _tts_local: LocalTTS | None
+        _uses_cache: tuple | None
+        _worker_leaving: bool
+        proc: QProcess | None
         _cfg_row: QWidget
         _checking: bool
         _civitai_row: QWidget

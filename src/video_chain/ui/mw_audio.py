@@ -253,6 +253,7 @@ class AudioMixin(MainWindowHost):
                 return
         before = self._done_clips()
         try:
+            assert self.tree is not None
             T.remove_audio_reference(self.project, refs[row]["file"], self.tree)
         except (OSError, RuntimeError, ValueError) as e:
             self._report_error(f"Could not remove the sound reference: {e}")
@@ -397,6 +398,7 @@ class AudioMixin(MainWindowHost):
         assert self.tree is not None
         n = len(T.track_users(self.tree, tid))
         for d in self._scene_dirs():
+            assert self.project is not None
             if Path(d) == Path(self.project):
                 continue
             try:

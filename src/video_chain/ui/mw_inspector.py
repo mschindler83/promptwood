@@ -129,6 +129,7 @@ class InspectorMixin(MainWindowHost):
     def _frozen_note(self, n: T.Node) -> str:
         try:
             assert self.project is not None
+            assert self.tree is not None
             return T.frozen_note(self.tree, n, T.Checker(self.project, self.tree).base())
         except Exception:  # noqa: BLE001  (an unreadable start image: no note)
             return ""
@@ -141,6 +142,7 @@ class InspectorMixin(MainWindowHost):
         ov, parts = n.overrides or {}, self._own_parts(n)
         if ov.get("guide"):
             parts.append(f"carry-over {ov['guide']}")
+        assert self.tree is not None
         if T.end_image_used(self.tree, n):
             parts.append("end image")
         if n.keyframes:
@@ -332,6 +334,7 @@ class InspectorMixin(MainWindowHost):
     def _lead_off(self, n: T.Node) -> str | None:
         """The lead's name when the clip's lead switch is off and the clip would get the lead with it on (its
         prompt mentions nobody), so its chip can switch it on again; else None."""
+        assert self.tree is not None
         lead = T.lead_of(self.tree)
         if T.lead_on(n) or lead is None:
             return None
@@ -349,6 +352,7 @@ class InspectorMixin(MainWindowHost):
             self.status.setText(f"Clip #{T.short_id(nid)} is frozen; unfreeze it first.")
             self._update_cards()
             return
+        assert self.tree is not None
         lead = T.lead_of(self.tree)
         T.set_lead_on(node, bool(on))
         card = self._card_of(nid)
@@ -381,6 +385,7 @@ class InspectorMixin(MainWindowHost):
     def _faces_text(self, use: dict) -> str:
         """Which faces (and voices) a clip is made with, for its card ('' without a cast); with spoken lines, who
         says each one (as the app reads it: the voice it gets)."""
+        assert self.tree is not None
         if not T.cast_of(self.tree):
             return ""
         text = self._cast_line(use)

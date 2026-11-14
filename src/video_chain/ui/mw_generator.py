@@ -404,6 +404,7 @@ class GeneratorMixin(MainWindowHost):
     def _reload_made(self):
         """Take what the generator recorded (made) from tree.json; nothing else changes during a run."""
         try:
+            assert self.project is not None
             fresh = T.load(self.project)
         except (OSError, ValueError):
             return

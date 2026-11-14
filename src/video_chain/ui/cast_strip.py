@@ -62,7 +62,7 @@ class CastStrip(QTableWidget):
                         "picture. Click a clip to show its card.")
         self._ids: list[str] = []
 
-    def show_path(self, options: dict, nodes: list) -> None:
+    def show_path(self, options: T.Options, nodes: list) -> None:
         cast = T.cast_of(options)
         show = bool(cast) and bool(nodes)
         self.setVisible(show)

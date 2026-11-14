@@ -267,6 +267,7 @@ class TtsMixin(MainWindowHost):
                 before = self._done_clips()
                 try:
                     assert self.project is not None
+                    assert self.tree is not None
                     entry = TTS.use_sample(self.project, self.tree, c["name"], dlg.wav, dlg.made["label"],
                                            dlg.made["text"], dlg.made["eleven"])
                 except (ValueError, OSError, RuntimeError) as e:

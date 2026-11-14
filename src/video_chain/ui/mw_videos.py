@@ -26,6 +26,7 @@ class VideosMixin(MainWindowHost):
         if self.project is None:
             self.status.setText("Open or create a project folder first.")
             return
+        assert self.tree is not None
         if not self.tree.can_add_video(parent):
             vc = self.tree.video_child(parent)
             self.status.setText(f"Clip #{T.short_id(parent)} already leads into video #{T.short_id(vc.id)}: a "
@@ -231,6 +232,7 @@ class VideosMixin(MainWindowHost):
             discard()
             self.refresh()
             return
+        assert self.project is not None
         old, old_made = T.clip_files(self.project, node), node.made
         node.made = made
         if not self._write_tree():                  # (the status says why) the record stays as it was
@@ -253,6 +255,7 @@ class VideosMixin(MainWindowHost):
             return None
         try:
             assert self.project is not None
+            assert self.tree is not None
             done = T.Checker(self.project, self.tree).status(nid) == "done"
         except Exception:  # noqa: BLE001
             done = False
@@ -261,6 +264,7 @@ class VideosMixin(MainWindowHost):
                                 "conversion), then replace the person.")
             return None
         pictures = []
+        assert self.tree is not None
         for c in T.cast_of(self.tree):
             if T.kind_of(c) != "person":            # (a head swap takes faces)
                 continue
@@ -269,7 +273,7 @@ class VideosMixin(MainWindowHost):
                     pictures.append((f"Face of @{c['name']}" + (f" ({k})" if len(c["images"]) > 1 else ""),
                                      str(self.project / rel)))
         url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL)
-        comfy_dir = os.path.expanduser(self.comfy_dir.text().strip()) or None
+        comfy_dir = self._comfy_dir_path()
         cleanup = self.comfy_cleanup.isChecked()
         switch = ModelSwitch()
 
@@ -366,6 +370,7 @@ class VideosMixin(MainWindowHost):
                 dlg.deleteLater()
         before = self._done_clips() - {nid}
         try:
+            assert self.tree is not None
             clip_node, rest = self.tree.split_video(nid, at)
         except ValueError as e:
             self._report_error(f"Could not split video #{T.short_id(nid)}: {e}")

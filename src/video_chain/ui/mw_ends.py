@@ -32,7 +32,7 @@ class EndsMixin(MainWindowHost):
             self.status.setText("Write a prompt first; the refiner improves it.")
             return None
         url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL)
-        comfy_dir = os.path.expanduser(self.comfy_dir.text().strip()) or None
+        comfy_dir = self._comfy_dir_path()
 
         llama = self.llama_server()
 
@@ -108,7 +108,7 @@ class EndsMixin(MainWindowHost):
             first = str(self.project / T.START_FILE) if (self.project / T.START_FILE).is_file() else None
         target = nid if node is not None and not node.is_video and self.tree.video_child(nid) is None else None
         url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL)
-        comfy_dir = os.path.expanduser(self.comfy_dir.text().strip()) or None
+        comfy_dir = self._comfy_dir_path()
         cleanup = self.comfy_cleanup.isChecked()
 
         switch = ModelSwitch()
@@ -147,12 +147,16 @@ class EndsMixin(MainWindowHost):
                         f"references tab, {S.keys('tab_cast')}); mention it in prompts as "
                         f"@{c['name']}." + (f" {self._remade_note}" if self._remade_note else ""))
             ok = self.set_image(png, confirm=True) if kind == "start" else \
-                bool(target) and self.set_end_image(target, png)
+                bool(target and self.set_end_image(target, png))
             if ok:
-                record_use(png, {"kind": "start", "sha1": chain.file_signature(self.project / T.START_FILE)}
-                           if kind == "start" else {"kind": "end", "file": self.tree.nodes[target].end_image})
+                if kind == "start":
+                    assert self.project is not None
+                    record_use(png, {"kind": "start", "sha1": chain.file_signature(self.project / T.START_FILE)})
+                else:
+                    assert self.tree is not None and target is not None
+                    record_use(png, {"kind": "end", "file": self.tree.nodes[target].end_image})
                 self.status.setText(("New start image from the AI edit" if kind == "start" else
-                                     f"Clip #{T.short_id(target)} now ends at the AI-edited image") +
+                                     f"Clip #{T.short_id(target or '')} now ends at the AI-edited image") +
                                     (f" — {self._remade_note}" if self._remade_note else "."))
             return bool(ok)
         known = label_loras(self.qwen_loras)
@@ -199,6 +203,7 @@ class EndsMixin(MainWindowHost):
         node = self.tree.nodes.get(nid) if self.tree else None
         if node is None or node.is_video or self.running:
             return
+        assert self.tree is not None
         if self.tree.video_child(nid) is not None:
             self.status.setText(f"Clip #{T.short_id(nid)} ends at the video after it; it hands over there.")
             return
@@ -261,6 +266,7 @@ class EndsMixin(MainWindowHost):
         node = self.tree.nodes.get(nid) if self.tree else None
         if node is None or node.is_video or self.running:
             return
+        assert self.tree is not None
         if self.tree.video_child(nid) is not None:
             self.status.setText(f"Clip #{T.short_id(nid)} ends at the first frame of the video after it.")
             return
@@ -309,6 +315,7 @@ class EndsMixin(MainWindowHost):
         node = self.tree.nodes.get(nid) if self.tree else None
         if node is None or node.is_video or self.running:
             return None
+        assert self.tree is not None
         if self.tree.video_child(nid) is not None:
             self.status.setText(f"Clip #{T.short_id(nid)} ends at the first frame of the video after it.")
             return None
@@ -351,6 +358,7 @@ class EndsMixin(MainWindowHost):
                 if QImage(image).isNull():
                     self.status.setText(f"Not an image: {Path(image).name}")
                     return False
+                assert self.project is not None
                 T.set_end_image(self.project, self.tree, nid, Path(image))
         except (ValueError, OSError, RuntimeError) as e:
             self._report_error(f"Could not set the end image: {e}")
@@ -402,6 +410,7 @@ class EndsMixin(MainWindowHost):
         elif act == "remove":
             try:
                 assert self.project is not None
+                assert self.tree is not None
                 T.remove_keyframe(self.project, self.tree, nid, i)
             except (ValueError, OSError, RuntimeError) as e:
                 self._report_error(f"Could not remove the keyframe: {e}")
@@ -614,6 +623,7 @@ class EndsMixin(MainWindowHost):
                                        self._picker_places(), self.project_images())
                 if not image:
                     return False
+                assert self.project is not None
                 T.set_node_start(self.project, self.tree, nid, Path(image))
         except (OSError, RuntimeError, ValueError) as e:
             self._report_error(f"Could not set the start image: {e}")

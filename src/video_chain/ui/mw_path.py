@@ -33,13 +33,13 @@ class PathMixin(MainWindowHost):
         known, lora_dir = self.known_loras(), self._lora_dir()      # (once for all cards: each reads files / settings)
         for k, n in enumerate(path):
             if n.is_video:
-                card = VideoCard(n, view=self.view)
-                card.action.connect(self.node_action)
-                card.play.connect(self._play_node)
-                self._fit_card(card)
-                self.card_stack.addWidget(card)
-                self.cards.append(card)
-                card.set_editable(not self.running)
+                vcard = VideoCard(n, view=self.view)
+                vcard.action.connect(self.node_action)
+                vcard.play.connect(self._play_node)
+                self._fit_card(vcard)
+                self.card_stack.addWidget(vcard)
+                self.cards.append(vcard)
+                vcard.set_editable(not self.running)
                 continue
             card = PromptCard(n, names=self._cast_names, view=self.view)
             card.edited.connect(self._card_edited)
@@ -211,11 +211,13 @@ class PathMixin(MainWindowHost):
             t += length
             st = self.state(n.id)
             if n.is_video:
-                there = self._is_file(n.source["file"])
+                assert isinstance(card, VideoCard)
+                there = self._is_file(n.source_dict()["file"])
                 card.set_source(n, there)
                 step = ("will be converted again" if st == "changed" else
                         "" if there or st == "done" else "the video file is missing")
             else:
+                assert isinstance(card, PromptCard)
                 why = self.why_of.get(n.id) if st == "changed" else ""
                 step = f"Will be made again: {why}." if why else ("will be made again" if st == "changed" else "")
                 if st == "done" and n.id in self.remix_due:
@@ -259,6 +261,7 @@ class PathMixin(MainWindowHost):
                 card.set_source_sound(avail, sound_text, max_guide, rep_ok, model_sound)
                 card.set_summary(" · ".join(self._own_parts(n)))
                 card.set_veda(self.veda_used(n))
+                assert self.project is not None
                 end = self.project / n.end_image if n.end_image else None
                 if vc is not None:
                     card.set_end(end, vc.id, self._pixmap(self.project / vc.made["first"]) if vc.made else None,
@@ -295,34 +298,36 @@ class PathMixin(MainWindowHost):
         self._update_problems()
 
     def _update_buttons(self):
-        has = self.tree is not None
-        sel = self.target_id() if has else None     # the actions work on the clip in the inspector
-        is_clip = bool(has and sel and sel != START and sel in self.tree.nodes)
+        tree = self.tree
+        has = tree is not None
+        sel = self.target_id() if tree is not None else None     # the actions work on the clip in the inspector
+        is_clip = bool(tree is not None and sel and sel != START and sel in tree.nodes)
         idle = not self.running
         self.b_continue.setEnabled(has and idle)
         self.b_add_video.setEnabled(has and idle)
-        for w in (self.act_save, self.act_save_as, self.act_close):
-            w.setEnabled(has and idle)
+        for act in (self.act_save, self.act_save_as, self.act_close):
+            act.setEnabled(has and idle)
         for w in (self.act_new, self.act_open, self.b_new, self.b_open, self.b_recent, self.recent_file_menu):
             w.setEnabled(idle)
         self.b_branch.setEnabled(is_clip and idle)
-        self.b_variant.setEnabled(is_clip and idle and sel in self.tree.nodes and not self.tree.nodes[sel].is_video)
+        sel_node = tree.nodes.get(sel) if tree is not None and is_clip and sel else None
+        self.b_variant.setEnabled(sel_node is not None and idle and not sel_node.is_video)
         path = self.selected_path()
         all_done = bool(path) and all(self.state(n.id) == "done" for n in path)
         free = idle and not self._joins and not self._converts   # a join reads clips a new run would replace
         self.b_gen.setEnabled(free and bool(path))
-        self.b_gen_all.setEnabled(free and has and bool(self.tree.nodes))
+        self.b_gen_all.setEnabled(free and tree is not None and bool(tree.nodes))
         self.b_delete.setEnabled(is_clip and free)
-        num = f" #{T.short_id(sel)}" if is_clip else ""
+        num = f" #{T.short_id(sel)}" if is_clip and sel else ""
         self.b_branch.setToolTip(S.tip(f"Branch: another continuation from the same point as clip{num}", "branch"))
         self.b_variant.setToolTip(S.tip(f"Variant of clip{num}: same prompt, other seed", "variant"))
         self.b_delete.setToolTip(S.tip(f"Delete clip{num} (the one in the inspector) and everything after it",
                                        "graph_delete"))
         self.b_play_path.setEnabled(all_done and idle)
         self.b_export.setEnabled(all_done and idle)
-        fn = self.tree.nodes.get(self.focus) if has and self.focus else None
+        fn = tree.nodes.get(self.focus) if tree is not None and self.focus else None
         self.b_play_clip.setEnabled(bool(fn and fn.made))
-        self.b_export_clip.setEnabled(bool(fn and fn.made) and idle and self.state(fn.id) == "done")
+        self.b_export_clip.setEnabled(fn is not None and bool(fn.made) and idle and self.state(fn.id) == "done")
         self.b_export_clip.setToolTip(f"Save clip #{T.short_id(fn.id)} on its own (as made, or upscaled)"
                                       if fn and fn.made
                                       else "The clip in the inspector is not made yet" if fn else
@@ -345,7 +350,7 @@ class PathMixin(MainWindowHost):
                                "Do not generate when ComfyUI has started" if self._waiting_comfy is not None else
                                "Stop generating")
         self._update_comfy_label()
-        for w in (self.start_tile, self.frames, self.resolution, self.steps,
+        for widget in (self.start_tile, self.frames, self.resolution, self.steps,
                   self.audio, self.keep_rep, self.b_project,
                   self.comfy_url, self.ref_size, self.ref_hint, self.b_ref_add, self.b_ref_create,
                   self.b_ref_start,
@@ -354,7 +359,7 @@ class PathMixin(MainWindowHost):
                   self.style_prefix, self.style_suffix, self.prompt_format, self.lora_triggers, self.veda,
                   self.b_ai_edit, self.b_ai_create,
                   self.b_film_cast):                # (storyboard and the film buttons: below, with the busy check)
-            w.setEnabled(idle)
+            widget.setEnabled(idle)
         self.aspect.setEnabled(idle and self.project is not None and T.size_origin(self.project, self.tree) == "aspect")
         self.b_start_clear.setEnabled(idle and self.project is not None and (self.project / T.START_FILE).is_file())
         busy = bool(self._copying or self._joins or self._converts)

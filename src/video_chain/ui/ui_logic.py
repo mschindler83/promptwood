@@ -4,7 +4,7 @@ from __future__ import annotations
 import copy
 from collections import Counter
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from .. import chain, config, llm_server as LLM, tree as T, tts as TTS
 from .graph import START
@@ -22,7 +22,7 @@ MAX_RECENT = 10
 UNLOAD_TIMEOUT = 10        # seconds ComfyUI is given to answer "unload your models"
 VRAM_POLL_SECONDS = 0.5    # how often the free VRAM is looked at while ComfyUI lets go
 AUDIO_REF_RANGE = f"{T.AUDIO_REF_MIN:g}-{T.AUDIO_REF_TOTAL:g} s"   # what one sound reference may last
-_SELECTED = object()         # "the selected character" as a default argument (None means: no character)
+_SELECTED: Any = object()         # "the selected character" as a default argument (None means: no character)
 MAX_RECENT_LORAS = 12      # LoRAs kept in the "recent" list of the pickers
 COMFY_START_TIMEOUT = 180  # seconds ComfyUI is given to come up after it was started
 KILL_GRACE_MS = 8000       # how long the generator process may take to end after Stop

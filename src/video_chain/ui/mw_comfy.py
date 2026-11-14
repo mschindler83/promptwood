@@ -22,6 +22,11 @@ from .mw_host import MainWindowHost
 class ComfyMixin(MainWindowHost):
     """ComfyUI: poll, start, free its models, close the window."""
 
+    def _comfy_dir_path(self) -> Path | None:
+        """ComfyUI's folder as typed in the settings (None: empty)."""
+        text = os.path.expanduser(self.comfy_dir.text().strip())
+        return Path(text) if text else None
+
     def unload(self):
         if self.worker_alive and not self.running:
             self.status.setText("Unloading the model …")

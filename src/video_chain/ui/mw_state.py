@@ -205,6 +205,7 @@ class StateMixin(MainWindowHost):
                 "their paths. The first clip then starts from its prompt."):
             return False
         before = self._done_clips()
+        assert self.tree is not None
         T.clear_start_image(self.project, self.tree)
         self._pix.clear()
         self._write_tree()
@@ -228,6 +229,7 @@ class StateMixin(MainWindowHost):
             return False
         made = self.made_from_start()
         try:                                        # another aspect ratio: another video size for every clip
+            assert self.tree is not None
             base = T.Checker(self.project, self.tree).base()
             size = chain.canvas_size(*chain.image_size(Path(path)), int(self.tree.options.get("resolution", 512)))
             if base is not None and size != (base["width"], base["height"]):
@@ -243,6 +245,7 @@ class StateMixin(MainWindowHost):
             return False
         before = self._done_clips()
         try:
+            assert self.tree is not None
             T.set_start_image(self.project, Path(path), self.tree)
         except (OSError, RuntimeError) as e:
             self._report_error(f"Could not use {Path(path).name}: {e}")

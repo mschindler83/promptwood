@@ -95,6 +95,7 @@ class ExportMixin(MainWindowHost):
             return
         assert self.project is not None
         default = str(self.project / f"{self.project.name}-{path[-1].id}{'-clip' if single else ''}.mp4")
+        assert self.tree is not None
         base = T.Checker(self.project, self.tree).base()
         strength = self.qs.value("refineStrength", "natural", type=str)
         method = self.qs.value("exportUpscaler", "seedvr2_7b", type=str)
