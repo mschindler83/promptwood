@@ -3520,7 +3520,7 @@ class MainWindow(QMainWindow):
         if len(self.film.scenes) < 2:
             return
         n = F.summary(self.film, sid)["clips"]
-        if QMessageBox.question(self, "Delete scene", f"Delete the scene “{sc.title}” with its {n} clip"
+        if self._ask_no(self, "Delete scene", f"Delete the scene “{sc.title}” with its {n} clip"
                                 f"{'s' if n != 1 else ''} from the film? Its folder with their files is not deleted: it is moved to "
                                 "old/ in the film's folder.") != QMessageBox.Yes:
             return
@@ -3856,8 +3856,7 @@ class MainWindow(QMainWindow):
             return False
         folder = Path(folder).expanduser().resolve()
         try:
-            if not folder.is_dir():
-                raise OSError(f"{folder} is not a folder")
+            folder.mkdir(parents=True, exist_ok=True)     # (after the leave check above; tests and the API open new folders)
             root = F.root_of(folder)
             film = F.Film.load(root)               # the film this folder belongs to, and which scene opens
             if len(film.scenes) > 1 and not film.problem:
@@ -4689,7 +4688,7 @@ class MainWindow(QMainWindow):
             return
         users = self._mentioning(c["name"])
         made = [n for n in users if self.tree.nodes[n].made]
-        if made and QMessageBox.question(
+        if made and self._ask_no(
                 self, "Rename character",
                 f"{len(users)} clip{'s mention' if len(users) != 1 else ' mentions'} @{c['name']}; the prompts "
                 f"change to @{new.strip()}. The name is part of what the model reads, so {len(made)} made "
@@ -4724,7 +4723,7 @@ class MainWindow(QMainWindow):
         if users:
             text += (f" {len(users)} clip{'s mention' if len(users) != 1 else ' mentions'} @{c['name']}; "
                      "they cannot be made until their prompts are changed.")
-        if QMessageBox.question(self, "Remove character" if T.kind_of(c) == "person" else f"Remove {T.kind_of(c)}",
+        if self._ask_no(self, "Remove character" if T.kind_of(c) == "person" else f"Remove {T.kind_of(c)}",
                                 text) != QMessageBox.Yes:
             return
         before = self._done_clips()
@@ -4948,7 +4947,7 @@ class MainWindow(QMainWindow):
         made = [n for n in before if n in self.tree.nodes and not self.tree.nodes[n].is_video
                 and rel in T.node_cast(self.tree.options, self.tree.nodes[n])["images"]]
         word = self._ref_word()
-        if made and QMessageBox.question(
+        if made and self._ask_no(
                 self, f"Remove {word}",
                 f"Remove this {word}? {len(made)} made clip{'s use' if len(made) != 1 else ' uses'} it and "
                 f"will count as CHANGED.") != QMessageBox.Yes:
@@ -5229,7 +5228,7 @@ class MainWindow(QMainWindow):
         c = self._selected_character()
         if c is None or not c.get("voice") or not self._cast_edit_ok():
             return
-        if QMessageBox.question(self, "Remove voice", f"Remove the voice of @{c['name']}? Its sample (a recording "
+        if self._ask_no(self, "Remove voice", f"Remove the voice of @{c['name']}? Its sample (a recording "
                                 "or a clone) is taken out of the project.") \
                 != QMessageBox.Yes:
             return
@@ -5310,7 +5309,7 @@ class MainWindow(QMainWindow):
             if later:
                 text += (f" The sounds after it move up (<Audio {row + 2}> becomes <Audio {row + 1}>), so check "
                          "those prompts.")
-            if QMessageBox.question(self, "Remove sound reference", text) != QMessageBox.Yes:
+            if self._ask_no(self, "Remove sound reference", text) != QMessageBox.Yes:
                 return
         before = self._done_clips()
         try:
@@ -5431,7 +5430,7 @@ class MainWindow(QMainWindow):
         if tr is None or self.project is None or self.running:
             return
         users = self._track_users_everywhere(tr["id"])
-        if users and QMessageBox.question(
+        if users and self._ask_no(
                 self, "Remove audio track",
                 f"Remove “{tr['name']}”? {users} clip{'s play' if users != 1 else ' plays'} it"
                 + (" (in all scenes)" if self.film is not None and len(self.film.scenes) > 1 else "")
@@ -5587,13 +5586,17 @@ class MainWindow(QMainWindow):
             return bool(self._write_tree())
         return True
 
+    def _ask_no(self, parent, title: str, text: str):
+        """A question before something is lost: Yes / No, with No as the answer Enter gives."""
+        return QMessageBox.question(parent, title, text, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+
     def _may_leave_project(self) -> bool:
         """Save before the project is closed or replaced; if that fails, ask before its edits are dropped."""
         self._save_timer.stop()
         if self._save_tree():
             return True
         why = self._write_error or self.status.text()
-        return QMessageBox.question(
+        return self._ask_no(
             self, "Unsaved changes", f"The project could not be saved: {why}\n\nClose it anyway and lose the "
             "changes since the last save?") == QMessageBox.Yes
 
@@ -5750,7 +5753,7 @@ class MainWindow(QMainWindow):
         if self._start_frozen():
             return False
         made = [i for i, st in self.status_of.items() if st == "done"] if self.made_from_start() else []
-        if confirm and made and QMessageBox.question(
+        if confirm and made and self._ask_no(
                 self, "Remove the start image",
                 f"Remove the start image?\n\n{len(made)} made clip{'s depend' if len(made) != 1 else ' depends'} on it "
                 "(it starts from it, or it sets the video size); they will count as CHANGED and be made again with "
@@ -5786,7 +5789,7 @@ class MainWindow(QMainWindow):
                 made = [i for i, st in self.status_of.items() if st == "done"]
         except Exception:  # noqa: BLE001
             pass
-        if confirm and made and QMessageBox.question(
+        if confirm and made and self._ask_no(
                 self, "Replace the start image",
                 f"Use {Path(path).name} as the start image?\n\n{len(made)} made clip{'s depend' if len(made) != 1 else ' depends'}"
                 " on the current one (it starts from it, or it sets the video size); they will count as CHANGED and "

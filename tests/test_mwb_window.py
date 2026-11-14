@@ -48,10 +48,10 @@ def test_failed_open_keeps_waits(win, tmp_path, image):
     assert win._waiting_comfy == "waiting"
 
 
-def test_open_missing_folder_does_not_create_it(win, tmp_path, image):
-    opened(win, tmp_path, image)
-    assert win.open_project(tmp_path / "nowhere", quiet=True) is False
-    assert not (tmp_path / "nowhere").exists()
+def test_failed_create_leaves_no_folder(win, tmp_path, monkeypatch):
+    monkeypatch.setattr(win, "open_project", lambda *a, **k: False)
+    assert win.create_project(tmp_path / "newp") is False
+    assert not (tmp_path / "newp").exists()
 
 
 def test_open_project_with_broken_option_values(win, tmp_path, image):
@@ -235,3 +235,21 @@ def test_cast_tooltip_plural(win, tmp_path, image):
     win.tree.options["cast"] = [{"name": "Anna", "images": [], "desc": "", "lead": False}]
     win._show_references(select="Anna")
     assert "clips mention it" not in win.cast_list.item(0).toolTip() or "0 clips" in win.cast_list.item(0).toolTip()
+
+
+def test_destructive_questions_default_to_no(win, tmp_path, image, monkeypatch):
+    opened(win, tmp_path, image)
+    win.tree.options["cast"] = [{"name": "Anna", "images": [], "desc": "", "lead": False,
+                                 "voice": {"file": "refs/v.wav", "secs": 3.0}}]
+    win._show_references(select="Anna")
+    seen = []
+
+    def ask(parent, title, text, buttons=QMessageBox.Yes | QMessageBox.No, default=QMessageBox.NoButton):
+        seen.append((title, default))
+        return QMessageBox.No
+    monkeypatch.setattr(QMessageBox, "question", ask)
+    win._remove_character()
+    win._remove_voice()
+    monkeypatch.setattr(win, "_save_tree", lambda: False)
+    win._may_leave_project()
+    assert len(seen) == 3 and all(d == QMessageBox.No for _, d in seen), seen
