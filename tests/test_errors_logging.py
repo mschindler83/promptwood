@@ -49,3 +49,61 @@ def test_setup_without_file(tmp_path):
         for h in list(root.handlers):
             if h not in before:
                 root.removeHandler(h)
+
+
+# ---- a swallowed error leaves a warning in the log
+def test_a_failing_note_is_logged(tmp_path, caplog):
+    import test_lora_notes as TL
+    from video_chain import lora_notes as LN
+    db, p = TL.db_with(tmp_path)
+
+    def broken(system, user, n):
+        raise RuntimeError("the model is gone")
+    with caplog.at_level(logging.WARNING):
+        assert LN.make_notes([p], broken, db=db) == 0
+    assert any("the model is gone" in r.getMessage() for r in caplog.records)
+
+
+def test_a_failing_remote_remove_is_logged(tmp_path, caplog):
+    from video_chain import runpod as RP
+    s = RP.RunpodSession(None, config=tmp_path / "cfg")
+
+    def boom(*a, **k):
+        raise OSError("ssh gone")
+    s.run = boom
+    with caplog.at_level(logging.WARNING):
+        s.remove_remote("input", RP.SUBFOLDER, "a.png")
+    assert any("ssh gone" in r.getMessage() for r in caplog.records)
+
+
+def test_a_failing_server_stop_at_exit_is_logged(caplog):
+    from video_chain import llm_server as L
+
+    class Bad:
+        def _take(self):
+            raise RuntimeError("take failed")
+
+        def _kill(self, *a, **k):
+            pass
+    bad = Bad()
+    old = L._LIVE
+    L._LIVE = [bad]
+    try:
+        with caplog.at_level(logging.WARNING):
+            L._stop_all()
+    finally:
+        L._LIVE = old
+    assert any("take failed" in r.getMessage() for r in caplog.records)
+
+
+def test_a_failing_progress_callback_is_logged(tmp_path, caplog):
+    from video_chain import triggers as TR
+    f = tmp_path / "a.safetensors"
+    f.write_bytes(b"x" * 100)
+    db = TR.TriggerDB(tmp_path / "db.json")
+
+    def boom(*a):
+        raise RuntimeError("window gone")
+    with caplog.at_level(logging.WARNING):
+        db.scan([str(f)], online=True, progress=boom, lookup=lambda sha: None, gap=0)
+    assert any("window gone" in r.getMessage() for r in caplog.records)
