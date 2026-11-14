@@ -1892,3 +1892,144 @@ def test_the_same_first_clip_for_more_start_pictures(project, tmp_path):
     d = t.to_json()
     d["nodes"][0]["start_image"] = "../elsewhere.png"
     assert T.Tree.from_json(d).nodes[d["nodes"][0]["id"]].start_image is None
+
+
+# ----------------------------------------------------------------------------- continue the clip before (<Video 1>)
+
+class TailGenerator(FakeGenerator):
+    """FakeGenerator that also looks at the reference video it gets (cut in a temp folder that is gone after the
+    clip): its frame count and the colour of its last frame."""
+
+    def generate(self, prompt, start_image, out_video, out_last_frame, seed, settings=None):
+        vids = []
+        for v in (settings or {}).get("ref_videos") or []:
+            last = Path(v).with_suffix(".last.png")
+            chain.last_frame(Path(v), last)
+            vids.append({"frames": chain.probe(Path(v))["frames"],
+                         "last_rgb": Image.open(last).convert("RGB").getpixel((5, 5))})
+        super().generate(prompt, start_image, out_video, out_last_frame, seed, settings)
+        self.calls[-1]["ref_videos"] = vids
+
+
+CONT_DEF = ("<Video 1> is the source video for the target video continuation; the target video continues directly "
+            "from its end.")
+CONT_KEEP = ("<Video 1> (continuation source, its end): fully_preserved - the subjects, scene, motion and camera "
+             "movement at its end carry on directly into [Shot 1].")
+
+
+def test_h3_continue_the_clip_before(tmp_path):
+    """Override "continue": the clip before's last n frames (up to its hand-over frame) go as the reference video,
+    recorded as settings["continue"] in h3 only; the prompt says so; the lengths offered fit both clips; the clip
+    becomes changed when the clip before is made again or hands over elsewhere."""
+    p, t = h3_project(tmp_path)
+    t.options["frames"] = 49
+    a = t.add(None, "A red car drives along a coast road.")
+    b = t.add(a.id, "The car drives on.")
+    assert T.continue_choices(t, a) == [] and T.continue_choices(t, b) == [22, 39]     # 49 frames each
+    b.overrides = {"frames": 25}
+    assert T.continue_choices(t, b) == [22]                     # (no longer than the clip itself)
+    b.overrides = {"continue": 39}
+    a.overrides = {"continue": 22}                              # a first clip: nothing to continue, not recorded
+    T.save(p, t)
+    ch = T.Checker(p, t)
+    assert ch.settings(b.id)["continue"] == {"frames": 39} and "continue" not in ch.settings(a.id)
+    assert ch.settings(b.id)["frame_pictures"] == ["start"]     # the reference model: the start frame is numbered
+    assert T.uses_ref_model(ch.settings(b.id)) and not T.uses_ref_model(ch.settings(a.id))
+    classic = T.Tree.from_json(t.to_json())
+    T.set_prompt_format(classic, "classic")
+    s = T.Checker(p, classic).settings(b.id)
+    assert "continue" not in s and not T.uses_ref_model(s)      # classic: no effect
+    gen = run(p, [b.id], TailGenerator(frames=49))
+    call = gen.calls[1]
+    assert call["ref_videos"][0]["frames"] == 39
+    a_last = Image.open(p / T.load(p).nodes[a.id].made["frame"]).convert("RGB").getpixel((5, 5))
+    assert call["ref_videos"][0]["last_rgb"] == a_last == call["start_rgb"]   # it ends where this clip starts
+    assert call["prompt"] == (
+        "subject_definitions:\n<Picture 1> is the first frame of [Shot 1] and the last frame of <Video 1>.\n"
+        f"{CONT_DEF}\n\n"
+        "summary:\n[keyframe completion + video continuation] The target video continues directly from the end of "
+        "<Video 1>. It follows the detailed description. It begins from <Picture 1>, the last frame of <Video 1>."
+        "\n\nretention_analysis:\n<Picture 1> ([Shot 1] first frame): fully_preserved - the target video begins "
+        f"exactly from this picture.\n{CONT_KEEP}\n\n"
+        "detailed_description:\n[Shot 1] The shot continues directly from the end of <Video 1>. It begins from "
+        "<Picture 1>, the last frame of <Video 1>. The car drives on.\n\n"
+        "overall_soundscape:\nNatural ambient sound that fits the scene.\n\nnon_diegetic_music:\nN/A")
+    assert "continue" not in gen.calls[0]["settings"] and not gen.calls[0]["ref_videos"]
+    t = T.load(p)
+    assert t.nodes[b.id].made["settings"]["continue"] == {"frames": 39} and "ref_videos" not in t.nodes[b.id].made["settings"]
+    assert t.nodes[b.id].made["continue_from"] == t.nodes[a.id].made["video"]
+    info = T.clip_inputs(p, t, b.id)
+    assert info["videos"] == [{"n": 1, "what": f"end of clip #{a.id[1:]}", "frames": 39, "node": a.id}]
+    assert info["model"] == "ref2va" and info["prompt"] == call["prompt"]
+    assert statuses(p) == {a.prompt: "done", b.prompt: "done"}
+    # the clip before as another file (same frame, so only the continuation sees it): changed
+    old = p / t.nodes[a.id].made["video"]
+    new = old.with_name(old.stem + "x.mp4")
+    shutil.copy(old, new)
+    t.nodes[a.id].made["video"] = f"nodes/{new.name}"
+    ch = T.Checker(p, t)
+    assert ch.status(a.id) == "done" and ch.status(b.id) == "changed" and ch.why(b.id) == "the clip it continues changed"
+    t.nodes[a.id].made["video"] = f"nodes/{old.name}"
+    t.nodes[a.id].end_at = 30                                  # it hands over earlier: the tail ends there
+    ch = T.Checker(p, t)
+    assert ch.continue_from(t.nodes[b.id]).endswith("@30") and ch.status(b.id) == "changed"
+    assert T.continue_choices(t, t.nodes[b.id]) == [22]        # 31 frames up to the hand-over
+    assert T.guide_problem(t, ch, [b.id]) == f"clip #{a.id[1:]} (31 frames) is shorter than the 39-frame " \
+                                              f"continuation of clip #{b.id[1:]}"
+    t.nodes[b.id].overrides["frames"] = 25
+    t.nodes[a.id].end_at = None
+    assert T.guide_problem(t, T.Checker(p, t), [b.id]) == (f"clip #{b.id[1:]} (25 frames) is shorter than its "
+                                                           "39-frame continuation; make it longer or the "
+                                                           "continuation shorter")
+
+
+def test_h3_continue_with_carry_over_and_a_remade_clip_before(tmp_path):
+    """With Carry-over at the start there is no plain start frame: the continuation sentence alone, no picture; the
+    clip still becomes changed when the clip before is made again (its frames and its video change)."""
+    p, t = h3_project(tmp_path)
+    t.options["frames"] = 49
+    a = t.add(None, "A red car drives along a coast road.")
+    b = t.add(a.id, "The car drives on.")
+    b.overrides = {"guide": 5, "continue": 22}
+    T.save(p, t)
+    gen = run(p, [b.id], TailGenerator(frames=49))
+    call = gen.calls[1]
+    assert call["guides"] and call["ref_videos"][0]["frames"] == 22
+    assert call["prompt"] == (
+        f"subject_definitions:\n{CONT_DEF}\n\n"
+        "summary:\n[video continuation] The target video continues directly from the end of <Video 1>. It follows "
+        f"the detailed description.\n\nretention_analysis:\n{CONT_KEEP}\n\n"
+        "detailed_description:\n[Shot 1] The shot continues directly from the end of <Video 1>. The car drives "
+        "on.\n\noverall_soundscape:\nNatural ambient sound that fits the scene.\n\nnon_diegetic_music:\nN/A")
+    assert "frame_pictures" not in call["settings"] and "Picture" not in call["prompt"]
+    assert statuses(p) == {a.prompt: "done", b.prompt: "done"}
+    t = T.load(p)
+    t.nodes[a.id].seed += 1                                   # the clip before is made again
+    T.save(p, t)
+    run(p, [a.id], gen)                                       # (the same fake: another last-frame colour)
+    t = T.load(p)
+    ch = T.Checker(p, t)
+    assert ch.status(a.id) == "done" and ch.status(b.id) == "changed"
+    m = t.nodes[b.id].made
+    assert m["continue_from"] != ch.continue_from(t.nodes[b.id]) and m["guide_from"] != ch.guide_from(t.nodes[b.id])
+    assert m["start_sha1"] != ch.sha(ch.start_frame(t.nodes[b.id]))   # (the start frame is checked with carry-over too)
+
+
+def test_joined_sound_start_is_where_the_joined_path_hears_the_clip(tmp_path):
+    """The sound the joined path has in a clip starts after the clip's repeated first frame(s), whatever its Sound
+    setting; the clip's own sound span starts that much earlier."""
+    t = T.Tree()
+    f = str(tmp_path / "talk.mp4")
+    v = t.add_video(None, f, 2.0, 3.0)
+    a = t.add(v.id, "she keeps talking")
+    b = t.add(a.id, "and talking")
+    b.overrides = {"source_sound": True, "guide": 5}
+    lone = t.add(None, "no video before")
+    before = dict(a.overrides or {})
+    assert T.joined_sound_start(t, a) == {"video": v, "file": f, "at": 3.0}
+    assert (a.overrides or {}) == before                              # (the node is not changed)
+    a.overrides = {"source_sound": True}
+    assert T.source_sound_span(t, a)["start"] == round(3.0 - 1 / chain.FPS, 3)
+    assert T.joined_sound_start(t, a)["at"] == 3.0
+    assert T.joined_sound_start(t, b)["at"] == round(T.source_sound_span(t, b)["start"] + 5 / chain.FPS, 3)
+    assert T.joined_sound_start(t, v) is None and T.joined_sound_start(t, lone) is None

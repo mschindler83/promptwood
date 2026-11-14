@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 
 from .. import h3_prompt as _h3
-from .consts import DIALOGUE, MENTION, SAID_BY
+from .consts import DIALOGUE, MENTION, SAID_BY, SPEECH_TAG
 from .cast import _in_lines, _unmention, character, kind_of
 
 
@@ -17,6 +17,28 @@ _MALE = re.compile(r"\b(man|men|boy|male|guy|gentleman|father|dad|husband|son|br
 
 
 _PRONOUN = re.compile(r"\b(she|he|sie|er)\b", re.IGNORECASE)
+
+
+def without_tags(line: str) -> str:
+    """A spoken line without its [tags] (and the spaces they leave)."""
+    out = SPEECH_TAG.sub(" ", line or "")
+    out = re.sub(r"[ \t]+", " ", out)
+    return re.sub(r" ([,.;:!?…])", r"\1", out).strip()
+
+
+def without_speech_tags(text: str) -> str:
+    """A prompt with the [tags] taken out of its spoken lines only (the brackets elsewhere stay, and so does the
+    [Language] of a <d>[Language] ...</d> line)."""
+    text = text or ""
+    out, pos = [], 0
+    for m in DIALOGUE.finditer(text):
+        g = next((k for k in range(1, (m.lastindex or 0) + 1) if m.group(k) is not None), None)
+        if g is None or not SPEECH_TAG.search(m.group(g)):
+            continue
+        a, b = m.span(g)
+        out += [text[pos:a], without_tags(m.group(g))]
+        pos = b
+    return "".join(out) + text[pos:]
 
 
 def gender_of(c: dict) -> str | None:

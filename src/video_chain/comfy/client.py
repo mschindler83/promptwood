@@ -194,6 +194,18 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
             prefix = (spec[1].get("template") or {}).get("prefix", prefix)
         return lambda i: f"ref_audios.{prefix}{i}"
 
+    def video_key(self):
+        """How this ComfyUI names the reference video inputs (raises ComfyError if its H3 nodes take none)."""
+        opt = self._object_info("MiniMaxH3ReferenceToVideo").get("input", {}).get("optional", {})
+        spec = opt.get("ref_videos")
+        if spec is None:
+            raise ComfyError("this ComfyUI's MiniMax H3 Reference to Video node takes no reference videos "
+                             "(update ComfyUI)")
+        prefix = "ref_video_"
+        if isinstance(spec, list) and len(spec) > 1 and isinstance(spec[1], dict):
+            prefix = (spec[1].get("template") or {}).get("prefix", prefix)
+        return lambda i: f"ref_videos.{prefix}{i}"
+
     def check_ref_model(self):
         req = self._object_info("UNETLoader").get("input", {}).get("required", {})
         if UNET_REF not in combo_options(req.get("unet_name")):
@@ -249,7 +261,8 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
         if s.get("hyperflow"):
             self.hyperflow_file()
         if s.get("pika"):
-            self.pika_lora(bool(s.get("refs") or s.get("ref_paths") or s.get("audio_refs") or s.get("audio_paths")))
+            self.pika_lora(bool(s.get("refs") or s.get("ref_paths") or s.get("audio_refs") or s.get("audio_paths")
+                                  or s.get("ref_videos")))
 
     def check_turbo(self):
         for node in ("MiniMaxH3TurboLoRA", "MiniMaxH3TurboSampler"):
@@ -468,7 +481,8 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
                 raise ComfyError(f"{Path(s['turbo']['lora']).name} is not in ComfyUI's LoRA folders")
             turbo = (name, float(s["turbo"].get("strength", 1.0)))
         hyper = (self.hyperflow_file(), float(s["hyperflow"].get("strength", 1.0))) if s.get("hyperflow") else None
-        pika = (self.pika_lora(bool(s.get("ref_paths") or s.get("audio_paths"))), float(s["pika"].get("strength", 1.0))) \
+        pika = (self.pika_lora(bool(s.get("ref_paths") or s.get("audio_paths") or s.get("ref_videos"))),
+                float(s["pika"].get("strength", 1.0))) \
             if s.get("pika") else None
         if turbo and self.last_hyperflow:
             self.free()                              # HyperFlow's patch would break the turbo LoRA
@@ -529,6 +543,14 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
             for a in s["audio_paths"]:
                 sounds.append(self.upload(Path(a)))
                 uploads.append((sounds[-1], a))
+        videos = []
+        if s.get("ref_videos"):                    # the end of the clip before (a continuation): ref2va as well
+            if not refs and not frame_refs and not sounds:
+                self.check_ref_model()
+            self.check_guides()                    # (LoadVideo + GetVideoComponents)
+            for v in s["ref_videos"]:
+                videos.append(self.upload(Path(v)))
+                uploads.append((videos[-1], v))
         prefix = f"{SUBFOLDER}/{uuid.uuid4().hex[:12]}"
         try:
             wf = build_workflow(prompt=prompt, image=image, seed=seed, width=s.get("width", DEFAULT_WIDTH),
@@ -541,7 +563,8 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
                                 cfg=float(s.get("cfg", 1.0)),
                                 audio_refs=sounds, **({"audio_key": self.audio_key()} if sounds else {}),
                                 start_pin=int(s.get("start_pin") or 1), recipe=s.get("recipe"), keyframes=keyframes,
-                                veda=self.veda_predictor(bool(refs or sounds)) if s.get("veda") else None)
+                                ref_videos=videos, **({"video_key": self.video_key()} if videos else {}),
+                                veda=self.veda_predictor(bool(refs or sounds or videos)) if s.get("veda") else None)
         except ValueError as e:                # (a setting combination that cannot be built: say why)
             raise ComfyError(str(e)) from e
         entry = self._run_workflow(wf)

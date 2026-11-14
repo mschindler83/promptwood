@@ -1,5 +1,6 @@
 """What a clip is made with, on its card: a row of chips in the order the model gets the inputs (start frame, end
-frame, the subjects with their pictures, the sounds and voices, the model and prompt format) and the "Model prompt"
+frame, the subjects with their pictures, the clip before it continues, the sounds and voices, the model and prompt
+format) and the "Model prompt"
 window with the exact text the model reads. Both show tree.clip_inputs; nothing here works anything out itself."""
 from __future__ import annotations
 
@@ -73,6 +74,11 @@ def chip_specs(info: dict, lead_off: str | None = None) -> list[dict]:
         out.append({"text": f"@{lead_off} · lead off", "variant": "neutral", "lead": False,
                     "tip": f"The lead is switched off for this clip: it is made without @{lead_off}. Check to use "
                            "the lead again."})
+    for vid in info.get("videos") or []:            # (the node's order: pictures, videos, then the sounds)
+        out.append({"text": f"Continues clip before · Video {vid['n']}", "variant": "", "lead": None,
+                    "tip": f"The {vid['what']} (its last {vid['frames'] / 24:.1f} s, {vid['frames']} frames, "
+                           f"pictures only) goes to the model as <Video {vid['n']}>, and the prompt tells it that "
+                           "this clip continues it: motion, camera and scene carry on (Continue)."})
     for snd in info["sounds"]:
         name = Path(snd["file"]).name if snd.get("file") else ""
         if snd["what"] == "soundtrack":
@@ -95,7 +101,8 @@ def chip_specs(info: dict, lead_off: str | None = None) -> list[dict]:
                            "sound; the model does not hear it."})
     model = info["model"]
     out.append({"text": model_chip_text(info), "variant": "neutral", "lead": None, "model": True,
-                "tip": ("Made with MiniMax H3's reference model (ref2va): it gets the pictures and sounds above. "
+                "tip": ("Made with MiniMax H3's reference model (ref2va): it gets the pictures, videos and sounds "
+                        "above. "
                         if model == "ref2va" else
                         "Made with MiniMax H3's first / last frame model (fl2va): no reference pictures or sounds. ")
                 + (f"The prompt is written in MiniMax H3's {FORMAT_NAMES['h3']} format." if info["format"] == "h3"
@@ -106,7 +113,8 @@ def chip_specs(info: dict, lead_off: str | None = None) -> list[dict]:
 def model_chip_text(info: dict) -> str:
     """How the clip is made, in plain words (the model and the prompt format are in the chip's tooltip)."""
     if info["model"] == "ref2va":
-        return "With reference pictures" if info["pictures"] else "With reference sounds"
+        return ("With reference pictures" if info["pictures"] else
+                "With a reference video" if info.get("videos") else "With reference sounds")
     given = [w for w in ("start", "end") if info[w]["given"] in ("frame", "guide")]
     return {("start",): "From the start frame", ("end",): "To the end frame",
             ("start", "end"): "From the start to the end frame"}.get(tuple(given), "From the prompt only")
@@ -171,7 +179,7 @@ class ChipRow(QWidget):
 
 
 def inputs_list(info: dict) -> str:
-    """The numbered pictures and sounds in the order the model gets them, as text (file names only)."""
+    """The numbered pictures, videos and sounds in the order the model gets them, as text (file names only)."""
     lines = [f"<Picture {p['n']}> — {p['what']} ({Path(str(p['file'])).name if p.get('file') else 'missing'})"
              for p in info["pictures"]]
     for which in ("start", "end"):
@@ -182,6 +190,7 @@ def inputs_list(info: dict) -> str:
                          " frame, not numbered")
         elif d["given"] == "guide":
             lines.append(f"{which.capitalize()}: carry-over frames, not numbered")
+    lines += [f"<Video {v['n']}> — {v['what']} ({v['frames']} frames)" for v in info.get("videos") or []]
     lines += [f"<Audio {s['n']}> — {s['what']} ("
               + (Path(s["file"]).name if s.get("file") else "cut when the clip is made") + ")" for s in info["sounds"]]
     return "\n".join(lines) if lines else "No pictures or sounds besides the prompt."

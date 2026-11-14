@@ -1375,3 +1375,125 @@ def test_refiner_is_told_what_a_reference_is():
                          {"name": "Kitchen", "images": [], "desc": "sunny", "lead": False, "kind": "place"},
                          {"name": "Noir", "images": [], "desc": "", "lead": False, "kind": "style"}]
     assert C.cast_instruction(T.refiner_cast(t)) == text
+
+
+# ----------------------------------------------------------------------------- continue the clip before (<Video 1>)
+
+def node_labels(cond: dict) -> list[str]:
+    """The labels MiniMaxH3ReferenceToVideo gives its references, in its order (nodes_minimax_h3.py): the images,
+    then the videos (a video's soundtrack gets an <Audio j> right before its <Video k>), then the standalone audio."""
+    out, n = [], {"Picture": 0, "Video": 0, "Audio": 0}
+
+    def add(kind):
+        n[kind] += 1
+        out.append(f"<{kind} {n[kind]}>")
+    for k in cond:
+        if k.startswith("ref_images."):
+            add("Picture")
+    for k in cond:
+        if k.startswith("ref_videos."):
+            if f"ref_video_audios.ref_video_audio_{k.rsplit('_', 1)[-1]}" in cond:
+                add("Audio")
+            add("Video")
+    for k in cond:
+        if k.startswith("ref_audios."):
+            add("Audio")
+    return out
+
+
+def test_reference_video_workflow():
+    """The tail of the clip before goes in as the first reference video (LoadVideo + GetVideoComponents, pictures
+    only): the ref2va model also without pictures or sounds, no soundtrack wired, so a sound stays <Audio 1>; the
+    pinning nodes are the same as without it."""
+    kw = dict(seed=1, width=512, height=512, frames=39, steps=20, loras=[], audio=True, prefix="p")
+    wf = C.build_workflow(prompt="x", image="s.png", ref_videos=["video-chain/tail.mp4"], **kw)
+    ref = wf["refcond"]["inputs"]
+    assert wf["unet"]["inputs"]["unet_name"] == C.UNET_REF and ref["ref_videos.ref_video_0"] == ["rvparts0", 0]
+    assert wf["rvparts0"] == {"class_type": "GetVideoComponents", "inputs": {"video": ["rvideo0", 0]}}
+    assert wf["rvideo0"] == {"class_type": "LoadVideo", "inputs": {"file": "video-chain/tail.mp4"}}
+    assert not [k for k in ref if k.startswith(("ref_video_audios.", "ref_images.", "ref_audios."))]
+    assert "audio_vae" not in ref and wf["cond"]["inputs"]["image"] == ["start", 0]     # the start still pinned
+    assert wf["cond"]["inputs"]["frame_idx"] == 0 and wf["cond"]["inputs"]["latent"] == ["refcond", 1]
+    full = dict(kw, prompt="x", image="s.png", end_image="e.png", refs=["r.png"], frame_refs=["start"],
+                audio_refs=["a.wav"], keyframes=[("k.png", 20)],
+                guides=[{"name": "g.mp4", "frame_idx": 30, "frames": 5, "audio": True, "at": "end"}])
+    without, wf = C.build_workflow(**full), C.build_workflow(**full, ref_videos=["tail.mp4"],
+                                                             video_key=lambda i: f"ref_videos.clip_{i}")
+    ref = wf["refcond"]["inputs"]
+    assert node_labels(ref) == ["<Picture 1>", "<Picture 2>", "<Video 1>", "<Audio 1>"]   # the sound stays Audio 1
+    assert ref["ref_videos.clip_0"] == ["rvparts0", 0] and ref["ref_audios.ref_audio_0"] == ["aref0", 0]
+    assert {k: v for k, v in wf.items() if k not in ("rvideo0", "rvparts0", "refcond")} == \
+        {k: v for k, v in without.items() if k != "refcond"}                              # pinning unchanged
+    assert {k: v for k, v in ref.items() if k != "ref_videos.clip_0"} == without["refcond"]["inputs"]
+
+
+def test_generate_continuing_a_clip(server, start, tmp_path, monkeypatch):
+    """A reference video alone forces the reference model (check_ref_model), is uploaded under the input name the
+    node reports and cleaned up; an older ComfyUI without reference videos refuses it."""
+    import subprocess
+    (server.root / "main.py").write_text("")
+    tail = tmp_path / "tail.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=192x108:r=24", "-f", "lavfi",
+                    "-i", "sine=f=330", "-frames:v", "22", "-t", f"{22 / 24:.4f}", "-c:v", "libx264", "-pix_fmt",
+                    "yuv420p", "-c:a", "aac", str(tail)], check=True)
+    gen = C.ComfyGenerator(server.url, comfy_dir=server.root)
+    checked = []
+    real = gen.check_ref_model
+    monkeypatch.setattr(gen, "check_ref_model", lambda: checked.append(1) or real())
+    gen.generate("The car drives on.", start, tmp_path / "v.mp4", tmp_path / "v.png", 3,
+                 settings(ref_videos=[str(tail)]))
+    wf = server.prompts[-1]
+    cond = wf["refcond"]["inputs"]
+    assert checked == [1] and wf["unet"]["inputs"]["unet_name"] == C.UNET_REF
+    assert cond["ref_videos.ref_video_0"] == ["rvparts0", 0] and wf["rvideo0"]["inputs"]["file"].startswith("video-chain/")
+    assert not [k for k in cond if k.startswith(("ref_video_audios.", "ref_images."))] and "audio_vae" not in cond
+    assert wf["cond"]["class_type"] == "MiniMaxH3AddGuide" and wf["cond"]["inputs"]["image"] == ["start", 0]
+    assert cond["prompt"] == "The car drives on."                                  # (no face hint)
+    assert not list((server.root / "input" / "video-chain").glob("*"))             # uploads cleaned up
+    info = {"input": {"optional": {"ref_videos": ["COMFY_AUTOGROW_V3", {"template": {"prefix": "vid_"}}]}}}
+    monkeypatch.setattr(gen, "_object_info", lambda node: info)
+    assert gen.video_key()(0) == "ref_videos.vid_0"
+    monkeypatch.undo()
+    server.video_refs = False                                                       # an older ComfyUI
+    gen = C.ComfyGenerator(server.url, comfy_dir=server.root)
+    with pytest.raises(C.ComfyError, match="no reference videos"):
+        gen.generate("x", start, tmp_path / "w.mp4", tmp_path / "w.png", 3, settings(ref_videos=[str(tail)]))
+
+
+def test_h3_tree_continuation_through_comfyui(server, tmp_path):
+    """A clip of an h3 project that continues the clip before, made through ComfyUI: <Video 1> is the workflow's
+    first reference video (22 frames), the start frame is <Picture 1> and still pinned, the prompt is the one the
+    Model prompt window shows."""
+    from pathlib import Path
+
+    from video_chain import tree as T
+    (server.root / "main.py").write_text("")
+    img = tmp_path / "in.png"
+    Image.new("RGB", (192, 108), (200, 10, 10)).save(img)
+    proj = tmp_path / "proj"
+    t = T.Tree()
+    t.options.update({"prompt_format": "h3", "frames": 39})
+    T.set_start_image(proj.mkdir() or proj, img, t)
+    a = t.add(None, "A red car on a coast road.")
+    b = t.add(a.id, "The car drives on.")
+    b.overrides = {"continue": 22}
+    T.save(proj, t)
+    sent = []
+    real = C.ComfyGenerator.upload
+
+    def upload(self, f):
+        if Path(f).name == "continue_from.mp4":
+            sent.append(chain.probe(Path(f))["frames"])
+        return real(self, f)
+    gen = C.ComfyGenerator(server.url, comfy_dir=server.root)
+    gen.upload = upload.__get__(gen)
+    T.run_tree(gen, proj, [b.id], log=lambda _m: None)
+    wf = server.prompts[-1]
+    ref = wf["refcond"]["inputs"]
+    assert sent == [22] and node_labels(ref) == ["<Picture 1>", "<Video 1>"]
+    assert ref["ref_images.ref_image_0"] == ["start", 0] and ref["ref_videos.ref_video_0"] == ["rvparts0", 0]
+    assert wf["cond"]["inputs"]["image"] == ["start", 0] and wf["cond"]["inputs"]["frame_idx"] == 0
+    t = T.load(proj)
+    assert ref["prompt"] == T.clip_inputs(proj, t, b.id)["prompt"]
+    assert "[keyframe completion + video continuation]" in ref["prompt"]
+    assert T.Checker(proj, t).status(b.id) == "done"

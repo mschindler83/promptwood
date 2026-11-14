@@ -331,3 +331,81 @@ def test_module_is_pure():
     mods = {a.name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
     mods |= {(n.module or "").split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
     assert mods <= {"__future__", "re", "dataclasses", "typing"}
+
+
+# ----------------------------------------------------------------------------- video continuation (<Video 1>)
+
+def test_continuation_alone_is_the_reference_format():
+    """The end of the clip before as <Video 1>, nothing else: the reference format (also with reference=False,
+    since the reference model gets the video), task type video continuation, the guide's 2.3 / 4.1 / 5.3 lines."""
+    out = H.compose("The car drives on along the coast.", continues=1)
+    assert out == """subject_definitions:
+<Video 1> is the source video for the target video continuation; the target video continues directly from its end.
+
+summary:
+[video continuation] The target video continues directly from the end of <Video 1>. It follows the detailed description.
+
+retention_analysis:
+<Video 1> (continuation source, its end): fully_preserved - the subjects, scene, motion and camera movement at its end carry on directly into [Shot 1].
+
+detailed_description:
+[Shot 1] The shot continues directly from the end of <Video 1>. The car drives on along the coast.
+
+overall_soundscape:
+Natural ambient sound that fits the scene.
+
+non_diegetic_music:
+N/A"""
+    assert H.compose("The car drives on along the coast.", continues=1, reference=False) == out
+    assert "<Video" not in H.compose("The car drives on.", continues=None)
+    assert H.task_types(continuation=True, keyframe=True, subjects=True, audio=True) == \
+        "[keyframe completion + reference generation + video continuation + audio reference]"
+
+
+def test_continuation_with_a_numbered_start_picture_says_it_is_the_videos_last_frame():
+    out = H.compose("A tall woman keeps walking.", start=True, frame_pictures={"start": 1}, continues=1)
+    assert ("subject_definitions:\n<Picture 1> is the first frame of [Shot 1] and the last frame of <Video 1>.\n"
+            "<Video 1> is the source video for the target video continuation; the target video continues directly "
+            "from its end.\n\n") in out
+    assert ("summary:\n[keyframe completion + video continuation] The target video continues directly from the end "
+            "of <Video 1>. It follows the detailed description. It begins from <Picture 1>, the last frame of "
+            "<Video 1>.\n\n") in out
+    assert ("retention_analysis:\n<Picture 1> ([Shot 1] first frame): fully_preserved - the target video begins "
+            "exactly from this picture.\n<Video 1> (continuation source, its end): fully_preserved - the subjects, "
+            "scene, motion and camera movement at its end carry on directly into [Shot 1].\n\n") in out
+    assert ("detailed_description:\n[Shot 1] The shot continues directly from the end of <Video 1>. It begins from "
+            "<Picture 1>, the last frame of <Video 1>. A tall woman keeps walking.\n\n") in out
+    plain = H.compose("She keeps walking.", start=True, continues=1)          # a start frame without a number
+    assert ("[Shot 1] The shot continues directly from the end of <Video 1>. It begins exactly from the given start "
+            "frame, the last frame of <Video 1>. She keeps walking.") in plain
+    assert "keyframe completion" not in plain and "The video begins exactly" not in plain
+
+
+def test_continuation_with_subjects_and_a_voice_keeps_the_audio_numbers():
+    """A person with a picture and a voice, a named sound: <Audio 1> stays the sound, <Audio 2> the voice (the video
+    adds no audio label); task types in the guide's order; the <Video 1> lines after the pictures, before the audio."""
+    text = '@Anna hears <Audio 1> and says "Wait."'
+    ls = lines_of(text, ["Anna"])
+    out = H.compose(text, start=True, sounds=1, lines=ls, frame_pictures={"start": 2}, continues=1,
+                    subjects=[H.Subject("Anna", "person", "a tall woman", (1,), voice=True)])
+    defs = out.split("subject_definitions:\n")[1].split("\n\n")[0].splitlines()
+    assert defs == ["<Subject 1> is Anna (a tall woman), the person in <Picture 1>.",
+                    "<Picture 2> is the first frame of [Shot 1] and the last frame of <Video 1>.",
+                    "<Video 1> is the source video for the target video continuation; the target video continues "
+                    "directly from its end.",
+                    "<Audio 1> is a sound reference, used as the description says.",
+                    "<Audio 2> is the voice-timbre reference for <Subject 1> (S1), the voice of one speaker."]
+    assert ("summary:\n[keyframe completion + reference generation + video continuation + audio reference] The "
+            "target video continues directly from the end of <Video 1>. It shows <Subject 1>. <Subject 1> (S1) "
+            "speaks with the voice timbre of <Audio 2>. It begins from <Picture 2>, the last frame of <Video 1>.") in out
+    keep = out.split("retention_analysis:\n")[1].split("\n\n")[0].splitlines()
+    assert [k.split(":")[0].split(" (")[0] for k in keep] == ["<Subject 1>", "<Picture 2>", "<Video 1>", "<Audio 1>",
+                                                              "<Audio 2>"]
+    assert ("[Shot 1] The shot continues directly from the end of <Video 1>. It begins from <Picture 2>, the last "
+            "frame of <Video 1>. <Subject 1> (S1), a tall woman, hears <Audio 1> and says, using the voice timbre "
+            "referenced from <Audio 2>, <d>[English] Wait.</d>") in out
+
+
+def test_continuation_leaves_a_structured_prompt_alone():
+    own = "subject_definitions:\nmy own\n\nsummary:\n[video continuation] mine"
+    assert H.compose(own, continues=1) == own

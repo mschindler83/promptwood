@@ -22,7 +22,7 @@ NO_LORA = "none"                   # old override value: this node without any L
 
 
 OVERRIDE_KEYS = ("loras", "frames", "steps", "guide", "source_sound", "sound_over", "sound_mix_level", "camera",
-                 "lead")
+                 "lead", "continue")
 
 
 _OLD_LORA_KEYS = ("lora", "strength", "extra_loras")
@@ -32,6 +32,11 @@ AI, VIDEO = "ai", "video"
 
 
 GUIDE_CHOICES = (5, 22, 39)        # motion guide lengths on H3's 17n+5 grid
+
+
+# lengths of the clip before's end shown as a reference video ("continue"): MiniMaxH3ReferenceToVideo keeps the
+# first 17n+5 frames of a reference video (at most the target's frame count), so only these lengths arrive whole
+CONTINUE_CHOICES = (22, 39, 56, 73, 90, 107, 124)
 
 
 DEFAULT_FRAMES = 73                 # a clip's length when nothing else is set
@@ -112,6 +117,11 @@ PICTURE_TAG = re.compile(r"<Picture\s*\d+>", re.IGNORECASE)
 # a spoken line: "...", “...”, „...“, «...» or MiniMax's own <d>[Language] ...</d>
 DIALOGUE = re.compile(r'<d>\s*(?:\[[^\]\n]*\]\s*)?(.*?)</d>|"([^"\n]+)"|“([^”\n]+)”|„([^“”\n]+)[“”]|«([^»\n]+)»',
                       re.DOTALL)
+
+
+# how a line is spoken, in square brackets inside it: "[angry] Lass mich!", "Ja [laughs] genau". Text to speech that
+# hears them gets them (tts.spoken_text); the clip model never does (clip_cast takes them out of the lines).
+SPEECH_TAG = re.compile(r"\[[^\[\]\n]{1,80}\]")
 
 
 SAID_BY = re.compile(r"[ \t]*,?[ \t]*(says|said|asks|asked|answers|answered|replies|replied|whispers|whispered|"
