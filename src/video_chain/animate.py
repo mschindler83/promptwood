@@ -270,10 +270,7 @@ class ComfyAnimator(ComfyGenerator):
                 if self.cleanup:
                     self._remove(self.output_dir, f, Path(dest))
         finally:
-            if self.cleanup:
-                for up, local in uploads:
-                    self._remove(self.input_dir, {"filename": Path(up).name, "subfolder": str(Path(up).parent)},
-                                 Path(local), same_size=False)
+            self._drop_uploads(uploads)
 
     def replace(self, video: Path, mask: Path, reference: Path, out: Path, seed: int, frames: int,
                 src_size: tuple[int, int], size: str = "480p", prompt: str = "", fps: float = FPS,

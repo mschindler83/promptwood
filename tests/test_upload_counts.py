@@ -1,0 +1,48 @@
+"""imagegen / animate remove their uploads through the shared reference count (comfy/client.py _drop_uploads)."""
+import pytest
+from fake_comfy import FakeComfy
+from PIL import Image
+
+from video_chain import animate as A
+from video_chain import imagegen as G
+
+
+@pytest.fixture
+def server(tmp_path):
+    s = FakeComfy(tmp_path / "comfy")
+    (s.root / "main.py").write_text("# fake ComfyUI folder\n")
+    yield s
+    s.close()
+
+
+@pytest.fixture
+def pic(tmp_path):
+    p = tmp_path / "pic.png"
+    Image.new("RGB", (64, 64), (10, 200, 10)).save(p)
+    return p
+
+
+def _there(server):
+    return list((server.root / "input" / "video-chain").glob("*"))
+
+
+def test_image_create_drops_its_upload_through_the_count(server, pic, tmp_path):
+    cr = G.ComfyImageCreator(server.url, comfy_dir=server.root)
+    cr.create("krea2", None, "style", tmp_path / "o.png", 5, "standard", 1024, 1024, refs=[pic])
+    assert not _there(server)
+    name = cr.upload(pic)                        # the same picture again: really sent again, not a stale count
+    assert (server.root / "input" / name).is_file()
+
+
+def test_animator_run_outputs_drops_its_upload_through_the_count(server, pic, tmp_path):
+    an = A.ComfyAnimator(server.url, comfy_dir=server.root)
+    name = an.upload(pic)
+    assert (server.root / "input" / name).is_file()
+    wf = {"save": {"class_type": "SaveImage", "inputs": {"images": ["x", 0], "filename_prefix": "video-chain/o"}}}
+    try:
+        an._run_outputs(wf, {}, [(name, pic)])
+    except Exception:
+        pass                                      # (the fake may not know this tiny workflow; the cleanup runs anyway)
+    assert not _there(server)
+    name2 = an.upload(pic)
+    assert (server.root / "input" / name2).is_file()

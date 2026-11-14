@@ -548,10 +548,7 @@ class ComfyImageCreator(ComfyGenerator):
             if self.cleanup:
                 self._remove(self.output_dir, out, Path(out_png))
         finally:
-            if self.cleanup:
-                for up, local in uploads:
-                    self._remove(self.input_dir, {"filename": Path(up).name, "subfolder": str(Path(up).parent)},
-                                 Path(local), same_size=False)
+            self._drop_uploads(uploads)
         used = (wf.get("unet") or {}).get("inputs", {}).get("unet_name") or \
             (wf.get("ckpt") or {}).get("inputs", {}).get("ckpt_name") or model
         return {"mode": "create", "family": family, "model": used, "chosen_model": model,
