@@ -400,3 +400,40 @@ def test_a_picture_dropped_on_the_end_of_a_clip_sets_it(app, win, tmp_path, imag
     card = next(c for c in win.cards if c.nid == ids[0])
     assert _drop(card.end_text, image)
     assert win.tree.nodes[ids[0]].end_image
+
+
+# ---------------------------------------------------------------- MWC-33: a single clip is exported in the background
+def test_exporting_a_single_clip_does_not_block_the_window(app, win, tmp_path, image, monkeypatch):
+    from test_ui import run_and_wait
+    ids = new_project(win, tmp_path, image, ("a",))
+    run_and_wait(app, win, win.generate_path)
+    wait(app, lambda: not win._joins, timeout=30)
+    gate, started = threading.Event(), threading.Event()
+    import shutil
+    real = shutil.copyfile
+
+    def slow(src, dst, *a, **k):
+        started.set()
+        assert gate.wait(20)
+        return real(src, dst, *a, **k)
+    monkeypatch.setattr(shutil, "copyfile", slow)
+    out = tmp_path / "out" / "clip.mp4"
+    win.export(out, "made", single=ids[0])              # returns at once
+    assert started.wait(10) and not out.exists() and win._joins == 1
+    assert "xporting" in win.status.text()
+    gate.set()
+    wait(app, lambda: "Exported clip.mp4" in win.status.text())
+    assert out.is_file() and win._joins == 0
+    assert not list(out.parent.glob("*.part*"))
+
+
+def test_a_failed_single_export_says_why(app, win, tmp_path, image, monkeypatch):
+    from test_ui import run_and_wait
+    ids = new_project(win, tmp_path, image, ("a",))
+    run_and_wait(app, win, win.generate_path)
+    wait(app, lambda: not win._joins, timeout=30)
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    win.export(blocker / "clip.mp4", "made", single=ids[0])      # (its folder is a file)
+    wait(app, lambda: "Could not export" in win.status.text())
+    assert win._joins == 0

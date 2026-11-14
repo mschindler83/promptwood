@@ -3215,6 +3215,7 @@ def test_export_one_clip(app, win, tmp_path, image, monkeypatch):
     node = win.tree.nodes[ids[0]]
     out = tmp_path / "clip-a.mp4"
     win.export(out, "made", single=ids[0])                                 # as made: the clip itself
+    wait(app, lambda: win.status.text().startswith("Exported clip-a.mp4"), timeout=30)   # (copied in the background)
     assert out.read_bytes() == (win.project / node.made["video"]).read_bytes()
     assert win.status.text() == f"Exported clip-a.mp4 (clip #{ids[0][1:]}, as made)."
     up = tmp_path / "clip-a-2k.mp4"

@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
 
 from .. import chain
 from .. import comfy as CMF
+from .. import media
 from .. import config
 from .. import film as F
 from .. import camera as CAM
@@ -628,6 +629,7 @@ class _Bridge(QObject):
     copied = Signal(str, str)                  # Save as: target folder, error ('' = done)
     converted = Signal(str, object, str, str, str)  # video node id, record or None, error, token, project
     remixed = Signal(object, str, str)         # [(clip id, its new record)], error ('' = done), project
+    exported = Signal(str, str, str)           # a single clip was copied out: its id, the file, error ('' = done)
     freed = Signal(bool)                       # ComfyUI's answer to "unload your models" (True: done)
     llm_room = Signal(str)                     # ComfyUI's models were unloaded for the llama.cpp server (why)
     spoken = Signal(str, object, str, str)     # clip id, rendered lines (tts.render_lines) or None, error, project
@@ -1937,6 +1939,7 @@ class MainWindow(QMainWindow):
         self.bridge.remixed.connect(self._remixed)
         self.bridge.llm_room.connect(self._llm_room_made)
         self.bridge.freed.connect(self._comfy_freed)
+        self.bridge.exported.connect(self._clip_copied)
         self.bridge.spoken.connect(self._lines_spoken)
         self.bridge.eleven_models.connect(self._fill_eleven_models)
         self.bridge.eleven_cloned.connect(self._eleven_cloned)
@@ -8877,14 +8880,7 @@ class MainWindow(QMainWindow):
             if node is None or not node.made:
                 return
             if size == "made":
-                out = Path(out)
-                try:
-                    out.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copyfile(self.project / node.made["video"], out)
-                except OSError as e:
-                    self.status.setText(f"Could not export clip #{single[1:]}: {e}")
-                    return
-                self.status.setText(f"Exported {out.name} (clip #{single[1:]}, as made).")
+                self._export_copy(single, self.project / node.made["video"], Path(out))
                 return
             target = single
         else:
@@ -8900,6 +8896,39 @@ class MainWindow(QMainWindow):
                                       "method": method, **({"single": True} if single is not None else {}),
                                       **({"denoise": True} if denoise else {}),
                                       **({"cloud": "runpod"} if cloud and method != "refine" else {})})
+
+    def _export_copy(self, nid: str, src: Path, out: Path):
+        """Copy a made clip to out in the background (it can be big, and out on a share); like a join it holds back
+        generating and deleting meanwhile. The file appears under its name only when it is complete (MWC-33)."""
+        if self._joins:
+            self.status.setText("A join or copy is still running; wait for it.")
+            return
+        self._joins += 1
+        self._update_buttons()
+        self.status.setText(f"Exporting clip #{nid[1:]} to {out.name} …")
+        bridge = self.bridge
+
+        def work():
+            error = ""
+            try:
+                out.parent.mkdir(parents=True, exist_ok=True)
+                with media.part_file(out) as tmp:
+                    shutil.copyfile(src, tmp)
+            except BaseException as e:  # noqa: BLE001  (the answer ends "exporting")
+                error = str(e) or type(e).__name__
+            try:
+                bridge.exported.emit(nid, str(out), error)
+            except RuntimeError:                       # (the window was closed meanwhile)
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def _clip_copied(self, nid: str, out: str, error: str):
+        self._joins = max(0, self._joins - 1)
+        self._update_buttons()
+        if error:
+            self._report_error(f"Could not export clip #{nid[1:]}: {error}")
+        else:
+            self.status.setText(f"Exported {Path(out).name} (clip #{nid[1:]}, as made).")
 
     # ------------------------------------------------------------------ GPU
     def _poll_gpu(self):
