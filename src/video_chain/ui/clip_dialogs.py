@@ -10,7 +10,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QImage, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QGridLayout, QHBoxLayout,
-                               QPushButton, QSlider, QStackedWidget, QVBoxLayout, QWidget)
+                               QPushButton, QSlider, QVBoxLayout, QWidget)
 
 from .. import chain
 from .theme import icon
@@ -28,18 +28,28 @@ class _Decoded(QObject):
     done = Signal(object, str)        # list of QImage, error
 
 
-def decode_frames(video: Path, width: int = PREVIEW_W) -> list[QImage]:
-    """Every frame of a (short) clip as a small QImage, in order."""
+def decode_frames(video: Path, width: int = PREVIEW_W, on_start=None) -> list[QImage]:
+    """Every frame of a (short) clip as a small QImage, in order. on_start(process) is given the ffmpeg process
+    as soon as it runs (so a closing dialog can end it)."""
     info = chain.probe(video)
     w = max(2, min(width, info["width"]) // 2 * 2)
     h = max(2, round(info["height"] * w / info["width"] / 2) * 2)
-    r = subprocess.run(["ffmpeg", "-v", "error", "-i", str(video), "-map", "0:v:0", "-vf", f"scale={w}:{h}",
-                        "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True, timeout=600)
-    if r.returncode != 0:
-        raise RuntimeError(r.stderr.decode(errors="replace").strip()[-300:] or "ffmpeg failed")
+    proc = subprocess.Popen(["ffmpeg", "-nostdin", "-v", "error", "-i", str(video), "-map", "0:v:0", "-vf",
+                             f"scale={w}:{h}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if on_start is not None:
+        on_start(proc)
+    try:
+        out, err = proc.communicate(timeout=600)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        raise
+    if proc.returncode != 0:
+        raise RuntimeError(err.decode(errors="replace").strip()[-300:] or "ffmpeg failed")
     size = w * h * 3
-    return [QImage(r.stdout[i:i + size], w, h, 3 * w, QImage.Format_RGB888).copy()
-            for i in range(0, len(r.stdout) - size + 1, size)]
+    return [QImage(out[i:i + size], w, h, 3 * w, QImage.Format_RGB888).copy()
+            for i in range(0, len(out) - size + 1, size)]
 
 
 class HandoverDialog(QDialog):
@@ -52,6 +62,9 @@ class HandoverDialog(QDialog):
         self.frames: list[QImage] = []
         self.min_frame = max(1, int(min_frame))
         self._current = current
+        self._proc = None                              # the ffmpeg that reads the frames (ended when closing)
+        self._choice: int | None = None
+        self._decided = False
         v = QVBoxLayout(self)
         info = label("The clips after this one start from the frame you choose here; the frames after it are left "
                      "out when the path is played or exported. This clip stays as it is (nothing is generated again "
@@ -95,7 +108,7 @@ class HandoverDialog(QDialog):
 
         def work():
             try:
-                frames, err = decode_frames(Path(video)), ""
+                frames, err = decode_frames(Path(video), on_start=lambda pr: setattr(self, "_proc", pr)), ""
             except Exception as e:  # noqa: BLE001
                 frames, err = [], str(e)
             try:
@@ -133,12 +146,14 @@ class HandoverDialog(QDialog):
     def done(self, r):
         choice = self.frame()
         self.frames = []                              # let go of the decoded frames (tens of MB)
-        self._choice = choice
+        self._choice, self._decided = choice, True
+        if self._proc is not None and self._proc.poll() is None:
+            self._proc.terminate()                    # (a long clip is not decoded on for nobody)
         super().done(r)
 
     def frame(self) -> int | None:
         """The chosen frame, None for the last one."""
-        if not self.frames and hasattr(self, "_choice"):
+        if not self.frames and self._decided:
             return self._choice
         if not self.frames or self.slider.value() >= len(self.frames) - 1:
             return None
@@ -189,9 +204,7 @@ class CompareDialog(QDialog):
                 self.audio_outs.append(out)
                 bv.addWidget(view, 1)
             else:
-                stack = QStackedWidget()
-                stack.addWidget(label(Path(video).name, level="tertiary"))
-                bv.addWidget(stack, 1)
+                bv.addWidget(label(Path(video).name, level="tertiary"), 1)
             head = QHBoxLayout()
             head.addWidget(label(name, type_="heading"))
             d = label(detail, level="tertiary")
@@ -212,7 +225,8 @@ class CompareDialog(QDialog):
         self.b_restart = QPushButton("From the start")
         self.b_restart.clicked.connect(self.restart)
         self.slider = QSlider(Qt.Horizontal)
-        self.slider.sliderMoved.connect(self.seek)
+        self._syncing = False                         # (the slider follows the players: that is not a seek)
+        self.slider.valueChanged.connect(self._slider_changed)
         self.loop = QCheckBox("Loop")
         self.loop.setChecked(True)
         self.sound = QComboBox()
@@ -237,8 +251,21 @@ class CompareDialog(QDialog):
                 p.durationChanged.connect(lambda _d: self.slider.setRange(
                     0, max(int(q.duration()) for q in self.players)))
             self.players[0].positionChanged.connect(
-                lambda ms: None if self.slider.isSliderDown() else self.slider.setValue(int(ms)))
+                self._follow)
             QTimer.singleShot(200, self.restart)
+
+    def _follow(self, ms: int):
+        if not self.slider.isSliderDown():
+            self._syncing = True
+            try:
+                self.slider.setValue(int(ms))
+            finally:
+                self._syncing = False
+
+    def _slider_changed(self, ms: int):
+        """The user moved the slider (drag, click in the groove, keys): all players go there."""
+        if not self._syncing:
+            self.seek(ms)
 
     def _playing(self) -> bool:
         from PySide6.QtMultimedia import QMediaPlayer
@@ -249,7 +276,10 @@ class CompareDialog(QDialog):
             return
         playing = self._playing()
         for p in self.players:
-            p.pause() if playing else p.play()
+            if playing:
+                p.pause()
+            else:
+                p.play()
         self.b_play.setIcon(icon("play" if playing else "pause"))
 
     def restart(self):
@@ -282,13 +312,17 @@ class CompareDialog(QDialog):
         for p in self.players:                       # the files of the others are deleted: let go of them
             p.stop()
             p.setSource(QUrl())
-        if self.on_keep(nid):
+        kept = False
+        try:
+            kept = bool(self.on_keep(nid))
+        finally:
+            if not kept:                             # (not kept, or it failed: the clips can be played again)
+                for p, (_n, _t, _d, video) in zip(self.players, self.items):
+                    p.setSource(QUrl.fromLocalFile(str(video)))
+                self.restart()
+        if kept:
             self.kept = nid
             self.accept()
-        else:
-            for p, (_n, _t, _d, video) in zip(self.players, self.items):
-                p.setSource(QUrl.fromLocalFile(str(video)))
-            self.restart()
 
     def done(self, r):
         for p in self.players:
@@ -377,6 +411,7 @@ class VideoFrameDialog(QDialog):
         if int(info.get("frames") or 0) > 0:           # the video stream's own count (a longer sound track
             self.frames = min(self.frames, int(info["frames"]))   # must not add positions without a frame)
         self._req = 0
+        self._closed = False
         self._grabbing = self._again = False        # one ffmpeg at a time; the newest position after it
         self._sig = _Grabbed()
         self._sig.ready.connect(self._ready)
@@ -459,7 +494,7 @@ class VideoFrameDialog(QDialog):
 
     def _ready(self, req: int, img: QImage):
         self._grabbing = False
-        if getattr(self, "_closed", False):
+        if self._closed:
             return
         if self._again:                              # moved on meanwhile: read the position it is at now
             self._again = False
