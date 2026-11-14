@@ -196,6 +196,11 @@ def fmt_left(seconds: float) -> str:
     return f"about {m} min" if m < 60 else f"about {m // 60} h {m % 60:02d} min"
 
 
+def plural(n: int, word: str, many: str | None = None) -> str:
+    """"1 clip", "3 clips" (many: the plural when it is not word + "s")."""
+    return f"{n} {word if n == 1 else many or word + 's'}"
+
+
 def time_left(elapsed: float, frac: float) -> float | None:
     """The time still needed at this progress (None while too early to say)."""
     if frac < 0.03 or elapsed < 3:
@@ -7769,30 +7774,40 @@ class MainWindow(QMainWindow):
             dlg.deleteLater()                       # its video players
         return dlg
 
-    def keep_only(self, nid: str, others: list[str], confirm: bool = True) -> list[str]:
-        """Delete these other clips (with what follows them); nid stays and is selected."""
-        if self.tree is None or self.running or not others or self._busy_files():
-            return []
-        doomed = others + [d.id for r in others for d in self.tree.descendants(r)]
+    def _delete_others(self, nid: str, roots: list[str], title: str, question, done: str,
+                       confirm: bool) -> list[str]:
+        """The shared part of keep_only / keep_branch: delete the branches that start at roots (with what follows
+        them), keep nid and select it. question(doomed): the text asked (before it, the made clips are counted);
+        done(gone): the status line. Returns the deleted ids."""
+        doomed = roots + [d.id for r in roots for d in self.tree.descendants(r)]
         made = sum(1 for d in doomed if self.tree.nodes[d].made)
         if confirm:
-            msg = (f"Keep clip #{T.short_id(nid)} and delete {len(doomed)} clip{'s' if len(doomed) != 1 else ''} "
-                   f"({', '.join('#' + T.short_id(o) for o in others)}" + (" and what follows them" if len(doomed) >
-                                                                  len(others) else "") + ")?")
+            msg = question(doomed)
             if made:
                 msg += (f"\n{made} of them are made; their video files are not deleted: they are moved to old/ in the "
                         "project folder.")
-            if not D.confirm(self, "Keep this one", msg):
+            if not D.confirm(self, title, msg):
                 return []
         gone = []
-        for r in others:
+        for r in roots:
             if r in self.tree.nodes:
                 gone += self.tree.remove(r, self.project)
         self.tree.selected = nid
         self._write_tree()
         self.refresh()
-        self.status.setText(f"Kept clip #{T.short_id(nid)}; deleted {len(gone)} clip{'s' if len(gone) != 1 else ''}.")
+        self.status.setText(f"Kept clip #{T.short_id(nid)}; deleted {plural(len(gone), 'clip')}{done}.")
         return gone
+
+    def keep_only(self, nid: str, others: list[str], confirm: bool = True) -> list[str]:
+        """Delete these other clips (with what follows them); nid stays and is selected."""
+        if self.tree is None or self.running or not others or self._busy_files():
+            return []
+
+        def question(doomed: list[str]) -> str:
+            after = " and what follows them" if len(doomed) > len(others) else ""
+            return (f"Keep clip #{T.short_id(nid)} and delete {plural(len(doomed), 'clip')} "
+                    f"({', '.join('#' + T.short_id(o) for o in others)}{after})?")
+        return self._delete_others(nid, others, "Keep this one", question, "", confirm)
 
     # ---- end images
     def choose_end_image(self, nid: str) -> None:
@@ -8269,27 +8284,12 @@ class MainWindow(QMainWindow):
         roots = self.tree.others_than_path(nid) if whole_path else [n.id for n in self.tree.siblings(nid)]
         if not roots or self._busy_files():
             return []
-        doomed = [r for r in roots] + [d.id for r in roots for d in self.tree.descendants(r)]
-        made = sum(1 for d in doomed if self.tree.nodes[d].made)
-        if confirm:
-            where = "along the path to" if whole_path else "next to"
-            msg = (f"Delete {len(doomed)} clip{'s' if len(doomed) != 1 else ''} in "
-                   f"{len(roots)} other branch{'es' if len(roots) != 1 else ''} {where} clip #{T.short_id(nid)}?")
-            if made:
-                msg += (f"\n{made} of them are made; their video files are not deleted: they are moved to old/ in the "
-                        "project folder.")
-            if not D.confirm(self, "Keep this branch", msg):
-                return []
-        gone = []
-        for r in roots:
-            if r in self.tree.nodes:
-                gone += self.tree.remove(r, self.project)
-        self.tree.selected = nid
-        self._write_tree()
-        self.refresh()
-        self.status.setText(f"Kept clip #{T.short_id(nid)}; deleted {len(gone)} clip{'s' if len(gone) != 1 else ''} "
-                            "in the other branches.")
-        return gone
+        where = "along the path to" if whole_path else "next to"
+
+        def question(doomed: list[str]) -> str:
+            return (f"Delete {plural(len(doomed), 'clip')} in {plural(len(roots), 'other branch', 'other branches')} "
+                    f"{where} clip #{T.short_id(nid)}?")
+        return self._delete_others(nid, roots, "Keep this branch", question, " in the other branches", confirm)
 
     def create_variants(self, nid: str, count: int, generate: bool = True, strength_steps: list[float] | None = None,
                         keep_seed: bool = False) -> list[str]:
