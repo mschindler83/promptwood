@@ -84,28 +84,12 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
     on_use(kind 'start' | 'end', png) -> bool; start_comfy() -> bool."""
 
     def __init__(self, parent, project: Path, sources: list[tuple[str, str]], source: str | None,
-                 end_target: str | None, connect: Callable[[Callable | None], object] | None = None,
-                 on_use: Callable[[str, str], bool] | None = None, settings: QSettings | None = None,
-                 places: list[tuple[str, str]] | None = None, start_comfy: Callable[[], bool] | None = None,
-                 on_start: Callable[[], None] | None = None, known_loras: list[tuple[str, str]] | None = None,
-                 lora_dir: str = "", uses: Callable[[ResultRecord], list[str]] | None = None,
-                 refine: Callable[..., RefineResult | None] | None = None,
-                 connect_create: Callable[[Callable | None], object] | None = None,
-                 family_loras: dict[str, list] | None = None, start_aspect: float | None = None, mode: str = "edit",
-                 check_lora: Callable[[str | None], bool | None] | None = None, use_triggers: bool = True,
-                 collections: Callable[[], list] | None = None, *, services: ImageEditServices | None = None):
+                 end_target: str | None, *, services: ImageEditServices):
         """What the dialog is for (project, the images to offer, the one chosen, the clip it ends) is given as
-        arguments; everything it calls out to or is told by the app is one ImageEditServices (`services`). The
-        single keyword arguments after end_target are the older way to give the same and still work."""
+        arguments; everything it calls out to or is told by the app is one ImageEditServices (`services`)."""
         super().__init__(parent)
-        if services is None:
-            services = ImageEditServices(
-                connect=connect, on_use=on_use, settings=settings, places=places, start_comfy=start_comfy,
-                on_start=on_start, known_loras=known_loras, lora_dir=lora_dir, uses=uses, refine=refine,
-                connect_create=connect_create, family_loras=family_loras, start_aspect=start_aspect, mode=mode,
-                check_lora=check_lora, use_triggers=use_triggers, collections=collections)
         if services.connect is None or services.on_use is None:
-            raise TypeError("ImageEditDialog needs connect and on_use (in services or as arguments)")
+            raise TypeError("ImageEditDialog needs connect and on_use in its services")
         self.services = services
         self.setWindowTitle("Edit an image with AI")
         fit_size(self, 1240, 820)

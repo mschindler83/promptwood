@@ -416,10 +416,9 @@ def test_image_window_own_sampling(app, tmp_path):
     from PySide6.QtCore import QSettings
 
     from video_chain import imagegen as G
-    from video_chain.ui.image_edit import ImageEditDialog
+    from video_chain.ui.image_edit import ImageEditDialog, ImageEditServices
     q = QSettings(str(tmp_path / "samp.ini"), QSettings.IniFormat)
-    dlg = ImageEditDialog(None, tmp_path, [], None, None, lambda p: None, lambda k, p: False, q,
-                          connect_create=lambda p: None)
+    dlg = ImageEditDialog(None, tmp_path, [], None, None, services=ImageEditServices(connect=lambda p: None, on_use=lambda k, p: False, settings=q, connect_create=lambda p: None))
     files = G.pick_files(["krea2/krea2_turbo_fp8_scaled.safetensors"], ["illustrij_v20.safetensors"],
                          ["qwen3vl_4b_fp8_scaled.safetensors"], ["qwen_image_vae.safetensors"], [])
     files["sampling"] = {"samplers": ["euler", "heun", "dpmpp_2m"], "schedulers": ["simple", "karras", "beta"]}
@@ -893,7 +892,7 @@ def test_results_gallery_groups_filters_and_favourites(app, tmp_path):
     from PySide6.QtCore import QSettings, Qt
 
     from video_chain.ui import results_gallery as RG
-    from video_chain.ui.image_edit import ImageEditDialog
+    from video_chain.ui.image_edit import ImageEditDialog, ImageEditServices
     ed = tmp_path / "edits"
     ed.mkdir()
     now = _t.time()
@@ -916,8 +915,7 @@ def test_results_gallery_groups_filters_and_favourites(app, tmp_path):
     assert "Edit: " in groups[2]["title"]
 
     q = QSettings(str(tmp_path / "g.ini"), QSettings.IniFormat)
-    dlg = ImageEditDialog(None, tmp_path, [], None, None, lambda p: None, lambda k, p: False, q,
-                          connect_create=lambda p: None)
+    dlg = ImageEditDialog(None, tmp_path, [], None, None, services=ImageEditServices(connect=lambda p: None, on_use=lambda k, p: False, settings=q, connect_create=lambda p: None))
     dlg.uses = lambda meta: ["the start image"] if meta.get("uses") else []
     dlg._load_results()
     assert dlg.results.count() == 5 and dlg.f_count.text() == "5 results" and dlg.selected()[0] == a1
@@ -1097,10 +1095,9 @@ def test_all_ideas_become_variations(app, tmp_path):
 
     from video_chain.ui.prompt_refiner import RefineResult
 
-    from video_chain.ui.image_edit import ImageEditDialog
+    from video_chain.ui.image_edit import ImageEditDialog, ImageEditServices
     q = QSettings(str(tmp_path / "i.ini"), QSettings.IniFormat)
-    dlg = ImageEditDialog(None, tmp_path, [], None, None, lambda p: None, lambda k, p: False, q,
-                          connect_create=lambda p: None, refine=lambda text, kind, pictures=None: RefineResult(ideas=["a cat", "a dog"]))
+    dlg = ImageEditDialog(None, tmp_path, [], None, None, services=ImageEditServices(connect=lambda p: None, on_use=lambda k, p: False, settings=q, connect_create=lambda p: None, refine=lambda text, kind, pictures=None: RefineResult(ideas=["a cat", "a dog"])))
     dlg.set_mode("create")
     dlg.prompt.setPlainText("- an animal")
     dlg._refine_prompt()

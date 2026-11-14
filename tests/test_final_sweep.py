@@ -68,12 +68,11 @@ def test_refine_text_returns_a_result_with_a_text_or_ideas(app, tmp_path, monkey
 def test_the_image_window_takes_a_refine_result(app, tmp_path):
     from PySide6.QtCore import QSettings
 
-    from video_chain.ui.image_edit import ImageEditDialog
+    from video_chain.ui.image_edit import ImageEditDialog, ImageEditServices
     from video_chain.ui.prompt_refiner import RefineResult
     q = QSettings(str(tmp_path / "i.ini"), QSettings.IniFormat)
     answer = {}
-    dlg = ImageEditDialog(None, tmp_path, [], None, None, lambda p: None, lambda k, p: False, q,
-                          connect_create=lambda p: None, refine=lambda text, kind, pictures=None: answer["r"])
+    dlg = ImageEditDialog(None, tmp_path, [], None, None, services=ImageEditServices(connect=lambda p: None, on_use=lambda k, p: False, settings=q, connect_create=lambda p: None, refine=lambda text, kind, pictures=None: answer["r"]))
     try:
         dlg.set_mode("create")
         dlg.prompt.setPlainText("- an animal")

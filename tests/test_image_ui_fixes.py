@@ -27,7 +27,7 @@ def test_picker_opens_for_every_kind(app, tmp_path):
 
 
 def test_empty_trash_keeps_masks(tmp_path):
-    from video_chain.ui.image_edit import EDITS_DIR, ImageEditDialog
+    from video_chain.ui.image_edit import EDITS_DIR, ImageEditDialog, ImageEditServices
     edits = tmp_path / EDITS_DIR
     (edits / "sources").mkdir(parents=True)
     src, mask, junk = (edits / "sources" / n for n in ("src.png", "mask_1.png", "junk.png"))
@@ -44,14 +44,13 @@ def test_typing_does_not_read_the_disk(app, tmp_path, monkeypatch):
     """Every typed character used to re-read the selected result's record (twice) from disk."""
     from PIL import Image
 
-    from video_chain.ui.image_edit import EDITS_DIR, ImageEditDialog
+    from video_chain.ui.image_edit import EDITS_DIR, ImageEditDialog, ImageEditServices
     edits = tmp_path / EDITS_DIR
     edits.mkdir()
     Image.new("RGB", (16, 16), "red").save(edits / "r.png")
     (edits / "r.json").write_text(json.dumps({"prompt": "a", "mode": "create"}))
     q = QSettings(str(tmp_path / "t.ini"), QSettings.IniFormat)
-    dlg = ImageEditDialog(None, tmp_path, [], None, None, lambda p: None, lambda k, p: False, q,
-                          connect_create=lambda p: None)
+    dlg = ImageEditDialog(None, tmp_path, [], None, None, services=ImageEditServices(connect=lambda p: None, on_use=lambda k, p: False, settings=q, connect_create=lambda p: None))
     app.processEvents()
     assert dlg.selected() is not None
     reads = []
@@ -70,10 +69,9 @@ def test_typing_does_not_read_the_disk(app, tmp_path, monkeypatch):
 
 
 def test_generate_tooltip_resets_when_enabled(app, tmp_path):
-    from video_chain.ui.image_edit import ImageEditDialog
+    from video_chain.ui.image_edit import ImageEditDialog, ImageEditServices
     q = QSettings(str(tmp_path / "g.ini"), QSettings.IniFormat)
-    dlg = ImageEditDialog(None, tmp_path, [], None, None, lambda p: None, lambda k, p: False, q,
-                          connect_create=lambda p: None)
+    dlg = ImageEditDialog(None, tmp_path, [], None, None, services=ImageEditServices(connect=lambda p: None, on_use=lambda k, p: False, settings=q, connect_create=lambda p: None))
     dlg.set_mode("create")
     from video_chain.ui.image_edit import FAMILIES
     dlg.families = {f: {"models": ["m"]} for f in FAMILIES}
@@ -89,10 +87,9 @@ def test_generate_tooltip_resets_when_enabled(app, tmp_path):
 
 
 def _dialog(tmp_path, name="d.ini", **kw):
-    from video_chain.ui.image_edit import ImageEditDialog
+    from video_chain.ui.image_edit import ImageEditDialog, ImageEditServices
     q = QSettings(str(tmp_path / name), QSettings.IniFormat)
-    return ImageEditDialog(None, tmp_path, [], None, None, lambda p: None, lambda k, p: False, q,
-                           connect_create=lambda p: None, **kw)
+    return ImageEditDialog(None, tmp_path, [], None, None, services=ImageEditServices(connect=lambda p: None, on_use=lambda k, p: False, settings=q, connect_create=lambda p: None, **kw))
 
 
 def test_before_after_tooltip_says_toggle(app, tmp_path):

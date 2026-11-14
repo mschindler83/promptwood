@@ -243,7 +243,7 @@ def test_a_value_change_rebuilds_only_the_card_it_belongs_to(app, monkeypatch):
     assert "6" in p.summary.text()
 
 
-def test_the_image_dialog_takes_its_services_as_one_object_and_the_old_keywords_still_work(app, tmp_path):
+def test_the_image_dialog_takes_its_services_as_one_object(app, tmp_path):
     from PySide6.QtCore import QSettings
 
     from video_chain.ui.image_edit import ImageEditDialog, ImageEditServices
@@ -255,12 +255,8 @@ def test_the_image_dialog_takes_its_services_as_one_object_and_the_old_keywords_
     assert dlg.lora_dir == "/loras" and dlg.use_triggers is False and dlg.start_aspect == 1.5 and dlg.qs is q
     assert dlg.on_use("start", "x") is True and used == ["start"]
     dlg.reject()
-    old = ImageEditDialog(None, tmp_path, [], None, None, lambda p: None, lambda k, p: False, q, lora_dir="/x",
-                          use_triggers=True)
-    assert old.lora_dir == "/x" and old.use_triggers is True and old.services.lora_dir == "/x"
-    old.reject()
     with pytest.raises(TypeError):
-        ImageEditDialog(None, tmp_path, [], None, None)
+        ImageEditDialog(None, tmp_path, [], None, None, services=ImageEditServices())
 
 
 def test_the_swap_letterbox_turns_a_phone_photo_upright(app, tmp_path):

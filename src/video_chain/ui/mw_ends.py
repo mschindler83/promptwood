@@ -11,7 +11,7 @@ from PySide6.QtWidgets import QDialog, QFileDialog, QInputDialog
 from .. import chain, comfy as CMF, imagegen, llm_server as LLM, media, tree as T
 from . import dialogs as D, shortcuts as S, image_picker as IP, prompt_refiner as PR
 from .clip_dialogs import HandoverDialog, VideoFrameDialog
-from .image_edit import ImageEditDialog, record_use
+from .image_edit import ImageEditDialog, ImageEditServices, record_use
 from .video_editor import choose_video
 from .generator_state import ComfyModel, ModelSwitch
 from .ui_logic import ASPECT_TOLERANCE, DEFAULT_COMFY_URL, label_loras, plural
@@ -56,8 +56,8 @@ class EndsMixin(MainWindowHost):
             ideas = dlg.chosen_ideas()
             if ideas:
                 return PR.RefineResult(ideas=list(ideas))     # (all ideas: for the image window's variations)
-            text = dlg.chosen()
-            return PR.RefineResult(text=text) if text else None
+            chosen = dlg.chosen()
+            return PR.RefineResult(text=chosen) if chosen else None
         finally:
             # the llama.cpp model goes with the window: it slows image / clip generation down while it is loaded
             self.stop_llama("the prompt refiner was closed")
@@ -172,14 +172,13 @@ class EndsMixin(MainWindowHost):
         if (self.project / T.START_FILE).is_file():
             img = QImage(str(self.project / T.START_FILE))
             aspect = img.width() / img.height() if img.height() else None
-        dlg = ImageEditDialog(self, self.project, sources, first, target, connect, use, self.qs,
-                              self._picker_places(), start_comfy=self.start_comfy, on_start=before_edit,
-                              known_loras=known, lora_dir=self._lora_dir(),
-                              uses=self._uses,
-                              refine=self.refine_text, connect_create=connect_create, family_loras=family_loras,
-                              start_aspect=aspect, mode=mode, check_lora=self.in_comfy_loras,
-                              collections=self.project_images,
-                              use_triggers=bool(self.tree.options.get("lora_triggers", True)))
+        services = ImageEditServices(
+            connect=connect, on_use=use, settings=self.qs, places=self._picker_places(), start_comfy=self.start_comfy,
+            on_start=before_edit, known_loras=known, lora_dir=self._lora_dir(), uses=self._uses,
+            refine=self.refine_text, connect_create=connect_create, family_loras=family_loras, start_aspect=aspect,
+            mode=mode, check_lora=self.in_comfy_loras, collections=self.project_images,
+            use_triggers=bool(self.tree.options.get("lora_triggers", True)))
+        dlg = ImageEditDialog(self, self.project, sources, first, target, services=services)
         self._edit_switch = switch
         if character:
             pc = T.character(self.tree, character)
