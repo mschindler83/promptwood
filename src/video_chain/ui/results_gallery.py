@@ -128,13 +128,13 @@ def badged(pix: QPixmap, size: QSize, tag: str, fav: bool, in_use: bool, selecte
         p.fillPath(path, bg)
         p.setPen(fg)
         p.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
-    dark = QColor(0, 0, 0, 170)
+    dark = t.hudBg
     if tag:
-        pill(tag, 5, size.height() - 21, dark, QColor(235, 235, 235))
+        pill(tag, 5, size.height() - 21, dark, t.overlayInk)
     if in_use:
         pill("IN USE", 5, 5, t.accent, t.onAccent)
     if fav:
-        pill("★", size.width() - 5, 5, QColor(0, 0, 0, 150), QColor(255, 196, 0), right=True)
+        pill("★", size.width() - 5, 5, t.hudBg, t.warning, right=True)
     if selected:
         p.setPen(QPen(t.accent, 3))
         p.setBrush(Qt.BrushStyle.NoBrush)

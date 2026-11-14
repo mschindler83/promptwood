@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (QButtonGroup, QDialog, QHBoxLayout, QPushButton,
                                QSlider, QVBoxLayout, QWidget)
 
 from .dialogs import button_row, confirm
+from .theme import theme, with_alpha
 from .widgets import fit_size, label, smooth_scaled, shortcut
 
 MASK_COLOUR = QColor(255, 40, 40, 120)
@@ -116,7 +117,7 @@ class MaskCanvas(QWidget):
 
     def paintEvent(self, _e):
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor(20, 20, 22))
+        p.fillRect(self.rect(), theme().bgSunken)
         f = self._frame()
         self._ensure_display()
         assert self._shown is not None and self._tint is not None      # (made by _ensure_display)
@@ -127,7 +128,7 @@ class MaskCanvas(QWidget):
         if self._cursor is not None:
             r = self.brush / 2 * f.width() / self.image.width()
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
-            p.setPen(QPen(QColor(255, 255, 255, 200), 1.5,
+            p.setPen(QPen(with_alpha(theme().overlayInk, 200 / 255), 1.5,
                           Qt.PenStyle.DashLine if self.erase else Qt.PenStyle.SolidLine))
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawEllipse(self._cursor, r, r)

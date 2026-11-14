@@ -359,3 +359,13 @@ def test_a_compare_player_that_fails_is_named_in_its_clip(app, tmp_path):
     assert "unsupported format" in dlg.errors["b"].text() and not dlg.errors["b"].isHidden()
     assert dlg.errors["a"].isHidden()
     dlg.reject()
+
+
+def test_the_mask_painter_and_the_gallery_take_their_colours_from_the_theme():
+    import re
+    ui = Path(__file__).parent.parent / "src" / "video_chain" / "ui"
+    literal = re.compile(r"QColor\(\s*\d")
+    mask = [ln for ln in (ui / "mask_painter.py").read_text().splitlines() if literal.search(ln)]
+    # the mask's own data colours stay literal: the red tint of the drawn area and the black / white of the mask itself
+    assert all("MASK_COLOUR" in ln or "erase" in ln for ln in mask), mask
+    assert [ln for ln in (ui / "results_gallery.py").read_text().splitlines() if literal.search(ln)] == []
