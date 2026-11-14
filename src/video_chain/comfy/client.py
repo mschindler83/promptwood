@@ -9,6 +9,7 @@ Needs no torch: only the standard library (+ websocket-client for step progress;
 polled and there is no per-step progress)."""
 from __future__ import annotations
 
+from collections.abc import Mapping
 import hashlib
 import http.client
 import json
@@ -57,7 +58,7 @@ WS_CONNECT_TIMEOUT = 5                # the websocket: connecting ...
 WS_RECV_TIMEOUT = 2.0                 # ... and waiting for a message (the wait loop looks at Stop between them)
 WS_RETRY_SECONDS = 10                 # a dropped websocket is connected again this often
 WAIT_SLEEP_SECONDS = 0.5              # the wait loop's pause without a websocket
-def _setting_dict(s: Any, key: str) -> dict:
+def _setting_dict(s: Mapping[str, object], key: str) -> dict:
     """A clip setting that is a dict ({"strength": ...}); another shape is said, not a KeyError / AttributeError."""
     v = s.get(key)
     if not isinstance(v, dict):

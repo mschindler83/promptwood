@@ -414,6 +414,7 @@ class TriggerDB:
         self._lock = threading.RLock()
         self._mtime: int | None = None
         self.data: dict[str, Any] = {"version": 1, "by_sha": {}, "files": {}}
+        self.material_cache: dict[tuple, Any] = {}      # lora_notes: what it made of a LoRA's details (see there)
         self._load()
 
     def _load(self):
@@ -450,6 +451,19 @@ class TriggerDB:
         if not re.fullmatch(r"[0-9a-fA-F]{64}", str(sha)):
             raise ValueError(f"not a SHA-256: {sha!r}")
         return self.path.parent / "civitai" / f"{sha.lower()}.json"
+
+    def details_stamp(self, path: str) -> tuple | None:
+        """Which version of a LoRA's details file there is: (sha, size, mtime_ns), None when there is none (for caches)."""
+        with self._lock:
+            self._load()
+            sha = (self._file(path) or {}).get("sha256")
+        if not sha:
+            return None
+        try:
+            st = self.details_path(sha).stat()
+        except (OSError, ValueError):
+            return None
+        return (sha, st.st_size, st.st_mtime_ns)
 
     def details(self, path: str) -> dict | None:
         """Everything CivitAI told about a LoRA (civitai_lookup's details), None when there is nothing."""

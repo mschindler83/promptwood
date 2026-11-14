@@ -661,3 +661,21 @@ def test_lora_picker_shows_covers_and_no_paths(tmp_path):
         time.sleep(0.01)
     assert loaded == [] and dlg2.list.item(0).data(dlg2.COVER) is None              # the setting is kept
     dlg2.reject()
+
+
+def test_material_is_built_once_until_the_details_change(tmp_path, monkeypatch):
+    db, p = db_with(tmp_path)
+    built = []
+    real = LN.material
+    monkeypatch.setattr(LN, "material", lambda *a, **k: built.append(1) or real(*a, **k))
+    first = LN.guidance([p], db)
+    LN.guidance([p], db)
+    LN.what_is_known(p, db)
+    LN.summary([p], db)
+    assert first and len(built) == 1                                  # not again for every refresh of the window
+    f = db.details_path(db.details_stamp(p)[0])
+    d = json.loads(f.read_text(encoding="utf-8"))
+    d["model"]["name"] = "Renamed"
+    f.write_text(json.dumps(d), encoding="utf-8")
+    os.utime(f, ns=(1, 2_000_000_000))                                 # (another file date)
+    assert "Renamed" in LN.guidance([p], db) and len(built) == 2

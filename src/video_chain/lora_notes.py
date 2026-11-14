@@ -18,7 +18,10 @@ import re
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Any, Callable, TypeGuard
+from typing import TYPE_CHECKING, Any, Callable, TypeGuard
+
+if TYPE_CHECKING:
+    from .triggers import TriggerDB
 
 logger = logging.getLogger(__name__)
 
@@ -234,6 +237,25 @@ def material(details: dict | None, words: list[str] | None = None, path: str = "
             "stamp": f"{NOTE_VERSION}:{d.get('fetched') or 0}:{len(pool)}"}
 
 
+MATERIAL_CACHE = 256
+
+
+def material_of(db: TriggerDB, path: str, details: dict | None) -> dict | None:
+    """material() of one LoRA of db, kept in db until its details file or its words change (building it cleans
+    and compares up to 300 example prompts: the window asks again for every LoRA on every refresh)."""
+    stamp = db.details_stamp(path)
+    words = db.words(path)
+    if stamp is None:
+        return material(details, words, path)
+    key = ("material", str(path), stamp, tuple(words))
+    cache = db.material_cache
+    if key not in cache:
+        if len(cache) >= MATERIAL_CACHE:
+            cache.clear()
+        cache[key] = material(details, words, path)
+    return cache[key]
+
+
 def examples(details: dict | None) -> list[dict]:
     """A LoRA's gallery pictures that tell their prompt, for showing (the most liked first, each prompt once):
     [{"prompt" (as posted), "clean" (as the refiner reads it), "negative", "settings" (text), "likes", "user",
@@ -320,7 +342,7 @@ def clean_note(text) -> str:
     return _cut("\n".join(out), NOTE_CHARS) if out else ""
 
 
-def note_of(db, path: str, mat: dict | None) -> dict:
+def note_of(db: TriggerDB, path: str, mat: dict | None) -> dict:
     """What is kept on a LoRA besides CivitAI's data: {"note": the note in force ("" when there is none or the
     model's note is out of date: CivitAI told something new since), "remarks": the user's own remarks for the
     refiner, "edited": the note is the user's (written or changed by hand; it stays until the user changes it)}."""
@@ -331,7 +353,7 @@ def note_of(db, path: str, mat: dict | None) -> dict:
     return {"note": text if current else "", "remarks": str(n.get("remarks") or "").strip(), "edited": edited}
 
 
-def save_user(db, path: str, note: str | None = None, remarks: str | None = None) -> bool:
+def save_user(db: TriggerDB, path: str, note: str | None = None, remarks: str | None = None) -> bool:
     """Keep the user's own text on a LoRA. note: their version of the note (None: as it is; "": none, so the
     language model writes one again at the next refine). remarks: their remarks for the refiner (None: as they
     are). False when it cannot be kept (the file's hash is not known yet: it was never looked at)."""
@@ -362,7 +384,7 @@ def worth_a_note(mat: dict | None) -> TypeGuard[dict]:
     return mat is not None and bool(mat) and (len(mat["examples"]) >= 3 or len(mat.get("about") or "") >= 200)
 
 
-def make_notes(paths: list[str], complete: Callable[[str, str, int], str], db=None,
+def make_notes(paths: list[str], complete: Callable[[str, str, int], str], db: TriggerDB | None = None,
                progress: Callable[[str, int, int], None] | None = None,
                stop: Callable[[], bool] = lambda: False) -> int:
     """Write the notes that are missing or out of date for these LoRAs (one question to the language model each;
@@ -373,7 +395,7 @@ def make_notes(paths: list[str], complete: Callable[[str, str, int], str], db=No
     db = db or triggers.db()
     todo = []
     for p in list(dict.fromkeys(paths))[:MAX_LORAS]:
-        mat = material(db.details(p), db.words(p), p)
+        mat = material_of(db, p, db.details(p))
         if worth_a_note(mat) and not note_of(db, p, mat)["note"]:     # (the user's own note is never replaced)
             todo.append((p, mat))
     made = 0
@@ -468,7 +490,7 @@ def _one(mat: dict, note: str, budget: int, prompt: str = "", remarks: str = "")
     return text if len(text) <= budget + 200 else _cut(text, budget + 200)
 
 
-def guidance(paths: list[str], db=None, prompt: str = "") -> str:
+def guidance(paths: list[str], db: TriggerDB | None = None, prompt: str = "") -> str:
     """The part of a refine's instruction about these LoRAs ("" when nothing is known of any of them). prompt: the
     user's prompt; the example prompts shown are those nearest to it (see nearest)."""
     from . import triggers
@@ -476,7 +498,7 @@ def guidance(paths: list[str], db=None, prompt: str = "") -> str:
     known = []
     for p in list(dict.fromkeys(paths))[:MAX_LORAS]:
         try:
-            mat = material(db.details(p), db.words(p), p)
+            mat = material_of(db, p, db.details(p))
         except Exception as e:  # noqa: BLE001  (a details file that cannot be read: this LoRA goes without)
             logger.warning("details of a LoRA unreadable: %s", e)
             mat = None
@@ -493,7 +515,7 @@ def guidance(paths: list[str], db=None, prompt: str = "") -> str:
     return GUIDE_HEAD + "\n\n" + "\n\n".join(_one(m, n["note"], budget, prompt, n["remarks"]) for m, n in known) + "\n\nEnd of the LoRA material."
 
 
-def summary(paths: list[str], db=None) -> dict:
+def summary(paths: list[str], db: TriggerDB | None = None) -> dict:
     """For the refine window: {"known": names of the LoRAs something is known of, "notes": how many have a current
     note, "missing": how many notes a refine would write first, "settings": [(name, settings text)], "loras":
     one of what_is_known per LoRA of the stack (also those nothing is known of)}."""
@@ -513,7 +535,7 @@ def summary(paths: list[str], db=None) -> dict:
     return out
 
 
-def what_is_known(path: str, db=None) -> dict:
+def what_is_known(path: str, db: TriggerDB | None = None) -> dict:
     """What the app has on one LoRA, for showing: {"path", "name", "base", "known" (anything that helps a prompt),
     "words", "prompts" (different example prompts), "pictures" (gallery pictures that tell their prompt; two may
     tell nearly the same one), "seen" (gallery pictures looked at), "note" (one in force),
@@ -530,7 +552,7 @@ def what_is_known(path: str, db=None) -> dict:
         details = db.details(path)
         out["looked_up"] = info is not None and info.get("source") != "tags" or bool(details)
         out["on_civitai"] = bool(details)
-        mat = material(details, db.words(path), path)
+        mat = material_of(db, path, details)
         seen = (details or {}).get("examples_seen")
         out["seen"] = seen if isinstance(seen, int) else 0
         out["pictures"] = len(examples(details))
