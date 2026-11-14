@@ -295,6 +295,8 @@ class Checker:
             return "it no longer starts at the frame it was made from"
         if m.get("guide_from") != self.guide_from(node):
             return "the clip its carry-over comes from was made again"
+        if m.get("continue_from") != self.continue_from(node):
+            return "the clip it continues was made again"
         if m.get("end_key") != self.end_key(node):
             return "the video it ends at changed"
         return None

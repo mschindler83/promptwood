@@ -2033,3 +2033,20 @@ def test_joined_sound_start_is_where_the_joined_path_hears_the_clip(tmp_path):
     assert T.joined_sound_start(t, a)["at"] == 3.0
     assert T.joined_sound_start(t, b)["at"] == round(T.source_sound_span(t, b)["start"] + 5 / chain.FPS, 3)
     assert T.joined_sound_start(t, v) is None and T.joined_sound_start(t, lone) is None
+
+
+def test_seam_problem_names_a_continuation_cut_from_another_clip(tmp_path, monkeypatch):
+    """status and why count a changed continue_from; the seam check says it too (as it does for guide_from)."""
+    p, t = h3_project(tmp_path)
+    a = t.add(None, "A red car.")
+    b = t.add(a.id, "It drives on.")
+    ch = T.Checker(p, t)
+    b.made = {"video": "b.mp4", "start_sha1": "s", "guide_from": None, "end_key": None, "continue_from": "a1.mp4@3"}
+    monkeypatch.setattr(ch, "sha", lambda _f: "s")
+    monkeypatch.setattr(ch, "start_frame", lambda _n: "frame")
+    monkeypatch.setattr(ch, "guide_from", lambda _n: None)
+    monkeypatch.setattr(ch, "end_key", lambda _n: None)
+    monkeypatch.setattr(ch, "continue_from", lambda _n: "a2.mp4@3")       # the clip before was made again
+    assert ch.seam_problem(b) and "continu" in ch.seam_problem(b)
+    monkeypatch.setattr(ch, "continue_from", lambda _n: "a1.mp4@3")
+    assert ch.seam_problem(b) is None
