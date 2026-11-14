@@ -39,6 +39,19 @@ class TtsMixin(MainWindowHost):
             self._set_tts_busy(False)
             raise
 
+    @contextmanager
+    def _tts_hold(self) -> Iterator[bool]:
+        """Text to speech is busy for the length of the block (a window that uses its worker); gives True when this
+        block made it busy, False when it already was (then it stays busy after the block)."""
+        mine = not self._tts_busy
+        if mine:
+            self._set_tts_busy(True)
+        try:
+            yield mine
+        finally:
+            if mine:
+                self._set_tts_busy(False)
+
     def _tts_changed(self, *_):
         if self._loading or self.tree is None:
             return

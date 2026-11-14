@@ -146,13 +146,13 @@ class ViewMixin(MainWindowHost):
             card.edit.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def show_guide(self, on: bool):
-        """Hide guide / View → Getting started (stored in the app's settings)."""
+        """Hide guide / Help → Getting started (stored in the app's settings)."""
         self.qs.setValue(SK.GUIDE_HIDDEN, not on)
         if on:
             self._show_left_tab(0)
         self._update_guide()
         if not on:
-            self.status.setText("Guide hidden: View → Getting started shows it again.")
+            self.status.setText("Guide hidden: Help → Getting started shows it again.")
 
     def _update_guide(self):
         """The guide while the project has no made clip (step 0 without a project), its steps ticked from the real
@@ -253,7 +253,6 @@ class ViewMixin(MainWindowHost):
             a.triggered.connect(lambda _=False, k=k: self._show_left_tab(k))
             a.setShortcut(S.sequence(("tab_clips", "tab_cast", "tab_sounds")[k]))
         v.addAction("Log", self.show_log).setShortcut(S.sequence("log"))
-        v.addAction("Getting started", lambda: self.show_guide(True))
         v.addAction("LoRAs (example prompts, pictures, what is known)…", lambda: self.show_loras())
         v.addSeparator()
         self.act_left = v.addAction("Left panel (clips, cast & references, sounds)")

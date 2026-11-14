@@ -88,26 +88,24 @@ class AudioMixin(MainWindowHost):
         c = self._selected_character()
         if c is None or not self._cast_edit_ok():
             return
-        mine = not self._tts_busy                   # (the worker that removes music is the text to speech one)
-        dlg = self._voice_dialog(f, c["name"], isolate=mine)
-        self._set_tts_busy(self._tts_busy or mine)
-        try:
-            if not dlg.file:
-                self._report_error(f"Could not set the voice: {dlg.info_label.text()}")
-                return
-            if dlg.exec() == QDialog.DialogCode.Accepted and dlg.file:
-                name = label if label and dlg.file == str(f) else None     # (another file chosen in the window)
-                if dlg.cleaned is not None:
-                    self.set_character_voice(str(dlg.cleaned),
-                                             label=f"{name or Path(dlg.file).name} (music removed)")
-                else:
-                    self.set_character_voice(dlg.file, label=name, start=dlg.start, end=dlg.end)
-        finally:
-            dlg.cleanup()
-            dlg.deleteLater()
-            if mine:
-                self._set_tts_busy(False)
-                self.stop_tts("the voice window was closed")
+        with self._tts_hold() as mine:               # (the worker that removes music is the text to speech one)
+            dlg = self._voice_dialog(f, c["name"], isolate=mine)
+            try:
+                if not dlg.file:
+                    self._report_error(f"Could not set the voice: {dlg.info_label.text()}")
+                    return
+                if dlg.exec() == QDialog.DialogCode.Accepted and dlg.file:
+                    name = label if label and dlg.file == str(f) else None     # (another file chosen in the window)
+                    if dlg.cleaned is not None:
+                        self.set_character_voice(str(dlg.cleaned),
+                                                 label=f"{name or Path(dlg.file).name} (music removed)")
+                    else:
+                        self.set_character_voice(dlg.file, label=name, start=dlg.start, end=dlg.end)
+            finally:
+                dlg.cleanup()
+                dlg.deleteLater()
+                if mine:
+                    self.stop_tts("the voice window was closed")
 
     def _voice_dialog(self, file: str, name: str, isolate: bool = True):
         """The window the part of a file is chosen in that becomes a character's voice (isolate: it can take the
