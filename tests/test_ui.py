@@ -978,7 +978,7 @@ def test_new_open_recent_save_close(app, win, tmp_path, image, monkeypatch):
     assert win.project.name == "first"
     assert T.load(win.project).nodes[win.selected_id()].prompt == "hello"
     # dialog: name + location -> folder, refuses existing projects
-    dlg = NewProjectDialog(win, str(tmp_path / "projects"))
+    dlg = NewProjectDialog(win, str(tmp_path / "projects"), win.qs)
     dlg.name.setText("first")
     assert "already a project" in dlg.target.text() and not dlg.buttons.button(QDialogButtonBox.Ok).isEnabled()
     dlg.name.setText("third")
@@ -3215,6 +3215,7 @@ def test_export_one_clip(app, win, tmp_path, image, monkeypatch):
     node = win.tree.nodes[ids[0]]
     out = tmp_path / "clip-a.mp4"
     win.export(out, "made", single=ids[0])                                 # as made: the clip itself
+    wait(app, lambda: win.status.text().startswith("Exported clip-a.mp4"), timeout=30)   # (copied in the background)
     assert out.read_bytes() == (win.project / node.made["video"]).read_bytes()
     assert win.status.text() == f"Exported clip-a.mp4 (clip #{ids[0][1:]}, as made)."
     up = tmp_path / "clip-a-2k.mp4"

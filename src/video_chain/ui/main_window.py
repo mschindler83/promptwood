@@ -20,7 +20,6 @@ import stat as stat_module
 import sys
 import threading
 import time
-import urllib.request
 from pathlib import Path
 from typing import NamedTuple
 
@@ -35,6 +34,10 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
                                QToolButton, QToolTip, QVBoxLayout, QWidget)
 
 from .. import chain
+from .. import comfy as CMF
+from .. import media
+from .. import net
+from .. import config
 from .. import film as F
 from .. import camera as CAM
 from .. import swap
@@ -58,13 +61,14 @@ from .face_crop import FaceCropDialog
 from .prompt_refiner import RefineDialog, replace_text
 from .speak_dialog import SpeakLinesDialog, run_dialog as run_speak_dialog
 from .tts_dialog import VoiceTtsDialog, run_dialog as run_voice_dialog
-from .image_edit import EDITS_DIR, ImageEditDialog, project_edits, record_use, uses_of
+from .image_edit import EDITS_DIR, ImageEditDialog, project_edits, record_use, uses_index, uses_of
 from .video_editor import VideoRangeDialog, choose_video
 from .theme import icon, repolish, theme
 from .widgets import FrameTile, VideoView, guard_wheel, icon_button, label, section_bar
 from .view_mode import AdvancedNote, ViewMode, row_widget
 from .problems import EXAMPLES, ProblemBox, add_example, camera_menu_items, insert_at_cursor
 from .guide import EngineBanner, GuidePanel, NextHint
+from . import shortcuts as S
 
 try:                                            # (the player is optional: Preview says so when it is missing)
     from PySide6.QtMultimedia import QMediaPlayer
@@ -73,9 +77,10 @@ except ImportError:                             # pragma: no cover
 
 DEFAULT_COMFY_URL = "http://127.0.0.1:8188"
 from ..llm_server import DEFAULT_PORT as LLM_DEFAULT_PORT, DEFAULT_SERVER as LLM_DEFAULT_SERVER  # noqa: E402
-LLM_MODEL_DIRS = (Path("/path/to/ai/hf-models"), Path.home() / ".cache" / "huggingface" / "hub")
+LLM_MODEL_DIRS = (config.hf_cache(), Path.home() / ".cache" / "huggingface" / "hub")
 
 
+CLOSE_GRACE = 3.0          # seconds llama-server gets to end after SIGTERM when the window closes
 CHAT_HINTS = ("instruct", "chat", "-it-", "-it.", "_it_", "abliterated", "uncensored")
 
 
@@ -185,8 +190,9 @@ MAX_RECENT = 10
 class NewProjectDialog(QDialog):
     """Name + location (+ an optional start image) for a new project."""
 
-    def __init__(self, parent, location: str, image: str = ""):
+    def __init__(self, parent, location: str, settings: QSettings, image: str = ""):
         super().__init__(parent)
+        self.qs = settings                 # (the image picker keeps its folders and cache in it)
         self.setWindowTitle("New project")
         self.setMinimumWidth(520)
         f = QFormLayout(self)
@@ -252,7 +258,7 @@ class NewProjectDialog(QDialog):
 
     def _choose_image(self):
         start = str(Path(self.image.text()).parent) if self.image.text().strip() else None
-        f = pick_image(self, "Start image", getattr(self.parent(), "qs", None), start)
+        f = pick_image(self, "Start image", self.qs, start)
         if f:
             self.image.setText(f)
 
@@ -581,6 +587,36 @@ def label_loras(items: list[tuple[str, str]]) -> list[tuple[str, str]]:
     return out
 
 
+class FileDrop(QObject):
+    """Makes a widget take files dropped on it: on_files(list of local paths). accept(): whether it takes them now.
+    (For a list or other scroll area pass its viewport(): that is where the drop arrives.)"""
+
+    def __init__(self, widget: QWidget, on_files, accept=lambda: True):
+        super().__init__(widget)
+        self.on_files, self.accept = on_files, accept
+        widget.setAcceptDrops(True)
+        widget.installEventFilter(self)
+
+    @staticmethod
+    def _files(e) -> list[str]:
+        md = e.mimeData()
+        return [u.toLocalFile() for u in md.urls() if u.isLocalFile()] if md.hasUrls() else []
+
+    def eventFilter(self, obj, e):
+        kind = e.type()
+        if kind in (e.Type.DragEnter, e.Type.DragMove):
+            if self._files(e) and self.accept():
+                e.acceptProposedAction()
+                return True
+        elif kind == e.Type.Drop:
+            files = self._files(e)
+            if files and self.accept():
+                e.acceptProposedAction()
+                self.on_files(files)
+                return True
+        return False
+
+
 class _Bridge(QObject):
     joined = Signal(object, object, str, str, str)  # path or None, error or None, purpose, status prefix, project
     film = Signal(object, object, str)               # the joined film or None, error or None, 'play' / 'export'
@@ -593,6 +629,8 @@ class _Bridge(QObject):
     copied = Signal(str, str)                  # Save as: target folder, error ('' = done)
     converted = Signal(str, object, str, str, str)  # video node id, record or None, error, token, project
     remixed = Signal(object, str, str)         # [(clip id, its new record)], error ('' = done), project
+    exported = Signal(str, str, str)           # a single clip was copied out: its id, the file, error ('' = done)
+    freed = Signal(bool)                       # ComfyUI's answer to "unload your models" (True: done)
     llm_room = Signal(str)                     # ComfyUI's models were unloaded for the llama.cpp server (why)
     spoken = Signal(str, object, str, str)     # clip id, rendered lines (tts.render_lines) or None, error, project
     tts_log = Signal(str)                      # a step of text to speech
@@ -736,6 +774,7 @@ class PromptCard(QFrame):
     lora_picked = Signal(str, str)             # node id, LoRA path chosen in the picker
     action = Signal(str, str)                  # action, node id
     keyframe = Signal(str, str, object)        # keyframe action, node id, {"index", "at"}
+    end_dropped = Signal(str, str)             # node id, a picture dropped on the end of the clip
     play = Signal(str)
     leadChanged = Signal(str, bool)            # node id, the lead switch (the lead chip)
     modelPrompt = Signal(str)                  # node id: show the exact prompt the model gets
@@ -1030,6 +1069,9 @@ class PromptCard(QFrame):
         erow.addWidget(self.b_end_ai)
         erow.addWidget(self.b_end_clear)
         link.addRow("End", erow)
+        for w in (self.end_text, self.end_thumb):          # (a picture dropped here is the end image)
+            FileDrop(w, lambda files: self.end_dropped.emit(self.nid, files[0]),
+                     lambda: self._end_free and not self.edit.isReadOnly())
         kbox = QVBoxLayout()
         kbox.setSpacing(2)
         krow = QHBoxLayout()
@@ -1529,8 +1571,10 @@ class PromptCard(QFrame):
         self.b_end_ai.setEnabled(on and self._end_free)
         self.b_end_clear.setEnabled(on and self._has_end)
 
-    def set_end(self, image: Path | None, video_after: str | None, pixmap: QPixmap | None):
-        """How this clip ends: at the video after it, at its own end image, or freely."""
+    def set_end(self, image: Path | None, video_after: str | None, pixmap: QPixmap | None,
+                present: bool | None = None):
+        """How this clip ends: at the video after it, at its own end image, or freely. present: whether the end
+        image file exists (the window knows it from its one look at the file; None: this looks itself)."""
         self._end_free, self._has_end = video_after is None, image is not None
         self.b_end.setToolTip(END_TIP if video_after is None else
                               f"This clip ends at the first frame of video #{video_after[1:]}; remove that video "
@@ -1539,7 +1583,9 @@ class PromptCard(QFrame):
             self.end_text.setText(f"first frame of video #{video_after[1:]}"
                                   + (" (own end image not used)" if image is not None else ""))
         elif image is not None:
-            self.end_text.setText("own end image" if image.is_file() else "end image missing")
+            if present is None:
+                present = image.is_file()
+            self.end_text.setText("own end image" if present else "end image missing")
         else:
             self.end_text.setText("free")
         self.end_text.setToolTip(str(image) if image is not None else "")
@@ -1625,10 +1671,13 @@ class VideoCard(QFrame):
         self.set_source(node)
         self._restyle()
 
-    def set_source(self, node: T.Node):
+    def set_source(self, node: T.Node, present: bool | None = None):
+        """present: whether the video file exists (the window's one look at it; None: this looks itself)."""
         src = node.source or {}
         f = Path(src.get("file", ""))
-        self.file.setText(f.name + ("" if f.is_file() else "  (file not found)"))
+        if present is None:
+            present = f.is_file()
+        self.file.setText(f.name + ("" if present else "  (file not found)"))
         self.file.setToolTip(str(f))
         n = chain.range_frames(src.get("start", 0), src.get("end", 0))
         rot = T.source_rotation(src)
@@ -1831,10 +1880,10 @@ class Preview(QWidget):
 class MainWindow(QMainWindow):
     viewChanged = Signal(bool)                  # the view was switched: True = Simple (after the controls follow)
 
-    def __init__(self, settings: QSettings | None = None, command: list[str] | None = None):
+    def __init__(self, settings: QSettings, command: list[str] | None = None):
         super().__init__()
         self.setWindowTitle("Promptwood")
-        self.qs = settings or QSettings()
+        self.qs = settings
         # Simple or Advanced, decided once: Simple on a first run (no settings yet), Advanced for settings from
         # before the views existed (that user knows every control); stored at once, so it never flips later
         mode = self.qs.value("viewMode", "", type=str)
@@ -1889,12 +1938,17 @@ class MainWindow(QMainWindow):
         self.bridge.converted.connect(self._converted)
         self.bridge.remixed.connect(self._remixed)
         self.bridge.llm_room.connect(self._llm_room_made)
+        self.bridge.freed.connect(self._comfy_freed)
+        self.bridge.exported.connect(self._clip_copied)
         self.bridge.spoken.connect(self._lines_spoken)
         self.bridge.eleven_models.connect(self._fill_eleven_models)
         self.bridge.eleven_cloned.connect(self._eleven_cloned)
         self.bridge.tts_log.connect(lambda m: (self.log.appendPlainText("TTS: " + m), self.status.setText(m + "…")))
         self._tts_local: TTS.LocalTTS | None = None
         self._tts_busy = False
+        self._uses_cache: tuple | None = None        # (tree, uses_index(tree)) until something changes
+        self._first_shown = False
+        self._notices: list[QMessageBox] = []        # non-blocking notices, kept until they are closed
         self._eleven_voices: list | None = None
         self.h3_loras: list[tuple[str, str]] = []
         self.qwen_loras: list[tuple[str, str]] = []
@@ -1927,6 +1981,7 @@ class MainWindow(QMainWindow):
         self._comfy_timer = QTimer(self, interval=4000, timeout=self._poll_comfy)
         self._build()
         self._load_settings()
+        self._end_leftover_llama()
         self._gpu_timer.start()
         self._comfy_timer.start()
         QTimer.singleShot(0, self._poll_comfy)
@@ -2262,6 +2317,8 @@ class MainWindow(QMainWindow):
                                "In a clip's prompt the first one is <Audio 1>, the second "
                                "<Audio 2> ... Double-click to listen")
         self.sounds.itemDoubleClicked.connect(lambda _i: self._play_sound())
+        FileDrop(self.sounds.viewport(), lambda files: [self.add_sound(f) for f in files],
+                 lambda: self.project is not None)
         self.sounds.currentRowChanged.connect(lambda _r: self._update_sound_buttons())
         av.addWidget(self.sounds)
         arow = QHBoxLayout()
@@ -2927,6 +2984,10 @@ class MainWindow(QMainWindow):
         self._model_timer.start()
 
         self.start_tile.clicked.connect(lambda _t: self._choose_image())
+        for lst in (self.refs, self.cast_list):          # pictures dropped on the cast are faces / pictures of it
+            FileDrop(lst.viewport(), lambda files: [self.add_reference(f) for f in files],
+                     lambda: self.project is not None)
+        FileDrop(self, self._dropped_on_window)         # a project folder dropped anywhere on the window
         self.start_tile.dropped.connect(lambda f: self.set_image(f, confirm=True))
         for sig in (self.frames.currentIndexChanged, self.resolution.currentIndexChanged,
                     self.aspect.currentIndexChanged,
@@ -2935,19 +2996,20 @@ class MainWindow(QMainWindow):
                     self.turbo_lora.currentIndexChanged, self.turbo_steps.valueChanged,
                     self.turbo_strength.valueChanged, self.clip_cfg.valueChanged):
             sig.connect(self._options_changed)
-        for keys, fn in (("Ctrl+N", lambda: self.node_action("continue", self.target_id())),
-                         ("Ctrl+Shift+V", lambda: self.node_action("video", self.target_id())),
-                         ("Ctrl+B", lambda: self.node_action("branch", self.target_id())),
-                         ("Ctrl+D", lambda: self.node_action("variant", self.target_id())),
-                         ("Ctrl+Return", self.generate_path), ("Ctrl+Shift+Return", self.generate_all),
-                         ("Alt+Left", lambda: self._step_focus(-1)), ("Alt+Right", lambda: self._step_focus(1))):
-            QShortcut(QKeySequence(keys), self, activated=fn)
+        for sid, fn in (("continue", lambda: self.node_action("continue", self.target_id())),
+                        ("add_video", lambda: self.node_action("video", self.target_id())),
+                        ("branch", lambda: self.node_action("branch", self.target_id())),
+                        ("variant", lambda: self.node_action("variant", self.target_id())),
+                        ("generate", self.generate_path), ("generate_all", self.generate_all),
+                        ("prev_clip", lambda: self._step_focus(-1)), ("next_clip", lambda: self._step_focus(1))):
+            QShortcut(S.sequence(sid), self, activated=fn)
         for w in (*self._panels, self.prefs):
             guard_wheel(w)
         # plain keys act only while the graph (or a child) has the focus: in a list or a combo, Delete / F are theirs
         self.graph.setFocusPolicy(Qt.StrongFocus)
-        for key, fn in (("Delete", lambda: self.node_action("delete", self.target_id())), ("F", self.graph.fit)):
-            sc = QShortcut(QKeySequence(key), self.graph, activated=fn)
+        for sid, fn in (("graph_delete", lambda: self.node_action("delete", self.target_id())),
+                        ("graph_fit", self.graph.fit)):
+            sc = QShortcut(S.sequence(sid), self.graph, activated=fn)
             sc.setContext(Qt.WidgetWithChildrenShortcut)
         self._register_advanced()
         self._show_view()
@@ -2968,8 +3030,7 @@ class MainWindow(QMainWindow):
             (self._tts_form, self.ref_size), self.ref_hint, (self._tts_form, self._eleven_row),
             # preferences: ComfyUI's technical part (the address, start command and auto start stay), RunPod
             (a, self._comfy_dir_row), (a, self.comfy_cleanup), (a, self.triggers_online), (a, self.civitai_site),
-            (a, self.llm_on),
-            (a, self.llm_server), (a, self._gguf_row), (a, self.llm_cpu_moe), (a, self._civitai_row),
+            (a, self._civitai_row),               # (the prompt refiner's language model setup stays: UX-4)
             (a, self._keep_row), *self._runpod_section,
             # the GPU's memory (the log stays: Details on a failed clip and bug reports lead there)
             self.gpu)
@@ -3228,15 +3289,15 @@ class MainWindow(QMainWindow):
     def _build_menu(self):
         m = self.menuBar().addMenu("&File")
         self.act_new = m.addAction("New project…", self.new_project)
-        self.act_new.setShortcut(QKeySequence("Ctrl+Shift+N"))
+        self.act_new.setShortcut(S.sequence("new_project"))
         self.act_open = m.addAction("Open project…", self._choose_project)
-        self.act_open.setShortcut(QKeySequence("Ctrl+O"))
+        self.act_open.setShortcut(S.sequence("open"))
         self.recent_file_menu = m.addMenu("Recent projects")
         m.addSeparator()
         self.act_save = m.addAction("Save", self.save_project)
-        self.act_save.setShortcut(QKeySequence("Ctrl+S"))
+        self.act_save.setShortcut(S.sequence("save"))
         self.act_save_as = m.addAction("Save as…", self.save_project_as)
-        self.act_save_as.setShortcut(QKeySequence("Ctrl+Shift+S"))
+        self.act_save_as.setShortcut(S.sequence("save_as"))
         m.addSeparator()
         self.act_close = m.addAction("Close project", self.close_project)
         m.addAction("Show project folder", self._open_dir)
@@ -3244,24 +3305,23 @@ class MainWindow(QMainWindow):
         self.act_ai_create = m.addAction("Create a new image with AI…",
                                          lambda: self.edit_image(start=True, mode="create"))
         m.addSeparator()
-        m.addAction("Quit", self.close).setShortcut(QKeySequence("Ctrl+Q"))
+        m.addAction("Quit", self.close).setShortcut(S.sequence("quit"))
         v = self.menuBar().addMenu("&View")
         for k, name in enumerate(("Clips", "Cast & references", "Sounds")):
             a = v.addAction(f"{name} (left)", lambda _=False, k=k: self._show_left_tab(k))
-            a.setShortcut(QKeySequence(f"Alt+{k + 1}"))
-        v.addAction("Log", self.show_log).setShortcut(QKeySequence("Alt+L"))
+            a.setShortcut(S.sequence(("tab_clips", "tab_cast", "tab_sounds")[k]))
+        v.addAction("Log", self.show_log).setShortcut(S.sequence("log"))
         v.addAction("Getting started", lambda: self.show_guide(True))
         v.addAction("LoRAs (example prompts, pictures, what is known)…", lambda: self.show_loras())
         v.addSeparator()
         self.act_left = v.addAction("Left panel (clips, cast & references, sounds)")
         self.act_left.setCheckable(True)
         self.act_left.setChecked(True)
-        self.act_left.setShortcut(QKeySequence("Ctrl+Alt+B"))
+        self.act_left.setShortcut(S.sequence("left_panel"))
         self.act_left.toggled.connect(lambda on: self._show_left(on))   # (the panel is built later, in _build)
-        for name, key, tip in (("edit", "Ctrl+Alt+1", "Layout: Edit (big viewer)"),
-                               ("write", "Ctrl+Alt+2", "Layout: Write (wide prompt)"),
-                               ("watch", "Ctrl+Alt+3", "Layout: Watch (viewer and timeline only)")):
-            v.addAction(tip, lambda _=False, n=name: self.apply_layout(n)).setShortcut(QKeySequence(key))
+        for name in ("edit", "write", "watch"):
+            row = S.SHORTCUTS[[s.id for s in S.SHORTCUTS].index(f"layout_{name}")]
+            v.addAction(row.text, lambda _=False, n=name: self.apply_layout(n)).setShortcut(S.sequence(row.id))
         v.addAction("Reset layout", lambda: self.apply_layout("edit"))
         v.addSeparator()
         group = QActionGroup(self)                  # (the view itself is made in __init__, after the menu)
@@ -3272,21 +3332,17 @@ class MainWindow(QMainWindow):
             group.addAction(a)
             a.triggered.connect(lambda _=False, on=simple: self.set_simple(on))
         st = self.menuBar().addMenu("&Settings")
-        st.addAction("Preferences…", self.show_prefs).setShortcut(QKeySequence("Ctrl+,"))
+        st.addAction("Preferences…", self.show_prefs).setShortcut(S.sequence("preferences"))
         h = self.menuBar().addMenu("&Help")
         h.addAction("Getting started", lambda: self.show_guide(True))
-        h.addAction("Keyboard shortcuts…", self.show_shortcuts)
+        h.addAction("Keyboard shortcuts…", self.show_shortcuts).setShortcut(S.sequence("shortcuts"))
         h.addAction("Show the log", self.show_log)
 
     def show_shortcuts(self):
-        """The shortcuts of the menus, read from the menu itself (so the list cannot go out of date)."""
-        lines = []
-        for top in self.menuBar().actions():
-            menu = top.menu()
-            for a in (menu.actions() if menu else []):
-                if not a.shortcut().isEmpty():
-                    lines.append(f"{a.shortcut().toString(QKeySequence.NativeText)}   {a.text().rstrip('…')}")
-        QMessageBox.information(self, "Keyboard shortcuts", "\n".join(lines))
+        """Help → Keyboard shortcuts: the table every window binds from (not modal: it stays beside the work)."""
+        dlg = S.shortcuts_dialog(self)
+        dlg.setAttribute(Qt.WA_DeleteOnClose)
+        dlg.open()
 
     def apply_layout(self, name: str):
         """A layout preset, as shares of the window: 'edit' (the default: a big viewer), 'write' (a wide inspector
@@ -3425,7 +3481,7 @@ class MainWindow(QMainWindow):
         def work():
             try:
                 bridge.film.emit((F.join_film(film, target, keep=out is None), root), None, purpose)
-            except Exception as e:  # noqa: BLE001
+            except BaseException as e:  # noqa: BLE001  (whatever ends the job: the busy flag is reset by the answer)
                 bridge.film.emit((None, root), str(e), purpose)
         threading.Thread(target=work, daemon=True).start()
 
@@ -3676,7 +3732,7 @@ class MainWindow(QMainWindow):
             try:
                 sc = F.Film.load(root).duplicate(sid)
                 bridge.duplicated.emit((sc.id, sc.title), None, str(root))
-            except Exception as e:  # noqa: BLE001
+            except BaseException as e:  # noqa: BLE001  (the answer ends "copying")
                 bridge.duplicated.emit(None, str(e), str(root))
         threading.Thread(target=work, daemon=True).start()
 
@@ -3789,7 +3845,7 @@ class MainWindow(QMainWindow):
             return
         last = self.recent_projects()
         location = str(Path(last[0]).parent) if last else str(Path.home())
-        dlg = NewProjectDialog(self, location)
+        dlg = NewProjectDialog(self, location, self.qs)
         if dlg.exec() != QDialog.Accepted:
             return
         self.create_project(dlg.folder(), dlg.image.text().strip())
@@ -3898,7 +3954,7 @@ class MainWindow(QMainWindow):
                     if (d / T.TREE_FILE).is_file():
                         T.save(d, T.load(d))
                 bridge.copied.emit(str(target), "")
-            except Exception as e:  # noqa: BLE001
+            except BaseException as e:  # noqa: BLE001  (the answer ends "copying")
                 if not existed:                       # a half copy would block the next try
                     shutil.rmtree(target, ignore_errors=True)
                 bridge.copied.emit(str(target), str(e))
@@ -3918,6 +3974,16 @@ class MainWindow(QMainWindow):
         if self.open_project((Path(target) / getattr(self, "_copy_scene", ".")).resolve(),
                              scene=getattr(self, "_copy_scene_id", None)):
             self.status.setText(f"Saved as {Path(target).name}; you are working in the copy now.")
+
+    def _dropped_on_window(self, files: list[str]):
+        """A project folder (or its tree.json) dropped on the window opens it."""
+        f = Path(files[0])
+        folder = f.parent if f.name == T.TREE_FILE else f
+        if folder.is_dir() and self._is_project(folder):
+            self.open_project(folder)
+        else:
+            self.status.setText(f"{f.name} is not a project: drop a project folder here to open it, "
+                                "or pictures on the cast, sounds on the sounds, a picture on a clip's end.")
 
     def close_project(self):
         if self.project is None or not self._idle_or_say():
@@ -4033,10 +4099,43 @@ class MainWindow(QMainWindow):
         self._warm_lora_hashes()
         self.refresh(rebuild_path=True)
         QTimer.singleShot(0, self.graph.fit)
+        QTimer.singleShot(0, self._focus_graph)
         self.status.setText(f"Project {folder.name}: {len(tree.nodes)} clip{'s' if len(tree.nodes) != 1 else ''}."
                             + synced + (f" Note: {film.problem}; the film's scene list is not changed until it is "
                                         "fixed." if film.problem else ""))
+        if tree.recovered_from is not None:
+            self._tell_recovered(folder, tree.recovered_from)
         return True
+
+    def _focus_graph(self):
+        """The keyboard goes to the clip graph (arrow keys walk the clips) unless something is being typed."""
+        fw = QApplication.focusWidget() or self.focusWidget()
+        typing = isinstance(fw, QPlainTextEdit) or (isinstance(fw, QLineEdit) and not fw.isReadOnly())
+        if not typing and self.tree is not None and self.graph.isVisible():
+            self.graph.setFocus(Qt.OtherFocusReason)
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        if not self._first_shown:
+            self._first_shown = True
+            QTimer.singleShot(0, lambda: self.graph.setFocus(Qt.OtherFocusReason))
+
+    def _tell_recovered(self, folder: Path, backup: Path):
+        """tree.json was damaged and its backup was opened: said in the status line and the log, and in a notice
+        that does not block the window (the last changes before the damage may be missing)."""
+        text = (f"tree.json of {folder.name} was damaged; the backup {backup.name} (the state before the last save) "
+                "was opened instead. The last changes may be missing. The damaged file is kept next to it "
+                "(tree.json.damaged) when the project is saved.")
+        self._report_error(text)
+        self.notify("Project opened from its backup", text)
+
+    def notify(self, title: str, text: str):
+        """A notice that does not block the window (a message box opened, not run); kept until it is closed."""
+        box = QMessageBox(QMessageBox.Information, title, text, QMessageBox.Ok, self)
+        box.setAttribute(Qt.WA_DeleteOnClose)
+        self._notices.append(box)
+        box.destroyed.connect(lambda _=None, b=box: self._notices.remove(b) if b in self._notices else None)
+        box.open()
 
     def _open_dir(self):
         if self.project and self.project.is_dir():
@@ -4283,6 +4382,20 @@ class MainWindow(QMainWindow):
         self._llama.before_launch = lambda llama=self._llama: self._room_for_llama(llama, url)
         return self._llama
 
+    def _end_leftover_llama(self):
+        """At start-up: a llama-server an earlier run left behind (it crashed; found by its pid file) holds RAM and
+        VRAM nobody knows about; it is ended, in the background. Nothing else is touched."""
+        from ..llm_server import LlamaServer
+        log_dir = Path.home() / ".cache" / "video-chain"
+        server, port = self.llm_server.text().strip() or LLM_DEFAULT_SERVER, self.llm_port.value()
+
+        def work():
+            try:
+                LlamaServer(server, "", port, log_dir=log_dir).stop(wait=True, grace=CLOSE_GRACE)
+            except Exception:  # noqa: BLE001
+                logging.getLogger(__name__).warning("ending a leftover llama-server", exc_info=True)
+        threading.Thread(target=work, daemon=True, name="llama-leftover").start()
+
     def _room_for_llama(self, llama, url: str, settle: float = 15.0) -> None:
         """(start()'s thread, just before the llama.cpp server starts) Too little free VRAM for it: ComfyUI is asked
         to unload its models (the clip / image model loads again when it is needed). While clips are generated it
@@ -4303,13 +4416,8 @@ class MainWindow(QMainWindow):
         if self.running:
             raise error(f"only {gb(free)} of VRAM is free while clips are generated and {what} needs about "
                         f"{gb(need)}; {later}")
-        try:
-            req = urllib.request.Request(url + "/free", data=b'{"unload_models": true, "free_memory": true}',
-                                         headers={"Content-Type": "application/json"}, method="POST")
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                resp.read()
-        except Exception:  # noqa: BLE001  (ComfyUI is not up: the VRAM is used by something else)
-            return
+        if not CMF.free_models(url, timeout=10):
+            return                                  # (ComfyUI is not up: the VRAM is used by something else)
         end = time.time() + settle
         now = free
         while time.time() < end:
@@ -4331,11 +4439,12 @@ class MainWindow(QMainWindow):
         self.log.appendPlainText(msg)
         self.status.setText(msg)
 
-    def stop_llama(self, why: str = "", wait: bool = False) -> bool:
+    def stop_llama(self, why: str = "", wait: bool = False, grace: float | None = None) -> bool:
         """Stop the refiner's llama.cpp server if the app started it (its RAM / VRAM back for ComfyUI). wait: until
-        it is gone (when the window closes: a background wait would die with the app, leaving the server)."""
+        it is gone (when the window closes: a background wait would die with the app, leaving the server). grace:
+        seconds it gets to end before it is killed (short when the window closes)."""
         cur = getattr(self, "_llama", None)
-        stopped = bool(cur is not None and cur.stop(wait=wait))
+        stopped = bool(cur is not None and (cur.stop(wait=wait) if grace is None else cur.stop(wait=wait, grace=grace)))
         if stopped and why:
             self.log.appendPlainText(f"Stopped the llama.cpp server ({why}).")
         return stopped
@@ -4510,9 +4619,9 @@ class MainWindow(QMainWindow):
             render=render,
             file=lambda r: project / r["file"])
         self._tts_busy = True
-        self._update_buttons()
         used = False
         try:
+            self._update_buttons()
             ok = run_speak_dialog(dlg)
             how = dlg.speak_values()
             if TTS.speak_options(self.tree) != how:     # how lines are spoken is kept with the project
@@ -4564,15 +4673,19 @@ class MainWindow(QMainWindow):
             return False
         snap, project = copy.deepcopy(self.tree), self.project
         self._tts_busy = True
-        self._update_buttons()
-        self.status.setText(f"Speaking the lines of clip #{nid[1:]} ({TTS.PROVIDERS[eng.name]})…")
+        try:
+            self._update_buttons()
+            self.status.setText(f"Speaking the lines of clip #{nid[1:]} ({TTS.PROVIDERS[eng.name]})…")
+        except BaseException:
+            self._tts_busy = False                  # (it never started: not busy for ever)
+            raise
 
         def work():
             try:
                 r = TTS.render_lines(project, snap, nid, eng, log=self.bridge.tts_log.emit)
                 self.bridge.spoken.emit(nid, r, "", str(project))
-            except Exception as e:  # noqa: BLE001
-                self.bridge.spoken.emit(nid, None, str(e), str(project))
+            except BaseException as e:  # noqa: BLE001  (the answer ends "busy")
+                self.bridge.spoken.emit(nid, None, str(e) or type(e).__name__, str(project))
             finally:
                 if eng.name == "local":
                     eng.stop()                      # (unloaded right after: its VRAM back for ComfyUI)
@@ -5220,15 +5333,19 @@ class MainWindow(QMainWindow):
             return
         snap, project = copy.deepcopy(self.tree), self.project
         self._tts_busy = True
-        self._update_buttons()
-        self.status.setText(f"Cloning the voice of @{name} at ElevenLabs…")
+        try:
+            self._update_buttons()
+            self.status.setText(f"Cloning the voice of @{name} at ElevenLabs…")
+        except BaseException:
+            self._tts_busy = False                  # (it never started: not busy for ever)
+            raise
 
         def work():
             try:
                 self.bridge.eleven_cloned.emit(name, TTS.clone_sample(project, snap, name, TTS.ElevenLabs()), "",
                                                str(project))
-            except Exception as e:  # noqa: BLE001
-                self.bridge.eleven_cloned.emit(name, None, str(e), str(project))
+            except BaseException as e:  # noqa: BLE001  (the answer ends "busy")
+                self.bridge.eleven_cloned.emit(name, None, str(e) or type(e).__name__, str(project))
         threading.Thread(target=work, daemon=True).start()
 
     def _eleven_cloned(self, name: str, voice, err: str, project: str):
@@ -5683,8 +5800,16 @@ class MainWindow(QMainWindow):
         self.b_sound_del.setEnabled(idle and sel)
         self.b_sound_play.setEnabled(sel)
 
+    def _uses(self, meta: dict) -> list[str]:
+        """Where an image-edit result is used (the AI image window asks for every result of a reload): the index of
+        the project's end images and face pictures is built once until something changes (UIM-26)."""
+        if self._uses_cache is None or self._uses_cache[0] is not self.tree:
+            self._uses_cache = (self.tree, uses_index(self.tree))
+        return uses_of(self.project, self.tree, meta, self._uses_cache[1])
+
     def _changed(self):
         """Something the clips depend on changed: save soon and update the states."""
+        self._uses_cache = None
         self._save_timer.start()
         self._refresh_timer.start()
 
@@ -6067,6 +6192,7 @@ class MainWindow(QMainWindow):
         return self.live.get(nid) or self.status_of.get(nid, "new")
 
     def refresh(self, rebuild_path: bool = False):
+        self._uses_cache = None
         self._update_adv_note()                    # (cheap: the project's options against the defaults)
         if self.tree is None:
             self.graph.show_nodes([])
@@ -6537,6 +6663,7 @@ class MainWindow(QMainWindow):
                              known)
             card.action.connect(self.node_action)
             card.keyframe.connect(self.keyframe_action)
+            card.end_dropped.connect(self.set_end_image)
             card.play.connect(self._play_node)
             card.leadChanged.connect(self.set_clip_lead)
             card.modelPrompt.connect(self.show_model_prompt)
@@ -6686,9 +6813,10 @@ class MainWindow(QMainWindow):
             t += length
             st = self.state(n.id)
             if n.is_video:
-                card.set_source(n)
+                there = self._is_file(n.source["file"])
+                card.set_source(n, there)
                 step = ("will be converted again" if st == "changed" else
-                        "" if self._is_file(n.source["file"]) or st == "done" else "the video file is missing")
+                        "" if there or st == "done" else "the video file is missing")
             else:
                 why = self.why_of.get(n.id) if st == "changed" else ""
                 step = f"Will be made again: {why}." if why else ("will be made again" if st == "changed" else "")
@@ -6732,9 +6860,10 @@ class MainWindow(QMainWindow):
                 card.set_veda(self.veda_used(n))
                 end = self.project / n.end_image if n.end_image else None
                 if vc is not None:
-                    card.set_end(end, vc.id, self._pixmap(self.project / vc.made["first"]) if vc.made else None)
+                    card.set_end(end, vc.id, self._pixmap(self.project / vc.made["first"]) if vc.made else None,
+                                 end is not None and self._is_file(end))
                 else:
-                    card.set_end(end, None, self._pixmap(end))
+                    card.set_end(end, None, self._pixmap(end), end is not None and self._is_file(end))
                 card.set_keyframes(T.clip_length(self.tree, n) / chain.FPS,
                                    [{"at": k["at"], "pixmap": self._pixmap(self.project / k["image"]),
                                      "note": k["note"], "ok": self._is_file(self.project / k["image"])}
@@ -7501,7 +7630,7 @@ class MainWindow(QMainWindow):
         dlg = ImageEditDialog(self, self.project, sources, first, target, connect, use, self.qs,
                               self._picker_places(), start_comfy=self.start_comfy, on_start=before_edit,
                               known_loras=known, lora_dir=self._lora_dir(),
-                              uses=lambda meta: uses_of(self.project, self.tree, meta),
+                              uses=self._uses,
                               refine=self.refine_text, connect_create=connect_create, family_loras=family_loras,
                               start_aspect=aspect, mode=mode, check_lora=self.in_comfy_loras,
                               collections=self.project_images,
@@ -7673,6 +7802,19 @@ class MainWindow(QMainWindow):
         if f:
             self.set_end_image(nid, f)
 
+    def _known_info(self, video) -> dict | None:
+        """What the frame window needs to know of a video, when it is a clip of this project (the record of making it
+        has it: no ffprobe on the UI thread, UIL-27); None for any other file (the window reads it itself)."""
+        if self.tree is None or self.project is None:
+            return None
+        for n in self.tree.nodes.values():
+            m = n.made
+            if m and m.get("video") and m.get("frames") and str(self.project / m["video"]) == str(video):
+                key = m.get("key") or {}
+                return {"fps": float(chain.FPS), "frames": int(m["frames"]), "duration": int(m["frames"]) / chain.FPS,
+                        "width": key.get("width") or "?", "height": key.get("height") or "?"}
+        return None
+
     def end_from_video(self, nid: str, video: str | None = None, dialog: bool = True):
         """End image from a video: choose a video (the project's real videos and clips first, or any file), then
         one of its frames; that frame at the video's full size becomes the clip's end image."""
@@ -7691,7 +7833,8 @@ class MainWindow(QMainWindow):
             if not video:
                 return None
         try:
-            dlg = VideoFrameDialog(self, Path(video), f"End image of clip #{nid[1:]}: a frame of {Path(video).name}")
+            dlg = VideoFrameDialog(self, Path(video), f"End image of clip #{nid[1:]}: a frame of {Path(video).name}",
+                                   self._known_info(video))
         except (RuntimeError, OSError) as e:
             self.status.setText(f"Cannot read {Path(video).name}: {e}")
             return None
@@ -7804,7 +7947,7 @@ class MainWindow(QMainWindow):
         title = (f"Keep a moment of clip #{nid[1:]}: the frame to keep (it is pinned at its time)" if own else
                  f"Keyframe of clip #{nid[1:]} at {at:.2f} s: a frame of {Path(video).name}")
         try:
-            dlg = VideoFrameDialog(self, Path(video), title)
+            dlg = VideoFrameDialog(self, Path(video), title, self._known_info(video))
         except (RuntimeError, OSError) as e:
             self.status.setText(f"Cannot read {Path(video).name}: {e}")
             return None
@@ -7990,7 +8133,7 @@ class MainWindow(QMainWindow):
             try:
                 made = T.make_video(project, work_node, base)
                 bridge.converted.emit(nid, made, "", token, str(project))
-            except Exception as e:  # noqa: BLE001
+            except BaseException as e:  # noqa: BLE001  (the answer ends "converting")
                 bridge.converted.emit(nid, None, str(e), token, str(project))
         threading.Thread(target=work, daemon=True).start()
         self.refresh()
@@ -8023,8 +8166,8 @@ class MainWindow(QMainWindow):
                 error = ""
                 try:
                     T.remix_sounds(project, tree, order, T.Checker(project, tree), persist=False)
-                except Exception as e:  # noqa: BLE001  (the ones remixed before it are still taken)
-                    error = str(e)
+                except BaseException as e:  # noqa: BLE001  (the ones remixed before it are still taken)
+                    error = str(e) or type(e).__name__
                 done = [n for n in order if (tree.nodes[n].made or {}).get("sound_rev") != revs[n]]
                 bridge.remixed.emit([(n, copy.deepcopy(tree.nodes[n].made)) for n in done], error, str(project))
         threading.Thread(target=work, daemon=True).start()
@@ -8558,7 +8701,11 @@ class MainWindow(QMainWindow):
             return None
         if at is None:
             clip = self.project / node.made["video"]
-            frames = int(node.made.get("frames") or chain.probe(clip)["frames"])
+            try:
+                frames = int(node.made.get("frames") or chain.probe(clip)["frames"])
+            except (OSError, RuntimeError) as e:       # (media.MediaError is a RuntimeError)
+                self.status.setText(f"Cannot read video #{nid[1:]}: {e}")
+                return None
             key = node.made.get("key") or {}
             size = (int(key.get("width") or 0) or 672, int(key.get("height") or 0) or 384)
             dlg = SplitDialog(self, clip, frames, size, node.source["start"], node.source["end"],
@@ -8625,8 +8772,8 @@ class MainWindow(QMainWindow):
                     joined = T.join_path(project, tree, nid, out)
                     secs = chain.joined_seconds(joined)             # not in the GUI thread (network shares)
                     result = ((joined, secs, T.path_spans(tree, nid)), None)
-                except Exception as e:  # noqa: BLE001
-                    result = (None, str(e))
+                except BaseException as e:  # noqa: BLE001  (the answer ends "joining")
+                    result = (None, str(e) or type(e).__name__)
                 try:
                     bridge.joined.emit(*result, purpose, pre, str(project))
                 except RuntimeError:                 # (the window was closed meanwhile)
@@ -8733,14 +8880,7 @@ class MainWindow(QMainWindow):
             if node is None or not node.made:
                 return
             if size == "made":
-                out = Path(out)
-                try:
-                    out.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copyfile(self.project / node.made["video"], out)
-                except OSError as e:
-                    self.status.setText(f"Could not export clip #{single[1:]}: {e}")
-                    return
-                self.status.setText(f"Exported {out.name} (clip #{single[1:]}, as made).")
+                self._export_copy(single, self.project / node.made["video"], Path(out))
                 return
             target = single
         else:
@@ -8756,6 +8896,39 @@ class MainWindow(QMainWindow):
                                       "method": method, **({"single": True} if single is not None else {}),
                                       **({"denoise": True} if denoise else {}),
                                       **({"cloud": "runpod"} if cloud and method != "refine" else {})})
+
+    def _export_copy(self, nid: str, src: Path, out: Path):
+        """Copy a made clip to out in the background (it can be big, and out on a share); like a join it holds back
+        generating and deleting meanwhile. The file appears under its name only when it is complete (MWC-33)."""
+        if self._joins:
+            self.status.setText("A join or copy is still running; wait for it.")
+            return
+        self._joins += 1
+        self._update_buttons()
+        self.status.setText(f"Exporting clip #{nid[1:]} to {out.name} …")
+        bridge = self.bridge
+
+        def work():
+            error = ""
+            try:
+                out.parent.mkdir(parents=True, exist_ok=True)
+                with media.part_file(out) as tmp:
+                    shutil.copyfile(src, tmp)
+            except BaseException as e:  # noqa: BLE001  (the answer ends "exporting")
+                error = str(e) or type(e).__name__
+            try:
+                bridge.exported.emit(nid, str(out), error)
+            except RuntimeError:                       # (the window was closed meanwhile)
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def _clip_copied(self, nid: str, out: str, error: str):
+        self._joins = max(0, self._joins - 1)
+        self._update_buttons()
+        if error:
+            self._report_error(f"Could not export clip #{nid[1:]}: {error}")
+        else:
+            self.status.setText(f"Exported {Path(out).name} (clip #{nid[1:]}, as made).")
 
     # ------------------------------------------------------------------ GPU
     def _poll_gpu(self):
@@ -8944,6 +9117,13 @@ class MainWindow(QMainWindow):
             problems.append(f"could not check the settings ({e})")
         return problems, [n.id for n in empty]
 
+    def _runpod_key_hint(self) -> str:
+        """Where the RunPod key is set; in the Simple view that place is hidden, so the way there is named (UX-3)."""
+        where = "Settings → Cloud upscaling"
+        if self.simple:
+            where = "the Advanced view (View → Advanced view), then Settings → Preferences → Cloud upscaling"
+        return f"To upscale on RunPod: save your RunPod API key ({where})."
+
     def _checked(self, gen: int, problems: list, empty: list):
         """Generate's pre-flight is done: report what is missing, or go on with the job."""
         if gen != self._check_gen or not self._checking or self.tree is None:
@@ -8960,7 +9140,7 @@ class MainWindow(QMainWindow):
         nodes = {n.id: n for t in targets for n in self.tree.path_to(t)}
         cloud = bool((refine or {}).get("cloud"))
         if cloud and not RP.api_key():
-            self.status.setText("To upscale on RunPod: save your RunPod API key (Settings → Cloud upscaling).")
+            self.status.setText(self._runpod_key_hint())
             self._film_queue = None
             self._cancel_check()
             return
@@ -9100,17 +9280,24 @@ class MainWindow(QMainWindow):
     def _free_comfy(self):
         """Ask ComfyUI to unload its models (in the background)."""
         url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL).rstrip("/")
-        self._comfy_model = None
         self._qwen_timer.stop()
 
         def work():
             try:
-                req = urllib.request.Request(url + "/free", data=b'{"unload_models": true, "free_memory": true}',
-                                             headers={"Content-Type": "application/json"}, method="POST")
-                urllib.request.urlopen(req, timeout=10).read()
+                ok = CMF.free_models(url, timeout=10)
             except Exception:  # noqa: BLE001
-                pass
+                logging.getLogger(__name__).warning("unloading ComfyUI's models", exc_info=True)
+                ok = False
+            self.bridge.freed.emit(ok)
         threading.Thread(target=work, daemon=True).start()
+
+    def _comfy_freed(self, ok: bool):
+        """ComfyUI answered the unload request (MWC-30): the model counts as unloaded only when it did."""
+        if ok:
+            self._comfy_model = None
+            self.log.appendPlainText("ComfyUI's models were unloaded.")
+        else:
+            self._report_error("Could not unload the model: ComfyUI did not answer; it may still hold the memory.")
         self._update_model_label()
 
     def _qwen_idle(self):
@@ -9411,7 +9598,7 @@ class MainWindow(QMainWindow):
 
         def check():
             try:
-                with urllib.request.urlopen(url + "/system_stats", timeout=1.5) as r:
+                with net.urlopen(url + "/system_stats", timeout=1.5) as r:
                     ok = r.status == 200
             except Exception:  # noqa: BLE001
                 ok = False
@@ -9525,11 +9712,9 @@ class MainWindow(QMainWindow):
         """Ask ComfyUI to unload its models, in a thread (the GUI never waits for the network)."""
         def work():
             try:
-                urllib.request.urlopen(urllib.request.Request(
-                    url.rstrip("/") + "/free", data=b'{"unload_models": true, "free_memory": true}',
-                    headers={"Content-Type": "application/json"}, method="POST"), timeout=3).read()
-            except Exception:  # noqa: BLE001
-                pass
+                CMF.free_models(url, timeout=3)
+            except Exception:  # noqa: BLE001  (free_models reports its own failures)
+                logging.getLogger(__name__).warning("unloading ComfyUI's models", exc_info=True)
             finally:
                 if done is not None:
                     done.set()
@@ -9601,7 +9786,7 @@ class MainWindow(QMainWindow):
         self._save_timer.stop()
         if self._trigger_scan is not None:
             self._trigger_scan.set()                  # the trigger word lookup stops at the next file
-        self.stop_llama()                             # never leave the language model server behind
+        self.stop_llama(wait=True, grace=CLOSE_GRACE)   # never leave the language model server behind (but be quick)
         self.stop_tts()
         timers = [t for t in (self._qwen_timer, self._model_timer, self._gpu_timer, self._comfy_timer) if t.isActive()]
         for t in timers:

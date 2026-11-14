@@ -133,7 +133,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     relay = _qt_error_relay()()
     install_exception_hooks(relay.show)
-    w = MainWindow()
+    w = MainWindow(QSettings())
     w.show()
     tick = install_signal_handlers(app, lambda: w)
     app.aboutToQuit.connect(lambda: _stop_helpers(w))     # (a quit that skipped the close button: logout, quit())

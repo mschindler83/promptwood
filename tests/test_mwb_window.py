@@ -169,7 +169,7 @@ def test_stop_llama_can_wait(win):
     calls = []
 
     class Fake:
-        def stop(self, wait=True):
+        def stop(self, wait=True, grace=20):
             calls.append(wait)
             return True
     win._llama = Fake()

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
-from PySide6.QtCore import QEvent, Qt  # noqa: E402
+from PySide6.QtCore import QEvent, QSettings, Qt  # noqa: E402
 from PySide6.QtGui import QKeySequence, QShortcut  # noqa: E402
 from PySide6.QtWidgets import QApplication, QDialogButtonBox, QMessageBox  # noqa: E402
 
@@ -105,7 +105,7 @@ def test_variants_keep_seed_without_steps_says_why(app):
 # ------------------------------------------------------------------ MWA-10
 def test_new_project_rejects_dot_names_and_files(app, tmp_path):
     from video_chain.ui.main_window import NewProjectDialog
-    d = NewProjectDialog(None, str(tmp_path))
+    d = NewProjectDialog(None, str(tmp_path), QSettings(str(tmp_path / "n.ini"), QSettings.IniFormat))
     d.name.setText("..")
     assert d.folder() is None
     d.name.setText(".")
@@ -226,7 +226,7 @@ def test_hide_guide_says_where_it_went(win):
     assert "Getting started" in win.status.text()
 
 
-def test_guide_wording_uses_the_controls_name():
+def test_guide_wording_uses_the_controls_name(app):
     from video_chain.ui.guide import GuidePanel
     g = GuidePanel()
     assert "Aspect" in g.b_text_only.toolTip()
