@@ -52,7 +52,7 @@ class EndsMixin(MainWindowHost):
         try:
             if dlg.exec() != QDialog.DialogCode.Accepted:
                 return None
-            ideas = dlg.chosen_ideas() if hasattr(dlg, "chosen_ideas") else None
+            ideas = dlg.chosen_ideas()
             return ideas if ideas else dlg.chosen()       # (a list: all ideas, for the image window's variations)
         finally:
             # the llama.cpp model goes with the window: it slows image / clip generation down while it is loaded

@@ -188,7 +188,7 @@ class NodeMixin(MainWindowHost):
         new = self.refine_text(card.edit.toPlainText(), "video_h3" if h3 else "video", pictures=pics,
                                seconds=frames / chain.FPS, start_image=start,
                                loras=[p for p, _s in T.node_loras(node)])
-        if new:
+        if isinstance(new, str) and new:          # (a clip's prompt is one text; a list is the image window's)
             replace_text(card.edit, new)          # Ctrl+Z in the prompt takes it back
             self.status.setText(f"Clip #{T.short_id(node.id)}: prompt refined (Ctrl+Z in the prompt undoes it).")
 
