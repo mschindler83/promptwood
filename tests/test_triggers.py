@@ -303,8 +303,9 @@ def test_the_chosen_site_is_asked_first_and_the_other_too(monkeypatch):
     answers.update({"civitai.com": 500})                             # one down, one failing: could not be asked
     with pytest.raises(OSError):
         TR._get_json("/api/v1/x", 5)
-    answers.update({"civitai.com": 404})                             # one down, the other does not know: unknown
-    assert TR._get_json("/api/v1/x", 5) is None
+    answers.update({"civitai.com": 404})                             # one down, the other does not know: not
+    with pytest.raises(OSError):                                     # known, but could not be asked either
+        TR._get_json("/api/v1/x", 5)
     # links go to the chosen site
     assert TR.on_site("https://civitai.com/models/3?modelVersionId=7") == "https://civitai.red/models/3?modelVersionId=7"
     assert TR.on_site("https://example.org/civitai.com/x") == "https://example.org/civitai.com/x"

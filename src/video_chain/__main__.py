@@ -20,6 +20,30 @@ from . import chain
 from . import tree as treemod
 
 
+def _positive(kind):
+    def parse(text: str):
+        try:
+            v = kind(text)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"not a number: {text!r}") from None
+        if not v > 0:                                  # (also rejects nan)
+            raise argparse.ArgumentTypeError(f"must be more than 0, got {text}")
+        return v
+    return parse
+
+
+def _not_negative(kind):
+    def parse(text: str):
+        try:
+            v = kind(text)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"not a number: {text!r}") from None
+        if not v >= 0:
+            raise argparse.ArgumentTypeError(f"must not be negative, got {text}")
+        return v
+    return parse
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="video-chain", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -31,12 +55,12 @@ def build_parser() -> argparse.ArgumentParser:
                                              "image, prompts and clip settings come from there")
     p.add_argument("--targets", default="", help="branching mode: comma-separated node ids whose paths to make")
     p.add_argument("--lora", type=Path, help="H3 LoRA (.safetensors) to apply; none = base model")
-    p.add_argument("--strength", type=float, default=1.0, help="LoRA strength (default 1.0)")
-    p.add_argument("--frames", type=int, default=73, help="frames per clip, 17n+5: 39, 56, 73 (default), 90, 107, 124")
-    p.add_argument("--steps", type=int, default=28, help="sampling steps (default 28; the trainer's samples use 20)")
-    p.add_argument("--seed", type=int, default=42, help="seed of clip 1; clip k uses seed+k-1 (default 42)")
+    p.add_argument("--strength", type=_positive(float), default=1.0, help="LoRA strength (default 1.0)")
+    p.add_argument("--frames", type=_positive(int), default=73, help="frames per clip, 17n+5: 39, 56, 73 (default), 90, 107, 124")
+    p.add_argument("--steps", type=_positive(int), default=28, help="sampling steps (default 28; the trainer's samples use 20)")
+    p.add_argument("--seed", type=_not_negative(int), default=42, help="seed of clip 1; clip k uses seed+k-1 (default 42)")
     p.add_argument("--same-seed", action="store_true", help="use the same seed for every clip")
-    p.add_argument("--resolution", type=int, default=512,
+    p.add_argument("--resolution", type=_positive(int), default=512,
                    help="about resolution² pixels in the start image's aspect ratio (default 512, like training)")
     p.add_argument("--size", help="exact size WxH instead (multiples of 32); the start image is stretched to it")
     p.add_argument("--no-audio", action="store_true", help="generate video only")
@@ -47,7 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--serve", action="store_true",
                    help="worker mode (for the GUI): load the model once, then read jobs as JSON lines from stdin "
                         '({"cmd": "run", "tree": DIR, "targets": [ids]} or {"cmd": "quit"})')
-    p.add_argument("--idle-minutes", type=float, default=15,
+    p.add_argument("--idle-minutes", type=_not_negative(float), default=15,
                    help="worker mode: quit (and free the memory) after this long without a job; 0 = never")
     p.add_argument("--comfy-url", default="http://127.0.0.1:8188", help="ComfyUI address")
     p.add_argument("--comfy-dir", type=Path, help="ComfyUI's folder (its LoRA folders; cleanup of its copies)")
@@ -68,15 +92,42 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """The command line; options that do nothing in the chosen mode are a mistake (exit code 2, a message)."""
+    p = build_parser()
+    a = p.parse_args(argv)
+    if a.tree and (a.image is not None or a.prompts is not None):
+        p.error("--tree reads the start image and prompts from the project: give no IMAGE PROMPTS with it")
+    if a.targets and not a.tree:
+        p.error("--targets belongs to --tree")
+    if not a.cloud:
+        wanted = [name for name, given in (("--runpod-gpu", a.runpod_gpu), ("--runpod-no-fallback", a.runpod_no_fallback),
+                                           ("--runpod-volume", a.runpod_volume),
+                                           ("--runpod-without-volume", a.runpod_without_volume),
+                                           ("--runpod-models", a.runpod_models != "7b")) if given]
+        if wanted:
+            p.error(f"{', '.join(wanted)} only work with --cloud runpod")
+    return a
+
+
 def _printer(enabled: bool):
     def emit(event: dict) -> None:
-        if enabled:
+        if not enabled or emit.gone:
+            return
+        try:
             print("@@ " + json.dumps(event, ensure_ascii=False), flush=True)
+        except (OSError, ValueError):                  # the GUI is gone (broken pipe) or stdout is closed
+            emit.gone = True
+    emit.gone = False
     return emit
 
 
 def main(argv: list[str] | None = None) -> int:
-    a = build_parser().parse_args(argv)
+    a = parse_args(argv)
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")      # (the events do not depend on the locale)
+    except (AttributeError, ValueError, OSError):
+        pass
     emit = _printer(a.events)
     try:
         return _main(a, emit)
@@ -130,11 +181,21 @@ def _close_cloud(holder: dict, emit) -> None:
     session = holder.pop("session", None)
     if session is None:
         return
+    sigs = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+    old = {}
+    try:
+        for sig in sigs:                                # (a second Stop must not cut the termination short)
+            old[sig] = signal.signal(sig, signal.SIG_IGN)
+    except ValueError:                                  # (not the main thread)
+        pass
     try:
         session.close()
     except Exception as e:  # noqa: BLE001
         print(f"RunPod: {e}", file=sys.stderr, flush=True)
         emit({"e": "error", "msg": f"RunPod: {e}"})
+    finally:
+        for sig, handler in old.items():
+            signal.signal(sig, handler)
 
 
 def _generator(a, emit, current):
@@ -286,6 +347,34 @@ def _missing_msg(lora: str) -> str:
             "(e.g. into my_models/loras)")
 
 
+def _free_quietly(gen) -> None:
+    """Ask ComfyUI to unload its models; a ComfyUI that is down is not the worker's end."""
+    if hasattr(gen, "free"):
+        try:
+            gen.free()
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+
+
+def _prologue(gen, cmd: dict) -> None:
+    """What a run / refine command asks before it starts."""
+    if cmd.get("free_first") and hasattr(gen, "free"):
+        gen.free()                                  # ComfyUI holds another model (an image edit): unload it first
+    if "last_hyperflow" in cmd and getattr(gen, "last_hyperflow", False) is None:
+        gen.last_hyperflow = cmd["last_hyperflow"]  # what the window knows of earlier workers
+
+
+def _guarded(emit, job: Callable[[], None]) -> None:
+    """Run one job of the worker loop; its errors are events, never the worker's end."""
+    try:
+        job()
+    except (JobError, ValueError, FileNotFoundError, KeyError) as e:
+        emit({"e": "error", "msg": str(e)})
+    except Exception as e:  # noqa: BLE001
+        traceback.print_exc()
+        emit({"e": "error", "msg": f"{type(e).__name__}: {e}"})
+
+
 def serve(a, emit, make_generator: Callable[[dict], object], stdin=None) -> int:
     """Worker: connect once, then run jobs from stdin until 'quit', end of input, or the idle timeout.
     make_generator(current) connects to ComfyUI; ComfyUI keeps the model loaded between jobs, and the worker asks
@@ -297,18 +386,16 @@ def serve(a, emit, make_generator: Callable[[dict], object], stdin=None) -> int:
     idle = a.idle_minutes * 60 if a.idle_minutes and a.idle_minutes > 0 else None
     emit({"e": "idle", "timeout": idle})
     while True:
+        if getattr(emit, "gone", False):            # the GUI's pipe is closed: nobody to answer
+            _free_quietly(gen)
+            return 0
         if idle is not None and not lines.ready(idle):
-            if hasattr(gen, "free"):
-                gen.free()                          # unload ComfyUI's models after the idle time
+            _free_quietly(gen)                      # unload ComfyUI's models after the idle time
             emit({"e": "bye", "reason": "idle"})
             return 0
         line = lines.readline()
         if not line:                                # the GUI is gone: give ComfyUI's memory back too
-            if hasattr(gen, "free"):
-                try:
-                    gen.free()
-                except Exception:  # noqa: BLE001
-                    pass
+            _free_quietly(gen)
             return 0
         try:
             cmd = json.loads(line)
@@ -318,17 +405,15 @@ def serve(a, emit, make_generator: Callable[[dict], object], stdin=None) -> int:
             emit({"e": "error", "msg": f"bad command: {line.strip()[:80]}"})
             continue
         if cmd.get("cmd") == "quit":
-            if cmd.get("free") and hasattr(gen, "free"):
-                gen.free()
+            if cmd.get("free"):
+                _free_quietly(gen)
             emit({"e": "bye", "reason": "quit"})
             return 0
         if cmd.get("cmd") == "refine":               # export a path at a higher size (2K refine)
             started = time.monotonic()
-            if cmd.get("free_first") and hasattr(gen, "free"):
-                gen.free()
-            if "last_hyperflow" in cmd and getattr(gen, "last_hyperflow", False) is None:
-                gen.last_hyperflow = cmd["last_hyperflow"]
-            try:
+
+            def refine():
+                _prologue(gen, cmd)
                 treemod.refine_path(gen, Path(cmd["tree"]), cmd["target"], cmd["size"], Path(cmd["out"]),
                                     fast_attention=bool(cmd.get("fast_attention")),
                                     refine_swapped=bool(cmd.get("refine_swapped")),
@@ -339,11 +424,7 @@ def serve(a, emit, make_generator: Callable[[dict], object], stdin=None) -> int:
                                     events=lambda ev: (ev.get("e") == "node" and ev.get("state") == "generating"
                                                        and current.update(id=ev["id"], k=ev.get("k", 0)),
                                                        emit(ev)))
-            except (JobError, ValueError, FileNotFoundError, KeyError) as e:
-                emit({"e": "error", "msg": str(e)})
-            except Exception as e:  # noqa: BLE001
-                traceback.print_exc()
-                emit({"e": "error", "msg": f"{type(e).__name__}: {e}"})
+            _guarded(emit, refine)
             emit({"e": "idle", "timeout": idle, "took": round(time.monotonic() - started, 1)})
             continue
         if cmd.get("cmd") != "run":
@@ -354,11 +435,9 @@ def serve(a, emit, make_generator: Callable[[dict], object], stdin=None) -> int:
             emit({"e": "idle", "timeout": idle})
             continue
         started = time.monotonic()
-        if cmd.get("free_first") and hasattr(gen, "free"):
-            gen.free()                              # ComfyUI holds another model (an image edit): unload it first
-        if "last_hyperflow" in cmd and getattr(gen, "last_hyperflow", False) is None:
-            gen.last_hyperflow = cmd["last_hyperflow"]          # what the window knows of earlier workers
-        try:
+
+        def run():
+            _prologue(gen, cmd)
             job = prepare_job(Path(cmd["tree"]), list(cmd.get("targets") or []))
             if job["ai_todo"]:
                 missing = gen.missing_loras(job["loras"])
@@ -368,11 +447,7 @@ def serve(a, emit, make_generator: Callable[[dict], object], stdin=None) -> int:
                 if problem:
                     raise JobError(problem)
             run_job(job, gen if job["ai_todo"] else None, emit, current)
-        except (JobError, ValueError, FileNotFoundError, KeyError) as e:
-            emit({"e": "error", "msg": str(e)})
-        except Exception as e:  # noqa: BLE001
-            traceback.print_exc()
-            emit({"e": "error", "msg": f"{type(e).__name__}: {e}"})
+        _guarded(emit, run)
         emit({"e": "idle", "timeout": idle, "took": round(time.monotonic() - started, 1)})
 
 

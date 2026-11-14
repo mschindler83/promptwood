@@ -17,12 +17,14 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 import queue
 import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -32,11 +34,12 @@ from pathlib import Path
 
 from . import chain
 from . import tree as T
+from .llm_server import rotate_log
 
 APP_DIR = Path(__file__).resolve().parents[2]
 TTS_PYTHON = APP_DIR / ".venv-tts" / "bin" / "python"
 WORKER = Path(__file__).resolve().with_name("tts_worker.py")
-HF_CACHE = Path("/path/to/ai/hf-models")
+HF_CACHE = Path(os.environ.get("VIDEO_CHAIN_HF_CACHE") or "/path/to/ai/hf-models")
 QWEN_BASE = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
 QWEN_DESIGN = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
 WHISPER = "openai/whisper-large-v3-turbo"
@@ -67,7 +70,7 @@ DELIVERIES = {"steady": "Steady (even, fewest slips)", "natural": "Natural",
 _LOCAL_TEMPERATURE = {"steady": 0.7, "natural": None, "lively": 1.1}
 _ELEVEN_STABILITY = {"steady": 0.8, "natural": None, "lively": 0.3}
 _ELEVEN_V3_STABILITY = {"steady": 1.0, "natural": None, "lively": 0.0}
-SPEED_RANGE = (0.7, 1.2)                 # (what ElevenLabs takes; local lines are made slower / faster afterwards)
+SPEED_RANGE = (0.7, 1.2)                 # the speed of a line: what ElevenLabs takes (local lines are changed by it afterwards)
 
 KEYRING_SERVICE, KEYRING_USER = "video-chain", "elevenlabs-api-key"
 ELEVEN_URL = "https://api.elevenlabs.io"
@@ -75,6 +78,10 @@ ELEVEN_URL = "https://api.elevenlabs.io"
 
 class TtsError(RuntimeError):
     pass
+
+
+def _pause(seconds: float) -> None:
+    time.sleep(seconds)
 
 
 def options(tree_or_options) -> dict:
@@ -90,6 +97,8 @@ def speak_options(tree_or_options=None, given: dict | None = None) -> dict:
         takes, speed = int(o["takes"]), float(o["speed"])
     except (TypeError, ValueError):
         takes, speed = SPEAK_DEFAULTS["takes"], 1.0
+    if not math.isfinite(speed):                        # (nan / inf from a damaged project: the normal speed)
+        speed = 1.0
     return {"takes": min(max(takes, 1), 8),
             "delivery": o["delivery"] if o["delivery"] in DELIVERIES else "natural",
             "speed": round(min(max(speed, SPEED_RANGE[0]), SPEED_RANGE[1]), 2)}
@@ -129,6 +138,7 @@ class LocalTTS:
         self.proc: subprocess.Popen | None = None
         self._answers: queue.Queue = queue.Queue()
         self._lock = threading.Lock()
+        self._seq = 0                           # request ids: a late answer is not taken for the next one's
         self.before_launch = None
 
     def problems(self, design: bool = False, transcribe: bool = False, isolate: bool = False) -> list[str]:
@@ -158,6 +168,8 @@ class LocalTTS:
             self.before_launch(self)
         env = {**os.environ, "HF_HUB_CACHE": str(self.cache), "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
                "PYTHONUNBUFFERED": "1", "TOKENIZERS_PARALLELISM": "false"}
+        if self.log:
+            rotate_log(Path(self.log))
         err = open(self.log, "ab") if self.log else subprocess.DEVNULL
         try:
             self.proc = subprocess.Popen([str(self.python), "-I", str(self.worker)], stdin=subprocess.PIPE,
@@ -182,12 +194,19 @@ class LocalTTS:
                     pass
         answers.put({"ok": False, "error": "the TTS worker stopped", "dead": True})
 
-    def _wait(self, timeout: float) -> dict:
-        try:
-            return self._answers.get(timeout=timeout)
-        except queue.Empty:
-            self.stop()
-            raise TtsError(f"the TTS worker gave no answer in {timeout:.0f} s") from None
+    def _wait(self, timeout: float, want: int | None = None) -> dict:
+        """The next answer (for request `want`: answers of other requests are dropped; the ready line and the
+        "worker stopped" answer have no id and always count)."""
+        end = time.monotonic() + timeout
+        answers = self._answers
+        while True:
+            try:
+                a = answers.get(timeout=max(0.0, end - time.monotonic()))
+            except queue.Empty:
+                self.stop()
+                raise TtsError(f"the TTS worker gave no answer in {timeout:.0f} s") from None
+            if want is None or "id" not in a or a["id"] == want:
+                return a
 
     def request(self, r: dict, timeout: float = 600.0) -> dict:
         with self._lock:
@@ -196,13 +215,15 @@ class LocalTTS:
             p = self.proc                       # (stop() from the GUI thread may clear self.proc meanwhile)
             if p is None:
                 raise TtsError("the TTS worker was stopped")
+            self._seq += 1
+            seq = self._seq
             try:
-                p.stdin.write(json.dumps(r) + "\n")
+                p.stdin.write(json.dumps({**r, "id": seq}) + "\n")
                 p.stdin.flush()
             except (OSError, ValueError):       # (it died, or was stopped, before it read the request)
                 self.stop()
                 raise TtsError("the TTS worker stopped before it got the request") from None
-            a = self._wait(timeout)
+            a = self._wait(timeout, seq)
         if not a.get("ok"):
             raise TtsError(a.get("error") or "the TTS worker failed")
         return a
@@ -308,21 +329,34 @@ class ElevenLabs:
         if ctype:
             headers["Content-Type"] = ctype
         req = urllib.request.Request(self.url + path, data=body, headers=headers, method=method)
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as r:
-                return r.read()
-        except urllib.error.HTTPError as e:
-            raw = e.read().decode("utf-8", "replace")
+        for attempt in (0, 1):
             try:
-                d = json.loads(raw).get("detail")
-                msg = d.get("message") if isinstance(d, dict) else d
-            except (ValueError, AttributeError):
-                msg = raw[:200]
-            if e.code == 401:
-                raise TtsError(f"ElevenLabs rejected the API key ({msg or 'unauthorized'})") from None
-            raise TtsError(f"ElevenLabs: {msg or e.reason} (HTTP {e.code})") from None
-        except OSError as e:
-            raise TtsError(f"ElevenLabs could not be reached ({e})") from None
+                with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                    return r.read()
+            except urllib.error.HTTPError as e:
+                if e.code == 429 and not attempt:        # slow down: wait as told (at most 30 s), ask once more
+                    try:
+                        wait = float((e.headers or {}).get("Retry-After") or 2)
+                    except (TypeError, ValueError):
+                        wait = 2.0
+                    _pause(min(max(wait, 0.0), 30.0))
+                    continue
+                raise self._error(e) from None
+            except OSError as e:
+                raise TtsError(f"ElevenLabs could not be reached ({e})") from None
+        raise TtsError("ElevenLabs is busy (HTTP 429); try again in a moment")
+
+    @staticmethod
+    def _error(e: urllib.error.HTTPError) -> TtsError:
+        raw = e.read().decode("utf-8", "replace")
+        try:
+            d = json.loads(raw).get("detail")
+            msg = d.get("message") if isinstance(d, dict) else d
+        except (ValueError, AttributeError):
+            msg = raw[:200]
+        if e.code == 401:
+            return TtsError(f"ElevenLabs rejected the API key ({msg or 'unauthorized'})")
+        return TtsError(f"ElevenLabs: {msg or e.reason} (HTTP {e.code})")
 
     def _json(self, method: str, path: str, data: dict | None = None):
         body = json.dumps(data).encode() if data is not None else None
@@ -334,8 +368,11 @@ class ElevenLabs:
         for _ in range(20):
             q = {"page_size": 100, **({"next_page_token": token} if token else {})}
             d = self._json("GET", "/v2/voices?" + urllib.parse.urlencode(q))
-            out += [{"id": v["voice_id"], "name": v.get("name") or v["voice_id"], "category": v.get("category"),
-                     "labels": v.get("labels") or {}} for v in d.get("voices") or []]
+            try:
+                out += [{"id": v["voice_id"], "name": v.get("name") or v["voice_id"], "category": v.get("category"),
+                         "labels": v.get("labels") or {}} for v in d.get("voices") or []]
+            except (KeyError, TypeError, AttributeError):
+                raise TtsError("ElevenLabs answered its voices in a form this app does not know") from None
             token = d.get("next_page_token")
             if not d.get("has_more") or not token:
                 break
@@ -344,9 +381,12 @@ class ElevenLabs:
     def models(self) -> list[dict]:
         """The TTS models: [{"id", "name", "languages": [ISO codes]}]."""
         d = self._json("GET", "/v1/models")
-        return [{"id": m["model_id"], "name": m.get("name") or m["model_id"],
-                 "languages": [x.get("language_id") for x in m.get("languages") or []]}
-                for m in (d if isinstance(d, list) else []) if m.get("can_do_text_to_speech")]
+        try:
+            return [{"id": m["model_id"], "name": m.get("name") or m["model_id"],
+                     "languages": [x.get("language_id") for x in m.get("languages") or []]}
+                    for m in (d if isinstance(d, list) else []) if m.get("can_do_text_to_speech")]
+        except (KeyError, TypeError, AttributeError):
+            raise TtsError("ElevenLabs answered its models in a form this app does not know") from None
 
     def speak(self, text: str, voice_id: str, out: Path, model: str = "eleven_multilingual_v2",
               lang: str | None = None, seed: int | None = None, settings: dict | None = None) -> float:
@@ -360,6 +400,8 @@ class ElevenLabs:
         code = LANGUAGES.get(lang or "")
         if code and "multilingual_v2" not in model:     # (multilingual_v2 does not take a language)
             body["language_code"] = code
+        if not voice_id:
+            raise TtsError("choose an ElevenLabs voice")
         mp3 = self._call("POST", f"/v1/text-to-speech/{urllib.parse.quote(voice_id)}?output_format=mp3_44100_128",
                          json.dumps(body).encode(), "application/json")
         with tempfile.TemporaryDirectory(prefix="video-chain-tts-") as tmp:
@@ -371,13 +413,19 @@ class ElevenLabs:
     def clone(self, name: str, sample: Path, description: str = "") -> str:
         """An instant voice clone of a voice sample in the account (a paid plan); returns its voice id."""
         b = uuid.uuid4().hex
-        parts = [("name", name), ("description", description or "made by video-chain from a voice sample")]
+
+        def plain(text) -> str:                 # (a quote or line break would end the header's value)
+            return " ".join(str(text).replace('"', "'").split())
+        parts = [("name", plain(name)), ("description", plain(description or "made by video-chain from a voice sample"))]
         body = b"".join(f'--{b}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
                         for k, v in parts)
-        body += (f'--{b}\r\nContent-Disposition: form-data; name="files"; filename="{Path(sample).name}"\r\n'
+        body += (f'--{b}\r\nContent-Disposition: form-data; name="files"; filename="{plain(Path(sample).name)}"\r\n'
                  "Content-Type: audio/wav\r\n\r\n").encode() + Path(sample).read_bytes() + f"\r\n--{b}--\r\n".encode()
-        d = json.loads(self._call("POST", "/v1/voices/add", body, f"multipart/form-data; boundary={b}"))
-        return d["voice_id"]
+        try:
+            return str(json.loads(self._call("POST", "/v1/voices/add", body,
+                                             f"multipart/form-data; boundary={b}"))["voice_id"])
+        except (KeyError, TypeError, ValueError):
+            raise TtsError("ElevenLabs did not answer the voice clone as expected") from None
 
 
 def engine(tree_or_options, local: LocalTTS | None = None):

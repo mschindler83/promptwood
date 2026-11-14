@@ -293,7 +293,7 @@ def test_local_worker_protocol(tmp_path):
     loc.before_launch = lambda _x: launched.append(1)
     assert loc.problems(design=True, transcribe=True) == []
     a = loc.request({"cmd": "clone", "x": 1})
-    assert a["echo"] == {"cmd": "clone", "x": 1} and loc.running() and launched == [1]
+    assert {k: v for k, v in a["echo"].items() if k != "id"} == {"cmd": "clone", "x": 1} and loc.running() and launched == [1]
     assert loc.clone("Hallo", "German", tmp_path / "r.wav", "t", tmp_path / "o.wav", 5) == 1.5
     assert launched == [1]                                  # one process for every request
     with pytest.raises(tts.TtsError, match="it broke"):
@@ -335,7 +335,7 @@ def test_removing_music_needs_its_package_and_model(tmp_path):
         echo = loc.request({"cmd": "x"})["echo"]
     finally:
         loc.stop()
-    assert echo == {"cmd": "x"}
+    assert {k: v for k, v in echo.items() if k != "id"} == {"cmd": "x"}
 
 
 def test_local_problems(tmp_path):

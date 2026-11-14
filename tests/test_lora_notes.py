@@ -312,7 +312,7 @@ def test_gallery_pictures_are_small_stills_from_civitai_only(tmp_path, monkeypat
     def urlopen(req, timeout):
         asked.append((req.full_url, dict(req.header_items())))
         return answers[0]
-    monkeypatch.setattr(LP.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(LP, "_open", urlopen)
     f = LP.fetch(pic, db)
     assert f == tmp_path / "civitai" / "pictures" / "5.jpg" and f.read_bytes() == b"JPEG"
     assert asked[0][0].endswith("/width=320/5.jpeg") and "Authorization" not in asked[0][1]     # (no API key)
