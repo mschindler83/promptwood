@@ -28,6 +28,7 @@ class CropView(QWidget):
         self.image, self.faces, self.crop = image, faces, crop
         self.setMinimumSize(560, 400)
         self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.StrongFocus)
         self._shown: QImage | None = None           # the picture scaled to the view (a big photo drags smoothly)
         self._drag: tuple[str, QPointF, tuple[int, int, int]] | None = None
 
@@ -125,7 +126,10 @@ class CropView(QWidget):
             return
         pos = e.position()
         if self._drag is None:
-            self.setCursor(Qt.SizeFDiagCursor if self._at_corner(pos) else Qt.ArrowCursor)
+            x, y, side = self.crop
+            inside = self._to_widget(x, y, side, side).contains(pos)
+            self.setCursor(Qt.SizeFDiagCursor if self._at_corner(pos) else Qt.SizeAllCursor if inside
+                           else Qt.ArrowCursor)
             return
         kind, start, (x, y, side) = self._drag
         s = self._frame()[0]
@@ -134,7 +138,7 @@ class CropView(QWidget):
             self.set_crop((round(x + dx), round(y + dy), side))
         else:                                       # the corner grows the square; its top-left stays
             limit = min(self.image.width() - x, self.image.height() - y)
-            self.set_crop((x, y, min(round(side + max(dx, dy)), limit)))
+            self.set_crop((x, y, min(round(side + (dx + dy) / 2), limit)))
 
     def mouseReleaseEvent(self, _e):
         self._drag = None
@@ -149,6 +153,27 @@ class CropView(QWidget):
         if new == side:                             # at the smallest / largest size: nothing moves
             return
         self.set_crop((round(x + (side - new) / 2), round(y + (side - new) / 2), new))
+        e.accept()
+
+    def keyPressEvent(self, e):
+        """Arrow keys move the square (Shift: 10 px), + and - resize it (the mouse is not needed)."""
+        if self.image.isNull():
+            return super().keyPressEvent(e)
+        x, y, side = self.crop
+        step = 10 if e.modifiers() & Qt.ShiftModifier else 1
+        moves = {Qt.Key_Left: (-step, 0), Qt.Key_Right: (step, 0), Qt.Key_Up: (0, -step), Qt.Key_Down: (0, step)}
+        if e.key() in moves:
+            dx, dy = moves[e.key()]
+            self.set_crop((x + dx, y + dy, side))
+        elif e.key() in (Qt.Key_Plus, Qt.Key_Minus, Qt.Key_Equal):
+            new = round(side * (1.07 if e.key() != Qt.Key_Minus else 0.93))
+            new = max(new, side + 1) if e.key() != Qt.Key_Minus else min(new, side - 1)
+            new = int(max(min(new, self.image.width(), self.image.height()),
+                          min(MIN_SIDE, self.image.width(), self.image.height())))
+            self.set_crop((round(x + (side - new) / 2), round(y + (side - new) / 2), new))
+        else:
+            return super().keyPressEvent(e)
+        e.accept()
 
 
 class _Loaded(QObject):

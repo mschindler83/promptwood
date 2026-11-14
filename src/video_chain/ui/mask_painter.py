@@ -5,7 +5,7 @@ Erase tool) takes it away; Ctrl + wheel changes the brush. The mask is kept at t
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QPointF, QRect, QRectF, Qt, Signal
+from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (QButtonGroup, QDialog, QDialogButtonBox, QHBoxLayout, QPushButton, QMessageBox,
                                QSlider, QVBoxLayout, QWidget)
@@ -100,11 +100,16 @@ class MaskCanvas(QWidget):
         """The image and the red mask at the frame's size. Strokes paint into the red picture themselves (`_dab`), so
         it is made anew only when the size changes or the mask is replaced (undo, clear, invert)."""
         size = self._frame().size().toSize()
-        if self._shown is None or self._shown[0] != size:      # the image at the frame's size, once per size
-            self._shown = (size, self.image.scaled(size, Qt.IgnoreAspectRatio, Qt.SmoothTransformation))
+        dpr = self.devicePixelRatioF()
+        dev = QSize(round(size.width() * dpr), round(size.height() * dpr))     # (device pixels: sharp on HiDPI)
+        if self._shown is None or self._shown[0] != (size, dpr):   # the image at the frame's size, once per size
+            shown = self.image.scaled(dev, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+            shown.setDevicePixelRatio(dpr)
+            self._shown = ((size, dpr), shown)
             self._tint = None
-        if self._tint is None or self._tint.size() != size:
-            self._tint = tinted(self.mask, size)
+        if self._tint is None or self._tint.size() != dev:
+            self._tint = tinted(self.mask, dev)
+            self._tint.setDevicePixelRatio(dpr)
 
     def paintEvent(self, _e):
         p = QPainter(self)
@@ -135,7 +140,7 @@ class MaskCanvas(QWidget):
         box = box.intersected(self.mask.rect())
         self._dirty = box if self._dirty is None else self._dirty.united(box)
         if self._tint is not None:                   # the same line into the red picture (no full re-scale)
-            k = self._tint.width() / self.image.width()
+            k = self._tint.width() / self._tint.devicePixelRatio() / self.image.width()    # (logical units)
             t = QPainter(self._tint)
             t.setRenderHint(QPainter.Antialiasing)
             t.setCompositionMode(QPainter.CompositionMode_Clear if erase else QPainter.CompositionMode_Source)
