@@ -61,3 +61,22 @@ class RunpodBinding:
 
 
 WorkerBinding = ComfyBinding | RunpodBinding
+
+
+@dataclass
+class ModelSwitch:
+    """ComfyUI changing from the clip model to the model of an editing window (an image edit, a replaced person):
+    the clip model is unloaded once, before the first job of the window, and the window says when its own model was
+    loaded (MWC-13: three windows had their own copy of this)."""
+    free: bool = False         # the clip model is still loaded: the first connection unloads it
+    loaded: bool = False       # a model of the window is loaded in ComfyUI now
+
+    def prepare(self, current: ComfyModel | None):
+        """(GUI thread, before each job) Does the clip model have to go? Once: after the first job it is gone."""
+        self.free = not self.loaded and current in CLIP_MODELS
+
+    def free_clip_model(self, editor):
+        """(worker thread, once connected) Unload the clip model if it is still there."""
+        if self.free:
+            editor.free()
+            self.free = False

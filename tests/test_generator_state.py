@@ -21,3 +21,25 @@ def test_a_comfy_binding_is_never_a_runpod_one():
     assert comfy != pod and not isinstance(comfy, RunpodBinding) and isinstance(pod, RunpodBinding)
     assert ComfyBinding("http://x", "/c", True) == comfy          # (a worker is reused when nothing changed)
     assert ComfyBinding("http://x", "/c", False) != comfy
+
+
+def test_model_switch_frees_the_clip_model_once():
+    from video_chain.ui.generator_state import ModelSwitch
+
+    class Editor:
+        freed = 0
+
+        def free(self):
+            self.freed += 1
+    sw = ModelSwitch()
+    sw.prepare(ComfyModel.H3)
+    ed = Editor()
+    sw.free_clip_model(ed)
+    sw.free_clip_model(ed)
+    assert ed.freed == 1                           # (the clip model goes once)
+    sw.loaded = True
+    sw.prepare(ComfyModel.H3)
+    assert not sw.free                             # (an image model is loaded already: nothing to unload)
+    other = ModelSwitch()
+    other.prepare(ComfyModel.LLM)
+    assert not other.free                          # (only the clip model is the generator's)

@@ -14,7 +14,7 @@ from .clip_dialogs import SplitDialog
 from .swap_dialog import SwapDialog
 from .video_editor import VideoRangeDialog, choose_video
 from .widgets import safe_emit
-from .generator_state import CLIP_MODELS
+from .generator_state import ModelSwitch
 from .ui_logic import DEFAULT_COMFY_URL, DEFAULT_SIZE
 
 
@@ -268,34 +268,30 @@ class VideosMixin:
         url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL)
         comfy_dir = os.path.expanduser(self.comfy_dir.text().strip()) or None
         cleanup = self.comfy_cleanup.isChecked()
-        switch = {"free": False, "loaded": False}
+        switch = ModelSwitch()
 
         def before():                               # GUI thread: the clip model makes room
             self._qwen_timer.stop()
-            switch["free"] = not switch["loaded"] and self._comfy_model in CLIP_MODELS
+            switch.prepare(self._comfy_model)
             if self.worker_alive and not self.running:
                 self._quit_worker(free=False)
 
         def connect(progress):                      # worker thread
             an = animate.ComfyAnimator(url, log=lambda _m: None, progress=progress, comfy_dir=comfy_dir,
                                        cleanup=cleanup)
-            switch["loaded"] = True                 # another model in ComfyUI now (unloaded after the window)
-            if switch["free"]:
-                an.free()
-                switch["free"] = False
+            switch.loaded = True                    # another model in ComfyUI now (unloaded after the window)
+            switch.free_clip_model(an)
             return an
 
         def describe_face(picture):                 # worker thread: the face details for the head swap
-            switch["loaded"] = True
+            switch.loaded = True
             return CMF.ComfyPromptRefiner(url, log=lambda _m: None, comfy_dir=comfy_dir, cleanup=cleanup).describe_face(
                 picture)
 
         def connect_h3(progress):                   # worker thread: the clip generator (H3 head swap)
             gen = CMF.ComfyGenerator(url, log=lambda _m: None, progress=progress, comfy_dir=comfy_dir, cleanup=cleanup)
-            if switch["free"]:
-                gen.free()
-                switch["free"] = False
-            switch["loaded"] = True
+            switch.free_clip_model(gen)
+            switch.loaded = True
             return gen
 
         dlg = SwapDialog(self, self.project, nid, self.project / node.made["video"], self.face_detector(), pictures,

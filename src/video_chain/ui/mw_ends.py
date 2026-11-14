@@ -14,7 +14,7 @@ from . import dialogs as D, shortcuts as S, image_picker as IP, prompt_refiner a
 from .clip_dialogs import HandoverDialog, VideoFrameDialog
 from .image_edit import ImageEditDialog, record_use
 from .video_editor import choose_video
-from .generator_state import CLIP_MODELS, ComfyModel
+from .generator_state import ComfyModel, ModelSwitch
 from .ui_logic import ASPECT_TOLERANCE, DEFAULT_COMFY_URL, label_loras, plural
 
 
@@ -110,32 +110,27 @@ class EndsMixin:
         comfy_dir = os.path.expanduser(self.comfy_dir.text().strip()) or None
         cleanup = self.comfy_cleanup.isChecked()
 
-        switch = {"free": False, "loaded": False}
+        switch = ModelSwitch()
 
         def before_edit():                          # GUI thread, before each Generate
             self._qwen_timer.stop()
             self.stop_llama("its memory is needed for the image")
-            # the clip model is loaded: unload it (once: after the first image of this window it is gone)
-            switch["free"] = not switch["loaded"] and self._comfy_model in CLIP_MODELS
+            switch.prepare(self._comfy_model)       # (the clip model is unloaded once, before the first image)
             if self.worker_alive and not self.running:
                 self._quit_worker(free=False)               # its model goes now; it is started again for clips
 
         def connect(progress):                      # worker thread
             ed = CMF.ComfyImageEditor(url, log=lambda _m: None, progress=progress, comfy_dir=comfy_dir, cleanup=cleanup)
-            if switch["free"]:
-                ed.free()
-                switch["free"] = False
-            switch["loaded"] = True
+            switch.free_clip_model(ed)
+            switch.loaded = True
             return ed
 
         def connect_create(progress):               # worker thread: the image creator (any image family)
             ed = imagegen.ComfyImageCreator(url, log=lambda _m: None, progress=progress, comfy_dir=comfy_dir,
                                             cleanup=cleanup)
-            if switch["free"]:
-                ed.free()
-                switch["free"] = False
+            switch.free_clip_model(ed)
             if progress is not None:                # (None: only listing the models)
-                switch["loaded"] = True             # an image model is loaded (unloaded before the next clips)
+                switch.loaded = True                # an image model is loaded (unloaded before the next clips)
             return ed
 
         def use(kind: str, png: str):
@@ -187,8 +182,8 @@ class EndsMixin:
     def edits_closed(self):
         """The edit dialog is closed: the image model stays loaded for the idle time ('Keep the model loaded'), else
         it is unloaded now."""
-        sw = self._edit_switch or {}
-        if sw.get("loaded"):                      # an image job connected (also when it finished after closing)
+        sw = self._edit_switch
+        if sw is not None and sw.loaded:                      # an image job connected (also when it finished after closing)
             self._comfy_model = ComfyModel.QWEN
         if self._comfy_model != ComfyModel.QWEN or self.running:
             return

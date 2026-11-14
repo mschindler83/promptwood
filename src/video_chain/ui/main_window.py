@@ -21,7 +21,7 @@ from .clip_dialogs import SplitDialog, VideoFrameDialog
 from .video_editor import VideoRangeDialog
 from .view_mode import ViewMode
 from .clip_cards import PromptCard, VideoCard
-from .generator_state import ComfyModel, Job, ModelState, Phase, WorkerBinding
+from .generator_state import ComfyModel, Job, ModelState, ModelSwitch, Phase, WorkerBinding
 from .mw_audio import AudioMixin
 from .mw_build import BuildMixin
 from .mw_cast import CastMixin
@@ -197,7 +197,7 @@ class MainWindow(BuildMixin, GeneratorMixin, ComfyMixin, ExportMixin, VideosMixi
     _exported = None
     _clip_started = _run_started = 0.0
     _clip_note = ""
-    _edit_switch: dict | None = None
+    _edit_switch: ModelSwitch | None = None
     _lora_misses: dict = {}
     _lora_hits: dict = {}
     _lora_scan_gen = 0
