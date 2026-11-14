@@ -16,10 +16,11 @@ import subprocess
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QIcon, QImage, QKeySequence, QPixmap, QShortcut
+from PySide6.QtGui import QIcon, QImage, QImageReader, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (QButtonGroup, QSlider, QStackedWidget, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
                                QFrame, QGridLayout, QHBoxLayout, QInputDialog, QLineEdit, QListWidget,
                                QFileDialog, QListWidgetItem, QMessageBox,
@@ -70,12 +71,38 @@ def scale_to(src: Path, dst: Path, size: tuple[int, int]) -> None:
         tmp.unlink(missing_ok=True)
 
 
-def upright(path) -> QImage:
-    """An image as ComfyUI's LoadImage sees it: turned by its EXIF orientation (phone photos)."""
+def _decode_upright(path) -> QImage:
     from PySide6.QtGui import QImageReader
     r = QImageReader(str(path))
     r.setAutoTransform(True)
     return r.read()
+
+
+_UPRIGHT: OrderedDict = OrderedDict()           # (path, mtime_ns, size) -> image: the last few pictures, decoded once
+_UPRIGHT_LOCK = threading.Lock()
+_UPRIGHT_KEEP = 3                               # (a big photo is tens of MB decoded)
+
+
+def upright(path) -> QImage:
+    """An image as ComfyUI's LoadImage sees it: turned by its EXIF orientation (phone photos). The latest few are
+    kept, so choosing, masking and browsing do not decode the same file again (a changed file is read anew)."""
+    try:
+        st = os.stat(path)
+        key = (str(path), st.st_mtime_ns, st.st_size)
+    except OSError:
+        return QImage()
+    with _UPRIGHT_LOCK:
+        hit = _UPRIGHT.get(key)
+        if hit is not None:
+            _UPRIGHT.move_to_end(key)
+            return hit
+    img = _decode_upright(path)
+    if not img.isNull():
+        with _UPRIGHT_LOCK:
+            _UPRIGHT[key] = img
+            while len(_UPRIGHT) > _UPRIGHT_KEEP:
+                _UPRIGHT.popitem(last=False)
+    return img
 
 
 def _mtime(p: Path) -> float:
@@ -978,7 +1005,7 @@ class ImageEditDialog(QDialog):
                                "not looked in).")
             self._select_source_item()
             return False
-        first = next((f for f in imgs if not upright(f).isNull()), None)
+        first = next((f for f in imgs if QImageReader(f).canRead()), None)
         if first is None:
             self.state.setText(f"None of the files in {Path(folder).name} could be read as an image.")
             self._select_source_item()
@@ -1268,7 +1295,7 @@ class ImageEditDialog(QDialog):
             png, meta = sel
             orig = meta.get("source_copy") or meta.get("source")
             show = orig if self.b_before.isChecked() and orig and Path(orig).is_file() else png
-            img = upright(show) if show != png else QImage(show)        # (a phone photo turned, like the result)
+            img = upright(show)                      # (a phone photo turned, like the result)
             self.view.set_image(img)
             how = (f"{FAMILIES.get(meta.get('family'), {}).get('label', '')} "
                    f"{FAMILIES.get(meta.get('family'), {}).get('qualities', {}).get(meta.get('quality'), '')}"

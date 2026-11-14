@@ -352,3 +352,29 @@ def test_project_edits_reads_each_record_once(tmp_path, monkeypatch):
     (edits / "r0.json").write_text(json.dumps({"prompt": "new, longer"}))      # a changed record is read again
     assert "new, longer" in [m["prompt"] for _p, m in IE.project_edits(tmp_path)]
     assert first
+
+
+def test_source_picture_is_decoded_once(app, tmp_path, monkeypatch):
+    """Setting a source, painting and setting a mask, and browsing results decoded the same file again and again."""
+    from PIL import Image
+
+    from video_chain.ui import image_edit as IE
+    src = tmp_path / "s.png"
+    Image.new("RGB", (64, 48), "blue").save(src)
+    reads = []
+    real = IE._decode_upright
+    monkeypatch.setattr(IE, "_decode_upright", lambda p: (reads.append(p), real(p))[1])
+    dlg = _dialog(tmp_path)
+    dlg.set_source(str(src))
+    from PySide6.QtGui import QImage
+    m = QImage(64, 48, QImage.Format_Grayscale8)
+    m.fill(255)
+    dlg.set_mask(m)
+    dlg.set_mask(None)
+    dlg.set_mask(m)
+    assert len(reads) == 1
+    Image.new("RGB", (64, 48), "red").save(src)                # the file changed: read again
+    os.utime(src, (time.time() + 5, time.time() + 5))
+    dlg.set_source(str(src))
+    assert len(reads) == 2
+    dlg.reject()
