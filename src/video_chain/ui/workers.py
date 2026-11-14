@@ -60,17 +60,27 @@ def _collect() -> None:
     gc.collect(2 if _gc_runs % 10 == 0 else 1)
 
 
-def _collect_on_the_gui_thread(parent: QObject) -> None:
+def _collect_on_the_gui_thread(parent: _Relay) -> None:
     """Python's automatic collector runs in whichever thread allocates: with workers running, a window that is
     cyclic garbage (its signal connections make cycles) was destroyed in a worker thread and Qt crashed. So the automatic
     collector is off and a timer of the GUI thread collects instead."""
     global _gc_timer
+    if _gc_timer is not None:
+        return
+    if QThread.currentThread() is not parent.thread():     # (first used from a worker: set up on the GUI thread,
+        _relay_call(parent, lambda: _collect_on_the_gui_thread(parent))   # a timer made here would never run)
+        return
     if _gc_timer is None:
-        gc.disable()
+        gc.disable()                                        # (only once the timer that replaces it exists)
         _gc_timer = QTimer(parent)
         _gc_timer.setInterval(_GC_MS)
         _gc_timer.timeout.connect(_collect)
         _gc_timer.start()
+
+
+def _relay_call(relay: _Relay, fn: Callable[[], None]) -> None:
+    """fn on the relay's (the GUI) thread, through its queued signal."""
+    relay.call.emit(fn)
 
 
 def _the_relay() -> _Relay:
