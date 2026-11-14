@@ -15,9 +15,10 @@ from .prompt_refiner import replace_text
 from .clip_cards import PromptCard
 from .project_dialogs import VariantsDialog
 from .ui_logic import FREEZE_TIP, plural, row_start_of, variant_strengths
+from .mw_host import MainWindowHost
 
 
-class NodeMixin:
+class NodeMixin(MainWindowHost):
     """What the node menu does: freeze, delete, branch, variants."""
 
     def node_action(self, action: str, nid: str | None):

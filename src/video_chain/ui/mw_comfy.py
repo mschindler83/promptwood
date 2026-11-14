@@ -16,9 +16,10 @@ from .theme import repolish
 from .widgets import safe_emit
 from .generator_state import ComfyModel, IMAGE_MODELS, ModelState
 from .ui_logic import CLOSE_GRACE, COMFY_START_TIMEOUT, DEFAULT_COMFY_LAUNCHER, DEFAULT_COMFY_URL
+from .mw_host import MainWindowHost
 
 
-class ComfyMixin:
+class ComfyMixin(MainWindowHost):
     """ComfyUI: poll, start, free its models, close the window."""
 
     def unload(self):

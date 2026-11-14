@@ -18,9 +18,10 @@ from .graph import START
 from .widgets import safe_emit
 from .project_dialogs import NewProjectDialog
 from .ui_logic import plural
+from .mw_host import MainWindowHost
 
 
-class ProjectMixin:
+class ProjectMixin(MainWindowHost):
     """Project files: new, open, save, copy, close."""
 
     # ---- new / open / save / close

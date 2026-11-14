@@ -8,9 +8,10 @@ from .. import runpod as RP, tree as T, triggers
 from . import ui_logic as UL
 from .ui_logic import (
     DEFAULT_COMFY_LAUNCHER, DEFAULT_COMFY_URL, LAYOUT_VERSION, LLM_DEFAULT_PORT, LLM_DEFAULT_SERVER, MAX_RECENT)
+from .mw_host import MainWindowHost
 
 
-class SettingsMixin:
+class SettingsMixin(MainWindowHost):
     """Window settings (QSettings), recent projects, the title."""
 
     # ------------------------------------------------------------------ settings

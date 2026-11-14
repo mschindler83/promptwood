@@ -14,9 +14,10 @@ from .clip_inputs import KIND_NAMES
 from .face_crop import FaceCropDialog
 from .clip_cards import PromptCard
 from .ui_logic import _SELECTED, plural
+from .mw_host import MainWindowHost
 
 
-class CastMixin:
+class CastMixin(MainWindowHost):
     """Characters and their references."""
 
     # ---- the cast (characters with face pictures, @Name in prompts)

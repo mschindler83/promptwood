@@ -13,9 +13,10 @@ from .widgets import safe_emit
 from .clip_cards import PromptCard
 from .mw_support import select_frames
 from .ui_logic import FRAME_CHOICES, speed_mode
+from .mw_host import MainWindowHost
 
 
-class OptionsMixin:
+class OptionsMixin(MainWindowHost):
     """The project's options widgets and the LoRA trigger words."""
 
     @staticmethod

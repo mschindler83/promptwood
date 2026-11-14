@@ -17,6 +17,7 @@ from .widgets import safe_emit
 from .generator_state import (
     CLIP_MODELS, ComfyBinding, ComfyModel, IMAGE_MODELS, Job, ModelState, Phase, RunpodBinding, WorkerBinding)
 from .ui_logic import CLOUD_KILL_GRACE_MS, DEFAULT_COMFY_URL, KILL_GRACE_MS, fmt_left, plural, time_left
+from .mw_host import MainWindowHost
 
 
 def step_status(nid: str, k: int, total: int, what: str, frac: float, left: float | None,
@@ -31,7 +32,7 @@ def step_status(nid: str, k: int, total: int, what: str, frac: float, left: floa
     return text
 
 
-class GeneratorMixin:
+class GeneratorMixin(MainWindowHost):
     """The generator worker: start, jobs, events, finish."""
 
     @property

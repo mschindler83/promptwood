@@ -13,6 +13,7 @@ from . import dialogs as D
 from .widgets import safe_emit
 from .ui_logic import (
     CLOSE_GRACE, DEFAULT_COMFY_URL, LLM_DEFAULT_SERVER, UNLOAD_TIMEOUT, VRAM_POLL_SECONDS, app_cache_dir)
+from .mw_host import MainWindowHost
 
 
 @dataclass
@@ -30,7 +31,7 @@ class KeyField:
     after: Callable[[str], None] | None = None      # after the status line
 
 
-class LlamaMixin:
+class LlamaMixin(MainWindowHost):
     """The local llama.cpp server and the API keys."""
 
     def llm_model_path(self) -> str:

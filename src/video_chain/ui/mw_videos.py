@@ -16,9 +16,10 @@ from .video_editor import VideoRangeDialog, choose_video
 from .widgets import safe_emit
 from .generator_state import ModelSwitch
 from .ui_logic import DEFAULT_COMFY_URL, DEFAULT_SIZE
+from .mw_host import MainWindowHost
 
 
-class VideosMixin:
+class VideosMixin(MainWindowHost):
     """Real videos in the chain: add, edit, convert, replace a person, split."""
 
     def _ask_video(self, parent: str | None):

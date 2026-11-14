@@ -13,9 +13,10 @@ from .. import chain, tree as T, tts as TTS
 from . import dialogs as D, image_picker as IP
 from .widgets import safe_emit
 from .ui_logic import AUDIO_REF_RANGE, plural
+from .mw_host import MainWindowHost
 
 
-class AudioMixin:
+class AudioMixin(MainWindowHost):
     """Voices, sounds and audio tracks."""
 
     # ---- a character's voice

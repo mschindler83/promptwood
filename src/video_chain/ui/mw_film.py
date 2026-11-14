@@ -12,9 +12,10 @@ from PySide6.QtWidgets import (
 from .. import chain, film as F, tree as T
 from . import dialogs as D, shortcuts as S
 from .widgets import format_time, label, safe_emit
+from .mw_host import MainWindowHost
 
 
-class FilmMixin:
+class FilmMixin(MainWindowHost):
     """The film: scenes, storyboard, joining the scenes."""
 
     def join_film(self, purpose: str = "play", out: Path | None = None):

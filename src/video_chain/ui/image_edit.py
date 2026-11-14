@@ -94,9 +94,16 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         self._restore(source, sources, mode)
 
     # ---- building the window
-    def _init_state(self, project: Path, connect, on_use, end_target, settings, places, start_comfy, on_start,
-                    known_loras, lora_dir, uses, refine, connect_create, family_loras, start_aspect, check_lora,
-                    use_triggers, collections):
+    def _init_state(self, project: Path, connect: Callable[[Callable | None], object],
+                    on_use: Callable[[str, str], bool], end_target: str | None, settings: QSettings | None,
+                    places: list[tuple[str, str]] | None, start_comfy: Callable[[], bool] | None,
+                    on_start: Callable[[], None] | None, known_loras: list[tuple[str, str]] | None, lora_dir: str,
+                    uses: Callable[[ResultRecord], list[str]] | None,
+                    refine: Callable[..., str | list[str] | None] | None,
+                    connect_create: Callable[[Callable | None], object] | None,
+                    family_loras: dict[str, list] | None, start_aspect: float | None,
+                    check_lora: Callable[[str | None], bool | None] | None, use_triggers: bool,
+                    collections: Callable[[], list] | None):
         self.project, self.connect_editor, self.on_use = Path(project), connect, on_use
         self.end_target, self.qs, self.places, self.start_comfy = end_target, settings, places or [], start_comfy
         self.on_start = on_start                         # called (GUI thread) before each Generate

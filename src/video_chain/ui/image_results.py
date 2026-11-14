@@ -16,9 +16,11 @@ from ..edits import ResultRecord
 from .imageio import upright
 from .lora_stack import lora_label
 from .results_gallery import badged, model_key, model_name, run_groups
+from .image_host import ImageEditHost
 
 
-class ResultsMixin:
+
+class ResultsMixin(ImageEditHost):
     # ---- results
     def _load_results(self, select: str | None = None, keep: bool = False):
         """The results with the filters applied: the strip below the large view and the gallery (grouped by

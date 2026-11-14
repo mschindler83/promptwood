@@ -12,9 +12,10 @@ from .. import chain, media, runpod as RP, tree as T
 from .theme import repolish
 from .widgets import format_time, safe_emit
 from .project_dialogs import ExportDialog
+from .mw_host import MainWindowHost
 
 
-class ExportMixin:
+class ExportMixin(MainWindowHost):
     """Joining and exporting a path, the GPU poll."""
 
     # ------------------------------------------------------------------ paths

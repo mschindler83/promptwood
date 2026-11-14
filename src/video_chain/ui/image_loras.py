@@ -11,9 +11,11 @@ from pathlib import Path
 from ..edits import LORA_FAMILY
 from ..triggers import stack_words
 from .lora_stack import lora_label
+from .image_host import ImageEditHost
 
 
-class LorasMixin:
+
+class LorasMixin(ImageEditHost):
     # ---- loras
     def _trigger_words(self, loras: list | None = None) -> list[str]:
         """The trigger words of the chosen LoRAs, or of `loras` [(path, strength)] (put before the prompt when the

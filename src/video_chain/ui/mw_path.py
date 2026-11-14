@@ -15,9 +15,10 @@ from .clip_cards import PromptCard, VideoCard
 from .ui_logic import (
     CARD_MIN_WIDTH, CONTINUE_CLASSIC_TIP, CONTINUE_FIRST_TIP, QWIDGETSIZE_MAX, STATE_TIP, THUMB_CACHE_MAX,
     TIMELINE_THUMB_HEIGHT, plural, row_start_of)
+from .mw_host import MainWindowHost
 
 
-class PathMixin:
+class PathMixin(MainWindowHost):
     """The path of cards and the timeline."""
 
     def _rebuild_path(self):

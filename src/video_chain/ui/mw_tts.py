@@ -11,9 +11,10 @@ from .tts_dialog import VoiceTtsDialog
 from .widgets import safe_emit
 from . import speak_dialog as SPD, tts_dialog as TD
 from .ui_logic import DEFAULT_COMFY_URL, app_cache_dir, plural
+from .mw_host import MainWindowHost
 
 
-class TtsMixin:
+class TtsMixin(MainWindowHost):
     """Text to speech and speaking a clip's lines."""
 
     def _tts_changed(self, *_):

@@ -15,9 +15,10 @@ from .widgets import safe_emit
 from . import ui_logic as UL
 from .clip_cards import PromptCard
 from .ui_logic import MAX_RECENT_LORAS, REMIX_DELAY_MS, STEPS_TIP, label_loras, plural
+from .mw_host import MainWindowHost
 
 
-class LorasMixin:
+class LorasMixin(MainWindowHost):
     """LoRAs: the list, the scan, the pickers."""
 
     def show_loras(self, current: str | None = None):

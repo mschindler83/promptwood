@@ -13,9 +13,11 @@ from ..edits import MOSS_EDIT_QUALITIES, QUALITY_TEXT, lora_note
 from ..imagegen import FAMILIES, size_for
 from .image_common import CREATE_HINT, PROMPT_HINT
 from .widgets import safe_emit
+from .image_host import ImageEditHost
 
 
-class ModelsMixin:
+
+class ModelsMixin(ImageEditHost):
     # ---- models
     def _mode_clicked(self, i: int):
         mode = "create" if i == 1 else "edit"

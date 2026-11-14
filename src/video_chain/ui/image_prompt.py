@@ -9,9 +9,11 @@ import random
 from .dialogs import confirm as ask
 from .image_common import MAX_RESULTS, SEED_MAX
 from .image_picker import pick_image
+from .image_host import ImageEditHost
 
 
-class PromptMixin:
+
+class PromptMixin(ImageEditHost):
     # ---- prompt
     def _negative_used(self) -> bool:
         """The negative prompt goes with the next Generate (create mode, its field shown for this model)."""

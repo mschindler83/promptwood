@@ -18,9 +18,10 @@ from .widgets import format_time
 from . import ui_logic as UL
 from .clip_cards import PromptCard
 from .ui_logic import REMIX_DELAY_MS, SourceSoundInfo, plain_problem, plural, row_start
+from .mw_host import MainWindowHost
 
 
-class InspectorMixin:
+class InspectorMixin(MainWindowHost):
     """Refresh, node states, problems and the texts of the cards."""
 
     def _stat(self, path) -> os.stat_result | None:

@@ -12,9 +12,11 @@ from .image_common import FOLDER_ITEM, FOLDER_PREFIX
 from .image_picker import IMAGE_EXTS, pick_image
 from .imageio import upright
 from .mask_painter import MaskPainterDialog, mask_area, overlay
+from .image_host import ImageEditHost
 
 
-class SourceMixin:
+
+class SourceMixin(ImageEditHost):
     # ---- source
     def _pick(self, title: str) -> str | None:
         return pick_image(self, title, self.qs, None, self.places,

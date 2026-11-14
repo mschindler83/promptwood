@@ -10,9 +10,11 @@ from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QGridLayout, QHBoxLayou
 
 from ..imagegen import FAMILIES, SAMPLERS, SCHEDULERS, default_sampling
 from .widgets import guard_wheel, icon_button, label
+from .image_host import ImageEditHost
 
 
-class SamplingMixin:
+
+class SamplingMixin(ImageEditHost):
     # ---- sampling
     def _build_sampling(self, cv):
         row = QHBoxLayout()

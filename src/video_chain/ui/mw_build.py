@@ -26,6 +26,7 @@ from .preview import Preview, StartTile
 from .ui_logic import (
     DEFAULT_COMFY_LAUNCHER, DEFAULT_COMFY_URL, FRAME_CHOICES, LLM_DEFAULT_PORT, LLM_DEFAULT_SERVER, STEPS_TIP,
     find_gguf_models, frames_text)
+from .mw_host import MainWindowHost
 
 
 def _panel() -> tuple[QWidget, QVBoxLayout]:
@@ -45,7 +46,7 @@ def _scrolled(w: QWidget) -> QScrollArea:
     return sa
 
 
-class BuildMixin:
+class BuildMixin(MainWindowHost):
     """The window's widgets."""
 
     # ------------------------------------------------------------------ layout

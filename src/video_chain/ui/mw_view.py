@@ -14,9 +14,10 @@ from .. import tree as T
 from . import shortcuts as S
 from .clip_cards import PromptCard
 from .ui_logic import COMFY_START_TIMEOUT, DEFAULT_COMFY_LAUNCHER, LAYOUTS, LAYOUT_VERSION, project_setting_changes
+from .mw_host import MainWindowHost
 
 
-class ViewMixin:
+class ViewMixin(MainWindowHost):
     """Simple / Advanced view, the guide, the engine banner, the menu and the panel layouts."""
 
     # ------------------------------------------------------------------ Simple / Advanced view

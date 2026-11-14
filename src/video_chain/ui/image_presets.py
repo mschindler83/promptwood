@@ -13,9 +13,11 @@ from ..imagegen import FAMILIES
 from .dialogs import confirm as ask, failed
 from .lora_stack import lora_label
 from .widgets import icon_button, label
+from .image_host import ImageEditHost
 
 
-class PresetsMixin:
+
+class PresetsMixin(ImageEditHost):
     # ---- presets
     def _build_presets(self, cv):
         row = QHBoxLayout()

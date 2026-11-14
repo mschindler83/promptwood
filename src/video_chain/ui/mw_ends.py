@@ -16,9 +16,10 @@ from .image_edit import ImageEditDialog, record_use
 from .video_editor import choose_video
 from .generator_state import ComfyModel, ModelSwitch
 from .ui_logic import ASPECT_TOLERANCE, DEFAULT_COMFY_URL, label_loras, plural
+from .mw_host import MainWindowHost
 
 
-class EndsMixin:
+class EndsMixin(MainWindowHost):
     """Start, end and key pictures of a clip, editing a picture, the clip's handover."""
 
     # ---- prompt refiner

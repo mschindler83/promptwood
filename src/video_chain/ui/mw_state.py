@@ -9,9 +9,10 @@ from .. import chain, swap, tree as T
 from . import dialogs as D, image_picker as IP, image_edit as IE
 from .graph import START
 from .image_edit import EDITS_DIR, project_edits, uses_of
+from .mw_host import MainWindowHost
 
 
-class StateMixin:
+class StateMixin(MainWindowHost):
     """The tree's state: saving, change marks, the start image."""
 
     def _uses(self, meta: dict) -> list[str]:
