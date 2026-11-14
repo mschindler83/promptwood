@@ -216,3 +216,64 @@ def test_speaking_does_not_stay_busy_when_it_cannot_start(app, win, tmp_path, im
     with pytest.raises(RuntimeError):
         win.speak_clip(ids[0])
     assert win._tts_busy is False
+
+
+# ---------------------------------------------------------------- UIM-26: one index per reload
+def test_the_uses_callback_builds_its_index_once_per_change(app, win, tmp_path, image, monkeypatch):
+    from video_chain.ui import main_window as M
+    ids = new_project(win, tmp_path, image, ("a",))
+    built = []
+    real = M.uses_index
+    monkeypatch.setattr(M, "uses_index", lambda tree: built.append(1) or real(tree))
+    for _ in range(5):
+        win._uses({"uses": []})
+    assert len(built) == 1
+    win.tree.nodes[ids[0]].end_image = "ends/x.png"
+    win._changed()                                  # something changed: the next question builds it again
+    win._uses({"uses": []})
+    assert len(built) == 2
+
+
+# ---------------------------------------------------------------- MWA-20: a file is looked at once per card update
+def test_cards_do_not_look_at_their_files_again_themselves(app, win, tmp_path, image, monkeypatch):
+    from PIL import Image
+    from test_ui import make_real_video
+    ids = new_project(win, tmp_path, image, ("a", "b"))
+    (win.project / "ends").mkdir(exist_ok=True)
+    Image.new("RGB", (64, 36), (9, 9, 9)).save(win.project / "ends" / "e.png")
+    win.tree.nodes[ids[0]].end_image = "ends/e.png"
+    src = make_real_video(tmp_path / "real.mp4")
+    v = win.add_video(ids[1], str(src), 0.0, 1.0)
+    wait(app, lambda: not win._converts)
+    watched = {str(win.project / "ends" / "e.png"): 0, str(src): 0}
+    real = os.stat
+
+    def counting(p, *a, **k):
+        if str(p) in watched:
+            watched[str(p)] += 1
+        return real(p, *a, **k)
+    monkeypatch.setattr(os, "stat", counting)
+    win._update_cards()
+    monkeypatch.setattr(os, "stat", real)
+    assert watched[str(win.project / "ends" / "e.png")] == 1, watched
+    assert watched[str(src)] == 1, watched
+
+
+# ---------------------------------------------------------------- UIL-27: a clip of the project is not probed again
+def test_the_frame_window_of_an_own_clip_does_not_probe(app, win, tmp_path, image, monkeypatch):
+    from video_chain import chain
+    from video_chain.ui import main_window as M
+    ids = new_project(win, tmp_path, image, ("a", "b"))
+    from test_ui import run_and_wait
+    run_and_wait(app, win, win.generate_path)
+    wait(app, lambda: not win._joins, timeout=30)
+    clip = win.project / win.tree.nodes[ids[0]].made["video"]
+    probed = []
+    real = chain.probe_source
+    monkeypatch.setattr(chain, "probe_source", lambda p: probed.append(p) or real(p))
+    monkeypatch.setattr(M.VideoFrameDialog, "exec", lambda self: 0)
+    win.end_from_video(ids[1], video=str(clip))
+    assert probed == []
+    dlg = win.end_from_video(ids[1], video=str(clip), dialog=False)
+    assert dlg is not None and dlg.frames == win.tree.nodes[ids[0]].made["frames"]
+    dlg.deleteLater()

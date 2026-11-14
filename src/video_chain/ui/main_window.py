@@ -60,7 +60,7 @@ from .face_crop import FaceCropDialog
 from .prompt_refiner import RefineDialog, replace_text
 from .speak_dialog import SpeakLinesDialog, run_dialog as run_speak_dialog
 from .tts_dialog import VoiceTtsDialog, run_dialog as run_voice_dialog
-from .image_edit import EDITS_DIR, ImageEditDialog, project_edits, record_use, uses_of
+from .image_edit import EDITS_DIR, ImageEditDialog, project_edits, record_use, uses_index, uses_of
 from .video_editor import VideoRangeDialog, choose_video
 from .theme import icon, repolish, theme
 from .widgets import FrameTile, VideoView, guard_wheel, icon_button, label, section_bar
@@ -1534,8 +1534,10 @@ class PromptCard(QFrame):
         self.b_end_ai.setEnabled(on and self._end_free)
         self.b_end_clear.setEnabled(on and self._has_end)
 
-    def set_end(self, image: Path | None, video_after: str | None, pixmap: QPixmap | None):
-        """How this clip ends: at the video after it, at its own end image, or freely."""
+    def set_end(self, image: Path | None, video_after: str | None, pixmap: QPixmap | None,
+                present: bool | None = None):
+        """How this clip ends: at the video after it, at its own end image, or freely. present: whether the end
+        image file exists (the window knows it from its one look at the file; None: this looks itself)."""
         self._end_free, self._has_end = video_after is None, image is not None
         self.b_end.setToolTip(END_TIP if video_after is None else
                               f"This clip ends at the first frame of video #{video_after[1:]}; remove that video "
@@ -1544,7 +1546,9 @@ class PromptCard(QFrame):
             self.end_text.setText(f"first frame of video #{video_after[1:]}"
                                   + (" (own end image not used)" if image is not None else ""))
         elif image is not None:
-            self.end_text.setText("own end image" if image.is_file() else "end image missing")
+            if present is None:
+                present = image.is_file()
+            self.end_text.setText("own end image" if present else "end image missing")
         else:
             self.end_text.setText("free")
         self.end_text.setToolTip(str(image) if image is not None else "")
@@ -1630,10 +1634,13 @@ class VideoCard(QFrame):
         self.set_source(node)
         self._restyle()
 
-    def set_source(self, node: T.Node):
+    def set_source(self, node: T.Node, present: bool | None = None):
+        """present: whether the video file exists (the window's one look at it; None: this looks itself)."""
         src = node.source or {}
         f = Path(src.get("file", ""))
-        self.file.setText(f.name + ("" if f.is_file() else "  (file not found)"))
+        if present is None:
+            present = f.is_file()
+        self.file.setText(f.name + ("" if present else "  (file not found)"))
         self.file.setToolTip(str(f))
         n = chain.range_frames(src.get("start", 0), src.get("end", 0))
         rot = T.source_rotation(src)
@@ -1901,6 +1908,7 @@ class MainWindow(QMainWindow):
         self.bridge.tts_log.connect(lambda m: (self.log.appendPlainText("TTS: " + m), self.status.setText(m + "…")))
         self._tts_local: TTS.LocalTTS | None = None
         self._tts_busy = False
+        self._uses_cache: tuple | None = None        # (tree, uses_index(tree)) until something changes
         self._notices: list[QMessageBox] = []        # non-blocking notices, kept until they are closed
         self._eleven_voices: list | None = None
         self.h3_loras: list[tuple[str, str]] = []
@@ -5727,8 +5735,16 @@ class MainWindow(QMainWindow):
         self.b_sound_del.setEnabled(idle and sel)
         self.b_sound_play.setEnabled(sel)
 
+    def _uses(self, meta: dict) -> list[str]:
+        """Where an image-edit result is used (the AI image window asks for every result of a reload): the index of
+        the project's end images and face pictures is built once until something changes (UIM-26)."""
+        if self._uses_cache is None or self._uses_cache[0] is not self.tree:
+            self._uses_cache = (self.tree, uses_index(self.tree))
+        return uses_of(self.project, self.tree, meta, self._uses_cache[1])
+
     def _changed(self):
         """Something the clips depend on changed: save soon and update the states."""
+        self._uses_cache = None
         self._save_timer.start()
         self._refresh_timer.start()
 
@@ -6111,6 +6127,7 @@ class MainWindow(QMainWindow):
         return self.live.get(nid) or self.status_of.get(nid, "new")
 
     def refresh(self, rebuild_path: bool = False):
+        self._uses_cache = None
         self._update_adv_note()                    # (cheap: the project's options against the defaults)
         if self.tree is None:
             self.graph.show_nodes([])
@@ -6730,9 +6747,10 @@ class MainWindow(QMainWindow):
             t += length
             st = self.state(n.id)
             if n.is_video:
-                card.set_source(n)
+                there = self._is_file(n.source["file"])
+                card.set_source(n, there)
                 step = ("will be converted again" if st == "changed" else
-                        "" if self._is_file(n.source["file"]) or st == "done" else "the video file is missing")
+                        "" if there or st == "done" else "the video file is missing")
             else:
                 why = self.why_of.get(n.id) if st == "changed" else ""
                 step = f"Will be made again: {why}." if why else ("will be made again" if st == "changed" else "")
@@ -6776,9 +6794,10 @@ class MainWindow(QMainWindow):
                 card.set_veda(self.veda_used(n))
                 end = self.project / n.end_image if n.end_image else None
                 if vc is not None:
-                    card.set_end(end, vc.id, self._pixmap(self.project / vc.made["first"]) if vc.made else None)
+                    card.set_end(end, vc.id, self._pixmap(self.project / vc.made["first"]) if vc.made else None,
+                                 end is not None and self._is_file(end))
                 else:
-                    card.set_end(end, None, self._pixmap(end))
+                    card.set_end(end, None, self._pixmap(end), end is not None and self._is_file(end))
                 card.set_keyframes(T.clip_length(self.tree, n) / chain.FPS,
                                    [{"at": k["at"], "pixmap": self._pixmap(self.project / k["image"]),
                                      "note": k["note"], "ok": self._is_file(self.project / k["image"])}
@@ -7545,7 +7564,7 @@ class MainWindow(QMainWindow):
         dlg = ImageEditDialog(self, self.project, sources, first, target, connect, use, self.qs,
                               self._picker_places(), start_comfy=self.start_comfy, on_start=before_edit,
                               known_loras=known, lora_dir=self._lora_dir(),
-                              uses=lambda meta: uses_of(self.project, self.tree, meta),
+                              uses=self._uses,
                               refine=self.refine_text, connect_create=connect_create, family_loras=family_loras,
                               start_aspect=aspect, mode=mode, check_lora=self.in_comfy_loras,
                               collections=self.project_images,
@@ -7717,6 +7736,19 @@ class MainWindow(QMainWindow):
         if f:
             self.set_end_image(nid, f)
 
+    def _known_info(self, video) -> dict | None:
+        """What the frame window needs to know of a video, when it is a clip of this project (the record of making it
+        has it: no ffprobe on the UI thread, UIL-27); None for any other file (the window reads it itself)."""
+        if self.tree is None or self.project is None:
+            return None
+        for n in self.tree.nodes.values():
+            m = n.made
+            if m and m.get("video") and m.get("frames") and str(self.project / m["video"]) == str(video):
+                key = m.get("key") or {}
+                return {"fps": float(chain.FPS), "frames": int(m["frames"]), "duration": int(m["frames"]) / chain.FPS,
+                        "width": key.get("width") or "?", "height": key.get("height") or "?"}
+        return None
+
     def end_from_video(self, nid: str, video: str | None = None, dialog: bool = True):
         """End image from a video: choose a video (the project's real videos and clips first, or any file), then
         one of its frames; that frame at the video's full size becomes the clip's end image."""
@@ -7735,7 +7767,8 @@ class MainWindow(QMainWindow):
             if not video:
                 return None
         try:
-            dlg = VideoFrameDialog(self, Path(video), f"End image of clip #{nid[1:]}: a frame of {Path(video).name}")
+            dlg = VideoFrameDialog(self, Path(video), f"End image of clip #{nid[1:]}: a frame of {Path(video).name}",
+                                   self._known_info(video))
         except (RuntimeError, OSError) as e:
             self.status.setText(f"Cannot read {Path(video).name}: {e}")
             return None
@@ -7848,7 +7881,7 @@ class MainWindow(QMainWindow):
         title = (f"Keep a moment of clip #{nid[1:]}: the frame to keep (it is pinned at its time)" if own else
                  f"Keyframe of clip #{nid[1:]} at {at:.2f} s: a frame of {Path(video).name}")
         try:
-            dlg = VideoFrameDialog(self, Path(video), title)
+            dlg = VideoFrameDialog(self, Path(video), title, self._known_info(video))
         except (RuntimeError, OSError) as e:
             self.status.setText(f"Cannot read {Path(video).name}: {e}")
             return None
