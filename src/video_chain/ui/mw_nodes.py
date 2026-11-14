@@ -193,6 +193,7 @@ class NodeMixin(MainWindowHost):
         if self.tree is None or self.running or nid not in self.tree.nodes:
             return []
         what = "video" if self.tree.nodes[nid].is_video else "clip"
+        assert self.project is not None
         why = T.freeze_problem(self.project, self.tree, nid)
         if why:
             self._report_error(f"Cannot freeze {what} #{T.short_id(nid)}: {why}.")
@@ -253,6 +254,7 @@ class NodeMixin(MainWindowHost):
         assert self.tree is not None
         vc = self.tree.video_child(source)
         if vc is not None and self.tree.can_add_video(target):
+            assert self.project is not None
             T.copy_video(self.project, self.tree, vc, target)
         try:
             T.copy_end_image(self.project, self.tree, source, target)
@@ -264,6 +266,7 @@ class NodeMixin(MainWindowHost):
         """A variant of a first clip with its own start image starts from its own copy of that picture."""
         try:
             assert self.tree is not None
+            assert self.project is not None
             T.copy_node_start(self.project, self.tree, source, target)
         except (OSError, RuntimeError, ValueError) as e:
             self._report_error(f"Could not copy the start image: {e}")
@@ -272,6 +275,7 @@ class NodeMixin(MainWindowHost):
         """Undo the edits of a made clip (prompt, seed, own settings, end image) so it counts as done again."""
         if self.tree is None or self.running or nid not in self.tree.nodes:
             return []
+        assert self.project is not None
         done = T.revert(self.project, self.tree, nid)
         if not done:
             return []

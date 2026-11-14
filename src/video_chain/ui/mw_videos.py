@@ -112,6 +112,7 @@ class VideosMixin(MainWindowHost):
             return
         node = self.tree.nodes[nid]
         try:
+            assert self.project is not None
             checker = T.Checker(self.project, self.tree)
             base = checker.base()
             if base is None or checker.status(nid) == "done" or not Path(node.source["file"]).is_file():
@@ -251,6 +252,7 @@ class VideosMixin(MainWindowHost):
         if node is None or not node.is_video or self.running:
             return None
         try:
+            assert self.project is not None
             done = T.Checker(self.project, self.tree).status(nid) == "done"
         except Exception:  # noqa: BLE001
             done = False
@@ -345,6 +347,7 @@ class VideosMixin(MainWindowHost):
             self.status.setText(f"Video #{T.short_id(nid)} is not converted yet; wait for it, then split it.")
             return None
         if at is None:
+            assert self.project is not None
             clip = self.project / node.made["video"]
             try:
                 frames = int(node.made.get("frames") or chain.probe(clip)["frames"])
@@ -394,6 +397,7 @@ class VideosMixin(MainWindowHost):
         if self.tree is None or nid not in self.tree.nodes:
             return
         n = self.tree.nodes[nid]
+        assert self.project is not None
         if n.made and (self.project / n.made["video"]).is_file():
             what = Path(n.source["file"]).name if n.is_video else n.prompt[:60]
             self.preview.open(self.project / n.made["video"],

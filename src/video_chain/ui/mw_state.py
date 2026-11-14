@@ -20,6 +20,7 @@ class StateMixin(MainWindowHost):
         the project's end images and face pictures is built once until something changes (UIM-26)."""
         if self._uses_cache is None or self._uses_cache[0] is not self.tree:
             self._uses_cache = (self.tree, IE.uses_index(self.tree))
+        assert self.project is not None
         return uses_of(self.project, self.tree, meta, self._uses_cache[1])
 
     def _changed(self):
@@ -45,10 +46,12 @@ class StateMixin(MainWindowHost):
             "changes since the last save?")
 
     def _stamp(self) -> tuple | None:
+        if self.project is None:
+            return None
         try:
             st = (self.project / T.TREE_FILE).stat()
             return st.st_mtime_ns, st.st_size
-        except (OSError, TypeError):
+        except OSError:
             return None
 
     def _say(self, msg: str):

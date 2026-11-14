@@ -186,6 +186,7 @@ class FilmMixin(MainWindowHost):
         if now == self._shared_sent:
             return
         try:
+            assert self.project is not None
             self.film.sync_shared(self.project, self.tree.options)
             self._shared_sent = now
         except (OSError, ValueError) as e:

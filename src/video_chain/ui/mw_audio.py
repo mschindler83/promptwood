@@ -145,6 +145,7 @@ class AudioMixin(MainWindowHost):
         before = self._done_clips()
         try:
             assert self.tree is not None
+            assert self.project is not None
             entry = T.set_voice(self.project, self.tree, c["name"], Path(path), start, label=label, end=end)
         except (ValueError, OSError, RuntimeError) as e:
             self._report_error(f"Could not set the voice: {e}")
@@ -171,6 +172,7 @@ class AudioMixin(MainWindowHost):
         before = self._done_clips()
         try:
             assert self.tree is not None
+            assert self.project is not None
             T.remove_voice(self.project, self.tree, c["name"])
         except (OSError, RuntimeError, ValueError) as e:
             self._report_error(f"Could not remove the voice: {e}")

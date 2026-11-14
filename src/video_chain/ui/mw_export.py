@@ -93,6 +93,7 @@ class ExportMixin(MainWindowHost):
             path = self.selected_path()
         if not path:
             return
+        assert self.project is not None
         default = str(self.project / f"{self.project.name}-{path[-1].id}{'-clip' if single else ''}.mp4")
         base = T.Checker(self.project, self.tree).base()
         strength = self.qs.value("refineStrength", "natural", type=str)
@@ -141,6 +142,7 @@ class ExportMixin(MainWindowHost):
             if node is None or not node.made:
                 return
             if size == "made":
+                assert self.project is not None
                 self._export_copy(single, self.project / node.made["video"], Path(out))
                 return
             target = single

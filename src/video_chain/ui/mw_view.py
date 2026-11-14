@@ -91,6 +91,7 @@ class ViewMixin(MainWindowHost):
         return set(d.get(self._guide_key(), [])) | set(d.get(str(self.project), []))    # (+ the key used before)
 
     def _guide_key(self) -> str:
+        assert self.project is not None
         return str(self.project.resolve())      # (the same folder spelled another way is the same project)
 
     def _guide_mark(self, what: str):

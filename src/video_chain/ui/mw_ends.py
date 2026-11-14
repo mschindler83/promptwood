@@ -202,6 +202,7 @@ class EndsMixin(MainWindowHost):
         if self.tree.video_child(nid) is not None:
             self.status.setText(f"Clip #{T.short_id(nid)} ends at the video after it; it hands over there.")
             return
+        assert self.project is not None
         if not node.made or not (self.project / node.made["video"]).is_file():
             self.status.setText(f"Make clip #{T.short_id(nid)} first; then choose the frame it hands over at.")
             return
@@ -227,6 +228,7 @@ class EndsMixin(MainWindowHost):
         node = self.tree.nodes[nid]
         if node.is_video:
             return False
+        assert self.project is not None
         if node.made and not node.made.get("frames") and (self.project / node.made["video"]).is_file():
             try:                                    # an older record: the real count, once
                 node.made["frames"] = chain.probe(self.project / node.made["video"])["frames"]
@@ -262,6 +264,7 @@ class EndsMixin(MainWindowHost):
         if self.tree.video_child(nid) is not None:
             self.status.setText(f"Clip #{T.short_id(nid)} ends at the first frame of the video after it.")
             return
+        assert self.project is not None
         start = str(Path(self.project / node.end_image).parent) if node.end_image else None
         f = IP.pick_image(self, f"End image of clip #{T.short_id(nid)} (the frame it steers its end to)", self.qs,
                           start,
@@ -285,6 +288,7 @@ class EndsMixin(MainWindowHost):
     def _choose_video_file(self, exclude: str | None = None) -> str | None:
         """Choose a video: the project's real videos and its made clips (not clip exclude) first, or any file."""
         assert self.tree is not None
+        assert self.project is not None
         clips = [(str(self.project / n.made["video"]), f"Clip #{T.short_id(n.id)} · {n.prompt[:40]}")
                  for n in sorted(self.tree.nodes.values(), key=lambda n: self.tree.number(n.id))
                  if not n.is_video and n.made and (self.project / n.made["video"]).is_file() and n.id != exclude]
@@ -341,6 +345,7 @@ class EndsMixin(MainWindowHost):
             if image is None:
                 if not self.tree.nodes[nid].end_image:
                     return False
+                assert self.project is not None
                 T.clear_end_image(self.project, self.tree, nid)
             else:
                 if QImage(image).isNull():
@@ -396,6 +401,7 @@ class EndsMixin(MainWindowHost):
                 self._set_keyframe(nid, None, at, note=text.strip(), index=i)
         elif act == "remove":
             try:
+                assert self.project is not None
                 T.remove_keyframe(self.project, self.tree, nid, i)
             except (ValueError, OSError, RuntimeError) as e:
                 self._report_error(f"Could not remove the keyframe: {e}")
@@ -411,6 +417,7 @@ class EndsMixin(MainWindowHost):
         assert self.tree is not None
         node = self.tree.nodes[nid]
         if own:
+            assert self.project is not None
             if not node.made or not (self.project / node.made["video"]).is_file():
                 self.status.setText(f"Clip #{T.short_id(nid)} is not made yet: there is no moment of it to keep.")
                 return None
@@ -459,6 +466,7 @@ class EndsMixin(MainWindowHost):
         frames = T.clip_length(self.tree, self.tree.nodes[nid])
         at = min((frames - 2) / chain.FPS, max(1 / chain.FPS, round(float(at) * chain.FPS) / chain.FPS))
         try:
+            assert self.project is not None
             T.set_keyframe(self.project, self.tree, nid, Path(image) if image else None, at, note, index)
         except (ValueError, OSError, RuntimeError) as e:
             self._report_error(f"Could not set the keyframe: {e}")
@@ -490,6 +498,7 @@ class EndsMixin(MainWindowHost):
                 node = tree.nodes[nid] = copy.copy(tree.nodes[nid])
                 src = node.source
                 node.source = T.video_source(file or src["file"], src["start"], src["end"], rotate)
+            assert self.project is not None
             base = T.Checker(self.project, tree).base()
             if base is not None:
                 return base["width"], base["height"]
@@ -527,6 +536,7 @@ class EndsMixin(MainWindowHost):
         if not images:
             return []
         try:
+            assert self.project is not None
             new = T.add_start_rows(self.project, self.tree, nid, [Path(f) for f in images])
         except (OSError, RuntimeError, ValueError) as e:
             self._report_error(f"Could not add the start images: {e}")
@@ -596,6 +606,7 @@ class EndsMixin(MainWindowHost):
             return False
         try:
             if clear:
+                assert self.project is not None
                 T.clear_node_start(self.project, self.tree, nid)
             else:
                 if image is None:

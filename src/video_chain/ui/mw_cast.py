@@ -89,6 +89,7 @@ class CastMixin(MainWindowHost):
         if not ok:
             return
         try:
+            assert self.project is not None
             c = T.add_character(self.project, self.tree, name, kind=kind)
         except ValueError as e:
             self._report_error(f"Could not add the {'character' if person else kind}: {e}")
@@ -182,6 +183,7 @@ class CastMixin(MainWindowHost):
         before = self._done_clips()
         try:
             assert self.tree is not None
+            assert self.project is not None
             T.remove_character(self.project, self.tree, c["name"])
         except (OSError, RuntimeError, ValueError) as e:
             self._report_error(f"Could not remove @{c['name']}: {e}")
@@ -236,6 +238,7 @@ class CastMixin(MainWindowHost):
         if self.tree is None:
             return 0
         try:
+            assert self.project is not None
             checker = T.Checker(self.project, self.tree)
             now = {n for n in self.tree.nodes if checker.status(n) == "done"}
         except Exception:  # noqa: BLE001
@@ -288,6 +291,7 @@ class CastMixin(MainWindowHost):
         if not rel:
             self.status.setText("That clip is not made yet.")
             return False
+        assert self.project is not None
         if self.add_reference(str(self.project / rel)):
             if not self._remade_note:                                          # keep the CHANGED count
                 self.status.setText(f"The {which} frame of #{T.short_id(nid)}: {self.status.text()}")
@@ -376,6 +380,7 @@ class CastMixin(MainWindowHost):
         if item is None or not self._cast_edit_ok():
             return
         rel = item.data(Qt.ItemDataRole.UserRole)
+        assert self.project is not None
         full = self.project / T.source_of(rel)
         whole = self._ref_word() == "picture"      # a place, object or style: its whole picture again, no window
         crop = None if whole else self.crop_face(str(full if full.is_file() else self.project / rel),
@@ -413,6 +418,7 @@ class CastMixin(MainWindowHost):
                 f"will count as CHANGED."):
             return
         try:
+            assert self.project is not None
             T.remove_picture(self.project, self.tree, rel)
         except (OSError, RuntimeError, ValueError) as e:
             self._report_error(f"Could not remove the {word}: {e}")

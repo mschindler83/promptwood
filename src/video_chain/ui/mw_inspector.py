@@ -74,6 +74,7 @@ class InspectorMixin(MainWindowHost):
             return
         if self.tree.options.get("audio_refs"):
             self._show_sound_info()                # how many clips name a sound (prompts change)
+        assert self.project is not None
         checker = T.Checker(self.project, self.tree)
         try:
             self.status_of = {nid: checker.status(nid) for nid in self.tree.nodes}
@@ -127,6 +128,7 @@ class InspectorMixin(MainWindowHost):
 
     def _frozen_note(self, n: T.Node) -> str:
         try:
+            assert self.project is not None
             return T.frozen_note(self.tree, n, T.Checker(self.project, self.tree).base())
         except Exception:  # noqa: BLE001  (an unreadable start image: no note)
             return ""
