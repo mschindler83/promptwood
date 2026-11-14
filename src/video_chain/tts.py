@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import math
 import os
 import queue
@@ -32,14 +33,16 @@ import uuid
 import wave
 from pathlib import Path
 
-from . import chain
+from . import chain, config, net
 from . import tree as T
 from .llm_server import rotate_log
+
+logger = logging.getLogger(__name__)
 
 APP_DIR = Path(__file__).resolve().parents[2]
 TTS_PYTHON = APP_DIR / ".venv-tts" / "bin" / "python"
 WORKER = Path(__file__).resolve().with_name("tts_worker.py")
-HF_CACHE = Path(os.environ.get("VIDEO_CHAIN_HF_CACHE") or "/path/to/ai/hf-models")
+HF_CACHE = config.hf_cache()
 QWEN_BASE = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
 QWEN_DESIGN = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
 WHISPER = "openai/whisper-large-v3-turbo"
@@ -331,7 +334,7 @@ class ElevenLabs:
         req = urllib.request.Request(self.url + path, data=body, headers=headers, method=method)
         for attempt in (0, 1):
             try:
-                with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                with net.urlopen(req, self.timeout) as r:
                     return r.read()
             except urllib.error.HTTPError as e:
                 if e.code == 429 and not attempt:        # slow down: wait as told (at most 30 s), ask once more

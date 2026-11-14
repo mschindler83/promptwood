@@ -9,6 +9,7 @@ written into the others (sync_shared), so every scene is made with the same peop
 A project from before scenes is a film with one scene: nothing on disk changes until a second scene is added."""
 from __future__ import annotations
 
+import logging
 import json
 import os
 import re
@@ -18,6 +19,8 @@ from pathlib import Path
 
 from . import chain
 from . import tree as T
+
+logger = logging.getLogger(__name__)
 
 FILM_FILE = "film.json"
 SCENES_DIR = "scenes"

@@ -5,6 +5,7 @@ The LoRA must be in one of ComfyUI's LoRA folders.
 """
 from __future__ import annotations
 
+import logging
 import argparse
 import json
 import os
@@ -18,6 +19,8 @@ from typing import Callable
 
 from . import chain
 from . import tree as treemod
+
+logger = logging.getLogger(__name__)
 
 
 def _positive(kind):

@@ -18,6 +18,7 @@ RunPod. Needs: ssh and ssh-keygen (OpenSSH) on this machine. Standard library on
 """
 from __future__ import annotations
 
+import logging
 import json
 import os
 import re
@@ -35,6 +36,10 @@ from pathlib import Path, PurePosixPath
 
 from .comfy import (SEEDVR_FULL_VRAM, SEEDVR_METHODS, SEEDVR_NODES, SEEDVR_PRECISION_FULL, SUBFOLDER, ComfyError,
                     ComfyGenerator)
+
+from . import net
+
+logger = logging.getLogger(__name__)
 
 API_URL = "https://api.runpod.io/v2"
 # RunPod's official PyTorch image (starts sshd from PUBLIC_KEY); CUDA 12.8 runs on Ampere, Ada, Hopper and Blackwell
@@ -134,7 +139,7 @@ class RunpodApi:
         for attempt in range(tries):
             req = urllib.request.Request(self.base + path, data=data, method=method, headers=headers)
             try:
-                with urllib.request.urlopen(req, timeout=timeout) as r:
+                with net.urlopen(req, timeout) as r:
                     body = r.read()
                     try:
                         return json.loads(body) if body.strip() else None
@@ -603,7 +608,7 @@ class RunpodSession:
                 err = self._tunnel_err.read().decode(errors="replace").strip()
                 raise RunpodError(f"the SSH tunnel to the pod ended: {err}")
             try:
-                with urllib.request.urlopen(url + "/system_stats", timeout=5) as r:
+                with net.urlopen(urllib.request.Request(url + "/system_stats"), 5) as r:
                     if r.status == 200:
                         self.url = url
                         self.note("RunPod: connected")

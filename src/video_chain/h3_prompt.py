@@ -71,9 +71,12 @@ The contract with the caller (tree.py), compose(body, ...):
 """
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import Callable, Iterable, Mapping
+
+logger = logging.getLogger(__name__)
 
 I2VA_HEADER = "For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced."
 FL2VA_HEADER = ("How the reference pictures align with the target video — Picture 1 (from Shot 1) aligns with the "

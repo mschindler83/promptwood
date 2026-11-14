@@ -12,6 +12,7 @@ import functools
 import http.client
 import io
 import json
+import logging
 import os
 import re
 import shutil
@@ -26,11 +27,15 @@ import weakref
 from pathlib import Path
 from typing import Sequence
 
+from . import config, net
+
+logger = logging.getLogger(__name__)
+
 from .comfy import clean_refined, refine_messages
 
 PREFIX = "llama:"                                # model ids of this backend in the refiner's list
 DEFAULT_PORT = 8091
-DEFAULT_SERVER = os.environ.get("VIDEO_CHAIN_LLAMA_SERVER") or "/path/to/ai/llama.cpp/build/bin/llama-server"
+DEFAULT_SERVER = config.llama_server()
 START_TIMEOUT = 600.0                            # a 25 GB model from a cold disk takes minutes
 CONTEXT = 16384                                  # a conversation with pictures (one ~1 MP picture: ~1-2k tokens)
 MAX_TOKENS = 1024                                # a prompt is a few hundred tokens; more means it rambles
@@ -261,7 +266,7 @@ def free_vram_mb() -> int | None:
         return None
 
 
-_LOOPBACK = urllib.request.build_opener(urllib.request.ProxyHandler({}))     # (a proxy setting must not catch 127.0.0.1)
+_LOOPBACK = net._DIRECT     # (a proxy setting must not catch 127.0.0.1)
 LOG_LIMIT = 5 * 1024 * 1024
 
 

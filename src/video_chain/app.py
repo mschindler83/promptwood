@@ -1,11 +1,14 @@
 """GUI entry point: video-chain-gui"""
 from __future__ import annotations
 
+import logging
 import shutil
 import signal
 import sys
 import threading
 import traceback
+
+logger = logging.getLogger(__name__)
 
 
 def _qt_error_relay():

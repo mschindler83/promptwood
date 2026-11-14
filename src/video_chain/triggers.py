@@ -21,6 +21,7 @@ unless chosen otherwise) is asked first and linked to; the other is asked when t
 cannot be reached."""
 from __future__ import annotations
 
+import logging
 import hashlib
 import json
 import os
@@ -32,6 +33,10 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Callable
+
+from . import net
+
+logger = logging.getLogger(__name__)
 
 RECHECK_DAYS = 30
 SITES = ("https://civitai.com", "https://civitai.red")    # CivitAI's two sites (the first is the default)
@@ -263,7 +268,7 @@ def _get_json(path: str, timeout: float, use_key: bool = True,
         data = None
         for attempt in (0, 1):
             try:
-                with urllib.request.urlopen(req, timeout=timeout) as r:
+                with net.urlopen(req, timeout) as r:
                     data = json.loads(r.read(MAX_ANSWER).decode("utf-8", "replace"))
                 break
             except urllib.error.HTTPError as e:

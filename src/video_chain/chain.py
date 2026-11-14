@@ -14,6 +14,7 @@ Output folder:
 """
 from __future__ import annotations
 
+import logging
 import hashlib
 import json
 import math
@@ -25,6 +26,8 @@ import subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Protocol
+
+logger = logging.getLogger(__name__)
 
 FPS = 24
 HYPERFLOW_STEPS = 8      # HyperFlow's trained sigma grid

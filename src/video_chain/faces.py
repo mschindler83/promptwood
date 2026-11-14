@@ -5,10 +5,13 @@ buffalo_l), run on the CPU with onnxruntime. Both are optional: without them the
 The picture is read with ffmpeg (scaled to fit the detector's 640 x 640), so no image library is needed."""
 from __future__ import annotations
 
+import logging
 import json
 import subprocess
 import threading
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 Box5 = tuple[float, float, float, float, float]    # x1, y1, x2, y2, score
 

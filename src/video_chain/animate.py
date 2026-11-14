@@ -5,11 +5,14 @@ keep everything else. Long clips are made in windows of 77 frames, each going on
 The generated frames are laid into the original ones along a soft edge of the head mask, at the clip's own size."""
 from __future__ import annotations
 
+import logging
 import math
 import uuid
 from pathlib import Path
 
 from .comfy import SUBFOLDER, ComfyError, ComfyGenerator, ComfyJobFailed, _combo_options, save_video
+
+logger = logging.getLogger(__name__)
 
 ANIMATE_NODES = ("WanAnimateToVideo", "TrimVideoLatent", "DWPreprocessor", "BlockifyMask", "DrawMaskOnImage",
                  "CLIPVisionEncode", "CLIPVisionLoader", "ModelSamplingSD3", "LoadVideo", "GetVideoComponents",

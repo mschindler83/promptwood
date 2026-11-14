@@ -17,7 +17,6 @@ from __future__ import annotations
 import functools
 import hashlib
 import http.client
-import ipaddress
 import json
 import logging
 import mimetypes
@@ -30,6 +29,10 @@ import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
+
+from . import net
+
+logger = logging.getLogger(__name__)
 
 try:
     import websocket  # websocket-client (optional: without it the result is polled)
@@ -135,7 +138,7 @@ def comfy_model_roots(comfy_dir: Path, kind: str) -> list[Path]:
             import yaml
             data = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
         except Exception as e:  # noqa: BLE001  (invalid yaml: only models/<kind>, but say why)
-            logging.getLogger(__name__).warning("%s is not readable: %s", cfg, e)
+            logger.warning("%s is not readable: %s", cfg, e)
             data = {}
         if not isinstance(data, dict):
             data = {}
@@ -518,14 +521,7 @@ class ComfyGenerator:
     # ---- HTTP
     def _open(self, req, timeout: float):
         """urlopen; LAN and loopback addresses never go through a proxy from the environment."""
-        host = urllib.parse.urlparse(self.url).hostname or ""
-        try:
-            local = host == "localhost" or "." not in host and ":" not in host or ipaddress.ip_address(host).is_private
-        except ValueError:
-            local = "." not in host
-        if local:
-            return urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=timeout)
-        return urllib.request.urlopen(req, timeout=timeout)
+        return net.urlopen(req, timeout)
 
     def _sleep(self, seconds: float) -> None:
         time.sleep(seconds)

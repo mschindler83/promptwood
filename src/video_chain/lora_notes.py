@@ -12,12 +12,15 @@ guidance() puts this into the refiner's instruction: the note when there is one 
 example prompts and the settings. The refiner takes wording from it, never content."""
 from __future__ import annotations
 
+import logging
 import html
 import re
 import time
 from collections import Counter
 from pathlib import Path
 from typing import Callable
+
+logger = logging.getLogger(__name__)
 
 NOTE_VERSION = 1            # raised when notes are asked for differently: every note is made once more
 NOTE_EXAMPLES = 20          # example prompts a note is written from (the most liked, each kind once)

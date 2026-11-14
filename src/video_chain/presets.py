@@ -3,6 +3,7 @@ scheduler), prompt variations and the LoRA's strength. Several per LoRA, kept in
 database), keyed by the LoRA's real path (a link and its target share them)."""
 from __future__ import annotations
 
+import logging
 import contextlib
 import fcntl
 import json
@@ -11,6 +12,8 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 FIELDS = ("prompt", "negative", "quality", "sampling", "strength", "family", "variations")
 

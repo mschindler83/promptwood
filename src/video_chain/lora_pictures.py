@@ -5,6 +5,7 @@ the gallery's text (prompts, settings); a picture is loaded only when the LoRA w
 Only CivitAI's picture server is asked, without the API key, and only for a picture address CivitAI gave."""
 from __future__ import annotations
 
+import logging
 import os
 import re
 import tempfile
@@ -14,6 +15,8 @@ import urllib.request
 from pathlib import Path
 
 from . import triggers
+
+logger = logging.getLogger(__name__)
 
 WIDTH = 320                      # pixels wide (CivitAI's server scales)
 MAX_BYTES = 4 * 2**20            # a small still is ~50 kB; more is not a still

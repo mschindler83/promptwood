@@ -18,6 +18,7 @@ Which model files a family uses is found in ComfyUI's lists (pick_files); a fami
 offered with the reason (e.g. FLUX.3 needs its gated download)."""
 from __future__ import annotations
 
+import logging
 import json
 import re
 import threading
@@ -27,6 +28,8 @@ from pathlib import Path
 
 from .comfy import (SUBFOLDER, ComfyError, ComfyGenerator, ComfyJobFailed, _combo_options, build_moss_workflow,
                     build_qwen21_workflow, is_qwen21_name, pick_moss_files, pick_qwen21_files)
+
+logger = logging.getLogger(__name__)
 
 QWEN_NEGATIVE = ("低分辨率，低画质，肢体畸形，手指畸形，画面过饱和，蜡像感，人脸无细节，过度光滑，画面具有AI感。构图混乱。文字模糊，扭曲")
 SDXL_NEGATIVE = ("lowres, worst quality, low quality, bad anatomy, bad hands, extra digits, fewer digits, jpeg artifacts, "

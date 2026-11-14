@@ -13,10 +13,13 @@ Combinations are counted like the node: the first variable changes fastest (mixe
 Each combination can be used `repeat` times in a row (the node's repeat_count; each image gets its own seed)."""
 from __future__ import annotations
 
+import logging
 import json
 import random
 import re
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 NAME = r"[A-Za-z_][\w-]*"
 _COND = re.compile(r"\{\?(" + NAME + r")\|((?:[^{}]|\{" + NAME + r"\})*)\}")

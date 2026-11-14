@@ -47,6 +47,7 @@ and is made again when a path through it is generated. Other branches are not to
 """
 from __future__ import annotations
 
+import logging
 import contextlib
 import copy
 import json
@@ -68,6 +69,8 @@ except ImportError:                                  # (Windows)
 from . import camera as _camera
 from . import chain
 from . import h3_prompt as _h3
+
+logger = logging.getLogger(__name__)
 
 TREE_FILE = "tree.json"
 TREE_VERSION = 3
