@@ -1,12 +1,14 @@
 """@mentions of the cast in prompt editors: a list of names while typing @..., known names highlighted, unknown
-ones marked. #camera tokens likewise (camera.py: #push-in-slow ...): offered while typing #, known ones highlighted."""
+ones marked. #camera tokens likewise (camera.py: #push-in-slow ...): offered while typing #, in plain words ("Push in,
+slow"; what is typed still matches the token), known ones highlighted."""
 from __future__ import annotations
 
 import re
 from typing import Callable
 
-from PySide6.QtCore import QEvent, QObject, QStringListModel, Qt
-from PySide6.QtGui import QFont, QSyntaxHighlighter, QTextCharFormat, QTextCursor
+from PySide6.QtCore import QEvent, QObject, Qt
+from PySide6.QtGui import (QFont, QStandardItem, QStandardItemModel, QSyntaxHighlighter, QTextCharFormat,
+                           QTextCursor)
 from PySide6.QtWidgets import QCompleter, QPlainTextEdit
 
 from .. import camera as CAM
@@ -15,6 +17,7 @@ from .theme import theme
 
 _TYPING = re.compile(r"(?<![\w@])@(\w[\w-]*)?$")      # an @mention being typed right before the cursor
 _TYPING_CAM = re.compile(r"(?<![\w#&/])#([A-Za-z][\w-]*)?$")   # a #camera token being typed
+INSERT = Qt.UserRole + 1                               # the list's role with the text that is put in (its match too)
 
 
 class MentionHighlighter(QSyntaxHighlighter):
@@ -45,15 +48,16 @@ class MentionHighlighter(QSyntaxHighlighter):
 
 class MentionHelper(QObject):
     """Typing @ (and the first letters of a name) in the editor offers the cast's names; Enter / Tab / a click
-    puts the whole name in."""
+    puts the whole name in. Typing # offers the camera moves, shown in plain words, and puts the token in."""
 
     def __init__(self, edit: QPlainTextEdit, names: Callable[[], list[str]]):
         super().__init__(edit)
         self.edit, self.names = edit, names
         self._kind = "@"                           # what is being typed: "@" a cast name, "#" a camera token
         self.highlighter = MentionHighlighter(edit.document(), names)
-        self.model = QStringListModel(self)
+        self.model = QStandardItemModel(self)
         self.completer = QCompleter(self.model, self)
+        self.completer.setCompletionRole(INSERT)          # matched and put in: the name / the token
         self.completer.setWidget(edit)
         self.completer.setCaseSensitivity(Qt.CaseInsensitive)
         self.completer.setCompletionMode(QCompleter.PopupCompletion)
@@ -80,7 +84,7 @@ class MentionHelper(QObject):
             popup.hide()
             return
         prefix = m.group(1) or ""
-        self.model.setStringList(names)
+        self._fill(names)
         self.completer.setCompletionPrefix(prefix)
         n = self.completer.completionCount()
         if n == 0 or (n == 1 and self.completer.currentCompletion().lower() == prefix.lower()):
@@ -90,6 +94,22 @@ class MentionHelper(QObject):
         rect = self.edit.cursorRect()
         rect.setWidth(max(160, popup.sizeHintForColumn(0) + popup.verticalScrollBar().sizeHint().width() + 16))
         self.completer.complete(rect)
+
+    def _fill(self, names: list[str]):
+        """The list: cast names as they are, camera tokens in plain words (the token in the tooltip)."""
+        self.model.clear()
+        for name in names:
+            words = CAM.label(name) if self._kind == "#" else None
+            it = QStandardItem(words or name)
+            it.setData(name, INSERT)
+            if words:
+                it.setToolTip(f"#{name}")
+            self.model.appendRow(it)
+
+    def offered(self) -> list[tuple[str, str]]:
+        """What the list offers now: (shown text, put-in text) (for tests and tools)."""
+        cm = self.completer.completionModel()
+        return [(cm.index(r, 0).data(), cm.index(r, 0).data(INSERT)) for r in range(cm.rowCount())]
 
     def _insert(self, name: str):
         m = self._typed()
@@ -109,7 +129,7 @@ class MentionHelper(QObject):
             if ev.key() in (Qt.Key_Enter, Qt.Key_Return, Qt.Key_Tab, Qt.Key_Backtab):
                 idx = self.completer.popup().currentIndex()
                 if idx.isValid():
-                    self._insert(idx.data())
+                    self._insert(idx.data(INSERT))
                 return True
             if ev.key() == Qt.Key_Escape:
                 self.completer.popup().hide()

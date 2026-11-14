@@ -109,6 +109,16 @@ def tokens() -> list[str]:
     return out
 
 
+def label(token: str) -> str | None:
+    """A token in plain words for menus and the # list: 'push-in-small-slow' -> 'Push in, small, slow' (None: not a
+    camera token)."""
+    p = parse(token)
+    if p is None:
+        return None
+    move, amplitude, speed = p
+    return ", ".join([MOVES[move][0]] + [x for x in (amplitude, speed) if x])
+
+
 def is_token(token: str) -> bool:
     return parse(token) is not None
 

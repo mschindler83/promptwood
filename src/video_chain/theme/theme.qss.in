@@ -43,6 +43,11 @@ QLabel[role="statusTag"][state="done"] { background: ${positive@.15}; color: ${p
 QLabel[role="statusTag"][state="missing"] { background: ${warning@.15}; color: ${warning}; }
 QLabel[role="statusTag"][state="failed"] { background: ${negative@.15}; color: ${negative}; }
 QToolButton[severity="warning"] { color: ${warning}; background: transparent; }
+/* notices where the user is: the guide, the engine banner, a clip's problems (severity: warning / error) */
+QFrame[role="notice"] { background: ${bgRaised}; border: 1px solid ${lineSubtle}; border-radius: ${radius.r2}px; }
+QFrame[role="notice"][severity="warning"] { background: ${warning@.10}; border: 1px solid ${warning@.45}; }
+QFrame[role="notice"][severity="error"] { background: ${negative@.10}; border: 1px solid ${negative@.45}; }
+QFrame[role="notice"] QLabel { background: transparent; border: none; }
 
 /* ---- menu bar and menus ---- */
 QMenuBar { background: ${bgApp}; color: ${textSecondary}; spacing: 2px; }
@@ -307,6 +312,7 @@ QToolButton#workspaceButton::menu-indicator { image: url(${icon:chd:textTertiary
 QToolButton[role="iconButton"] { background: transparent; border: none; border-radius: ${radius.r2}px; min-width: 24px; max-width: 24px;
                                  min-height: 24px; max-height: 24px; padding: 0; }
 QToolButton[role="iconButton"]:hover { background: ${white@.045}; }
+QToolButton[role="textButton"] { padding: 2px 3px; min-height: 20px; font-size: ${font.small}px; }     /* small text buttons in a narrow row */
 QToolButton[role="iconButton"]:checked { background: ${accentMuted}; }
 
 /* ---- context tool bar (.ctx / .ctx-tool / .seg / target chip) ---- */

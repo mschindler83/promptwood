@@ -13,6 +13,7 @@ import copy
 import json
 import os
 import random
+import re
 import shutil
 import sys
 import threading
@@ -58,6 +59,8 @@ from .video_editor import VideoRangeDialog, choose_video
 from .theme import icon, repolish, theme
 from .widgets import FrameTile, VideoView, guard_wheel, icon_button, label, section_bar
 from .view_mode import AdvancedNote, ViewMode, row_widget
+from .problems import EXAMPLES, ProblemBox, add_example, camera_menu_items, insert_at_cursor
+from .guide import EngineBanner, GuidePanel, NextHint
 
 DEFAULT_COMFY_URL = "http://127.0.0.1:8188"
 from ..llm_server import DEFAULT_PORT as LLM_DEFAULT_PORT, DEFAULT_SERVER as LLM_DEFAULT_SERVER  # noqa: E402
@@ -358,9 +361,10 @@ class ExportDialog(QDialog):
 
     def __init__(self, parent, default: str, made_size: tuple[int, int] | None, refined,
                  swapped: int = 0, strength: str = "natural", method: str = "seedvr2_7b", denoise: bool = False,
-                 cloud: bool | None = None, cloud_on: bool = False):
+                 cloud: bool | None = None, cloud_on: bool = False, simple: bool = False):
         """cloud: None without a RunPod API key (the option is shown greyed), else whether it can be used;
-        cloud_on: its last choice."""
+        cloud_on: its last choice. simple: the Simple view, where cloud upscaling is offered only once it is set up
+        (its settings are in the Advanced view)."""
         super().__init__(parent)
         self.setWindowTitle("Export path")
         self.cloud_ok = cloud
@@ -415,6 +419,10 @@ class ExportDialog(QDialog):
             "the second. Settings → Cloud upscaling (RunPod)" if cloud is not None else
             "Needs a RunPod API key: Settings → Cloud upscaling (RunPod)")
         f.addRow("", self.cloud)
+        if simple and cloud is None:               # not set up: not offered; where to set it up is in the tooltip
+            f.setRowVisible(self.cloud, False)
+            self.size.setToolTip(self.size.toolTip() + ". Upscaling on a cloud GPU (RunPod) can be set up in the "
+                                 "Advanced view (View → Advanced view, then Settings → Preferences)")
         self.strength = QComboBox()
         for key, text in (("soft", "Soft — calm, little new detail"),
                           ("natural", "Natural — clean, keeps the person (default)"),
@@ -550,6 +558,16 @@ class _CurrentStack(QStackedWidget):
         return w.minimumSizeHint() if w is not None else super().minimumSizeHint()
 
 
+def plain_problem(raw: str, nid: str) -> str:
+    """A check's message about one clip as a sentence on that clip's card ("clip #3 is shorter …" -> "This clip is
+    shorter …")."""
+    num = nid[1:]
+    t = raw.replace(f"clip #{num}'s", "this clip's").replace(f" (clip #{num})", "").replace(f"clip #{num}", "this clip")
+    t = " ".join(t.split())
+    t = t[:1].upper() + t[1:]
+    return t if t.endswith((".", "?", "!")) else t + "."
+
+
 def project_setting_changes(o: dict) -> list[tuple[str, str]]:
     """The project's settings (tree.options) that differ from a new project's (tree.DEFAULT_OPTIONS) and change how
     its clips are made: [(key, name shown)]. A setting that has no effect now (the steps in a speed mode with its
@@ -648,10 +666,12 @@ class PromptCard(QFrame):
     play = Signal(str)
     leadChanged = Signal(str, bool)            # node id, the lead switch (the lead chip)
     modelPrompt = Signal(str)                  # node id: show the exact prompt the model gets
+    fix = Signal(str, str)                     # what to fix (a problem's action, "cast" …), node id
 
     def __init__(self, node: T.Node, parent=None, names=lambda: [], view: ViewMode | None = None):
         super().__init__(parent)
         self.nid = node.id
+        self.names = names
         self.setObjectName("promptCard")
         self.setAttribute(Qt.WA_StyledBackground)
         self.setFixedWidth(CARD_WIDTH)
@@ -706,8 +726,8 @@ class PromptCard(QFrame):
         self.thumb.clicked.connect(lambda _t: self.play.emit(self.nid))
         v.addWidget(self.thumb)
         self.edit = QPlainTextEdit(node.prompt)
-        self.edit.setPlaceholderText("What happens in this clip? It starts from the last frame of the clip before "
-                                     "(and ends at the first frame of a real video after it).")
+        self.edit.setPlaceholderText("What happens in this clip? It starts from the last frame of the clip before.\n"
+                                     "Type @ for a person or place; the Camera button adds a camera move.")
         self.edit.setTabChangesFocus(True)
         self.edit.setMinimumHeight(96)
         v.addWidget(self.edit, 1)
@@ -720,15 +740,51 @@ class PromptCard(QFrame):
         self.chips.leadToggled.connect(lambda on: self.leadChanged.emit(self.nid, on))
         self.chips.promptWanted.connect(lambda: self.modelPrompt.emit(self.nid))
         v.addWidget(self.chips)
+        # under the prompt: put in a person or place, a camera move, an example; Refine
         foot = QHBoxLayout()
-        self.words = label("", level="tertiary")
-        foot.addWidget(self.words)
+        foot.setSpacing(2)
+        self.b_mention = self._text_button("@ Person or place", "Put a person or place from Cast & references into "
+                                           "the description at the cursor (as @Name)")
+        self.mention_menu = QMenu(self.b_mention)          # (filled when shown: the cast changes)
+        self.b_mention.clicked.connect(self._mention_clicked)
+        self.b_camera = self._text_button("Camera", "Put a camera move into the description at the cursor (as a "
+                                          "#word; the model gets it as a sentence, e.g. “the camera pushes in at "
+                                          "slow speed”)")
+        self.camera_menu = QMenu(self.b_camera)
+        for text, variants in camera_menu_items():
+            sub = self.camera_menu.addMenu(text) if len(variants) > 1 else self.camera_menu
+            for words, token in variants:
+                a = sub.addAction(words)
+                a.setToolTip(f"#{token}")
+                a.triggered.connect(lambda _=False, t=token: self.insert_text(f"#{t}"))
+        self.b_camera.setMenu(self.camera_menu)
+        self.b_camera.setPopupMode(QToolButton.InstantPopup)
+        self.b_examples = self._text_button("Examples", "Example descriptions: one replaces an empty description, "
+                                            "else it is added at the end (Ctrl+Z takes it back)")
+        self.examples_menu = QMenu(self.b_examples)
+        for ex in EXAMPLES:
+            a = self.examples_menu.addAction(ex if len(ex) <= 60 else ex[:57].rstrip() + " …")
+            a.setToolTip(ex)
+            a.triggered.connect(lambda _=False, t=ex: self.add_example(t))
+        self.b_examples.setMenu(self.examples_menu)
+        self.b_examples.setPopupMode(QToolButton.InstantPopup)
+        for b in (self.b_mention, self.b_camera, self.b_examples):
+            foot.addWidget(b)
+        foot.addStretch(1)
         self.b_refine = icon_button("gen", "Refine: a language model rewrites this prompt with more detail (motion, "
                                            "camera, sound); you see the new version before it is used")
         self.b_refine.setText("Refine")
+        self.b_refine.setProperty("role", "textButton")     # (an icon button's fixed 24 px would cut its name off)
         self.b_refine.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.b_refine.clicked.connect(lambda: self.action.emit("refine", self.nid))
         foot.addWidget(self.b_refine)
+        v.addLayout(foot)
+        self.problems = ProblemBox(self)             # what blocks the clip / what went wrong, with what to do
+        self.problems.wanted.connect(lambda a: self.fix.emit(a, self.nid))
+        v.addWidget(self.problems)
+        foot = QHBoxLayout()
+        self.words = label("", level="tertiary")
+        foot.addWidget(self.words)
         foot.addStretch(1)
         self.veda_mark = label("⚡ Veda", level="tertiary")
         self.veda_mark.setToolTip("This clip is large enough for Veda sparse attention: it is made with it (much "
@@ -1018,6 +1074,46 @@ class PromptCard(QFrame):
     def text(self) -> str:
         return " ".join(self.edit.toPlainText().split())
 
+    @staticmethod
+    def _text_button(text: str, tip: str) -> QToolButton:
+        b = QToolButton()
+        b.setProperty("role", "textButton")
+        b.setText(text)
+        b.setToolTip(tip)
+        b.setAutoRaise(True)
+        b.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        b.setCursor(Qt.PointingHandCursor)
+        return b
+
+    def _fill_mentions(self) -> list[str]:
+        """The @ menu: the cast's names now."""
+        self.mention_menu.clear()
+        names = list(self.names())
+        for name in names:
+            act = self.mention_menu.addAction(f"@{name}")
+            act.triggered.connect(lambda _=False, n=name: self.insert_text(f"@{n}"))
+        return names
+
+    def _mention_clicked(self):
+        """@ Person or place: the cast's names to put in; without any, Cast & references opens to add one."""
+        if not self._fill_mentions():
+            self.fix.emit("cast_new", self.nid)
+            return
+        self.mention_menu.popup(self.b_mention.mapToGlobal(self.b_mention.rect().bottomLeft()))
+
+    def insert_text(self, text: str):
+        """Put a @Name or #camera token in at the cursor (one step Ctrl+Z takes back)."""
+        if not self.edit.isReadOnly():
+            insert_at_cursor(self.edit, text)
+
+    def add_example(self, text: str):
+        if not self.edit.isReadOnly():
+            add_example(self.edit, text)
+
+    def set_problems(self, items: list[dict]):
+        """What blocks this clip or went wrong when it was made, each with what to do (ProblemBox)."""
+        self.problems.set_items(items)
+
     def random_seed(self):
         """A new random seed in the field (new_seed(): one no other clip has, else any)."""
         self.seed.setValue(self.new_seed() if self.new_seed is not None else random.randint(1, T.SEED_MAX))
@@ -1063,7 +1159,7 @@ class PromptCard(QFrame):
         edit = self._on and not self.frozen
         self.edit.setReadOnly(not edit)
         for w in (self.seed, self.b_seed, self.length, self.steps, self.loras, self.guide, self.src_sound,
-                  self.sound_over, self.b_refine, self.b_speak):
+                  self.sound_over, self.b_refine, self.b_speak, self.b_mention, self.b_camera, self.b_examples):
             w.setEnabled(edit)
         self._enable_speak()
         for b in self.chips.chips:                 # (the lead chip is an own setting of the clip)
@@ -1618,6 +1714,8 @@ class MainWindow(QMainWindow):
         self.comfy_up: bool | None = None
         self._comfy_polling = False
         self._comfy_starting = 0.0
+        self._failures: dict[str, dict] = {}    # clip -> what went wrong when it was made (on its card until it is
+        #                                         made again or edited)
         self._waiting_comfy: list[str] | None = None   # targets to generate once ComfyUI answers
         # the model this app last used in ComfyUI ("h3" clips, "qwen" image edits, None: none / unloaded). ComfyUI
         # is asked to unload only when it changes: switching models frees the other one first instead of letting
@@ -2408,6 +2506,33 @@ class MainWindow(QMainWindow):
         self.b_fit.clicked.connect(lambda: self.graph.fit())
         bh.addWidget(self.b_fit)
         gv.addWidget(bar)
+        # above the clips: the engine banner (engine not reachable), the guide (no made clip yet), the one-time
+        # "how to go on" line (after the first made clip)
+        notes = QVBoxLayout()
+        notes.setContentsMargins(6, 6, 6, 0)
+        notes.setSpacing(6)
+        self.engine_banner = EngineBanner()
+        self.engine_banner.button.clicked.connect(self._engine_banner_clicked)
+        self.engine_banner.hide()
+        self.guide_panel = GuidePanel()
+        self.guide_panel.hideWanted.connect(lambda: self.show_guide(False))
+        self.guide_panel.b_new.clicked.connect(self.new_project)
+        self.guide_panel.b_open.clicked.connect(self._choose_project)
+        self.guide_panel.b_picture.clicked.connect(self._choose_image)
+        self.guide_panel.b_text_only.clicked.connect(self._guide_text_only)
+        self.guide_panel.b_cast.clicked.connect(self._guide_cast)
+        self.guide_panel.b_skip_cast.clicked.connect(lambda: self._guide_mark("no_cast"))
+        self.guide_panel.b_write.clicked.connect(self._guide_write)
+        self.guide_panel.b_show_gen.clicked.connect(lambda: self.b_gen.setFocus(Qt.OtherFocusReason))
+        self.guide_panel.hide()
+        self.next_hint = NextHint()
+        self.next_hint.b_next.clicked.connect(lambda: self.node_action("continue", self.target_id()))
+        self.next_hint.closeWanted.connect(self._next_hint_done)
+        self.next_hint.hide()
+        for w in (self.engine_banner, self.guide_panel, self.next_hint):
+            notes.addWidget(w)
+        gv.addLayout(notes)
+        self._guide_ready = False                  # every needed step of the guide is done (Generate is next)
         self.graph = GraphView()
         self.graph.selected.connect(self._graph_clicked)
         self.graph.activated.connect(self._activate)
@@ -2612,6 +2737,7 @@ class MainWindow(QMainWindow):
         self._register_advanced()
         self._show_view()
         self._update_buttons()
+        self._update_guide()
 
     # ------------------------------------------------------------------ Simple / Advanced view
     def _register_advanced(self):
@@ -2662,6 +2788,116 @@ class MainWindow(QMainWindow):
         """View → Log: shown in the Simple view too when asked for (until the view is switched)."""
         self.view.reveal((self.tabs, self.log))
         self.tabs.setCurrentWidget(self.log)
+
+    # ------------------------------------------------------------------ guided start
+    def _guide_store(self) -> dict:
+        try:
+            d = json.loads(self.qs.value("guideChoices", "{}", type=str) or "{}")
+        except ValueError:
+            d = {}
+        return d if isinstance(d, dict) else {}
+
+    def _guide_choices(self) -> set[str]:
+        """What the guide was told for this project ("text_only", "no_cast"); kept in the app's settings, not in
+        the project (it changes nothing the clips are made with)."""
+        return set(self._guide_store().get(str(self.project), [])) if self.project is not None else set()
+
+    def _guide_mark(self, what: str):
+        if self.project is None:
+            return
+        d, key = self._guide_store(), str(self.project)
+        d[key] = sorted(set(d.pop(key, [])) | {what})
+        self.qs.setValue("guideChoices", json.dumps(dict(list(d.items())[-50:])))     # (the last 50 projects)
+        self._update_guide()
+
+    def _guide_text_only(self):
+        """Step 1 without a picture: the first clip is made from its description; its picture format is Aspect."""
+        if self.project is None:
+            return
+        self._guide_mark("text_only")
+        self.inspector.setCurrentWidget(self.proj_scroll)
+        QTimer.singleShot(0, lambda: self.proj_scroll.ensureWidgetVisible(self.aspect, 0, 40))
+        self.status.setText("Text only: the first clip is made from its description. Choose its picture format "
+                            "under Aspect (Project tab).")
+
+    def _guide_cast(self):
+        """Step 2: Cast & references, with New in focus (it adds a person or a place)."""
+        self._show_left_tab(1)
+        self.b_char_new.setFocus(Qt.OtherFocusReason)
+        self.status.setText("Press New to add a person or a place, then give it pictures.")
+
+    def _first_clip(self) -> T.Node | None:
+        if self.tree is None:
+            return None
+        roots = sorted(self.tree.children(None), key=lambda n: self.tree.number(n.id))
+        return roots[0] if roots else None
+
+    def _guide_write(self):
+        """Step 3: the first clip's description, with the cursor in it."""
+        first = self._first_clip()
+        if first is None:
+            return
+        self.select(first.id)
+        self.focus_clip(first.id)
+        card = next((c for c in self.cards if c.nid == first.id and isinstance(c, PromptCard)), None)
+        if card is not None:
+            card.edit.setFocus(Qt.OtherFocusReason)
+
+    def show_guide(self, on: bool):
+        """Hide guide / View → Getting started (stored in the app's settings)."""
+        self.qs.setValue("guideHidden", not on)
+        if on:
+            self._show_left_tab(0)
+        self._update_guide()
+
+    def _update_guide(self):
+        """The guide while the project has no made clip (step 0 without a project), its steps ticked from the real
+        state; the "how to go on" line once after the first made clip."""
+        hidden = self.qs.value("guideHidden", False, type=bool)
+        if self.tree is None or self.project is None:
+            self.guide_panel.set_state(project=False)
+            self.guide_panel.setVisible(not hidden)
+            self.next_hint.hide()
+            self._guide_ready = False
+            return
+        made = any(n.made for n in self.tree.nodes.values())
+        choices = self._guide_choices()
+        first = self._first_clip()
+        picture = ((self.project / T.START_FILE).is_file() or "text_only" in choices
+                   or bool(first is not None and first.is_video))
+        cast = bool(T.cast_of(self.tree)) or "no_cast" in choices
+        prompt = first is not None and (first.is_video or bool(first.prompt.strip()))
+        ready = self.guide_panel.set_state(True, picture, cast, prompt)
+        show = not hidden and not made
+        self.guide_panel.setVisible(show)
+        if show and ready and not self._guide_ready:      # Generate is next: the keyboard focus goes there (not
+            fw = QApplication.focusWidget()                 # away from a description being typed)
+            if not isinstance(fw, (QPlainTextEdit, QLineEdit)):
+                self.b_gen.setFocus(Qt.OtherFocusReason)
+        self._guide_ready = ready
+        if len(self.tree.nodes) >= 2 and not self.qs.value("nextHintDone", False, type=bool):
+            self.qs.setValue("nextHintDone", True)          # a second clip exists: the user knows how to go on
+        self.next_hint.setVisible(made and not self.qs.value("nextHintDone", False, type=bool))
+
+    def _next_hint_done(self):
+        self.qs.setValue("nextHintDone", True)
+        self.next_hint.hide()
+
+    def _engine_can_start(self) -> bool:
+        """The app has a start command for ComfyUI (what start_comfy needs)."""
+        return Path(os.path.expanduser(self.comfy_launcher.text().strip() or DEFAULT_COMFY_LAUNCHER)).is_file()
+
+    def _engine_banner_clicked(self):
+        if self.engine_banner.can_start:
+            self.start_comfy()
+        else:
+            self.show_prefs()
+
+    def _update_engine_banner(self):
+        """The banner while the video engine is not reachable (the connection state the app polls anyway)."""
+        starting = bool(self._comfy_starting and time.monotonic() - self._comfy_starting < 180)
+        self.engine_banner.set_state(starting, self._engine_can_start())
+        self.engine_banner.setVisible(self.comfy_up is False)
 
     def _project_controls(self) -> dict:
         """project_setting_changes' keys -> the control that sets each."""
@@ -2780,6 +3016,7 @@ class MainWindow(QMainWindow):
             a = v.addAction(f"{name} (left)", lambda _=False, k=k: self._show_left_tab(k))
             a.setShortcut(QKeySequence(f"Alt+{k + 1}"))
         v.addAction("Log", self.show_log).setShortcut(QKeySequence("Alt+L"))
+        v.addAction("Getting started", lambda: self.show_guide(True))
         v.addSeparator()
         self.act_left = v.addAction("Left panel (clips, cast & references, sounds)")
         self.act_left.setCheckable(True)
@@ -5424,6 +5661,7 @@ class MainWindow(QMainWindow):
         if self.tree is None:
             self.graph.show_nodes([])
             self._update_buttons()
+            self._update_guide()
             return
         if self.tree.options.get("audio_refs"):
             self._show_sound_info()                # how many clips name a sound (prompts change)
@@ -5464,6 +5702,7 @@ class MainWindow(QMainWindow):
                                f" · {branches} branch{'es' if branches != 1 else ''} · {made} made")
         self._update_scene_card()
         self._update_buttons()
+        self._update_guide()
 
     def _frozen_note(self, n: T.Node) -> str:
         try:
@@ -5501,6 +5740,157 @@ class MainWindow(QMainWindow):
             return T.clip_inputs(self.project, self.tree, n.id, checker)
         except Exception:  # noqa: BLE001
             return None
+
+    # ------------------------------------------------------------------ problems where they are
+    def clip_problems(self, nid: str, checker: T.Checker | None = None) -> list[dict]:
+        """What blocks making this clip, from the checks Generate makes (_start; nothing new is checked here and
+        Generate refuses exactly as before), each as a plain sentence with the technical text in its tooltip and,
+        where the app can do it, an action (fix_problem). A clip that is made (and unchanged) has none. The prompt
+        of a new clip being empty is not one: the placeholder and the guide say that."""
+        if self.tree is None or self.project is None or nid not in self.tree.nodes:
+            return []
+        n = self.tree.nodes[nid]
+        if n.is_video or n.frozen or self.status_of.get(nid) == "done":
+            return []
+        out: list[dict] = []
+
+        def add(text, tip="", action=None, button=None):
+            out.append({"text": text, "tip": tip, "action": action, "button": button})
+        try:
+            turbo = self.tree.options.get("turbo") or {}
+            if turbo.get("on") and not turbo.get("lora"):
+                add("The fast speed (turbo) needs an add-on that is not chosen yet. Choose it, or set Speed to "
+                    "Normal.", "Clips → Turbo LoRA: choose a turbo LoRA (or switch Speed to Normal)", "turbo", "Show")
+            checker = checker or T.Checker(self.project, self.tree)
+            if checker.base() is None:
+                add("Choose a start picture for the first clip.", "The project has no start image and no real "
+                    "video to start from", "start_image", "Choose…")
+                return out
+            todo = [nid]
+            guide = T.guide_problem(self.tree, checker, todo)
+            if guide:
+                add("The carry-over of this clip does not fit the clip next to it. Make it shorter, or make the "
+                    "clip longer.", guide, "carry", "Show")
+            if T.missing_end_images(self.project, self.tree, todo):
+                add("The end picture of this clip is missing from the project folder. Choose it again.",
+                    f"ends/: {n.end_image}", "end_image", "Choose…")
+            for raw in T.audio_problems(self.project, self.tree, todo):
+                text = ("A sound reference this clip uses is missing from the project folder. Add it again in "
+                        "Sounds." if "missing" in raw else
+                        plain_problem(raw, nid) + " Add the sound in Sounds, or change the description.")
+                add(text, raw + " (Sound reference)", "sounds", "Open Sounds")
+            for raw in T.source_sound_problems(self.tree, todo, self.project):
+                add(plain_problem(raw, nid), raw + " (the clip's “Sound” setting)", "sound", "Show")
+            for raw in T.cast_problems(self.project, self.tree, todo):
+                m = re.search(r"mentions @([\w-]+), but there is no such character(?: — did you mean @([\w-]+)\?)?",
+                              raw)
+                pic = re.match(r"@([\w-]+) \(clip #\d+\) has no (picture|face picture or voice) yet", raw)
+                if m:
+                    add(f"The description names @{m.group(1)}, but Cast & references has no {m.group(1)}."
+                        + (f" Did you mean @{m.group(2)}?" if m.group(2) else " Add it there, or change the name."),
+                        raw, "cast_new", "Open Cast & references")
+                elif pic:
+                    add(f"@{pic.group(1)} has no picture yet. Add one, so the clip can show "
+                        + ("this person." if pic.group(2) != "picture" else "it."), raw, f"cast:{pic.group(1)}",
+                        "Add a picture")
+                else:
+                    add(plain_problem(raw, nid), raw + " (Cast & references)", "cast", "Open Cast & references")
+            for lo in T.loras_needed(self.tree, checker, [nid]):
+                if not Path(lo).is_file():
+                    add(f"An add-on (LoRA) of this clip is missing: {Path(lo).name}. Choose it again or remove it.",
+                        f"The LoRA file does not exist: {lo}", "loras", "Show")
+                    break
+        except Exception:  # noqa: BLE001  (Generate says what it could not check)
+            pass
+        return out
+
+    def _note_failure(self, code: int):
+        """A run failed: what went wrong stays on the card of the clip it failed at (the first clip still to make
+        when it failed before any clip began), with Details (the log) and, where it helps, the engine's start."""
+        if self.tree is None:
+            return
+        err = self._error or f"the generator exited with code {code}"
+        nids = [n for n, s_ in self.live.items() if s_ == "failed" and n in self.tree.nodes]
+        if not nids:
+            todo = [n.id for t in self._targets if t in self.tree.nodes for n in self.tree.path_to(t)
+                    if self.status_of.get(n.id) != "done" and not n.is_video]
+            nids = todo[:1]
+        down = code == 4 or "not running" in err.lower() or "connection refused" in err.lower()
+        missing = not down and any(w in err.lower() for w in ("missing", "not found", "not in comfyui", "node",
+                                                               "model"))
+        if down:
+            text = ("The video engine (ComfyUI) stopped or is not running, so this clip was not made. Start it, "
+                    "then press Generate again.")
+            more = [("start_engine", "Start the video engine") if self._engine_can_start()
+                    else ("prefs", "Open preferences")]
+        elif missing:
+            text = ("The video engine is missing something this clip needs (a model or an add-on), so it was not "
+                    "made. Details shows what.")
+            more = []
+        else:
+            text = "Making this clip failed. Details shows why; press Generate to try again."
+            more = []
+        for nid in nids:
+            self._failures[nid] = {"text": text, "tip": err, "error": True, "action": "log", "button": "Details",
+                                   "more": more}
+        if nids and self.simple:                    # (Simple has no Log tab in sight: the card shows it)
+            self.focus_clip(nids[0])
+        self._update_problems()
+
+    def _update_problems(self):
+        """The problems of the card in focus (worked out for it only: the others are not in sight, and some checks
+        read files); the other cards are cleared."""
+        for c in self.cards:
+            if not isinstance(c, PromptCard):
+                continue
+            if c.nid != self.focus or self.tree is None or c.nid not in self.tree.nodes:
+                c.set_problems([])
+                continue
+            fail = self._failures.get(c.nid)
+            c.set_problems(([fail] if fail else []) + ([] if self.running else self.clip_problems(c.nid)))
+
+    def _clear_failure(self, nid: str):
+        if self._failures.pop(nid, None) is not None:
+            self._update_problems()
+
+    def fix_problem(self, action: str, nid: str):
+        """A problem's button on a card: the place that fixes it (or the action itself)."""
+        card = next((c for c in self.cards if c.nid == nid and isinstance(c, PromptCard)), None)
+        if action == "log":
+            self.show_log()
+        elif action == "start_engine":
+            self.start_comfy()
+        elif action == "prefs":
+            self.show_prefs()
+        elif action == "start_image":
+            self._choose_image()
+        elif action in ("cast", "cast_new"):
+            self._show_left_tab(1)
+            if action == "cast_new":
+                self.b_char_new.setFocus(Qt.OtherFocusReason)
+                self.status.setText("Press New to add a person or a place (its name is what you write after @).")
+        elif action.startswith("cast:"):
+            self._show_left_tab(1)
+            self._show_references(select=action[5:])
+            self.b_ref_add.setFocus(Qt.OtherFocusReason)
+            self.status.setText(f"Add a picture of @{action[5:]}: Image…, Start image or Selected clip.")
+        elif action == "sounds":
+            self._show_left_tab(2)
+        elif action == "end_image":
+            self.node_action("end_image", nid)
+        elif action == "turbo":
+            c = self._clips_form
+            for t in ((c, self.speed), (c, self.turbo_lora), (c, self._turbo_row)):
+                self.view.reveal(t)
+            self.inspector.setCurrentWidget(self.proj_scroll)
+            QTimer.singleShot(0, lambda: self.proj_scroll.ensureWidgetVisible(self.turbo_lora, 0, 40))
+            self.turbo_lora.setFocus(Qt.OtherFocusReason)
+        elif action in ("sound", "carry", "loras") and card is not None:
+            w = {"sound": card.src_sound, "carry": card.guide, "loras": card.loras}[action]
+            if action != "sound":
+                self.view.reveal((card._link, w))         # (an advanced setting: shown in Simple until a switch)
+            self.focus_clip(nid)
+            w.setFocus(Qt.OtherFocusReason)
 
     def _sent_guess(self, n: T.Node, use: dict) -> str:
         """The prompt the model gets, from the clip alone (when clip_inputs cannot be worked out)."""
@@ -5709,6 +6099,7 @@ class MainWindow(QMainWindow):
             card.play.connect(self._play_node)
             card.leadChanged.connect(self.set_clip_lead)
             card.modelPrompt.connect(self.show_model_prompt)
+            card.fix.connect(self.fix_problem)
             self._fit_card(card)
             self.card_stack.addWidget(card)
             self.cards.append(card)
@@ -5745,6 +6136,7 @@ class MainWindow(QMainWindow):
             self.focus_info.setText("")
         self.timeline.set_focus(self.focus)
         self.graph.set_focus(self.focus)
+        self._update_problems()
         self._update_buttons()                     # (the actions follow the clip in focus)
 
     def focus_clip(self, nid: str):
@@ -5915,6 +6307,7 @@ class MainWindow(QMainWindow):
                                                                            else " · all made"))
         else:
             self.path_info.setText("")
+        self._update_problems()
 
     def _update_buttons(self):
         has = self.tree is not None
@@ -6004,6 +6397,7 @@ class MainWindow(QMainWindow):
         made = (node.made or {}).get("prompt")
         # the card keeps words, not spacing: a made prompt that differs only in spaces / line breaks stays as made
         node.prompt = made if isinstance(made, str) and " ".join(made.split()) == text else text
+        self._failures.pop(nid, None)              # (edited: what went wrong before may no longer apply)
         self._changed()
 
     def known_loras(self) -> list[tuple[str, str]]:
@@ -6152,6 +6546,7 @@ class MainWindow(QMainWindow):
     def _overrides_changed(self, nid: str, ov: dict):
         if self.tree and nid in self.tree.nodes and not self.tree.nodes[nid].frozen:
             self.tree.nodes[nid].overrides = dict(ov)
+            self._failures.pop(nid, None)
             self._changed()
 
     def _lora_picked(self, nid: str, path: str):
@@ -7571,7 +7966,7 @@ class MainWindow(QMainWindow):
         swapped = sum(1 for n in path if T.swapped_video(n))
         dlg = ExportDialog(self, default, (base["width"], base["height"]) if base else None, ready, swapped,
                            strength, method, denoise, cloud=True if RP.api_key() else None,
-                           cloud_on=self.qs.value("exportCloud", False, type=bool))
+                           cloud_on=self.qs.value("exportCloud", False, type=bool), simple=self.simple)
         if single is not None:
             dlg.setWindowTitle(f"Export {'video' if path[0].is_video else 'clip'} #{single[1:]}")
         try:
@@ -7784,6 +8179,8 @@ class MainWindow(QMainWindow):
         self._exported = None
         self._error, self._stopping, self._phase = "", False, "starting"
         self._targets, self._plan = targets, []
+        for n in nodes:                            # made again now: what went wrong last time goes
+            self._failures.pop(n, None)
         self._made_now: set[str] = set()           # the clips really made (an export reuses kept refined copies)
         self.live, self.progress_of = {}, {}
         self.log.clear()
@@ -8131,8 +8528,10 @@ class MainWindow(QMainWindow):
         else:
             self.progress.setValue(0)
             self.status.setText(f"Failed: {self._error or f'the generator exited with code {code}'}")
-            if self.view.visible((self.tabs, self.log)):     # (Simple: the status line says what failed)
+            if self.view.visible((self.tabs, self.log)):     # (Simple: the status line and the card say it)
                 self.tabs.setCurrentWidget(self.log)
+            if not refine:                                   # (an export's failure is not a clip's)
+                self._note_failure(code)
         self._stopping = False
         if self.worker_alive and (self._cloud_worker or not self.keep_loaded.isChecked()):
             self._quit_worker()                    # (a RunPod worker always: its pod is billed while it waits)
@@ -8257,6 +8656,7 @@ class MainWindow(QMainWindow):
         self.comfy_label.setProperty("severity", sev)
         repolish(self.comfy_label)
         self.b_start_comfy.setEnabled(not self.comfy_up)
+        self._update_engine_banner()
 
     def start_comfy(self) -> bool:
         """Start ComfyUI in the background with the user's launcher (it runs on its own, not tied to this app)."""

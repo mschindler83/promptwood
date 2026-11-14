@@ -4375,3 +4375,247 @@ def test_plain_words(app, win, tmp_path, image):
     none = {"given": None}
     assert model_chip_text({"model": "fl2va", "start": none, "end": none, "pictures": []}) == "From the prompt only"
     assert model_chip_text({"model": "ref2va", "start": none, "end": none, "pictures": []}) == "With reference sounds"
+
+
+# ---------------------------------------------------------------- guided start, writing the prompt, problems
+def test_guide_steps_tick_with_the_state_and_hide(app, win, tmp_path, image):
+    """No project: step 0. A project: the three steps tick from the real state (text only / a start picture, a
+    cast entry or Skip, the first clip's prompt), then Generate is pointed out; Hide guide is stored, View → Getting
+    started brings it back; once a clip is made the guide goes and the "how to go on" line shows once."""
+    g = win.guide_panel
+    assert g.isVisibleTo(win) and g.step0.isVisibleTo(g) and not g.step1.isVisibleTo(g)
+    win.open_project(tmp_path / "proj")
+    flush(app, win)
+    assert g.isVisibleTo(win) and not g.step0.isVisibleTo(g)
+    assert [s.done for s in (g.step1, g.step2, g.step3)] == [False, False, False] and not g.gen_row.isVisibleTo(g)
+    g.b_text_only.click()
+    assert g.step1.done and win.inspector.currentWidget() is win.proj_scroll
+    g.b_skip_cast.click()
+    assert g.step2.done
+    g.b_write.click()
+    assert win.focus == "n1" and win.inspector.currentIndex() == 0
+    type_prompt(win, "n1", "A cat jumps.")
+    flush(app, win)
+    assert g.step3.done and g.gen_row.isVisibleTo(g) and "Generate" in g.gen_hint.text()
+    g.b_show_gen.click()
+    win.open_project(tmp_path / "proj2")                  # another project: its own steps
+    flush(app, win)
+    assert not g.step1.done and not g.step2.done
+    win.set_image(str(image))
+    T.add_character(win.project, win.tree, "Anna")
+    win._show_references()
+    win._changed()                                        # (as New in the Cast tab does)
+    flush(app, win)
+    assert g.step1.done and g.step2.done and not g.step3.done
+    g.b_hide.click()
+    assert not g.isVisibleTo(win) and win.qs.value("guideHidden", type=bool) is True
+    view_menu = next(a.menu() for a in win.menuBar().actions() if a.text() == "&View")
+    next(a for a in view_menu.actions() if a.text() == "Getting started").trigger()
+    assert g.isVisibleTo(win) and win.qs.value("guideHidden", type=bool) is False and win.left_tabs.currentIndex() == 0
+    type_prompt(win, "n1", "A cat jumps.")
+    flush(app, win)
+    assert not win.next_hint.isVisibleTo(win)
+    run_and_wait(app, win, win.generate_path)
+    wait(app, lambda: not win._joins, timeout=30)          # (the path is joined to play after a run)
+    flush(app, win)
+    assert not g.isVisibleTo(win) and win.next_hint.isVisibleTo(win)
+    win.next_hint.b_next.click()                         # a second clip: the line has done its job, for good
+    flush(app, win)
+    assert len(win.tree.nodes) == 2 and not win.next_hint.isVisibleTo(win) and win.qs.value("nextHintDone", type=bool)
+
+
+def test_engine_banner_follows_the_engine_state(app, win, tmp_path, monkeypatch):
+    """Not reachable: the banner with "Start the video engine" (a start command exists) or "Open preferences";
+    reachable: gone. Fed with the app's own connection state, no network call of the test's."""
+    win._comfy_timer.stop()
+    started, prefs = [], []
+    monkeypatch.setattr(win, "start_comfy", lambda: started.append(1) or True)
+    monkeypatch.setattr(win, "show_prefs", lambda: prefs.append(1))
+    launcher = tmp_path / "start-comfy.sh"
+    launcher.write_text("#!/bin/sh\n")
+    win.comfy_launcher.setText(str(launcher))
+    win._comfy_state(False)
+    b = win.engine_banner
+    assert b.isVisibleTo(win) and "not running" in b.text.text() and b.button.text() == "Start the video engine"
+    b.button.click()
+    assert started == [1] and prefs == []
+    win.comfy_launcher.setText(str(tmp_path / "none.sh"))
+    win._comfy_state(False)
+    assert b.button.text() == "Open preferences"
+    b.button.click()
+    assert prefs == [1] and started == [1]
+    win._comfy_state(True)
+    assert not b.isVisibleTo(win)
+
+
+def test_hash_completion_offers_camera_moves_in_plain_words(app):
+    """Typing # offers the camera moves in plain words; the chosen one goes in as a token camera.expand knows."""
+    from video_chain import camera as CAM
+    from video_chain.ui.main_window import PromptCard
+    card = PromptCard(T.Node("n1", None, ""))
+    card.show()
+    card.activateWindow()
+    card.edit.setFocus()
+    app.processEvents()
+    card.edit.insertPlainText("A boat drifts while #push-in")
+    app.processEvents()
+    offered = card.mentions.offered()
+    assert ("Push in, slow", "push-in-slow") in offered and ("Push in", "push-in") not in offered[1:]
+    assert all(CAM.is_token(t) for _w, t in offered)
+    cm = card.mentions.completer.completionModel()
+    idx = cm.index([t for _w, t in offered].index("push-in-slow"), 0)
+    assert card.mentions.completer.pathFromIndex(cm.mapToSource(idx)) == "push-in-slow"   # what activated() gives
+    popup = card.mentions.completer.popup()
+    if popup.isVisible():                                 # Enter in the list, as the user does
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        popup.setCurrentIndex(idx)
+        QTest.keyClick(card.edit, Qt.Key_Return)
+    else:
+        card.mentions._insert("push-in-slow")
+    text = card.edit.toPlainText()
+    assert text.startswith("A boat drifts while #push-in-slow")
+    assert "while the camera pushes in at slow speed" in CAM.expand(text)
+    assert CAM.label("pan-left-large-fast") == "Pan left, large, fast" and CAM.label("nope") is None
+    card.close()
+    card.deleteLater()
+
+
+def test_prompt_helpers_insert_undo_and_fit_the_card(app):
+    """@ Person or place (none: Cast & references opens), Camera and Examples change the prompt, Ctrl+Z takes each
+    back; the foot rows fit the card's width (size hints, offscreen)."""
+    from video_chain import camera as CAM
+    from video_chain.ui.main_window import CARD_WIDTH, PromptCard
+    from video_chain.ui.problems import EXAMPLES
+    assert 4 <= len(EXAMPLES) <= 6 and any('"' in e for e in EXAMPLES) and any("#" in e for e in EXAMPLES)
+    assert all(CAM.expand(e).count("#") == 0 for e in EXAMPLES)          # the camera example is a real token
+    cast = []
+    card = PromptCard(T.Node("n1", None, ""), names=lambda: list(cast))
+    asked = []
+    card.fix.connect(lambda a, nid: asked.append((a, nid)))
+    card.b_mention.click()
+    assert asked == [("cast_new", "n1")]
+    assert "@" in card.edit.placeholderText() and "Camera" in card.edit.placeholderText()
+    examples = card.examples_menu.actions()
+    examples[0].trigger()
+    assert card.edit.toPlainText() == EXAMPLES[0]
+    examples[1].trigger()
+    assert card.edit.toPlainText() == EXAMPLES[0] + " " + EXAMPLES[1]
+    card.edit.undo()
+    assert card.edit.toPlainText() == EXAMPLES[0]
+    card.edit.setPlainText("A man waves")
+    examples[3].trigger()                                                 # a new sentence after the text
+    assert card.edit.toPlainText() == "A man waves. " + EXAMPLES[3]
+    card.edit.undo()
+    card.edit.moveCursor(QTextCursor.End)
+    cast.append("Anna")
+    assert card._fill_mentions() == ["Anna"]
+    card.mention_menu.actions()[0].trigger()
+    assert card.edit.toPlainText() == "A man waves @Anna "
+    cam = next(a for m in card.camera_menu.actions() if m.menu() for a in m.menu().actions()
+               if a.toolTip() == "#push-in-slow")
+    assert cam.text() == "Push in, slow"
+    cam.trigger()
+    assert card.edit.toPlainText() == "A man waves @Anna #push-in-slow "
+    assert "the camera pushes in at slow speed" in CAM.expand(card.edit.toPlainText())
+    card.edit.undo()
+    card.edit.undo()
+    assert card.edit.toPlainText() == "A man waves"
+    m = card.layout().contentsMargins()
+    room = CARD_WIDTH - m.left() - m.right()
+    for b in (card.b_refine, card.seed):
+        foot = next(card.layout().itemAt(k).layout() for k in range(card.layout().count())
+                    if card.layout().itemAt(k).layout() is not None
+                    and card.layout().itemAt(k).layout().indexOf(b) >= 0)
+        assert foot.sizeHint().width() <= room, (b, foot.sizeHint().width(), room)
+    card.deleteLater()
+
+
+def _make_sound(path, secs=2.5):
+    import subprocess
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"sine=f=400:d={secs}", str(path)],
+                   check=True)
+    return path
+
+
+def test_problems_show_on_the_right_card_with_an_action(app, win, tmp_path, image):
+    """A cast problem and a sound limit appear on the card of the clip they block, in plain words (the check's own
+    text in the tooltip), each with a button that goes to the right place; a made clip has none."""
+    ids = new_project(win, tmp_path, image, ("@Anna waves.", "A dog barks."))
+    T.add_character(win.project, win.tree, "Anna")
+    win._show_references()
+    flush(app, win)
+    win.focus_clip(ids[0])
+    first = next(c for c in win.cards if c.nid == ids[0])
+    assert first.problems.isVisibleTo(first)
+    item = first.problems.items[0]
+    assert item["text"].startswith("@Anna has no picture yet") and "clip #1" in item["tip"]
+    assert "clip #" not in item["text"]
+    win.left_tabs.setCurrentIndex(0)
+    first.problems.buttons()["Add a picture"].click()
+    assert win.left_tabs.currentIndex() == 1 and win.cast_list.currentItem().data(0x0100) == "Anna"
+    second = next(c for c in win.cards if c.nid == ids[1])
+    win.focus_clip(ids[1])
+    assert not second.problems.isVisibleTo(second)                        # nothing blocks the second clip
+    for k in (1, 2, 3):                                                   # three sound references and a track
+        assert win.add_sound(str(_make_sound(tmp_path / f"s{k}.wav")))
+    tid = win.add_track(str(_make_sound(tmp_path / "song.wav", 20)), 0.0, 20.0, "Song")
+    n = win.tree.nodes[ids[1]]
+    n.prompt = "A dog barks <Audio 3>."
+    n.overrides = {"source_sound": f"track:{tid}"}
+    win._rebuild_path()
+    win.focus_clip(ids[1])
+    second = next(c for c in win.cards if c.nid == ids[1])
+    texts = [p["text"] for p in second.problems.items]
+    assert any("too many sounds" in t and t.startswith("This clip") for t in texts), texts
+    p = next(p for p in second.problems.items if "too many sounds" in p["text"])
+    assert p["action"] == "sound" and "Sound" in p["tip"]
+    win.fix_problem("sound", ids[1])
+    assert win.focus == ids[1]
+
+
+def test_failed_run_shows_on_the_card_in_simple_and_details_shows_the_log(app, win, tmp_path, image, monkeypatch):
+    """Simple: a failed run does not jump to the (hidden) Log; the card of the failed clip says what went wrong,
+    Details shows the Log; editing the clip takes the note away."""
+    ids = new_project(win, tmp_path, image, ("a", "b"))
+    win.set_simple(True)
+    monkeypatch.setenv("FAKE_FAIL", "1")
+    run_and_wait(app, win, win.generate_path)
+    flush(app, win)
+    assert win.status.text().startswith("Failed:") and win.state(ids[1]) == "failed"
+    assert not win.tabs.isTabVisible(win.tabs.indexOf(win.log))
+    assert win.focus == ids[1]
+    card = next(c for c in win.cards if c.nid == ids[1])
+    assert card.problems.isVisibleTo(card) and card.problems.property("severity") == "error"
+    fail = card.problems.items[0]
+    assert fail["text"].startswith("Making this clip failed") and "fake failure in clip 2" in fail["tip"]
+    for word in ("ref2va", "fl2va", "node", "workflow", "latent", "sampler"):
+        assert word not in fail["text"].lower()
+    card.problems.buttons()["Details"].click()
+    assert win.tabs.isTabVisible(win.tabs.indexOf(win.log)) and win.tabs.currentWidget() is win.log
+    type_prompt(win, ids[1], "b again")
+    flush(app, win)
+    card = next(c for c in win.cards if c.nid == ids[1])
+    assert not card.problems.isVisibleTo(card) and ids[1] not in win._failures
+
+
+def test_cloud_upscaling_not_offered_in_simple_without_a_key(app, win, tmp_path, image, monkeypatch):
+    """Simple without a RunPod key: the export dialog does not offer the cloud (its tooltip says where it is set
+    up); with a key it is offered as before; Advanced shows it greyed as before."""
+    from video_chain import runpod as RP
+    from video_chain.ui import main_window as MW
+    seen = []
+    monkeypatch.setattr(MW.ExportDialog, "exec", lambda self: seen.append(self) or 0)
+    new_project(win, tmp_path, image, ("a",))
+    run_and_wait(app, win, win.generate_path)
+    wait(app, lambda: not win._joins, timeout=30)
+    win.set_simple(True)
+    win.export_path()
+    assert seen[-1].cloud.isHidden() and "Advanced view" in seen[-1].size.toolTip()
+    win.set_simple(False)
+    win.export_path()
+    assert not seen[-1].cloud.isHidden() and not seen[-1].cloud.isEnabled()
+    monkeypatch.setattr(RP, "api_key", lambda: "k-test")
+    win.set_simple(True)
+    win.export_path()
+    assert not seen[-1].cloud.isHidden() and "Advanced view" not in seen[-1].size.toolTip()
