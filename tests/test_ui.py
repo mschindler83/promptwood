@@ -646,6 +646,7 @@ def test_identity_references_in_the_window(app, win, tmp_path, image, monkeypatc
     flush(app, win)
     win.select(ids[1])
     win.generate_path()
+    wait(app, lambda: not win.running)
     assert not win.running and "did you mean @Ben? (Cast)" in win.status.text()
     type_prompt(win, ids[1], "@Ben waves")
     flush(app, win)
@@ -838,6 +839,7 @@ def test_sound_references_in_the_window(app, win, tmp_path, image, monkeypatch):
     flush(app, win)
     assert win.state(ids[1]) == "changed"
     win.generate_path()
+    wait(app, lambda: not win.running)                                        # (checked in the background)
     assert not win.running and "names <Audio 2>, but there is only 1 sound reference" in win.status.text()
     type_prompt(win, ids[1], "b, in the voice of <Audio 1>")
     flush(app, win)
@@ -1936,6 +1938,7 @@ def test_export_on_runpod(app, win, tmp_path, image, monkeypatch):
     win.comfy_up = False                                                     # no local ComfyUI: not needed
     monkeypatch.setenv("FAKE_LOAD_DELAY", "0.5")                             # (the pod "prepares" a moment)
     win.export(out, "2k", method="seedvr2_3b", cloud=True)
+    wait(app, lambda: win._job is not None)                                   # (checked in the background first)
     assert win.running and win._worker_key()[0] == "runpod"
     seen = []
     wait(app, lambda: seen.append(win.status.text()) or not win.running, timeout=120)
