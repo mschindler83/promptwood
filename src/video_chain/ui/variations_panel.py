@@ -699,16 +699,23 @@ class VariationsPanel(QFrame):
         order = [n for n in used if self.variable(n) is not None] + [v.name for v in self.vars if v.name not in used]
         self.vars.sort(key=lambda v: order.index(v.name) if v.name in order else 999)
         if on:
-            names = self.names()
             for var in self.vars:
-                card = VariableCard(var, color_of(var.name, names), var.name in used, self.mode() == "random",
-                                    self.pick_file)
-                card.changed.connect(self._rebuild_later)
-                card.typing.connect(self._remember_typing)
-                card.insert.connect(self.insert)
-                card.remove.connect(self._remove)
-                card.renamed.connect(self._rename)
-                self.cards_box.addWidget(card)
+                self.cards_box.addWidget(self._make_card(var, used))
+        self._focus_typing()
+        self._refresh()
+
+    def _make_card(self, var: V.Variable, used: list[str]) -> VariableCard:
+        card = VariableCard(var, color_of(var.name, self.names()), var.name in used, self.mode() == "random",
+                            self.pick_file)
+        card.changed.connect(lambda c=card: self._rebuild_card_later(c))
+        card.typing.connect(self._remember_typing)
+        card.insert.connect(self.insert)
+        card.remove.connect(self._remove)
+        card.renamed.connect(self._rename)
+        return card
+
+    def _focus_typing(self) -> None:
+        """The cursor back in the value field the user was typing in (its card was made anew)."""
         focus = self._typing_in
         if focus:
             self._typing_in = None
@@ -717,13 +724,28 @@ class VariationsPanel(QFrame):
                 found = cast("VariableCard | None", item.widget() if item is not None else None)
                 if found is not None and found.var.name == focus:
                     found.add.setFocus()
+
+    def _rebuild_card_later(self, card: VariableCard) -> None:
+        QTimer.singleShot(0, lambda: self._rebuild_card(card))   # (the pill that asked is still on the stack)
+
+    def _rebuild_card(self, card: VariableCard) -> None:
+        """The values of one placeholder changed: only its card is made anew (the others, and the order of the cards, are as
+        they were: no placeholder came or went)."""
+        i = self.cards_box.indexOf(card)
+        if i < 0 or not self.enabled():
+            return                                 # (a rebuild of all cards came first)
+        used = V.names_in(self.prompt, self.negative)
+        fresh = self._make_card(card.var, used)
+        self.cards_box.insertWidget(i, fresh)
+        self.cards_box.removeWidget(card)
+        card.hide()
+        card.setParent(None)
+        card.deleteLater()
+        self._focus_typing()
         self._refresh()
 
     def _remember_typing(self, name: str):
         self._typing_in = name
-
-    def _rebuild_later(self):
-        QTimer.singleShot(0, self._rebuild)      # (the pill that asked is still on the stack)
 
     def _refresh(self):
         plan = self._plan()

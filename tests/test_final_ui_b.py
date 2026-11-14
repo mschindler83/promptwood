@@ -221,3 +221,23 @@ def test_scratch_settings_share_one_folder_that_is_removed(app):
     assert folder.is_dir()
     IP.drop_scratch_settings()
     assert not folder.exists()
+
+
+def test_a_value_change_rebuilds_only_the_card_it_belongs_to(app, monkeypatch):
+    from test_variations_panel_fixes import cards, panel
+    from video_chain.ui import variations_panel as VP
+    from waiting import wait
+    p = panel()
+    others = cards(p)
+    made = []
+    real = VP.VariableCard
+    monkeypatch.setattr(VP, "VariableCard", lambda *a, **k: (made.append(1), real(*a, **k))[1])
+    others[0].add.setText("f")
+    others[0].add.returnPressed.emit()
+    assert wait(app, lambda: made)
+    app.processEvents()
+    assert len(made) == 1
+    now = cards(p)
+    assert now[1] is others[1] and now[0] is not others[0]          # (the other card stays as it was)
+    assert [v.text for v in p.variable("x").values][-1] == "f" and len(now[0].pills.findChildren(VP.Pill)) == 6
+    assert "6" in p.summary.text()
