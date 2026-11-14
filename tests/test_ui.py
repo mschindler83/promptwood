@@ -4303,7 +4303,7 @@ def test_simple_view_hides_the_expert_controls_also_on_rebuilt_cards(app, win, t
     c = win._clips_form
     for f in (win.steps, win.speed, win._cfg_row, win.veda, win.prompt_format, win.style_prefix, win.lora_triggers):
         assert _row_hidden(c, f), f
-    assert not win.tabs.isTabVisible(win.tabs.indexOf(win.log)) and win.ref_hint.isHidden()
+    assert win.tabs.isTabVisible(win.tabs.indexOf(win.log)) and win.ref_hint.isHidden()   # (the log stays: UX-31)
     for f in (win.frames, win.resolution, win.aspect, win.audio):        # kept
         assert not f.isHidden() and not (c.labelForField(f) and c.labelForField(f).isHidden())
     for w in (win.b_gen, win.b_stop, win.b_play_path, win.b_export, win.start_tile, win.cast_list, win.comfy_label):
@@ -4676,7 +4676,6 @@ def test_failed_run_shows_on_the_card_in_simple_and_details_shows_the_log(app, w
     run_and_wait(app, win, win.generate_path)
     flush(app, win)
     assert win.status.text().startswith("Failed:") and win.state(ids[1]) == "failed"
-    assert not win.tabs.isTabVisible(win.tabs.indexOf(win.log))
     assert win.focus == ids[1]
     card = next(c for c in win.cards if c.nid == ids[1])
     assert card.problems.isVisibleTo(card) and card.problems.property("severity") == "error"
