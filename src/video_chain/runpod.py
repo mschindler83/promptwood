@@ -136,7 +136,10 @@ class RunpodApi:
             try:
                 with urllib.request.urlopen(req, timeout=timeout) as r:
                     body = r.read()
-                    return json.loads(body) if body.strip() else None
+                    try:
+                        return json.loads(body) if body.strip() else None
+                    except ValueError as e:        # (a proxy's HTML page with status 200)
+                        raise RunpodError(f"RunPod {method} {path}: the answer is not JSON ({body[:80]!r})") from e
             except urllib.error.HTTPError as e:
                 body = e.read().decode(errors="replace")
                 retry = e.code == 429 or (idempotent and e.code >= 500)
@@ -207,6 +210,9 @@ class RunpodApi:
         res = self.call("GET", f"/catalog/gpus?include=AVAILABILITY&product=POD&cloud=SECURE&minCudaVersion={MIN_CUDA}")
         res = res or {}
         return res.get("gpus") or []
+
+
+_CAPACITY_WORDS = re.compile(r"availab|capacity|instances|stock|insufficient|no longer|not enough", re.I)
 
 
 def _detail(body: str) -> str:
@@ -281,11 +287,21 @@ def ensure_key(config: Path = CONFIG_DIR) -> tuple[Path, str]:
     config.mkdir(parents=True, exist_ok=True)
     os.chmod(config, 0o700)
     key = config / "id_ed25519"
-    if not key.is_file():
-        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "video-chain-runpod", "-f", str(key)],
-                       check=True, capture_output=True)
-    os.chmod(key, 0o600)
-    return key, key.with_suffix(".pub").read_text(encoding="utf-8").strip()
+    try:
+        if not key.is_file():
+            subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "video-chain-runpod", "-f",
+                            str(key)], check=True, capture_output=True)
+        os.chmod(key, 0o600)
+        pub = key.with_suffix(".pub")
+        if not pub.is_file():                  # (deleted by hand: made again from the private key)
+            r = subprocess.run(["ssh-keygen", "-y", "-f", str(key)], check=True, capture_output=True, text=True)
+            pub.write_text(r.stdout.strip() + "\n", encoding="utf-8")
+        return key, pub.read_text(encoding="utf-8").strip()
+    except FileNotFoundError as e:
+        raise RunpodError("OpenSSH is not installed (ssh-keygen is missing): install it to use RunPod") from e
+    except subprocess.CalledProcessError as e:
+        err = e.stderr.decode(errors="replace") if isinstance(e.stderr, bytes) else str(e.stderr or "")
+        raise RunpodError("ssh-keygen failed: " + err.strip()[:300]) from e
 
 
 def known_hosts_line(host: str, port: int, host_keys: str) -> str:
@@ -334,10 +350,12 @@ class RunpodSession:
         self.host: tuple[str, int] | None = None
         self.url: str | None = None
         self.tunnel: subprocess.Popen | None = None
+        self._tunnel_err = None
         self.started = None
         self._tmp = tempfile.TemporaryDirectory(prefix="video-chain-runpod-")
         self.known_hosts = Path(self._tmp.name) / "known_hosts"
         self._closed = False
+        self._closing = False
         self._lock = threading.Lock()
 
     # ---- start
@@ -347,12 +365,20 @@ class RunpodSession:
         if not Path(self.setup_script).is_file():
             raise RunpodError(f"the pod setup script is missing ({self.setup_script})")
         self.key, pub = ensure_key(self.config)
-        self._create(pub)
-        self.host = self._wait_running()
-        self._trust_host()
-        self._wait_ssh()
-        self._setup()
-        self._open_tunnel()
+        self._remove_leftovers()
+        try:
+            self._create(pub)
+            self.host = self._wait_running()
+            self._trust_host()
+            self._wait_ssh()
+            self._setup()
+            self._open_tunnel()
+        except BaseException:                    # (also Ctrl-C / SystemExit: never leave a billed pod behind)
+            try:
+                self.close()
+            except RunpodError as e:
+                self.log(str(e))
+            raise
         return self.url
 
     def _candidates(self) -> list[str]:
@@ -418,11 +444,13 @@ class RunpodSession:
                 pod = self.api.create_pod(pod_body(name=name, gpu=gpu, public_key=public_key, volume=volume,
                                                    data_center=dc, volume_kind=self.volume_kind))
             except RunpodError as e:
-                if e.status in (400, 403):       # no capacity for this one (or not allowed): the next type
+                if e.status == 400 and _CAPACITY_WORDS.search(str(e)):   # no capacity for this one: the next type
                     self.log(f"RunPod: {gpu}: {e}")
                     last = e
                     continue
-                raise
+                if e.status is None or e.status >= 500:      # the answer was lost: the pod may exist all the same
+                    self._remove_pods_named(name)
+                raise                            # (401/403: key or credit; other 400: our request: not a stock matter)
             if not isinstance(pod, dict) or not pod.get("id") or "podId" in pod:   # (a queued pod: never asked for)
                 raise RunpodError(f"RunPod did not create a pod: {json.dumps(pod)[:300]}")
             self.pod_id, self.pod, self.started = pod["id"], pod, time.monotonic()
@@ -479,8 +507,11 @@ class RunpodSession:
                 "-o", "LogLevel=ERROR", *extra, f"{self.user}@{host}"]
 
     def run(self, command: str, timeout: float = 60, stdin: bytes | None = None) -> subprocess.CompletedProcess:
-        return subprocess.run(self.ssh_args() + [command], input=stdin, capture_output=True, timeout=timeout,
-                              check=False)
+        try:
+            return subprocess.run(self.ssh_args() + [command], input=stdin, capture_output=True, timeout=timeout,
+                                  check=False)
+        except FileNotFoundError as e:
+            raise RunpodError("OpenSSH is not installed (ssh is missing): install it to use RunPod") from e
 
     def _wait_ssh(self) -> None:
         end = time.monotonic() + 300
@@ -516,13 +547,27 @@ class RunpodSession:
                "VOLUME_PATH": VOLUME_PATH if self.volume else "", "TORCH_PINS": " ".join(TORCH_PINS),
                "CODE_DIR": self.remote_code}
         cmd = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items()) + " bash -s"
-        p = subprocess.Popen(self.ssh_args() + [cmd], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                             stderr=subprocess.STDOUT)
-        p.stdin.write(Path(self.setup_script).read_bytes())
-        p.stdin.close()
+        try:
+            p = subprocess.Popen(self.ssh_args() + [cmd], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT)
+        except FileNotFoundError as e:
+            raise RunpodError("OpenSSH is not installed (ssh is missing): install it to use RunPod") from e
         tail: list[str] = []
-        timer = threading.Timer(self.setup_timeout, p.kill)
+        timed_out = threading.Event()
+
+        def expire():
+            timed_out.set()
+            p.kill()
+        timer = threading.Timer(self.setup_timeout, expire)
         timer.start()
+
+        def feed():                              # (apart: ssh's answer is read meanwhile, a dead ssh must not block)
+            try:
+                p.stdin.write(Path(self.setup_script).read_bytes())
+                p.stdin.close()
+            except (BrokenPipeError, OSError):
+                pass
+        threading.Thread(target=feed, daemon=True).start()
         try:
             for raw in p.stdout:
                 line = raw.decode(errors="replace").rstrip()
@@ -534,20 +579,28 @@ class RunpodSession:
             code = p.wait()
         finally:
             timer.cancel()
+            if p.poll() is None:
+                p.kill()
+                p.wait()
+        if timed_out.is_set():
+            raise RunpodError(f"preparing the pod timed out after {self.setup_timeout / 60:.0f} min: "
+                              + " | ".join(tail[-3:]))
         if code != 0:
             raise RunpodError(f"preparing the pod failed (exit {code}): " + " | ".join(tail[-5:]))
 
     def _open_tunnel(self) -> None:
         port = free_port()
+        self._tunnel_err = tempfile.TemporaryFile()      # (a file, not a pipe: nobody reads it while the tunnel lives)
         self.tunnel = subprocess.Popen(
             self.ssh_args("-N", "-o", "ExitOnForwardFailure=yes",
                           "-L", f"127.0.0.1:{port}:127.0.0.1:{self.remote_port}"),
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=self._tunnel_err)
         url = f"http://127.0.0.1:{port}"
         end = time.monotonic() + 60
         while time.monotonic() < end:
             if self.tunnel.poll() is not None:
-                err = self.tunnel.stderr.read().decode(errors="replace").strip()
+                self._tunnel_err.seek(0)
+                err = self._tunnel_err.read().decode(errors="replace").strip()
                 raise RunpodError(f"the SSH tunnel to the pod ended: {err}")
             try:
                 with urllib.request.urlopen(url + "/system_stats", timeout=5) as r:
@@ -600,19 +653,19 @@ class RunpodSession:
 
     # ---- end
     def close(self) -> None:
-        """End the tunnel and terminate the pod (checked; idempotent). Raises RunpodError if the pod may still
-        exist, so the caller can tell the user."""
+        """End the tunnel and terminate the pod (checked). Raises RunpodError if the pod may still exist, so the
+        caller can tell the user; close() can then be called again to retry. Once it succeeded it does nothing."""
         with self._lock:
-            if self._closed:
+            if self._closed or self._closing:
                 return
-            self._closed = True
-        if self.tunnel is not None and self.tunnel.poll() is None:
-            self.tunnel.terminate()
-            try:
-                self.tunnel.wait(5)
-            except subprocess.TimeoutExpired:
-                self.tunnel.kill()
+            self._closing = True
         try:
+            if self.tunnel is not None and self.tunnel.poll() is None:
+                self.tunnel.terminate()
+                try:
+                    self.tunnel.wait(5)
+                except subprocess.TimeoutExpired:
+                    self.tunnel.kill()
             if self.pod_id:
                 spent = self.cost_so_far
                 err = None
@@ -623,16 +676,40 @@ class RunpodSession:
                         if st in (None, "TERMINATED"):
                             self.log(f"RunPod: pod {self.pod_id} terminated"
                                      + (f" (about ${spent:.2f})" if spent is not None else ""))
-                            return
+                            break
                         err = f"status {st}"
                     except RunpodError as e:
                         err = str(e)
                     time.sleep(2 * (attempt + 1))
-                raise RunpodError(f"could not terminate pod {self.pod_id} ({err}): end it in RunPod's console "
-                                  "(it removes itself after {IDLE_MIN} min without a connection)".replace(
-                                      "{IDLE_MIN}", str(self.idle_min)))
-        finally:
+                else:
+                    raise RunpodError(f"could not terminate pod {self.pod_id} ({err}): end it in RunPod's console "
+                                      f"(it removes itself after {self.idle_min} min without a connection)")
+            with self._lock:
+                self._closed = True              # only now: a failed close can be tried again
             self._tmp.cleanup()
+        finally:
+            self._closing = False
+
+    def _remove_pods_named(self, name: str) -> None:
+        """A create whose answer was lost may have made the pod: find it by its unique name and terminate it
+        (best effort: the original error is what the caller gets)."""
+        try:
+            found = [p for p in leftover_pods(self.api) if p.get("name") == name]
+            for p in found:
+                self.api.delete_pod(p["id"])
+                self.log(f"RunPod: removed pod {p['id']} whose creation was not answered")
+        except RunpodError as e:
+            self.log(f"RunPod: could not look for a pod made without an answer ({e}); check RunPod's console")
+
+    def _remove_leftovers(self) -> None:
+        """Pods of this app left by a crash or a lost connection (they bill): terminated before a new one is made.
+        Best effort; a failure here never stops the start."""
+        try:
+            for p in leftover_pods(self.api):
+                self.note(f"RunPod: ending a pod left over from an earlier run ({p.get('id')})")
+                self.api.delete_pod(p["id"])
+        except RunpodError as e:
+            self.log(f"RunPod: could not check for leftover pods ({e})")
 
     def _status(self) -> str | None:
         try:
@@ -713,23 +790,35 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="python -m video_chain.runpod", description=main.__doc__)
     p.add_argument("what", choices=("status", "down", "gpus"))
     a = p.parse_args(argv)
+    try:
+        return _cli(a.what)
+    except RunpodError as e:
+        print(f"error: {e}")
+        return 1
+
+
+def _cli(what: str) -> int:
     api = RunpodApi(api_key())
-    if a.what == "gpus":
+    if what == "gpus":
         for g in api.gpus():
             price = (g.get("price") or {}).get("secure")
-            print(f"{g.get('id'):40} {g.get('memory', '?'):>3} GB  "
+            print(f"{str(g.get('id') or '?'):40} {g.get('memory', '?'):>3} GB  "
                   + (f"${price:.2f}/h" if isinstance(price, (int, float)) else "   -   ")
                   + f"  {g.get('availability') or ''}")
         return 0
-    pods = leftover_pods(api)
+    pods, failed = leftover_pods(api), 0
     for pod in pods:
         print(f"{pod.get('id')}  {pod.get('name')}  {pod.get('status')}  {(pod.get('gpu') or {}).get('id', '')}")
-        if a.what == "down":
-            api.delete_pod(pod["id"])
-            print("  terminated")
+        if what == "down":
+            try:
+                api.delete_pod(pod["id"])
+                print("  terminated")
+            except RunpodError as e:         # (the others still get their turn)
+                failed += 1
+                print(f"  NOT terminated: {e}")
     if not pods:
         print("no video-chain pods on RunPod")
-    return 0
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
