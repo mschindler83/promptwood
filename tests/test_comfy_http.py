@@ -195,3 +195,34 @@ def test_a_failed_unload_is_logged_and_does_not_count(server, monkeypatch):
     monkeypatch.setattr(g, "_json", boom)
     assert g.free() is False
     assert any("unload" in str(m) for m in logs)
+
+
+def test_a_job_connects_the_socket_before_queueing_and_cancels_a_lost_queue(server):
+    order = []
+    g = C.ComfyGenerator(server.url)
+    g._connect_ws = lambda: order.append("ws")
+    real = g._queue
+
+    def queue(wf):
+        order.append("queue")
+        return real(wf)
+    g._queue = queue
+    server.render = lambda wf: {}
+    g._run_workflow({"1": {"class_type": "X", "inputs": {}}})
+    assert order == ["ws", "queue"]
+    # a queue request that fails after ComfyUI may have accepted it: the job is cancelled, current is cleared
+    server.hold = True
+
+    def lost(wf):
+        g.current = "p9"
+        raise C.ComfyUnavailable("answer lost")
+    g._queue = lost
+    with pytest.raises(C.ComfyUnavailable):
+        g._run_workflow({})
+    assert ("BODY", "/queue", {"delete": ["p9"]}) in server.calls and g.current is None
+
+
+def test_refine_and_seedvr_save_through_save():
+    import inspect
+    for fn in (C._refine, C._seedvr_job):
+        assert ".part.mp4" not in inspect.getsource(fn) and "_save(" in inspect.getsource(fn)

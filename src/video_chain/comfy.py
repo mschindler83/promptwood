@@ -1394,7 +1394,7 @@ def build_moss_workflow(*, files: dict, prompt: str, seed: int, prefix: str, sav
             wf[f"scale{k}"] = {"class_type": "ImageScaleToTotalPixels",
                                "inputs": {"image": [f"pic{k}", 0], "upscale_method": "lanczos", "megapixels": 1.0,
                                           "resolution_steps": 16}}
-            pics[f"images.image_{k}"] = [f"scale{k}", 0]
+            pics[f"images.image_{k}"] = [f"scale{k}", 0]   # (0-based, as MOSS's own template; Qwen 2.1 counts from 1)
         for nid, text in (("pos", prompt), ("neg", neg)):
             wf[nid] = {"class_type": "TextEncodeMOSSImageEdit",
                        "inputs": {"clip": ["clip", 0], "prompt": text, "edit_format": "Moss-Image-Edit",
@@ -1702,9 +1702,9 @@ def build_refine_workflow(*, prompt: str, draft: str, seed: int, width: int, hei
     if last_frame:
         wf["last"] = {"class_type": "LoadImage", "inputs": {"image": last_frame}}
     model = ["unet", 0]
-    for k, (name, strength) in enumerate(list(loras) + [(refiner, 1.0)]):
+    for k, (name, weight) in enumerate(list(loras) + [(refiner, 1.0)]):
         wf[f"lora{k}"] = {"class_type": "LoraLoaderModelOnly",
-                          "inputs": {"model": model, "lora_name": name, "strength_model": float(strength)}}
+                          "inputs": {"model": model, "lora_name": name, "strength_model": float(weight)}}
         model = [f"lora{k}", 0]
     window = context_window(frames, width, height)
     if window:                                  # a long clip: refined in overlapping windows (memory)
