@@ -79,6 +79,6 @@ def test_remix_sounds_saves_once(project, tmp_path, monkeypatch):
         t.nodes[i].overrides = {"source_sound": f"track:{tid}", "sound_over": "mix"}
     saves = []
     real = T.save
-    monkeypatch.setattr(T, "save", lambda *a, **k: saves.append(1) or real(*a, **k))
+    monkeypatch.setattr(T.engine, "save", lambda *a, **k: saves.append(1) or real(*a, **k))
     assert sorted(T.remix_sounds(project, t, ids)) == sorted(ids)
     assert len(saves) == 1
