@@ -162,6 +162,11 @@ class Node:
         return self.kind == VIDEO
 
 
+def short_id(nid: str) -> str:
+    """The number shown for a clip id ("n3" -> "3", as in "clip #3"): the id without its one prefix letter."""
+    return str(nid)[1:]
+
+
 @dataclass
 class Tree:
     nodes: dict[str, Node] = field(default_factory=dict)

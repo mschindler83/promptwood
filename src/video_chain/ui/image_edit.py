@@ -215,7 +215,7 @@ def uses_of(project: Path, tree, meta: dict, index: dict | None = None) -> list[
             out.append("the start image")
         elif kind == "end" and tree is not None:
             for nid in dict.fromkeys(index["ends"].get(u.get("file"), [])) if u.get("file") else []:
-                out.append(f"the end image of clip #{nid[1:]}")
+                out.append(f"the end image of clip #{T.short_id(nid)}")
         elif kind == "ref" and u.get("file") in owner:
             out.append(f"face of @{owner[u['file']]}")
     return list(dict.fromkeys(out))

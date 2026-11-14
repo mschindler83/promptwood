@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QF
                                QMessageBox, QProgressBar, QPushButton, QVBoxLayout)
 
 from .. import chain, media, swap
+from .. import tree as T
 from ..animate import DEFAULT_PROMPT, SIZES, gen_size, window_count
 from .compare_player import ComparePlayer
 from .widgets import FrameTile, guard_wheel, label
@@ -62,7 +63,7 @@ class SwapDialog(QDialog):
                  source: dict | None = None, pick=None, groups: list[list[str]] | None = None,
                  h3: dict | None = None):
         super().__init__(parent)
-        self.setWindowTitle(f"Replace a person in video #{nid[1:]}")
+        self.setWindowTitle(f"Replace a person in video #{T.short_id(nid)}")
         self.resize(1180, 720)
         self.project, self.nid, self.clip, self.detector = Path(project), nid, Path(clip), detector
         self.connect, self.qs, self.on_start = connect, settings, on_start

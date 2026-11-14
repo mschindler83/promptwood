@@ -643,7 +643,7 @@ def apply_lines(project: Path, tree: T.Tree, nid: str, r: dict) -> dict:
     tid = "t" + uuid.uuid4().hex[:6]
     while tid in have:
         tid = "t" + uuid.uuid4().hex[:6]
-    entry = {"id": tid, "name": f"Lines of clip #{nid[1:]}", "file": r["file"], "secs": r["secs"],
+    entry = {"id": tid, "name": f"Lines of clip #{T.short_id(nid)}", "file": r["file"], "secs": r["secs"],
              "source": str(Path(project) / r["file"]), "start": 0.0, "end": r["secs"],
              "tts": {"clip": nid, "provider": r["provider"], "language": r["language"], "lines": r["lines"]}}
     tree.options["tracks"] = T.tracks(tree) + [entry]
