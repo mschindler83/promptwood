@@ -249,7 +249,10 @@ def test_close_terminates_checks_and_reports_a_pod_left(tmp_path):
         finally:
             mod.time.sleep = orig
         assert sum(1 for c in f.calls if c[0] == "DELETE") == 5
-        s.close()                                                         # idempotent
+        f.keep_running = False
+        s.close()                                                         # a failed close is tried again
+        assert not f.pods
+        s.close()                                                         # and then idempotent
     finally:
         f.close()
 
@@ -430,6 +433,9 @@ def test_whole_session_over_real_ssh(tmp_path):
     import time
     from http.server import BaseHTTPRequestHandler as BH
 
+    sshd_bin = shutil.which("sshd") or ("/usr/sbin/sshd" if os.path.exists("/usr/sbin/sshd") else None)
+    if not (sshd_bin and shutil.which("ssh") and shutil.which("ssh-keygen")):
+        pytest.skip("needs OpenSSH (sshd, ssh, ssh-keygen) on this machine")
     d = tmp_path / "sshd"
     d.mkdir()
     subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(d / "host")], check=True)
@@ -442,7 +448,7 @@ def test_whole_session_over_real_ssh(tmp_path):
         f"Port {port}\nListenAddress 127.0.0.1\nHostKey {d}/host\nAuthorizedKeysFile {d}/authorized_keys\n"
         f"PasswordAuthentication no\nKbdInteractiveAuthentication no\nUsePAM no\nStrictModes no\n"
         f"PidFile {d}/sshd.pid\nAllowTcpForwarding yes\n")
-    sshd = subprocess.Popen(["/usr/sbin/sshd", "-D", "-e", "-f", str(d / "sshd_config")],
+    sshd = subprocess.Popen([sshd_bin, "-D", "-e", "-f", str(d / "sshd_config")],
                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
     class Comfy(BH):                                          # the "pod's" ComfyUI, on its own port
@@ -468,11 +474,13 @@ def test_whole_session_over_real_ssh(tmp_path):
     setup.write_text('#!/usr/bin/env bash\nset -e\necho "@@ installing ComfyUI $COMFY_REF"\n'
                      'echo "models: $MODELS idle: $IDLE_MIN volume: [$VOLUME_PATH]"\necho "@@ ready"\n')
     try:
-        for _ in range(100):                                  # sshd up
+        for _ in range(200):                                  # sshd up
             with socket.socket() as c:
                 if c.connect_ex(("127.0.0.1", port)) == 0:
                     break
             time.sleep(0.05)
+        else:
+            pytest.fail("the throwaway sshd did not open its port")
         notes, logs = [], []
         s = RP.RunpodSession(api(f), note=notes.append, log=logs.append, config=tmp_path / "cfg", models="3b")
         s.user, s.remote_port, s.setup_script = getpass.getuser(), comfy.server_address[1], setup

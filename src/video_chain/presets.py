@@ -3,6 +3,8 @@ scheduler), prompt variations and the LoRA's strength. Several per LoRA, kept in
 database), keyed by the LoRA's real path (a link and its target share them)."""
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import tempfile
@@ -30,12 +32,39 @@ class PresetStore:
         self.path = Path(path) if path else default_path()
         self._lock = threading.RLock()
 
-    def _read(self) -> dict:
+    @contextlib.contextmanager
+    def _exclusive(self):
+        """This process's threads and other processes (a second window, the worker) one at a time."""
+        with self._lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.path.with_name(self.path.name + ".lock"), "a") as f:
+                fcntl.flock(f, fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(f, fcntl.LOCK_UN)
+
+    def _read(self, update: bool = False) -> dict:
+        """The file's content. update=True (before a write): an unreadable file raises OSError, so nothing is
+        written over it; a damaged one (not JSON) is moved to a .bak file first and a new one is started."""
+        empty = {"version": 1, "loras": {}}
         try:
-            d = json.loads(self.path.read_text(encoding="utf-8"))
-            return d if isinstance(d, dict) and isinstance(d.get("loras"), dict) else {"version": 1, "loras": {}}
-        except (OSError, ValueError):
-            return {"version": 1, "loras": {}}
+            text = self.path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return empty
+        except OSError:
+            if update:
+                raise
+            return empty
+        try:
+            d = json.loads(text)
+            if isinstance(d, dict) and isinstance(d.get("loras"), dict):
+                return d
+        except ValueError:
+            pass
+        if update:                                           # damaged: kept, not destroyed
+            os.replace(self.path, self.path.with_name(f"{self.path.name}.{int(time.time() * 1000)}.bak"))
+        return empty
 
     def _write(self, data: dict) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -43,6 +72,8 @@ class PresetStore:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=1, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(tmp, self.path)
         finally:
             if os.path.exists(tmp):
@@ -64,8 +95,8 @@ class PresetStore:
         if not name:
             raise ValueError("a preset needs a name")
         preset = {"name": name, **{k: values.get(k) for k in FIELDS if k in values}, "updated": time.time()}
-        with self._lock:
-            data = self._read()
+        with self._exclusive():
+            data = self._read(update=True)
             entry = data["loras"].setdefault(lora_key(lora), {"file": Path(lora).name, "presets": []})
             entry["presets"] = [p for p in entry.get("presets") or [] if p.get("name") != name] + [preset]
             self._write(data)
@@ -75,10 +106,11 @@ class PresetStore:
         new = " ".join(str(new or "").split())
         if not new:
             raise ValueError("a preset needs a name")
-        with self._lock:
-            data = self._read()
-            entry = data["loras"].get(lora_key(lora)) or {}
-            presets = entry.get("presets") or []
+        with self._exclusive():
+            data = self._read(update=True)
+            presets = (data["loras"].get(lora_key(lora)) or {}).get("presets") or []
+            if not any(p.get("name") == old for p in presets):
+                raise ValueError(f"no preset “{old}” (it may have been changed meanwhile)")
             if new != old and any(p.get("name") == new for p in presets):
                 raise ValueError(f"there is already a preset “{new}”")
             for p in presets:
@@ -87,11 +119,13 @@ class PresetStore:
             self._write(data)
 
     def delete(self, lora: str, name: str) -> None:
-        with self._lock:
-            data = self._read()
+        with self._exclusive():
+            data = self._read(update=True)
             key = lora_key(lora)
-            entry = data["loras"].get(key) or {}
-            entry["presets"] = [p for p in entry.get("presets") or [] if p.get("name") != name]
+            entry = data["loras"].get(key)
+            if not entry or not any(p.get("name") == name for p in entry.get("presets") or []):
+                return                                       # (nothing to remove: nothing written)
+            entry["presets"] = [p for p in entry["presets"] if p.get("name") != name]
             if not entry["presets"]:
                 data["loras"].pop(key, None)
             self._write(data)

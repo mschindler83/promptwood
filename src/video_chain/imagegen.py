@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import uuid
+from collections.abc import Sequence
 from pathlib import Path
 
 from .comfy import (SUBFOLDER, ComfyError, ComfyGenerator, ComfyJobFailed, _combo_options, build_moss_workflow,
@@ -382,6 +384,8 @@ def sampling_of(wf: dict) -> dict:
     """The sampling settings of a create workflow: {"steps", "cfg", "sampler", "scheduler"} (scheduler "manual":
     a fixed sigma list, e.g. Qwen-Image 2.1 Turbo's)."""
     smp = wf.get("sample") or {}
+    if not smp:
+        raise ComfyError("this workflow has no sampler node (\"sample\")")
     i = smp.get("inputs") or {}
     if smp.get("class_type") == "KSampler":
         return {"steps": int(i["steps"]), "cfg": float(i["cfg"]), "sampler": i["sampler_name"],
@@ -401,7 +405,9 @@ def apply_sampling(wf: dict, steps: int | None = None, cfg: float | None = None,
                    scheduler: str | None = None) -> dict:
     """The workflow with the given sampling settings (None: the model's own). A fixed sigma list (ManualSigmas) is
     replaced by ComfyUI's BasicScheduler when steps or scheduler are set. Returns the settings now used."""
-    smp = wf["sample"]
+    smp = wf.get("sample")
+    if not smp:
+        raise ComfyError("this workflow has no sampler node (\"sample\")")
     i = smp["inputs"]
     if smp["class_type"] == "KSampler":
         for key, val in (("steps", steps), ("cfg", cfg), ("sampler_name", sampler), ("scheduler", scheduler)):
@@ -433,11 +439,13 @@ def default_sampling(family: str, files: dict, model: str | None, quality: str, 
     """The sampling settings a family uses by itself for this model and quality (None if it cannot be built)."""
     try:
         model = model if model in (files.get("models") or []) else (files.get("models") or [None])[0]
+        if "missing" in files or model is None:
+            return None
         wf = build_create_workflow(family=family, files=files, model=model, prompt="x", negative="", width=1024,
                                    height=1024, seed=1, quality=quality, loras=[],
                                    refs=[f"ref{k}.png" for k in range(refs)], ref_strength=ref_strength, prefix="x")
         return sampling_of(wf)
-    except Exception:  # noqa: BLE001  (missing files of a family: no defaults to show)
+    except (ComfyError, KeyError, ValueError):   # (missing files of a family: no defaults to show)
         return None
 
 
@@ -508,8 +516,8 @@ class ComfyImageCreator(ComfyGenerator):
                     self.files[fam] = {"missing": f"this ComfyUI has no {lacking} node (update ComfyUI)"}
 
     def create(self, family: str, model: str | None, prompt: str, out_png: Path, seed: int, quality: str,
-               width: int, height: int, negative: str = "", loras: list[tuple[str, float]] = (),
-               refs: list[Path] = (), ref_strength: float = 0.65, quality_tags: bool = True,
+               width: int, height: int, negative: str = "", loras: Sequence[tuple[str, float]] = (),
+               refs: Sequence[Path] = (), ref_strength: float = 0.65, quality_tags: bool = True,
                sampling: dict | None = None) -> dict:
         """sampling: {"steps", "cfg", "sampler", "scheduler"} to use instead of the model's own (None or a missing
         key: its own)."""
@@ -542,7 +550,7 @@ class ComfyImageCreator(ComfyGenerator):
                 entry = self._wait(self.current, ws)
             except ComfyJobFailed:
                 raise
-            except Exception:
+            except BaseException:                # (also a stop by KeyboardInterrupt / SystemExit: cancel the job)
                 self.interrupt()
                 raise
             finally:
@@ -555,7 +563,7 @@ class ComfyImageCreator(ComfyGenerator):
             out = self._first_file((entry.get("outputs") or {}).get("create_save"))
             if out is None:
                 raise ComfyError("ComfyUI finished without the image")
-            Path(out_png).write_bytes(self._download(out))
+            self._save(out, Path(out_png))             # (under a temporary name first: never a truncated picture)
             if self.cleanup:
                 self._remove(self.output_dir, out, Path(out_png))
         finally:
@@ -573,6 +581,8 @@ class ComfyImageCreator(ComfyGenerator):
 
 
 _FAMILY_CACHE: dict[tuple, str | None] = {}
+_FAMILY_LOCK = threading.Lock()
+MAX_HEADER = 16 * 2**20                            # a LoRA's safetensors header is a few hundred KB at most
 
 
 def lora_file_family(path: str) -> str | None:
@@ -588,7 +598,7 @@ def lora_file_family(path: str) -> str | None:
         try:
             with open(path, "rb") as f:
                 n = int.from_bytes(f.read(8), "little")
-                if 0 < n < 100 * 2**20:
+                if 0 < n < MAX_HEADER:
                     head = json.loads(f.read(n))
                     fam = lora_family(k for k in head if k != "__metadata__")
                     if fam in WIDTH:                   # the width tells models with such layer names apart
@@ -596,9 +606,12 @@ def lora_file_family(path: str) -> str | None:
                                                                r"[._]lora_(A|down)", k)), None)
                         if k is not None and (head[k].get("shape") or [0, 0])[-1] != WIDTH[fam]:
                             fam = None
-        except (OSError, ValueError):
+        except (OSError, ValueError, AttributeError, TypeError):   # (a damaged file: family unknown, not a crash)
             fam = None
-        _FAMILY_CACHE[key] = fam
+        with _FAMILY_LOCK:
+            if len(_FAMILY_CACHE) >= 20000:
+                _FAMILY_CACHE.clear()
+            _FAMILY_CACHE[key] = fam
     return _FAMILY_CACHE[key]
 
 
@@ -611,7 +624,13 @@ def find_image_loras(roots: list[Path]) -> dict[str, list[tuple[str, str]]]:
     own = ("style_reference", "moss_image_edit", "control", "turbo", "lightning", "_steps")
     seen = set()
     for root in roots:
-        for dirpath, _dirs, files in os.walk(root, followlinks=True):
+        visited: set[str] = set()                      # (per root: two roots may overlap)
+        for dirpath, dirs, files in os.walk(root, followlinks=True):
+            real = os.path.realpath(dirpath)
+            if real in visited:                        # (a link back up or to a folder seen already: not again)
+                dirs[:] = []
+                continue
+            visited.add(real)
             for f in files:
                 full = os.path.join(dirpath, f)
                 if not f.endswith(".safetensors") or full in seen:
