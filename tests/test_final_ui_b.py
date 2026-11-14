@@ -148,3 +148,34 @@ def test_the_compare_player_steps_with_the_shared_frame_stepper(app):
     assert p.time.text() == "frame 12 / 20 · 1.10 s"
     p.seek(19)
     assert p.position() == 19
+
+
+def test_the_swap_dialog_probes_a_clip_without_a_detector_in_a_worker(app, tmp_path, monkeypatch):
+    import threading
+
+    from video_chain import swap
+    from video_chain.ui.swap_dialog import SwapDialog
+    from waiting import wait
+    seen = []
+
+    def probe(clip):
+        seen.append(threading.current_thread())
+        return 160, 90, 6, 24.0
+    monkeypatch.setattr(swap, "probe", probe)
+    dlg = SwapDialog(None, tmp_path, "v1", tmp_path / "c.mp4", None, [], lambda p: None)
+    assert dlg.heads is None                          # (not read on the GUI thread)
+    assert wait(app, lambda: dlg.heads is not None)
+    assert dlg.heads["frames"] == 6 and dlg.heads["size"] == (160, 90)
+    assert seen and all(t is not threading.main_thread() for t in seen)
+    dlg.reject()
+
+
+def test_the_swap_dialog_says_when_the_clip_cannot_be_read(app, tmp_path, monkeypatch):
+    from video_chain import swap
+    from video_chain.ui.swap_dialog import SwapDialog
+    from waiting import wait
+    monkeypatch.setattr(swap, "probe", lambda clip: (_ for _ in ()).throw(RuntimeError("no video stream")))
+    dlg = SwapDialog(None, tmp_path, "v1", tmp_path / "c.mp4", None, [], lambda p: None)
+    assert wait(app, lambda: "Cannot read the clip" in dlg.found_text.text())
+    assert "no video stream" in dlg.found_text.text() and dlg.heads is None
+    dlg.reject()

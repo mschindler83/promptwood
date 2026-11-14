@@ -231,11 +231,13 @@ class SwapDialog(QDialog):
     def _no_heads(self, why: str):
         """No head boxes (no detector, no face, stopped): the clip itself still goes to Face only and H3 (which find
         the face themselves or need none); the Animate methods need the head."""
-        try:
-            w, h, n, fps = swap.probe(self.clip)
-        except Exception as e:  # noqa: BLE001
-            self.found_text.setText(f"Cannot read the clip: {e}")
-            return
+        clip = self.clip
+        self.found_text.setText("Reading the clip …")
+        run_in_background(lambda: swap.probe(clip), on_done=lambda r: self._clip_read(why, r),
+                          on_error=lambda e: self.found_text.setText(f"Cannot read the clip: {e}"), owner=self)
+
+    def _clip_read(self, why: str, probed: tuple) -> None:
+        w, h, n, fps = probed
         self.heads = {"boxes": [], "found": 0, "frames": n, "size": (w, h), "fps": fps, "track": []}
         self.boxes = []
         self.player.load(self.clip, n, (w, h))
