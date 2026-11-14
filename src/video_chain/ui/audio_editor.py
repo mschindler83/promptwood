@@ -5,8 +5,6 @@ type them in. The cut part becomes an audio track of the project: clips that pla
 """
 from __future__ import annotations
 
-import array
-import subprocess
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -25,51 +23,11 @@ from .video_editor import RangeBar, RangePlayerMixin, fmt
 from .dialogs import button_row
 from .widgets import VideoView, fit_size, guard_wheel, icon_button, label, remember_geometry, shortcut, label_for
 from .qsvalue import qs_value
+from ..media import waveform
 
 if TYPE_CHECKING:
     from PySide6.QtMultimedia import QMediaPlayer
 
-PEAKS = 1200                                    # waveform columns
-
-
-def waveform(path: str | Path, duration: float, columns: int = PEAKS, rate: int = 4000,
-             cancelled=lambda: False) -> list[float]:
-    """The loudest sample of each of about `columns` equal parts of a file's sound (0..1), read as a stream (long
-    files need little memory); [] if it cannot be read or `cancelled()` turns true."""
-    import math
-    step = max(1, math.ceil(max(duration, 0.001) * rate / columns))     # samples per column
-    try:
-        proc = media.popen(["ffmpeg", "-nostdin", "-v", "error", "-i", str(path), "-map", "0:a:0", "-vn",
-                            "-ac", "1", "-ar", str(rate), "-f", "f32le", "-"],
-                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
-    except (OSError, media.MediaError):
-        return []
-    out, rest = [], b""
-    try:
-        while True:
-            if cancelled():
-                return []
-            assert proc.stdout is not None
-            data = proc.stdout.read(step * 4 * 64)
-            if not data:
-                break
-            data = rest + data
-            n = len(data) // (step * 4) * (step * 4)
-            a = array.array("f")
-            a.frombytes(data[:n])
-            rest = data[n:]
-            for k in range(0, len(a), step):
-                chunk = a[k:k + step]
-                out.append(min(1.0, max(max(chunk), -min(chunk))))
-        if len(rest) >= 4:
-            a = array.array("f")
-            a.frombytes(rest[: len(rest) // 4 * 4])
-            out.append(min(1.0, max(max(a), -min(a))))
-        return out
-    finally:
-        if proc.poll() is None:
-            proc.kill()
-        proc.wait()
 
 
 class WaveBar(RangeBar):
