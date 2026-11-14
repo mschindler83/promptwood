@@ -159,6 +159,17 @@ class PromptCard(_ClipCardBase):
         self._build_sound_rows(shared)
         self._build_end_rows(shared)
         self._build_footer(shared, view)
+        self._name_fields()
+
+    def _name_fields(self) -> None:
+        """Accessible names for the fields (the seed has its label beside it: its buddy)."""
+        self.seed_label.setBuddy(self.seed)
+        for field, name in ((self.edit, "Prompt of this clip"), (self.seed, "Seed"), (self.steps, "Steps"),
+                            (self.length, "Length of this clip"), (self.cam_move, "Camera move"),
+                            (self.cam_amp, "How far the camera moves"), (self.cam_speed, "How fast the camera moves"),
+                            (self.src_sound, "Where the clip's sound comes from"),
+                            (self.mix_level, "Level of the given sound")):
+            field.setAccessibleName(name)
 
     def _build_header(self, shared, node):
         """Build the header: title, state tag, variant button, More menu."""

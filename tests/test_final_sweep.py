@@ -326,3 +326,22 @@ def test_the_preferences_remember_their_size(app, tmp_path):
         assert w.qs.value("geometry/prefs") is not None
     finally:
         w.close()
+
+
+def test_the_project_dialogs_and_the_clip_card_name_their_fields(app, tmp_path):
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QLabel
+
+    from video_chain import tree as T
+    from video_chain.ui.clip_cards import PromptCard
+    from video_chain.ui.project_dialogs import ExportDialog, NewProjectDialog
+    q = QSettings(str(tmp_path / "a.ini"), QSettings.IniFormat)
+    new = NewProjectDialog(None, str(tmp_path), q)
+    buddies = {lab.text(): lab.buddy() for lab in new.findChildren(QLabel) if lab.buddy() is not None}
+    assert buddies["Location"] is new.location and buddies["Start image"] is new.image
+    assert new.location.accessibleName() == "Location" and new.image.accessibleName() == "Start image"
+    export = ExportDialog(None, str(tmp_path / "x.mp4"), (832, 480), {})
+    assert {lab.text(): lab.buddy() for lab in export.findChildren(QLabel)}["File"] is export.file
+    card = PromptCard(T.Node("n1", None, 'a cat', overrides={}), names=lambda: [], view=None)
+    for name in ("edit", "seed", "steps", "mix_level", "length", "cam_move", "cam_amp", "cam_speed", "src_sound"):
+        assert getattr(card, name).accessibleName(), name

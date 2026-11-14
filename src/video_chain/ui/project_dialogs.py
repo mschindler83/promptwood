@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
 from .. import tree as T
 from ..comfy import refine_size
 from .lora_stack import LORA_MAX, LORA_MIN, lora_label
-from .widgets import guard_wheel, icon_button, label, remember_geometry
+from .widgets import guard_wheel, icon_button, label, label_for, remember_geometry
 from . import image_picker as IP
 from .ui_logic import repeated_variants, variant_strengths
 
@@ -37,7 +37,7 @@ class NewProjectDialog(QDialog):
         b.clicked.connect(self._choose_location)
         lrow.addWidget(self.location, 1)
         lrow.addWidget(b)
-        f.addRow("Location", lrow)
+        f.addRow(label_for("Location", self.location), lrow)
         irow = QHBoxLayout()
         self.image = QLineEdit(image)
         self.image.setPlaceholderText("optional: start image")
@@ -45,7 +45,7 @@ class NewProjectDialog(QDialog):
         b2.clicked.connect(self._choose_image)
         irow.addWidget(self.image, 1)
         irow.addWidget(b2)
-        f.addRow("Start image", irow)
+        f.addRow(label_for("Start image", self.image), irow)
         self.target = label("", level="tertiary")
         self.target.setWordWrap(True)
         f.addRow("", self.target)
@@ -242,7 +242,7 @@ class ExportDialog(QDialog):
         b.clicked.connect(self._choose)
         row.addWidget(self.file, 1)
         row.addWidget(b)
-        f.addRow("File", row)
+        f.addRow(label_for("File", self.file), row)
         self.size = QComboBox()
         w, h = made_size or (0, 0)
         self.size.addItem(f"As made ({w}×{h}) — quick" if made_size else "As made — quick", "made")
