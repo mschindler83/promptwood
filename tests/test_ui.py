@@ -2903,6 +2903,7 @@ def test_replace_a_person_in_a_real_video(app, tmp_path, image, monkeypatch):
         dlg.head_size.setValue(1.3)                                    # larger head: the boxes grow
         assert dlg.boxes[0][2] - dlg.boxes[0][0] > 40 * 1.3
         dlg.set_reference(str(image))
+        wait(app, lambda: not dlg.ref_busy, timeout=20)
         assert dlg.b_gen.isEnabled()
         dlg.generate()
         wait(app, lambda: not dlg._busy, timeout=60)
@@ -2964,6 +2965,7 @@ def test_replace_a_person_in_a_real_video(app, tmp_path, image, monkeypatch):
         monkeypatch.setattr(F, "available", lambda model: None)
         monkeypatch.setattr(F, "detect", lambda png, model: [(700.0, 300.0, 820.0, 450.0, 0.9)])
         dlg.set_reference(str(wide))
+        wait(app, lambda: not dlg.ref_busy, timeout=20)
         assert dlg.ref_crop is not None and dlg.ref_crop[2] == round(150 * swap.HEAD_CROP_MARGIN)
         dlg.method.setCurrentIndex(dlg.method.findData("h3"))
         assert dlg.head_crop.isVisibleTo(dlg) and dlg.head_crop.isChecked() and "head square" in dlg.crop_info.text()
@@ -2999,8 +3001,10 @@ def test_replace_a_person_in_a_real_video(app, tmp_path, image, monkeypatch):
                                    text=True).stdout.strip()
         assert has_sound                                               # the clip's own sound
         dlg.set_reference(str(wide))                                   # the same picture: its description stays
+        wait(app, lambda: not dlg.ref_busy, timeout=20)
         assert dlg.prompt.text() == "Male, oval face, short black hair"
         dlg.set_reference(str(image))                                  # another picture: its own description
+        wait(app, lambda: not dlg.ref_busy, timeout=20)
         assert dlg.prompt.text() == ""
         dlg.h3["turbo"] = None
         dlg._update()
@@ -3014,6 +3018,7 @@ def test_replace_a_person_in_a_real_video(app, tmp_path, image, monkeypatch):
         nodet = w.replace_person(v, dialog=False)
         assert nodet.heads is not None and nodet.heads["frames"] == n and not nodet.boxes
         nodet.set_reference(str(image))
+        wait(app, lambda: not nodet.ref_busy, timeout=20)
         nodet.method.setCurrentIndex(nodet.method.findData("face"))
         assert nodet.b_gen.isEnabled()
         nodet.method.setCurrentIndex(nodet.method.findData("animate"))

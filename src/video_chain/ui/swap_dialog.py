@@ -50,6 +50,7 @@ class _Sig(QObject):
     progress = Signal(str, int, int)        # what, done, of
     finished = Signal(object, str)          # (out path, meta) or None, error
     details = Signal(str)                   # the face details written by the vision model
+    reference = Signal(int, str, object, object)   # picture generation, path, upright PNG (None: unreadable), crop
 
 
 class SwapDialog(QDialog):
@@ -84,6 +85,10 @@ class SwapDialog(QDialog):
         self._sig.progress.connect(self._progress)
         self._sig.finished.connect(self._finished)
         self._sig.details.connect(self._auto_details_made)
+        self._sig.reference.connect(self._reference_ready)
+        self._ref_gen = 0                              # which picture the worker is preparing (older answers drop)
+        self.ref_busy = False
+        self._closed = False
         self._auto_details = ""                        # the face details the vision model wrote (for this picture)
 
         top = QHBoxLayout(self)
@@ -327,20 +332,50 @@ class SwapDialog(QDialog):
         self._auto_details = ""
 
     def set_reference(self, path: str | None):
-        """The new person's picture (turned upright as a PNG; the head found for the crop)."""
+        """The new person's picture (turned upright as a PNG; the head found for the crop). The picture is read and
+        searched in a worker: the window stays usable and the tile says so; Generate waits for it."""
         if str(path or "") != str(self.ref or ""):
             self._forget_auto_details()
         self.ref, self.ref_png, self.ref_crop = None, None, None
-        if path:
-            png = Path(self._tmp.name) / f"ref_{uuid.uuid4().hex[:6]}.png"
+        self._ref_gen += 1
+        self.ref_busy = bool(path)
+        if not path:
+            self._show_reference()
+            self._update()
+            return
+        self.ref_tile.clear_frame("Looking at the picture …")
+        self.crop_info.setText("Looking for the face …")
+        png = Path(self._tmp.name) / f"ref_{uuid.uuid4().hex[:6]}.png"
+        gen, sig = self._ref_gen, self._sig
+
+        def work():
+            crop = None
             try:
-                chain.to_png(Path(path), png)            # upright (EXIF), as shown and as cropped
-                upright_ok = True
-            except Exception:  # noqa: BLE001
-                png, upright_ok = Path(path), False
-            if not QImage(str(png)).isNull():
-                self.ref, self.ref_png = str(path), png
-                self.ref_crop = self._find_head(png) if upright_ok else None
+                try:
+                    chain.to_png(Path(path), png)        # upright (EXIF), as shown and as cropped
+                    upright_ok = True
+                except Exception:  # noqa: BLE001
+                    use, upright_ok = Path(path), False
+                else:
+                    use = png
+                ok = not QImage(str(use)).isNull()
+                crop = self._find_head(use) if ok and upright_ok else None
+                out = use if ok else None
+            except Exception:  # noqa: BLE001  (the temporary folder removed by a close, ...)
+                out = None
+            try:
+                sig.reference.emit(gen, str(path), out, crop)
+            except RuntimeError:                         # the window is gone
+                pass
+        threading.Thread(target=work, daemon=True).start()
+        self._update()
+
+    def _reference_ready(self, gen: int, path: str, png, crop):
+        if gen != self._ref_gen or self._closed:         # another picture was chosen, or the window closed
+            return
+        self.ref_busy = False
+        if png is not None:
+            self.ref, self.ref_png, self.ref_crop = path, Path(png), crop
         self._show_reference()
         self._update()
 
@@ -405,7 +440,7 @@ class SwapDialog(QDialog):
 
     # ---- generating
     def _update(self):
-        ready = self.heads is not None and bool(self.ref) and not self._busy
+        ready = self.heads is not None and bool(self.ref) and not self._busy and not self.ref_busy
         self.b_gen.setEnabled(ready)
         self.b_gen.setToolTip("" if ready else "Wait for the head to be found and choose the new person's picture")
         self.b_stop.setEnabled(self._busy)
@@ -608,7 +643,9 @@ class SwapDialog(QDialog):
         self._update()
 
     def done(self, r):
+        self._closed = True
         if self._busy:
             self.stop()
         self.player.stop_loading()
         super().done(r)
+        self._tmp.cleanup()
