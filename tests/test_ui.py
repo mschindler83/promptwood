@@ -65,7 +65,7 @@ def win(app, tmp_path, monkeypatch):
     w.close()
 
 
-def wait(app, cond, timeout=60):
+def wait(app, cond, timeout=30):
     end = time.time() + timeout
     while time.time() < end:
         app.processEvents()
@@ -73,6 +73,14 @@ def wait(app, cond, timeout=60):
             return True
         time.sleep(0.02)
     raise AssertionError("timed out")
+
+
+def wait_for_joined_path(app, win, last: str, timeout=30):
+    """Until the joined path that ends at clip `last` is played (one played before it, e.g. of a shorter path or the
+    clip just made, does not count: under load it can come first)."""
+    want = win.project / "paths" / f"{last}.mp4"
+    wait(app, lambda: win.played and win.played[-1] == want, timeout)
+    return want
 
 
 def flush(app, win):
@@ -1211,8 +1219,7 @@ def test_video_first_then_generated_clip(app, win, tmp_path):
     type_prompt(win, a, "after the real video")
     run_and_wait(app, win, win.generate_path)
     assert win.state(a) == "done", win.status.text()
-    wait(app, lambda: win.played)
-    assert chain.probe(win.played[-1])["frames"] == 36 + 16
+    assert chain.probe(wait_for_joined_path(app, win, a))["frames"] == 36 + 16
     # a later start, same last frame: converted again, but the clip after it stays (it starts from that frame)
     win.set_video_range(v, str(src), 0.5, 1.5)
     wait(app, lambda: not win._converts)
@@ -1236,8 +1243,7 @@ def test_clip_into_video_and_variants(app, win, tmp_path, image):
     run_and_wait(app, win, win.generate_path)                             # path start -> a -> v
     assert win.state(a) == "done" and win.state(v) == "done", win.status.text()
     assert win.tree.nodes[a].made["end_key"] == win.tree.nodes[v].made["key"]
-    wait(app, lambda: win.played)
-    assert chain.probe(win.played[-1])["frames"] == 16 + 24              # the clip's repeated last frame is cut
+    assert chain.probe(wait_for_joined_path(app, win, v))["frames"] == 16 + 24              # the clip's repeated last frame is cut
     new = win.create_variants(a, 2, generate=False)
     for nid in new:
         vc = win.tree.video_child(nid)
@@ -1574,8 +1580,8 @@ def test_waiting_for_comfyui_can_be_cancelled(app, win, tmp_path, image, monkeyp
     win.comfy_autostart.setChecked(True)
     monkeypatch.setattr(win, "start_comfy", lambda: True)
     win.generate_path()
-    wait(app, lambda: not win.running)
-    assert win._waiting_comfy == [ids[0]] and not win.running and win.b_stop.isEnabled()
+    wait(app, lambda: win._waiting_comfy == [ids[0]] and not win.running)      # (Generate checks in the background first)
+    assert win.b_stop.isEnabled()
     win.stop()
     assert win._waiting_comfy is None and not win.b_stop.isEnabled() and "Cancelled" in win.status.text()
     win._comfy_state(True)                                            # ComfyUI comes up: nothing starts
