@@ -13,6 +13,7 @@ import threading
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 from PySide6.QtCore import QObject, QSettings, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPixmap
@@ -663,7 +664,7 @@ def pick_image(parent, title: str, settings: QSettings, start_dir: str | None = 
     """Show the picker; the chosen file's path or None. kind: 'image', 'video' or 'media' (sounds and videos).
     The thumbnail cache can be moved with the setting 'thumbCacheDir' (empty = no disk cache)."""
     qs = settings
-    cache = qs.value("thumbCacheDir", None)
+    cache: Any = qs.value("thumbCacheDir", None)
     cache_dir = CACHE_DIR if cache is None else (Path(cache) if cache else None)
     dlg = ImagePickerDialog(parent, title, start_dir, qs, places, cache_dir=cache_dir, collections=collections,
                             kind=kind)

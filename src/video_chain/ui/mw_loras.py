@@ -6,6 +6,7 @@ import os
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 from PySide6.QtWidgets import QFileDialog
 
@@ -205,7 +206,7 @@ class LorasMixin(MainWindowHost):
         """Put a LoRA file at the end of a clip's stack."""
         if self.tree is None or self.running or nid not in self.tree.nodes or self.tree.nodes[nid].frozen:
             return
-        ov = dict(self.tree.nodes[nid].overrides)
+        ov: dict[str, Any] = dict(self.tree.nodes[nid].overrides)
         p = lora_path(path)
         ov["loras"] = list(ov.get("loras") or []) + [{"path": p, "strength": float(strength)}]
         self._remember_lora(p)

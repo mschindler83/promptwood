@@ -3,8 +3,11 @@ from __future__ import annotations
 
 from collections import OrderedDict
 
+from typing import cast
+
 from PySide6.QtCore import QEvent, QObject, QRect, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QFontInfo, QImage, QKeySequence, QPainter, QPixmap, QShortcut, QTransform
+from PySide6.QtGui import (QColor, QFont, QFontInfo, QImage, QKeySequence, QPainter, QPixmap, QShortcut,
+                           QStandardItem, QStandardItemModel, QTransform)
 from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QHBoxLayout, QLabel, QSizePolicy,
                                QSlider, QToolButton, QVBoxLayout, QWidget)
 
@@ -28,6 +31,11 @@ TERMS = {
     "dialog buttons": "the action says what it does ('Use this range', 'Save'); Cancel when closing discards "
                       "something, Close when nothing is held back; 'Hide' dismisses a hint",
 }
+
+
+def combo_item(combo: QComboBox, index: int) -> QStandardItem:
+    """The item of a combo box entry (its model is a QStandardItemModel; the stubs say QAbstractItemModel)."""
+    return cast(QStandardItemModel, combo.model()).item(index)
 
 
 def shortcut(key, parent: QWidget, fn, context=None) -> QShortcut:

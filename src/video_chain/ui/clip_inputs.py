@@ -134,7 +134,7 @@ class ChipRow(QWidget):
         self._specs: list[dict] | None = None
         self.chips: list[QToolButton] = []
         self.model_chip: QToolButton | None = None      # how the clip is made (the Simple view hides it)
-        self.b_prompt = None
+        self.b_prompt: QToolButton | None = None
         self.setVisible(False)
 
     def set_specs(self, specs: list[dict] | None):

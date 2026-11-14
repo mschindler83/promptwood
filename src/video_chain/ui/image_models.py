@@ -12,7 +12,7 @@ from ..comfy import EDIT_MODELS
 from ..edits import MOSS_EDIT_QUALITIES, QUALITY_TEXT, lora_note
 from ..imagegen import FAMILIES, size_for
 from .image_common import CREATE_HINT, PROMPT_HINT
-from .widgets import safe_emit
+from .widgets import safe_emit, combo_item
 from .image_host import ImageEditHost
 from .qsvalue import qs_value
 
@@ -85,7 +85,7 @@ class ModelsMixin(ImageEditHost):
         MOSS also needs its edit LoRA)."""
         if not self.families:                      # not listed (yet, or ComfyUI is gone): all offered again
             for i in range(self.edit_model.count()):
-                self.edit_model.model().item(i).setEnabled(True)
+                combo_item(self.edit_model, i).setEnabled(True)
                 self.edit_model.setItemText(i, EDIT_MODELS[self.edit_model.itemData(i)])
             return
         for key in ("2511", "qwen21", "moss"):
@@ -94,12 +94,12 @@ class ModelsMixin(ImageEditHost):
             ok = "models" in info and (key != "moss" or bool(info.get("edit_lora")))
             why = info.get("missing") or ("MOSS-Image's edit LoRA (moss_image_edit_lora_rank_64_bf16) is missing"
                                           if key == "moss" else "")
-            self.edit_model.model().item(k).setEnabled(ok)
+            combo_item(self.edit_model, k).setEnabled(ok)
             self.edit_model.setItemText(k, EDIT_MODELS[key] + ("" if ok else "  (not available)"))
             self.edit_model.setItemData(k, EDIT_MODELS[key] if ok else why, Qt.ItemDataRole.ToolTipRole)
         cur = self.edit_model.currentIndex()
-        if not self.edit_model.model().item(cur).isEnabled():   # the chosen one is not there: the first one that is
-            ok = [i for i in range(self.edit_model.count()) if self.edit_model.model().item(i).isEnabled()]
+        if not combo_item(self.edit_model, cur).isEnabled():   # the chosen one is not there: the first one that is
+            ok = [i for i in range(self.edit_model.count()) if combo_item(self.edit_model, i).isEnabled()]
             if ok:
                 self.edit_model.setCurrentIndex(ok[0])
 
@@ -141,9 +141,9 @@ class ModelsMixin(ImageEditHost):
             k = self.family.count() - 1
             self.family.setItemData(k, info.get("missing", f["label"]), Qt.ItemDataRole.ToolTipRole)
             if "models" not in info:
-                self.family.model().item(k).setEnabled(False)
+                combo_item(self.family, k).setEnabled(False)
         saved = qs_value(self.qs, "createFamily", "", str) if self.qs is not None else ""
-        avail = [i for i in range(self.family.count()) if self.family.model().item(i).isEnabled()
+        avail = [i for i in range(self.family.count()) if combo_item(self.family, i).isEnabled()
                  and self.family.itemData(i)]
         i = self.family.findData(saved)
         self.family.setCurrentIndex(i if i in avail else (avail[0] if avail else 0))

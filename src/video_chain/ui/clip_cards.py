@@ -4,6 +4,7 @@ from __future__ import annotations
 import random
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QAction, QCursor, QKeySequence, QPixmap
@@ -21,7 +22,7 @@ from .problems import EXAMPLES, ProblemBox, add_example, camera_menu_items, inse
 from .prompt_refiner import replace_text
 from .theme import icon, repolish, theme
 from .view_mode import AdvancedNote, ViewMode, row_widget
-from .widgets import FrameTile, format_time, guard_wheel, icon_button, label
+from .widgets import FrameTile, combo_item, format_time, guard_wheel, icon_button, label
 from .mw_support import FileDrop, select_frames
 from .ui_logic import (
     CARD_WIDTH, CONTINUE_FIRST_TIP, CONTINUE_SHORT_TIP, CONTINUE_TIP, END_TIP, FRAME_CHOICES, FREEZE_TIP,
@@ -37,7 +38,7 @@ class _CardAction(QAction):
 
 
 def more_menu(card, nid: str, entries, tip: str = "More actions for this clip: variants, compare, branch, freeze, "
-                                                   "delete") -> tuple[QToolButton, dict[str, QAction]]:
+                                                   "delete") -> tuple[QToolButton, dict[str, _CardAction]]:
     """A card's "More" button: a menu of (action, icon, text, tooltip, shortcut or None) entries (None: a separator)
     that emit card.action(action, nid), the same signal the header buttons had. A shortcut is only shown (and works
     while the menu is open): the window's own shortcuts do the work, one per window, not one per card."""
@@ -73,8 +74,18 @@ class _ClipCardBase(QFrame):
     """What the card of a made clip and the card of a real video share: the state tag and picture, the border while it
     is worked on, freezing. The subclasses say how they differ in the class attributes and _frozen_tip."""
     _NO_PICTURE = "not made yet"                       # the thumbnail's text while there is nothing to show
-    _BUSY = ("generating",)                            # the states in which the card shows the progress bar
+    _BUSY: tuple[str, ...] = ("generating",)           # the states in which the card shows the progress bar
     _BACKGROUND = "bgRaised"                           # the theme colour of the card's background
+    # (made by the subclasses)
+    tag: QLabel
+    thumb: FrameTile
+    step: QLabel
+    bar: QProgressBar
+    b_freeze: QAction
+    _on: bool
+
+    def set_editable(self, on: bool):
+        raise NotImplementedError
 
     def set_state(self, state: str, pixmap: QPixmap | None, step: str = ""):
         self.state = state
@@ -112,6 +123,7 @@ class _ClipCardBase(QFrame):
 
 class PromptCard(_ClipCardBase):
     """One clip of the selected path: prompt, seed, LoRAs, own length / steps, status."""
+    _end_free: bool
     settings_open = False                      # the own-settings part is open (the same on every card)
     edited = Signal(str)
     seedChanged = Signal(str, int)
@@ -591,7 +603,7 @@ class PromptCard(_ClipCardBase):
         self._update_note()
 
     def _ov_changed(self, *_):
-        ov = {}
+        ov: dict[str, Any] = {}
         loras = self.loras.items()
         if loras:
             ov["loras"] = loras
@@ -715,8 +727,8 @@ class PromptCard(_ClipCardBase):
         for b in self.chips.chips:                 # (the lead chip is an own setting of the clip)
             if b.isCheckable():
                 b.setEnabled(edit)
-        for w in self.buttons:
-            w.setEnabled(self._on)
+        for button in self.buttons:
+            button.setEnabled(self._on)
         self.steps.setEnabled(edit and not self.steps_locked)
         self._enable_camera()
         self._enable_guide()
@@ -912,12 +924,11 @@ class PromptCard(_ClipCardBase):
         switched on); model_sound: the project's sound is on (a sound laid over can be mixed with the model's)."""
         self._max_guide = max_guide
         cur = self.src_sound.currentData()
-        model = self.src_sound.model()
         for k in range(self.src_sound.count()):        # a choice in use stays choosable (to be taken back)
             d = self.src_sound.itemData(k)
             track = isinstance(d, str) and d.startswith(T.TRACK_PREFIX)
             ok = d is None or d == cur or track or (available if d is True else repeat)
-            model.item(k).setEnabled(ok)
+            combo_item(self.src_sound, k).setEnabled(ok)
         some = available or repeat or bool(cur) or self.src_sound.count() > len(SOUND_MODES)
         self.link_form.setRowVisible(self.sound_box, True)   # (always: Speak the lines)
         self.src_sound.setVisible(some)

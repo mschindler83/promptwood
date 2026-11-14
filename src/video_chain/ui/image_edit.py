@@ -44,7 +44,7 @@ from .imageio import decode_upright as _decode_upright, upright  # noqa: F401  (
 from .lora_stack import LoraStack
 from .results_gallery import InfoCard, ResultGallery, ResultView, ThumbLoader
 from .variations_panel import PlaceholderHighlighter, VariationsPanel
-from .widgets import FrameTile, fit_size, guard_wheel, icon_button, label, shortcut
+from .widgets import FrameTile, fit_size, guard_wheel, icon_button, label, shortcut, combo_item
 from .qsvalue import qs_value
 
 
@@ -839,7 +839,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
             if self.mode() != "create":
                 self.set_mode("create")
             i = self.family.findData(meta.get("family"))
-            if i >= 0 and self.family.model().item(i).isEnabled():
+            if i >= 0 and combo_item(self.family, i).isEnabled():
                 self.family.setCurrentIndex(i)
             j = self.model_file.findData(meta.get("chosen_model") or meta.get("model"))
             if j >= 0:
@@ -855,7 +855,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
             if self.mode() != "edit":
                 self.set_mode("edit")
             i = self.edit_model.findData(meta.get("edit_model") or "2511")
-            if i >= 0 and self.edit_model.model().item(i).isEnabled():
+            if i >= 0 and combo_item(self.edit_model, i).isEnabled():
                 self.edit_model.setCurrentIndex(i)
             q = self.quality.findData(meta.get("quality"))
             if q >= 0:

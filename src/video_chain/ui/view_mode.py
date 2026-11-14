@@ -88,7 +88,7 @@ class ViewMode(QObject):
         self.apply()
         self.changed.emit(on)
 
-    def advanced(self, *targets: Target) -> None:
+    def advanced(self, *targets: Target | None) -> None:
         """Register advanced-only controls (hidden in Simple); they follow the current view at once. Their own
         visibility is taken as it is now."""
         self._prune()
