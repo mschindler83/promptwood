@@ -11,6 +11,7 @@ from PySide6.QtGui import (QColor, QFont, QFontInfo, QImage, QKeySequence, QPain
 from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QHBoxLayout, QLabel, QSizePolicy,
                                QSlider, QToolButton, QVBoxLayout, QWidget)
 
+from .. import chain
 from .theme import icon, theme
 
 # The words of the interface, one per thing (counted over the app's own texts; main_window follows, see the notes).
@@ -495,7 +496,7 @@ class FrameStepper(QWidget):
     second) on the host window. HandoverDialog and VideoFrameDialog share it."""
     valueChanged = Signal(int)
 
-    def __init__(self, host: QWidget, fps: float = 24.0, parent=None):
+    def __init__(self, host: QWidget, fps: float = chain.FPS, parent=None):
         super().__init__(parent or host)
         self.fps = float(fps)
         sec = max(1, round(self.fps))

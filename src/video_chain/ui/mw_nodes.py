@@ -155,7 +155,7 @@ class NodeMixin(MainWindowHost):
                 msg += "\nTheir video files are not deleted: they are moved to old/ in the project folder."
             if not D.confirm(self, "Delete", msg):
                 return
-            self.tree.remove(node.id, self.project)
+            self.tree.remove(node.id, self.project, later=True)      # (its files move once tree.json is saved)
             if self.tree.selected is None:
                 self.tree.selected = START
             self._write_tree()
@@ -358,7 +358,7 @@ class NodeMixin(MainWindowHost):
         gone = []
         for r in roots:
             if r in self.tree.nodes:
-                gone += self.tree.remove(r, self.project)
+                gone += self.tree.remove(r, self.project, later=True)
         self.tree.selected = nid
         self._write_tree()
         self.refresh()

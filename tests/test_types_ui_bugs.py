@@ -4,7 +4,7 @@ import os
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 import logging  # noqa: E402
 
-from test_ui import app, image, new_project, run_and_wait, win  # noqa: E402,F401
+from ui_helpers import app, image, new_project, run_and_wait, win  # noqa: E402,F401
 
 
 def _menu_of(win, nid, monkeypatch):

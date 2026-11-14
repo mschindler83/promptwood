@@ -3,14 +3,13 @@ from __future__ import annotations
 
 import logging
 import os
-import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from .workers import post, run_in_background
 from .. import comfy as CMF, llm_server as LLM, runpod as RP, triggers, tts as TTS
 from . import dialogs as D
-from .widgets import safe_emit
 from .ui_logic import (
     CLOSE_GRACE, DEFAULT_COMFY_URL, LLM_DEFAULT_SERVER, UNLOAD_TIMEOUT, VRAM_POLL_SECONDS, app_cache_dir)
 from .mw_host import MainWindowHost
@@ -64,12 +63,10 @@ class LlamaMixin(MainWindowHost):
         log_dir = app_cache_dir()
         server, port = self.llm_server.text().strip() or LLM_DEFAULT_SERVER, self.llm_port.value()
 
-        def work():
-            try:
-                LLM.LlamaServer(server, "", port, log_dir=log_dir).stop(wait=True, grace=CLOSE_GRACE)
-            except Exception:  # noqa: BLE001
-                logging.getLogger(__name__).warning("ending a leftover llama-server", exc_info=True)
-        threading.Thread(target=work, daemon=True, name="llama-leftover").start()
+        run_in_background(lambda: LLM.LlamaServer(server, "", port, log_dir=log_dir).stop(wait=True, grace=CLOSE_GRACE),
+                          on_done=lambda _r: None, owner=self, name="llama-leftover",
+                          on_error=lambda e: logging.getLogger(__name__).warning("ending a leftover llama-server",
+                                                                                 exc_info=e))
 
     def _room_for_llama(self, llama, url: str, settle: float = 15.0) -> None:
         """(start()'s thread, just before the llama.cpp server starts) Too little free VRAM for it: ComfyUI is asked
@@ -91,8 +88,9 @@ class LlamaMixin(MainWindowHost):
             raise error(f"only {gb(free)} of VRAM is free while clips are generated and {what} needs about "
                         f"{gb(need)}; {later}")
         if not CMF.free_models(url, timeout=UNLOAD_TIMEOUT):
-            safe_emit(self.bridge.log, f"ComfyUI did not unload its models (is it running?): only {gb(free)} of VRAM "
-                                       f"is free and {what} needs about {gb(need)}.")
+            note = (f"ComfyUI did not unload its models (is it running?): only {gb(free)} of VRAM "
+                    f"is free and {what} needs about {gb(need)}.")
+            post(self, lambda: self.log.appendPlainText(note))
             return                                  # (ComfyUI is not up: the VRAM is used by something else)
         end = time.time() + settle
         now: float | None = free
@@ -101,10 +99,10 @@ class LlamaMixin(MainWindowHost):
             now = LLM.free_vram_mb()
             if now is None or now >= need:
                 break
-        safe_emit(self.bridge.room_made,
-                  f"ComfyUI's models were unloaded for {what} (it needs about {gb(need)} of VRAM, "
-                  f"{gb(free)} was free" + (f", now {gb(now)}" if now is not None else "") +
-                  "); the clip model loads again before the next clips.")
+        note = (f"ComfyUI's models were unloaded for {what} (it needs about {gb(need)} of VRAM, "
+                f"{gb(free)} was free" + (f", now {gb(now)}" if now is not None else "") +
+                "); the clip model loads again before the next clips.")
+        post(self, lambda: self._room_made(note))
 
     def _tts_log(self, message: str):
         """A step of text to speech: in the log, and in the status line while it works."""

@@ -1,19 +1,21 @@
 """Voices, sounds and audio tracks."""
 from __future__ import annotations
 
+import logging
 import copy
 import os
-import threading
 from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDialog, QListWidgetItem
 
+from .workers import run_in_background
 from .. import chain, tree as T, tts as TTS
 from . import dialogs as D, image_picker as IP
-from .widgets import safe_emit
 from .ui_logic import AUDIO_REF_RANGE, plural
 from .mw_host import MainWindowHost
+
+log = logging.getLogger(__name__)
 
 
 class AudioMixin(MainWindowHost):
@@ -52,13 +54,10 @@ class AudioMixin(MainWindowHost):
             self._tts_busy = False                  # (it never started: not busy for ever)
             raise
 
-        def work():
-            try:
-                safe_emit(self.bridge.eleven_cloned, name, TTS.clone_sample(project, snap, name, TTS.ElevenLabs()), "",
-                                               str(project))
-            except BaseException as e:  # noqa: BLE001  (the answer ends "busy")
-                safe_emit(self.bridge.eleven_cloned, name, None, str(e) or type(e).__name__, str(project))
-        threading.Thread(target=work, daemon=True).start()
+        run_in_background(lambda: TTS.clone_sample(project, snap, name, TTS.ElevenLabs()),
+                          on_done=lambda v: self._eleven_cloned(name, v, "", str(project)),      # (the answer ends "busy")
+                          on_error=lambda e: self._eleven_cloned(name, None, str(e) or type(e).__name__, str(project)),
+                          owner=self)
 
     def _eleven_cloned(self, name: str, voice, err: str, project: str):
         self._tts_busy = False
@@ -383,7 +382,7 @@ class AudioMixin(MainWindowHost):
             return
         try:
             assert self.tree is not None
-            T.remove_track(self.project, self.tree, tr["id"])
+            T.remove_track(self.tree, tr["id"])
         except (OSError, RuntimeError, ValueError) as e:
             self._report_error(f"Could not remove the audio track: {e}")
             return
@@ -408,7 +407,7 @@ class AudioMixin(MainWindowHost):
             try:
                 n += len(T.track_users(T.load(Path(d)), tid))
             except Exception:  # noqa: BLE001  (a scene that cannot be read: not counted)
-                pass
+                log.warning("the tracks of the scene %s could not be counted", d, exc_info=True)
         return n
 
     def _drop_unused_tracks(self):

@@ -119,7 +119,7 @@ class Pill(QFrame):
         self.refresh()
 
     def refresh(self):
-        v, c = self.value, self.color
+        v = self.value
         shown = html.escape(v.text) if v.text.strip() else "<i>(nothing)</i>"
         self.text.setText(f"<s>{shown}</s>" if not v.on else shown)
         self.weight.setText(f"×{v.weight}")

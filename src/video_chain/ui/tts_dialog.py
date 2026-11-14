@@ -2,21 +2,15 @@
 account's ElevenLabs voices. A sample sentence is made to listen to; "Use this voice" makes it the character's voice."""
 from __future__ import annotations
 
-import threading
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLineEdit,
                                QPlainTextEdit, QPushButton, QSpinBox, QStackedWidget, QVBoxLayout, QWidget)
 
+from .workers import run_in_background
 from .. import media, tts
 from .dialogs import button_row
-from .widgets import fit_size, label, safe_emit
-
-
-class _Signals(QObject):
-    sample = Signal(object, str)               # secs or None, error
-    voices = Signal(object, str)               # [voice] or None, error
+from .widgets import fit_size, label
 
 
 class VoiceTtsDialog(QDialog):
@@ -29,9 +23,6 @@ class VoiceTtsDialog(QDialog):
         self.setWindowTitle(f"Voice of @{name} with text to speech")
         self.name, self.lang, self.model = name, lang, model
         self._play, self._local, self._eleven = play, local, eleven
-        self._sig = _Signals(self)
-        self._sig.sample.connect(self._sample_done)
-        self._sig.voices.connect(self._voices_done)
         self._tmp = media.scratch("voice")
         self.wav = Path(self._tmp.name) / "sample.wav"
         self.made: dict | None = None            # what the sample was made with (use_sample's label / text / eleven)
@@ -127,14 +118,8 @@ class VoiceTtsDialog(QDialog):
         self._enable()
         self.info.setText("Asking ElevenLabs for your voices…")
 
-        def work():
-            try:
-                voices = self._eleven().voices()
-            except Exception as e:  # noqa: BLE001
-                safe_emit(self._sig.voices, None, str(e))
-                return
-            safe_emit(self._sig.voices, voices, "")
-        threading.Thread(target=work, daemon=True).start()
+        run_in_background(lambda: self._eleven().voices(), on_done=lambda v: self._voices_done(v, ""),
+                          on_error=lambda e: self._voices_done(None, str(e)), owner=self)
 
     def _voices_done(self, voices, err: str):
         self.busy = False
@@ -172,16 +157,13 @@ class VoiceTtsDialog(QDialog):
                  "eleven": {"id": voice["id"], "name": voice["name"]}})
 
         def work():
-            try:
-                eng = self._local() if kind == "local" else self._eleven()
-                secs = tts.make_sample(eng, text, self.lang, self.wav, description=desc, voice_id=voice_id,
-                                       model=self.model, seed=seed)
-                self._pending = made
-            except Exception as e:  # noqa: BLE001
-                safe_emit(self._sig.sample, None, str(e))
-                return
-            safe_emit(self._sig.sample, secs, "")
-        threading.Thread(target=work, daemon=True).start()
+            eng = self._local() if kind == "local" else self._eleven()
+            secs = tts.make_sample(eng, text, self.lang, self.wav, description=desc, voice_id=voice_id,
+                                   model=self.model, seed=seed)
+            self._pending = made
+            return secs
+        run_in_background(work, on_done=lambda secs: self._sample_done(secs, ""),
+                          on_error=lambda e: self._sample_done(None, str(e)), owner=self)
 
     def _sample_done(self, secs, err: str):
         self.busy = False

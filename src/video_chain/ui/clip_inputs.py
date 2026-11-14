@@ -11,7 +11,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QPlainTextEdit, QPushButton,
                                QToolButton, QVBoxLayout, QWidget)
 
-from .. import tree as T
+from .. import chain, tree as T
 from .dialogs import button_row
 from .widgets import fit_size, FlowBox, label
 
@@ -77,7 +77,7 @@ def chip_specs(info: dict, lead_off: str | None = None) -> list[dict]:
                            "the lead again."})
     for vid in info.get("videos") or []:            # (the node's order: pictures, videos, then the sounds)
         out.append({"text": f"Continues clip before · Video {vid['n']}", "variant": "", "lead": None,
-                    "tip": f"The {vid['what']} (its last {vid['frames'] / 24:.1f} s, {vid['frames']} frames, "
+                    "tip": f"The {vid['what']} (its last {vid['frames'] / chain.FPS:.1f} s, {vid['frames']} frames, "
                            f"pictures only) goes to the model as <Video {vid['n']}>, and the prompt tells it that "
                            "this clip continues it: motion, camera and scene carry on (Continue)."})
     for snd in info["sounds"]:

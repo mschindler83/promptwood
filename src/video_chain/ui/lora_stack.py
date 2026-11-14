@@ -8,12 +8,13 @@ from pathlib import Path
 
 import threading
 
-from PySide6.QtCore import QObject, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QFontMetrics, QImage, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
                                QListView, QListWidget, QListWidgetItem, QPushButton,
                                QStyledItemDelegate, QToolButton, QVBoxLayout, QWidget)
 
+from .workers import post, run_in_background
 from .. import tree as T
 from .dialogs import add_action, button_row, failed
 from .widgets import fit_size, guard_wheel, icon_button, label
@@ -68,10 +69,6 @@ def matches(query: str, *texts: str) -> bool:
 COVER = 156                      # pixels: the side of a card's cover in the LoRA picker
 CARD_W, CARD_H = COVER + 16, COVER + 62
 COVER_LOADERS = 2
-
-
-class _CoverSig(QObject):
-    cover = Signal(str, str, object)             # LoRA path, Pictures setting, QImage or None
 
 
 _COVERS: dict[tuple[str, str], QImage] = {}      # (path, setting) -> the cover, kept while the app runs
@@ -281,14 +278,12 @@ class LoraPickerDialog(QDialog):
         self._wanted: list[tuple[str, str]] = []
         self._busy: set[tuple[str, str]] = set()
         self._wake = threading.Event()
-        self._sig = _CoverSig()
-        self._sig.cover.connect(self._cover)
         self._side = int(COVER * max(1.0, self.devicePixelRatioF()))
         self._prioritise = QTimer(self, singleShot=True, interval=60)
         self._prioritise.timeout.connect(self._want_covers)
         self.list.verticalScrollBar().valueChanged.connect(lambda *_: self._prioritise.start())
         for _ in range(COVER_LOADERS):
-            threading.Thread(target=self._load_covers, daemon=True).start()
+            run_in_background(self._load_covers, on_done=lambda _r: None, owner=self)
 
         self.search.textChanged.connect(self._filter)
         self.search.returnPressed.connect(self._accept)
@@ -363,10 +358,8 @@ class LoraPickerDialog(QDialog):
                     img = None
             with self._lock:
                 self._busy.discard(job)
-            try:
-                self._sig.cover.emit(path, mode, img)
-            except RuntimeError:
-                return
+            if not post(self, self._cover, path, mode, img):
+                return                                # (the dialog is gone)
 
     def _cover(self, path: str, mode: str, img):
         it = self._items.get(path)

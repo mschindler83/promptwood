@@ -2,13 +2,12 @@
 from __future__ import annotations
 
 import copy
-import threading
 from pathlib import Path
 
+from .workers import post, run_in_background
 from .. import chain, tree as T, tts as TTS
 from .speak_dialog import SpeakLinesDialog
 from .tts_dialog import VoiceTtsDialog
-from .widgets import safe_emit
 from . import speak_dialog as SPD, tts_dialog as TD
 from .ui_logic import DEFAULT_COMFY_URL, app_cache_dir, plural
 from .mw_host import MainWindowHost
@@ -32,13 +31,9 @@ class TtsMixin(MainWindowHost):
             self.status.setText("ElevenLabs needs your API key: Preferences → ElevenLabs API key.")
 
     def _load_eleven_models(self):
-        def work():
-            try:
-                safe_emit(self.bridge.eleven_models, TTS.ElevenLabs().models(), "")
-            except Exception as e:  # noqa: BLE001
-                safe_emit(self.bridge.eleven_models, None, str(e))
         self.status.setText("Asking ElevenLabs for its models…")
-        threading.Thread(target=work, daemon=True).start()
+        run_in_background(lambda: TTS.ElevenLabs().models(), on_done=lambda m: self._fill_eleven_models(m, ""),
+                          on_error=lambda e: self._fill_eleven_models(None, str(e)), owner=self)
 
     def _fill_eleven_models(self, models, err: str):
         if models is None:
@@ -84,7 +79,7 @@ class TtsMixin(MainWindowHost):
         VRAM), then ComfyUI is asked to unload its models (_make_room)."""
         cur = self._llama
         if cur is not None and cur.stop(wait=True):
-            safe_emit(self.bridge.tts_log, "stopped the llama.cpp server: Fish S2 Pro needs its RAM and VRAM")
+            post(self, lambda: self._tts_log("stopped the llama.cpp server: Fish S2 Pro needs its RAM and VRAM"))
         self._make_room(TTS.FISH_VRAM_MB, url, "Fish S2 Pro", TTS.TtsError, "speak the lines after the run")
 
     def stop_tts(self, why: str = "") -> bool:
@@ -207,14 +202,13 @@ class TtsMixin(MainWindowHost):
 
         def work():
             try:
-                r = TTS.render_lines(project, snap, nid, eng, log=lambda m: safe_emit(self.bridge.tts_log, m))
-                safe_emit(self.bridge.spoken, nid, r, "", str(project))
-            except BaseException as e:  # noqa: BLE001  (the answer ends "busy")
-                safe_emit(self.bridge.spoken, nid, None, str(e) or type(e).__name__, str(project))
+                return TTS.render_lines(project, snap, nid, eng, log=lambda m: post(self, lambda: self._tts_log(m)))
             finally:
                 if eng.name in ("local", "fish"):
                     eng.stop()                      # (unloaded right after: its VRAM back for ComfyUI)
-        threading.Thread(target=work, daemon=True).start()
+        run_in_background(work, on_done=lambda r: self._lines_spoken(nid, r, "", str(project)),     # (the answer ends "busy")
+                          on_error=lambda e: self._lines_spoken(nid, None, str(e) or type(e).__name__, str(project)),
+                          owner=self)
         return True
 
     def _lines_spoken(self, nid: str, r, err: str, project: str):

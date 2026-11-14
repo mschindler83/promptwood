@@ -12,13 +12,14 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QObject, QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QImage, QPainter, QPen
 from PySide6.QtWidgets import QHBoxLayout, QSlider, QToolButton, QVBoxLayout, QWidget
 
+from .workers import post, run_in_background
 from .. import chain, media
 from .theme import icon, theme
-from .widgets import icon_button, label, safe_emit, shortcut
+from .widgets import icon_button, label, shortcut
 
 MEMORY_BUDGET = 900 * 2**20               # bytes for the stored frames of both clips (RGB, 3 bytes a pixel)
 MAX_SIZE = (1280, 720)                    # never stored larger than this (the view is smaller)
@@ -129,11 +130,6 @@ class CompareView(QWidget):
             self._move_split(e.position().x())
 
 
-class _Sig(QObject):
-    loaded = Signal(int, object, str, int)          # load number, frames (or None), error, which (0 before, 1 after)
-    progress = Signal(int, int, int)                # load number, which, frames done
-
-
 class ComparePlayer(QWidget):
     """The original clip (and the result, once there is one) with play / pause, a frame and a second back and on,
     a frame slider and the before / after divider. overlay(k, image) may draw onto the original's frame k (e.g. the
@@ -161,9 +157,6 @@ class ComparePlayer(QWidget):
         self._t0 = 0.0                                   # when playing started (monotonic) and at which frame
         self._k0 = 0
         self._shown_k = -1
-        self._sig = _Sig()
-        self._sig.loaded.connect(self._loaded)
-        self._sig.progress.connect(self._progress)
         self.timer = QTimer(self)
         self.timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.timer.timeout.connect(self._tick)
@@ -249,22 +242,25 @@ class ComparePlayer(QWidget):
         self._gen[which] += 1
         if not which:
             self._gen[1] += 1                            # a result of the clip before is not shown
-        tid, size, sig = self._gen[which], self.size_, self._sig
+        tid, size = self._gen[which], self.size_
         own = self._result_cancel if which else self._cancel
         parent = self._cancel
 
         def cancel() -> bool:                            # (a result also stops with its clip)
             return own.is_set() or parent.is_set()
 
+        def progress(k: int) -> None:
+            if k % 12 == 0:
+                post(self, lambda: self._progress(tid, which, k))
+
         def work():
-            try:
-                fr = decode(clip, size, lambda k: sig.progress.emit(tid, which, k) if k % 12 == 0 else None,
-                            cancel)
-                if not cancel():
-                    sig.loaded.emit(tid, fr, "", which)
-            except Exception as e:  # noqa: BLE001
-                safe_emit(sig.loaded, tid, None, str(e), which)
-        threading.Thread(target=work, daemon=True).start()
+            fr = decode(clip, size, progress, cancel)
+            return None if cancel() else fr             # (a cancelled decode answers nothing)
+
+        def done(fr):
+            if fr is not None:
+                self._loaded(tid, fr, "", which)
+        run_in_background(work, on_done=done, on_error=lambda e: self._loaded(tid, None, str(e), which), owner=self)
 
     def _progress(self, tid: int, which: int, k: int):
         if self._gen[which] != tid:

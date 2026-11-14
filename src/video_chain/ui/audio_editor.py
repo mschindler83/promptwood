@@ -8,21 +8,21 @@ from __future__ import annotations
 import array
 import subprocess
 import tempfile
-import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QObject, QPointF, QRectF, QSettings, Qt, QUrl, Signal
+from PySide6.QtCore import QPointF, QRectF, QSettings, Qt, QUrl
 from PySide6.QtGui import QKeySequence, QPainter, QPen
 from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout,
                                QLineEdit, QPushButton, QVBoxLayout)
 
+from .workers import run_in_background
 from .. import chain, media
 from ..tree import AUDIO_REF_MIN, VOICE_MAX_SECS, VOICE_REF_MAX_SECS
 from .theme import theme, with_alpha
 from .video_editor import RangeBar, RangePlayerMixin, fmt
 from .dialogs import button_row
-from .widgets import VideoView, fit_size, guard_wheel, icon_button, label, safe_emit, shortcut
+from .widgets import VideoView, fit_size, guard_wheel, icon_button, label, shortcut
 from .qsvalue import qs_value
 
 if TYPE_CHECKING:
@@ -108,18 +108,6 @@ class WaveBar(RangeBar):
         p.drawLine(QPointF(x, 2), QPointF(x, h - 2))
 
 
-class _Probed(QObject):
-    ready = Signal(int, float, str)               # generation, the sound's length (0), error
-
-
-class _Peaks(QObject):
-    ready = Signal(int, list)
-
-
-class _Clean(QObject):
-    ready = Signal(object, str, float, float)       # the cleaned file or None, error, the part it is of (start, end)
-
-
 class AudioRangeDialog(RangePlayerMixin, QDialog):
     """Choose a sound file and the part of it that becomes an audio track. file / start / end / name: the result.
     voice: the part becomes a character's voice instead (no name; a video's picture is shown while it plays, to
@@ -141,21 +129,15 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
         self.clean_player: QMediaPlayer | None = None
         self._clean_n = 0
         self._tmp: tempfile.TemporaryDirectory | None = None
-        self._clean_sig = _Clean()
-        self._clean_sig.ready.connect(self._cleaned)
         self.file, self.duration = "", 0.0
         self.start, self.end = 0.0, 0.0
         self.player: QMediaPlayer | None = None
         self._pos = 0.0
         self._stop_at: float | None = None
         self._gen = 0
-        self._probed = _Probed()
-        self._probed.ready.connect(self._probe_done)
         self._load_gen = 0
         self.loading = False                          # the file is being read off the UI thread
         self._pending: tuple = ()
-        self._peaks = _Peaks()
-        self._peaks.ready.connect(self._peaks_ready)
         self._named = bool(name)                       # a name typed (or given): a new file does not replace it
 
         v = QVBoxLayout(self)
@@ -280,7 +262,7 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
         """load(), with ffprobe run off the UI thread (busy text, the dialog cannot be accepted meanwhile; an answer
         that comes after another load or after closing is dropped)."""
         self._load_gen += 1
-        gen, sig = self._load_gen, self._probed
+        gen = self._load_gen
         self._pending = (str(file), start, end)
         self.loading = True
         self.info_label.setText(f"Reading {Path(file).name} …")
@@ -291,8 +273,8 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
                 dur, err = chain.audio_seconds(Path(file)), ""
             except (RuntimeError, OSError, ValueError) as e:
                 dur, err = 0.0, str(e)
-            safe_emit(sig.ready, gen, float(dur or 0.0), err)
-        threading.Thread(target=work, daemon=True).start()
+            return float(dur or 0.0), err
+        run_in_background(work, on_done=lambda r: self._probe_done(gen, *r), owner=self)
 
     def _probe_done(self, gen: int, dur: float, err: str) -> None:
         if gen != self._load_gen:
@@ -334,14 +316,11 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
         self.set_range(0.0 if start is None else float(start), whole if end is None else float(end))
         self.seek(self.start)
         self._gen += 1
-        gen, sig, f, dur = self._gen, self._peaks, self.file, self.duration
+        gen, f, dur = self._gen, self.file, self.duration
 
         def work():
-            peaks = waveform(f, dur, cancelled=lambda: gen != self._gen)
-            if gen != self._gen:
-                return
-            safe_emit(sig.ready, gen, peaks)
-        threading.Thread(target=work, daemon=True).start()
+            return waveform(f, dur, cancelled=lambda: gen != self._gen)
+        run_in_background(work, on_done=lambda peaks: self._peaks_ready(gen, peaks), owner=self)
         self._update_enabled()
         return True
 
@@ -452,19 +431,18 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
         self._clean_n += 1
         raw = Path(self._tmp.name) / f"part{self._clean_n}.wav"
         out = Path(self._tmp.name) / f"cleaned{self._clean_n}.wav"
-        (start, end), f, isolate, sig = self._clean_part(), self.file, self._isolate, self._clean_sig
+        (start, end), f, isolate = self._clean_part(), self.file, self._isolate
         self.clean_busy = True
         self.clean_info.setText("Removing the music… (the model loads first)")
         self._update_enabled()
 
         def work():
-            try:
-                chain.to_wav(Path(f), raw, start, end - start)
-                isolate(raw, out)
-                sig.ready.emit(out, "", start, end)
-            except Exception as e:  # noqa: BLE001
-                safe_emit(sig.ready, None, str(e), start, end)
-        threading.Thread(target=work, daemon=True).start()
+            chain.to_wav(Path(f), raw, start, end - start)
+            isolate(raw, out)
+            return out
+
+        run_in_background(work, on_done=lambda made: self._cleaned(made, "", start, end),
+                          on_error=lambda e: self._cleaned(None, str(e), start, end), owner=self)
 
     def _cleaned(self, out, err: str, start: float, end: float):
         self.clean_busy = False

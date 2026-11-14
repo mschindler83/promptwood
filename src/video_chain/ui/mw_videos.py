@@ -3,17 +3,16 @@ from __future__ import annotations
 
 import copy
 import os
-import threading
 from pathlib import Path
 
 from PySide6.QtWidgets import QDialog
 
+from .workers import run_in_background
 from .. import animate, chain, comfy as CMF, swap, tree as T
 from . import dialogs as D, image_picker as IP
 from .clip_dialogs import SplitDialog
 from .swap_dialog import SwapDialog
 from .video_editor import VideoRangeDialog, choose_video
-from .widgets import safe_emit
 from .generator_state import ModelSwitch
 from .ui_logic import DEFAULT_COMFY_URL, DEFAULT_SIZE
 from .mw_host import MainWindowHost
@@ -125,16 +124,12 @@ class VideosMixin(MainWindowHost):
         token = os.urandom(6).hex()
         self._converts[nid] = token
         self.live[nid] = "converting"
-        work_node, project, bridge = copy.deepcopy(node), self.project, self.bridge
+        work_node, project = copy.deepcopy(node), self.project
         self.status.setText(f"Converting video #{T.short_id(nid)} …")
 
-        def work():
-            try:
-                made = T.make_video(project, work_node, base)
-                safe_emit(bridge.converted, nid, made, "", token, str(project))
-            except BaseException as e:  # noqa: BLE001  (the answer ends "converting")
-                safe_emit(bridge.converted, nid, None, str(e), token, str(project))
-        threading.Thread(target=work, daemon=True).start()
+        run_in_background(lambda: T.make_video(project, work_node, base),
+                          on_done=lambda made: self._converted(nid, made, "", token, str(project)),   # (the answer ends "converting")
+                          on_error=lambda e: self._converted(nid, None, str(e), token, str(project)), owner=self)
         self.refresh()
 
     # ---- a sound-only change: the sound is mixed again from the model's kept sound (no new generation)
@@ -152,7 +147,7 @@ class VideosMixin(MainWindowHost):
             return
         tree, project = T.Tree.from_json(self.tree.to_json()), self.project
         order = sorted(tree.nodes, key=tree.depth)           # (a clip before the ones after it: what repeats it)
-        bridge, lock = self.bridge, self._join_lock
+        lock = self._join_lock
         self._remixing = True
         self._joins += 1                                     # (generate, delete, join: they wait for it)
         self._update_buttons()
@@ -168,8 +163,10 @@ class VideosMixin(MainWindowHost):
                 except BaseException as e:  # noqa: BLE001  (the ones remixed before it are still taken)
                     error = str(e) or type(e).__name__
                 done = [n for n in order if (tree.nodes[n].made or {}).get("sound_rev") != revs[n]]
-                safe_emit(bridge.remixed, [(n, copy.deepcopy(tree.nodes[n].made)) for n in done], error, str(project))
-        threading.Thread(target=work, daemon=True).start()
+                return [(n, copy.deepcopy(tree.nodes[n].made)) for n in done], error
+
+        run_in_background(work, on_done=lambda r: self._remixed(r[0], r[1], str(project)),
+                          on_error=lambda e: self._remixed([], str(e) or type(e).__name__, str(project)), owner=self)
 
     def _remixed(self, results, error: str, project: str):
         """Take the remixed clips' records (only for the clip version that was remixed: one made again meanwhile

@@ -391,3 +391,13 @@ def test_format_time_with_one_decimal_as_the_main_window_shows_times():
     from video_chain.ui.widgets import format_time
     assert format_time(3.04, 1) == "0:03.0" and format_time(15.083, 1) == "0:15.1"
     assert format_time(59.96, 1) == "1:00.0" and format_time(0, 1) == "0:00.0"
+
+
+# ---------------------------------------------------------------- one frame rate (XC-18, UI part)
+def test_the_ui_uses_the_chains_frame_rate_not_a_literal(monkeypatch):
+    from video_chain import chain
+    from video_chain.ui import ui_logic
+    monkeypatch.setattr(chain, "FPS", 25)
+    assert ui_logic.continue_text(50) == "last 2.0 s (50 frames)"
+    src = (UI / "widgets.py").read_text() + (UI / "clip_inputs.py").read_text()
+    assert "fps: float = 24.0" not in src and "frames'] / 24" not in src

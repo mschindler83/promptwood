@@ -11,7 +11,7 @@ from PySide6.QtGui import QKeySequence, QShortcut  # noqa: E402
 from PySide6.QtWidgets import QApplication, QDialogButtonBox, QMessageBox  # noqa: E402
 
 from video_chain import tree as T  # noqa: E402
-from test_ui import FAKE, app, settings  # noqa: E402,F401  (the module's QApplication / own settings file)
+from ui_helpers import FAKE, app, settings  # noqa: E402,F401  (the module's QApplication / own settings file)
 
 
 @pytest.fixture

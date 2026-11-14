@@ -5,15 +5,16 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QHBoxLayout, QPushButton, QVBoxLayout, QWidget
 
+from .workers import run_in_background
 from .. import chain, media
 from .. import faces as F
 from .theme import theme
 from .dialogs import button_row
-from .widgets import fit_size, label, safe_emit, smooth_scaled
+from .widgets import fit_size, label, smooth_scaled
 
 MIN_SIDE = 32
 SMALL_SIDE = 160           # below this the face picture is soft for the model
@@ -178,10 +179,6 @@ class CropView(QWidget):
         e.accept()
 
 
-class _Loaded(QObject):
-    done = Signal()
-
-
 class FaceCropDialog(QDialog):
     """crop(): the square (x, y, side) to use, or None for the whole picture; exec() Rejected: cancelled.
     The picture is made upright (ffmpeg) and searched for faces in a worker: the window opens at once ("Looking for
@@ -199,8 +196,6 @@ class FaceCropDialog(QDialog):
         self._closed = False
         self._result: tuple | None = None            # what the worker found, until the window takes it
         self._finished = threading.Event()
-        self._loaded = _Loaded()
-        self._loaded.done.connect(self._apply)
         self.loading = True
         self.faces: list = []
         self.why: str | None = None
@@ -229,7 +224,7 @@ class FaceCropDialog(QDialog):
         v.addLayout(row)
         self._set_busy(True)
         self.info.setText("Looking for the face …")
-        threading.Thread(target=self._work, args=(Path(image_path), model), daemon=True).start()
+        run_in_background(lambda: self._work(Path(image_path), model), on_done=lambda _r: self._apply(), owner=self)
 
     def _set_busy(self, busy: bool) -> None:
         self.loading = busy
@@ -264,7 +259,6 @@ class FaceCropDialog(QDialog):
         except Exception as e:  # noqa: BLE001  (the temporary folder removed by a close, ...)
             self._result = (QImage(), [], f"the picture could not be read: {e}", "")
         self._finished.set()
-        safe_emit(self._loaded.done)
 
     def _apply(self) -> None:
         if self._result is None or self._closed:

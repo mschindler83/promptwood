@@ -5,15 +5,14 @@ import json
 import logging
 import os
 import sys
-import threading
 import time
 from pathlib import Path
 
 from PySide6.QtCore import QProcess, QProcessEnvironment, QTimer
 
+from .workers import run_in_background
 from .. import comfy as CMF, runpod as RP, tree as T
 from ..__main__ import COMFY_DOWN
-from .widgets import safe_emit
 from .generator_state import (
     CLIP_MODELS, ComfyBinding, ComfyModel, IMAGE_MODELS, Job, ModelState, Phase, RunpodBinding, WorkerBinding)
 from .ui_logic import CLOUD_KILL_GRACE_MS, DEFAULT_COMFY_URL, KILL_GRACE_MS, fmt_left, plural, time_left
@@ -96,7 +95,7 @@ class GeneratorMixin(MainWindowHost):
             self.status.setText("Wait until text to speech is done.")
             return
         self._checking, self._check_gen = True, self._check_gen + 1
-        gen, project, tree, bridge = self._check_gen, self.project, self.tree, self.bridge
+        gen, project, tree = self._check_gen, self.project, self.tree
         self._check_args = (list(targets), refine)
         self.status.setText("Checking the project …")
         for c in self.cards:
@@ -105,12 +104,8 @@ class GeneratorMixin(MainWindowHost):
 
         def work():
             assert project is not None
-            problems, empty = self._preflight(project, tree, targets, refine)
-            try:
-                safe_emit(bridge.checked, gen, problems, empty)
-            except RuntimeError:                   # (the window was closed meanwhile)
-                pass
-        threading.Thread(target=work, daemon=True).start()
+            return self._preflight(project, tree, targets, refine)
+        run_in_background(work, on_done=lambda r: self._checked(gen, *r), owner=self)
 
     def _cancel_check(self):
         """Stop waiting for the pre-flight (Stop, closing): its result is not used any more."""

@@ -630,12 +630,10 @@ def test_tts_dialog_worker_error_after_close_does_not_raise(app, monkeypatch):
     monkeypatch.setattr(tts_dialog.tts, "make_sample", make_sample)
     dlg = _tts(app)
     dlg._make()
-    sig = dlg._sig
-    shiboken6.delete(sig)                                       # the dialog is gone while the worker runs
+    shiboken6.delete(dlg)                                       # the dialog is gone while the worker runs
     gate.set()
     time.sleep(0.5)
     assert errors == []
-    dlg.cleanup()
 
 
 def _speak(app, render=None):

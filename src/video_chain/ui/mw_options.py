@@ -7,9 +7,9 @@ import threading
 
 from PySide6.QtCore import QTimer
 
+from .workers import post, run_in_background
 from .. import tree as T, triggers, tts as TTS
 from ..comfy import REF_HINT
-from .widgets import safe_emit
 from .clip_cards import PromptCard
 from .mw_support import select_frames
 from .ui_logic import FRAME_CHOICES, as_dict, speed_mode
@@ -214,24 +214,20 @@ class OptionsMixin(MainWindowHost):
         paths = self._trigger_paths()
         if self._trigger_scan is not None or not paths:
             return
-        online, bridge = self.triggers_online.isChecked(), self.bridge
+        online = self.triggers_online.isChecked()
         self._trigger_scan = threading.Event()
         self._trigger_scan_online = online
         stop = self._trigger_scan
 
         def progress(*a) -> None:
-            safe_emit(bridge.trigger_progress, *a)
+            post(self, lambda: self._trigger_progress(*a))
 
-        def work():
-            counts = {}
-            try:
-                counts = triggers.db().scan(paths, online=online, stop=stop.is_set, progress=progress)
-            except Exception as e:  # noqa: BLE001  (the scan ends; what went wrong is in the log)
-                logging.getLogger(__name__).warning("trigger word scan failed", exc_info=True)
-                safe_emit(bridge.log, f"The trigger word scan failed: {type(e).__name__}: {e}")
-                counts = {}
-            safe_emit(bridge.triggers, counts)
-        threading.Thread(target=work, daemon=True).start()
+        def failed(e: BaseException):                 # (the scan ends; what went wrong is in the log)
+            logging.getLogger(__name__).warning("trigger word scan failed", exc_info=e)
+            self.log.appendPlainText(f"The trigger word scan failed: {type(e).__name__}: {e}")
+            self._triggers_found({})
+        run_in_background(lambda: triggers.db().scan(paths, online=online, stop=stop.is_set, progress=progress),
+                          on_done=self._triggers_found, on_error=failed, owner=self)
 
     def _video_gpu_changed(self, on: bool):
         self.qs.setValue("videoGpu", on)           # at once: read at the next start, also after a crash

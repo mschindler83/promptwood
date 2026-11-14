@@ -116,7 +116,7 @@ CONTINUE_SHORT_TIP = ("The clip before or this clip is shorter than the shortest
 
 def continue_text(frames: int) -> str:
     """A continuation length in words: 'last 1.6 s (39 frames)'."""
-    return f"last {frames / 24:.1f} s ({frames} frames)"
+    return f"last {frames / chain.FPS:.1f} s ({frames} frames)"
 
 
 def fmt_left(seconds: float) -> str:

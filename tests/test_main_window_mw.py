@@ -13,7 +13,7 @@ from PySide6.QtGui import QCloseEvent  # noqa: E402
 from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
 from conftest import settings as make_settings  # noqa: E402
-from test_ui import FAKE, app, image, new_project, settings, silent_player, wait, win  # noqa: E402,F401
+from ui_helpers import FAKE, app, image, new_project, settings, silent_player, wait, win  # noqa: E402,F401
 from video_chain import tree as T  # noqa: E402
 
 
@@ -155,7 +155,7 @@ def test_the_new_project_dialog_picks_images_with_the_windows_settings(app, win,
 
 # ---------------------------------------------------------------- media errors are RuntimeErrors
 def test_split_video_survives_an_unreadable_clip(app, win, tmp_path, monkeypatch):
-    from test_ui import make_real_video
+    from ui_helpers import make_real_video
     from video_chain import chain, media
     src = make_real_video(tmp_path / "real.mp4")
     win.open_project(tmp_path / "proj")
@@ -177,7 +177,7 @@ class _Boom(BaseException):
 
 
 def test_a_failing_conversion_does_not_leave_the_window_busy(app, win, tmp_path, monkeypatch):
-    from test_ui import make_real_video
+    from ui_helpers import make_real_video
     src = make_real_video(tmp_path / "real.mp4")
     monkeypatch.setattr(T, "make_video", lambda *a, **k: (_ for _ in ()).throw(_Boom()))
     win.open_project(tmp_path / "proj")
@@ -239,7 +239,7 @@ def test_the_uses_callback_builds_its_index_once_per_change(app, win, tmp_path, 
 # ---------------------------------------------------------------- MWA-20: a file is looked at once per card update
 def test_cards_do_not_look_at_their_files_again_themselves(app, win, tmp_path, image, monkeypatch):
     from PIL import Image
-    from test_ui import make_real_video
+    from ui_helpers import make_real_video
     ids = new_project(win, tmp_path, image, ("a", "b"))
     (win.project / "ends").mkdir(exist_ok=True)
     Image.new("RGB", (64, 36), (9, 9, 9)).save(win.project / "ends" / "e.png")
@@ -266,7 +266,7 @@ def test_the_frame_window_of_an_own_clip_does_not_probe(app, win, tmp_path, imag
     from video_chain import chain
     from video_chain.ui import main_window as M
     ids = new_project(win, tmp_path, image, ("a", "b"))
-    from test_ui import run_and_wait
+    from ui_helpers import run_and_wait
     run_and_wait(app, win, win.generate_path)
     wait(app, lambda: not win._joins, timeout=30)
     clip = win.project / win.tree.nodes[ids[0]].made["video"]
@@ -284,7 +284,7 @@ def test_the_frame_window_of_an_own_clip_does_not_probe(app, win, tmp_path, imag
 # ---------------------------------------------------------------- UX-8: a frozen clip's buttons are disabled
 def test_a_frozen_clips_card_buttons_are_disabled(app, win, tmp_path, image):
     from video_chain.ui.main_window import PromptCard
-    from test_ui import run_and_wait
+    from ui_helpers import run_and_wait
     ids = new_project(win, tmp_path, image, ("a",))
     run_and_wait(app, win, win.generate_path)
     wait(app, lambda: not win._joins, timeout=30)
@@ -406,7 +406,7 @@ def test_a_picture_dropped_on_the_end_of_a_clip_sets_it(app, win, tmp_path, imag
 
 # ---------------------------------------------------------------- MWC-33: a single clip is exported in the background
 def test_exporting_a_single_clip_does_not_block_the_window(app, win, tmp_path, image, monkeypatch):
-    from test_ui import run_and_wait
+    from ui_helpers import run_and_wait
     ids = new_project(win, tmp_path, image, ("a",))
     run_and_wait(app, win, win.generate_path)
     wait(app, lambda: not win._joins, timeout=30)
@@ -430,7 +430,7 @@ def test_exporting_a_single_clip_does_not_block_the_window(app, win, tmp_path, i
 
 
 def test_a_failed_single_export_says_why(app, win, tmp_path, image, monkeypatch):
-    from test_ui import run_and_wait
+    from ui_helpers import run_and_wait
     ids = new_project(win, tmp_path, image, ("a",))
     run_and_wait(app, win, win.generate_path)
     wait(app, lambda: not win._joins, timeout=30)

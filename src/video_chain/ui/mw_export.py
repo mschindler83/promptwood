@@ -2,16 +2,15 @@
 from __future__ import annotations
 
 import shutil
-import threading
 from pathlib import Path
-from typing import Any
 
 from PySide6.QtCore import QProcess
 from PySide6.QtWidgets import QDialog
 
+from .workers import run_in_background
 from .. import chain, media, runpod as RP, tree as T
 from .theme import repolish
-from .widgets import format_time, safe_emit
+from .widgets import format_time
 from .project_dialogs import ExportDialog
 from .mw_host import MainWindowHost
 from .qsvalue import qs_value
@@ -30,24 +29,20 @@ class ExportMixin(MainWindowHost):
         tree = T.Tree.from_json(self.tree.to_json())
         pre = f"{prefix} " if prefix else ""
         self.status.setText(f"{pre}Joining the path …")
-        bridge, lock = self.bridge, self._join_lock
+        lock = self._join_lock
         self._joins += 1
         self._update_buttons()
 
         def work():
             with lock:
-                result: tuple[Any, str | None]
-                try:
-                    joined = T.join_path(project, tree, nid, out)
-                    secs = chain.joined_seconds(joined)             # not in the GUI thread (network shares)
-                    result = ((joined, secs, T.path_spans(tree, nid)), None)
-                except BaseException as e:  # noqa: BLE001  (the answer ends "joining")
-                    result = (None, str(e) or type(e).__name__)
-                try:
-                    safe_emit(bridge.joined, *result, purpose, pre, str(project))
-                except RuntimeError:                 # (the window was closed meanwhile)
-                    pass
-        threading.Thread(target=work, daemon=True).start()
+                joined = T.join_path(project, tree, nid, out)
+                secs = chain.joined_seconds(joined)             # not in the GUI thread (network shares)
+                return joined, secs, T.path_spans(tree, nid)
+
+        def error(e: BaseException):                           # (the answer ends "joining")
+            self._joined(None, str(e) or type(e).__name__, purpose, pre, str(project))
+        run_in_background(work, on_done=lambda r: self._joined(r, None, purpose, pre, str(project)),
+                          on_error=error, owner=self)
 
     def _joined(self, path, error, purpose, pre, project):
         self._joins = max(0, self._joins - 1)
@@ -175,21 +170,14 @@ class ExportMixin(MainWindowHost):
         self._joins += 1
         self._update_buttons()
         self.status.setText(f"Exporting clip #{T.short_id(nid)} to {out.name} …")
-        bridge = self.bridge
 
         def work():
-            error = ""
-            try:
-                out.parent.mkdir(parents=True, exist_ok=True)
-                with media.part_file(out) as tmp:
-                    shutil.copyfile(src, tmp)
-            except BaseException as e:  # noqa: BLE001  (the answer ends "exporting")
-                error = str(e) or type(e).__name__
-            try:
-                safe_emit(bridge.exported, nid, str(out), error)
-            except RuntimeError:                       # (the window was closed meanwhile)
-                pass
-        threading.Thread(target=work, daemon=True).start()
+            out.parent.mkdir(parents=True, exist_ok=True)
+            with media.part_file(out) as tmp:
+                shutil.copyfile(src, tmp)
+
+        run_in_background(work, on_done=lambda _r: self._clip_copied(nid, str(out), ""),    # (the answer ends "exporting")
+                          on_error=lambda e: self._clip_copied(nid, str(out), str(e) or type(e).__name__), owner=self)
 
     def _clip_copied(self, nid: str, out: str, error: str):
         self._joins = max(0, self._joins - 1)

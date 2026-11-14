@@ -2,16 +2,16 @@
 from __future__ import annotations
 
 import json
-import threading
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QDialog, QDialogButtonBox, QFileDialog, QInputDialog, QTableWidget, QTableWidgetItem, QVBoxLayout)
 
+from .workers import run_in_background
 from .. import chain, film as F, tree as T
 from . import dialogs as D, shortcuts as S
-from .widgets import format_time, label, safe_emit
+from .widgets import format_time, label
 from .mw_host import MainWindowHost
 
 
@@ -30,7 +30,7 @@ class FilmMixin(MainWindowHost):
         if not self._save_tree():
             return
         self._update_continues()
-        film, bridge = F.Film.load(self.film.root), self.bridge
+        film = F.Film.load(self.film.root)
         target = Path(out) if out else self.film.root / "paths" / "film.mp4"
         root = str(self.film.root)
         self.status.setText("Checking and joining the film …")
@@ -38,16 +38,16 @@ class FilmMixin(MainWindowHost):
         self._update_buttons()
 
         def work():
+            path = F.join_film(film, target, keep=out is None)
             try:
-                path = F.join_film(film, target, keep=out is None)
-                try:
-                    secs = chain.joined_seconds(Path(path))      # not in the GUI thread (network shares)
-                except Exception:  # noqa: BLE001
-                    secs = 0.0
-                safe_emit(bridge.film, (path, root, secs), None, purpose)
-            except BaseException as e:  # noqa: BLE001  (whatever ends the job: the busy flag is reset by the answer)
-                safe_emit(bridge.film, (None, root, 0.0), str(e), purpose)
-        threading.Thread(target=work, daemon=True).start()
+                secs = chain.joined_seconds(Path(path))      # not in the GUI thread (network shares)
+            except Exception:  # noqa: BLE001
+                secs = 0.0
+            return path, root, secs
+
+        # (whatever ends the job: the busy flag is reset by the answer)
+        run_in_background(work, on_done=lambda r: self._film_joined(r, None, purpose),
+                          on_error=lambda e: self._film_joined((None, root, 0.0), str(e), purpose), owner=self)
 
     def _film_joined(self, result, error, purpose):
         self._joins = max(0, self._joins - 1)
@@ -285,18 +285,17 @@ class FilmMixin(MainWindowHost):
             return
         if not self._save_tree():
             return
-        root, bridge = self.film.root, self.bridge
+        root = self.film.root
         self._copying = str(root)                  # (no scene switch, no other copy meanwhile)
         self._update_buttons()
         self.status.setText(f"Copying “{self.film.scene(sid).title}” with its clips …")
 
         def work():
-            try:
-                sc = F.Film.load(root).duplicate(sid)
-                safe_emit(bridge.duplicated, (sc.id, sc.title), None, str(root))
-            except BaseException as e:  # noqa: BLE001  (the answer ends "copying")
-                safe_emit(bridge.duplicated, None, str(e), str(root))
-        threading.Thread(target=work, daemon=True).start()
+            sc = F.Film.load(root).duplicate(sid)
+            return sc.id, sc.title
+
+        run_in_background(work, on_done=lambda r: self._scene_duplicated(r, None, str(root)),     # (the answer ends "copying")
+                          on_error=lambda e: self._scene_duplicated(None, str(e), str(root)), owner=self)
 
     def _scene_duplicated(self, result, error, root):
         self._copying = None

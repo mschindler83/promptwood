@@ -18,6 +18,8 @@ from .ui_logic import ASPECT_TOLERANCE, DEFAULT_COMFY_URL, label_loras, plural
 from .mw_host import MainWindowHost
 from .qsvalue import qs_value
 
+log = logging.getLogger(__name__)
+
 
 class EndsMixin(MainWindowHost):
     """Start, end and key pictures of a clip, editing a picture, the clip's handover."""
@@ -570,8 +572,8 @@ class EndsMixin(MainWindowHost):
             if base.get("width") and base.get("height"):
                 size = (f" Each picture is cut from its centre to the project's {base['width']}×{base['height']} "
                         "shape (nothing is stretched).")
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:  # noqa: BLE001  (only the size note is left out)
+            log.warning("the project's video size could not be read", exc_info=True)
         self.status.setText(f"{plural(len(ids), 'start image')} added: clip #{T.short_id(nid)} "
                             f"once for each, with the same prompt, seed and settings, on its own row."
                             + (f" {skipped} could not be read." if skipped else "") + size)

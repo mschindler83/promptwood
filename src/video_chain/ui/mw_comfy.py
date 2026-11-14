@@ -11,10 +11,10 @@ from typing import Any
 from PySide6.QtCore import QEventLoop, QProcess, Qt, QTimer
 from PySide6.QtWidgets import QApplication, QProgressDialog
 
+from .workers import run_in_background
 from .. import comfy as CMF, net
 from . import dialogs as D, shortcuts as S
 from .theme import repolish
-from .widgets import safe_emit
 from .generator_state import ComfyModel, IMAGE_MODELS, ModelState
 from .ui_logic import CLOSE_GRACE, COMFY_START_TIMEOUT, DEFAULT_COMFY_LAUNCHER, DEFAULT_COMFY_URL
 from .mw_host import MainWindowHost
@@ -41,14 +41,12 @@ class ComfyMixin(MainWindowHost):
         url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL).rstrip("/")
         self._qwen_timer.stop()
 
-        def work():
-            try:
-                ok = CMF.free_models(url, timeout=10)
-            except Exception:  # noqa: BLE001
-                logging.getLogger(__name__).warning("unloading ComfyUI's models", exc_info=True)
-                ok = False
-            safe_emit(self.bridge.freed, ok)
-        threading.Thread(target=work, daemon=True).start()
+        run_in_background(lambda: CMF.free_models(url, timeout=10), on_done=self._comfy_freed,
+                          on_error=self._free_failed, owner=self)
+
+    def _free_failed(self, e: BaseException):
+        logging.getLogger(__name__).warning("unloading ComfyUI's models", exc_info=e)
+        self._comfy_freed(False)
 
     def _comfy_freed(self, ok: bool):
         """ComfyUI answered the unload request (MWC-30): the model counts as unloaded only when it did."""
@@ -69,19 +67,12 @@ class ComfyMixin(MainWindowHost):
         if self._comfy_polling:
             return
         self._comfy_polling = True
-        url, bridge = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL).rstrip("/"), self.bridge
+        url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL).rstrip("/")
 
         def check():
-            try:
-                with net.urlopen(url + "/system_stats", timeout=1.5) as r:
-                    ok = r.status == 200
-            except Exception:  # noqa: BLE001
-                ok = False
-            try:
-                safe_emit(bridge.comfy, ok)
-            except RuntimeError:                     # (the window was closed meanwhile)
-                pass
-        threading.Thread(target=check, daemon=True).start()
+            with net.urlopen(url + "/system_stats", timeout=1.5) as r:
+                return r.status == 200
+        run_in_background(check, on_done=self._comfy_state, on_error=lambda _e: self._comfy_state(False), owner=self)
 
     def _autostart(self, targets: list[str], refine: dict | None = None) -> bool:
         """ComfyUI is down: start it (if allowed) and generate targets once it answers. False: not started."""
@@ -196,7 +187,7 @@ class ComfyMixin(MainWindowHost):
             finally:
                 if done is not None:
                     done.set()
-        threading.Thread(target=work, daemon=True).start()
+        run_in_background(work, on_done=lambda _r: None, owner=self)
 
     def _wait_for_shutdown(self, p: QProcess | None, cloud: bool, also: threading.Event | None):
         """Wait (the window stays alive and says what it waits for) until the generator process has ended: it gets
