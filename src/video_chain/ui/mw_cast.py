@@ -45,14 +45,23 @@ class CastMixin:
         item = self.cast_list.currentItem()
         return T.character(self.tree, item.data(Qt.UserRole)) if item is not None and self.tree else None
 
-    def _mentioning(self, name: str) -> list[str]:
-        """Clips whose prompt (with the style text) mentions @name."""
+    def _mention_map(self) -> dict[str, list[str]]:
+        """Every character (lower-case name) -> the clips whose prompt (with the style text) mentions @name. One look
+        at each clip, whatever the number of characters."""
+        out: dict[str, list[str]] = {}
         if self.tree is None:
-            return []
-        low = name.lower()
-        return [n.id for n in self.tree.nodes.values() if not n.is_video and any(
-            c["name"].lower() == low for c in T.mentions(self.tree.options,
-                                                        T.full_prompt(self.tree.options, n.prompt))[0])]
+            return out
+        for n in self.tree.nodes.values():
+            if n.is_video:
+                continue
+            found = T.mentions(self.tree.options, T.full_prompt(self.tree.options, n.prompt))[0]
+            for low in {c["name"].lower() for c in found}:
+                out.setdefault(low, []).append(n.id)
+        return out
+
+    def _mentioning(self, name: str, mention_map: dict[str, list[str]] | None = None) -> list[str]:
+        """Clips whose prompt (with the style text) mentions @name (mention_map: one already made for the list)."""
+        return (self._mention_map() if mention_map is None else mention_map).get(name.lower(), [])
 
     def _cast_edit_ok(self) -> bool:
         if self.project is None or self.tree is None:
@@ -414,6 +423,7 @@ class CastMixin:
         self.cast_list.blockSignals(True)
         self.cast_list.clear()
         row = 0
+        mention_map = self._mention_map()          # (one look at the clips, not one per character)
         for k, c in enumerate(cast):
             pm = self._pixmap(self.project / c["images"][0]) if self.project and c["images"] else None
             n = len(c["images"])
@@ -425,7 +435,7 @@ class CastMixin:
                         f"@{c['name']}   no picture yet") + f"   · {T.kind_of(c)}"
             item = QListWidgetItem(QIcon(pm) if pm else QIcon(), text)
             item.setData(Qt.UserRole, c["name"])
-            mentions = len(self._mentioning(c["name"]))
+            mentions = len(self._mentioning(c["name"], mention_map))
             item.setToolTip((c.get("desc") or "")
                             + f" ({mentions} clip{'s mention' if mentions != 1 else ' mentions'} it)")
             self.cast_list.addItem(item)

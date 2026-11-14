@@ -65,6 +65,7 @@ class _Bridge(QObject):
     freed = Signal(bool)                       # ComfyUI's answer to "unload your models" (True: done)
     room_made = Signal(str)                     # ComfyUI's models were unloaded for a model of this app (the llama.cpp server, text to speech)
     spoken = Signal(str, object, str, str)     # clip id, rendered lines (tts.render_lines) or None, error, project
+    log = Signal(str)                          # a line for the log from a worker thread
     tts_log = Signal(str)                      # a step of text to speech
     eleven_models = Signal(object, str)        # ElevenLabs' TTS models or None, error
     eleven_cloned = Signal(str, object, str, str)   # character, cloned voice (tts.clone_sample) or None, error, project

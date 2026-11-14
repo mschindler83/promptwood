@@ -121,6 +121,7 @@ class MainWindow(BuildMixin, GeneratorMixin, ComfyMixin, ExportMixin, VideosMixi
         self.bridge.eleven_models.connect(self._fill_eleven_models)
         self.bridge.eleven_cloned.connect(self._eleven_cloned)
         self.bridge.tts_log.connect(self._tts_log)
+        self.bridge.log.connect(lambda text: self.log.appendPlainText(text))
         self._tts_local: TTS.LocalTTS | None = None
         self._tts_fish: TTS.FishTTS | None = None
         self._tts_busy = False

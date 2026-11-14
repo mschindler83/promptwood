@@ -38,24 +38,25 @@ class FilmMixin:
 
         def work():
             try:
-                safe_emit(bridge.film, (F.join_film(film, target, keep=out is None), root), None, purpose)
+                path = F.join_film(film, target, keep=out is None)
+                try:
+                    secs = chain.joined_seconds(Path(path))      # not in the GUI thread (network shares)
+                except Exception:  # noqa: BLE001
+                    secs = 0.0
+                safe_emit(bridge.film, (path, root, secs), None, purpose)
             except BaseException as e:  # noqa: BLE001  (whatever ends the job: the busy flag is reset by the answer)
-                safe_emit(bridge.film, (None, root), str(e), purpose)
+                safe_emit(bridge.film, (None, root, 0.0), str(e), purpose)
         threading.Thread(target=work, daemon=True).start()
 
     def _film_joined(self, result, error, purpose):
         self._joins = max(0, self._joins - 1)
         self._update_buttons()
-        path, root = result
+        path, root, secs = result
         if self.film is None or str(self.film.root) != root:
             return                                 # another film was opened meanwhile
         if error:
             self.status.setText(f"The film cannot be joined yet: {error}.")
             return
-        try:
-            secs = chain.joined_seconds(Path(path))
-        except Exception:  # noqa: BLE001
-            secs = 0.0
         if purpose == "play":
             self.preview.open(Path(path), f"Film · {len(self.film.scenes) if self.film else 1} scenes · "
                                           f"{format_time(secs, 1)}")

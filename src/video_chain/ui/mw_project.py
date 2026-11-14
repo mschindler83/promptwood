@@ -275,8 +275,8 @@ class ProjectMixin:
         self._remember_project(root)
         try:
             film.save()                            # which scene was open (only once there are several)
-        except OSError:
-            pass
+        except OSError as e:
+            self._report_error(f"Could not remember which scene is open: {e}")
         self._show_storyboard()
         self._update_title()
         self._warm_lora_hashes()

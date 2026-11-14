@@ -70,6 +70,8 @@ class LlamaMixin:
             raise error(f"only {gb(free)} of VRAM is free while clips are generated and {what} needs about "
                         f"{gb(need)}; {later}")
         if not CMF.free_models(url, timeout=UNLOAD_TIMEOUT):
+            safe_emit(self.bridge.log, f"ComfyUI did not unload its models (is it running?): only {gb(free)} of VRAM "
+                                       f"is free and {what} needs about {gb(need)}.")
             return                                  # (ComfyUI is not up: the VRAM is used by something else)
         end = time.time() + settle
         now = free
