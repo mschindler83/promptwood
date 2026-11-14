@@ -524,9 +524,9 @@ def frames_for(secs: float, have: int) -> int | None:
     need = int(secs * chain.FPS + 0.999)
     if need <= have:
         return None
-    for n in range(4, 22):
-        if 17 * n + 5 >= need:
-            return 17 * n + 5
+    frames = chain.h3_frames(max(need, 73))         # (a clip is at least 73 frames)
+    if frames <= chain.H3_MAX_FRAMES:
+        return frames
     raise TtsError(f"the lines take {secs:.1f} s; a clip is at most 15 s: split them over two clips")
 
 

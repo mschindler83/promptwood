@@ -188,3 +188,14 @@ def test_file_digest_and_scratch_names(tmp_path):
     with media.scratch("crop", dir=w) as d:
         assert os.path.basename(d).startswith("video-chain-crop-") and os.path.isdir(d)
     assert not os.path.exists(d)
+
+
+# ---- H3's 17n+5 grid (one helper for chain, swap and tts)
+def test_h3_frames_is_the_next_length_on_the_grid():
+    from video_chain import chain, swap, tts
+    assert chain.H3_MAX_FRAMES == 362 == swap.H3_MAX_FRAMES
+    assert [chain.h3_frames(n) for n in (0, 5, 6, 22, 23, 73, 74, 362)] == [5, 5, 22, 22, 39, 73, 90, 362]
+    assert swap.h3_length(100) == chain.h3_frames(100) == 107
+    assert tts.frames_for(1.0, 73) is None and tts.frames_for(4.0, 73) == 107
+    with pytest.raises(tts.TtsError):
+        tts.frames_for(15.5, 73)

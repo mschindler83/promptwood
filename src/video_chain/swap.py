@@ -287,7 +287,7 @@ def store_pose(project: Path, key: str, parts: dict, info: dict) -> dict:
 # ---- H3 head swap (the BFS "H3 Head Swap - Ref2VA" LoRA, minimax_h3_head_swap_v1.0_r32): the reference model with
 # the new person's picture as <Picture 1> and the whole clip (with its sound) as the guide from its first frame, the
 # LoRA at strength 1 and its structured prompt (as in the LoRA's own workflow: the face details in the middle)
-H3_MAX_FRAMES = 362                         # H3's 17n+5 grid up to 15 s
+H3_MAX_FRAMES = chain.H3_MAX_FRAMES         # H3's 17n+5 grid up to 15 s
 # the creator's recipe (Henge, backend/workflows.py, profile "headswap"): the DMD 8-step turbo LoRA (drbaph) under the
 # head swap LoRA, both at strength 1; MiniMaxH3SigmaShift 12 / 3, euler, the beta scheduler, 8 steps, cfg 1
 H3_SWAP_STEPS = 8
@@ -329,8 +329,7 @@ def head_swap_prompt(details: str = "") -> str:
 
 def h3_length(frames: int) -> int:
     """The H3 length (17n+5) that holds a clip of this many frames."""
-    n = max(0, -(-(int(frames) - 5) // 17))
-    return 17 * n + 5
+    return chain.h3_frames(frames)
 
 
 def trim_with_sound(made: Path, clip: Path, out: Path, frames: int, fps: float = 24.0) -> None:

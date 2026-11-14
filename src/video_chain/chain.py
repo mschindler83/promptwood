@@ -14,17 +14,17 @@ Output folder:
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import os
 import shutil
-import tempfile
 import threading
-import subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Protocol
+
+from . import media
+from .media import MediaError
 
 FPS = 24
 HYPERFLOW_STEPS = 8      # HyperFlow's trained sigma grid
@@ -33,6 +33,14 @@ PIKA_STEPS = 6           # Pika H3 Flex (its template's 6-step sigmas)
 # 5 s clip at 672x384 (37k tokens) 25-30 % slower and a 10 s clip at 1344x768 (290k tokens) 2.3x faster; the
 # predictor's own RTX 4090 numbers give 1.77x at 1344x768 for 5 s (149k). So it is used from this many tokens on.
 VEDA_MIN_TOKENS = 120_000
+
+
+H3_MAX_FRAMES = 362                         # H3's 17n+5 grid up to 15 s
+
+
+def h3_frames(need: int) -> int:
+    """The shortest H3 length (17n+5 frames) that holds `need` frames (not capped: compare with H3_MAX_FRAMES)."""
+    return 17 * max(0, -(-(int(need) - 5) // 17)) + 5
 
 
 def h3_tokens(width: int, height: int, frames: int) -> int:
@@ -123,12 +131,7 @@ def parse_size(text: str) -> tuple[int, int]:
 
 # ----------------------------------------------------------------------------- ffmpeg helpers
 
-def _run(cmd: list[str]) -> str:
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    if r.returncode != 0:
-        tail = "\n".join(r.stderr.strip().splitlines()[-5:])
-        raise RuntimeError(f"{cmd[0]} failed: {tail}")
-    return r.stdout
+# (the one runner for ffmpeg / ffprobe is media.py: a failure is a MediaError, a RuntimeError with ffmpeg's own words)
 
 
 CUT_SIZE = (32, 18)                 # frames are compared this small (grey): motion averages out, a cut does not
@@ -138,15 +141,11 @@ CUT_RATIO, CUT_FLOOR = 8.0, 10.0    # a cut: the change is this many times the c
 def hard_cuts(video: Path) -> list[int]:
     """Frames (0-based) where a clip jumps to another picture instead of moving there: the change from the frame
     before is many times the clip's typical frame-to-frame change and large in itself. [] when it cannot be read."""
-    w, h = CUT_SIZE
+    n = CUT_SIZE[0] * CUT_SIZE[1]
     try:
-        raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(video), "-map", "0:v:0", "-vf",
-                              f"scale={w}:{h}:flags=area,format=gray", "-f", "rawvideo", "-"],
-                             capture_output=True, timeout=300, check=True).stdout
-    except (OSError, subprocess.SubprocessError):
+        frames = list(media.iter_frames(video, CUT_SIZE, "gray", timeout=300))
+    except (OSError, MediaError):
         return []
-    n = w * h
-    frames = [raw[i:i + n] for i in range(0, len(raw) - n + 1, n)]
     diffs = [sum(abs(a - b) for a, b in zip(frames[i], frames[i - 1])) / n for i in range(1, len(frames))]
     if len(diffs) < 3:
         return []
@@ -155,19 +154,11 @@ def hard_cuts(video: Path) -> list[int]:
 
 
 def probe(path: Path) -> dict:
-    out = _run(["ffprobe", "-v", "error", "-count_frames", "-print_format", "json", "-show_streams", str(path)])
-    streams = json.loads(out).get("streams") or []
-    v = next((s for s in streams if s.get("codec_type") == "video"), None)
-    if v is None:
-        raise RuntimeError(f"{path} has no video stream")
-    num, _, den = (v.get("r_frame_rate") or "0/1").partition("/")
-    try:
-        fps = float(num) / float(den or 1)
-    except (ValueError, ZeroDivisionError):     # "0/0" for some streams
-        fps = 0.0
-    return {"frames": int(v.get("nb_read_frames") or 0), "fps": fps,
-            "width": int(v["width"]), "height": int(v["height"]),
-            "audio": any(s.get("codec_type") == "audio" for s in streams)}
+    """{"frames" (counted by decoding: exact), "fps", "width", "height", "audio"} of a video; RuntimeError
+    (MediaError) when it cannot be read or has no video stream."""
+    info = media.probe(path, count_frames=True)
+    return {"frames": info.frames, "fps": info.fps, "width": info.width, "height": info.height,
+            "audio": info.has_audio}
 
 
 def last_frame(video: Path, png: Path) -> None:
@@ -184,46 +175,35 @@ def last_frame(video: Path, png: Path) -> None:
 START_BACKGROUND = "0x808080"   # what transparent parts of a start image become (H3 drops the alpha channel)
 
 
+TO_PNG_TIMEOUT = 120               # seconds a picture conversion may take (a hung ffmpeg must not block a worker for ever)
+
+
 def prepare_image(src: Path, dst: Path, width: int, height: int) -> None:
     """A start image exactly as H3 takes it best: cut from the centre to the canvas's exact aspect ratio (H3 would
     stretch it), scaled once with Lanczos in RGB to width x height, transparent parts on neutral grey. The image's
     own EXIF rotation is applied by ffmpeg when it reads it. Written under a temporary name first."""
     dst = Path(dst)
     r = int(width) / int(height)
-    tmp = dst.with_name(dst.stem + ".part.png")
     graph = (f"[0:v]crop=w='min(iw,ih*{r:.8f})':h='min(ih,iw/{r:.8f})',"
              f"scale={int(width)}:{int(height)}:flags=lanczos+accurate_rnd+full_chroma_int,format=rgba[fg];"
              f"color=c={START_BACKGROUND}:s={int(width)}x{int(height)}:d=1,format=rgba[bg];"
              f"[bg][fg]overlay=shortest=1,format=rgb24")
-    try:
-        _run(["ffmpeg", "-v", "error", "-y", "-i", str(src), "-filter_complex", graph, "-frames:v", "1", str(tmp)])
-        tmp.replace(dst)
-    finally:
-        tmp.unlink(missing_ok=True)
+    with media.part_file(dst) as tmp:
+        media.ffmpeg(["-y", "-i", src, "-filter_complex", graph, "-frames:v", "1", tmp], timeout=TO_PNG_TIMEOUT)
 
 
 def to_png(image: Path, png: Path, crop: tuple[int, int, int, int] | None = None) -> None:
     """Convert to PNG (crop: x, y, width, height in its pixels); written under a temporary name first, so a failed
     conversion never leaves a broken file."""
     png = Path(png)
-    tmp = png.with_name(png.stem + ".part.png")
     vf = ["-vf", "crop={2}:{3}:{0}:{1}".format(*(int(v) for v in crop))] if crop else []
-    try:
-        _run(["ffmpeg", "-v", "error", "-y", "-i", str(image), "-frames:v", "1", *vf, str(tmp)])
-        tmp.replace(png)
-    finally:
-        tmp.unlink(missing_ok=True)
+    with media.part_file(png) as tmp:
+        media.ffmpeg(["-y", "-i", image, "-frames:v", "1", *vf, tmp], timeout=TO_PNG_TIMEOUT)
 
 
 def audio_seconds(path: Path) -> float | None:
     """Length of a file's first audio stream in seconds (None: it has no sound)."""
-    out = _run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=duration:format=duration",
-                "-print_format", "json", str(path)])
-    info = json.loads(out or "{}")
-    if not info.get("streams"):
-        return None
-    d = info["streams"][0].get("duration") or (info.get("format") or {}).get("duration")
-    return float(d) if d not in (None, "N/A") else None
+    return media.audio_seconds(path)
 
 
 def to_wav(source: Path, wav: Path, start: float = 0.0, seconds: float | None = None, loop: float | None = None,
@@ -233,8 +213,7 @@ def to_wav(source: Path, wav: Path, start: float = 0.0, seconds: float | None = 
     begins `offset` seconds into that loop. pad: seconds of silence first. fill: a sound that ends before `seconds` is
     filled up with silence."""
     wav = Path(wav)
-    tmp = wav.with_name(wav.stem + ".part.wav")
-    cmd = ["ffmpeg", "-v", "error", "-y", "-ss", f"{float(start):.3f}"]
+    cmd = ["-y", "-ss", f"{float(start):.3f}"]
     if loop:
         cmd += ["-t", f"{float(loop):.3f}"]
     cmd += ["-i", str(source), "-map", "0:a:0", "-vn"]
@@ -250,54 +229,19 @@ def to_wav(source: Path, wav: Path, start: float = 0.0, seconds: float | None = 
             cmd += ["-af", ",".join(filters)]
     if seconds is not None:
         cmd += ["-t", f"{float(seconds):.3f}"]
-    try:
-        _run(cmd + ["-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le", str(tmp)])
-        tmp.replace(wav)
-    finally:
-        tmp.unlink(missing_ok=True)
+    with media.part_file(wav) as tmp:
+        media.ffmpeg(cmd + ["-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le", tmp])
 
 
 def image_size(path: Path) -> tuple[int, int]:
-    out = _run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
-                "-of", "csv=p=0", str(path)])
-    w, h = out.strip().split(",")[:2]
-    return int(w), int(h)
+    return media.image_size(path)
 
 
 def probe_source(path: Path) -> dict:
-    """Size, frame rate, duration and sound of any video file, without decoding it (fast, also on a share)."""
-    out = _run(["ffprobe", "-v", "error", "-print_format", "json", "-show_streams", "-show_format", str(path)])
-    data = json.loads(out)
-    streams = data.get("streams") or []
-    v = next((s for s in streams if s.get("codec_type") == "video"), None)
-    if v is None:
-        raise RuntimeError(f"{Path(path).name} has no video stream")
-
-    def rate(text):
-        num, _, den = (text or "0/1").partition("/")
-        try:
-            return float(num) / float(den or 1)
-        except (ValueError, ZeroDivisionError):
-            return 0.0
-    fps = rate(v.get("avg_frame_rate")) or rate(v.get("r_frame_rate")) or float(FPS)
-    try:
-        duration = float(v.get("duration") or (data.get("format") or {}).get("duration") or 0)
-    except ValueError:
-        duration = 0.0
-    w, h = int(v["width"]), int(v["height"])
-    rot = 0
-    for sd in v.get("side_data_list") or []:            # phone videos: stored sideways + a rotation flag
-        if "rotation" in sd:
-            rot = int(float(sd["rotation"]))
-    rot = rot or int(float((v.get("tags") or {}).get("rotate", 0) or 0))
-    if rot % 180:
-        w, h = h, w
-    try:
-        frames = int(v.get("nb_frames") or 0)           # (not every container says; 0: unknown)
-    except ValueError:
-        frames = 0
-    return {"width": w, "height": h, "fps": fps, "duration": duration, "frames": frames,
-            "audio": any(s.get("codec_type") == "audio" for s in streams)}
+    """Size, frame rate, duration and sound of any video file, without decoding it (fast, also on a share).
+    "frames" is the container's own count (0: it does not say)."""
+    info = media.probe(path)
+    return info.as_dict() | {"fps": info.fps or float(FPS)}
 
 
 def joined_seconds(path: Path) -> float:
@@ -348,32 +292,26 @@ def convert_range(source: Path, out: Path, start: float, end: float, width: int,
     if n < 1:
         raise ValueError("the range is shorter than one frame")
     out = Path(out)
-    tmp = out.with_name(out.stem + ".part" + out.suffix)
     turn = rotate_filter(rotate)
     vf = (f"fps={fps},{turn + ',' if turn else ''}scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,"
           f"crop={width}:{height},setsar=1,format=yuv420p")
-    cmd = ["ffmpeg", "-v", "error", "-y", "-ss", f"{float(start):.6f}", "-i", str(source), "-map", "0:v:0",
+    cmd = ["-y", "-ss", f"{float(start):.6f}", "-i", str(source), "-map", "0:v:0",
            "-vf", vf, "-frames:v", str(n), "-c:v", "libx264", "-crf", "12", "-preset", "slow"]
     if info["audio"]:
         cmd += ["-map", "0:a:0", "-af", f"aresample=48000,aformat=channel_layouts=stereo,apad,"
                                         f"atrim=0:{n / fps:.6f}", "-c:a", "aac", "-b:a", "256k"]
-    cmd += ["-map_metadata", "-1", "-r", str(fps), str(tmp)]
-    try:
-        _run(cmd)
+    with media.part_file(out) as tmp:
+        media.ffmpeg(cmd + ["-map_metadata", "-1", "-r", str(fps), tmp])
         made = probe(tmp)["frames"]
         if made < 1:
             raise RuntimeError(f"no frames in {Path(source).name} between {start:.2f} s and {end:.2f} s")
-        tmp.replace(out)
-    finally:
-        tmp.unlink(missing_ok=True)
     return made
 
 
 def frame_at(video: Path, index: int, png: Path) -> None:
     """Frame number index (0-based) of a video as PNG."""
     Path(png).unlink(missing_ok=True)              # an older PNG there must not pass as this frame
-    _run(["ffmpeg", "-v", "error", "-y", "-i", str(video), "-vf", f"select=eq(n\\,{int(index)})", "-frames:v", "1",
-          "-update", "1", str(png)])
+    media.ffmpeg(["-y", "-i", video, "-vf", f"select=eq(n\\,{int(index)})", "-frames:v", "1", "-update", "1", png])
     if not Path(png).is_file():
         raise RuntimeError(f"{Path(video).name} has no frame {index}")
 
@@ -382,13 +320,9 @@ def replace_audio(video: Path, wav: Path) -> None:
     """Put this sound into a clip instead of its own (the picture is copied, not re-encoded); the sound is cut or
     padded with silence to the clip's length. Written under a temporary name first."""
     video = Path(video)
-    tmp = video.with_name(video.stem + ".part" + video.suffix)
-    try:
-        _run(["ffmpeg", "-v", "error", "-y", "-i", str(video), "-i", str(wav), "-map", "0:v:0", "-map", "1:a:0",
-              "-c:v", "copy", "-af", "apad", "-c:a", "aac", "-b:a", "256k", "-shortest", str(tmp)])
-        tmp.replace(video)
-    finally:
-        tmp.unlink(missing_ok=True)
+    with media.part_file(video) as tmp:
+        media.ffmpeg(["-y", "-i", video, "-i", wav, "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-af", "apad",
+                      "-c:a", "aac", "-b:a", "256k", "-shortest", tmp])
 
 
 MIX_LIMIT = 0.891       # the mix's peak limit (-1 dBFS): room for the AAC encoder's overshoot, so nothing clips
@@ -418,14 +352,9 @@ def _mix_into(video: Path, own: Path, wav: Path, level_db: float) -> None:
              f"[own][given]amix=inputs=2:duration=first:normalize=0,"
              f"alimiter=limit={MIX_LIMIT}:level=false:latency=true[mix]")
     video = Path(video)
-    tmp = video.with_name(video.stem + ".part" + video.suffix)
-    try:
-        _run(["ffmpeg", "-v", "error", "-y", "-i", str(video), "-i", str(own), "-i", str(wav), "-filter_complex",
-              graph, "-map", "0:v:0", "-map", "[mix]", "-c:v", "copy", "-c:a", "aac", "-b:a", "256k", "-shortest",
-              str(tmp)])
-        tmp.replace(video)
-    finally:
-        tmp.unlink(missing_ok=True)
+    with media.part_file(video) as tmp:
+        media.ffmpeg(["-y", "-i", video, "-i", own, "-i", wav, "-filter_complex", graph, "-map", "0:v:0", "-map",
+                      "[mix]", "-c:v", "copy", "-c:a", "aac", "-b:a", "256k", "-shortest", tmp])
 
 
 OWN_SOUND = ".own"     # nodes/<clip stem>.own.m4a: the sound the model made for a clip whose sound was laid over
@@ -433,8 +362,8 @@ OWN_SOUND = ".own"     # nodes/<clip stem>.own.m4a: the sound the model made for
 
 def audio_codec(path: Path) -> str | None:
     """The codec of a file's first audio stream (None: it has no sound)."""
-    out = _run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name",
-                "-of", "csv=p=0", str(path)]).strip()
+    out = media.ffprobe(["-select_streams", "a:0", "-show_entries", "stream=codec_name", "-of", "csv=p=0",
+                         path]).strip()
     return out.splitlines()[0].strip() if out else None
 
 
@@ -448,12 +377,8 @@ def keep_own_sound(video: Path) -> Path | None:
     if codec is None:
         return None
     out = video.with_name(video.stem + OWN_SOUND + (".m4a" if codec in ("aac", "alac") else ".mka"))
-    tmp = out.with_name(out.stem + ".part" + out.suffix)
-    try:
-        _run(["ffmpeg", "-v", "error", "-y", "-i", str(video), "-map", "0:a:0", "-vn", "-c:a", "copy", str(tmp)])
-        tmp.replace(out)
-    finally:
-        tmp.unlink(missing_ok=True)
+    with media.part_file(out) as tmp:
+        media.ffmpeg(["-y", "-i", video, "-map", "0:a:0", "-vn", "-c:a", "copy", tmp])
     return out
 
 
@@ -472,21 +397,17 @@ def cut_frames(video: Path, out: Path, first: int, count: int, fps: int = FPS) -
     """Frames first .. first+count-1 of a chain clip (and their sound) as a clip of their own, nearly lossless.
     Returns whether it has sound."""
     has_audio = probe(video)["audio"]
-    cmd = ["ffmpeg", "-v", "error", "-y", "-i", str(video), "-map", "0:v:0",
+    cmd = ["-y", "-i", str(video), "-map", "0:v:0",
            "-vf", f"trim=start_frame={first}:end_frame={first + count},setpts=PTS-STARTPTS",
            "-c:v", "libx264", "-crf", "8", "-preset", "slow", "-pix_fmt", "yuv420p"]
     if has_audio:
         cmd += ["-map", "0:a:0", "-af", f"atrim=start={first / fps:.6f}:end={(first + count) / fps:.6f},"
                                         "asetpts=PTS-STARTPTS", "-c:a", "aac", "-b:a", "256k"]
     out = Path(out)
-    tmp = out.with_name(out.stem + ".part" + out.suffix)
-    try:
-        _run(cmd + ["-r", str(fps), str(tmp)])
+    with media.part_file(out) as tmp:
+        media.ffmpeg(cmd + ["-r", str(fps), tmp])
         if probe(tmp)["frames"] != count:
             raise RuntimeError(f"could not cut {count} frames from {Path(video).name}")
-        tmp.replace(out)
-    finally:
-        tmp.unlink(missing_ok=True)
     return has_audio
 
 
@@ -543,13 +464,9 @@ def concat(videos: list[Path], out: Path, drop_first: bool = True, fps: int = FP
     maps = ["-map", "[v]"] + (["-map", "[a]"] if any_audio else [])
     codec = ["-c:v", "libx264", "-crf", "16", "-preset", "slow", "-pix_fmt", "yuv420p"]
     codec += ["-c:a", "aac", "-b:a", "192k"] if any_audio else []
-    tmp = out.with_name(out.stem + ".part" + out.suffix)
-    try:
-        _run(["ffmpeg", "-v", "error", "-y", *args, "-filter_complex", ";".join(filters), *maps, *codec,
-              "-r", str(fps), str(tmp)])
-        tmp.replace(out)
-    finally:
-        tmp.unlink(missing_ok=True)
+    out = Path(out)
+    with media.part_file(out) as tmp:
+        media.ffmpeg(["-y", *args, "-filter_complex", ";".join(filters), *maps, *codec, "-r", str(fps), tmp])
 
 
 def join_parts(videos: list[Path], out: Path, size: tuple[int, int], joins: list[str], fade: float = 0.5,
@@ -598,14 +515,10 @@ def join_parts(videos: list[Path], out: Path, size: tuple[int, int], joins: list
             t += durs[k]
         cv, ca = nv, na
     out = Path(out)
-    tmp = out.with_name(out.stem + ".part" + out.suffix)
-    try:
-        _run(["ffmpeg", "-v", "error", "-y", *args, "-filter_complex", ";".join(filters), "-map", cv, "-map", ca,
-              "-c:v", "libx264", "-crf", "16", "-preset", "slow", "-pix_fmt", "yuv420p", "-c:a", "aac",
-              "-b:a", "192k", "-r", str(fps), str(tmp)])
-        tmp.replace(out)
-    finally:
-        tmp.unlink(missing_ok=True)
+    with media.part_file(out) as tmp:
+        media.ffmpeg(["-y", *args, "-filter_complex", ";".join(filters), "-map", cv, "-map", ca, "-c:v", "libx264",
+                      "-crf", "16", "-preset", "slow", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+                      "-r", str(fps), tmp])
 
 
 _SHA_CACHE: dict[tuple, str] = {}
@@ -634,11 +547,7 @@ def file_signature(path: str | Path | None) -> str | None:
 
 
 def sha1_file(path: Path) -> str:
-    h = hashlib.sha1()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
+    return media.file_digest(path, "sha1")
 
 
 # ----------------------------------------------------------------------------- the chain
@@ -759,9 +668,7 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
 def _write_record(out_dir: Path, settings: dict, clips: list[Clip], done: bool, image: Path | None = None) -> None:
     data = {"tool": "video-chain", "image": str(image) if image else None, "settings": settings, "done": done,
             "chain": "chain.mp4" if done else None, "clips": [asdict(c) for c in clips]}
-    tmp = out_dir / "chain.json.part"
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(out_dir / "chain.json")
+    media.atomic_write_json(out_dir / "chain.json", data)
 
 
 OLD_DIR = "old"                     # in a project: what the app no longer uses (see keep_aside)
@@ -816,19 +723,7 @@ def keep_copy(root: Path, f: Path) -> bool:
         return False
 
 
-def atomic_write_text(path: Path, text: str) -> None:
-    """Write a small text file whole or not at all (a name of its own, on disk, then renamed over the old file): a
-    crash leaves the old text, not a cut-off one."""
-    path = Path(path)
-    fd, name = tempfile.mkstemp(prefix=path.name + ".", suffix=".part", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(name, path)
-    finally:
-        Path(name).unlink(missing_ok=True)
+atomic_write_text = media.atomic_write_text     # (kept here: tree.py and others call it as chain.atomic_write_text)
 
 
 def replace_kept(root: Path, target: Path, write: Callable[[Path], None]) -> None:
