@@ -14,12 +14,12 @@ from typing import Any
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QImage, QPainter, QPen
-from PySide6.QtWidgets import QHBoxLayout, QSlider, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 
 from .workers import post, run_in_background
 from .. import chain, media
 from .theme import icon, theme
-from .widgets import icon_button, label, shortcut
+from .widgets import FrameStepper, icon_button, label, shortcut
 
 MEMORY_BUDGET = 900 * 2**20               # bytes for the stored frames of both clips (RGB, 3 bytes a pixel)
 MAX_SIZE = (1280, 720)                    # never stored larger than this (the view is smaller)
@@ -165,49 +165,29 @@ class ComparePlayer(QWidget):
         v.setContentsMargins(0, 0, 0, 0)
         self.view = CompareView()
         v.addWidget(self.view, 1)
-        self.slider = QSlider(Qt.Orientation.Horizontal)
+        self.stepper = FrameStepper(self, fps, context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.stepper.stepped.connect(self.pause)         # (a step by hand stops the playing)
+        self.slider, self.time = self.stepper.slider, self.stepper.label
         self.slider.setEnabled(False)
-        self.slider.valueChanged.connect(self._show)
-        v.addWidget(self.slider)
+        self.stepper.valueChanged.connect(self._show)
+        v.addWidget(self.stepper)
         row = QHBoxLayout()
-        self.b_back = self._button("«", "One second back (Shift+Left)", lambda: self.step(-round(self.fps)))
-        self.b_prev = icon_button("skipb", "One frame back (Left)")
-        self.b_prev.clicked.connect(lambda: self.step(-1))
         self.b_play = icon_button("play", "Play / pause (Space)")
         self.b_play.clicked.connect(self.toggle)
-        self.b_next = icon_button("skipf", "One frame on (Right)")
-        self.b_next.clicked.connect(lambda: self.step(1))
-        self.b_fwd = self._button("»", "One second on (Shift+Right)", lambda: self.step(round(self.fps)))
-        for b in (self.b_back, self.b_prev, self.b_play, self.b_next, self.b_fwd):
-            row.addWidget(b)
-        self.time = label("", level="tertiary", type_="mono")
+        row.addWidget(self.b_play)
         row.addSpacing(8)
-        row.addWidget(self.time)
-        row.addStretch(1)
         self.hint = label("", level="tertiary")
-        row.addWidget(self.hint)
+        row.addWidget(self.hint, 1)
         v.addLayout(row)
         self._controls(False)
         from PySide6.QtGui import QKeySequence
-        for key, fn in (("Space", self.toggle), ("Left", lambda: self.step(-1)), ("Right", lambda: self.step(1)),
-                        ("Shift+Left", lambda: self.step(-round(self.fps))),
-                        ("Shift+Right", lambda: self.step(round(self.fps))), ("Home", lambda: self.seek(0)),
+        for key, fn in (("Space", self.toggle), ("Home", lambda: self.seek(0)),
                         ("End", lambda: self.seek(self.count() - 1))):
             shortcut(QKeySequence(key), self, fn, context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
 
-    @staticmethod
-    def _button(text: str, tip: str, fn) -> QToolButton:
-        b = QToolButton()
-        b.setProperty("role", "iconButton")
-        b.setText(text)
-        b.setToolTip(tip)
-        b.clicked.connect(fn)
-        return b
-
     def _controls(self, on: bool):
-        for b in (self.b_back, self.b_prev, self.b_play, self.b_next, self.b_fwd):
-            b.setEnabled(on)
-        self.slider.setEnabled(on and self.count() > 1)
+        self.b_play.setEnabled(on)
+        self.stepper.setEnabled(on and self.count() > 1)
 
     # ---- loading
     def load(self, clip: Path, frames: int, size: tuple[int, int]) -> None:
@@ -287,7 +267,7 @@ class ComparePlayer(QWidget):
         else:
             self.frames = frames
             self.slider.blockSignals(True)
-            self.slider.setRange(0, max(0, len(frames) - 1))
+            self.stepper.set_range(0, max(0, len(frames) - 1))
             self.slider.setValue(min(self.slider.value(), len(frames) - 1))
             self.slider.blockSignals(False)
             self._controls(True)
@@ -320,8 +300,6 @@ class ComparePlayer(QWidget):
             self.overlay(k, before)
         after = self.image(k, True) if self.result is not None else None
         self.view.show_frames(before, after if after is not None and not after.isNull() else None)
-        n = self.count()
-        self.time.setText(f"frame {k + 1} / {n} · {k / self.fps:.2f} s")
         self.frameChanged.emit(k)
 
     def refresh(self):

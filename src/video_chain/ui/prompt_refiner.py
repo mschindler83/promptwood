@@ -458,7 +458,6 @@ class RefineDialog(QDialog):
     def show_loras(self):
         """The LoRA window for this prompt's LoRAs: what the model was told at the last refine (before the first
         one: what it will be told, without the notes still to write), and the examples behind it."""
-        from .. import lora_notes
         from .lora_window import LoraWindow
         on = self.use_loras.isEnabled() and self.use_loras.isChecked()
         told, title = self._told, "What the language model was told"

@@ -127,3 +127,24 @@ def test_the_frame_window_says_when_the_file_cannot_be_read(app, tmp_path, monke
     assert wait(app, lambda: "could not be read" in dlg.note.text())
     assert not dlg.ready and not dlg.buttons.button(dlg.buttons.StandardButton.Ok).isEnabled()
     dlg.reject()
+
+
+def test_the_compare_player_steps_with_the_shared_frame_stepper(app):
+    from video_chain.ui.compare_player import ComparePlayer, store_size
+    from video_chain.ui.widgets import FrameStepper
+    p = ComparePlayer(fps=10)
+    assert isinstance(p.stepper, FrameStepper) and p.slider is p.stepper.slider
+    size = store_size(8, 8, 20)
+    p.size_, p.clip_size = size, (8, 8)
+    p.frames = [bytes(size[0] * size[1] * 3)] * 20
+    p._controls(True)
+    p.stepper.set_range(0, 19)
+    p.play()
+    assert p.playing()
+    p.stepper.b_fwd1.click()                       # a step by hand stops the playing
+    assert not p.playing() and p.position() == 1
+    p.stepper.b_fwd_s.click()                      # a second at 10 fps
+    assert p.position() == 11
+    assert p.time.text() == "frame 12 / 20 · 1.10 s"
+    p.seek(19)
+    assert p.position() == 19

@@ -495,8 +495,9 @@ class FrameStepper(QWidget):
     label ("frame 3 / 120 · 0.08 s"), and the keys Left / Right (one frame) and Shift+Left / Shift+Right (one
     second) on the host window. HandoverDialog and VideoFrameDialog share it."""
     valueChanged = Signal(int)
+    stepped = Signal()                          # a button or key moved it by hand (a player stops playing then)
 
-    def __init__(self, host: QWidget, fps: float = chain.FPS, parent=None):
+    def __init__(self, host: QWidget, fps: float = chain.FPS, parent=None, context=None):
         super().__init__(parent or host)
         self.fps = float(fps)
         sec = max(1, round(self.fps))
@@ -516,7 +517,7 @@ class FrameStepper(QWidget):
             row.addWidget(b)
         row.addWidget(self.label)
         for key, step in (("Left", -1), ("Right", 1), ("Shift+Left", -sec), ("Shift+Right", sec)):
-            shortcut(QKeySequence(key), host, lambda s=step: self.step(s))
+            shortcut(QKeySequence(key), host, lambda s=step: self.step(s), context=context)
         self.slider.valueChanged.connect(self._moved)
         self.slider.valueChanged.connect(self.valueChanged)
 
@@ -531,6 +532,7 @@ class FrameStepper(QWidget):
         return b
 
     def step(self, n: int) -> None:
+        self.stepped.emit()
         self.slider.setValue(self.slider.value() + n)       # (the slider keeps it inside its range)
 
     def set_range(self, lo: int, hi: int) -> None:
