@@ -123,7 +123,7 @@ def test_node_settings_are_worked_out_once_per_round(tmp_path, monkeypatch):
     t = T.Tree()
     a = t.add(None, "a")
     calls = []
-    monkeypatch.setattr(T, "node_settings", lambda *a_, **k: calls.append(1) or {})
+    monkeypatch.setattr(T.checker, "node_settings", lambda *a_, **k: calls.append(1) or {})
     ck = T.Checker(tmp_path, t)
     ck.base = lambda: {}
     for _ in range(4):
