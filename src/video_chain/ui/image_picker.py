@@ -10,17 +10,17 @@ import hashlib
 import json
 import os
 import threading
-import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QSettings, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QIcon, QImage, QImageReader, QPainter, QPixmap
+from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QMenu, QSlider, QSplitter, QStyle, QVBoxLayout, QWidget)
 
 from .. import media
+from .imageio import file_facts, read_scaled
 from .theme import icon, theme
 from .widgets import fit_size, format_time, icon_button, label, safe_emit
 
@@ -136,13 +136,7 @@ def _thumbnail(path: str) -> QImage:
         return _video_frame(path)
     if Path(path).suffix.lower() in SOUND_EXTS | TEXT_EXTS:
         return QImage()
-    r = QImageReader(path)
-    r.setAutoTransform(True)
-    size = r.size()
-    if size.isValid() and (size.width() > THUMB_MAX or size.height() > THUMB_MAX):
-        r.setScaledSize(size.scaled(THUMB_MAX, THUMB_MAX, Qt.KeepAspectRatio))
-    img = r.read()
-    return img if not img.isNull() else QImage()
+    return read_scaled(path, THUMB_MAX)[0]
 
 
 class ImagePickerDialog(QDialog):
@@ -515,11 +509,7 @@ class ImagePickerDialog(QDialog):
             self.preview.setPixmap(QPixmap.fromImage(img).scaled(box, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         else:
             self.preview.setPixmap(self.style().standardIcon(QStyle.SP_MediaVolume).pixmap(96, 96))
-        try:
-            st = Path(path).stat()
-            mb, when = st.st_size / 2**20, time.strftime("%Y-%m-%d %H:%M", time.localtime(st.st_mtime))
-        except OSError:
-            mb, when = 0.0, ""
+        mb, when = file_facts(path)
         caption = item.data(Qt.UserRole + 2)
         self.info.setText((f"{caption}\n" if caption else "") + f"{Path(path).name}\n{media}\n{mb:.1f} MB · {when}")
 
@@ -600,21 +590,10 @@ class ImagePickerDialog(QDialog):
             except RuntimeError:                       # (closed)
                 pass
             return
-        r = QImageReader(path)
-        r.setAutoTransform(True)
-        size = r.size()
-        box = self.preview.size()
-        if size.isValid() and (size.width() > box.width() or size.height() > box.height()):
-            r.setScaledSize(size.scaled(box, Qt.KeepAspectRatio))
-        img = r.read()
+        img, size = read_scaled(path, self.preview.size())
         if not img.isNull():
             self.preview.setPixmap(QPixmap.fromImage(img))
-        try:
-            st = Path(path).stat()
-            mb = st.st_size / 2**20
-            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(st.st_mtime))
-        except OSError:
-            mb, when = 0.0, ""
+        mb, when = file_facts(path)
         dims = f"{size.width()}×{size.height()}" if size.isValid() else "?"
         caption = item.data(Qt.UserRole + 2)
         self.info.setText((f"{caption}\n" if caption else "") + f"{Path(path).name}\n{dims} px · {mb:.1f} MB · {when}")
