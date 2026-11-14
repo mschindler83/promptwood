@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 
 from . import config, media
+from .media import squash
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +86,7 @@ class PresetStore:
 
     def save(self, lora: str, name: str, values: dict) -> dict:
         """Save (or replace) the preset `name` of a LoRA; returns it."""
-        name = " ".join(str(name or "").split())
+        name = squash(name)
         if not name:
             raise ValueError("a preset needs a name")
         preset = {"name": name, **{k: values.get(k) for k in FIELDS if k in values}, "updated": time.time()}
@@ -97,7 +98,7 @@ class PresetStore:
         return preset
 
     def rename(self, lora: str, old: str, new: str) -> None:
-        new = " ".join(str(new or "").split())
+        new = squash(new)
         if not new:
             raise ValueError("a preset needs a name")
         with self._exclusive():

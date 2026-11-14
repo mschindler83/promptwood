@@ -35,6 +35,7 @@ from typing import Any, Callable
 
 from . import config, keys, media, net
 from .h3_prompt import contains_word
+from .media import squash
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +118,7 @@ def _clean(words) -> list[str]:
     out: list[str] = []
     for w in words or []:
         for part in str(w).split(","):
-            part = " ".join(part.split()).strip()
+            part = squash(part).strip()
             if part and part.lower() not in [x.lower() for x in out]:
                 out.append(part)
     return out

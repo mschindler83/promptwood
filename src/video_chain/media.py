@@ -317,6 +317,11 @@ def text_digest(text: str, algo: str = "sha256") -> str:
     return hashlib.new(algo, text.encode("utf-8")).hexdigest()
 
 
+def squash(text) -> str:
+    """The text with every run of white space (also line breaks) as one space, trimmed; None is ""."""
+    return " ".join(str(text or "").split())
+
+
 def sweep_scratch(root: str | Path | None = None, older_than: float = 86400.0) -> list[Path]:
     """Remove scratch folders (video-chain-*, see scratch) in root (default: the temp folder) that nobody has touched
     for `older_than` seconds: what a killed run left behind. Returns the removed. Only folders; never a young one,

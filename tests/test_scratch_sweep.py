@@ -28,3 +28,7 @@ def test_a_project_sweep_takes_the_job_folders_of_a_killed_run(tmp_path):
     (tmp_path / "nodes" / "n1.mp4").write_bytes(b"clip")
     T.sweep_scratch(tmp_path)
     assert not (tmp_path / "nodes" / "video-chain-job-1").exists() and (tmp_path / "nodes" / "n1.mp4").exists()
+
+
+def test_squash_makes_one_line_of_any_white_space():
+    assert media.squash("  a \n b\t\tc  ") == "a b c" and media.squash(None) == "" and media.squash(5) == "5"

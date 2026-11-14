@@ -11,6 +11,7 @@ Two layers, both only text:
 guidance() puts this into the refiner's instruction: the note when there is one (else the page's text), a few of the
 example prompts and the settings. The refiner takes wording from it, never content."""
 from __future__ import annotations
+from .media import squash
 
 import logging
 import html
@@ -49,7 +50,7 @@ def plain(text) -> str:
     s = re.sub(r"(?is)<(script|style)\b.*?</\1\s*>", " ", str(text or ""))
     s = re.sub(r"(?i)<\s*(br|/p|/li|/h\d|/div)\s*/?>", ". ", s)
     s = html.unescape(_TAG.sub(" ", s))
-    s = " ".join(s.split())
+    s = squash(s)
     return re.sub(r"(\s*\.){2,}", ".", s).replace(" .", ".").strip(" .") if s else ""
 
 
@@ -64,9 +65,9 @@ def clean_example(prompt) -> str:
         s = new
     s = re.sub(r"\bBREAK\b", ",", s)
     s = re.sub(r"[()\[\]{}]{2,}", " ", s)
-    s = " ".join(s.split())
+    s = squash(s)
     s = re.sub(r"(\s*,)+", ",", s).replace(",", ", ")
-    return " ".join(s.split()).strip(" ,")
+    return squash(s).strip(" ,")
 
 
 _FORGED = re.compile(r"(?i)end\s+of\s+data|the\s+user'?s\s+own\s+remarks|end\s+of\s+the\s+lora\s+material")
@@ -75,7 +76,7 @@ _FORGED = re.compile(r"(?i)end\s+of\s+data|the\s+user'?s\s+own\s+remarks|end\s+o
 def _defang(text, n: int = 0) -> str:
     """Text from CivitAI (anyone may write it) for a prompt: on one line, cut to n characters (0: not cut), and
     without the phrases the prompts use as their own markers (the end of the DATA block, the user's remarks)."""
-    s = _FORGED.sub("...", " ".join(str(text or "").split()))
+    s = _FORGED.sub("...", squash(text))
     return s[:n].strip() if n else s
 
 
@@ -232,7 +233,7 @@ def material(details: dict | None, words: list[str] | None = None, path: str = "
     examples = pool[:NOTE_EXAMPLES]
     if not (words or about or examples):
         return None
-    return {"name": " ".join(name.split())[:80], "base": _defang(v.get("baseModel"), 80), "words": words,
+    return {"name": squash(name)[:80], "base": _defang(v.get("baseModel"), 80), "words": words,
             "about": about, "tags": tags, "examples": examples, "pool": pool, "settings": settings_of(d, path),
             "stamp": f"{NOTE_VERSION}:{d.get('fetched') or 0}:{len(pool)}"}
 
@@ -358,7 +359,7 @@ def save_user(db: TriggerDB, path: str, note: str | None = None, remarks: str | 
     language model writes one again at the next refine). remarks: their remarks for the refiner (None: as they
     are). False when it cannot be kept (the file's hash is not known yet: it was never looked at)."""
     if note is not None:
-        note = "\n".join(" ".join(x.split()) for x in note.strip().splitlines() if x.strip())[:NOTE_CHARS]
+        note = "\n".join(squash(x) for x in note.strip().splitlines() if x.strip())[:NOTE_CHARS]
 
     def change(current):
         n = dict(current or {})
@@ -367,7 +368,7 @@ def save_user(db: TriggerDB, path: str, note: str | None = None, remarks: str | 
             n.update(note=note, edited=bool(note), made=time.time())
             n.pop("stamp", None)
         if remarks is not None:
-            n["remarks"] = " ".join(remarks.split())[:REMARK_CHARS]
+            n["remarks"] = squash(remarks)[:REMARK_CHARS]
         return n if n.get("note") or n.get("remarks") else None
     return db.update_note(path, change)
 
