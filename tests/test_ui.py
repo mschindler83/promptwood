@@ -3305,12 +3305,14 @@ def test_camera_row_and_hash_tokens(app, win, tmp_path, image):
     card.edit.setFocus()
     card.edit.setPlainText("She waits, #pan-ri")
     card.edit.moveCursor(QTextCursor.End)
-    assert card.mentions._typed() is not None and card.mentions._kind == "#"
+    kind, m = card.mentions._typed()
+    assert m is not None and kind == "#"
+    card.mentions._kind = kind                      # (what _update sets when it shows the list; offscreen: no focus)
     card.mentions._insert("pan-right-slow")
     assert card.edit.toPlainText() == "She waits, #pan-right-slow "
     card.edit.setPlainText("Hi @Ann")                                                   # (@ still the cast)
     card.edit.moveCursor(QTextCursor.End)
-    assert card.mentions._typed() is not None and card.mentions._kind == "@"
+    assert card.mentions._typed()[0] == "@" and card.mentions._typed()[1] is not None
 
 
 def test_export_shows_the_enlargement_and_size_1024(app, win, tmp_path, image):
@@ -3411,7 +3413,8 @@ def test_file_browser_for_videos_and_sounds(app, win, tmp_path, image):
     item = vids.grid.item(0)
     wait(app, lambda: item.data(Qt.UserRole + 1) == "96×54", timeout=20)          # a frame became the thumbnail
     vids.grid.setCurrentItem(item)
-    assert "0:02.0" in vids.info.text() and "96×54" in vids.info.text() and "24 fps" in vids.info.text()
+    wait(app, lambda: "0:02.0" in vids.info.text(), timeout=20)                     # (the details load in the pool)
+    assert "96×54" in vids.info.text() and "24 fps" in vids.info.text()
     vids._accept()
     assert vids.chosen() == str(d / "clip.mp4") and q.value("videoDir", type=str) == str(d)   # (its own folder)
     vids.deleteLater()
@@ -3419,7 +3422,8 @@ def test_file_browser_for_videos_and_sounds(app, win, tmp_path, image):
     assert names(media) == ["clip.mp4", "voice.wav"]
     media.grid.setCurrentItem(next(media.grid.item(i) for i in range(media.grid.count())
                                    if media.grid.item(i).text() == "voice.wav"))
-    assert "0:01.0" in media.info.text() and "sound" in media.info.text()
+    wait(app, lambda: "0:01.0" in media.info.text(), timeout=20)                   # (the details load in the pool)
+    assert "sound" in media.info.text()
     media.deleteLater()
     # the project's own real videos are offered first
     win.open_project(tmp_path / "proj")
@@ -4020,7 +4024,7 @@ def test_text_to_speech_in_the_app(app, win, tmp_path, image, monkeypatch):
         dlg.delivery.setCurrentIndex(dlg.delivery.findData("lively"))
         dlg.speed.setValue(0.8)
         dlg.make()
-        seen["busy"] = (dlg.busy, dlg.b_make.isEnabled())
+        seen["busy"] = (dlg.busy, dlg.b_make.isEnabled(), dlg.b_make.text())      # (the button stops the round)
         dlg.reject()                                         # (while takes are made: it would close afterwards)
         dlg._close_when_done = False
         wait(app, lambda: not dlg.busy, timeout=30)
@@ -4043,7 +4047,7 @@ def test_text_to_speech_in_the_app(app, win, tmp_path, image, monkeypatch):
     assert win.tree.nodes[nid].prompt == """@Anna waves and says "Hallo, 'Welt'!\"""" # the take's words: the prompt's
     assert T.load(win.project).nodes[nid].prompt == win.tree.nodes[nid].prompt and tr_lines(win, nid) == ["Hallo, 'Welt'!"]
     assert next(c for c in win.cards if c.nid == nid).text() == win.tree.nodes[nid].prompt
-    assert seen["start"] == TTS.SPEAK_DEFAULTS and seen["busy"] == (True, False)
+    assert seen["start"] == TTS.SPEAK_DEFAULTS and seen["busy"] == (True, True, "Stop")
     assert 1 <= len(seen["rows"]) <= 3 and seen["rows"][0].startswith("Take 1   ·   ")
     assert [f.is_file() for f in seen["files"]] == [False] * (len(seen["files"]) - 1) + [True]   # the others went
     assert all((win.project / chain.OLD_DIR / "refs" / f.name).is_file() for f in seen["files"][:-1])   # ... to old/
