@@ -19,7 +19,7 @@ from .guide import EngineBanner, GuidePanel, NextHint
 from .storyboard import Storyboard
 from .timeline import Timeline
 from .view_mode import AdvancedNote, row_widget
-from .widgets import guard_wheel, icon_button, label, section_bar, shortcut
+from .widgets import guard_wheel, icon_button, label, section_bar, shortcut, timer
 from .mw_support import FileDrop, _CurrentStack
 from .preview import Preview, StartTile
 from .ui_logic import (
@@ -1083,7 +1083,7 @@ class BuildMixin(MainWindowHost):
         sb.addPermanentWidget(self.model_label)
         sb.addPermanentWidget(self.b_unload)
         sb.addPermanentWidget(self.gpu)
-        self._model_timer = QTimer(self, interval=20000, timeout=self._update_model_label)
+        self._model_timer = timer(self, self._update_model_label, 20000)
         self._model_timer.start()
 
         self.start_tile.clicked.connect(self._choose_image)

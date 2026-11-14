@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import threading
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject, QPointF, QRectF, QSettings, Qt, QUrl, Signal
 from PySide6.QtGui import QKeySequence, QPainter, QPen
@@ -21,8 +22,11 @@ from ..tree import AUDIO_REF_MIN, VOICE_MAX_SECS, VOICE_REF_MAX_SECS
 from .theme import theme, with_alpha
 from .video_editor import RangeBar, RangePlayerMixin, fmt
 from .dialogs import button_row
-from .widgets import fit_size, guard_wheel, icon_button, label, safe_emit, shortcut
+from .widgets import VideoView, fit_size, guard_wheel, icon_button, label, safe_emit, shortcut
 from .qsvalue import qs_value
+
+if TYPE_CHECKING:
+    from PySide6.QtMultimedia import QMediaPlayer
 
 PEAKS = 1200                                    # waveform columns
 
@@ -129,18 +133,18 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
         self.setWindowTitle(title)
         fit_size(self, 920, 640 if voice else 420)
         self.settings, self.want_player, self.voice = settings, player, voice
-        self.video = None
+        self.video: VideoView | None = None
         self._isolate = isolate if voice else None
         self.clean: dict | None = None                 # {"file", "start", "end"}: the chosen part without its music
         self.clean_busy = False
-        self.clean_player = None
+        self.clean_player: QMediaPlayer | None = None
         self._clean_n = 0
         self._tmp: tempfile.TemporaryDirectory | None = None
         self._clean_sig = _Clean()
         self._clean_sig.ready.connect(self._cleaned)
         self.file, self.duration = "", 0.0
         self.start, self.end = 0.0, 0.0
-        self.player = None
+        self.player: QMediaPlayer | None = None
         self._pos = 0.0
         self._stop_at: float | None = None
         self._gen = 0

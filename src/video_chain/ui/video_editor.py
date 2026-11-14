@@ -10,16 +10,20 @@ from __future__ import annotations
 import subprocess
 import threading
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from PySide6.QtCore import QObject, QPointF, QRectF, QSettings, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QImage, QPainter, QPen
-from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QDoubleSpinBox, QHBoxLayout, QLineEdit,
-                               QPushButton, QStackedWidget, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QDoubleSpinBox, QHBoxLayout, QLabel, QLineEdit,
+                               QPushButton, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
 from .. import chain, media
 from .theme import icon, theme, with_alpha
 from .dialogs import button_row
-from .widgets import fit_size, format_time, FrameTile, guard_wheel, icon_button, label, safe_emit, VideoView, shortcut
+from .widgets import fit_size, format_time, FrameTile, guard_wheel, icon_button, label, safe_emit, VideoView, shortcut, timer
+
+if TYPE_CHECKING:
+    from PySide6.QtMultimedia import QMediaPlayer
 
 FPS = chain.FPS
 
@@ -151,6 +155,23 @@ class RangePlayerMixin:
 
     SPIN_STEP = 0.1                                     # the step of the start / end boxes (seconds)
     player_error = ""                                   # why the player cannot play this file ("" = it can)
+    # (made by the dialog)
+    player: QMediaPlayer | None
+    info_label: QLabel
+    file: str
+    start: float
+    end: float
+    bar: Any
+    time: QLabel
+    b_play: QToolButton
+    _stop_at: float | None
+    _pos: float
+
+    def _update_enabled(self) -> None:
+        raise NotImplementedError
+
+    def seek(self, t: float) -> None:
+        raise NotImplementedError
 
     def _spin(self, tip: str) -> QDoubleSpinBox:
         s = QDoubleSpinBox()
@@ -186,6 +207,7 @@ class RangePlayerMixin:
             return
         from PySide6.QtMultimedia import QMediaPlayer
         self._before_play()
+        assert self.player is not None                 # (_can_play)
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.player.pause()
         else:
@@ -196,6 +218,7 @@ class RangePlayerMixin:
         if not self._can_play():
             return
         self._before_play()
+        assert self.player is not None                 # (_can_play)
         self.seek(self.start)
         self._stop_at = self.end
         self.player.play()
@@ -207,6 +230,7 @@ class RangePlayerMixin:
             self.time.setText(f"{fmt(self._pos)} / {fmt(self._total())}")
         if self._stop_at is not None and self._pos >= self._stop_at:
             self._stop_at = None
+            assert self.player is not None
             self.player.pause()
 
     def _player_state(self, st):
@@ -244,10 +268,11 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
         self.canvas_for = canvas_for
         self.rotate = chain.rotation(rotate)
         self.on_reference = on_reference              # callable(png path) -> bool: crop and add a face picture
-        self.file, self.info = "", None
+        self.file: str = ""
+        self.info: dict | None = None
         self.start, self.end = 0.0, 0.0
-        self.player = None
-        self.video = None
+        self.player: QMediaPlayer | None = None
+        self.video: VideoView | None = None
         self._closed = False
         self._gen = 0
         self._probed = _Probed()
@@ -259,7 +284,7 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
         self._pending: tuple = ()
         self._frames = _Frames()
         self._frames.ready.connect(self._frame_ready)
-        self._frame_timer = QTimer(self, singleShot=True, interval=300, timeout=self._update_frames)
+        self._frame_timer = timer(self, self._update_frames, 300, single=True)
         self._stop_at: float | None = None
 
         v = QVBoxLayout(self)
@@ -680,7 +705,7 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
                     proc.kill()
                     proc.communicate()
                     return None if gen != self._gen else QImage()
-        return QImage.fromData(out, "PNG") if proc.returncode == 0 else QImage()
+        return QImage.fromData(out, "PNG") if proc.returncode == 0 else QImage()  # type: ignore[arg-type]  # (stubs: bytes, runtime: str)
 
     def _frame_ready(self, gen: int, which: str, img: QImage):
         if gen != self._gen:

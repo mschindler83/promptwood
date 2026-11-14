@@ -102,7 +102,7 @@ def _video_frame(path: str, box: int = THUMB_MAX) -> QImage:
                                 "-f", "image2pipe", "-c:v", "png", "-"], timeout=30, text=False)
         except media.MediaError:
             continue                                    # (no frame at that second: the first one is tried)
-        img = QImage.fromData(out, "PNG") if out else QImage()
+        img = QImage.fromData(out, "PNG") if out else QImage()  # type: ignore[arg-type]  # (stubs: bytes, runtime: str)
         if not img.isNull():
             return img
     return QImage()
@@ -492,7 +492,7 @@ class ImagePickerDialog(QDialog):
                 try:
                     f.parent.mkdir(parents=True, exist_ok=True)
                     tmp = f.with_name(f.stem + ".part.jpg")
-                    if img.save(str(tmp), "JPG", 85):
+                    if img.save(str(tmp), "JPG", 85):  # type: ignore[call-overload]  # (stubs: bytes, runtime: str)
                         tmp.replace(f)
                 except OSError:
                     pass

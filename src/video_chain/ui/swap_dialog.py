@@ -46,7 +46,7 @@ def letterbox(src: str, dest, size: int, crop: tuple[int, int, int] | None = Non
     p = QPainter(out)
     p.drawImage((size - fit.width()) // 2, (size - fit.height()) // 2, fit)
     p.end()
-    return out.save(str(dest), "PNG")
+    return out.save(str(dest), "PNG")  # type: ignore[call-overload]  # (stubs: bytes, runtime: str)
 
 
 class _Sig(QObject):

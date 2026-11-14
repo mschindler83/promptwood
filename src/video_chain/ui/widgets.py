@@ -5,7 +5,7 @@ from collections import OrderedDict
 
 from typing import cast
 
-from PySide6.QtCore import QEvent, QObject, QRect, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (QColor, QFont, QFontInfo, QImage, QKeySequence, QPainter, QPixmap, QShortcut,
                            QStandardItem, QStandardItemModel, QTransform)
 from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QHBoxLayout, QLabel, QSizePolicy,
@@ -31,6 +31,15 @@ TERMS = {
     "dialog buttons": "the action says what it does ('Use this range', 'Save'); Cancel when closing discards "
                       "something, Close when nothing is held back; 'Hide' dismisses a hint",
 }
+
+
+def timer(parent: QObject, fn, interval: int | None = None, single: bool = False) -> QTimer:
+    """A QTimer that calls fn when it fires (the PySide6 stubs know the signal, not its use as a keyword argument)."""
+    t = QTimer(parent, singleShot=single)
+    if interval is not None:
+        t.setInterval(interval)
+    t.timeout.connect(fn)
+    return t
 
 
 def combo_item(combo: QComboBox, index: int) -> QStandardItem:
