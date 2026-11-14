@@ -137,6 +137,11 @@ def test_what_a_plugin_adds_to_the_window(made_up, tmp_path, monkeypatch):
         win._write_tree()
         entries["Count the clips"].trigger()
         assert win.status.text() == "1 clips" and host.tree is win.tree and host.project == win.project
+        win.tree.nodes[nid].prompt = "she waves twice"                # a plugin changed the project: saved and shown
+        host.changed()
+        from video_chain import tree as T
+        assert T.load(win.project).nodes[nid].prompt == "she waves twice"
+        assert win.graph.items_by_id[nid].info.prompt == "she waves twice"
         entries["Break"].trigger()
         assert "“Break” failed: ZeroDivisionError" in win.status.text()
         # the clip's right-click menu: the plugin's action for this clip (not the one its condition rules out)

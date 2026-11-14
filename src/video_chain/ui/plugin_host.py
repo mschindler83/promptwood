@@ -5,6 +5,7 @@
         app.add_clip_action("Mark as favourite", lambda nid: ..., when=lambda node: not node.is_video)
         app.add_panel("My panel", my_widget)                       # a tab next to Clips / Cast / Sounds
         app.on("clip_made", lambda nid: ...)                       # also: project_opened, run_event, run_finished
+        app.tree.nodes[nid].prompt = "…"; app.changed()            # after changing the project: save and show it
 
 Everything here stays as it is between versions of the app. app.window is the main window itself: with it a plugin
 can reach (and change) anything, but that can break when the app changes."""
@@ -113,6 +114,12 @@ class PluginHost:
     def status(self, text: str) -> None:
         """A line in the window's status bar."""
         self.window.status.setText(str(text))
+
+    def changed(self, rebuild: bool = True) -> None:
+        """Call after changing the open project's tree (a clip's prompt or settings, the project's options): the
+        project is saved and the window shows the new state. rebuild=False: the clip cards are only updated."""
+        self.window._write_tree()
+        self.window.refresh(rebuild_path=bool(rebuild))
 
     def menu(self) -> QMenu:
         """The Plugins menu of the menu bar (made when first needed)."""
