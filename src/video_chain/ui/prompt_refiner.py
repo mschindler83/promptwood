@@ -781,7 +781,8 @@ class RefineDialog(QDialog):
         return self._chosen_ideas
 
     def _use(self):
-        text = " ".join(self.out.toPlainText().split())
+        # (line breaks are kept: only runs of spaces inside a line and the blank ends are tidied)
+        text = "\n".join(" ".join(line.split()) for line in self.out.toPlainText().strip().splitlines()).strip()
         if text:
             self._chosen = text
             self.accept()

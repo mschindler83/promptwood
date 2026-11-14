@@ -394,10 +394,12 @@ def test_lora_window_shows_what_is_known(tmp_path):
     assert not loaded and all(c.picture.text() == "Pictures are off" for c in w.cards)
     # finding, sorting, copying
     w.find.setText("fox dawn")
+    w.flush()                                                       # (typing is waited out)
     assert len(w.cards) == 1 and "1 of 8 match" in w.count.text()
     w.cards[0].copied.emit(w.cards[0].ex["clean"])
     assert app.clipboard().text().startswith("ink4sketch, loose ink sketch of a red fox") and "Copied" in w.state.text()
     w.find.setText("")
+    w.flush()
     w.sort.setCurrentIndex(w.sort.findData("near"))
     assert "market stall full of oranges" in w.cards[1].ex["prompt"]            # (the most liked, then the nearest)
     # how to prompt it: words, counted settings, the note (none yet), word for word what the refiner is told

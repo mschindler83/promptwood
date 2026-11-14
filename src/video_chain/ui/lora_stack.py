@@ -364,6 +364,7 @@ class LoraStack(QWidget):
         spin.setToolTip(f"Strength of this LoRA ({LORA_MIN:g} … {LORA_MAX:g}; negative values reverse its effect, "
                         "e.g. for slider LoRAs)")
         rm = icon_button("x", "Remove this LoRA", w)
+        w.remove_button = rm                           # (setEnabled reaches it through the row's widget)
         h.addWidget(button, 1)
         h.addWidget(spin)
         h.addWidget(rm)
@@ -392,6 +393,7 @@ class LoraStack(QWidget):
     def setEnabled(self, on: bool):          # noqa: N802  (Qt naming)
         self._enabled = on
         self.b_add.setEnabled(on)
-        for _w, b, spin in self.rows:
+        for w, b, spin in self.rows:
             b.setEnabled(on)
             spin.setEnabled(on)
+            w.remove_button.setEnabled(on)
