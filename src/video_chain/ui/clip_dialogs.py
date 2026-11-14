@@ -2,18 +2,22 @@
 side to pick one (CompareDialog)."""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, QUrl
-from PySide6.QtGui import QImage, QKeySequence
+from PySide6.QtGui import QImage
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QGridLayout, QHBoxLayout,
-                               QPushButton, QSlider, QVBoxLayout, QWidget)
+                               QLabel, QPushButton, QSlider, QVBoxLayout, QWidget)
 
+from . import shortcuts as S
 from .workers import run_in_background
 from .. import chain, media
 from .theme import icon
 from .dialogs import add_action, button_row
 from .widgets import fit_size, FrameStepper, FrameTile, icon_button, label, VideoView, shortcut
+
+log = logging.getLogger(__name__)
 
 FPS = chain.FPS
 PREVIEW_W = 480                    # frames are decoded once at this width, so scrubbing is instant
@@ -128,6 +132,7 @@ class CompareDialog(QDialog):
         grid.setSpacing(10)
         cols = 2 if len(items) <= 4 else 3
         self.keep_buttons: dict[str, QPushButton] = {}
+        self.errors: dict[str, QLabel] = {}
         self.audio_outs: list = []
         has_player = False
         if player:
@@ -151,6 +156,7 @@ class CompareDialog(QDialog):
                 p.setVideoOutput(view.sink)
                 p.setSource(QUrl.fromLocalFile(str(video)))
                 p.mediaStatusChanged.connect(lambda st, p=p: self._ended(p, st))
+                p.errorOccurred.connect(lambda _e, msg="", nid=nid: self._player_error(nid, msg))
                 self.players.append(p)
                 self.audio_outs.append(out)
                 bv.addWidget(view, 1)
@@ -168,6 +174,11 @@ class CompareDialog(QDialog):
             self.keep_buttons[nid] = keep
             head.addWidget(keep)
             bv.addLayout(head)
+            err = label("", severity="error")             # (why this clip cannot be played: filled by its player)
+            err.setWordWrap(True)
+            err.hide()
+            self.errors[nid] = err
+            bv.addWidget(err)
             grid.addWidget(box, k // cols, k % cols)
         v.addLayout(grid, 1)
         ctl = QHBoxLayout()
@@ -193,7 +204,7 @@ class CompareDialog(QDialog):
         v.addLayout(ctl)
         close, _none = button_row(self)
         v.addWidget(close)
-        shortcut(QKeySequence("Space"), self, self.toggle)
+        shortcut(S.sequence("play"), self, self.toggle)
         for control in (self.b_play, self.b_restart, self.slider, self.loop, self.sound):
             control.setEnabled(bool(self.players))
         if self.players:
@@ -203,6 +214,13 @@ class CompareDialog(QDialog):
             self.players[0].positionChanged.connect(
                 self._follow)
             QTimer.singleShot(200, self.restart)
+
+    def _player_error(self, nid: str, message: str) -> None:
+        """A clip that cannot be played (no codec, unreadable file, no audio device): say so under it."""
+        lab = self.errors.get(nid)
+        if lab is not None:
+            lab.setText(f"Cannot play this clip: {message or 'the player reported an error'}")
+            lab.show()
 
     def _follow(self, ms: int):
         if not self.slider.isSliderDown():
@@ -346,34 +364,58 @@ class VideoFrameDialog(QDialog):
         self.setWindowTitle(title)
         fit_size(self, 860, 640)
         self.video = Path(video)
-        info = info or chain.probe_source(self.video)
+        self._req = 0
+        self._closed = False
+        self.ready = False                          # (the video is probed: for a file the user picked that is a worker's job)
+        self._grabbing = self._again = False        # one ffmpeg at a time; the newest position after it
+        self._tmp = media.scratch("frame")
+        self.fps, self.duration, self.frames = float(FPS), 0.0, 1
+        self._v = QVBoxLayout(self)
+        self.note = label("Reading the video …", level="tertiary")
+        self.tile = FrameTile(800, 450)
+        self.tile.clear_frame("reading the video …")
+        self._v.addWidget(self.tile, 1, Qt.AlignmentFlag.AlignHCenter)
+        self._v.addWidget(self.note)
+        self.buttons, self._ok = button_row(self, "Use this frame", enabled=False)
+        self._v.addWidget(self.buttons)
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(90)                 # (dragging the slider: only the frame it stops at is read)
+        self._timer.timeout.connect(self._grab)
+        self.slider = QSlider(Qt.Orientation.Horizontal)     # (replaced by the stepper's once the video is known)
+        self.where = QLabel()
+        if info:
+            self._setup(info)
+        else:
+            run_in_background(lambda: chain.probe_source(self.video), on_done=self._probed,
+                              on_error=self._unreadable, owner=self)
+
+    def _probed(self, info: dict) -> None:
+        if not self._closed:
+            self._setup(info)
+
+    def _unreadable(self, error: BaseException) -> None:
+        log.warning("could not read %s: %s", self.video, error)
+        self.tile.clear_frame("no frame here")
+        self.note.setText(f"{self.video.name} could not be read: is it a video?")
+
+    def _setup(self, info: dict) -> None:
+        """The frames of the video, once its frame rate and length are known."""
         self.fps = float(info.get("fps") or FPS)
         self.duration = float(info.get("duration") or 0.0)
         self.frames = max(1, int(round(self.duration * self.fps)))
         if int(info.get("frames") or 0) > 0:           # the video stream's own count (a longer sound track
             self.frames = min(self.frames, int(info["frames"]))   # must not add positions without a frame)
-        self._req = 0
-        self._closed = False
-        self._grabbing = self._again = False        # one ffmpeg at a time; the newest position after it
-        self._tmp = media.scratch("frame")
-        v = QVBoxLayout(self)
-        self.tile = FrameTile(800, 450)
         self.tile.clear_frame("reading the frame …")
-        v.addWidget(self.tile, 1, Qt.AlignmentFlag.AlignHCenter)
         self.stepper = FrameStepper(self, self.fps)
         self.slider, self.where = self.stepper.slider, self.stepper.label
         self.stepper.set_range(0, self.frames - 1)
         self.stepper.setEnabled(True)
-        v.addWidget(self.stepper)
-        self.note = label(f"{self.video.name} · {info.get('width', '?')}×{info.get('height', '?')} · "
-                          f"{self.duration:.1f} s · {self.fps:.3g} fps", level="tertiary")
-        v.addWidget(self.note)
-        self.buttons, _ok = button_row(self, "Use this frame")
-        v.addWidget(self.buttons)
-        self._timer = QTimer(self)
-        self._timer.setSingleShot(True)
-        self._timer.setInterval(90)                 # (dragging the slider: only the frame it stops at is read)
-        self._timer.timeout.connect(self._grab)
+        self._v.insertWidget(1, self.stepper)
+        self.note.setText(f"{self.video.name} · {info.get('width', '?')}×{info.get('height', '?')} · "
+                          f"{self.duration:.1f} s · {self.fps:.3g} fps")
+        self._ok.setEnabled(True)
+        self.ready = True
         self.slider.valueChanged.connect(self._moved)
         self._moved(0)                               # (the first frame: read when the timer fires)
 

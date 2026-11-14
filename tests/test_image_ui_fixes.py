@@ -324,7 +324,7 @@ def test_thumbnail_loader_survives_a_failing_decode(app, tmp_path, monkeypatch):
     assert ("bad.png", True) in got and ("good.png", False) in got
 
 
-def test_thumbnails_follow_the_widgets_pixel_ratio():
+def test_thumbnails_follow_the_widgets_pixel_ratio(app):
     from PySide6.QtCore import QSize
     from PySide6.QtGui import QPixmap
 

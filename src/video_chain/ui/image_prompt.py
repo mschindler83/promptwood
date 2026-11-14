@@ -3,15 +3,20 @@
 A mixin of ImageEditDialog (ui/image_edit.py): the widgets it uses are created there."""
 from __future__ import annotations
 
+import inspect
 import json
 import random
+import re
 from collections.abc import Mapping
 from typing import Any
+
+from ..variations import MAX_IMAGES, Value, Variable
 
 from .dialogs import confirm as ask
 from .image_common import MAX_RESULTS, SEED_MAX
 from .image_picker import pick_image
 from .image_host import ImageEditHost
+from .prompt_refiner import replace_text
 
 
 
@@ -42,7 +47,7 @@ class PromptMixin(ImageEditHost):
         self.tries.setToolTip("Variations decide how many images are made (Make … below the prompt)" if active
                               else f"How many results at once (1 … {MAX_RESULTS}; each with the next seed), to "
                                    "pick the best one. They are made one after another and each appears when it "
-                                   "is ready; Cancel stops after the current one")
+                                   "is ready; Stop ends it after the current one")
         per = len(self._lora_runs())
         if self.batch and self.mode() == "edit":
             per *= len(self.batch)
@@ -58,9 +63,7 @@ class PromptMixin(ImageEditHost):
         self.prompt.setFocus()
 
     def _rename_placeholder(self, old: str, new: str):
-        import re as _re
-        pat = _re.compile(r"\{(\??)" + _re.escape(old) + r"([|}])")
-        from .prompt_refiner import replace_text
+        pat = re.compile(r"\{(\??)" + re.escape(old) + r"([|}])")
         replace_text(self.prompt, pat.sub(lambda m: "{" + m.group(1) + new + m.group(2), self.prompt.toPlainText()))
         self.negative.setText(pat.sub(lambda m: "{" + m.group(1) + new + m.group(2), self.negative.text()))
 
@@ -74,7 +77,6 @@ class PromptMixin(ImageEditHost):
             return None
         self._templates_changed()
         many = self.variations.too_many()
-        from ..variations import MAX_IMAGES
         if many and not ask(self, "Variations", f"Every combination makes {many:,} images"
                                     + (f" (one Generate makes at most {MAX_IMAGES:,})" if many > MAX_IMAGES
                                        else "") + ". Make them all?"):
@@ -99,7 +101,6 @@ class PromptMixin(ImageEditHost):
 
     def _use_example(self, text: str):
         """An example prompt from the LoRA window replaces the prompt (one step Ctrl+Z takes back)."""
-        from .prompt_refiner import replace_text
         replace_text(self.prompt, text)
 
     def prompt_kind(self) -> str:
@@ -108,7 +109,6 @@ class PromptMixin(ImageEditHost):
     def _refine_prompt(self):
         if self.refine is None:
             return
-        import inspect
         params: Mapping[str, Any]
         try:
             params = inspect.signature(self.refine).parameters
@@ -121,14 +121,11 @@ class PromptMixin(ImageEditHost):
         if isinstance(new, list) and new:
             self.use_ideas(new)
         elif new:
-            from .prompt_refiner import replace_text
-            replace_text(self.prompt, str(new))
+                replace_text(self.prompt, str(new))
 
     def use_ideas(self, prompts: list[str]):
         """All ideas from the refiner as one Generate: the prompt becomes {idea}, its values the ideas, every
         combination once (Ctrl+Z in the prompt brings the bullet points back)."""
-        from ..variations import Value, Variable
-        from .prompt_refiner import replace_text
         p = self.variations
         name, k = "idea", 1
         while (var := p.variable(name)) is not None and [v.text for v in var.values] != prompts:

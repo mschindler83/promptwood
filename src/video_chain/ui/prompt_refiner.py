@@ -11,17 +11,18 @@ from typing import Any
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QTimer
-from PySide6.QtGui import QIcon, QImage, QKeySequence, QPixmap
+from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLineEdit, QPlainTextEdit,
                                QPushButton, QSpinBox, QTextBrowser, QToolButton, QVBoxLayout, QWidget)
 
+from . import shortcuts as S
 from .workers import post, run_in_background
 from ..tree import refine_problems
 from .lora_details import themed
 from .theme import repolish, theme
 from .dialogs import add_action, button_row
 from .text_edit import replace_text  # noqa: F401  (main_window and image_edit import it from here)
-from .widgets import fit_size, guard_wheel, label, shortcut
+from .widgets import fit_size, guard_wheel, label, remember_geometry, shortcut
 from .qsvalue import qs_value
 
 log = logging.getLogger(__name__)
@@ -30,6 +31,24 @@ LIKE_EXAMPLE = ("Rewrite my prompt in the manner of this example prompt, which i
                 "its wording, its structure and its level of detail. Keep what my prompt is about (my subjects, my "
                 "cast, the place and what happens) and take nothing of the example's content. The example: "
                 "\"{example}\"")
+LIKE_EXAMPLE_LABEL = "like an example prompt of the LoRA"
+
+
+def shown_ask(ask: str) -> str:
+    """What the conversation shows for a message: the long fixed instruction for "write like this example" as a short label."""
+    return LIKE_EXAMPLE_LABEL if ask.startswith(LIKE_EXAMPLE.split("{example}")[0]) else ask
+
+
+def guidance_or_empty(loras: list, prompt: str) -> str:
+    """What the language model is told about the LoRAs (nothing when their data cannot be read: a plain refine)."""
+    from .. import lora_notes
+    try:
+        return lora_notes.guidance(loras, prompt=prompt)
+    except Exception:  # noqa: BLE001
+        log.warning("what the LoRAs' notes say could not be read", exc_info=True)
+        return ""
+
+
 KIND_TEXT = {"video": "video clip prompt", "video_h3": "video clip prompt", "image": "image prompt",
              "edit": "edit instruction"}
 
@@ -58,6 +77,7 @@ class RefineDialog(QDialog):
         self.setWindowTitle(f"Refine the {KIND_TEXT.get(kind, 'prompt')}")
         fit_size(self, 1100, 680)
         self.kind, self.connect, self.qs, self.start_comfy = kind, connect, settings, start_comfy
+        remember_geometry(self, settings, "promptRefiner")
         self.refiner: Any = None                  # (the connected refiner)
         self._connecting = False
         self._retries = 0                         # (more tries to connect: ComfyUI is starting)
@@ -75,8 +95,11 @@ class RefineDialog(QDialog):
         self._chosen_ideas: list[str] | None = None
         v = QVBoxLayout(self)
         top = QHBoxLayout()
-        top.addWidget(label("Model", level="tertiary"))
+        model_label = label("Model", level="tertiary")
+        top.addWidget(model_label)
         self.model = QComboBox()
+        model_label.setBuddy(self.model)
+        self.model.setAccessibleName("Model")
         self.model.addItem("looking for language models …", None)
         self.model.setEnabled(False)
         self.model.setToolTip("The language model that rewrites the prompt. Uncensored ones follow your wording "
@@ -196,7 +219,7 @@ class RefineDialog(QDialog):
         v.addWidget(self.buttons)
         self.out.textChanged.connect(lambda: self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(
             bool(self.out.toPlainText().strip()) and not self._busy))
-        shortcut(QKeySequence("Ctrl+Return"), self, lambda: self.refine())
+        shortcut(S.sequence("refine"), self, lambda: self.refine())
         guard_wheel(self)
         self._show_pictures()
         self._mode_changed()
@@ -440,15 +463,11 @@ class RefineDialog(QDialog):
     def show_loras(self):
         """The LoRA window for this prompt's LoRAs: what the model was told at the last refine (before the first
         one: what it will be told, without the notes still to write), and the examples behind it."""
-        from .. import lora_notes
         from .lora_window import LoraWindow
         on = self.use_loras.isEnabled() and self.use_loras.isChecked()
         told, title = self._told, "What the language model was told"
         if not told and on:
-            try:
-                told = lora_notes.guidance(self.loras, prompt=self.original.toPlainText())
-            except Exception:  # noqa: BLE001
-                told = ""
+            told = guidance_or_empty(self.loras, self.original.toPlainText())
             title = "What the language model will be told"
         wanted: list[str] = []                     # (an example to rewrite like: asked once the window is closed)
         idle = not self._busy and self.refiner is not None and not self.ideas_mode()
@@ -572,7 +591,7 @@ class RefineDialog(QDialog):
         for k, (ask, version) in enumerate(self.turns):
             cur = k == self.base
             short = html.escape(version if len(version) <= 220 else version[:218] + "…")
-            rows.append(f"<p style='margin:4px 0 0 0'><b>You:</b> {html.escape(ask) if ask else '<i>improve it</i>'}</p>"
+            rows.append(f"<p style='margin:4px 0 0 0'><b>You:</b> {html.escape(shown_ask(ask)) if ask else '<i>improve it</i>'}</p>"
                         f"<p style='margin:0 0 6px 12px'><a href='v:{k}' style='text-decoration:none'>"
                         f"<b>{'▶ ' if cur else ''}Version {k + 1}</b></a>"
                         f"{' <i>(edited by you)</i>' if self._edited.get(k) else ''}<br>"

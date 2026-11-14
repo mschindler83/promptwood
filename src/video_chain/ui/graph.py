@@ -241,6 +241,17 @@ class GraphView(QGraphicsView):
         self._kids_of: dict[str, list[str]] = {}
         # the keyboard reaches the branches too (see keyPressEvent)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName("Clip graph")
+        self.setAccessibleDescription("No clips yet.")
+
+    def _describe(self) -> None:
+        """What a screen reader says about the graph: how many clips, and the one in the inspector."""
+        n = len([k for k in self.items_by_id if k != START])
+        text = f"{n} clip{'s' if n != 1 else ''}."
+        cur = self.items_by_id.get(self._focus) if self._focus else None
+        if cur is not None:
+            text += f" Focused: {cur.info.title}, {STATUS_TEXT.get(cur.info.status, cur.info.status)}."
+        self.setAccessibleDescription(text)
 
     def set_playing(self, nid: str | None) -> None:
         """Mark the clip the played path is at (None: nothing is played), and bring it into view."""
@@ -261,6 +272,7 @@ class GraphView(QGraphicsView):
             if item.focused != (k == nid):
                 item.focused = k == nid
                 item.update()
+        self._describe()
 
     # ---- content
     def show_nodes(self, infos: list[NodeInfo]) -> None:
@@ -273,6 +285,7 @@ class GraphView(QGraphicsView):
             for i in infos:
                 self.items_by_id[i.id].set_info(i)
         self._style_edges()
+        self._describe()
 
     def _rebuild(self, infos: list[NodeInfo]) -> None:
         sc = self.scene()

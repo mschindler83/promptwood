@@ -1,6 +1,7 @@
 """What the prompt refiner is told about LoRAs (lora_notes): cleaned example prompts, counted settings, the note a
 language model writes once per LoRA, and the refine window passing it on. All data is made up."""
 import os
+from waiting import show_lora, wait_loaded
 import struct
 import json
 import time
@@ -358,6 +359,7 @@ def test_lora_window_shows_what_is_known(tmp_path):
     qs = settings(tmp_path, view=None)
     w = LoraWindow(None, [(p, "inksketch_v2"), (other, "unknown")], current=p, settings=qs, db=db, fetch=fetch,
                    prompt="oranges at a market stall", told=told)
+    wait_loaded(app, w)
 
     def settle(until=lambda: True):
         end = time.time() + 30
@@ -415,7 +417,7 @@ def test_lora_window_shows_what_is_known(tmp_path):
     assert w.told_view.toPlainText() == told and w.tabs.currentWidget() is w.told_view
     # a note shows, and can be forgotten
     db.set_note(p, {"note": "Does: ink.\nWording: tags.", "stamp": LN.material(db.details(p), db.words(p), p)["stamp"]})
-    w.show_lora(p)
+    show_lora(app, w, p)
     assert w.note_edit.toPlainText() == "Does: ink.\nWording: tags." and "the refiner has a note" in w.facts.text()
     assert "written by the language model" in w.note_title.text() and "Does: ink." in w.how.toPlainText()
     # ... be changed: the user's version stays, also when CivitAI tells something new; own remarks are told too
@@ -423,6 +425,7 @@ def test_lora_window_shows_what_is_known(tmp_path):
     w.remarks_edit.setPlainText("never write   'portrait' with it")
     assert w.b_save.isEnabled()
     w.save_note()
+    wait_loaded(app, w)
     assert "yours" in w.note_title.text() and "Kept." in w.state.text() and not w.b_save.isEnabled()
     told_now = LN.guidance([p], db)
     assert "Does: ink, best for animals." in told_now and "Does: ink.\n" not in told_now
@@ -435,26 +438,29 @@ def test_lora_window_shows_what_is_known(tmp_path):
     assert LN.make_notes([p], lambda *a: "Does: the model's.", db=db) == 0          # the user's is not replaced
     # ... or handed back to the model: the note goes, the remarks stay, the next refine writes a new one
     w.save_note(forget=True)
+    wait_loaded(app, w)
     assert w.note_edit.toPlainText() == "" and w.remarks_edit.toPlainText() == "never write 'portrait' with it"
     assert LN.make_notes([p], lambda *a: "Does: the model's.", db=db) == 1
     kept = db.note(p)
     assert kept["note"] == "Does: the model's." and kept["remarks"] == "never write 'portrait' with it"
     assert not kept.get("edited")
-    w.show_lora(p)
+    show_lora(app, w, p)
     w.remarks_edit.setPlainText("")
     w.note_edit.setPlainText("")
     w.save_note()
+    wait_loaded(app, w)
     assert db.note(p) is None                                        # nothing of one's own left: nothing kept
     # a LoRA nothing is known of says so
-    w.show_lora(other)
+    show_lora(app, w, other)
     assert "CivitAI was not asked about this file yet" in w.facts.text()
     db.scan([other], lookup=lambda sha: None, gap=0)
-    w.show_lora(other)
+    show_lora(app, w, other)
     assert "CivitAI does not know this file" in w.facts.text() and not w.cards
     assert "No example prompts" in w.count.text() and "Nothing:" in w.how.toPlainText()
     w.done(0)
     # without a prompt and without anything told: no such tab, no nearest sorting; an empty list does not break
     w2 = LoraWindow(None, [p], db=db, fetch=fetch, settings=qs)
+    wait_loaded(app, w2)
     assert w2.told_view is None and w2.sort.count() == 1 and w2.title.text() == "Ink Sketch"
     w2.done(0)
     w3 = LoraWindow(None, [], db=db, fetch=fetch)
@@ -498,19 +504,21 @@ def test_lora_window_acts_on_the_prompt_it_was_opened_for(tmp_path):
     def buttons(w):
         return [b.text() for b in w.cards[0].findChildren(QPushButton)]
     w = LoraWindow(None, [p, other], current=p, db=db, fetch=lambda item: None, adapt=adapted.append, **args)
+    wait_loaded(app, w)
     # the usual strength of its examples, one click away
     assert "This prompt uses it at 1.00." in w.how.toPlainText() and "Set its strength to 0.80" in w.how.toPlainText()
     w._link(QUrl("strength:0.80"))
     assert changes[-1][p] == 0.8 and "strength set to 0.80" in w.state.text()
     assert "This prompt uses it at 0.80, the usual strength of its examples." in w.how.toPlainText()
-    w.show_lora(other)                                               # nothing counted: nothing offered
+    show_lora(app, w, other)                                               # nothing counted: nothing offered
     assert "strength" not in w.how.toPlainText().lower().replace("lora strength", "")
-    w.show_lora(p)
+    show_lora(app, w, p)
     # an example into the prompt (as plain wording), or the prompt rewritten in its manner; the window closes
     assert buttons(w)[:2] == ["Use as my prompt", "Rewrite mine like this"]
     w.cards[0].used.emit(w.cards[0].ex["clean"])
     assert used == [w.cards[0].ex["clean"]] and "<lora" not in used[0] and w.result() == LoraWindow.Accepted
     w2 = LoraWindow(None, [p], current=p, db=db, fetch=lambda item: None, adapt=adapted.append)
+    wait_loaded(app, w2)
     assert buttons(w2)[0] == "Rewrite mine like this"
     w2.cards[1].adapted.emit(w2.cards[1].ex["clean"])
     assert adapted == [w2.cards[1].ex["clean"]] and w2.result() == LoraWindow.Accepted
@@ -519,6 +527,7 @@ def test_lora_window_acts_on_the_prompt_it_was_opened_for(tmp_path):
     locked = stack.window_args()
     assert locked["set_strength"] is None and locked["use_prompt"] is None and not stack.set_strength(p, 0.3)
     w3 = LoraWindow(None, [p], current=p, db=db, fetch=lambda item: None, **locked)
+    wait_loaded(app, w3)
     assert "its examples usually use" not in w3.how.toPlainText()    # (0.80 is the usual one)
     assert "Use as my prompt" not in buttons(w3) and "Rewrite mine like this" not in buttons(w3)
     for x in (w, w2, w3):

@@ -17,11 +17,13 @@ from PySide6.QtGui import QImage, QPainter, QPen
 from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QDoubleSpinBox, QHBoxLayout, QLabel, QLineEdit,
                                QPushButton, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
+from . import shortcuts as S
 from .workers import post, run_in_background
 from .. import chain, media
 from .theme import icon, theme, with_alpha
 from .dialogs import button_row
-from .widgets import fit_size, format_time, FrameTile, guard_wheel, icon_button, label, VideoView, shortcut, timer
+from .widgets import (fit_size, format_time, FrameTile, guard_wheel, icon_button, label, remember_geometry, VideoView,
+                      shortcut, timer, label_for)
 
 if TYPE_CHECKING:
     from PySide6.QtMultimedia import QMediaPlayer
@@ -256,6 +258,7 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
         self.setWindowTitle("Real video")
         fit_size(self, 980, 760)
         self.settings, self.canvas, self.want_player = settings, canvas, player
+        remember_geometry(self, settings, "videoEditor")
         self.canvas_for = canvas_for
         self.rotate = chain.rotation(rotate)
         self.on_reference = on_reference              # callable(png path) -> bool: crop and add a face picture
@@ -337,11 +340,11 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
         b_set_end = QPushButton("End here")
         b_set_end.setToolTip("Set the end of the range at the playhead (])")
         b_set_end.clicked.connect(lambda: self.set_range(self.start, self.position(), moved="end"))
-        rrow.addWidget(label("Start", level="tertiary"))
+        rrow.addWidget(label_for("Start", self.start_spin, level="tertiary"))
         rrow.addWidget(self.start_spin)
         rrow.addWidget(b_set_start)
         rrow.addSpacing(16)
-        rrow.addWidget(label("End", level="tertiary"))
+        rrow.addWidget(label_for("End", self.end_spin, level="tertiary"))
         rrow.addWidget(self.end_spin)
         rrow.addWidget(b_set_end)
         rrow.addStretch(1)
@@ -378,14 +381,14 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
 
         self.buttons, _ok = button_row(self, "Use this range")
         v.addWidget(self.buttons)
-        for key, fn in (("Space", self.toggle), ("Left", lambda: self.step_frames(-1)),
-                        ("Right", lambda: self.step_frames(1)), ("[", lambda: self.set_range(self.position(),
-                                                                                             self.end)),
-                        ("]", lambda: self.set_range(self.start, self.position(), moved="end")),
-                        ("R", lambda: self.set_rotation(self.rotate + 90)),
-                        ("Shift+R", lambda: self.set_rotation(self.rotate - 90))):
-            from PySide6.QtGui import QKeySequence
-            shortcut(QKeySequence(key), self, fn)
+        turn_right, turn_left = S.sequences("rotate")
+        for key, fn in ((S.sequence("play"), self.toggle), (S.sequence("frame_back"), lambda: self.step_frames(-1)),
+                        (S.sequence("frame_on"), lambda: self.step_frames(1)),
+                        (S.sequence("range_set_start"), lambda: self.set_range(self.position(), self.end)),
+                        (S.sequence("range_set_end"), lambda: self.set_range(self.start, self.position(), moved="end")),
+                        (turn_right, lambda: self.set_rotation(self.rotate + 90)),
+                        (turn_left, lambda: self.set_rotation(self.rotate - 90))):
+            shortcut(key, self, fn)
         self._pos = 0.0
         self._keep = None if file else (start, end)   # a missing file: its range (and turn) is kept for the one
                                                       # chosen again

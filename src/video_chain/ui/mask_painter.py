@@ -10,7 +10,9 @@ from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen
 from PySide6.QtWidgets import (QButtonGroup, QDialog, QHBoxLayout, QPushButton, 
                                QSlider, QVBoxLayout, QWidget)
 
+from . import shortcuts as S
 from .dialogs import button_row, confirm
+from .theme import theme, with_alpha
 from .widgets import fit_size, label, smooth_scaled, shortcut
 
 MASK_COLOUR = QColor(255, 40, 40, 120)
@@ -116,7 +118,7 @@ class MaskCanvas(QWidget):
 
     def paintEvent(self, _e):
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor(20, 20, 22))
+        p.fillRect(self.rect(), theme().bgSunken)
         f = self._frame()
         self._ensure_display()
         assert self._shown is not None and self._tint is not None      # (made by _ensure_display)
@@ -127,7 +129,7 @@ class MaskCanvas(QWidget):
         if self._cursor is not None:
             r = self.brush / 2 * f.width() / self.image.width()
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
-            p.setPen(QPen(QColor(255, 255, 255, 200), 1.5,
+            p.setPen(QPen(with_alpha(theme().overlayInk, 200 / 255), 1.5,
                           Qt.PenStyle.DashLine if self.erase else Qt.PenStyle.SolidLine))
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawEllipse(self._cursor, r, r)
@@ -281,8 +283,11 @@ class MaskPainterDialog(QDialog):
         self.b_paint.setChecked(True)
         self.b_paint.toggled.connect(lambda on: setattr(self.canvas, "erase", not on))
         row.addSpacing(12)
-        row.addWidget(label("Brush", level="tertiary"))
+        brush_label = label("Brush", level="tertiary")
+        row.addWidget(brush_label)
         self.size = QSlider(Qt.Orientation.Horizontal)
+        brush_label.setBuddy(self.size)
+        self.size.setAccessibleName("Brush size")
         self.size.setRange(2, max(8, min(image.width(), image.height()) // 2))
         self.size.setValue(self.canvas.brush)
         self.size.setMinimumWidth(180)
@@ -303,12 +308,14 @@ class MaskPainterDialog(QDialog):
         buttons, _ok = button_row(self, "Use this mask")
         v.addWidget(buttons)
         shortcut(QKeySequence.StandardKey.Undo, self, self.canvas.undo)
-        for key in (QKeySequence.StandardKey.Redo, QKeySequence("Ctrl+Y")):
+        for key in S.sequences("mask_redo"):
             shortcut(key, self, self.canvas.redo)
-        shortcut(QKeySequence("["), self, lambda: self.canvas.set_brush(round(self.canvas.brush / 1.15) - 1))
-        shortcut(QKeySequence("]"), self, lambda: self.canvas.set_brush(round(self.canvas.brush * 1.15) + 1))
-        shortcut(QKeySequence("B"), self, self.b_paint.click)
-        shortcut(QKeySequence("E"), self, self.b_erase.click)
+        smaller, bigger = S.sequences("mask_brush")
+        shortcut(smaller, self, lambda: self.canvas.set_brush(round(self.canvas.brush / 1.15) - 1))
+        shortcut(bigger, self, lambda: self.canvas.set_brush(round(self.canvas.brush * 1.15) + 1))
+        paint, erase = S.sequences("mask_paint")
+        shortcut(paint, self, self.b_paint.click)
+        shortcut(erase, self, self.b_erase.click)
         self._start = self.canvas.mask.copy()            # (to tell, when closing, whether work would be lost)
         self.canvas.changed.connect(self._show_area)
         self._show_area()

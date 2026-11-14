@@ -125,3 +125,31 @@ def test_a_failing_size_hook_is_logged_not_swallowed(caplog):
         d._apply_rotation()
     assert any("no size" in str(r.exc_info) for r in caplog.records)
     d.deleteLater()
+
+
+def test_the_collector_keeps_running_when_a_worker_thread_asks_first(monkeypatch):
+    """If the very first use comes from a worker thread (post from a worker), the collection timer must still live
+    on the GUI thread and run, or garbage collection stays off for the whole session."""
+    import gc
+    import threading
+
+    from PySide6.QtCore import QCoreApplication
+    from video_chain.ui import workers as W
+    was = gc.isenabled()
+    monkeypatch.setattr(W, "_relay", None)
+    monkeypatch.setattr(W, "_gc_timer", None)
+    gc.enable()
+    done = []
+    t = threading.Thread(target=lambda: W.post(None, lambda: done.append(1)))
+    t.start()
+    t.join(5)
+    for _ in range(50):
+        QCoreApplication.processEvents()
+    try:
+        assert done == [1]
+        assert gc.isenabled() or (W._gc_timer is not None and W._gc_timer.thread() is app.thread()
+                                  and W._gc_timer.isActive()), "garbage collection is off and nothing collects"
+    finally:
+        if W._gc_timer is not None:
+            W._gc_timer.stop()
+        (gc.enable if was else gc.disable)()

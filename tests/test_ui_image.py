@@ -37,7 +37,8 @@ def test_image_picker(app, tmp_path):
     wait(app, lambda: big.data(Qt.UserRole + 1) is not None, timeout=10)       # thumbnail made in the background
     assert big.data(Qt.UserRole + 1) == "320×240"                              # read at reduced size
     dlg.grid.setCurrentItem(big)
-    assert "800×600 px" in dlg.info.text() and dlg.buttons.button(dlg.buttons.StandardButton.Open).isEnabled()
+    assert wait(app, lambda: "800×600 px" in dlg.info.text())               # (the file is read in the pool)
+    assert dlg.buttons.button(dlg.buttons.StandardButton.Open).isEnabled()
     dlg._activated(dlg.grid.item(0))                                            # into the subfolder
     assert dlg.folder == (d / "sub").resolve() and dlg.grid.item(0).text() == "inner.webp"
     dlg.go_up()
@@ -818,6 +819,7 @@ def test_replace_a_person_in_a_real_video(app, tmp_path, image, monkeypatch):
         monkeypatch.setattr(w, "face_detector", lambda: None)
         w.modal_dialogs = False
         nodet = w.replace_person(v)
+        assert wait(app, lambda: nodet.heads is not None, timeout=20)      # (the clip is read in a worker)
         assert nodet.heads is not None and nodet.heads["frames"] == n and not nodet.boxes
         nodet.set_reference(str(image))
         wait(app, lambda: not nodet.ref_busy, timeout=20)

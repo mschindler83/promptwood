@@ -5,13 +5,14 @@ from collections import OrderedDict
 
 from typing import Any, cast
 
-from PySide6.QtCore import QEvent, QObject, QRect, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import (QColor, QFont, QFontInfo, QImage, QKeySequence, QPainter, QPixmap, QShortcut,
+from PySide6.QtCore import QByteArray, QEvent, QObject, QRect, QSettings, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import (QColor, QFont, QFontInfo, QImage, QPainter, QPixmap, QShortcut,
                            QStandardItem, QStandardItemModel, QTransform)
 from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QHBoxLayout, QLabel, QSizePolicy,
                                QSlider, QToolButton, QVBoxLayout, QWidget)
 
 from .. import chain
+from . import shortcuts as S
 from .theme import icon, theme
 
 # The words of the interface, one per thing (counted over the app's own texts; main_window follows, see the notes).
@@ -80,6 +81,24 @@ def fit_size(widget: QWidget, width: int, height: int) -> None:
     screen = widget.screen() if widget.window() is not None else None
     avail = screen.availableGeometry().size() if screen is not None else None
     widget.resize(capped_size(width, height, avail))
+
+
+def remember_geometry(dialog: QWidget, qs: QSettings | None, key: str) -> None:
+    """Give the dialog the size and place it had when it was closed last time (kept in the settings it is given, under
+    "geometry/<key>"), and keep them again when it closes. Without settings nothing is remembered. A saved size
+    that no longer fits the screen is cut to it."""
+    if qs is None:
+        return
+    name = f"geometry/{key}"
+    saved = qs.value(name)
+    if isinstance(saved, (QByteArray, bytes)) and dialog.restoreGeometry(saved):
+        fitted = capped_size(dialog.width(), dialog.height(),
+                             dialog.screen().availableGeometry().size() if dialog.screen() is not None else None, 1.0)
+        if fitted != dialog.size():
+            dialog.resize(fitted)
+    finished = getattr(dialog, "finished", None)
+    if finished is not None:
+        finished.connect(lambda _r: qs.setValue(name, dialog.saveGeometry()))
 
 
 def small_font(base: QFont, scale: float = 0.8) -> QFont:
@@ -495,8 +514,9 @@ class FrameStepper(QWidget):
     label ("frame 3 / 120 · 0.08 s"), and the keys Left / Right (one frame) and Shift+Left / Shift+Right (one
     second) on the host window. HandoverDialog and VideoFrameDialog share it."""
     valueChanged = Signal(int)
+    stepped = Signal()                          # a button or key moved it by hand (a player stops playing then)
 
-    def __init__(self, host: QWidget, fps: float = chain.FPS, parent=None):
+    def __init__(self, host: QWidget, fps: float = chain.FPS, parent=None, context=None):
         super().__init__(parent or host)
         self.fps = float(fps)
         sec = max(1, round(self.fps))
@@ -515,8 +535,8 @@ class FrameStepper(QWidget):
         for b in (self.b_fwd1, self.b_fwd_s):
             row.addWidget(b)
         row.addWidget(self.label)
-        for key, step in (("Left", -1), ("Right", 1), ("Shift+Left", -sec), ("Shift+Right", sec)):
-            shortcut(QKeySequence(key), host, lambda s=step: self.step(s))
+        for key, step in (("frame_back", -1), ("frame_on", 1), ("second_back", -sec), ("second_on", sec)):
+            shortcut(S.sequence(key), host, lambda s=step: self.step(s), context=context)
         self.slider.valueChanged.connect(self._moved)
         self.slider.valueChanged.connect(self.valueChanged)
 
@@ -531,6 +551,7 @@ class FrameStepper(QWidget):
         return b
 
     def step(self, n: int) -> None:
+        self.stepped.emit()
         self.slider.setValue(self.slider.value() + n)       # (the slider keeps it inside its range)
 
     def set_range(self, lo: int, hi: int) -> None:

@@ -176,7 +176,11 @@ class EditWorker(GenerateWorker):
                                 [Path(x) for x in p.refs], loras, model=p.model, mask=mask_file)
         entry[2] += 1
         if size is not None:
-            edits.scale_to(out, out, size)
+            try:
+                edits.scale_to(out, out, size)
+            except Exception:
+                out.unlink(missing_ok=True)       # (no result without its record)
+                raise
         self._finish(out, meta, job, seed, words, {
             "source": src, "source_copy": str(kept), **({"mask": str(mask_file)} if mask_file else {}),
             "refs": p.refs, "size": list(size) if size else None,

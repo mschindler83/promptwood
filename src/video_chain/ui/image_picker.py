@@ -6,11 +6,13 @@ on a network share is read in full only once; thumbnails the desktop already mad
 ~/.cache/thumbnails, e.g. from the file manager) are used without reading the image at all."""
 from __future__ import annotations
 
+import atexit
 import hashlib
 import json
 import os
 import threading
 import urllib.parse
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -23,7 +25,7 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QHBoxLayout
 from .. import media
 from .imageio import file_facts, read_scaled
 from .theme import icon, theme
-from .widgets import fit_size, format_time, icon_button, label, safe_emit
+from .widgets import fit_size, format_time, icon_button, label, remember_geometry, safe_emit, label_for
 from .qsvalue import qs_value
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
@@ -59,7 +61,7 @@ class _Preview(QLabel):
 
 class _Thumbs(QObject):
     ready = Signal(int, str, QImage)            # generation, path, thumbnail
-    preview = Signal(int, str, QImage, str)     # selection number, path, large frame (video), media details
+    preview = Signal(int, str, QImage, str, float, str)   # selection number, path, picture, details, MB, modified
 
 
 def _cache_file(cache_dir: Path, path: str, st: os.stat_result) -> Path:
@@ -155,6 +157,7 @@ class ImagePickerDialog(QDialog):
         self.setWindowTitle(title)
         fit_size(self, 1100, 700)
         self.qs = settings
+        remember_geometry(self, settings, "imagePicker")
         self._gen = 0
         self._lock = threading.Lock()                  # the pool's threads share the cache and the counters
         self._zoom_px = 0
@@ -173,7 +176,6 @@ class ImagePickerDialog(QDialog):
         self._thumbs.preview.connect(self._preview_ready)
         self._sel = 0                                  # which selection the preview is for (older answers drop)
         self._items: dict[str, QListWidgetItem] = {}
-        from collections import OrderedDict
         self._cache: OrderedDict[tuple, QImage] = OrderedDict()     # the latest thumbnails (bounded)
         self.folder: Path = Path.home()
         self._chosen: str | None = None
@@ -203,9 +205,9 @@ class ImagePickerDialog(QDialog):
         top.addWidget(self.b_up)
         top.addWidget(self.path, 1)
         top.addWidget(self.b_fav)
-        top.addWidget(label("Sort", level="tertiary"))
+        top.addWidget(label_for("Sort", self.sort, level="tertiary"))
         top.addWidget(self.sort)
-        top.addWidget(label("Size", level="tertiary"))
+        top.addWidget(label_for("Size", self.zoom, level="tertiary"))
         top.addWidget(self.zoom)
         v.addLayout(top)
 
@@ -502,19 +504,29 @@ class ImagePickerDialog(QDialog):
                 self._cache.popitem(last=False)
         self._thumbs.ready.emit(gen, path, img)
 
-    def _preview_ready(self, sel: int, path: str, img: QImage, media: str):
+    def _preview_ready(self, sel: int, path: str, img: QImage, extra: str, mb: float, when: str):
         item = self.grid.currentItem()
         if sel != self._sel or item is None or item.data(Qt.ItemDataRole.UserRole)[1] != path:
-            return
-        box = self.preview.size()
-        if not img.isNull():
-            self.preview.setPixmap(QPixmap.fromImage(img).scaled(box, Qt.AspectRatioMode.KeepAspectRatio,
-                                                                 Qt.TransformationMode.SmoothTransformation))
-        else:
-            self.preview.setPixmap(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaVolume).pixmap(96, 96))
-        mb, when = file_facts(path)
+            return                                               # (another item was chosen meanwhile)
+        ext = Path(path).suffix.lower()
+        name, box = Path(path).name, self.preview.size()
         caption = item.data(Qt.ItemDataRole.UserRole + 2)
-        self.info.setText((f"{caption}\n" if caption else "") + f"{Path(path).name}\n{media}\n{mb:.1f} MB · {when}")
+        head = f"{caption}\n" if caption else ""
+        if ext in TEXT_EXTS:
+            self.preview.setPixmap(self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon).pixmap(64, 64))
+            self.info.setText(f"{name}\n{extra}")
+            return
+        if not img.isNull():
+            pm = QPixmap.fromImage(img)
+            self.preview.setPixmap(pm if ext not in VIDEO_EXTS else
+                                   pm.scaled(box, Qt.AspectRatioMode.KeepAspectRatio,
+                                             Qt.TransformationMode.SmoothTransformation))
+        elif ext in VIDEO_EXTS or ext in SOUND_EXTS:
+            self.preview.setPixmap(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaVolume).pixmap(96, 96))
+        if ext in VIDEO_EXTS or ext in SOUND_EXTS:
+            self.info.setText(f"{head}{name}\n{extra}\n{mb:.1f} MB · {when}")
+        else:
+            self.info.setText(f"{head}{name}\n{extra} · {mb:.1f} MB · {when}")
 
     def _count(self, what: str) -> None:
         with self._lock:
@@ -567,40 +579,33 @@ class ImagePickerDialog(QDialog):
             self.buttons.button(QDialogButtonBox.StandardButton.Open).setEnabled(False)
             return
         ext = Path(path).suffix.lower()
-        if ext in TEXT_EXTS:                                     # a list: its first lines
-            try:
-                with open(path, encoding="utf-8", errors="replace") as fh:   # (only the start of a big file)
-                    head = fh.read(4000).splitlines()[:14]
-            except OSError:
-                head = []
-            self.preview.setPixmap(self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon).pixmap(64, 64))
-            self.info.setText(f"{Path(path).name}\n" + "\n".join(line[:80] for line in head))
-            self.buttons.button(QDialogButtonBox.StandardButton.Open).setEnabled(True)
-            return
-        if ext in VIDEO_EXTS or ext in SOUND_EXTS:              # a frame of the video / the sound's icon, its details
-            box = self.preview.size()
-            self._sel += 1
-            self.preview.clear()
-            self.info.setText(f"{Path(path).name}\nLoading …")        # (ffmpeg and ffprobe run in the pool)
-            self.buttons.button(QDialogButtonBox.StandardButton.Open).setEnabled(True)
-            sel, thumbs, size = self._sel, self._thumbs, max(box.width(), box.height())
-
-            def work():
-                img = _video_frame(path, size) if ext in VIDEO_EXTS else QImage()
-                safe_emit(thumbs.preview, sel, path, img, _media_info(path))
-            try:
-                self._pool.submit(work)
-            except RuntimeError:                       # (closed)
-                pass
-            return
-        img, full = read_scaled(path, self.preview.size())
-        if not img.isNull():
-            self.preview.setPixmap(QPixmap.fromImage(img))
-        mb, when = file_facts(path)
-        dims = f"{full.width()}×{full.height()}" if full.isValid() else "?"
+        box = self.preview.size()
+        self.preview.clear()
         caption = item.data(Qt.ItemDataRole.UserRole + 2)
-        self.info.setText((f"{caption}\n" if caption else "") + f"{Path(path).name}\n{dims} px · {mb:.1f} MB · {when}")
-        self.buttons.button(QDialogButtonBox.StandardButton.Open).setEnabled(True)
+        self.info.setText((f"{caption}\n" if caption else "") + f"{Path(path).name}\nLoading …")   # (every read of the file runs in the pool: a
+        self.buttons.button(QDialogButtonBox.StandardButton.Open).setEnabled(True)   # network share can be slow)
+        sel, thumbs, size = self._sel, self._thumbs, max(box.width(), box.height())
+
+        def work():
+            img, full, extra = QImage(), QSize(), ""
+            if ext in TEXT_EXTS:                                 # a list: its first lines
+                try:
+                    with open(path, encoding="utf-8", errors="replace") as fh:   # (only the start of a big file)
+                        extra = "\n".join(line[:80] for line in fh.read(4000).splitlines()[:14])
+                except OSError:
+                    extra = ""
+            elif ext in VIDEO_EXTS or ext in SOUND_EXTS:         # a frame of the video / the sound's icon, its details
+                img = _video_frame(path, size) if ext in VIDEO_EXTS else QImage()
+                extra = _media_info(path)
+            else:
+                img, full = read_scaled(path, box)
+                extra = f"{full.width()}×{full.height()} px" if full.isValid() else "? px"
+            mb, when = file_facts(path)
+            safe_emit(thumbs.preview, sel, path, img, extra, mb, when)
+        try:
+            self._pool.submit(work)
+        except RuntimeError:                                     # (closed)
+            pass
 
     def _activated(self, item):
         kind, path = item.data(Qt.ItemDataRole.UserRole)
@@ -652,11 +657,28 @@ class ImagePickerDialog(QDialog):
         super().done(r)
 
 
+_SCRATCH: Any = None                  # the one folder of the session's scratch settings (removed when the program ends)
+_SCRATCH_COUNT = 0
+
+
+def drop_scratch_settings() -> None:
+    """Remove the folder of the scratch settings (at the end of the program; the next call makes a new one)."""
+    global _SCRATCH
+    if _SCRATCH is not None:
+        _SCRATCH.cleanup()
+        _SCRATCH = None
+
+
 def scratch_settings() -> QSettings:
     """Settings that live only for this session (a window made without settings of its own: its picker remembers
-    nothing; it never reads or writes the user's real store)."""
-    import tempfile
-    return QSettings(str(Path(tempfile.mkdtemp(prefix="video-chain-")) / "picker.ini"), QSettings.Format.IniFormat)
+    nothing; it never reads or writes the user's real store). All of them share one temporary folder, removed
+    when the program ends."""
+    global _SCRATCH, _SCRATCH_COUNT
+    if _SCRATCH is None:
+        _SCRATCH = media.scratch("picker")
+        atexit.register(drop_scratch_settings)
+    _SCRATCH_COUNT += 1
+    return QSettings(str(Path(_SCRATCH.name) / f"picker{_SCRATCH_COUNT}.ini"), QSettings.Format.IniFormat)
 
 
 def pick_image(parent, title: str, settings: QSettings | None, start_dir: str | None = None,

@@ -12,17 +12,18 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QPointF, QRectF, QSettings, Qt, QUrl
-from PySide6.QtGui import QKeySequence, QPainter, QPen
+from PySide6.QtGui import QPainter, QPen
 from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout,
                                QLineEdit, QPushButton, QVBoxLayout)
 
+from . import shortcuts as S
 from .workers import run_in_background
 from .. import chain, media
 from ..tree import AUDIO_REF_MIN, VOICE_MAX_SECS, VOICE_REF_MAX_SECS
 from .theme import theme, with_alpha
 from .video_editor import RangeBar, RangePlayerMixin, fmt
 from .dialogs import button_row
-from .widgets import VideoView, fit_size, guard_wheel, icon_button, label, shortcut
+from .widgets import VideoView, fit_size, guard_wheel, icon_button, label, remember_geometry, shortcut, label_for
 from .qsvalue import qs_value
 
 if TYPE_CHECKING:
@@ -122,11 +123,13 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
         self.setWindowTitle(title)
         fit_size(self, 920, 640 if voice else 420)
         self.settings, self.want_player, self.voice = settings, player, voice
+        remember_geometry(self, settings, "audioEditorVoice" if voice else "audioEditor")
         self.video: VideoView | None = None
         self._isolate = isolate if voice else None
         self.clean: dict | None = None                 # {"file", "start", "end"}: the chosen part without its music
         self.clean_busy = False
         self.clean_player: QMediaPlayer | None = None
+        self.clean_error = ""                           # why the cleaned sound cannot be played ('' = it can)
         self._clean_n = 0
         self._tmp: tempfile.TemporaryDirectory | None = None
         self.file, self.duration = "", 0.0
@@ -201,11 +204,11 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
         b_e = QPushButton("End here")
         b_e.setToolTip("Set the end at the playhead (])")
         b_e.clicked.connect(lambda: self.set_range(self.start, self.position(), moved="end"))
-        rrow.addWidget(label("Start", level="tertiary"))
+        rrow.addWidget(label_for("Start", self.start_spin, level="tertiary"))
         rrow.addWidget(self.start_spin)
         rrow.addWidget(b_s)
         rrow.addSpacing(16)
-        rrow.addWidget(label("End", level="tertiary"))
+        rrow.addWidget(label_for("End", self.end_spin, level="tertiary"))
         rrow.addWidget(self.end_spin)
         rrow.addWidget(b_e)
         rrow.addStretch(1)
@@ -220,12 +223,12 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
         v.addWidget(self.summary)
         self.b_clean = QPushButton("Remove music")
         self.b_clean.setToolTip(no_isolate or
-                                "Take background music and noise out of the chosen part (on this computer, about "
+                                "Take background music and noise out of the chosen range (on this computer, about "
                                 "2 GB of GPU memory for a few seconds). A cloned voice copies everything in its "
                                 "sample, music too. Echo stays, and so does a singer or a second speaker.")
         self.b_clean.clicked.connect(self.remove_music)
         self.b_clean_play = QPushButton("Play cleaned")
-        self.b_clean_play.setToolTip("Listen to the chosen part without its music")
+        self.b_clean_play.setToolTip("Listen to the chosen range without its music")
         self.b_clean_play.clicked.connect(self.play_cleaned)
         self.use_clean = QCheckBox("Use the cleaned sound")
         self.use_clean.setToolTip("Unticked: the voice is taken from the file as it is")
@@ -240,9 +243,10 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
 
         self.buttons, _ok = button_row(self, "Use this range")
         v.addWidget(self.buttons)
-        for key, fn in (("Space", self.toggle), ("[", lambda: self.set_range(self.position(), self.end)),
-                        ("]", lambda: self.set_range(self.start, self.position(), moved="end"))):
-            shortcut(QKeySequence(key), self, fn)
+        for key, fn in ((S.sequence("play"), self.toggle),
+                        (S.sequence("range_set_start"), lambda: self.set_range(self.position(), self.end)),
+                        (S.sequence("range_set_end"), lambda: self.set_range(self.start, self.position(), moved="end"))):
+            shortcut(key, self, fn)
         if file:
             self.load(file, start, end)
         self._update_enabled()
@@ -357,7 +361,8 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
         # (its thread is writing)
         self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setEnabled(not self.clean_busy)
         self.b_clean.setEnabled(on and long and not self.clean_busy and self._isolate is not None)
-        self.b_clean_play.setEnabled(self.clean is not None and self.want_player and not self.clean_busy)
+        self.b_clean_play.setEnabled(self.clean is not None and self.want_player and not self.clean_busy
+                                     and not self.clean_error)
         self.use_clean.setEnabled(self.clean is not None and not self.clean_busy)
 
     # ---- range
@@ -397,7 +402,7 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
             first = min(secs, VOICE_MAX_SECS)
             cloned = "all of it" if secs <= VOICE_REF_MAX_SECS else f"its first {VOICE_REF_MAX_SECS:g} s"
             self.summary.setText(
-                f"Voice {fmt(self.start)} – {fmt(self.end)}: {secs:.2f} s.{short} Choose a part where only this "
+                f"Voice {fmt(self.start)} – {fmt(self.end)}: {secs:.2f} s.{short} Choose a range where only this "
                 f"speaker talks, without music or echo. The clip model hears its first {first:.1f} s; text to speech "
                 f"clones the voice from {cloned}.")
         else:
@@ -407,7 +412,7 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
             self._stop_cleaned()
             self.clean = None                           # (the cleaned sound is of another part)
             self.use_clean.setChecked(False)
-            self.clean_info.setText("The part changed: remove the music again.")
+            self.clean_info.setText("The range changed: remove the music again.")
         self._update_enabled()
 
     # ---- the chosen part without its music (voice)
@@ -449,9 +454,10 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
         if out is None:
             self.clean_info.setText(f"Could not remove the music: {err}")
         elif (start, end) != self._clean_part():
-            self.clean_info.setText("The part changed meanwhile: remove the music again.")
+            self.clean_info.setText("The range changed meanwhile: remove the music again.")
         else:
             self.clean = {"file": Path(out), "start": start, "end": end}
+            self.clean_error = ""
             self.use_clean.setChecked(True)
             self.clean_info.setText(f"Music removed from {fmt(start)} – {fmt(end)}. Listen to it; untick to use the "
                                     "sound as it is.")
@@ -471,6 +477,7 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
             self.clean_audio = QAudioOutput(self)
             self.clean_player = QMediaPlayer(self)
             self.clean_player.setAudioOutput(self.clean_audio)
+            self.clean_player.errorOccurred.connect(self._on_clean_error)
             self.clean_player.playbackStateChanged.connect(
                 lambda st: self.b_clean_play.setText("Stop" if st == QMediaPlayer.PlaybackState.PlayingState else "Play cleaned"))
         if self.clean_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
@@ -480,9 +487,16 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
             self.player.pause()
         url = QUrl.fromLocalFile(str(self.clean["file"]))
         if self.clean_player.source() != url:
+            self.clean_error = ""
             self.clean_player.setSource(url)
         self.clean_player.setPosition(0)
         self.clean_player.play()
+
+    def _on_clean_error(self, _error, message: str = "") -> None:
+        """The cleaned sound cannot be played (no codec, no audio device): say so and switch the button off."""
+        self.clean_error = message or "the player reported an error"
+        self.clean_info.setText(f"Cannot play the cleaned sound: {self.clean_error}")
+        self._update_enabled()
 
     def _stop_cleaned(self):
         if self.clean_player is not None:

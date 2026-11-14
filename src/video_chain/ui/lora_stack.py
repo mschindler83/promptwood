@@ -214,8 +214,11 @@ class LoraPickerDialog(QDialog):
         self.search.setPlaceholderText("Search LoRAs by name or folder … (several words: all must match)")
         self.search.setClearButtonEnabled(True)
         bar.addWidget(self.search, 1)
-        bar.addWidget(label("Pictures", level="tertiary"))
+        pictures_label = label("Pictures", level="tertiary")
+        bar.addWidget(pictures_label)
         self.pictures = QComboBox()
+        pictures_label.setBuddy(self.pictures)
+        self.pictures.setAccessibleName("Pictures")
         for key, text in SHOW:
             self.pictures.addItem(text, key)
         saved = qs_value(self.qs, "loraPictures", "safe", str) if self.qs is not None else "safe"
@@ -557,19 +560,22 @@ class LoraStack(QWidget):
 
     def _set_button(self, button: QPushButton, path: str):
         button.setProperty("path", path)
-        missing = "" if Path(path).is_file() else " (missing)"
+        exists = Path(path).is_file()                  # (asked once: the trigger line below needs it too)
+        missing = "" if exists else " (missing)"
         button.setText(lora_label(path) + missing)
         button.setToolTip(f"{path}{missing}\nClick to choose another LoRA; right-click for its trigger words and CivitAI details")
         trig = getattr(button.parentWidget(), "trigger_label", None)
         if trig is not None:
-            self._show_trigger(trig, path)
+            self._show_trigger(trig, path, exists)
 
     @staticmethod
-    def _show_trigger(lab, path: str):
+    def _show_trigger(lab, path: str, exists: bool | None = None):
         """The LoRA's trigger words under its row (triggers.py), with where they come from."""
         try:
             from .. import triggers
-            info = triggers.db().info(path) if Path(path).is_file() else None
+            if exists is None:
+                exists = Path(path).is_file()
+            info = triggers.db().info(path) if exists else None
         except Exception:  # noqa: BLE001
             info = None
         if info is None:

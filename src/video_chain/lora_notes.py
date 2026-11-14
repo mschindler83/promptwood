@@ -80,7 +80,7 @@ def _defang(text, n: int = 0) -> str:
     return s[:n].strip() if n else s
 
 
-def _cut(text: str, n: int) -> str:
+def cut(text: str, n: int) -> str:
     text = text.strip()
     if len(text) <= n:
         return text
@@ -313,10 +313,10 @@ def note_messages(mat: dict) -> tuple[str, str]:
         lines.append(f"Tags: {mat['tags']}")
     lines.append("Trigger words: " + (", ".join(mat["words"]) if mat["words"] else "none given"))
     if mat.get("about"):
-        lines.append("The creator's description: " + _cut(mat["about"], NOTE_ABOUT_CHARS))
+        lines.append("The creator's description: " + cut(mat["about"], NOTE_ABOUT_CHARS))
     if mat["examples"]:
         lines.append(f"Prompts of the {len(mat['examples'])} most liked example pictures:")
-        lines += [f"{i + 1}. {_cut(p, NOTE_EXAMPLE_CHARS)}" for i, p in enumerate(mat["examples"])]
+        lines += [f"{i + 1}. {cut(p, NOTE_EXAMPLE_CHARS)}" for i, p in enumerate(mat["examples"])]
     else:
         lines.append("There are no example prompts.")
     return NOTE_SYSTEM, "DATA\n" + "\n".join(lines) + "\nEND OF DATA\n\nWrite the note."
@@ -340,7 +340,7 @@ def clean_note(text) -> str:
             continue
         seen.add(m.group(1).lower())
         out.append(f"{m.group(1).capitalize()}: {value}")
-    return _cut("\n".join(out), NOTE_CHARS) if out else ""
+    return cut("\n".join(out), NOTE_CHARS) if out else ""
 
 
 def note_of(db: TriggerDB, path: str, mat: dict | None) -> dict:
@@ -472,13 +472,13 @@ def _one(mat: dict, note: str, budget: int, prompt: str = "", remarks: str = "")
     if note:
         lines.append(note)
     elif mat.get("about"):
-        lines.append("Its creator says: " + _cut(mat["about"], GUIDE_ABOUT_CHARS))
+        lines.append("Its creator says: " + cut(mat["about"], GUIDE_ABOUT_CHARS))
     if remarks:
         lines.append("The user's own remarks on this LoRA (follow them): " + remarks)
     used = sum(len(x) + 1 for x in lines)
     examples: list[str] = []
     for p in nearest(mat, prompt, GUIDE_EXAMPLES + (0 if note else 1)):
-        p = _cut(p, GUIDE_EXAMPLE_CHARS)
+        p = cut(p, GUIDE_EXAMPLE_CHARS)
         if examples and used + len(p) + 6 > budget:
             break
         examples.append(p)
@@ -487,7 +487,7 @@ def _one(mat: dict, note: str, budget: int, prompt: str = "", remarks: str = "")
         lines.append("Prompts that work with it:")
         lines += [f"- \"{p}\"" for p in examples]
     text = "\n".join(lines)
-    return text if len(text) <= budget + 200 else _cut(text, budget + 200)
+    return text if len(text) <= budget + 200 else cut(text, budget + 200)
 
 
 def guidance(paths: list[str], db: TriggerDB | None = None, prompt: str = "") -> str:

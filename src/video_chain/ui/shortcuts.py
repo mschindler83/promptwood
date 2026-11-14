@@ -42,7 +42,15 @@ SHORTCUTS: list[Shortcut] = [
     Shortcut("shortcuts", "F1", "Keyboard shortcuts", MAIN),
     Shortcut("graph_delete", "Delete", "Delete the selected clip (asks first)", "clip graph"),
     Shortcut("graph_fit", "F", "Fit the whole graph in the view", "clip graph"),
+    Shortcut("graph_move", "Up / Down / Left / Right", "Move between clips: Up / Down the clips of the same "
+             "step, Left the clip before, Right the first one after", "clip graph"),
+    Shortcut("graph_first", "Home", "The first clip", "clip graph"),
+    Shortcut("graph_open", "Enter", "Open the focused clip (as a double-click does)", "clip graph"),
+    Shortcut("graph_menu", "Menu", "The menu of the focused clip", "clip graph"),
     Shortcut("generate_image", "Ctrl+Return", "Make or edit the image", "image dialog"),
+    Shortcut("image_delete", "Delete", "Delete the selected result (Undo delete brings it back)", "image dialog"),
+    Shortcut("image_before_after", "B", "Switch between the result and the image it was made from", "image dialog"),
+    Shortcut("image_favorite", "F", "Mark the selected result as a favorite (or take the star away)", "image dialog"),
     Shortcut("refine", "Ctrl+Return", "Refine the prompt (Send, in a chat)", "prompt refiner"),
     Shortcut("frame_back", "Left", "One frame back", "frame pickers"),
     Shortcut("frame_on", "Right", "One frame on", "frame pickers"),
@@ -51,11 +59,14 @@ SHORTCUTS: list[Shortcut] = [
     Shortcut("play", "Space", "Play / pause", "players"),
     Shortcut("range_start", "Ctrl+Left / Ctrl+Right", "Move the range start by one frame", "range editors"),
     Shortcut("range_end", "Ctrl+Shift+Left / Right", "Move the range end by one frame", "range editors"),
+    Shortcut("range_set_start", "[", "Set the range start to the playing position", "range editors"),
+    Shortcut("range_set_end", "]", "Set the range end to the playing position", "range editors"),
+    Shortcut("compare_first_last", "Home / End", "Go to the first / the last frame", "compare player"),
     Shortcut("rotate", "R / Shift+R", "Turn the video right / left", "video editor"),
     Shortcut("mask_paint", "B / E", "Paint / erase", "mask painter"),
     Shortcut("mask_brush", "[ / ]", "Smaller / bigger brush", "mask painter"),
     Shortcut("undo", "Ctrl+Z", "Undo", "text fields, mask painter"),
-    Shortcut("redo", "Ctrl+Shift+Z", "Redo", "mask painter"),
+    Shortcut("mask_redo", "Ctrl+Shift+Z / Ctrl+Y", "Redo", "mask painter"),
 ]
 _BY_ID = {s.id: s for s in SHORTCUTS}
 
@@ -67,6 +78,11 @@ def keys(id: str) -> str:
 
 def sequence(id: str) -> QKeySequence:
     return QKeySequence(keys(id))
+
+
+def sequences(id: str) -> list[QKeySequence]:
+    """The keys of a row that lists several ("[ / ]", "Home / End"), one sequence each, in the order written."""
+    return [QKeySequence(k.strip()) for k in keys(id).split(" / ")]
 
 
 def shown(id: str) -> str:
