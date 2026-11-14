@@ -279,6 +279,7 @@ def test_damaged_tree_files_are_refused(project):
     t, a, b1, b2, c = build(project)
     good = (project / T.TREE_FILE).read_text()
     (project / T.TREE_FILE).write_text("{ not json")
+    (project / (T.TREE_FILE + ".bak")).unlink(missing_ok=True)         # (with a backup it opens: test_tree_store)
     with pytest.raises(ValueError, match="damaged"):
         T.load(project)
     d = json.loads(good)
@@ -338,7 +339,7 @@ def test_identity_references(project, tmp_path):
     assert statuses(project)["c"] == "done"
     face(project / rel, (10, 10, 10))                                          # another reference image
     assert statuses(project)["a"] == "changed"
-    T.remove_reference(project, rel, t)
+    T.remove_picture(project, t, rel)
     assert not (project / rel).exists() and T.cast_of(t)[0]["images"] == []
     assert T.Tree().options["cast"] is not T.Tree().options["cast"]             # defaults are not shared
 
@@ -727,6 +728,8 @@ def test_undo_changes_of_a_made_clip(project, tmp_path):
 def test_clip_states_do_not_read_every_frame_again(project, monkeypatch):
     """The states are checked after every edit: the frames are hashed and the start image probed once per version
     of the file, not on every check (slow on a network share)."""
+    T._IMG_SIZE.clear()                       # (caches of earlier tests must not decide the counts)
+    chain._SHA_CACHE.clear()
     t, a, b1, b2, c = build(project)
     run(project, [c.id, b2.id])
     assert set(statuses(project).values()) == {"done"}

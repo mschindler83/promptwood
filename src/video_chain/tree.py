@@ -47,6 +47,7 @@ and is made again when a path through it is generated. Other branches are not to
 """
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 import os
@@ -59,11 +60,21 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
 
+try:
+    import fcntl
+except ImportError:                                  # (Windows)
+    fcntl = None
+
 from . import camera as _camera
 from . import chain
 from . import h3_prompt as _h3
 
 TREE_FILE = "tree.json"
+TREE_VERSION = 3
+
+
+class NewerTreeError(ValueError):
+    """tree.json was written by a newer app: not opened (and not replaced by the backup)."""
 START_FILE = "start.png"
 NO_LORA = "none"                   # old override value: this node without any LoRA
 OVERRIDE_KEYS = ("loras", "frames", "steps", "guide", "source_sound", "sound_over", "sound_mix_level", "camera",
@@ -71,7 +82,8 @@ OVERRIDE_KEYS = ("loras", "frames", "steps", "guide", "source_sound", "sound_ove
 _OLD_LORA_KEYS = ("lora", "strength", "extra_loras")
 AI, VIDEO = "ai", "video"
 GUIDE_CHOICES = (5, 22, 39)        # motion guide lengths on H3's 17n+5 grid
-DEFAULT_OPTIONS = {"model": "Comfy-Org/MiniMax-H3", "frames": 73, "steps": 28,
+DEFAULT_FRAMES = 73                 # a clip's length when nothing else is set
+DEFAULT_OPTIONS = {"model": "Comfy-Org/MiniMax-H3", "frames": DEFAULT_FRAMES, "steps": 28,
                    "resolution": 512, "audio": True, "keep_repeated": False, "seed": 42,
                    # the aspect ratio of a project without a start image or video (its first clip starts from text)
                    "aspect": "16:9",
@@ -156,6 +168,7 @@ class Tree:
     image: str | None = None       # where the start image came from (start.png is the copy that counts)
     selected: str | None = None
     next_num: int = 1
+    recovered_from: Path | None = field(default=None, compare=False, repr=False)   # set by load(): the backup used
 
     # ---- structure
     def children(self, nid: str | None) -> list[Node]:
@@ -236,7 +249,7 @@ class Tree:
             raise ValueError(f"#{nid[1:]} is not a real video")
         start, end = float(v.source["start"]), float(v.source["end"])
         at = round(float(at), 4)
-        if not start + 1 / 24 <= at <= end - 1 / 24:
+        if not start + 1 / chain.FPS <= at <= end - 1 / chain.FPS:
             raise ValueError("split inside the video's range (not at its first or last frame)")
         kids = self.children(nid)
         rest_source = {**v.source, "start": at, "end": round(end, 4)}
@@ -289,7 +302,7 @@ class Tree:
 
     # ---- files
     def to_json(self) -> dict:
-        return {"tool": "video-chain", "version": 3, "image": self.image, "options": self.options,
+        return {"tool": "video-chain", "version": TREE_VERSION, "image": self.image, "options": self.options,
                 "selected": self.selected, "next_num": self.next_num,
                 "nodes": [asdict(n) for n in sorted(self.nodes.values(), key=lambda n: self.number(n.id))]}
 
@@ -298,20 +311,24 @@ class Tree:
         """Raises ValueError for a tree that cannot be right (duplicate ids, missing parents, cycles)."""
         if not isinstance(d, dict):
             raise ValueError("not a tree file")
+        if isinstance(d.get("version"), int) and d["version"] > TREE_VERSION:
+            raise NewerTreeError(f"this project was saved by a newer version of the app (file version "
+                                 f"{d['version']}, this one reads up to {TREE_VERSION}); saving would drop what it "
+                                 "added")
         stored = copy.deepcopy(d.get("options") or {})
         stored.pop("backend", None)                       # ComfyUI is the only generator now
         project_loras = {k: stored.pop(k) for k in _OLD_LORA_KEYS if k in stored}   # older: project LoRAs
-        t = cls(options={**copy.deepcopy(DEFAULT_OPTIONS), **stored},
+        t = cls(options=_merged_options(stored),
                 image=d.get("image"),
                 selected=d.get("selected"), next_num=int(d.get("next_num") or 1))
         if stored.get("prompt_format") not in PROMPT_FORMATS:
             t.options["prompt_format"] = "classic"   # a project from before the setting: as it was made
         _migrate_cast(t.options, "cast" in stored)
-        for nd in d.get("nodes", []):
+        for nd in copy.deepcopy(d.get("nodes", [])):        # (a copy: the caller's dict is not changed)
             if not isinstance(nd, dict) or not nd.get("id"):
                 raise ValueError("a node without id")
-            if not re.fullmatch(r"n\d+", str(nd["id"])) or nd.get("parent") is not None and \
-                    not re.fullmatch(r"n\d+", str(nd["parent"])):
+            if not re.fullmatch(r"n\d+", str(nd["id"])) or (
+                    nd.get("parent") is not None and not re.fullmatch(r"n\d+", str(nd["parent"]))):
                 raise ValueError(f"node {str(nd['id'])[:20]!r} has an invalid id")       # ids become file names
             if nd.get("made") is not None and not isinstance(nd.get("made"), dict):
                 raise ValueError(f"node {nd['id']} has a damaged record")
@@ -339,7 +356,7 @@ class Tree:
             own = own if kind == AI and nd.get("parent") is None and isinstance(own, str) \
                 and own.startswith(STARTS_DIR + "/") else None
             row = nd.get("row") if isinstance(nd.get("row"), str) and re.fullmatch(r"n\d+", nd["row"]) else None
-            n = Node(nd["id"], nd.get("parent"), nd.get("prompt", ""), int(nd.get("seed", 42)), nd.get("made"), ov,
+            n = Node(nd["id"], nd.get("parent"), nd.get("prompt", ""), _int_or(nd.get("seed"), 42), nd.get("made"), ov,
                      kind, dict(src) if kind == VIDEO else None, end, at,
                      clean_keyframes(nd.get("keyframes")) if kind == AI else [],
                      bool(nd.get("frozen")) and isinstance(nd.get("made"), dict), own,
@@ -454,8 +471,16 @@ def load(project: Path) -> Tree:
     if p.exists():
         try:
             return Tree.from_json(json.loads(p.read_text(encoding="utf-8")))
-        except Exception as e:  # noqa: BLE001  (any damage: one clear message)
-            raise ValueError(f"{p} is damaged ({type(e).__name__}: {e})") from e
+        except NewerTreeError:
+            raise
+        except Exception as e:  # noqa: BLE001  (any damage: the backup, else one clear message)
+            bak = project / (TREE_FILE + ".bak")
+            try:
+                t = Tree.from_json(json.loads(bak.read_text(encoding="utf-8")))
+            except Exception:  # noqa: BLE001
+                raise ValueError(f"{p} is damaged ({type(e).__name__}: {e})") from e
+            t.recovered_from = bak                  # the caller tells the user; the next save keeps the damaged file
+            return t
     old = chain.load_record(project)
     t = Tree()
     if old:
@@ -480,15 +505,92 @@ def load(project: Path) -> Tree:
     return t
 
 
+def _merged_options(stored: dict) -> dict:
+    """The defaults with the stored options on top; a stored sub-dict (turbo, style ...) is merged key by key, so a
+    file saved before a sub-key existed still gets its default."""
+    out = copy.deepcopy(DEFAULT_OPTIONS)
+    for k, v in stored.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict) and k != "cast":
+            out[k] = {**out[k], **v}
+        else:
+            out[k] = v
+    return out
+
+
+def _int_or(v, default: int) -> int:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _parses(p: Path) -> bool:
+    try:
+        Tree.from_json(json.loads(p.read_text(encoding="utf-8")))
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _sync_dir(d: Path) -> None:
+    """The rename itself on disk too (power cut); not possible everywhere (network shares), then skipped."""
+    try:
+        fd = os.open(d, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+@contextlib.contextmanager
+def _write_lock(project: Path):
+    """One writer at a time, across threads and processes (window, worker, command line): an advisory lock on
+    tree.json.lock. Without fcntl (or a share that refuses locks) the unique temp name still keeps the file whole."""
+    f = None
+    try:
+        f = open(project / (TREE_FILE + ".lock"), "a")
+        if fcntl is not None:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+    except OSError:
+        pass
+    try:
+        yield
+    finally:
+        if f is not None:
+            f.close()                                # (closing releases the lock)
+
+
 def save(project: Path, tree: Tree) -> None:
+    """Writes tree.json whole or not at all. The file before stays as tree.json.bak (load() falls back to it); a
+    damaged tree.json is kept as tree.json.damaged instead of replacing the good backup."""
     project = Path(project)
     project.mkdir(parents=True, exist_ok=True)
-    tmp = project / (TREE_FILE + ".part")
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(json.dumps(tree.to_json(), indent=2, ensure_ascii=False))
-        f.flush()
-        os.fsync(f.fileno())                       # on disk before it replaces the old file (power cut)
-    tmp.replace(project / TREE_FILE)
+    final = project / TREE_FILE
+    text = json.dumps(tree.to_json(), indent=2, ensure_ascii=False)
+    with _write_lock(project):
+        fd, name = tempfile.mkstemp(prefix=TREE_FILE + ".", suffix=".part", dir=project)   # (a name of its own)
+        tmp = Path(name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+                f.flush()
+                os.fsync(f.fileno())               # on disk before it replaces the old file (power cut)
+            if final.is_file():
+                if _parses(final):
+                    bak = project / (TREE_FILE + ".bak")
+                    shutil.copyfile(final, tmp.with_name(tmp.name + ".bak"))
+                    tmp.with_name(tmp.name + ".bak").replace(bak)
+                else:
+                    shutil.copyfile(final, project / (TREE_FILE + ".damaged"))
+            tmp.replace(final)
+            _sync_dir(project)
+        finally:
+            tmp.unlink(missing_ok=True)
+            tmp.with_name(tmp.name + ".bak").unlink(missing_ok=True)
 
 
 def _migrate_cast(options: dict, has_cast: bool) -> None:
@@ -714,10 +816,6 @@ def _drop_file(project: Path, rel: str, tree: Tree) -> None:
 def remove_picture(project: Path, tree: Tree, rel: str) -> None:
     _set_cast(tree, [{**c, "images": [r for r in c["images"] if r != rel]} for c in cast_of(tree)])
     _drop_file(project, rel, tree)
-
-
-def remove_reference(project: Path, rel: str, tree: Tree) -> None:
-    remove_picture(project, tree, rel)
 
 
 def remove_character(project: Path, tree: Tree, name: str) -> None:
@@ -1531,28 +1629,20 @@ def changed_inputs(tree: Tree, nid: str) -> list[str]:
 def revert(project: Path, tree: Tree, nid: str) -> list[str]:
     """Undo the edits of a made generated clip: back to the prompt, seed, own settings and end image it was
     made with. Returns what was restored."""
-    done = changed_inputs(tree, nid)
     node = tree.nodes[nid]
-    m = node.made
-    if "prompt" in done:
-        node.prompt = m["prompt"]
-    if "seed" in done:
-        node.seed = int(m["seed"])
-    if "settings" in done:
-        node.overrides = copy.deepcopy(m["overrides"])
-    if "end image" in done:
+    newer = {k["image"] for k in node.keyframes}
+    if "end image" in changed_inputs(tree, nid):
         clear_end_image(project, tree, nid)       # the newer image goes (unless it is the made one)
-        node.end_image = m["end_image"]
+    done = _revert_fields(tree, nid)
     if "keyframes" in done:
-        newer = {k["image"] for k in node.keyframes}
-        node.keyframes = clean_keyframes(m["keyframes"])
         for rel in newer:
             _drop_keyframe_file(project, node, rel)
     return done
 
 
-def _revert_fields(tree: Tree, nid: str) -> None:
-    """Undo the edits of a made clip in the tree only (no files touched): for trying out what freezing finds."""
+def _revert_fields(tree: Tree, nid: str) -> list[str]:
+    """Undo the edits of a made clip in the tree only (no files touched; revert adds those): also for trying out
+    what freezing finds. Returns what was restored."""
     node, done = tree.nodes[nid], changed_inputs(tree, nid)
     m = node.made
     if "prompt" in done:
@@ -1565,6 +1655,7 @@ def _revert_fields(tree: Tree, nid: str) -> None:
         node.end_image = m["end_image"]
     if "keyframes" in done:
         node.keyframes = clean_keyframes(m["keyframes"])
+    return done
 
 
 def freeze_set(tree: Tree, nid: str) -> list[Node]:
@@ -1718,6 +1809,8 @@ def set_keyframe(project: Path, tree: Tree, nid: str, image: Path | None, at: fl
         raise ValueError("a real video has no keyframes")
     if not at > 0:
         raise ValueError("a keyframe needs a time after the start")
+    if index is not None and not 0 <= index < len(node.keyframes):
+        raise ValueError(f"no keyframe {index}")
     old = dict(node.keyframes[index]) if index is not None else None
     rel = old["image"] if old else None
     if image is not None:
@@ -1737,6 +1830,8 @@ def set_keyframe(project: Path, tree: Tree, nid: str, image: Path | None, at: fl
 
 def remove_keyframe(project: Path, tree: Tree, nid: str, index: int) -> None:
     node = tree.nodes[nid]
+    if not 0 <= index < len(node.keyframes):
+        raise ValueError(f"no keyframe {index}")
     gone = node.keyframes.pop(index)
     _drop_keyframe_file(project, node, gone["image"])
 
@@ -1922,7 +2017,7 @@ def prepared_start(project: Path, width: int, height: int, source: Path | None =
             old.unlink(missing_ok=True)
             old.with_suffix(".json").unlink(missing_ok=True)
     chain.prepare_image(src, dst, width, height)
-    rec.write_text(json.dumps({"source": sig}), encoding="utf-8")
+    chain.atomic_write_text(rec, json.dumps({"source": sig}))
     return dst
 
 
@@ -2061,6 +2156,7 @@ class Checker:
         self._settings: dict | None = None
         self._audio: list[dict] | None = None
         self._pictures: dict[str, str | None] = {}
+        self._node_settings: dict[str, dict | None] = {}
 
     def sha(self, path: Path | None) -> str | None:
         """SHA-1 of a frame, cached across checks by (path, size, date): a check after every edit must not read
@@ -2086,6 +2182,12 @@ class Checker:
         return self._pictures[rel]
 
     def settings(self, nid: str) -> dict | None:
+        """The settings a node would be made with now (worked out once per node and round, like status)."""
+        if nid not in self._node_settings:
+            self._node_settings[nid] = self._work_out_settings(nid)
+        return self._node_settings[nid]
+
+    def _work_out_settings(self, nid: str) -> dict | None:
         base = self.base()
         node = self.tree.nodes[nid]
         span = source_sound_span(self.tree, node, self.project) \
@@ -2150,6 +2252,9 @@ class Checker:
         if nid in self._status:
             return self._status[nid]
         node = self.tree.nodes[nid]
+        if not node.is_video and node.parent is not None and node.parent not in self._status:
+            for above in self.tree.path_to(nid)[:-1]:   # parents first (path_to is iterative): no deep recursion
+                self.status(above.id)
         m = node.made
         if not self._files_there(node):
             st = "new"
@@ -2269,7 +2374,7 @@ def current_settings(project: Path, options: dict, tree: "Tree | None" = None) -
     pika_on = bool(pika.get("on")) and not turbo_on and not hyper_on
     style = options.get("style") or {}
     return chain.settings_dict(model=options.get("model", DEFAULT_OPTIONS["model"]), lora=None,
-                               strength=1.0, frames=options.get("frames", 73),
+                               strength=1.0, frames=options.get("frames", DEFAULT_FRAMES),
                                steps=(int(turbo.get("steps", 6)) if turbo_on else chain.HYPERFLOW_STEPS if hyper_on
                                       else chain.PIKA_STEPS if pika_on else options.get("steps", 28)),
                                hyperflow=float(hyper.get("strength", 1.0)) if hyper_on else None,
@@ -2702,7 +2807,7 @@ def _h3_model_prompt(options: dict, node: Node, s: dict, start: bool, end: bool)
     if given:
         soundtrack = len(s.get("audio_refs") or []) + 1
         extra.append(_soundtrack_sentence(ss, soundtrack))
-    frames = int(s.get("frames") or (node.overrides or {}).get("frames") or options.get("frames", 73))
+    frames = int(s.get("frames") or (node.overrides or {}).get("frames") or options.get("frames", DEFAULT_FRAMES))
     return _h3.compose(h["body"], start=start, end=end, seconds=frames / chain.FPS, subjects=h["subjects"],
                        frame_pictures=frame_numbers(len(use["images"]), s.get("frame_pictures")),
                        sounds=h["sounds"], soundtrack=soundtrack, lines=h["lines"], language=_language(options),
@@ -2815,7 +2920,7 @@ def node_settings(base: dict, options: dict, node: Node, audio_pool: list[dict] 
     lora, strength = stack[0] if stack else (None, 1.0)
     s = chain.settings_dict(model=base["model"], lora=lora, extra_loras=stack[1:],
                                strength=strength,
-                               frames=ov.get("frames", options.get("frames", 73)),
+                               frames=ov.get("frames", options.get("frames", DEFAULT_FRAMES)),
                                # turbo / HyperFlow: their steps for every clip (a clip's own steps would break it)
                                steps=(base["steps"] if base.get("turbo") or base.get("hyperflow") or base.get("pika")
                                       else ov.get("steps", options.get("steps", 28))),
@@ -2832,7 +2937,7 @@ def node_settings(base: dict, options: dict, node: Node, audio_pool: list[dict] 
                                lora_triggers=_stack_triggers(options, node, stack),
                                source_sound=source_sound,
                                veda=veda_for(options, base["width"], base["height"],
-                                             int(ov.get("frames", options.get("frames", 73)))),
+                                             int(ov.get("frames", options.get("frames", DEFAULT_FRAMES)))),
                                camera=_camera.clean(ov.get("camera")))
     if not h3:
         return s
@@ -2950,7 +3055,7 @@ def clip_length(tree: Tree, node: Node) -> int:
         if node.made and node.made.get("frames"):
             return int(node.made["frames"])
         return chain.range_frames(node.source["start"], node.source["end"])
-    return int((node.overrides or {}).get("frames", tree.options.get("frames", 73)))
+    return int((node.overrides or {}).get("frames", tree.options.get("frames", DEFAULT_FRAMES)))
 
 
 def made_frames(node: Node) -> int | None:
@@ -3106,15 +3211,18 @@ def guide_problem(tree: Tree, checker: "Checker", todo: list[str]) -> str | None
     return None
 
 
-def given_sound(project: Path, node: Node, ss: dict, wav: Path) -> None:
+def given_sound(project: Path, node: Node, ss: dict, wav: Path, check: bool = True) -> None:
     """A clip's given sound (its recorded source_sound span) cut into a WAV, as the clip gets it: by run_tree before
     the model and remix_sound after it, so a remix lays exactly the same sound."""
-    if ss.get("mode") == "previous":
+    if check and ss.get("mode") == "previous":
         bad = _repeat_sound_problems(project, node, ss)
         if bad:
             raise RuntimeError(bad[0])
     chain.to_wav(sound_file(project, ss), wav, ss["start"], ss["secs"], ss.get("loop"), ss.get("offset") or 0.0,
                  ss.get("pad") or 0.0, fill=ss.get("mode") == "track")
+
+
+_SOUND_OVERRIDES = ("source_sound", "sound_over", "sound_mix_level")
 
 
 def remix_sound(project: Path, tree: Tree, nid: str, checker: Checker | None = None, persist: bool = True) -> bool:
@@ -3137,10 +3245,18 @@ def remix_sound(project: Path, tree: Tree, nid: str, checker: Checker | None = N
     with tempfile.TemporaryDirectory(prefix="video-chain-", dir=str(project / "nodes")) as tmp:
         wav = Path(tmp) / "source_sound.wav"
         given_sound(project, node, ss, wav)
+        if not chain.keep_copy(project, project / node.made["video"]):      # (never overwritten: the old mix stays)
+            raise OSError(f"the clip of {nid} could not be kept in {chain.OLD_DIR}/ before its sound is mixed again")
         chain.remix_audio(project / node.made["video"], project / node.made["own_sound"], wav,
                           float(ss.get("mix_level") or 0.0) if ss.get("mix") else None)
     node.made["settings"] = settings
-    node.made["overrides"] = copy.deepcopy(node.overrides or {})
+    base = node.made.get("overrides")           # (what Undo goes back to: only the sound keys follow the remix)
+    if isinstance(base, dict):
+        for k in _SOUND_OVERRIDES:
+            if (node.overrides or {}).get(k) is None:
+                base.pop(k, None)
+            else:
+                base[k] = copy.deepcopy(node.overrides[k])
     node.made["sound_rev"] = int(node.made.get("sound_rev") or 0) + 1
     if persist:
         save(project, tree)
@@ -3148,20 +3264,35 @@ def remix_sound(project: Path, tree: Tree, nid: str, checker: Checker | None = N
 
 
 def remix_sounds(project: Path, tree: Tree, nids: list[str], checker: Checker | None = None,
-                 persist: bool = True) -> list[str]:
+                 persist: bool = True, log: Callable[[str], None] = print) -> list[str]:
     """remix_sound for every due clip of nids (in this order: put a clip before the ones after it), again and again
-    while one becomes due (a clip that lays over the sound of the one before, remixed now). Returns the remixed."""
+    while one becomes due (a clip that lays over the sound of the one before, remixed now). Returns the remixed.
+    A clip that cannot be remixed (its sound file is gone, ffmpeg fails) is reported to log and left as it is: it
+    stays "changed" and does not stop the others."""
     out: list[str] = []
+    failed: set[str] = set()
     ck = checker or Checker(project, tree)
     again = True
-    while again and len(out) <= len(nids) ** 2:   # (each remix can make only the clips after it due)
-        again = False
-        for nid in nids:
-            if remix_sound(project, tree, nid, ck, persist):
-                out.append(nid)
-                ck = Checker(project, tree)         # (what depends on its sound changes)
-                again = True
-                break
+    try:
+        while again and len(out) <= len(nids) ** 2:   # (each remix can make only the clips after it due)
+            again = False
+            for nid in nids:
+                if nid in failed:
+                    continue
+                try:
+                    done = remix_sound(project, tree, nid, ck, persist=False)
+                except (OSError, RuntimeError) as e:
+                    failed.add(nid)
+                    log(f"{nid}: its sound could not be mixed again ({e})")
+                    continue
+                if done:
+                    out.append(nid)
+                    ck = Checker(project, tree)         # (what depends on its sound changes)
+                    again = True
+                    break
+    finally:
+        if persist and out:
+            save(project, tree)                         # once, not after every clip
     return out
 
 
@@ -3184,7 +3315,7 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
     on_paths = {n.id for t in targets for n in tree.path_to(t)}
     # a sound-only change: the sound is mixed again (seconds), not the clip made again; before the plan, since what
     # repeats or carries over that sound depends on it
-    for nid in remix_sounds(project, tree, sorted(on_paths, key=lambda i: tree.depth(i)), checker):
+    for nid in remix_sounds(project, tree, sorted(on_paths, key=lambda i: tree.depth(i)), checker, log=log):
         log(f"{nid}: sound mixed again from its kept own sound (no new generation)")
         checker = Checker(project, tree)
     todo = plan(tree, checker, targets)
@@ -3285,8 +3416,9 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
                     raise RuntimeError(f"the generator did not write the clip of {nid}")
                 made_n = chain.probe(new_video)["frames"]      # the real count (hand-over frames, joins)
             except BaseException:
-                for f in (new_video, new_frame):
-                    _unlink(f)
+                for f in (new_video, new_frame, own):
+                    if f is not None:
+                        _unlink(f)
                 raise
             old_end = (node.made or {}).get("end_image")
             old_keys = {k.get("image") for k in (node.made or {}).get("keyframes") or [] if isinstance(k, dict)}
@@ -3416,8 +3548,7 @@ def _refined_sound(project: Path, node: Node, target: Path, tmp: Path, log: Call
     elif s.get("source_sound"):
         ss = s["source_sound"]
         wav = tmp / f"{node.id}_sound.wav"     # the recorded sound, as in the clip
-        chain.to_wav(sound_file(project, ss), wav, ss["start"], ss["secs"], ss.get("loop"), ss.get("offset") or 0.0,
-                     ss.get("pad") or 0.0, fill=ss.get("mode") == "track")
+        given_sound(project, node, ss, wav, check=False)
         chain.replace_audio(target, wav)
 
 
@@ -3457,7 +3588,7 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
     if single and nid not in tree.nodes:
         raise ValueError(f"no clip {nid}")
     path = [tree.nodes[nid]] if single else tree.path_to(nid)
-    if remix_sounds(project, tree, [n.id for n in path], checker):   # (the refined copies take the clip's sound)
+    if remix_sounds(project, tree, [n.id for n in path], checker, log=log):   # (the refined copies take the clip's sound)
         checker = Checker(project, tree)
     missing = [n.id for n in path if checker.status(n.id) != "done"]
     if missing:
@@ -3520,7 +3651,7 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
             if reuse and (copy_rev or None) != (sound_rev or None) and target.parent != tmp:
                 log(f"[{k}/{len(order)}] {node.id}: its sound was mixed again; the refined copy gets the new sound")
                 _refined_sound(project, node, target, tmp, log, f"[{k}/{len(order)}] {node.id}")
-                target.with_suffix(".json").write_text(json.dumps({**pins, "sound": sound_rev}), encoding="utf-8")
+                chain.atomic_write_text(target.with_suffix(".json"), json.dumps({**pins, "sound": sound_rev}))
             if reuse:
                 emit({"e": "node", "id": node.id, "state": "reused"})
                 continue
@@ -3594,7 +3725,7 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
                 _refined_sound(project, node, target, tmp, log, f"[{k}/{len(order)}] {node.id}")
             if sound_rev:
                 pins["sound"] = sound_rev
-            target.with_suffix(".json").write_text(json.dumps(pins), encoding="utf-8")
+            chain.atomic_write_text(target.with_suffix(".json"), json.dumps(pins))
             made_now.append(node.id)
             emit({"e": "node", "id": node.id, "state": "done"})
         videos = [files.get(n.id) or refined_file(project, n, size) for n in path]
@@ -3639,7 +3770,7 @@ def join_path(project: Path, tree: Tree, nid: str, out: Path | None = None, pers
         chain.concat(videos, f, cuts=cuts, size=size, fill=True)
     if out is None:                                # the join before is never deleted: it goes to old/
         chain.replace_kept(project, target, write)
-        stamp.write_text(key)
+        chain.atomic_write_text(stamp, key)
     else:
         write(target)
     return target
