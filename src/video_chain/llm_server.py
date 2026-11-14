@@ -19,6 +19,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -314,6 +315,56 @@ class _Adopted:
 _LIVE: "weakref.WeakSet[LlamaServer]" = weakref.WeakSet()
 
 
+def _die_with_parent() -> None:
+    """In the child, before exec: the kernel sends SIGTERM when the parent thread ends (Linux prctl)."""
+    import ctypes
+    ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGTERM, 0, 0, 0)       # 1 = PR_SET_PDEATHSIG
+
+
+class _Spawner:
+    """Starts child processes from ONE long-lived daemon thread. PR_SET_PDEATHSIG fires when the *thread* that forked
+    ends, not the process: a worker thread that asked for the server and then finished (a refine) must not take it
+    down. This thread ends only with the app (also a crash or SIGKILL of it), so llama-server cannot outlive it."""
+
+    def __init__(self):
+        import queue
+        self._q: "queue.Queue" = queue.Queue()
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+
+    def _loop(self) -> None:
+        while True:
+            argv, kw, box, done = self._q.get()
+            try:
+                box.append(subprocess.Popen(argv, preexec_fn=_die_with_parent, **kw))    # noqa: PLW1509
+            except BaseException as e:  # noqa: BLE001  (handed to the caller)
+                box.append(e)
+            done.set()
+
+    def spawn(self, argv, **kw) -> subprocess.Popen:
+        with self._lock:
+            if self._thread is None:
+                self._thread = threading.Thread(target=self._loop, name="spawner", daemon=True)
+                self._thread.start()
+        box: list = []
+        done = threading.Event()
+        self._q.put((argv, kw, box, done))
+        done.wait()
+        if isinstance(box[0], BaseException):
+            raise box[0]
+        return box[0]
+
+
+_SPAWNER = _Spawner()
+
+
+def spawn(argv, **kw) -> subprocess.Popen:
+    """subprocess.Popen that dies with the app where Linux can do that (PR_SET_PDEATHSIG; elsewhere a plain Popen)."""
+    if sys.platform.startswith("linux"):
+        return _SPAWNER.spawn(argv, **kw)
+    return subprocess.Popen(argv, **kw)
+
+
 _DYING: list = []          # servers sent SIGTERM without waiting for them
 
 
@@ -510,9 +561,8 @@ class LlamaServer:
                     rotate_log(self.log_dir / "llama-server.log")
                     log = open(self.log_dir / "llama-server.log", "ab")    # noqa: SIM115
                 try:
-                    self.proc = subprocess.Popen(self._command(),
-                                                 stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                                 start_new_session=True)
+                    self.proc = spawn(self._command(), stdout=log, stderr=subprocess.STDOUT,
+                                      stdin=subprocess.DEVNULL, start_new_session=True)
                 except OSError as e:
                     raise LlmServerError(f"the llama.cpp server could not be started: {e}") from e
                 finally:
@@ -572,12 +622,13 @@ class LlamaServer:
             threading.Thread(target=_reap, args=(p, grace), daemon=True).start()
         return True
 
-    def stop(self, wait: bool = True) -> bool:
+    def stop(self, wait: bool = True, grace: float = 20) -> bool:
         """Stop the server this object started (frees its RAM and VRAM); a load in progress is cancelled. True if
-        one was running. wait=False: the signal is sent now, the waiting happens in the background."""
+        one was running. wait=False: the signal is sent now, the waiting happens in the background. grace: seconds
+        the server gets to end after SIGTERM before SIGKILL (a closing window passes a short one)."""
         self._bump()
         left = self._take_over_leftover(keep=False, wait=wait)    # (a server a crashed run left behind, too)
-        return self._kill(self._take(), wait) or left
+        return self._kill(self._take(), wait, grace) or left
 
     def _bump(self) -> None:
         with self._lock:
