@@ -15,16 +15,16 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLineEdit,
-                               QProgressBar, QPushButton, QVBoxLayout)
+                               QMessageBox, QProgressBar, QPushButton, QVBoxLayout)
 
 from .. import chain, swap
 from ..animate import DEFAULT_PROMPT, SIZES, gen_size, window_count
+from .compare_player import ComparePlayer
+from .widgets import FrameTile, guard_wheel, label
 
 METHODS = (("animate+lock", "Head + face lock (Animate, then face swap)"), ("animate", "Head only (Animate)"),
            ("face", "Face only (face swap, the clip's own motion)"),
            ("h3", "Head swap with H3 (head swap LoRA, the clip as guide)"))
-from .compare_player import ComparePlayer
-from .widgets import FrameTile, guard_wheel, label
 
 
 def letterbox(src: str, dest, size: int, crop: tuple[int, int, int] | None = None) -> bool:
@@ -50,6 +50,7 @@ class _Sig(QObject):
     progress = Signal(str, int, int)        # what, done, of
     finished = Signal(object, str)          # (out path, meta) or None, error
     details = Signal(str)                   # the face details written by the vision model
+    reference = Signal(int, str, object, object)   # picture generation, path, upright PNG (None: unreadable), crop
 
 
 class SwapDialog(QDialog):
@@ -84,6 +85,10 @@ class SwapDialog(QDialog):
         self._sig.progress.connect(self._progress)
         self._sig.finished.connect(self._finished)
         self._sig.details.connect(self._auto_details_made)
+        self._sig.reference.connect(self._reference_ready)
+        self._ref_gen = 0                              # which picture the worker is preparing (older answers drop)
+        self.ref_busy = False
+        self._closed = False
         self._auto_details = ""                        # the face details the vision model wrote (for this picture)
 
         top = QHBoxLayout(self)
@@ -177,7 +182,7 @@ class SwapDialog(QDialog):
         form.addRow("", self.sharpen)
         self.size = QComboBox()
         for key in SIZES:
-            self.size.addItem({"480p": "480p (faster)", "720p": "720p (sharper, slower)"}[key], key)
+            self.size.addItem({"480p": "480p (faster)", "720p": "720p (sharper, slower)"}.get(key, key), key)
         self.size.setCurrentIndex(max(0, self.size.findData(settings.value("swapSize", "480p", type=str)
                                                             if settings else "480p")))
         self.size.setToolTip("The size the new head is made at (only the head area: the rest of the clip keeps "
@@ -284,6 +289,7 @@ class SwapDialog(QDialog):
         if self.heads is not None:
             w, h = self.heads["size"]
             self.boxes = swap.head_boxes(self.heads["track"], w, h, self.head_size.value())
+            self.player.refresh()                         # the red head area is drawn at the new size
     
     def _draw_head(self, k: int, img: QImage):
         """The head area of frame k onto the original's picture (stored size)."""
@@ -327,20 +333,50 @@ class SwapDialog(QDialog):
         self._auto_details = ""
 
     def set_reference(self, path: str | None):
-        """The new person's picture (turned upright as a PNG; the head found for the crop)."""
+        """The new person's picture (turned upright as a PNG; the head found for the crop). The picture is read and
+        searched in a worker: the window stays usable and the tile says so; Generate waits for it."""
         if str(path or "") != str(self.ref or ""):
             self._forget_auto_details()
         self.ref, self.ref_png, self.ref_crop = None, None, None
-        if path:
-            png = Path(self._tmp.name) / f"ref_{uuid.uuid4().hex[:6]}.png"
+        self._ref_gen += 1
+        self.ref_busy = bool(path)
+        if not path:
+            self._show_reference()
+            self._update()
+            return
+        self.ref_tile.clear_frame("Looking at the picture …")
+        self.crop_info.setText("Looking for the face …")
+        png = Path(self._tmp.name) / f"ref_{uuid.uuid4().hex[:6]}.png"
+        gen, sig = self._ref_gen, self._sig
+
+        def work():
+            crop = None
             try:
-                chain.to_png(Path(path), png)            # upright (EXIF), as shown and as cropped
-                upright_ok = True
-            except Exception:  # noqa: BLE001
-                png, upright_ok = Path(path), False
-            if not QImage(str(png)).isNull():
-                self.ref, self.ref_png = str(path), png
-                self.ref_crop = self._find_head(png) if upright_ok else None
+                try:
+                    chain.to_png(Path(path), png)        # upright (EXIF), as shown and as cropped
+                    upright_ok = True
+                except Exception:  # noqa: BLE001
+                    use, upright_ok = Path(path), False
+                else:
+                    use = png
+                ok = not QImage(str(use)).isNull()
+                crop = self._find_head(use) if ok and upright_ok else None
+                out = use if ok else None
+            except Exception:  # noqa: BLE001  (the temporary folder removed by a close, ...)
+                out = None
+            try:
+                sig.reference.emit(gen, str(path), out, crop)
+            except RuntimeError:                         # the window is gone
+                pass
+        threading.Thread(target=work, daemon=True).start()
+        self._update()
+
+    def _reference_ready(self, gen: int, path: str, png, crop):
+        if gen != self._ref_gen or self._closed:         # another picture was chosen, or the window closed
+            return
+        self.ref_busy = False
+        if png is not None:
+            self.ref, self.ref_png, self.ref_crop = path, Path(png), crop
         self._show_reference()
         self._update()
 
@@ -405,24 +441,24 @@ class SwapDialog(QDialog):
 
     # ---- generating
     def _update(self):
-        ready = self.heads is not None and bool(self.ref) and not self._busy
+        ready = self.heads is not None and bool(self.ref) and not self._busy and not self.ref_busy
         self.b_gen.setEnabled(ready)
         self.b_gen.setToolTip("" if ready else "Wait for the head to be found and choose the new person's picture")
         self.b_stop.setEnabled(self._busy)
         self.b_play.setEnabled(self.result is not None and not self._busy)
         self.b_use.setEnabled(self.result is not None and not self._busy)
-        for w in (self.head_size, self.ref_combo, self.size, self.prompt, self.method, self.body, self.sharpen):
-            w.setEnabled(not self._busy)
         m = self.method.currentData()
         animate = m in ("animate", "animate+lock")
-        for w in (self.size, self.body, self.head_size):
-            w.setEnabled(not self._busy and animate)
+        idle = not self._busy
+        # one rule per control: busy and the method decide (nothing is enabled and then switched off again)
+        for w, on in ((self.ref_combo, True), (self.method, True), (self.head_size, animate), (self.size, animate),
+                      (self.body, animate), (self.prompt, m != "face"),
+                      (self.sharpen, m in ("face", "animate+lock")),
+                      (self.head_crop, bool(self.ref_png)), (self.b_crop, bool(self.ref_png))):
+            w.setEnabled(idle and on)
         for w in (self.head_crop, self.b_crop):           # (the H3 head swap's picture)
             w.setVisible(m == "h3")
-            w.setEnabled(not self._busy and bool(self.ref_png))
         self.crop_info.setVisible(m == "h3")
-        self.prompt.setEnabled(not self._busy and m != "face")
-        self.sharpen.setEnabled(not self._busy and m in ("face", "animate+lock"))
         self.prompt.setPlaceholderText("The new person's face (empty: described automatically), e.g. “Male, oval "
                                        "face, short black hair, dark beard, brown eyes”" if m == "h3" else DEFAULT_PROMPT)
         why = ""
@@ -442,12 +478,16 @@ class SwapDialog(QDialog):
     def generate(self):
         if not self.b_gen.isEnabled():
             return
+        if self.on_start is not None:
+            try:
+                self.on_start()
+            except Exception as e:  # noqa: BLE001  (a hook that fails must not leave the window half started)
+                self.state.setText(f"Cannot start: {e}")
+                return
         if self.qs is not None:
             for k, v in (("swapSize", self.size.currentData()), ("swapMethod", self.method.currentData()),
                          ("swapBody", self.body.isChecked()), ("swapSharpen", self.sharpen.isChecked())):
                 self.qs.setValue(k, v)
-        if self.on_start is not None:
-            self.on_start()
         self._busy, self._cancel = True, False
         out_dir = self.project / swap.SWAPS_DIR
         stem = f"swap_{self.nid}_{time.strftime('%Y%m%d-%H%M%S')}_{uuid.uuid4().hex[:6]}"
@@ -505,7 +545,7 @@ class SwapDialog(QDialog):
                     gen.generate(swap.head_swap_prompt(details), None, made_raw, out_dir / f"{stem}_h3.png", seed,
                                  settings=st)
                     check()
-                    swap.trim_with_sound(made_raw, clip, out, n)
+                    swap.trim_with_sound(made_raw, clip, out, n, fps=fps)
                     meta = {"method": "h3", "lora": self.h3["lora"], "frames_made": length, "details": details,
                             "steps": st.get("steps"), "seed": seed}
                 elif method == "face":
@@ -595,8 +635,9 @@ class SwapDialog(QDialog):
             elif meta.get("method") == "h3":
                 text = f"Done: {n} frames re-rendered by H3 with the head swap LoRA (the clip's own sound)."
             else:
-                text = (f"Done: {n} frames, made at {meta['gen_size'][0]}×{meta['gen_size'][1]} in "
-                        f"{meta['windows']} part{'s' if meta['windows'] != 1 else ''}"
+                gen, windows = meta.get("gen_size") or ("?", "?"), meta.get("windows")
+                text = (f"Done: {n} frames, made at {gen[0]}×{gen[1]}"
+                        + (f" in {windows} part{'s' if windows != 1 else ''}" if windows else "")
                         + (f" (stored motion used: {', '.join(meta['pose_cached'])})" if meta.get("pose_cached")
                            else "")
                         + ("; its motion is stored for the next try" if meta.get("pose_made") else "")
@@ -607,8 +648,18 @@ class SwapDialog(QDialog):
             self.player.load_result(out)
         self._update()
 
+    def reject(self):
+        """Close: a made result is kept only with "Use this"; ask before it is dropped."""
+        if self.result is not None and not self._busy and QMessageBox.question(
+                self, "Replace a person", "Close without using the result? It stays in the project's swaps folder "
+                "but the video keeps playing its own clip.") != QMessageBox.Yes:
+            return
+        super().reject()
+
     def done(self, r):
+        self._closed = True
         if self._busy:
             self.stop()
         self.player.stop_loading()
         super().done(r)
+        self._tmp.cleanup()

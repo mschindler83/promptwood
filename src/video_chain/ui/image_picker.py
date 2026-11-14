@@ -9,13 +9,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSettings, QSize, Qt, Signal
-from PySide6.QtGui import QIcon, QImage, QImageReader, QPixmap
+from PySide6.QtCore import QObject, QSettings, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QIcon, QImage, QImageReader, QPainter, QPixmap
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QMenu, QSlider, QSplitter, QStyle, QVBoxLayout, QWidget)
 
@@ -37,8 +38,25 @@ DESKTOP_THUMBS = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) 
 MAX_CACHED = 20000                 # beyond this many cached thumbnails the oldest are removed
 
 
+class _Preview(QLabel):
+    """The preview; its background is read from the theme when it is painted (not baked into a stylesheet)."""
+
+    def background(self) -> QColor:
+        return theme().bgSunken
+
+    def paintEvent(self, e):                    # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setBrush(self.background())
+        p.setPen(Qt.NoPen)
+        p.drawRoundedRect(self.rect(), 6, 6)
+        p.end()
+        super().paintEvent(e)
+
+
 class _Thumbs(QObject):
     ready = Signal(int, str, QImage)            # generation, path, thumbnail
+    preview = Signal(int, str, QImage, str)     # selection number, path, large frame (video), media details
 
 
 def _cache_file(cache_dir: Path, path: str, st: os.stat_result) -> Path:
@@ -146,6 +164,12 @@ class ImagePickerDialog(QDialog):
         self.resize(1100, 700)
         self.qs = settings or QSettings()
         self._gen = 0
+        self._lock = threading.Lock()                  # the pool's threads share the cache and the counters
+        self._zoom_px = 0
+        self._zoom_save = QTimer(self)
+        self._zoom_save.setSingleShot(True)
+        self._zoom_save.setInterval(400)
+        self._zoom_save.timeout.connect(lambda: self.qs.setValue("pickerZoom", self._zoom_px))
         self._pool = ThreadPoolExecutor(max_workers=THREADS)
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self.desktop_thumbs = Path(desktop_thumbs) if desktop_thumbs else None
@@ -154,6 +178,8 @@ class ImagePickerDialog(QDialog):
             self._pool.submit(prune_cache, self.cache_dir)
         self._thumbs = _Thumbs()
         self._thumbs.ready.connect(self._thumb_ready)
+        self._thumbs.preview.connect(self._preview_ready)
+        self._sel = 0                                  # which selection the preview is for (older answers drop)
         self._items: dict[str, QListWidgetItem] = {}
         from collections import OrderedDict
         self._cache: OrderedDict[tuple, QImage] = OrderedDict()     # the latest thumbnails (bounded)
@@ -211,10 +237,9 @@ class ImagePickerDialog(QDialog):
         side = QWidget()
         sv = QVBoxLayout(side)
         sv.setContentsMargins(6, 0, 0, 0)
-        self.preview = QLabel()
+        self.preview = _Preview()
         self.preview.setAlignment(Qt.AlignCenter)
         self.preview.setMinimumSize(280, 280)
-        self.preview.setStyleSheet(f"background: {theme().bgSunken.name()}; border-radius: 6px;")
         self.info = label("", level="secondary")
         self.info.setWordWrap(True)
         sv.addWidget(self.preview, 1)
@@ -327,7 +352,8 @@ class ImagePickerDialog(QDialog):
             head.setFlags(Qt.NoItemFlags)
             self.places.addItem(head)
         entries = [("Home", str(Path.home()))]
-        for name in {"image": ("Pictures",), "video": ("Videos",), "media": ("Music", "Videos")}[self.kind]:
+        for name in {"image": ("Pictures",), "video": ("Videos",), "media": ("Music", "Videos"),
+                     "text": ("Documents",)}.get(self.kind, ()):
             if (Path.home() / name).is_dir():
                 entries.append((name, str(Path.home() / name)))
         entries += list(self._extra_places)
@@ -411,7 +437,12 @@ class ImagePickerDialog(QDialog):
         dirs = sorted((e for e in entries if e.is_dir() and not e.name.startswith(".")), key=lambda e: e.name.lower())
         imgs = [e for e in entries if e.is_file() and Path(e.name).suffix.lower() in self.exts]
         if self.sort.currentData() == "date":
-            imgs.sort(key=lambda e: e.stat().st_mtime, reverse=True)
+            def mtime(e):
+                try:
+                    return e.stat().st_mtime
+                except OSError:                       # (gone since the listing: sorted last, still shown)
+                    return 0.0
+            imgs.sort(key=mtime, reverse=True)
         else:
             imgs.sort(key=lambda e: e.name.lower())
         dir_icon = self.style().standardIcon(QStyle.SP_DirIcon)
@@ -440,9 +471,10 @@ class ImagePickerDialog(QDialog):
             key = (path, st.st_mtime_ns, st.st_size)
         except OSError:
             return
-        img = self._cache.get(key)
+        with self._lock:
+            img = self._cache.get(key)
         if img is not None:
-            self.stats["memory"] += 1
+            self._count("memory")
         if img is None and self.cache_dir is not None:          # local disk: no network read
             f = _cache_file(self.cache_dir, path, st)
             if f.is_file():
@@ -450,19 +482,19 @@ class ImagePickerDialog(QDialog):
                 if img.isNull():
                     img = None
                 else:
-                    self.stats["disk"] += 1
+                    self._count("disk")
                     os.utime(f)                                  # recently used: kept when pruning
         if img is None and self.desktop_thumbs is not None:     # the file manager's thumbnail
             img = _desktop_thumbnail(self.desktop_thumbs, path, st)
             if img.isNull():
                 img = None
             else:
-                self.stats["desktop"] += 1
+                self._count("desktop")
         if img is None:                                          # read the image (over the network)
             if gen != self._gen:
                 return
             img = _thumbnail(path)
-            self.stats["read"] += 1
+            self._count("read")
             if not img.isNull() and self.cache_dir is not None:
                 f = _cache_file(self.cache_dir, path, st)
                 try:
@@ -472,10 +504,32 @@ class ImagePickerDialog(QDialog):
                         tmp.replace(f)
                 except OSError:
                     pass
-        self._cache[key] = img
-        while len(self._cache) > 600:                  # a huge folder must not keep every thumbnail in memory
-            self._cache.popitem(last=False)
+        with self._lock:
+            self._cache[key] = img
+            while len(self._cache) > 600:              # a huge folder must not keep every thumbnail in memory
+                self._cache.popitem(last=False)
         self._thumbs.ready.emit(gen, path, img)
+
+    def _preview_ready(self, sel: int, path: str, img: QImage, media: str):
+        item = self.grid.currentItem()
+        if sel != self._sel or item is None or item.data(Qt.UserRole)[1] != path:
+            return
+        box = self.preview.size()
+        if not img.isNull():
+            self.preview.setPixmap(QPixmap.fromImage(img).scaled(box, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        else:
+            self.preview.setPixmap(self.style().standardIcon(QStyle.SP_MediaVolume).pixmap(96, 96))
+        try:
+            st = Path(path).stat()
+            mb, when = st.st_size / 2**20, time.strftime("%Y-%m-%d %H:%M", time.localtime(st.st_mtime))
+        except OSError:
+            mb, when = 0.0, ""
+        caption = item.data(Qt.UserRole + 2)
+        self.info.setText((f"{caption}\n" if caption else "") + f"{Path(path).name}\n{media}\n{mb:.1f} MB · {when}")
+
+    def _count(self, what: str) -> None:
+        with self._lock:
+            self.stats[what] += 1
 
     def _thumb_ready(self, gen: int, path: str, img: QImage):
         if gen != self._gen or path not in self._items:
@@ -509,13 +563,15 @@ class ImagePickerDialog(QDialog):
         self.grid.setGridSize(QSize(cell.width() + 6, cell.height() + 6))
         for i in range(self.grid.count()):
             self.grid.item(i).setSizeHint(cell)
-        self.qs.setValue("pickerZoom", px)
+        self._zoom_px = px
+        self._zoom_save.start()                         # (written once the slider rests, not at every tick)
 
     # ---- selection
     def _selected(self, item, _prev=None):
         if item is None:
             return
         kind, path = item.data(Qt.UserRole)
+        self._sel += 1                                       # (a video's details still coming are for another item)
         if kind == "dir":
             self.preview.clear()
             self.info.setText(f"Folder {Path(path).name}")
@@ -534,20 +590,22 @@ class ImagePickerDialog(QDialog):
             return
         if ext in VIDEO_EXTS or ext in SOUND_EXTS:              # a frame of the video / the sound's icon, its details
             box = self.preview.size()
-            img = _video_frame(path, max(box.width(), box.height())) if ext in VIDEO_EXTS else QImage()
-            if not img.isNull():
-                self.preview.setPixmap(QPixmap.fromImage(img).scaled(box, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-            else:
-                self.preview.setPixmap(self.style().standardIcon(QStyle.SP_MediaVolume).pixmap(96, 96))
-            try:
-                st = Path(path).stat()
-                mb, when = st.st_size / 2**20, time.strftime("%Y-%m-%d %H:%M", time.localtime(st.st_mtime))
-            except OSError:
-                mb, when = 0.0, ""
-            caption = item.data(Qt.UserRole + 2)
-            self.info.setText((f"{caption}\n" if caption else "") + f"{Path(path).name}\n{_media_info(path)}\n"
-                              f"{mb:.1f} MB · {when}")
+            self._sel += 1
+            self.preview.clear()
+            self.info.setText(f"{Path(path).name}\nLoading …")        # (ffmpeg and ffprobe run in the pool)
             self.buttons.button(QDialogButtonBox.Open).setEnabled(True)
+            sel, thumbs, size = self._sel, self._thumbs, max(box.width(), box.height())
+
+            def work():
+                img = _video_frame(path, size) if ext in VIDEO_EXTS else QImage()
+                try:
+                    thumbs.preview.emit(sel, path, img, _media_info(path))
+                except RuntimeError:                   # the dialog is gone
+                    pass
+            try:
+                self._pool.submit(work)
+            except RuntimeError:                       # (closed)
+                pass
             return
         r = QImageReader(path)
         r.setAutoTransform(True)
@@ -612,6 +670,9 @@ class ImagePickerDialog(QDialog):
 
     def done(self, r):
         self._gen += 1                           # pending thumbnails are dropped
+        if self._zoom_save.isActive():           # a zoom change still waiting to be written
+            self._zoom_save.stop()
+            self.qs.setValue("pickerZoom", self._zoom_px)
         self._pool.shutdown(wait=False, cancel_futures=True)
         super().done(r)
 
