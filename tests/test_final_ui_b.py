@@ -179,3 +179,34 @@ def test_the_swap_dialog_says_when_the_clip_cannot_be_read(app, tmp_path, monkey
     assert wait(app, lambda: "Cannot read the clip" in dlg.found_text.text())
     assert "no video stream" in dlg.found_text.text() and dlg.heads is None
     dlg.reject()
+
+
+def test_the_picker_reads_an_image_preview_and_a_list_head_in_the_pool(app, tmp_path, monkeypatch):
+    import threading
+
+    from PIL import Image
+
+    from video_chain.ui import image_picker as IP
+    from waiting import wait
+    Image.new("RGB", (40, 30), "red").save(tmp_path / "a.png")
+    (tmp_path / "l.txt").write_text("first line\nsecond line\n")
+    seen = []
+    real_scaled, real_facts = IP.read_scaled, IP.file_facts
+    monkeypatch.setattr(IP, "read_scaled", lambda *a: (seen.append(("scaled", threading.current_thread())), real_scaled(*a))[1])
+    monkeypatch.setattr(IP, "file_facts", lambda p: (seen.append(("facts", threading.current_thread())), real_facts(p))[1])
+    from PySide6.QtCore import QSettings
+    q = QSettings(str(tmp_path / "s.ini"), QSettings.IniFormat)
+    dlg = IP.ImagePickerDialog(None, "x", str(tmp_path), q, cache_dir=None, desktop_thumbs=None, kind="image")
+    seen.clear()
+    dlg.grid.setCurrentItem(dlg._items[str(tmp_path / "a.png")])
+    assert "Loading" in dlg.info.text()
+    assert wait(app, lambda: "40×30 px" in dlg.info.text())
+    main = threading.main_thread()
+    assert seen and all(t is not main for _w, t in seen), seen
+    dlg.reject()
+    dlg = IP.ImagePickerDialog(None, "x", str(tmp_path), q, cache_dir=None, desktop_thumbs=None, kind="text")
+    seen.clear()
+    dlg.grid.setCurrentItem(dlg._items[str(tmp_path / "l.txt")])
+    assert wait(app, lambda: "second line" in dlg.info.text())
+    assert all(t is not main for _w, t in seen)
+    dlg.reject()
