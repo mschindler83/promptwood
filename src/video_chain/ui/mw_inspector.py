@@ -95,7 +95,8 @@ class InspectorMixin(MainWindowHost):
                 and not self._remixing and not self.running:
             self._remix_timer.start(REMIX_DELAY_MS)  # (e.g. one left over by a stopped run: mixed again soon)
         sel = self.selected_id()
-        on_path = {n.id for n in self.selected_path()}
+        path = self.selected_path()
+        on_path = {n.id for n in path}
         start_pm = self._pixmap(self.project / T.START_FILE)
         infos = [NodeInfo(START, None, "Start", "", Path(self.tree.image).name if self.tree.image else "",
                           "start", start_pm, on_path=True, selected=sel == START)]
@@ -121,7 +122,7 @@ class InspectorMixin(MainWindowHost):
                                   self.badge(n), n.kind))
         self.graph.show_nodes(infos)
         self._show_tracks()                        # (how many clips play each track)
-        if rebuild_path or [c.nid for c in self.cards] != [n.id for n in self.selected_path()]:
+        if rebuild_path or [c.nid for c in self.cards] != [n.id for n in path]:
             self._rebuild_path()
         else:
             self._update_cards()

@@ -359,3 +359,19 @@ def test_remade_note_holds_what_a_change_said_about_changed_clips(app, win, tmp_
     win.steps.setValue(28)                                  # set back: the clips are done again, none is CHANGED
     win._options_settled()
     assert win._remade_note == ""
+
+
+# ------------------------------------------------------------------ MWB-11: refresh walks the selected path once
+def test_refresh_asks_for_the_selected_path_once(app, win, tmp_path, image, monkeypatch):
+    new_project(win, tmp_path, image, ("a", "b"))
+    calls = []
+    orig = win.selected_path
+    import sys
+
+    def counted():
+        if sys._getframe(1).f_code.co_name == "refresh":          # (what refresh itself asks, not its helpers)
+            calls.append(1)
+        return orig()
+    monkeypatch.setattr(win, "selected_path", counted)
+    win.refresh()
+    assert len(calls) == 1
