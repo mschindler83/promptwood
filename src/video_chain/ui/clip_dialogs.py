@@ -131,6 +131,7 @@ class CompareDialog(QDialog):
         grid.setSpacing(10)
         cols = 2 if len(items) <= 4 else 3
         self.keep_buttons: dict[str, QPushButton] = {}
+        self.errors: dict[str, QLabel] = {}
         self.audio_outs: list = []
         has_player = False
         if player:
@@ -154,6 +155,7 @@ class CompareDialog(QDialog):
                 p.setVideoOutput(view.sink)
                 p.setSource(QUrl.fromLocalFile(str(video)))
                 p.mediaStatusChanged.connect(lambda st, p=p: self._ended(p, st))
+                p.errorOccurred.connect(lambda _e, msg="", nid=nid: self._player_error(nid, msg))
                 self.players.append(p)
                 self.audio_outs.append(out)
                 bv.addWidget(view, 1)
@@ -171,6 +173,11 @@ class CompareDialog(QDialog):
             self.keep_buttons[nid] = keep
             head.addWidget(keep)
             bv.addLayout(head)
+            err = label("", severity="error")             # (why this clip cannot be played: filled by its player)
+            err.setWordWrap(True)
+            err.hide()
+            self.errors[nid] = err
+            bv.addWidget(err)
             grid.addWidget(box, k // cols, k % cols)
         v.addLayout(grid, 1)
         ctl = QHBoxLayout()
@@ -206,6 +213,13 @@ class CompareDialog(QDialog):
             self.players[0].positionChanged.connect(
                 self._follow)
             QTimer.singleShot(200, self.restart)
+
+    def _player_error(self, nid: str, message: str) -> None:
+        """A clip that cannot be played (no codec, unreadable file, no audio device): say so under it."""
+        lab = self.errors.get(nid)
+        if lab is not None:
+            lab.setText(f"Cannot play this clip: {message or 'the player reported an error'}")
+            lab.show()
 
     def _follow(self, ms: int):
         if not self.slider.isSliderDown():

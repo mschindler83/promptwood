@@ -331,3 +331,31 @@ def test_the_image_dialog_stops_a_running_job_with_stop_like_the_other_windows(a
     dlg = _dialog(tmp_path)
     assert dlg.b_cancel.text() == "Stop"
     dlg.reject()
+
+
+def test_the_play_cleaned_player_says_when_it_cannot_play(app, tmp_path):
+    from PySide6.QtMultimedia import QMediaPlayer
+
+    from test_ui_media_fixes import make_wav
+    from video_chain.ui.audio_editor import AudioRangeDialog
+    dlg = AudioRangeDialog(None, str(make_wav(tmp_path / "s.wav")), player=True)
+    dlg.clean = {"file": str(make_wav(tmp_path / "c.wav")), "start": 0.0, "end": 1.0}
+    dlg._update_enabled()
+    dlg.play_cleaned()
+    assert dlg.clean_player is not None and dlg.b_clean_play.isEnabled()
+    dlg.clean_player.errorOccurred.emit(QMediaPlayer.Error.ResourceError, "no audio device")
+    assert "no audio device" in dlg.clean_info.text() and not dlg.b_clean_play.isEnabled()
+    dlg.done(0)
+
+
+def test_a_compare_player_that_fails_is_named_in_its_clip(app, tmp_path):
+    from PySide6.QtMultimedia import QMediaPlayer
+
+    from video_chain.ui.clip_dialogs import CompareDialog
+    dlg = CompareDialog(None, [("a", "A", "", tmp_path / "a.mp4"), ("b", "B", "", tmp_path / "b.mp4")],
+                        lambda nid: True)
+    assert len(dlg.players) == 2
+    dlg.players[1].errorOccurred.emit(QMediaPlayer.Error.FormatError, "unsupported format")
+    assert "unsupported format" in dlg.errors["b"].text() and not dlg.errors["b"].isHidden()
+    assert dlg.errors["a"].isHidden()
+    dlg.reject()

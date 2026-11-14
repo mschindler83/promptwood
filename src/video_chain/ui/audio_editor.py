@@ -127,6 +127,7 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
         self.clean: dict | None = None                 # {"file", "start", "end"}: the chosen part without its music
         self.clean_busy = False
         self.clean_player: QMediaPlayer | None = None
+        self.clean_error = ""                           # why the cleaned sound cannot be played ('' = it can)
         self._clean_n = 0
         self._tmp: tempfile.TemporaryDirectory | None = None
         self.file, self.duration = "", 0.0
@@ -357,7 +358,8 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
         # (its thread is writing)
         self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setEnabled(not self.clean_busy)
         self.b_clean.setEnabled(on and long and not self.clean_busy and self._isolate is not None)
-        self.b_clean_play.setEnabled(self.clean is not None and self.want_player and not self.clean_busy)
+        self.b_clean_play.setEnabled(self.clean is not None and self.want_player and not self.clean_busy
+                                     and not self.clean_error)
         self.use_clean.setEnabled(self.clean is not None and not self.clean_busy)
 
     # ---- range
@@ -452,6 +454,7 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
             self.clean_info.setText("The part changed meanwhile: remove the music again.")
         else:
             self.clean = {"file": Path(out), "start": start, "end": end}
+            self.clean_error = ""
             self.use_clean.setChecked(True)
             self.clean_info.setText(f"Music removed from {fmt(start)} – {fmt(end)}. Listen to it; untick to use the "
                                     "sound as it is.")
@@ -471,6 +474,7 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
             self.clean_audio = QAudioOutput(self)
             self.clean_player = QMediaPlayer(self)
             self.clean_player.setAudioOutput(self.clean_audio)
+            self.clean_player.errorOccurred.connect(self._on_clean_error)
             self.clean_player.playbackStateChanged.connect(
                 lambda st: self.b_clean_play.setText("Stop" if st == QMediaPlayer.PlaybackState.PlayingState else "Play cleaned"))
         if self.clean_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
@@ -480,9 +484,16 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
             self.player.pause()
         url = QUrl.fromLocalFile(str(self.clean["file"]))
         if self.clean_player.source() != url:
+            self.clean_error = ""
             self.clean_player.setSource(url)
         self.clean_player.setPosition(0)
         self.clean_player.play()
+
+    def _on_clean_error(self, _error, message: str = "") -> None:
+        """The cleaned sound cannot be played (no codec, no audio device): say so and switch the button off."""
+        self.clean_error = message or "the player reported an error"
+        self.clean_info.setText(f"Cannot play the cleaned sound: {self.clean_error}")
+        self._update_enabled()
 
     def _stop_cleaned(self):
         if self.clean_player is not None:
