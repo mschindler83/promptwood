@@ -125,7 +125,7 @@ def test_main_builds_the_window_and_runs_the_loop(qapp, monkeypatch):
     import video_chain.ui.main_window as M
 
     class FakeWin:
-        def __init__(self):
+        def __init__(self, settings):
             events.append("made")
 
         def show(self):

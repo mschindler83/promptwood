@@ -35,6 +35,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
                                QToolButton, QToolTip, QVBoxLayout, QWidget)
 
 from .. import chain
+from .. import comfy as CMF
+from .. import config
 from .. import film as F
 from .. import camera as CAM
 from .. import swap
@@ -73,9 +75,10 @@ except ImportError:                             # pragma: no cover
 
 DEFAULT_COMFY_URL = "http://127.0.0.1:8188"
 from ..llm_server import DEFAULT_PORT as LLM_DEFAULT_PORT, DEFAULT_SERVER as LLM_DEFAULT_SERVER  # noqa: E402
-LLM_MODEL_DIRS = (Path("/path/to/ai/hf-models"), Path.home() / ".cache" / "huggingface" / "hub")
+LLM_MODEL_DIRS = (config.hf_cache(), Path.home() / ".cache" / "huggingface" / "hub")
 
 
+CLOSE_GRACE = 3.0          # seconds llama-server gets to end after SIGTERM when the window closes
 CHAT_HINTS = ("instruct", "chat", "-it-", "-it.", "_it_", "abliterated", "uncensored")
 
 
@@ -185,8 +188,9 @@ MAX_RECENT = 10
 class NewProjectDialog(QDialog):
     """Name + location (+ an optional start image) for a new project."""
 
-    def __init__(self, parent, location: str, image: str = ""):
+    def __init__(self, parent, location: str, settings: QSettings, image: str = ""):
         super().__init__(parent)
+        self.qs = settings                 # (the image picker keeps its folders and cache in it)
         self.setWindowTitle("New project")
         self.setMinimumWidth(520)
         f = QFormLayout(self)
@@ -252,7 +256,7 @@ class NewProjectDialog(QDialog):
 
     def _choose_image(self):
         start = str(Path(self.image.text()).parent) if self.image.text().strip() else None
-        f = pick_image(self, "Start image", getattr(self.parent(), "qs", None), start)
+        f = pick_image(self, "Start image", self.qs, start)
         if f:
             self.image.setText(f)
 
@@ -593,6 +597,7 @@ class _Bridge(QObject):
     copied = Signal(str, str)                  # Save as: target folder, error ('' = done)
     converted = Signal(str, object, str, str, str)  # video node id, record or None, error, token, project
     remixed = Signal(object, str, str)         # [(clip id, its new record)], error ('' = done), project
+    freed = Signal(bool)                       # ComfyUI's answer to "unload your models" (True: done)
     llm_room = Signal(str)                     # ComfyUI's models were unloaded for the llama.cpp server (why)
     spoken = Signal(str, object, str, str)     # clip id, rendered lines (tts.render_lines) or None, error, project
     tts_log = Signal(str)                      # a step of text to speech
@@ -1831,10 +1836,10 @@ class Preview(QWidget):
 class MainWindow(QMainWindow):
     viewChanged = Signal(bool)                  # the view was switched: True = Simple (after the controls follow)
 
-    def __init__(self, settings: QSettings | None = None, command: list[str] | None = None):
+    def __init__(self, settings: QSettings, command: list[str] | None = None):
         super().__init__()
         self.setWindowTitle("Promptwood")
-        self.qs = settings or QSettings()
+        self.qs = settings
         # Simple or Advanced, decided once: Simple on a first run (no settings yet), Advanced for settings from
         # before the views existed (that user knows every control); stored at once, so it never flips later
         mode = self.qs.value("viewMode", "", type=str)
@@ -1889,6 +1894,7 @@ class MainWindow(QMainWindow):
         self.bridge.converted.connect(self._converted)
         self.bridge.remixed.connect(self._remixed)
         self.bridge.llm_room.connect(self._llm_room_made)
+        self.bridge.freed.connect(self._comfy_freed)
         self.bridge.spoken.connect(self._lines_spoken)
         self.bridge.eleven_models.connect(self._fill_eleven_models)
         self.bridge.eleven_cloned.connect(self._eleven_cloned)
@@ -1928,6 +1934,7 @@ class MainWindow(QMainWindow):
         self._comfy_timer = QTimer(self, interval=4000, timeout=self._poll_comfy)
         self._build()
         self._load_settings()
+        self._end_leftover_llama()
         self._gpu_timer.start()
         self._comfy_timer.start()
         QTimer.singleShot(0, self._poll_comfy)
@@ -3789,7 +3796,7 @@ class MainWindow(QMainWindow):
             return
         last = self.recent_projects()
         location = str(Path(last[0]).parent) if last else str(Path.home())
-        dlg = NewProjectDialog(self, location)
+        dlg = NewProjectDialog(self, location, self.qs)
         if dlg.exec() != QDialog.Accepted:
             return
         self.create_project(dlg.folder(), dlg.image.text().strip())
@@ -4302,6 +4309,20 @@ class MainWindow(QMainWindow):
         self._llama.before_launch = lambda llama=self._llama: self._room_for_llama(llama, url)
         return self._llama
 
+    def _end_leftover_llama(self):
+        """At start-up: a llama-server an earlier run left behind (it crashed; found by its pid file) holds RAM and
+        VRAM nobody knows about; it is ended, in the background. Nothing else is touched."""
+        from ..llm_server import LlamaServer
+        log_dir = Path.home() / ".cache" / "video-chain"
+        server, port = self.llm_server.text().strip() or LLM_DEFAULT_SERVER, self.llm_port.value()
+
+        def work():
+            try:
+                LlamaServer(server, "", port, log_dir=log_dir).stop(wait=True, grace=CLOSE_GRACE)
+            except Exception:  # noqa: BLE001
+                logging.getLogger(__name__).warning("ending a leftover llama-server", exc_info=True)
+        threading.Thread(target=work, daemon=True, name="llama-leftover").start()
+
     def _room_for_llama(self, llama, url: str, settle: float = 15.0) -> None:
         """(start()'s thread, just before the llama.cpp server starts) Too little free VRAM for it: ComfyUI is asked
         to unload its models (the clip / image model loads again when it is needed). While clips are generated it
@@ -4322,13 +4343,8 @@ class MainWindow(QMainWindow):
         if self.running:
             raise error(f"only {gb(free)} of VRAM is free while clips are generated and {what} needs about "
                         f"{gb(need)}; {later}")
-        try:
-            req = urllib.request.Request(url + "/free", data=b'{"unload_models": true, "free_memory": true}',
-                                         headers={"Content-Type": "application/json"}, method="POST")
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                resp.read()
-        except Exception:  # noqa: BLE001  (ComfyUI is not up: the VRAM is used by something else)
-            return
+        if not CMF.free_models(url, timeout=10):
+            return                                  # (ComfyUI is not up: the VRAM is used by something else)
         end = time.time() + settle
         now = free
         while time.time() < end:
@@ -4350,11 +4366,12 @@ class MainWindow(QMainWindow):
         self.log.appendPlainText(msg)
         self.status.setText(msg)
 
-    def stop_llama(self, why: str = "", wait: bool = False) -> bool:
+    def stop_llama(self, why: str = "", wait: bool = False, grace: float | None = None) -> bool:
         """Stop the refiner's llama.cpp server if the app started it (its RAM / VRAM back for ComfyUI). wait: until
-        it is gone (when the window closes: a background wait would die with the app, leaving the server)."""
+        it is gone (when the window closes: a background wait would die with the app, leaving the server). grace:
+        seconds it gets to end before it is killed (short when the window closes)."""
         cur = getattr(self, "_llama", None)
-        stopped = bool(cur is not None and cur.stop(wait=wait))
+        stopped = bool(cur is not None and (cur.stop(wait=wait) if grace is None else cur.stop(wait=wait, grace=grace)))
         if stopped and why:
             self.log.appendPlainText(f"Stopped the llama.cpp server ({why}).")
         return stopped
@@ -9126,17 +9143,24 @@ class MainWindow(QMainWindow):
     def _free_comfy(self):
         """Ask ComfyUI to unload its models (in the background)."""
         url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL).rstrip("/")
-        self._comfy_model = None
         self._qwen_timer.stop()
 
         def work():
             try:
-                req = urllib.request.Request(url + "/free", data=b'{"unload_models": true, "free_memory": true}',
-                                             headers={"Content-Type": "application/json"}, method="POST")
-                urllib.request.urlopen(req, timeout=10).read()
+                ok = CMF.free_models(url, timeout=10)
             except Exception:  # noqa: BLE001
-                pass
+                logging.getLogger(__name__).warning("unloading ComfyUI's models", exc_info=True)
+                ok = False
+            self.bridge.freed.emit(ok)
         threading.Thread(target=work, daemon=True).start()
+
+    def _comfy_freed(self, ok: bool):
+        """ComfyUI answered the unload request (MWC-30): the model counts as unloaded only when it did."""
+        if ok:
+            self._comfy_model = None
+            self.log.appendPlainText("ComfyUI's models were unloaded.")
+        else:
+            self._report_error("Could not unload the model: ComfyUI did not answer; it may still hold the memory.")
         self._update_model_label()
 
     def _qwen_idle(self):
@@ -9551,11 +9575,9 @@ class MainWindow(QMainWindow):
         """Ask ComfyUI to unload its models, in a thread (the GUI never waits for the network)."""
         def work():
             try:
-                urllib.request.urlopen(urllib.request.Request(
-                    url.rstrip("/") + "/free", data=b'{"unload_models": true, "free_memory": true}',
-                    headers={"Content-Type": "application/json"}, method="POST"), timeout=3).read()
-            except Exception:  # noqa: BLE001
-                pass
+                CMF.free_models(url, timeout=3)
+            except Exception:  # noqa: BLE001  (free_models reports its own failures)
+                logging.getLogger(__name__).warning("unloading ComfyUI's models", exc_info=True)
             finally:
                 if done is not None:
                     done.set()
@@ -9627,7 +9649,7 @@ class MainWindow(QMainWindow):
         self._save_timer.stop()
         if self._trigger_scan is not None:
             self._trigger_scan.set()                  # the trigger word lookup stops at the next file
-        self.stop_llama()                             # never leave the language model server behind
+        self.stop_llama(wait=True, grace=CLOSE_GRACE)   # never leave the language model server behind (but be quick)
         self.stop_tts()
         timers = [t for t in (self._qwen_timer, self._model_timer, self._gpu_timer, self._comfy_timer) if t.isActive()]
         for t in timers:
