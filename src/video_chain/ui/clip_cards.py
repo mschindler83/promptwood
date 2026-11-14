@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import random
 from pathlib import Path
+from types import SimpleNamespace
 
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QAction, QCursor, QKeySequence, QPixmap
@@ -68,7 +69,48 @@ def more_menu(card, nid: str, entries, tip: str = "More actions for this clip: v
     return b, acts
 
 
-class PromptCard(QFrame):
+class _ClipCardBase(QFrame):
+    """What the card of a made clip and the card of a real video share: the state tag and picture, the border while it
+    is worked on, freezing. The subclasses say how they differ in the class attributes and _frozen_tip."""
+    _NO_PICTURE = "not made yet"                       # the thumbnail's text while there is nothing to show
+    _BUSY = ("generating",)                            # the states in which the card shows the progress bar
+    _BACKGROUND = "bgRaised"                           # the theme colour of the card's background
+
+    def set_state(self, state: str, pixmap: QPixmap | None, step: str = ""):
+        self.state = state
+        self.tag.setText(STATE_TEXT.get(state, state.upper()))
+        self.tag.setProperty("state", STATE_STYLE.get(state, ""))
+        repolish(self.tag)
+        if pixmap is not None and not pixmap.isNull():
+            self.thumb.set_image(pixmap.toImage())
+        else:
+            self.thumb.clear_frame(self._NO_PICTURE)
+        self.step.setText(step)
+        self.bar.setVisible(state in self._BUSY)
+        self._restyle()
+
+    def set_progress(self, i: int, n: int, text: str | None = None):
+        """The progress of the work on the card (a real video has none)."""
+
+    def _frozen_tip(self, frozen: bool) -> str:
+        raise NotImplementedError
+
+    def set_frozen(self, frozen: bool):
+        self.frozen = bool(frozen)
+        self.b_freeze.setChecked(self.frozen)
+        self.b_freeze.setToolTip(self._frozen_tip(self.frozen))
+        self.set_editable(self._on)
+
+    def _restyle(self):
+        t = theme()
+        border = t.accent.name() if self.state in self._BUSY else t.lineSubtle.name()
+        css = (f"QFrame#promptCard {{ background: {getattr(t, self._BACKGROUND).name()}; border: 1px solid {border};"
+               f" border-radius: 6px; }} QFrame#promptCard QLabel {{ background: transparent; }}")
+        if css != self.styleSheet():                # (a new sheet re-polishes the card and everything in it)
+            self.setStyleSheet(css)
+
+
+class PromptCard(_ClipCardBase):
     """One clip of the selected path: prompt, seed, LoRAs, own length / steps, status."""
     settings_open = False                      # the own-settings part is open (the same on every card)
     edited = Signal(str)
@@ -85,6 +127,7 @@ class PromptCard(QFrame):
     fix = Signal(str, str)                     # what to fix (a problem's action, "cast" …), node id
 
     def __init__(self, node: T.Node, parent=None, names=lambda: [], view: ViewMode | None = None):
+        shared = SimpleNamespace()          # what the sections of the build hand to each other
         super().__init__(parent)
         self.nid = node.id
         self.names = names
@@ -92,9 +135,21 @@ class PromptCard(QFrame):
         self.setAttribute(Qt.WA_StyledBackground)
         self.setFixedWidth(CARD_WIDTH)
         self.state = ""
-        v = QVBoxLayout(self)
-        v.setContentsMargins(10, 8, 8, 10)
-        v.setSpacing(6)
+        shared.v = QVBoxLayout(self)
+        shared.v.setContentsMargins(10, 8, 8, 10)
+        shared.v.setSpacing(6)
+        self._build_header(shared, node)
+        self._build_prompt(shared, node, names)
+        self._build_prompt_tools(shared)
+        self._build_problems(shared, node)
+        self._build_own_settings(shared)
+        self._build_link_rows(shared)
+        self._build_sound_rows(shared)
+        self._build_end_rows(shared)
+        self._build_footer(shared, view)
+
+    def _build_header(self, shared, node):
+        """Build the header: title, state tag, variant button, More menu."""
         head = QHBoxLayout()
         head.setSpacing(6)
         self.title = label("Clip", type_="heading")
@@ -143,28 +198,34 @@ class PromptCard(QFrame):
         self.has_lines = False                   # its prompt has a spoken line (text to speech can speak it)
         self.b_freeze = acts["freeze_toggle"]
         self.b_freeze.setCheckable(True)
-        v.addLayout(head)
+        shared.v.addLayout(head)
+
+    def _build_prompt(self, shared, node, names):
+        """Build the picture, the prompt box, the faces line and the chips."""
         self.span = label("", level="tertiary")
-        v.addWidget(self.span)
+        shared.v.addWidget(self.span)
         self.thumb = FrameTile(312, 176)
         self.thumb.setToolTip("Last frame of this clip (or its hand-over frame); click to play the clip")
         self.thumb.clicked.connect(lambda _t: self.play.emit(self.nid))
-        v.addWidget(self.thumb)
+        shared.v.addWidget(self.thumb)
         self.edit = QPlainTextEdit(node.prompt)
         self.edit.setPlaceholderText("What happens in this clip? It starts from the last frame of the clip before.\n"
                                      "Type @ for a person or place; the Camera button adds a camera move.")
         self.edit.setTabChangesFocus(True)
         self.edit.setMinimumHeight(96)
-        v.addWidget(self.edit, 1)
+        shared.v.addWidget(self.edit, 1)
         self.mentions = MentionHelper(self.edit, names)
         self.faces = label("", level="tertiary")
         self.faces.setWordWrap(True)
         self.faces.hide()
-        v.addWidget(self.faces)
+        shared.v.addWidget(self.faces)
         self.chips = ChipRow(self)                 # what the clip is made with, in model order (set_inputs)
         self.chips.leadToggled.connect(lambda on: self.leadChanged.emit(self.nid, on))
         self.chips.promptWanted.connect(lambda: self.modelPrompt.emit(self.nid))
-        v.addWidget(self.chips)
+        shared.v.addWidget(self.chips)
+
+    def _build_prompt_tools(self, shared):
+        """Build the buttons under the prompt (person, camera, example, refine)."""
         # under the prompt: put in a person or place, a camera move, an example; Refine
         foot = QHBoxLayout()
         foot.setSpacing(2)
@@ -203,10 +264,13 @@ class PromptCard(QFrame):
         self.b_refine.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.b_refine.clicked.connect(lambda: self.action.emit("refine", self.nid))
         foot.addWidget(self.b_refine)
-        v.addLayout(foot)
+        shared.v.addLayout(foot)
+
+    def _build_problems(self, shared, node):
+        """Build the problems box and the seed row."""
         self.problems = ProblemBox(self)             # what blocks the clip / what went wrong, with what to do
         self.problems.wanted.connect(lambda a: self.fix.emit(a, self.nid))
-        v.addWidget(self.problems)
+        shared.v.addWidget(self.problems)
         foot = QHBoxLayout()
         self.words = label("", level="tertiary")
         foot.addWidget(self.words)
@@ -229,10 +293,13 @@ class PromptCard(QFrame):
         self.b_seed = icon_button("rotate", "New random seed for this clip (another version when it is made again)")
         self.b_seed.clicked.connect(self.random_seed)
         foot.addWidget(self.b_seed)
-        v.addLayout(foot)
+        shared.v.addLayout(foot)
 
         # own settings of this clip; "default" = the project's
         self.ov = dict(node.overrides or {})
+
+    def _build_own_settings(self, shared):
+        """Build the clip's own settings: length, steps, LoRAs."""
         self.steps_locked = False                 # turbo mode: the turbo steps apply to every clip
         self.settings_toggle = QToolButton()
         self.settings_toggle.setCheckable(True)
@@ -240,7 +307,7 @@ class PromptCard(QFrame):
         self.settings_toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.settings_toggle.setToolTip("This clip's own length and steps (unset: the project's)")
         self.settings_toggle.toggled.connect(self._show_settings)
-        v.addWidget(self.settings_toggle)
+        shared.v.addWidget(self.settings_toggle)
         self.own = QWidget()
         grid = QFormLayout(self.own)
         grid.setContentsMargins(0, 0, 0, 0)
@@ -263,23 +330,26 @@ class PromptCard(QFrame):
         srow.addWidget(self.steps_label)
         srow.addWidget(self.steps)
         grid.addRow("Length", srow)
-        v.addWidget(self.own)
-        link = QFormLayout()
-        link.setContentsMargins(0, 2, 0, 0)
-        link.setHorizontalSpacing(8)
-        link.setVerticalSpacing(4)
-        link.addRow("LoRAs", self.loras)
+        shared.v.addWidget(self.own)
+
+    def _build_link_rows(self, shared):
+        """Build the rows of carry-over, continue and camera."""
+        shared.link = QFormLayout()
+        shared.link.setContentsMargins(0, 2, 0, 0)
+        shared.link.setHorizontalSpacing(8)
+        shared.link.setVerticalSpacing(4)
+        shared.link.addRow("LoRAs", self.loras)
         self.guide = QComboBox()
         for n, text in GUIDE_TEXT:
             self.guide.addItem(text, n)
         self.guide.setToolTip(GUIDE_TIP)
-        link.addRow("Carry-over", self.guide)
+        shared.link.addRow("Carry-over", self.guide)
         self.cont = QComboBox()                  # continue the clip before: its end as <Video 1> (h3 format)
         self.cont.addItem("off", None)
         self.cont.setToolTip(CONTINUE_TIP)
         self._cont_choices: list[int] = []       # the lengths that fit (tree.continue_choices)
         self._cont_why = CONTINUE_FIRST_TIP      # why it cannot be used ('': it can)
-        link.addRow("Continue", self.cont)
+        shared.link.addRow("Continue", self.cont)
         crow = QHBoxLayout()
         crow.setSpacing(6)
         self.cam_move = QComboBox()
@@ -301,7 +371,10 @@ class PromptCard(QFrame):
         crow.addWidget(self.cam_move, 2)
         crow.addWidget(self.cam_amp, 1)
         crow.addWidget(self.cam_speed, 1)
-        link.addRow("Camera", crow)
+        shared.link.addRow("Camera", crow)
+
+    def _build_sound_rows(self, shared):
+        """Build the sound rows."""
         self.sound_box = QWidget()
         sb = QVBoxLayout(self.sound_box)
         sb.setContentsMargins(0, 0, 0, 0)
@@ -352,10 +425,13 @@ class PromptCard(QFrame):
         sb.addWidget(self.sound_over)
         sb.addWidget(self.mix_row)
         sb.addWidget(self.src_sound_info)
-        link.addRow("Sound", self.sound_box)
-        self._link = link
-        link.setRowVisible(self.sound_box, True)           # (the sound choice in it only when there is one)
+        shared.link.addRow("Sound", self.sound_box)
+        self._link = shared.link
+        shared.link.setRowVisible(self.sound_box, True)           # (the sound choice in it only when there is one)
         self._max_guide = 0
+
+    def _build_end_rows(self, shared):
+        """Build the end image and keyframe rows."""
         erow = QHBoxLayout()
         erow.setSpacing(6)
         self.end_thumb = QLabel()
@@ -378,7 +454,7 @@ class PromptCard(QFrame):
         erow.addWidget(self.b_end_video)
         erow.addWidget(self.b_end_ai)
         erow.addWidget(self.b_end_clear)
-        link.addRow("End", erow)
+        shared.link.addRow("End", erow)
         for w in (self.end_text, self.end_thumb):          # (a picture dropped here is the end image)
             FileDrop(w, lambda files: self.end_dropped.emit(self.nid, files[0]),
                      lambda: self._end_free and not self.edit.isReadOnly())
@@ -401,7 +477,7 @@ class PromptCard(QFrame):
         self.key_warn.hide()
         kbox.addWidget(self.key_warn)
         self.keys_row = row_widget(kbox)
-        link.addRow("Keyframes", self.keys_row)
+        shared.link.addRow("Keyframes", self.keys_row)
         hrow = QHBoxLayout()
         hrow.setSpacing(6)
         self.hand_text = label("last frame", level="secondary")
@@ -414,19 +490,22 @@ class PromptCard(QFrame):
         hrow.addWidget(self.b_hand)
         hrow.addWidget(self.b_hand_clear)
         self.hand_row = row_widget(hrow)
-        link.addRow("Hand-over", self.hand_row)
+        shared.link.addRow("Hand-over", self.hand_row)
         self._can_hand, self._has_hand = False, False
         self._end_free = True                    # no video after this clip: its own end image can be set
         self._has_end = False
         self._guide_useful = True                # there is a clip before it or a video after it
-        v.addLayout(link)
+        shared.v.addLayout(shared.link)
+
+    def _build_footer(self, shared, view):
+        """Build the Simple view, the status rows and the signal wiring."""
         # Simple view: the expert parts of the card are hidden (their values still apply: the note says so)
         self.view = view if view is not None else ViewMode(False, self)
         self.adv_note = AdvancedNote(self.view)
-        v.addWidget(self.adv_note)
+        shared.v.addWidget(self.adv_note)
         self.view.advanced(self.seed_label, self.seed, self.b_seed, self.veda_mark, self.steps_label, self.steps,
-                           (link, self.loras), (link, self.guide), (link, self.cont), (link, self.keys_row),
-                           (link, self.hand_row), self.mix_level_box)
+                           (shared.link, self.loras), (shared.link, self.guide), (shared.link, self.cont), (shared.link, self.keys_row),
+                           (shared.link, self.hand_row), self.mix_level_box)
         self._show_mix()
         self._show_settings(PromptCard.settings_open)
         self.guide.currentIndexChanged.connect(self._ov_changed)
@@ -449,11 +528,11 @@ class PromptCard(QFrame):
         self.b_revert.hide()
         strow.addWidget(self.step, 1)
         strow.addWidget(self.b_revert, 0, Qt.AlignTop)
-        v.addLayout(strow)
+        shared.v.addLayout(strow)
         self.bar = QProgressBar()
         self.bar.setRange(0, 100)
         self.bar.hide()
-        v.addWidget(self.bar)
+        shared.v.addWidget(self.bar)
         self.edit.textChanged.connect(self._text)
         self.seed.valueChanged.connect(lambda s: self.seedChanged.emit(self.nid, s))
         self.guide.currentIndexChanged.connect(lambda *_: self._enable_guide())
@@ -608,19 +687,6 @@ class PromptCard(QFrame):
         n = len(self.text().split())
         self.words.setText(f"{n} words" if n else "empty prompt")
 
-    def set_state(self, state: str, pixmap: QPixmap | None, step: str = ""):
-        self.state = state
-        self.tag.setText(STATE_TEXT.get(state, state.upper()))
-        self.tag.setProperty("state", STATE_STYLE.get(state, ""))
-        repolish(self.tag)
-        if pixmap is not None and not pixmap.isNull():
-            self.thumb.set_image(pixmap.toImage())
-        else:
-            self.thumb.clear_frame("not made yet")
-        self.step.setText(step)
-        self.bar.setVisible(state == "generating")
-        self._restyle()
-
     def set_progress(self, i: int, n: int, text: str | None = None):
         if n:
             self.bar.setValue(round(100 * i / n))
@@ -656,14 +722,10 @@ class PromptCard(QFrame):
         self.b_revert.setEnabled(edit)
         self.b_freeze.setEnabled(self._on and (self.frozen or self.state == "done"))
 
-    def set_frozen(self, frozen: bool):
-        """A frozen clip: its prompt, seed, settings, end, keyframes and hand-over are locked."""
-        self.frozen = bool(frozen)
-        self.b_freeze.setChecked(self.frozen)
-        self.b_freeze.setToolTip(FREEZE_TIP if not self.frozen else
-                                 "Frozen: kept as made, whatever the project's settings say. Click to unfreeze it "
-                                 "(and the frozen clips after it): it can be edited and follows the settings again")
-        self.set_editable(self._on)
+    def _frozen_tip(self, frozen: bool) -> str:
+        return FREEZE_TIP if not frozen else (
+            "Frozen: kept as made, whatever the project's settings say. Click to unfreeze it "
+            "(and the frozen clips after it): it can be edited and follows the settings again")
 
     def _show_settings(self, on: bool):
         PromptCard.settings_open = bool(on)
@@ -947,17 +1009,12 @@ class PromptCard(QFrame):
             self.end_thumb.hide()
         self._enable_end()
 
-    def _restyle(self):
-        t = theme()
-        border = t.accent.name() if self.state == "generating" else t.lineSubtle.name()
-        css = (f"QFrame#promptCard {{ background: {t.bgRaised.name()}; border: 1px solid {border};"
-               f" border-radius: 6px; }} QFrame#promptCard QLabel {{ background: transparent; }}")
-        if css != self.styleSheet():                # (a new sheet re-polishes the card and everything in it)
-            self.setStyleSheet(css)
 
-
-class VideoCard(QFrame):
+class VideoCard(_ClipCardBase):
     """A real video in the selected path: its file and range, status; edit the range, play, delete."""
+    _NO_PICTURE = "not converted yet"
+    _BUSY = ("generating", "converting")
+    _BACKGROUND = "bgSunken"
     action = Signal(str, str)                  # action, node id
     play = Signal(str)
 
@@ -1034,22 +1091,6 @@ class VideoCard(QFrame):
         self.range.setText(f"{format_time(src.get('start', 0), 1)} – {format_time(src.get('end', 0), 1)} of the file · "
                            f"{n} frames at {chain.FPS} fps" + (f" · turned {rot}° right" if rot else ""))
 
-    def set_state(self, state: str, pixmap: QPixmap | None, step: str = ""):
-        self.state = state
-        self.tag.setText(STATE_TEXT.get(state, state.upper()))
-        self.tag.setProperty("state", STATE_STYLE.get(state, ""))
-        repolish(self.tag)
-        if pixmap is not None and not pixmap.isNull():
-            self.thumb.set_image(pixmap.toImage())
-        else:
-            self.thumb.clear_frame("not converted yet")
-        self.step.setText(step)
-        self.bar.setVisible(state in ("generating", "converting"))
-        self._restyle()
-
-    def set_progress(self, i: int, n: int, text: str | None = None):
-        pass
-
     def set_editable(self, on: bool):
         self._on = bool(on)
         for w in self.buttons:
@@ -1058,17 +1099,6 @@ class VideoCard(QFrame):
         self.buttons[0].setEnabled(self._on and not self.frozen)       # (edit range)
         self.b_freeze.setEnabled(self._on and (self.frozen or self.state == "done"))
 
-    def set_frozen(self, frozen: bool):
-        self.frozen = bool(frozen)
-        self.b_freeze.setChecked(self.frozen)
-        self.b_freeze.setToolTip(FREEZE_TIP.replace("this clip", "this video") if not self.frozen else
-                                 "Frozen: kept as converted, whatever the project's size says. Click to unfreeze it")
-        self.set_editable(self._on)
-
-    def _restyle(self):
-        t = theme()
-        border = t.accent.name() if self.state in ("generating", "converting") else t.lineSubtle.name()
-        css = (f"QFrame#promptCard {{ background: {t.bgSunken.name()}; border: 1px solid {border};"
-               f" border-radius: 6px; }} QFrame#promptCard QLabel {{ background: transparent; }}")
-        if css != self.styleSheet():
-            self.setStyleSheet(css)
+    def _frozen_tip(self, frozen: bool) -> str:
+        return FREEZE_TIP.replace("this clip", "this video") if not frozen else (
+            "Frozen: kept as converted, whatever the project's size says. Click to unfreeze it")
