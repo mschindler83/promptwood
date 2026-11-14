@@ -128,3 +128,22 @@ def test_setup_logging_writes_to_file_once(tmp_path):
             if h not in before:
                 root.removeHandler(h)
                 h.close()
+
+
+def test_the_two_nms_copies_agree():
+    """faces.py and the ComfyUI node package keep their own _nms (the node package cannot import video_chain);
+    this keeps them equal."""
+    import importlib.util
+    from pathlib import Path
+
+    import numpy as np
+    from video_chain import faces
+    path = Path(__file__).resolve().parents[1] / "comfy_nodes" / "video_chain_nodes" / "faceswap.py"
+    spec = importlib.util.spec_from_file_location("faceswap_node", path)
+    node = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(node)
+    rng = np.random.default_rng(1)
+    xy = rng.uniform(0, 100, (40, 2))
+    boxes = np.hstack([xy, xy + rng.uniform(10, 60, (40, 2))])
+    scores = rng.uniform(0, 1, 40)
+    assert list(faces._nms(boxes, scores)) == list(node._nms(boxes, scores))

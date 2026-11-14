@@ -80,6 +80,7 @@ def _session(model: Path):
         return _SESSIONS[key]
 
 
+# (a copy of comfy_nodes/video_chain_nodes/faceswap.py:_nms: that package runs inside ComfyUI and cannot import this one)
 def _nms(boxes, scores, thresh: float = 0.4) -> list[int]:
     """Indices of the boxes kept: the best score first, others overlapping it by more than thresh dropped."""
     import numpy as np
