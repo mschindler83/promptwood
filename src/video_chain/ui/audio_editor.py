@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFormLayout
                                QLineEdit, QPushButton, QVBoxLayout)
 
 from . import shortcuts as S
+from .audio_devices import follow_default_output
 from . import settings_keys as SK
 from .workers import run_in_background
 from .. import chain, media
@@ -300,6 +301,7 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
             except ImportError:
                 return
             self.audio = QAudioOutput(self)
+            follow_default_output(self.audio)
             self.player = QMediaPlayer(self)
             self.player.setAudioOutput(self.audio)
             if self.video is not None:
@@ -434,6 +436,7 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
             return
         if self.clean_player is None:
             self.clean_audio = QAudioOutput(self)
+            follow_default_output(self.clean_audio)
             self.clean_player = QMediaPlayer(self)
             self.clean_player.setAudioOutput(self.clean_audio)
             self.clean_player.errorOccurred.connect(self._on_clean_error)

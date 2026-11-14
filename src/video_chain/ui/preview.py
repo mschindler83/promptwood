@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtWidgets import QHBoxLayout, QSlider, QStackedWidget, QVBoxLayout, QWidget
 
 from .theme import icon
+from .audio_devices import follow_default_output
 from .widgets import FrameTile, VideoView, format_time, icon_button, label
 
 if TYPE_CHECKING:
@@ -90,6 +91,7 @@ class Preview(QWidget):
         self.video.setMinimumHeight(200)
         self.stack.addWidget(self.video)
         self.audio = QAudioOutput(self)
+        follow_default_output(self.audio)
         self.player = QMediaPlayer(self)
         self.player.setAudioOutput(self.audio)
         self.player.setVideoOutput(self.video.sink)

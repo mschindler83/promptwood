@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QDoubleSpinBox, QHBoxL
                                QPushButton, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
 from . import shortcuts as S
+from .audio_devices import follow_default_output
 from .workers import post, run_in_background
 from .. import chain, media
 from .theme import icon, theme, with_alpha
@@ -488,6 +489,7 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
                 self.video = VideoView(turnable=True, gpu=False)
             self.stack.addWidget(self.video)
             self.audio = QAudioOutput(self)
+            follow_default_output(self.audio)
             self.player = QMediaPlayer(self)
             self.player.setAudioOutput(self.audio)
             self.player.setVideoOutput(self.video.sink)
