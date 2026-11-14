@@ -36,16 +36,17 @@ if TYPE_CHECKING:
     from .timeline import Timeline
     from .ui_logic import Problem
     from .view_mode import AdvancedNote, ViewMode
+    from .workers import Latest
 
     class MainWindowHost(QMainWindow):
-        _check_gen: int
+        _check: Latest
         _comfy_polling: bool
         _eleven_voices: list | None
         _first_shown: bool
         _gpu_proc: QProcess | None
         _lora_hits: dict
         _lora_misses: dict
-        _lora_scan_gen: int
+        _lora_scan: Latest
         _path_end: str | None
         FROZEN_LOCKED: set[str]
         _worker_bound: WorkerBinding | None

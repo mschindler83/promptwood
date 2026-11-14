@@ -22,6 +22,7 @@ from .clip_dialogs import SplitDialog, VideoFrameDialog  # noqa: F401
 from .video_editor import VideoRangeDialog  # noqa: F401
 from .ui_logic import Problem
 from .view_mode import ViewMode
+from .workers import Latest
 from .clip_cards import PromptCard, VideoCard
 from .generator_state import ComfyModel, ComfyService, Job, ModelState, ModelSwitch, Phase, WorkerBinding
 from .mw_audio import AudioMixin
@@ -134,6 +135,8 @@ class MainWindow(BuildMixin, GeneratorMixin, ComfyMixin, ExportMixin, VideosMixi
         # both fight over the memory; the same model again is used as it is (no reload)
         self.comfy = ComfyService()             # what is loaded in ComfyUI (the model, whether a quit unloads it)
         self._qwen_timer = timer(self, self._qwen_idle, single=True)
+        self._check = Latest()                  # Generate's pre-flight: only the newest answer counts
+        self._lora_scan = Latest()              # the LoRA scan: only the newest answer counts
         self._join_lock = threading.Lock()      # joins run one after another (play after generating + export)
         self._save_timer = timer(self, self._save_tree, 400, single=True)
         self._refresh_timer = timer(self, self.refresh, 250, single=True)
@@ -191,12 +194,10 @@ class MainWindow(BuildMixin, GeneratorMixin, ComfyMixin, ExportMixin, VideosMixi
     _runpod_loading = False                     # the settings are being loaded (the RunPod fields change unsaved)
     # the generator run (mw_generator): checking the project first, then the clips
     _checking = False                           # Generate is checking the project (in the background)
-    _check_gen = 0
     _exported = None
     _clip_started = _run_started = 0.0
     _clip_note = ""
     _edit_switch: ModelSwitch | None = None
     _lora_misses: dict = {}
     _lora_hits: dict = {}
-    _lora_scan_gen = 0
     _path_end = None

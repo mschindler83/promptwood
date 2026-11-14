@@ -276,3 +276,43 @@ def test_window_keeps_the_model_in_its_comfy_service(app, tmp_path):
 def test_refine_text_asks_the_dialog_directly():
     assert "hasattr(dlg" not in (UI / "mw_ends.py").read_text(encoding="utf-8")
     assert "isinstance(new, str)" in (UI / "mw_nodes.py").read_text(encoding="utf-8")      # a clip prompt is one text
+
+
+# ------------------------------------------------------------------ MWC-29: a stale background answer is dropped (Latest)
+def test_only_the_newest_lora_scan_counts(app, tmp_path, monkeypatch):
+    import threading
+    import time
+
+    from video_chain import comfy as CMF
+    from video_chain.ui.main_window import MainWindow
+    first_go = threading.Event()
+    calls = []
+
+    def find(roots):
+        n = len(calls)
+        calls.append(n)
+        if n == 0:
+            first_go.wait(10)                        # the first scan answers last
+            return [("/x/old.safetensors", "old")]
+        return [("/x/new.safetensors", "new")]
+    monkeypatch.setattr(CMF, "find_h3_loras", find)
+    monkeypatch.setattr(CMF, "comfy_lora_roots", lambda d: [])
+    monkeypatch.setattr(CMF, "find_qwen_loras", lambda roots: [])
+    w = MainWindow(settings(tmp_path), command=FAKE)
+    try:
+        calls.clear()
+        w.scan_loras()
+        w.scan_loras()
+        deadline = time.time() + 10
+        while time.time() < deadline and w.h3_loras != [("/x/new.safetensors", "new")]:
+            app.processEvents()
+            time.sleep(0.01)
+        assert w.h3_loras == [("/x/new.safetensors", "new")]
+        first_go.set()
+        for _ in range(50):
+            app.processEvents()
+            time.sleep(0.01)
+        assert w.h3_loras == [("/x/new.safetensors", "new")]
+    finally:
+        first_go.set()
+        w.close()

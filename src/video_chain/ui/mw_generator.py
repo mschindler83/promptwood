@@ -98,8 +98,8 @@ class GeneratorMixin(MainWindowHost):
         if self._tts_busy:
             self.status.setText("Wait until text to speech is done.")
             return
-        self._checking, self._check_gen = True, self._check_gen + 1
-        gen, project, tree = self._check_gen, self.project, self.tree
+        self._checking = True
+        project, tree = self.project, self.tree
         self._check_args = (list(targets), refine)
         self.status.setText("Checking the project …")
         for c in self.cards:
@@ -109,11 +109,12 @@ class GeneratorMixin(MainWindowHost):
         def work():
             assert project is not None
             return self._preflight(project, tree, targets, refine)
-        run_in_background(work, on_done=lambda r: self._checked(gen, *r), owner=self)
+        run_in_background(work, on_done=lambda r: self._checked(*r), owner=self, latest=self._check)
 
     def _cancel_check(self):
         """Stop waiting for the pre-flight (Stop, closing): its result is not used any more."""
-        self._checking, self._check_gen = False, self._check_gen + 1
+        self._checking = False
+        self._check.ticket()                        # (the answer on its way is old now)
         for c in self.cards:
             c.set_editable(not self.running)
         self._update_buttons()
@@ -175,9 +176,9 @@ class GeneratorMixin(MainWindowHost):
             where = "the Advanced view (View → Advanced view), then Settings → Preferences → Cloud upscaling"
         return f"To upscale on RunPod: save your RunPod API key ({where})."
 
-    def _checked(self, gen: int, problems: list, empty: list):
+    def _checked(self, problems: list, empty: list):
         """Generate's pre-flight is done: report what is missing, or go on with the job."""
-        if gen != self._check_gen or not self._checking or self.tree is None:
+        if not self._checking or self.tree is None:
             return                                  # (stopped, closed or another project meanwhile)
         self._checking = False
         targets, refine = self._check_args
