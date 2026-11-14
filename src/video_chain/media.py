@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Generator, Iterator, Literal, overload
@@ -314,6 +315,26 @@ def file_digest(path: str | Path, algo: str = "sha256", stop: Callable[[], bool]
 def text_digest(text: str, algo: str = "sha256") -> str:
     """Hex digest of a text (utf-8)."""
     return hashlib.new(algo, text.encode("utf-8")).hexdigest()
+
+
+def sweep_scratch(root: str | Path | None = None, older_than: float = 86400.0) -> list[Path]:
+    """Remove scratch folders (video-chain-*, see scratch) in root (default: the temp folder) that nobody has touched
+    for `older_than` seconds: what a killed run left behind. Returns the removed. Only folders; never a young one,
+    which a running job may still use."""
+    base = Path(root) if root else Path(tempfile.gettempdir())
+    gone: list[Path] = []
+    try:
+        found = list(base.glob("video-chain-*"))
+    except OSError:
+        return gone
+    for p in found:
+        try:
+            if p.is_dir() and not p.is_symlink() and time.time() - p.stat().st_mtime > older_than:
+                shutil.rmtree(p, ignore_errors=True)
+                gone.append(p)
+        except OSError:
+            continue
+    return gone
 
 
 def scratch(name: str, dir: str | Path | None = None) -> tempfile.TemporaryDirectory:

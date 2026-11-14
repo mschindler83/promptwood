@@ -358,6 +358,12 @@ def remix_sound(project: Path, tree: Tree, nid: str, checker: Checker | None = N
     return True
 
 
+def sweep_scratch(project: Path) -> None:
+    """The temporary folders of a killed run in the project's nodes/ (also for the window to call when it opens one)."""
+    for left in list((Path(project) / "nodes").glob("video-chain-*")):
+        shutil.rmtree(left, ignore_errors=True)
+
+
 def remix_sounds(project: Path, tree: Tree, nids: list[str], checker: Checker | None = None,
                  persist: bool = True, log: Callable[[str], None] = print) -> list[str]:
     """remix_sound for every due clip of nids (in this order: put a clip before the ones after it), again and again
@@ -573,8 +579,7 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
     emit({"e": "plan", "make": todo})
     nodes_dir = project / "nodes"
     nodes_dir.mkdir(exist_ok=True)
-    for left in list(nodes_dir.glob("video-chain-*")):                  # temp folders of a killed run
-        shutil.rmtree(left, ignore_errors=True)
+    sweep_scratch(project)
     remove_stale_files(project, tree)
     for k, nid in enumerate(todo, start=1):
         node = tree.nodes[nid]
