@@ -20,6 +20,8 @@ How the window is built (the design, and what is still shared):
 - Edit windows (image edit, replace a person, clips' frame pickers, the LoRA window) stay MODAL on purpose: they hold
   a ComfyUI model (ModelSwitch / ComfyService) and the project's files while open, and the window's edits and Generate
   are locked by a run, not by a dialog; a non-modal window would need that lock extended to them first (UX-13).
+- Words (MWA-30, decided): Delete = a clip with its files; Remove = an entry from a list (a reference, a LoRA, a
+  recent project): nothing on disk is lost.
 """
 from __future__ import annotations
 
