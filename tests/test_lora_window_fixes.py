@@ -186,3 +186,56 @@ def test_chip_row_uses_the_widget_flow_and_chips_are_reachable_by_tab():
     row.resize(300, 40)
     row.set_specs(specs)
     assert row.texts() == ["@ann · lead", "Start frame"]
+
+
+def test_refiner_failures_are_shown_as_errors_and_a_stale_warning_is_cleared():
+    dlg = _refine_dialog([{"file": "llama:/m/q.gguf", "label": "Q", "chat": True, "vision": False}])
+    dlg.state.setProperty("severity", "warning")
+    dlg._result("", "server went away")
+    assert dlg.state.property("severity") == "error" and "server went away" in dlg.state.text()
+    dlg._ideas_ready([], "no answer")
+    assert dlg.state.property("severity") == "error"
+    dlg._result("A fine prompt of a cat sitting.", "")
+    assert dlg.state.property("severity") in ("", None)
+    dlg.reject()
+
+
+def test_refiner_says_why_it_cannot_start_and_connects_only_once():
+    from video_chain.ui.prompt_refiner import RefineDialog
+    dlg = _refine_dialog([{"file": "llama:/m/q.gguf", "label": "Q", "chat": True, "vision": False}])
+    dlg.original.setPlainText("   ")
+    dlg.state.setText("")
+    dlg.refine()
+    assert dlg.state.text() and "prompt" in dlg.state.text().lower()
+    dlg.reject()
+    calls = []
+
+    class Fake:
+        models = []
+    dlg = RefineDialog(None, "a cat", "image", lambda: (calls.append(1), time.sleep(0.2), Fake())[2])
+    dlg._load_models()                     # (the retry timer and the Start button can both ask)
+    end = time.time() + 5
+    while dlg.model.isEnabled() is False and time.time() < end and not dlg.refiner:
+        app.processEvents()
+    app.processEvents()
+    assert len(calls) == 1
+    dlg.reject()
+
+
+def test_a_running_refine_can_be_stopped():
+    dlg = _refine_dialog([{"file": "llama:/m/q.gguf", "label": "Q", "chat": True, "vision": False}])
+    stopped = []
+    dlg.refiner.interrupt = lambda: stopped.append(1)
+    assert dlg.b_stop.isHidden()
+    dlg._busy = True
+    dlg._update_buttons()
+    assert not dlg.b_stop.isHidden() and dlg.b_stop.isEnabled()
+    dlg.b_stop.click()
+    end = time.time() + 3
+    while not stopped and time.time() < end:
+        app.processEvents()
+    assert stopped
+    dlg._busy = False
+    dlg._update_buttons()
+    assert dlg.b_stop.isHidden()
+    dlg.reject()
