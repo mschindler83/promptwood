@@ -186,8 +186,9 @@ def test_result_record_is_written_atomically(app, tmp_path, monkeypatch):
             pass
 
     written = []
-    real = IE.write_meta
-    monkeypatch.setattr(IE, "write_meta", lambda f, m: (written.append(Path(f)), real(f, m)))
+    from video_chain import edits as ED
+    real = ED.write_meta                                       # (the worker writes through video_chain.edits)
+    monkeypatch.setattr(ED, "write_meta", lambda f, m: (written.append(Path(f)), real(f, m)))
     src = tmp_path / "s.png"
     Image.new("RGB", (16, 16), "blue").save(src)
     dlg = _dialog(tmp_path)
@@ -362,8 +363,9 @@ def test_source_picture_is_decoded_once(app, tmp_path, monkeypatch):
     src = tmp_path / "s.png"
     Image.new("RGB", (64, 48), "blue").save(src)
     reads = []
-    real = IE._decode_upright
-    monkeypatch.setattr(IE, "_decode_upright", lambda p: (reads.append(p), real(p))[1])
+    from video_chain.ui import imageio
+    real = imageio.decode_upright                              # (upright() lives in ui/imageio.py now)
+    monkeypatch.setattr(imageio, "decode_upright", lambda p: (reads.append(p), real(p))[1])
     dlg = _dialog(tmp_path)
     dlg.set_source(str(src))
     from PySide6.QtGui import QImage

@@ -9,10 +9,11 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QGuiApplication, QImage, QImageReader, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QColor, QFont, QGuiApplication, QImage, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy,
                                QToolButton, QVBoxLayout, QWidget)
 
+from .imageio import read_scaled
 from .theme import theme
 from .widgets import FlowBox, label, safe_emit, smooth_scaled
 
@@ -440,13 +441,7 @@ class ResultGallery(QScrollArea):
 
 def read_thumb(png: str) -> QImage:
     """A result's thumbnail, decoded at the reduced size (a PNG is not read in full when only 400 px are shown)."""
-    r = QImageReader(png)
-    r.setAutoTransform(True)
-    size = r.size()
-    if size.isValid() and (size.width() > THUMB_DECODE or size.height() > THUMB_DECODE):
-        r.setScaledSize(size.scaled(THUMB_DECODE, THUMB_DECODE, Qt.KeepAspectRatio))
-    img = r.read()
-    return img if not img.isNull() else QImage()
+    return read_scaled(png, THUMB_DECODE)[0]
 
 
 class ThumbLoader(QObject):
@@ -605,7 +600,6 @@ class InfoCard(QFrame):
             b.setProperty("role", "chipButton")
             b.setCursor(Qt.PointingHandCursor)
             b.setFixedHeight(max(16, self.chips.items[-1].sizeHint().height()) if self.chips.items else 18)
-            b.setStyleSheet("padding: 0 6px;")
             b.setToolTip("Use this seed for the next Generate (and keep it: New seed after each Generate is "
                          "switched off)")
             seed = info["seed"]

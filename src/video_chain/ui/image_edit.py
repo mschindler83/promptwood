@@ -5,291 +5,98 @@ edits/sources/), so earlier tries stay at hand.
 1. the image to edit (start image, a clip's frame, an end image, a face reference, any file, an earlier result)
 2. what should change (the prompt), optionally up to two more pictures (Picture 2 / 3, e.g. a face)
 3. Generate: one or more tries (other seeds); 4. pick a result, compare it with the original, use it.
+
+The dialog is one window made of parts in sibling modules: image_models (modes, model families), image_source
+(image to edit, folder, mask), image_prompt (variations, seeds, refiner), image_loras, image_sampling,
+image_presets, image_results (strip, gallery, favourites, delete); image_generate runs a Generate in a thread and
+`video_chain.edits` holds the records and files without Qt.
 """
 from __future__ import annotations
 
-import copy
 import json
-import os
 import random
-import threading
-import time
-import uuid
-from collections import OrderedDict
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSettings, QSize, QTimer, Qt, Signal
-from PySide6.QtGui import QIcon, QImage, QImageReader, QKeySequence, QPixmap, QShortcut
-from PySide6.QtWidgets import (QButtonGroup, QSlider, QStackedWidget, QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
-                               QFrame, QGridLayout, QHBoxLayout, QInputDialog, QLineEdit, QListWidget,
-                               QFileDialog, QListWidgetItem, 
-                               QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSpinBox, QVBoxLayout,
-                               QWidget)
+from PySide6.QtCore import QSettings, QSize, QTimer, Qt, Signal, QObject
+from PySide6.QtGui import QImage, QKeySequence, QPixmap, QShortcut
+from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFrame, QGridLayout,
+                               QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QProgressBar,
+                               QPushButton, QScrollArea, QSlider, QSpinBox, QStackedWidget, QVBoxLayout, QWidget)
 
-from .image_picker import IMAGE_EXTS, pick_image
-from .. import media
 from ..comfy import EDIT_MODELS
-from ..triggers import stack_words, with_triggers
-from ..imagegen import FAMILIES, SAMPLERS, SCHEDULERS, default_sampling, size_for
-from .lora_stack import LoraStack, lora_label
+# (main_window and the tests import these from here: they moved to video_chain/edits.py)
+from ..edits import (EDITS_DIR, MOSS_EDIT_QUALITIES, QUALITY_TEXT, ResultRecord, how_made, lora_note,  # noqa: F401
+                     project_edits, record_use, scale_to, uses_index, uses_of, write_meta)
+from ..imagegen import FAMILIES, size_for
+from .dialogs import button_row, confirm as ask
+from .image_common import (ASK_ABOVE, CREATE_HINT, FOLDER_ITEM, FOLDER_PREFIX, MAX_RESULTS, PROMPT_HINT,  # noqa: F401
+                           SEED_MAX, PictureSlot)
+from .image_generate import CreatePlan, EditPlan, CreateWorker, EditWorker, GenerateWorker
+from .image_loras import LorasMixin
+from .image_models import ModelsMixin
+from .image_presets import PresetsMixin
+from .image_prompt import PromptMixin
+from .image_results import ResultsMixin
+from .image_sampling import SamplingMixin
+from .image_source import SourceMixin
+from .imageio import decode_upright as _decode_upright, upright  # noqa: F401  (tests / main_window import from here)
+from .lora_stack import LoraStack
+from .results_gallery import InfoCard, ResultGallery, ResultView, ThumbLoader
 from .variations_panel import PlaceholderHighlighter, VariationsPanel
-from .results_gallery import (InfoCard, ResultGallery, ResultView, ThumbLoader, badged, model_key, model_name,
-                              run_groups)
-from .mask_painter import MaskPainterDialog, mask_area, overlay
-from .dialogs import button_row, confirm as ask, failed
-from .widgets import fit_size, FrameTile, guard_wheel, icon_button, label, safe_emit
-
-MAX_RESULTS = 20                           # results per Generate (made one after another, Cancel stops)
-SEED_MAX = 2**31 - 1                      # (the seeds ComfyUI's image samplers take here)
-
-EDITS_DIR = "edits"
-FOLDER_ITEM, FOLDER_PREFIX = "\x00choose-folder", "\x00folder:"   # the source list's folder entries
-ASK_ABOVE = 10                             # a folder Generate of more images than this asks first
-MOSS_EDIT_QUALITIES = {"standard": "Standard (30 steps)"}
-LORA_FAMILY = {"chroma": "flux1"}         # Chroma LoRAs have FLUX.1's layer names (and FLUX.1 LoRAs often work)
-QUALITY_TEXT = {"fast": "Fast (Lightning, 4 steps)", "standard": "Standard (20 steps)", "best": "Best (40 steps, slow)"}
-PROMPT_HINT = ("Describe the change, e.g. “she smiles and looks into the camera”, “night, lit by a street lamp”, "
-               "“replace the red jacket with a black leather jacket”. Say what must stay: “keep her face, pose and "
-               "the background”.")
+from .widgets import FrameTile, fit_size, guard_wheel, icon_button, label
 
 
-CREATE_HINT = ("Describe the image: who or what, doing what, where; light, mood, camera and style, e.g. “a woman "
-               "in a red coat on a rainy Paris street at night, neon reflections, 35 mm photo”. With reference "
-               "pictures, say what to take from them.")
-
-
-def scale_to(src: Path, dst: Path, size: tuple[int, int]) -> None:
-    """Scale an image to exactly this size (the result keeps the size of the image it was made from)."""
-    with media.part_file(dst) as tmp:
-        media.ffmpeg(["-y", "-i", src, "-vf", f"scale={size[0]}:{size[1]}:flags=lanczos", "-frames:v", "1", tmp],
-                     timeout=120)
-
-
-def _decode_upright(path) -> QImage:
-    from PySide6.QtGui import QImageReader
-    r = QImageReader(str(path))
-    r.setAutoTransform(True)
-    return r.read()
-
-
-_UPRIGHT: OrderedDict = OrderedDict()           # (path, mtime_ns, size) -> image: the last few pictures, decoded once
-_UPRIGHT_LOCK = threading.Lock()
-_UPRIGHT_KEEP = 3                               # (a big photo is tens of MB decoded)
-
-
-def upright(path) -> QImage:
-    """An image as ComfyUI's LoadImage sees it: turned by its EXIF orientation (phone photos). The latest few are
-    kept, so choosing, masking and browsing do not decode the same file again (a changed file is read anew)."""
-    try:
-        st = os.stat(path)
-        key = (str(path), st.st_mtime_ns, st.st_size)
-    except OSError:
-        return QImage()
-    with _UPRIGHT_LOCK:
-        hit = _UPRIGHT.get(key)
-        if hit is not None:
-            _UPRIGHT.move_to_end(key)
-            return hit
-    img = _decode_upright(path)
-    if not img.isNull():
-        with _UPRIGHT_LOCK:
-            _UPRIGHT[key] = img
-            while len(_UPRIGHT) > _UPRIGHT_KEEP:
-                _UPRIGHT.popitem(last=False)
-    return img
-
-
-def _mtime(p: Path) -> float:
-    try:
-        return p.stat().st_mtime
-    except OSError:
-        return 0.0
-
-
-def project_edits(project: Path) -> list[tuple[Path, dict]]:
-    """The edit results kept in a project, newest first, with what they were made from."""
-    d = Path(project) / EDITS_DIR
-    out = []
-    for png in d.glob("*.png") if d.is_dir() else []:
-        if ".part" in png.name:
-            continue
-        meta = _record(png.with_suffix(".json"))
-        out.append((png, meta))
-    return sorted(out, key=lambda x: _mtime(x[0]), reverse=True)
-
-
-_RECORDS: dict[str, tuple[tuple[int, int], dict]] = {}     # record file -> ((mtime_ns, size), parsed)
-
-
-def _record(f: Path) -> dict:
-    """A result's record, parsed once per version of the file (a reload of hundreds of results reads none again)."""
-    try:
-        st = f.stat()
-        key = (st.st_mtime_ns, st.st_size)
-        hit = _RECORDS.get(str(f))
-        if hit is None or hit[0] != key:
-            hit = (key, json.loads(f.read_text(encoding="utf-8")))
-            _RECORDS[str(f)] = hit
-    except (OSError, ValueError):
-        return {}
-    return copy.deepcopy(hit[1])
-
-
-def write_meta(meta_file: Path, meta: dict) -> None:
-    """A result's record, written atomically (a reader never sees half a file)."""
-    media.atomic_write_json(meta_file, meta)
-
-
-def record_use(png: str | Path, use: dict) -> None:
-    """Note in a result's record which project copy it became ({"kind": "start", "sha1"} / {"kind": "end",
-    "file"} / {"kind": "ref", "file"}), so the window knows it is in use."""
-    meta_file = Path(png).with_suffix(".json")
-    try:
-        meta = json.loads(meta_file.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        meta = {}
-    except (OSError, ValueError):
-        return                                      # (an unreadable record is not replaced by a near-empty one)
-    uses = [u for u in meta.get("uses") or [] if u != use]
-    meta["uses"] = uses + [use]
-    write_meta(meta_file, meta)
-
-
-def how_made(meta: dict) -> str:
-    """The model and quality a result was made with, in words (for the result's facts)."""
-    if meta.get("mode") == "create":
-        fam = FAMILIES.get(meta.get("family"), {})
-        return f"{fam.get('label', '')} {fam.get('qualities', {}).get(meta.get('quality'), '')}"
-    if meta.get("edit_model") == "qwen21":
-        return f"{EDIT_MODELS['qwen21']} {FAMILIES['qwen21']['qualities'].get(meta.get('quality'), '')}"
-    if meta.get("edit_model") == "moss":
-        return f"{EDIT_MODELS['moss']} {MOSS_EDIT_QUALITIES['standard']}"
-    return QUALITY_TEXT.get(meta.get("quality"), "")
-
-
-def lora_note(mode: str, family: dict | None, fam: str, edit_model: str, family_loras: dict) -> str:
-    """The line above the LoRA list: which LoRAs fit the chosen model, and how many were found."""
-    if mode == "create":
-        if not family:
-            return ""
-        found = len(family_loras.get(LORA_FAMILY.get(fam, fam), []))
-        if fam == "chroma":
-            return ("LoRAs (optional): Chroma and FLUX.1 LoRAs (the same layer names, so they are listed together; "
-                    f"FLUX.1 LoRAs often work on Chroma, not always; {found} found), applied in this order.")
-        return (f"LoRAs (optional): {family['label']} LoRAs from ComfyUI's LoRA folders (found by their contents; "
-                f"{found} found), applied in this order.")
-    if edit_model == "qwen21":
-        return ("LoRAs (optional): Qwen-Image 2.1 LoRAs from ComfyUI's LoRA folders (found by their contents; "
-                f"{len(family_loras.get('qwen21', []))} found), applied in this order.")
-    if edit_model == "moss":
-        return ("LoRAs (optional): MOSS-Image LoRAs from ComfyUI's LoRA folders (found by their contents; "
-                f"{len(family_loras.get('moss', []))} found), applied before its edit LoRA.")
-    return ("LoRAs (optional): Qwen Image / Image Edit LoRAs from ComfyUI's LoRA folders, applied in this order. "
-            "Text-to-image Qwen LoRAs often work for edits too, not always.")
-
-
-def uses_index(tree) -> dict:
-    """What `uses_of` looks up, built once for the whole project (a reload asks once per result): who owns each
-    face picture, and which clips have which end image."""
-    from .. import tree as T
-    owner = {r: c["name"] for c in (T.cast_of(tree) if tree is not None else []) for r in c["images"]}
-    ends: dict[str, list[str]] = {}
-    for n in (tree.nodes.values() if tree is not None else []):
-        for f in (n.end_image, (n.made or {}).get("end_image")):
-            if f:
-                ends.setdefault(f, []).append(n.id)
-    return {"owner": owner, "ends": ends}
-
-
-def uses_of(project: Path, tree, meta: dict, index: dict | None = None) -> list[str]:
-    """Where a result is used now, in words: the start image (still that picture), a clip's end image (set now or
-    made with), a face reference. Empty: it can go. index: `uses_index(tree)`, when many results are asked in a row."""
-    from .. import chain
-    from .. import tree as T
-    out = []
-    index = index or uses_index(tree)
-    owner = index["owner"]
-    for u in meta.get("uses") or []:
-        kind = u.get("kind")
-        if kind == "start" and u.get("sha1") and chain.file_signature(Path(project) / T.START_FILE) == u["sha1"]:
-            out.append("the start image")
-        elif kind == "end" and tree is not None:
-            for nid in dict.fromkeys(index["ends"].get(u.get("file"), [])) if u.get("file") else []:
-                out.append(f"the end image of clip #{T.short_id(nid)}")
-        elif kind == "ref" and u.get("file") in owner:
-            out.append(f"face of @{owner[u['file']]}")
-    return list(dict.fromkeys(out))
-
-
-class _Sig(QObject):
+class _FamiliesSignal(QObject):
     families = Signal(object, str)              # what ComfyUI has of each image family, error
-    progress = Signal(int, int, int, int)       # try k, of n, step i, of steps
-    result = Signal(str, object)                # png, meta
-    finished = Signal(str)                      # error ('' = all done or cancelled)
 
 
-class PictureSlot(QWidget):
-    """A small optional picture (Picture 2 / 3) with choose / remove."""
-    changed = Signal()
-
-    def __init__(self, title: str, chooser, parent=None):
-        super().__init__(parent)
-        self.path: str | None = None
-        self.chooser = chooser
-        v = QVBoxLayout(self)
-        v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(2)
-        self.tile = FrameTile(120, 90)
-        self.tile.clear_frame(title)
-        self.tile.setCursor(Qt.PointingHandCursor)
-        self.tile.setToolTip(f"{title}: click to choose a picture (e.g. a face or a piece of clothing)")
-        self.tile.clicked.connect(lambda _t: self.choose())
-        self.title = title
-        row = QHBoxLayout()
-        row.addWidget(label(title, level="tertiary"))
-        row.addStretch(1)
-        self.b_clear = icon_button("x", f"Remove {title}")
-        self.b_clear.clicked.connect(lambda: self.set(None))
-        self.b_clear.setEnabled(False)
-        row.addWidget(self.b_clear)
-        v.addWidget(self.tile)
-        v.addLayout(row)
-
-    def choose(self):
-        f = self.chooser(f"{self.title} (optional)")
-        if f:
-            self.set(f)
-
-    def set(self, path: str | None):
-        self.path = path
-        if path:
-            self.tile.set_image(upright(path))
-            self.tile.setToolTip(path)
-        else:
-            self.tile.clear_frame(self.title)
-        self.b_clear.setEnabled(bool(path))
-        self.changed.emit()
-
-
-class ImageEditDialog(QDialog):
+class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, LorasMixin, SamplingMixin, PresetsMixin,
+                      QDialog):
     """sources: [(label, path)] offered as the image to edit; end_target: the clip a result can become the end
     image of (None: only the start image). connect(progress) -> a ComfyImageEditor (called in a thread);
     on_use(kind 'start' | 'end', png) -> bool; start_comfy() -> bool."""
 
     def __init__(self, parent, project: Path, sources: list[tuple[str, str]], source: str | None,
-                 end_target: str | None, connect: Callable, on_use: Callable[[str, str], bool],
+                 end_target: str | None, connect: Callable[[Callable | None], object], on_use: Callable[[str, str], bool],
                  settings: QSettings | None = None, places: list[tuple[str, str]] | None = None,
                  start_comfy: Callable[[], bool] | None = None, on_start: Callable[[], None] | None = None,
                  known_loras: list[tuple[str, str]] | None = None, lora_dir: str = "",
-                 uses: Callable[[dict], list[str]] | None = None, refine: Callable[[str, str], str | None] | None = None,
-                 connect_create: Callable | None = None, family_loras: dict[str, list] | None = None,
+                 uses: Callable[[ResultRecord], list[str]] | None = None, refine: Callable[..., str | list[str] | None] | None = None,
+                 connect_create: Callable[[Callable | None], object] | None = None, family_loras: dict[str, list] | None = None,
                  start_aspect: float | None = None, mode: str = "edit",
                  check_lora: Callable[[str | None], bool | None] | None = None,
-                 use_triggers: bool = True, collections: list | None = None):
+                 use_triggers: bool = True, collections: Callable[[], list] | None = None):
         super().__init__(parent)
         self.setWindowTitle("Edit an image with AI")
         fit_size(self, 1240, 820)
+        self._init_state(project, connect, on_use, end_target, settings, places, start_comfy, on_start, known_loras,
+                         lora_dir, uses, refine, connect_create, family_loras, start_aspect, check_lora,
+                         use_triggers, collections)
+        top = QHBoxLayout(self)
+        left = QVBoxLayout()
+        left.setSpacing(6)
+        self._build_mode_row(left)
+        self._build_edit_box(left, sources)
+        self._build_create_box(left)
+        self._build_prompt_box(left)
+        self._build_lora_box(left, known_loras, lora_dir, family_loras)
+        self._build_options(left)
+        self._build_actions(left)
+        top.addWidget(self._scrolled(left))
+        line = QFrame()
+        line.setFrameShape(QFrame.VLine)
+        top.addWidget(line)
+        top.addLayout(self._build_results_panel(), 1)
+        self._built = True                               # (every widget the parts above talk to exists now)
+        self._fill_presets()
+        self._add_shortcuts()
+        self._restore(source, sources, mode)
+
+    # ---- building the window
+    def _init_state(self, project: Path, connect, on_use, end_target, settings, places, start_comfy, on_start,
+                    known_loras, lora_dir, uses, refine, connect_create, family_loras, start_aspect, check_lora,
+                    use_triggers, collections):
         self.project, self.connect_editor, self.on_use = Path(project), connect, on_use
         self.end_target, self.qs, self.places, self.start_comfy = end_target, settings, places or [], start_comfy
         self.on_start = on_start                         # called (GUI thread) before each Generate
@@ -302,15 +109,26 @@ class ImageEditDialog(QDialog):
         self.collections = collections                   # () -> the project's pictures by kind (image picker)
         self.families: dict = {}                         # what ComfyUI has of each family (from the creator)
         self._families_error = ""
+        self._was_down = False                           # ComfyUI was not reachable at the last listing
         self._retry_families = 0                         # retries left while ComfyUI starts
-        self._trash: Path | None = None                  # the result deleted last (Undo delete brings it back)
+        self._trash: list[Path] = []                     # the results deleted (Undo delete brings back the last)
         self._thumbs: dict[str, tuple[int, QPixmap]] = {}  # result thumbnails: png -> (its mtime_ns, pixmap)
         self._requested: set[tuple[str, int]] = set()
         self._failed: set[tuple[str, int]] = set()
-        self._entries: list[tuple[str, dict, float]] = []
+        self._entries: list[tuple[str, ResultRecord, float]] = []
+        self._in_use: set[str] = set()                   # the results that are used somewhere
+        self._shown: list[tuple[str, ResultRecord, float, int]] = []   # the strip's results: png, record, mtime, ns
         self._strip_items: dict[str, QListWidgetItem] = {}
         self._loader = ThumbLoader(self)
         self._loader.ready.connect(self._thumb_ready)
+        self._built = False                              # True once every widget exists (parts talk to each other)
+        self._rehighlighting = False
+        self._sampling_family: str | None = None
+        self._sampling_loading = False
+        self._sampling_auto: dict = {}                   # the model's own settings, shown as "auto (…)"
+        self.mask: QImage | None = None                  # white = drawn anew, at the source's (upright) size
+        self.known_loras, self.lora_dir = list(known_loras or []), lora_dir
+        self.family_loras = family_loras or {}
         self.closed = False
         self.source: str | None = None
         self.batch: list[str] = []                       # a folder chosen: its images (each edited in turn)
@@ -318,19 +136,12 @@ class ImageEditDialog(QDialog):
         self._batch_names: list[str] = []                # (the images of the running Generate, for its progress)
         self._per_image = 1
         self._skipped: list[str] = []
-        self.editor = None
+        self._worker: GenerateWorker | None = None       # the running Generate
         self._busy = False
-        self._cancel = False
         self.used: tuple[str, str] | None = None        # (kind, png) once a result was used
-        self._sig = _Sig()
-        self._sig.progress.connect(self._progress)
-        self._sig.result.connect(self._result)
-        self._sig.finished.connect(self._finished)
+        self._sig = _FamiliesSignal()
         self._sig.families.connect(self._families_found)
-
-        top = QHBoxLayout(self)
-        left = QVBoxLayout()
-        left.setSpacing(6)
+    def _build_mode_row(self, left: QVBoxLayout):
         # mode: edit an image (Qwen Image Edit) or create a new one (four model families)
         mrow = QHBoxLayout()
         self.m_edit = QPushButton("Edit an image")
@@ -346,6 +157,7 @@ class ImageEditDialog(QDialog):
         self.m_edit.setChecked(True)
         left.addLayout(mrow)
 
+    def _build_edit_box(self, left: QVBoxLayout, sources: list[tuple[str, str]]):
         # ---- edit: the image to edit
         self.edit_box = QWidget()
         ev = QVBoxLayout(self.edit_box)
@@ -375,7 +187,7 @@ class ImageEditDialog(QDialog):
         self.edit_model.setToolTip("Qwen-Image-Edit 2511: the proven edit model. Qwen-Image 2.1 (2026): newer and "
                                    "smaller, one model for creating and editing; research licence (non-commercial). "
                                    "MOSS-Image Edit (2026, 5B, Apache 2.0): MOSS-Image with its edit LoRA")
-        saved = settings.value("editModel", "", type=str) if settings is not None else ""
+        saved = self.qs.value("editModel", "", type=str) if self.qs is not None else ""
         self.edit_model.setCurrentIndex(max(0, self.edit_model.findData(saved)))
         self.edit_model.currentIndexChanged.connect(self._edit_model_changed)
         self.edit_model.activated.connect(lambda _i: self.qs is not None and
@@ -400,6 +212,7 @@ class ImageEditDialog(QDialog):
         self.mask: QImage | None = None              # white = drawn anew, at the source's (upright) size
         left.addWidget(self.edit_box)
 
+    def _build_create_box(self, left: QVBoxLayout):
         # ---- create: model, references, size
         self.create_box = QWidget()
         cv = QVBoxLayout(self.create_box)
@@ -460,13 +273,14 @@ class ImageEditDialog(QDialog):
         self._build_presets(cv)
         left.addWidget(self.create_box)
 
+    def _build_prompt_box(self, left: QVBoxLayout):
         prow0 = QHBoxLayout()
         self.prompt_title = label("2  What should change?", type_="heading")
         prow0.addWidget(self.prompt_title)
         prow0.addStretch(1)
         self.b_refine = icon_button("gen", "Refine this prompt with a language model")
         self.b_refine.clicked.connect(self._refine_prompt)
-        self.b_refine.setVisible(refine is not None)
+        self.b_refine.setVisible(self.refine is not None)
         prow0.addWidget(self.b_refine)
         left.addLayout(prow0)
         self.prompt = QPlainTextEdit()
@@ -504,6 +318,8 @@ class ImageEditDialog(QDialog):
         prow.addStretch(1)
         epv.addLayout(prow)
         left.addWidget(self.edit_pics)
+
+    def _build_lora_box(self, left: QVBoxLayout, known_loras, lora_dir, family_loras):
         self.lora_text = label("", level="tertiary")
         self.lora_text.setWordWrap(True)
         left.addWidget(self.lora_text)
@@ -530,6 +346,7 @@ class ImageEditDialog(QDialog):
         self.loras.filled.connect(lambda: self._variations_changed())
         left.addWidget(self.lora_each)
 
+    def _build_options(self, left: QVBoxLayout):
         opts = QGridLayout()
         self.quality = QComboBox()
         self.quality.setToolTip("Faster settings use the model's speed LoRA or distilled version; Best samples "
@@ -575,6 +392,8 @@ class ImageEditDialog(QDialog):
         opts.addWidget(self.keep_size, 2, 0, 1, 4)
         opts.addWidget(self.tags, 3, 0, 1, 4)
         left.addLayout(opts)
+
+    def _build_actions(self, left: QVBoxLayout):
         brow = QHBoxLayout()
         self.b_gen = QPushButton("Generate")
         self.b_gen.setProperty("variant", "primary")
@@ -598,6 +417,8 @@ class ImageEditDialog(QDialog):
         self.state = label("", level="secondary")
         self.state.setWordWrap(True)
         left.addWidget(self.state)
+
+    def _scrolled(self, left: QVBoxLayout) -> QScrollArea:
         lw = QWidget()
         lw.setLayout(left)
         scroll = QScrollArea()
@@ -607,11 +428,9 @@ class ImageEditDialog(QDialog):
         scroll.setWidget(lw)
         scroll.setFixedWidth(430)
         self.left_scroll = scroll
-        top.addWidget(scroll)
-        line = QFrame()
-        line.setFrameShape(QFrame.VLine)
-        top.addWidget(line)
+        return scroll
 
+    def _build_results_panel(self):
         right = QVBoxLayout()
         head = QHBoxLayout()
         head.addWidget(label("3  Results", type_="heading"))
@@ -688,8 +507,7 @@ class ImageEditDialog(QDialog):
         self.results.setFixedHeight(130)
         self.results.setMovement(QListWidget.Static)
         self.results.setToolTip("The results shown (newest first); Gallery shows them all, grouped by run")
-        self.results.setStyleSheet("QListWidget { background: transparent; border: none; } "
-                                   "QListWidget::item:selected, QListWidget::item:hover { background: transparent; }")
+        self.results.setProperty("role", "resultStrip")      # (the theme styles it: transparent, no frame)
         self.results.currentItemChanged.connect(self._strip_selection)
         self.results.currentItemChanged.connect(lambda *_: self._show_selected())
         sv.addWidget(self.results)
@@ -709,9 +527,9 @@ class ImageEditDialog(QDialog):
         self.b_use_start = QPushButton("Use as start image")
         self.b_use_start.setToolTip("The first frame of the chain: the clips right after the start begin with it")
         self.b_use_start.clicked.connect(lambda: self._use("start"))
-        self.b_use_end = QPushButton(f"Use as end image of clip #{end_target[1:]}" if end_target else
+        self.b_use_end = QPushButton(f"Use as end image of clip #{self.end_target[1:]}" if self.end_target else
                                      "Use as end image")
-        self.b_use_end.setToolTip("The frame this clip steers its end to (the video model's last-frame input)" if end_target else
+        self.b_use_end.setToolTip("The frame this clip steers its end to (the video model's last-frame input)" if self.end_target else
                                   "Open this from a clip (its End row or its menu) to make its end image")
         self.b_use_end.clicked.connect(lambda: self._use("end"))
         self.b_further = QPushButton("Edit this one further")
@@ -741,8 +559,9 @@ class ImageEditDialog(QDialog):
         right.addLayout(arow)
         close, _none = button_row(self)
         right.addWidget(close)
-        top.addLayout(right, 1)
+        return right
 
+    def _add_shortcuts(self):
         QShortcut(QKeySequence("Ctrl+Return"), self, activated=self.generate)
         for key, fn in (("Delete", self.delete_selected), ("B", self.b_before.toggle),
                         ("F", lambda: self.toggle_favorite())):
@@ -753,6 +572,9 @@ class ImageEditDialog(QDialog):
             b.setAutoDefault(False)
             b.setDefault(False)
         guard_wheel(self)
+
+    def _restore(self, source: str | None, sources: list[tuple[str, str]], mode: str):
+        """What the user had last time: sizes, variations, view, the image to edit, the mode; then the first look."""
         if self.qs is not None:
             self.thumb_size.setValue(self.qs.value("resultsThumb", 200, type=int))
             try:
@@ -770,557 +592,16 @@ class ImageEditDialog(QDialog):
         elif sources:
             self.set_source(sources[0][1])
         self.modes.idClicked.connect(self._mode_clicked)
-        self.m_create.setEnabled(connect_create is not None)
+        self.m_create.setEnabled(self.connect_create is not None)
         saved = self.qs.value("imageMode", "", type=str) if self.qs is not None else ""
         if mode != "auto" and self.qs is not None:
             self.qs.setValue("imageMode", mode)       # opened from its Edit / Create button: the user's choice
         self.set_mode(mode if mode != "auto" else (saved or "edit"))
-        if connect_create is not None:
+        if self.connect_create is not None:
             self._load_families()
         self._update_buttons()
 
-    # ---- modes
-    def _mode_clicked(self, i: int):
-        mode = "create" if i == 1 else "edit"
-        if self.qs is not None:
-            self.qs.setValue("imageMode", mode)       # remembered only when the user chooses it
-        self.set_mode(mode)
-
-    def mode(self) -> str:
-        return "create" if self.m_create.isChecked() else "edit"
-
-    def set_mode(self, mode: str):
-        create = mode == "create" and self.connect_create is not None
-        (self.m_create if create else self.m_edit).setChecked(True)
-
-        self.setWindowTitle("Create a new image with AI" if create else "Edit an image with AI")
-        for w in (self.edit_box, self.edit_pics, self.keep_size):
-            w.setVisible(not create)
-        self.create_box.setVisible(create)
-        self.prompt_title.setText("2  Describe the image" if create else "2  What should change?")
-        self.prompt.setPlaceholderText(CREATE_HINT if create else PROMPT_HINT)
-        self.b_refine.setToolTip("Refine this prompt with a language model")
-        self.quality.blockSignals(True)
-        self.quality.clear()
-        if create:
-            fam = self.family.currentData()
-            files = self.families.get(fam) or {}
-            need = {"qwen21": {"fast": "turbo", "best": "base"}, "chroma": {"fast": "flash", "best": "hd"}}.get(fam, {})
-            for key, text in (FAMILIES[fam]["qualities"].items() if fam in FAMILIES else []):
-                if "models" in files and key in need and not files.get(need[key]):
-                    continue                       # its model file is not installed
-                self.quality.addItem(text, key)
-        elif self.edit_model.currentData() in ("qwen21", "moss"):
-            qs = FAMILIES["qwen21"]["qualities"] if self.edit_model.currentData() == "qwen21" else MOSS_EDIT_QUALITIES
-            for key, text in qs.items():
-                self.quality.addItem(text, key)
-        else:
-            for q in ("fast", "standard", "best"):
-                self.quality.addItem(QUALITY_TEXT[q], q)
-        saved = self.qs.value(self._quality_key(), "", type=str) if self.qs is not None else ""
-        i = self.quality.findData(saved)
-        self.quality.setCurrentIndex(i if i >= 0 else 0)
-        self.quality.blockSignals(False)
-        self.loras.set_items(self._known(), self._remembered_loras())
-        self._create_widgets()
-        self._variations_changed()
-        if create and self._families_error:
-            self.state.setText(f"Cannot list the models: {self._families_error}")
-            self.b_start_comfy.setVisible("not reachable" in self._families_error and self.start_comfy is not None)
-        self._update_buttons()
-
-    def _quality_key(self) -> str:
-        if self.mode() == "create":
-            return f"createQuality_{self.family.currentData()}"
-        return "editQuality" if self.edit_model.currentData() == "2511" else f"editQuality_{self.edit_model.currentData()}"
-
-    def _edit_model_changed(self, *_):
-        if self.mode() == "edit":
-            self.set_mode("edit")                # its qualities and LoRAs
-        self._show_mask()
-        self._update_buttons()
-
-    def _show_edit_models(self):
-        """Qwen-Image 2.1 and MOSS-Image can be chosen only when ComfyUI has them (known from Create's model list;
-        MOSS also needs its edit LoRA)."""
-        if not self.families:                      # not listed (yet, or ComfyUI is gone): all offered again
-            for i in range(self.edit_model.count()):
-                self.edit_model.model().item(i).setEnabled(True)
-                self.edit_model.setItemText(i, EDIT_MODELS[self.edit_model.itemData(i)])
-            return
-        for key in ("2511", "qwen21", "moss"):
-            info = self.families.get({"2511": "edit2511"}.get(key, key)) or {}
-            k = self.edit_model.findData(key)
-            ok = "models" in info and (key != "moss" or bool(info.get("edit_lora")))
-            why = info.get("missing") or ("MOSS-Image's edit LoRA (moss_image_edit_lora_rank_64_bf16) is missing"
-                                          if key == "moss" else "")
-            self.edit_model.model().item(k).setEnabled(ok)
-            self.edit_model.setItemText(k, EDIT_MODELS[key] + ("" if ok else "  (not available)"))
-            self.edit_model.setItemData(k, EDIT_MODELS[key] if ok else why, Qt.ToolTipRole)
-        cur = self.edit_model.currentIndex()
-        if not self.edit_model.model().item(cur).isEnabled():   # the chosen one is not there: the first one that is
-            ok = [i for i in range(self.edit_model.count()) if self.edit_model.model().item(i).isEnabled()]
-            if ok:
-                self.edit_model.setCurrentIndex(ok[0])
-
-    def _remember_quality(self):
-        if self.qs is not None and self.quality.currentData():
-            self.qs.setValue(self._quality_key(), self.quality.currentData())
-
-    def _load_families(self):
-        sig, connect = self._sig, self.connect_create
-
-        def work():
-            try:
-                sig.families.emit(connect(None).files, "")
-            except Exception as e:  # noqa: BLE001
-                safe_emit(sig.families, {}, str(e))
-        threading.Thread(target=work, daemon=True).start()
-
-    def _families_found(self, files: dict, error: str):
-        before = self.family.currentData()
-        kept = self.loras.items() if self.mode() == "create" and before not in FAMILIES else []
-        self.families = files
-        self._families_error = error
-        if error and self._retry_families > 0:           # ComfyUI is starting: ask again in a few seconds
-            self._retry_families -= 1
-            QTimer.singleShot(5000, self._load_families)
-        elif not error and self._retry_families >= 0 and getattr(self, "_was_down", False):
-            self.state.setText("ComfyUI is running: the models are listed.")
-        self._was_down = bool(error)
-        self.family.blockSignals(True)
-        self.family.clear()
-        if error:
-            self.family.addItem("ComfyUI is not reachable", None)
-            if self.mode() == "create":
-                self.state.setText(f"Cannot list the models: {error}")
-                self.b_start_comfy.setVisible("not reachable" in error and self.start_comfy is not None)
-        for key, f in FAMILIES.items():
-            info = files.get(key) or {}
-            self.family.addItem(f["label"] + ("" if "models" in info else "  (not available)"), key)
-            k = self.family.count() - 1
-            self.family.setItemData(k, info.get("missing", f["label"]), Qt.ToolTipRole)
-            if "models" not in info:
-                self.family.model().item(k).setEnabled(False)
-        saved = self.qs.value("createFamily", "", type=str) if self.qs is not None else ""
-        avail = [i for i in range(self.family.count()) if self.family.model().item(i).isEnabled()
-                 and self.family.itemData(i)]
-        i = self.family.findData(saved)
-        self.family.setCurrentIndex(i if i in avail else (avail[0] if avail else 0))
-        self.family.blockSignals(False)
-        self._show_edit_models()
-        self._family_changed()
-        if kept and not self.loras.items():         # chosen before the list came: keep them
-            self.loras.set_items(self._known(), kept)
-            self._remember_loras()
-
-    def _family_changed(self, *_):
-        fam = self.family.currentData()
-        self.model_file.clear()
-        for m in (self.families.get(fam) or {}).get("models") or []:
-            self.model_file.addItem(Path(m).stem, m)
-            self.model_file.setItemData(self.model_file.count() - 1, m, Qt.ToolTipRole)
-        if self.mode() == "create":
-            self.set_mode("create")              # qualities, LoRAs of this family
-
-    def _create_widgets(self):
-        fam = self.family.currentData()
-        f = FAMILIES.get(fam)
-        create = self.mode() == "create"
-        refs = create and self.use_refs.isChecked() and f is not None
-        n = f["refs"] if f else 0
-        moss_no_edit = fam == "moss" and "models" in (self.families.get("moss") or {}) \
-            and not (self.families.get("moss") or {}).get("edit_lora")
-        if moss_no_edit:
-            n = 0                                  # pictures go through MOSS's edit LoRA
-        for k, slot in enumerate(self.cpics):
-            slot.setVisible(refs and k < n)
-        self.ref_text.setVisible(refs)
-        self.ref_text.setText("MOSS-Image needs its edit LoRA (moss_image_edit_lora_rank_64_bf16) for pictures"
-                              if moss_no_edit else f["ref_text"] if f else "")
-        img2img = refs and fam in ("flux1", "sdxl", "chroma")
-        self.ref_strength.setVisible(img2img)
-        self._sampling_defaults()
-        self.ref_strength_label.setVisible(img2img)
-        self._show_negative()
-        self.tags.setVisible(create and fam == "sdxl")
-        if f:
-            w, h = size_for(fam, self.aspect.currentData() or 1.0)
-            self.size_text.setText(f"{w}×{h}")
-        self.lora_text.setText(lora_note("create" if create else "edit", f, fam, self.edit_model.currentData(),
-                                         self.family_loras))
-        self.b_gen.setToolTip("Make the image (Ctrl+Enter)" if create else
-                              "Edit the image with this prompt (Ctrl+Enter)")
-        self._update_buttons()
-
-    # ---- source and pictures
-    def _pick(self, title: str) -> str | None:
-        return pick_image(self, title, self.qs, None, self.places,
-                          self.collections() if self.collections is not None else None)
-
-    def _choose_source(self):
-        f = self._pick("Image to edit")
-        if f:
-            self.set_source(f)
-
-    def _source_picked(self, i: int):
-        path = self.src_combo.itemData(i)
-        if path is None:
-            self._choose_source()
-        elif path == FOLDER_ITEM:
-            self._choose_folder()
-        elif path.startswith(FOLDER_PREFIX):
-            self.set_folder(path[len(FOLDER_PREFIX):])
-        else:
-            self.set_source(path)
-
-    def _choose_folder(self):
-        start = self.qs.value("editFolder", "", type=str) if self.qs is not None else ""
-        d = QFileDialog.getExistingDirectory(self, "Folder of images to edit (each one in turn)", start)
-        if d:
-            self.set_folder(d)
-        else:
-            self._select_source_item()
-
-    def _select_source_item(self):
-        """The source list shows what is chosen: the folder, the image or (any other file) Choose file…"""
-        key = (FOLDER_PREFIX + self._batch_dir) if self.batch else self.source
-        i = self.src_combo.findData(key) if key else -1
-        self.src_combo.setCurrentIndex(i if i >= 0 else self.src_combo.findData(None))
-
-    @staticmethod
-    def folder_images(folder: str | Path) -> list[str]:
-        """The images directly in a folder (not its subfolders), by name (img2 before img10)."""
-        import re as _re
-        try:
-            files = [f for f in Path(folder).iterdir() if f.is_file() and f.suffix.lower() in IMAGE_EXTS
-                     and not f.name.startswith(".")]
-        except OSError:
-            return []
-        return [str(f) for f in sorted(files, key=lambda f: [int(t) if t.isdigit() else t for t in
-                                                             _re.split(r"(\d+)", f.name.lower())])]
-
-    def set_folder(self, folder: str) -> bool:
-        """Edit every image of a folder in turn (shown: the first). False if it has none."""
-        imgs = self.folder_images(folder)
-        if not imgs:
-            self.state.setText(f"No images in {Path(folder).name or folder} (PNG, JPG, WEBP …; subfolders are "
-                               "not looked in).")
-            self._select_source_item()
-            return False
-        first = next((f for f in imgs if QImageReader(f).canRead()), None)
-        if first is None:
-            self.state.setText(f"None of the files in {Path(folder).name} could be read as an image.")
-            self._select_source_item()
-            return False
-        if self.qs is not None:
-            self.qs.setValue("editFolder", str(folder))
-        self.set_source(first)
-        self.batch, self._batch_dir = imgs, str(folder)
-        self.set_mask(None)                           # (a mask belongs to one picture)
-        key, text = FOLDER_PREFIX + str(folder), f"Folder: {Path(folder).name} ({len(imgs)} images)"
-        i = self.src_combo.findData(key)
-        if i < 0:
-            i = self.src_combo.findData(None)          # (before Choose file…)
-            self.src_combo.insertItem(i, text, key)
-        else:
-            self.src_combo.setItemText(i, text)
-        self.src_combo.setCurrentIndex(i)
-        self.src_tile.setToolTip(f"{folder}\nShown: the first image, {Path(first).name}")
-        self.src_info.setText(f"Folder {Path(folder).name}: {len(imgs)} image{'s' if len(imgs) != 1 else ''}, "
-                              "each edited in turn with the same prompt and settings (shown: the first, "
-                              f"{Path(first).name}).")
-        self._show_mask()
-        self._update_buttons()
-        self._variations_changed()
-        return True
-
-    def set_source(self, path: str):
-        img = upright(path)
-        if img.isNull():
-            self.state.setText(f"Not an image: {Path(path).name}")
-            return
-        was_batch, self.batch = bool(self.batch), []    # (one image again: not the folder)
-        changed = str(path) != self.source
-        self.source = str(path)
-        if changed or (self.mask is not None and self.mask.size() != img.size()):
-            self.mask = None                       # a mask belongs to its image
-        self.src_tile.set_image(overlay(img, self.mask) if self.mask is not None else img)
-        self.src_tile.setToolTip(str(path))
-        self._show_mask()
-        i = self.src_combo.findData(str(path))
-        self.src_info.setText(f"{self.src_combo.itemText(i) + ' · ' if i >= 0 else ''}{Path(path).name} · "
-                              f"{img.width()}×{img.height()}")
-        if was_batch:
-            self._select_source_item()
-            self._variations_changed()
-        self._update_buttons()
-
-    # ---- mask (inpainting)
-    def paint_mask(self):
-        if not self.source:
-            return
-        img = upright(self.source)
-        dlg = MaskPainterDialog(self, img, self.mask)
-        try:
-            if dlg.exec() == QDialog.Accepted:
-                self.set_mask(dlg.mask if mask_area(dlg.mask) > 0 else None)
-        finally:
-            dlg.deleteLater()
-
-    def set_mask(self, mask: QImage | None):
-        """The painted mask for the image to edit (None: the whole image is edited)."""
-        self.mask = mask.copy() if mask is not None else None
-        if self.source:
-            img = upright(self.source)
-            self.src_tile.set_image(overlay(img, self.mask) if self.mask is not None else img)
-        self._show_mask()
-        self._update_buttons()
-
-    def _mask_problem(self) -> str:
-        """Why the painted mask cannot be used now ("" if it can, or there is none)."""
-        if self.mask is None:
-            return ""
-        if self.edit_model.currentData() != "qwen21":
-            return "A painted mask works with Qwen-Image 2.1: choose it as the model (or remove the mask)."
-        return ""
-
-    def _show_mask(self):
-        on = self.mask is not None
-        self.b_mask.setText("Change mask…" if on else "Paint mask…")
-        self.b_mask.setEnabled(bool(self.source) and not self._busy and not self.batch)
-        self.b_mask.setToolTip("A mask belongs to one picture: choose a single image to paint one" if self.batch
-                               else "")
-        self.b_mask_clear.setVisible(on)
-        why = self._mask_problem()
-        a = mask_area(self.mask) if on else 0.0
-        self.mask_info.setText(why or (f"Only the red part ({f'{a * 100:.0f} %' if a >= 0.01 else 'under 1 %'}) is "
-                                       "drawn anew; the rest stays exactly as it is. Say what it should show, e.g. “She tilts her head back "
-                                       "and looks up at the ceiling” (a short “She is looking up” only moves the "
-                                       "eyes)." if on else ""))
-
-    # ---- results
-    def _load_results(self, select: str | None = None, keep: bool = False):
-        """The results with the filters applied: the strip below the large view and the gallery (grouped by
-        Generate run); thumbnails are decoded in the background (each file once)."""
-        cur = self.selected()
-        if select is None and (keep or cur is not None):
-            select = cur[0] if cur else None
-        entries = []
-        for png, meta in project_edits(self.project):
-            try:
-                entries.append((str(png), meta, png.stat().st_mtime, png.stat().st_mtime_ns))
-            except OSError:
-                continue
-        self._entries = [(p, m, t) for p, m, t, _ns in entries]
-        used = {p for p, m, _t in self._entries if self.uses(m)}
-        self._in_use = used
-        models = sorted({model_key(m) for _p, m, _t in self._entries}, key=model_name)
-        want = self.f_model.currentData()
-        self.f_model.blockSignals(True)
-        self.f_model.clear()
-        self.f_model.addItem("All models", None)
-        for k in models:
-            self.f_model.addItem(model_name(k), k)
-        self.f_model.setCurrentIndex(max(0, self.f_model.findData(want)))
-        self.f_model.blockSignals(False)
-        show, model = self.f_show.currentData(), self.f_model.currentData()
-        words = self.f_search.text().lower().split()
-
-        def keep_it(png, meta):
-            if show == "fav" and not meta.get("favorite"):
-                return False
-            if show == "used" and png not in used:
-                return False
-            if model and model_key(meta) != model:
-                return False
-            text = " ".join(str(meta.get(k) or "") for k in ("prompt", "negative")).lower()
-            return all(w in text for w in words)
-        shown = [(p, m, t, ns) for p, m, t, ns in entries if keep_it(p, m)]
-        self.results.blockSignals(True)
-        self.results.clear()
-        self._strip_items = {}                       # png -> its item (a thumbnail arriving finds it at once)
-        for png, meta, _t, ns in shown:
-            it = QListWidgetItem(self._strip_icon(png, meta), "")
-            it.setData(Qt.UserRole, (png, meta))
-            it.setToolTip(meta.get("prompt", Path(png).name))
-            self.results.addItem(it)
-            self._strip_items[png] = it
-            if self._thumbs.get(png, (None,))[0] != ns and (png, ns) not in self._requested \
-                    and (png, ns) not in self._failed:
-                self._requested.add((png, ns))
-                self._loader.request(png, ns)
-        self.results.blockSignals(False)
-        self.gallery.set_groups(run_groups([(p, m, t) for p, m, t, _ns in shown]), used)
-        for png, (_ns, pix) in self._thumbs.items():
-            self.gallery.set_thumb(png, pix)
-        n, total = len(shown), len(entries)
-        self.f_count.setText(f"{n} result{'s' if n != 1 else ''}" if n == total else f"{n} of {total}")
-        alive = {p for p, *_r in entries}
-        for png in [p for p in self._thumbs if p not in alive]:     # deleted results: their thumbnails go
-            del self._thumbs[png]
-        if self.results.count():
-            k = next((i for i in range(self.results.count())
-                      if self.results.item(i).data(Qt.UserRole)[0] == select), 0)
-            self.results.blockSignals(True)            # (shown once below, not also through the signal)
-            self.results.setCurrentRow(k)
-            self.results.blockSignals(False)
-            self._strip_selection(self.results.currentItem(), None)
-        self._show_selected()
-
-    def _strip_icon(self, png: str, meta: dict, selected: bool = False) -> QIcon:
-        pix = self._thumbs.get(png, (None, QPixmap()))[1]
-        return QIcon(badged(pix, QSize(150, 100), "", bool(meta.get("favorite")), png in self._in_use, selected,
-                            self.devicePixelRatioF()))
-
-    def _strip_selection(self, cur, prev):
-        for it, on in ((prev, False), (cur, True)):
-            if it is not None:
-                png, meta = it.data(Qt.UserRole)
-                it.setIcon(self._strip_icon(png, meta, on))
-
-    def _thumb_ready(self, png: str, ns: int, img: QImage):
-        self._requested.discard((png, ns))
-        if img.isNull():
-            self._failed.add((png, ns))                # (not asked again until the file changes)
-            return
-        pix = QPixmap.fromImage(img)
-        self._thumbs[png] = (ns, pix)
-        it = self._strip_items.get(png)
-        if it is not None:
-            it.setIcon(self._strip_icon(png, it.data(Qt.UserRole)[1], it is self.results.currentItem()))
-        self.gallery.set_thumb(png, pix)
-
-    # ---- views, favourites
-    def set_view(self, view: str, remember: bool = True):
-        gallery = view == "gallery"
-        self.stack.setCurrentIndex(1 if gallery else 0)
-        (self.b_gallery if gallery else self.b_single).setChecked(True)
-        self.thumb_size.setVisible(gallery)
-        if remember and self.qs is not None:
-            self.qs.setValue("resultsView", "gallery" if gallery else "single")
-        sel = self.selected()
-        if gallery:
-            self.gallery.set_selected(sel[0] if sel else None)
-            self.gallery.setFocus()
-        else:
-            self.results.setFocus()
-            it = self.results.currentItem()
-            if it is not None:
-                self.results.scrollToItem(it)
-
-    def view_mode(self) -> str:
-        return "gallery" if self.stack.currentIndex() == 1 else "single"
-
-    def _thumb_size_changed(self, px: int):
-        self.gallery.set_thumb_size(px)
-        if self.qs is not None:
-            self.qs.setValue("resultsThumb", px)
-
-    def _select_png(self, png: str):
-        for i in range(self.results.count()):
-            if self.results.item(i).data(Qt.UserRole)[0] == png:
-                self.results.setCurrentRow(i)
-                return
-
-    def _gallery_clicked(self, png: str):
-        self._select_png(png)
-        self.gallery.setFocus()
-
-    def _gallery_opened(self, png: str):
-        self._select_png(png)
-        self.set_view("single")
-
-    def toggle_favorite(self, png: str | None = None) -> bool:
-        """★ a result (the selected one if none is given) or take its star away; kept in its record. A result
-        whose record is not written yet (still being made) or cannot be read is left alone."""
-        sel = self.selected()
-        png = png or (sel[0] if sel else None)
-        if not png:
-            return False
-        f = Path(png).with_suffix(".json")
-        try:
-            meta = json.loads(f.read_text(encoding="utf-8"))
-            if not isinstance(meta, dict):
-                raise ValueError("not a record")
-        except (OSError, ValueError):
-            self.state.setText("This result's record is not written yet (or cannot be read): try again in a moment.")
-            return False
-        meta["favorite"] = not meta.get("favorite")
-        if not meta["favorite"]:
-            meta.pop("favorite")
-        try:
-            write_meta(f, meta)
-        except OSError as e:
-            self.state.setText(f"Could not mark it: {e}")
-            return False
-        if self.f_show.currentData() == "fav" and not meta.get("favorite"):
-            self._load_results(keep=True)              # (it leaves the Favourites view)
-        else:                                          # in place: no rebuild, the view stays where it is
-            for i in range(self.results.count()):
-                it = self.results.item(i)
-                if it.data(Qt.UserRole)[0] == png:
-                    it.setData(Qt.UserRole, (png, meta))
-                    it.setIcon(self._strip_icon(png, meta, it is self.results.currentItem()))
-            self.gallery.update_thumb(png, meta)
-            if sel is not None and sel[0] == png:
-                self.b_fav.setChecked(bool(meta.get("favorite")))
-        if self.view_mode() == "gallery":
-            self.gallery.setFocus()
-        return bool(meta.get("favorite"))
-
-    def _use_seed(self, seed: int):
-        self.seed.setValue(int(seed))
-        self.fresh_seed.setChecked(False)
-        self.state.setText(f"Seed {seed} is set for the next Generate (New seed after each Generate is off).")
-
-    def selected(self) -> tuple[str, dict] | None:
-        """The selected result and its record, read again (a use is recorded while the window is open)."""
-        it = self.results.currentItem()
-        if it is None:
-            return None
-        png, meta = it.data(Qt.UserRole)
-        try:
-            meta = json.loads(Path(png).with_suffix(".json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            pass
-        return png, meta
-
-    def _show_selected(self):
-        sel = self.selected()
-        if sel is None:
-            self.view.clear_frame("Results appear here")
-            self.res_info.set(None)
-            self.view.setToolTip("")
-            self.gallery.set_selected(None)
-            self.b_fav.setChecked(False)
-        else:
-            png, meta = sel
-            orig = meta.get("source_copy") or meta.get("source")
-            show = orig if self.b_before.isChecked() and orig and Path(orig).is_file() else png
-            img = upright(show)                      # (a phone photo turned, like the result)
-            self.view.set_image(img)
-            how = how_made(meta)
-            smp = " · ".join(x for x in (f"{meta['steps']} steps" if meta.get("steps") else "",
-                                         f"CFG {meta['cfg']:g}" if isinstance(meta.get("cfg"), (int, float)) else "",
-                                         meta.get("sampler") or "", meta.get("scheduler") or "") if x)
-            w, h = meta.get("width"), meta.get("height")
-            if not (w and h) and not img.isNull():
-                w, h = img.width(), img.height()
-            self.res_info.set({
-                "original": show != png, "where": self.uses(meta), "model": how.strip(), "sampling": smp,
-                "size": f"{w} × {h}" if w and h else "",
-                "loras": [f"{lora_label(lo['path'])} ×{lo['strength']:g}" for lo in meta.get("loras") or []],
-                "seed": meta.get("seed"),
-                "when": time.strftime("%Y-%m-%d %H:%M", time.localtime(_mtime(Path(png)))),
-                "values": (meta.get("variation") or {}).get("values") or {},
-                "prompt": meta.get("prompt", ""), "trigger_words": meta.get("trigger_words") or [],
-                "negative": meta.get("negative") or ""})
-            self.view.setToolTip(self.res_info.toolTip())
-            self.gallery.set_selected(png, scroll=self.view_mode() == "gallery")
-            self.b_fav.setChecked(bool(meta.get("favorite")))
-        self._update_buttons()
-
+    # ---- buttons
     def _update_generate_button(self):
         """Generate and Paint mask: what the prompt, source and model decide (no disk reads: used while typing)."""
         idle = not self._busy
@@ -1360,7 +641,7 @@ class ImageEditDialog(QDialog):
             return self.generate_new()
         if self._busy or not self.source or not self.prompt.toPlainText().strip():
             return
-        self._busy, self._cancel = True, False
+        self._busy = True
         prompt = " ".join(self.prompt.toPlainText().split())
         source, quality, n = self.source, self.quality.currentData(), self.tries.value()
         model = self.edit_model.currentData()
@@ -1389,538 +670,18 @@ class ImageEditDialog(QDialog):
         self._remember_loras()
         keep_size = self.keep_size.isChecked() and mask is None   # (an inpaint comes back at the source's own size)
         self._batch_names = [Path(f).name for f in sources] if len(sources) > 1 else []
-        self._per_image, self._skipped = per, []
-        skipped = self._skipped
-        edits = self.project / EDITS_DIR
-        sig, connect = self._sig, self.connect_editor
-        if not self._run_on_start():
-            return
-        seeds = self._seeds(base_n)                    # (after the checks: a refused Generate keeps the seed)
-        self.bar.setValue(0)
-        self.bar.show()
-        self.b_start_comfy.hide()
-        self.state.setText("Connecting to ComfyUI … (the first edit loads the model, which takes a while; if a "
+        self._per_image = per
+        plan = EditPlan(self.project / EDITS_DIR, self.connect_editor, prompt, quality, n, [], runs, run_words, refs,
+                        jobs, model=model, sources=sources, per=per, mask=mask, keep_size=keep_size)
+        self._start_worker(EditWorker(plan), base_n,
+                           "Connecting to ComfyUI … (the first edit loads the model, which takes a while; if a "
                            "clip is being generated, the edit waits for it)")
-        self._update_buttons()
-
-        run = uuid.uuid4().hex[:12]                  # this Generate's results belong together
-
-        def work():
-            copies = []                               # [kept source, mask file, results made from it]
-            try:
-                edits.mkdir(parents=True, exist_ok=True)
-                cur = {"k": 1}
-                self.editor = connect(lambda i, s: sig.progress.emit(cur["k"], n, i, s))
-                if model not in self.editor.models():
-                    raise RuntimeError(f"{EDIT_MODELS[model]} is not available in ComfyUI")
-                if quality == "fast" and "fast" not in self.editor.qualities(model):
-                    sig.progress.emit(0, n, 0, 0)
-                for si, src in enumerate(sources):
-                    if self._cancel:
-                        break
-                    size = None
-                    if len(sources) > 1 or keep_size:
-                        img = upright(src)            # the size the edit comes back at (a phone photo turned)
-                        if img.isNull():
-                            skipped.append(Path(src).name)   # (a folder's unreadable file: the next one)
-                            continue
-                        if keep_size:
-                            size = (img.width() // 2 * 2, img.height() // 2 * 2)
-                    kept = edits / "sources" / (f"source_{time.strftime('%Y%m%d-%H%M%S')}_{uuid.uuid4().hex[:6]}"
-                                                f"{Path(src).suffix.lower() or '.png'}")
-                    kept.parent.mkdir(exist_ok=True)
-                    kept.write_bytes(Path(src).read_bytes())         # the original stays with its results
-                    entry = [kept, None, 0]
-                    copies.append(entry)
-                    if mask is not None:                             # the mask too (white = drawn anew)
-                        entry[1] = kept.with_name(kept.stem.replace("source_", "mask_", 1) + ".png")
-                        if not mask.save(str(entry[1]), "PNG"):
-                            raise RuntimeError("could not save the mask")
-                    mask_file = entry[1]
-                    for j in range(per):
-                        if self._cancel:
-                            break
-                        k = si * per + j + 1
-                        cur["k"] = k
-                        b, r = divmod(j, len(runs))
-                        loras, words = runs[r], run_words[r]
-                        seed = seeds[b]
-                        stem = f"edit_{time.strftime('%Y%m%d-%H%M%S')}_{seed}"
-                        out = edits / f"{stem}.png"
-                        if out.exists() or out.with_suffix(".json").exists():
-                            out = edits / f"{stem}_{k}.png"   # (the same seed again within a second)
-                        job = jobs[b] if jobs else None
-                        meta = self.editor.edit(Path(src), with_triggers(job.prompt if job else prompt, words), out,
-                                                seed, quality, [Path(x) for x in refs], loras, model=model,
-                                                mask=mask_file)
-                        entry[2] += 1
-                        if size is not None:
-                            scale_to(out, out, size)
-                        meta.update({"run": run, "prompt": job.prompt if job else prompt, "trigger_words": words,
-                                     "seed": seed, "source": src,
-                                     "source_copy": str(kept), **({"mask": str(mask_file)} if mask_file else {}),
-                                     "refs": refs, "size": list(size) if size else None,
-                                     **({"folder": str(Path(src).parent)} if len(sources) > 1 else {}),
-                                     **(self._variation_meta(job, prompt, job.key) if job else {})})
-                        write_meta(out.with_suffix(".json"), meta)
-                        sig.result.emit(str(out), meta)
-                sig.finished.emit("")
-            except Exception as e:  # noqa: BLE001
-                safe_emit(sig.finished, "cancelled" if self._cancel else str(e))
-            finally:
-                for kept, mask_file, made in copies:
-                    if not made:                 # no result refers to them: the copies of source and mask go
-                        for f in (kept, mask_file):
-                            if f is not None:
-                                Path(f).unlink(missing_ok=True)
-        threading.Thread(target=work, daemon=True).start()
-
-    # ---- sampling (Create): steps, cfg, sampler, scheduler; each "auto" = what the model uses by itself
-    def _build_sampling(self, cv):
-        self._sampling_family, self._sampling_loading = None, False
-        row = QHBoxLayout()
-        self.steps = QSpinBox()
-        self.steps.setRange(0, 200)
-        self.steps.setToolTip("Sampling steps (auto: the model's own for this quality). More steps rarely help a "
-                              "distilled / Turbo / Lightning model and cost time in proportion")
-        self.cfg = QDoubleSpinBox()
-        self.cfg.setRange(0.0, 30.0)
-        self.cfg.setSingleStep(0.1)
-        self.cfg.setDecimals(1)
-        self.cfg.setToolTip("CFG (auto: the model's own). Above 1 the negative prompt counts and each step runs "
-                            "twice (about twice as slow); distilled / Turbo / Lightning models want 1")
-        self.sampler = QComboBox()
-        self.sampler.setToolTip("The sampler (auto: the model's own)")
-        self.scheduler = QComboBox()
-        self.scheduler.setToolTip("The scheduler: how the noise levels are spread over the steps (auto: the "
-                                  "model's own; Qwen-Image 2.1 Turbo uses a fixed list of its own, any choice here "
-                                  "replaces it)")
-        b_reset = icon_button("rotate", "Back to the model's own settings (all auto)")
-        b_reset.clicked.connect(lambda: self.set_sampling({}))
-        for w in (self.steps, self.cfg):
-            guard_wheel(w)
-        grid = QGridLayout()                       # two rows, so the panel stays narrow
-        for k, (w, text) in enumerate(((self.steps, "Steps"), (self.cfg, "CFG"), (self.sampler, "Sampler"),
-                                       (self.scheduler, "Scheduler"))):
-            grid.addWidget(label(text, level="tertiary"), k // 2, (k % 2) * 2)
-            grid.addWidget(w, k // 2, (k % 2) * 2 + 1)
-            w.setMinimumWidth(60)
-            if isinstance(w, QComboBox):
-                w.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
-                w.setMinimumContentsLength(8)
-        grid.addWidget(b_reset, 0, 4)
-        grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(3, 1)
-        row.addLayout(grid, 1)
-        cv.addLayout(row)
-        self.sampling_note = label("", level="tertiary")
-        self.sampling_note.setWordWrap(True)
-        cv.addWidget(self.sampling_note)
-        self.steps.valueChanged.connect(lambda *_: self._sampling_changed())
-        self.cfg.valueChanged.connect(lambda *_: self._sampling_changed())
-        self.sampler.currentIndexChanged.connect(lambda *_: self._sampling_changed())
-        self.scheduler.currentIndexChanged.connect(lambda *_: self._sampling_changed())
-        self.model_file.currentIndexChanged.connect(lambda *_: self._sampling_defaults())
-        self._sampling_auto: dict = {}
-        self._fill_sampling_lists()
-
-    def _fill_sampling_lists(self):
-        lists = (self.families or {}).get("sampling") or {}
-        for combo, names in ((self.sampler, lists.get("samplers") or SAMPLERS),
-                             (self.scheduler, lists.get("schedulers") or SCHEDULERS)):
-            cur = combo.currentData()
-            combo.blockSignals(True)
-            combo.clear()
-            combo.addItem("auto", None)
-            for n in names:
-                combo.addItem(n, n)
-            i = combo.findData(cur)
-            combo.setCurrentIndex(i if i >= 0 else 0)
-            combo.blockSignals(False)
-
-    def sampling(self) -> dict:
-        """The chosen sampling settings; a missing key: the model's own."""
-        out = {}
-        if self.steps.value():
-            out["steps"] = self.steps.value()
-        if self.cfg.value():
-            out["cfg"] = round(self.cfg.value(), 2)
-        if self.sampler.currentData():
-            out["sampler"] = self.sampler.currentData()
-        if self.scheduler.currentData():
-            out["scheduler"] = self.scheduler.currentData()
-        return out
-
-    def set_sampling(self, sp: dict):
-        self._sampling_loading = True
-        try:
-            self.steps.setValue(int(sp.get("steps") or 0))
-            self.cfg.setValue(float(sp.get("cfg") or 0))
-            for combo, key in ((self.sampler, "sampler"), (self.scheduler, "scheduler")):
-                name = sp.get(key)
-                if name and combo.findData(name) < 0:
-                    combo.addItem(name, name)          # (one this ComfyUI does not list: kept, ComfyUI says no)
-                combo.setCurrentIndex(max(0, combo.findData(name)) if name else 0)
-        finally:
-            self._sampling_loading = False
-        self._sampling_changed()
-
-    def _sampling_key(self) -> str:
-        return f"createSampling_{self.family.currentData()}"
-
-    def _sampling_defaults(self):
-        """The model's own settings shown as "auto (…)"; the family's remembered settings when it changed."""
-        if not hasattr(self, "steps") or not hasattr(self, "quality"):
-            return
-        fam = self.family.currentData()
-        if self.sampler.count() <= 1 or (self.families or {}).get("sampling"):
-            self._fill_sampling_lists()
-        if fam != self._sampling_family:
-            self._sampling_family = fam
-            saved = {}
-            if self.qs is not None and fam:
-                try:
-                    saved = json.loads(self.qs.value(self._sampling_key(), "{}", type=str) or "{}")
-                except ValueError:
-                    saved = {}
-            self.set_sampling(saved if isinstance(saved, dict) else {})
-        refs = sum(1 for s in self.cpics[:FAMILIES.get(fam, {}).get("refs", 0)] if s.path) \
-            if self.use_refs.isChecked() else 0
-        auto = default_sampling(fam, (self.families or {}).get(fam) or {}, self.model_file.currentData(),
-                                self.quality.currentData() or "", refs, self.ref_strength.value()) if fam in FAMILIES \
-            else None
-        self._sampling_auto = auto or {}
-        a = self._sampling_auto
-        self.steps.setSpecialValueText(f"auto ({a['steps']})" if a else "auto")
-        self.cfg.setSpecialValueText(f"auto ({a['cfg']:g})" if a else "auto")
-        self.sampler.setItemText(0, f"auto ({a['sampler']})" if a else "auto")
-        self.scheduler.setItemText(0, f"auto ({a['scheduler']})" if a else "auto")
-        self._sampling_note()
-        self._show_negative()                       # (a model's own CFG above 1 shows the negative prompt)
-
-    def _sampling_changed(self):
-        self._show_negative()
-        if self._sampling_loading:
-            return
-        if self.qs is not None and self.family.currentData():
-            self.qs.setValue(self._sampling_key(), json.dumps(self.sampling()))
-        self._sampling_note()
-
-    def _show_negative(self):
-        """The negative prompt: for families that use one, and for the others (made for CFG 1, where a negative
-        prompt does nothing) as soon as CFG is set above 1."""
-        if not hasattr(self, "negative"):
-            return
-        f = FAMILIES.get(self.family.currentData()) if self.mode() == "create" else None
-        own = bool(f and f["negative"])
-        cfg_on = hasattr(self, "cfg") and (self.cfg.value() or (getattr(self, "_sampling_auto", {}) or {}).get("cfg", 1)) > 1
-        was = self.negative.isVisibleTo(self)
-        self.negative.setVisible(bool(f) and (own or cfg_on))
-        if was != self.negative.isVisibleTo(self) and hasattr(self, "_var_timer"):
-            self._var_timer.start()                 # (variations count the negative only while it is used)
-        cfg = self.cfg.value() or (getattr(self, "_sampling_auto", {}) or {}).get("cfg", 1) if hasattr(self, "cfg") else 1
-        self.negative.setPlaceholderText("Avoid (optional negative prompt; empty: the model's usual one)" if own else
-                                         f"Avoid (optional negative prompt; counts because CFG is {cfg:g})"
-                                         if cfg_on else "")
-
-    def _sampling_note(self):
-        sp, a = self.sampling(), self._sampling_auto
-        notes = []
-        if a and sp.get("cfg") and sp["cfg"] > 1 and a.get("cfg", 1) <= 1:
-            notes.append(f"CFG {sp['cfg']:g} on a model made for CFG 1 (distilled / Turbo / Lightning): about twice "
-                         "as slow, colours often burn")
-        if a and sp.get("steps") and a.get("steps") and sp["steps"] < a["steps"] * 0.6:
-            notes.append(f"{sp['steps']} steps is far below the model's own {a['steps']}: expect unfinished, "
-                         "noisy images")
-        if a and sp.get("scheduler") and a.get("scheduler") == "manual":
-            notes.append("replaces Qwen-Image 2.1 Turbo's own sigma list")
-        self.sampling_note.setText(("Own settings: " + "; ".join(notes) + ".") if notes else
-                                   "Own settings in use (each auto field uses the model's own)." if sp else "")
-        self.sampling_note.setVisible(bool(self.sampling_note.text()))
-
-    # ---- LoRA presets (Create): named prompt + negative + quality + sampling + strength, several per LoRA
-    def _build_presets(self, cv):
-        row = QHBoxLayout()
-        self.preset = QComboBox()
-        self.preset.setToolTip("Presets of the LoRAs above: choosing one puts its prompt, negative prompt, quality, "
-                               "sampling settings and LoRA strength into the fields")
-        self.preset.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
-        self.preset.setMinimumContentsLength(12)
-        self.preset.activated.connect(lambda _i: self.apply_preset())
-        self.preset.currentIndexChanged.connect(lambda *_: self._preset_buttons())
-        self.b_preset_new = icon_button("plus", "Save the prompt and these settings as a new preset of a LoRA")
-        self.b_preset_new.clicked.connect(lambda: self.save_preset_as())
-        self.b_preset_save = icon_button("save", "Save the current prompt and settings into the chosen preset")
-        self.b_preset_save.clicked.connect(lambda: self.update_preset())
-        self.b_preset_rename = icon_button("pen", "Rename the chosen preset")
-        self.b_preset_rename.clicked.connect(lambda: self.rename_preset())
-        self.b_preset_delete = icon_button("trash", "Delete the chosen preset")
-        self.b_preset_delete.clicked.connect(lambda: self.delete_preset())
-        row.addWidget(label("Preset", level="tertiary"))
-        row.addWidget(self.preset, 1)
-        for b in (self.b_preset_new, self.b_preset_save, self.b_preset_rename, self.b_preset_delete):
-            row.addWidget(b)
-        cv.addLayout(row)
-        self._fill_presets()
-
-    def _preset_loras(self) -> list[str]:
-        return [it["path"] for it in self.loras.items() if it.get("path")] if hasattr(self, "loras") else []
-
-    def _fill_presets(self, select: tuple[str, str] | None = None):
-        if not hasattr(self, "preset"):
-            return
-        from .. import presets
-        cur = "\n".join(select) if select else self.preset.currentData()
-        self.preset.blockSignals(True)
-        self.preset.clear()
-        loras = self._preset_loras()
-        found = [(lo, p) for lo in loras for p in presets.store().list(lo)]
-        self.preset.addItem("— choose a preset —" if found else
-                            "no presets for these LoRAs (+ saves one)" if loras else "add a LoRA for its presets", None)
-        for lo, p in found:
-            text = p["name"] if len(loras) == 1 else f"{lora_label(lo)}: {p['name']}"
-            self.preset.addItem(text, f"{lo}\n{p['name']}")         # (a string: findData cannot match tuples)
-            self.preset.setItemData(self.preset.count() - 1, (p.get("prompt") or "")[:300], Qt.ToolTipRole)
-        i = self.preset.findData(cur) if cur else -1
-        self.preset.setCurrentIndex(max(0, i))
-        self.preset.blockSignals(False)
-        self._preset_buttons()
-
-    def _chosen_preset(self) -> tuple[str, str] | None:
-        data = self.preset.currentData()
-        return tuple(data.rsplit("\n", 1)) if data else None
-
-    def _preset_buttons(self):
-        chosen = self.preset.currentData() is not None
-        has = bool(self._preset_loras())
-        self.b_preset_new.setEnabled(has)
-        self.b_preset_new.setToolTip("Save the prompt and these settings as a new preset of a LoRA" if has else
-                                     "Presets belong to a LoRA: add a LoRA above first")
-        for b, tip in ((self.b_preset_save, "Save the current prompt and settings into the chosen preset"),
-                       (self.b_preset_rename, "Rename the chosen preset"),
-                       (self.b_preset_delete, "Delete the chosen preset")):
-            b.setToolTip(tip if chosen else tip + " (choose a preset first)")
-        for b in (self.b_preset_save, self.b_preset_rename, self.b_preset_delete):
-            b.setEnabled(chosen)
-
-    def _preset_values(self, lora: str) -> dict:
-        strength = next((it["strength"] for it in self.loras.items()
-                         if os.path.realpath(it["path"]) == os.path.realpath(lora)), 1.0)
-        var = {k: v for k, v in self.variations.state().items() if k != "positions"}
-        return {"variations": var, "prompt": self.prompt.toPlainText().strip(), "negative": self.negative.text().strip(),
-                "quality": self.quality.currentData(), "sampling": self.sampling(), "strength": strength,
-                "family": self.family.currentData()}
-
-    def apply_preset(self):
-        """The chosen preset into the fields: prompt, negative, quality, sampling, its LoRA's strength."""
-        data = self._chosen_preset()
-        if not data:
-            return
-        from .. import presets
-        p = presets.store().get(*data)
-        if p is None:
-            self._fill_presets()
-            return
-        if p.get("prompt") is not None:
-            self.prompt.setPlainText(p["prompt"])
-        if p.get("negative") is not None:
-            self.negative.setText(p["negative"])
-        other = p.get("family") and p["family"] != self.family.currentData()
-        if p.get("variations") is not None:
-            self.variations.set_state(p["variations"])
-        q = self.quality.findData(p.get("quality")) if not other else -1
-        if q >= 0:
-            self.quality.setCurrentIndex(q)
-        if not other:                               # (sampling settings of another model would not fit this one)
-            self.set_sampling(p.get("sampling") or {})
-        if p.get("strength") is not None:
-            items = [dict(it, strength=float(p["strength"])) if os.path.realpath(it["path"]) ==
-                     os.path.realpath(data[0]) else it for it in self.loras.items()]
-            self.loras.set_items(self._known(), items)
-            self._remember_loras()
-            self._fill_presets(data)
-        self.state.setText(f"Preset “{p['name']}” of {lora_label(data[0])} is in the fields."
-                           + (f" It was made with {FAMILIES.get(p['family'], {}).get('label', p['family'])}: its "
-                              "quality and sampling settings were left as they are." if other else ""))
-
-    def save_preset_as(self, name: str | None = None, lora: str | None = None) -> bool:
-        """A new preset from the fields (asks for its name, and for the LoRA when there are several)."""
-        from .. import presets
-        loras = self._preset_loras()
-        if not loras:
-            return False
-        if lora is None:
-            if len(loras) == 1:
-                lora = loras[0]
-            else:
-                labels = [lora_label(lo) for lo in loras]
-                cur = self._chosen_preset()
-                start = loras.index(cur[0]) if cur and cur[0] in loras else 0
-                pick, ok = QInputDialog.getItem(self, "New preset", "The preset belongs to the LoRA:", labels, start,
-                                                False)
-                if not ok:
-                    return False
-                lora = loras[labels.index(pick)]
-        if name is None:
-            name, ok = QInputDialog.getText(self, "New preset", f"Name of the new preset of {lora_label(lora)}:")
-            if not ok:
-                return False
-        name = " ".join(str(name).split())
-        if not name:
-            return False
-        if presets.store().get(lora, name) is not None and not ask(
-                self, "New preset", f"{lora_label(lora)} already has a preset “{name}”. Replace it?"):
-            return False
-        try:
-            presets.store().save(lora, name, self._preset_values(lora))
-        except (OSError, ValueError) as e:
-            failed(self, "New preset", "save the preset", e)
-            return False
-        self._fill_presets((lora, name))
-        self.state.setText(f"Saved the preset “{name}” of {lora_label(lora)}.")
-        return True
-
-    def update_preset(self) -> bool:
-        """The chosen preset takes the current prompt and settings."""
-        from .. import presets
-        data = self._chosen_preset()
-        if not data:
-            return False
-        try:
-            presets.store().save(data[0], data[1], self._preset_values(data[0]))
-        except (OSError, ValueError) as e:
-            failed(self, "Preset", "save the preset", e)
-            return False
-        self._fill_presets(data)
-        self.state.setText(f"Saved the changes to the preset “{data[1]}”.")
-        return True
-
-    def rename_preset(self, new: str | None = None) -> bool:
-        from .. import presets
-        data = self._chosen_preset()
-        if not data:
-            return False
-        if new is None:
-            new, ok = QInputDialog.getText(self, "Rename preset", "New name:", text=data[1])
-            if not ok:
-                return False
-        new = " ".join(str(new).split())
-        if not new or new == data[1]:
-            return False
-        try:
-            presets.store().rename(data[0], data[1], new)
-        except (OSError, ValueError) as e:
-            failed(self, "Rename preset", "rename it", e)
-            return False
-        self._fill_presets((data[0], new))
-        return True
-
-    def delete_preset(self, confirm: bool = True) -> bool:
-        from .. import presets
-        data = self._chosen_preset()
-        if not data:
-            return False
-        if confirm and not ask(self, "Delete preset", f"Delete the preset “{data[1]}” of "
-                                                f"{lora_label(data[0])}?"):
-            return False
-        try:
-            presets.store().delete(*data)
-        except OSError as e:
-            failed(self, "Delete preset", "delete it", e)
-            return False
-        self._fill_presets()
-        self.state.setText(f"Deleted the preset “{data[1]}”.")
-        return True
-
-    # ---- prompt variations (variations_panel.py)
-    def _negative_used(self) -> bool:
-        """The negative prompt goes with the next Generate (create mode, its field shown for this model)."""
-        return self.mode() == "create" and self.negative.isVisibleTo(self)
-
-    def _templates_changed(self):
-        self.variations.set_templates(self.prompt.toPlainText(),
-                                      self.negative.text() if self._negative_used() else "")
-
-    def _variations_changed(self):
-        if self.qs is not None:
-            st = self.variations.state()
-            self.qs.setValue("promptVariations", json.dumps(st, ensure_ascii=False))
-        if not getattr(self, "_rehighlighting", False):
-            self._rehighlighting = True
-            try:
-                self._highlight.rehighlight()
-            finally:
-                self._rehighlighting = False
-        active = self.variations.active()
-        if hasattr(self, "tries"):
-            self.tries.setEnabled(not active)
-            self.tries.setToolTip("Variations decide how many images are made (Make … below the prompt)" if active
-                                  else f"How many results at once (1 … {MAX_RESULTS}; each with the next seed), to "
-                                       "pick the best one. They are made one after another and each appears when it "
-                                       "is ready; Cancel stops after the current one")
-        if hasattr(self, "b_gen"):
-            per = len(self._lora_runs()) if hasattr(self, "lora_each") else 1
-            if self.batch and self.mode() == "edit":
-                per *= len(self.batch)
-            n = (self.variations.amount() if active else self.tries.value() if hasattr(self, "tries") else 1) * per
-            self.b_gen.setText(f"Generate {n} image{'s' if n != 1 else ''}" if active or per > 1 or self.batch
-                               else "Generate")
-
-    def _insert_placeholder(self, name: str):
-        cur = self.prompt.textCursor()
-        before = self.prompt.toPlainText()[:cur.position()]
-        cur.insertText(("" if not before or before[-1].isspace() else " ") + "{" + name + "}")
-        self.prompt.setTextCursor(cur)
-        self.prompt.setFocus()
-
-    def _rename_placeholder(self, old: str, new: str):
-        import re as _re
-        pat = _re.compile(r"\{(\??)" + _re.escape(old) + r"([|}])")
-        from .prompt_refiner import replace_text
-        replace_text(self.prompt, pat.sub(lambda m: "{" + m.group(1) + new + m.group(2), self.prompt.toPlainText()))
-        self.negative.setText(pat.sub(lambda m: "{" + m.group(1) + new + m.group(2), self.negative.text()))
-
-    def _pick_list(self) -> str | None:
-        return pick_image(self, "Choose a wildcard list (.txt, one value per line)", self.qs, kind="text")
-
-    def _variation_jobs(self) -> list | None:
-        """The next Generate's prompts when variations are active (None: not active; [] after a refusal)."""
-        if not self.variations.active():
-            return None
-        self._templates_changed()
-        many = self.variations.too_many()
-        from ..variations import MAX_IMAGES
-        if many and not ask(self, "Variations", f"Every combination makes {many:,} images"
-                                    + (f" (one Generate makes at most {MAX_IMAGES:,})" if many > MAX_IMAGES
-                                       else "") + ". Make them all?"):
-            return []
-        jobs = self.variations.jobs()
-        key = self.variations.position_key()
-        for j in jobs:                                     # (as the plain prompt: one line, single spaces)
-            j.prompt, j.negative, j.key = " ".join(j.prompt.split()), " ".join(j.negative.split()), key
-        return jobs
-
-    def _variation_meta(self, job, prompt: str, key: str) -> dict:
-        return {"template": prompt, "variation": {"values": job.combo, "step": job.step, "index": job.index,
-                                                  "key": key}}
-
-    def new_seed(self):
-        """A fresh random seed in the field."""
-        self.seed.setValue(random.randint(1, SEED_MAX))
-
-    def _seeds(self, n: int) -> list[int]:
-        """The seeds of the next n results (the field's, +1 ...); a fresh one in the field afterwards if wanted."""
-        first = self.seed.value()
-        seeds = [(first - 1 + k) % SEED_MAX + 1 for k in range(n)]
-        if self.fresh_seed.isChecked():
-            self.new_seed()
-        return seeds
 
     def generate_new(self):
         """Create mode: new images from the prompt (and reference pictures) with the chosen model family."""
         if self._busy or not self.b_gen.isEnabled():
             return
-        self._busy, self._cancel = True, False
+        self._busy = True
         fam, model = self.family.currentData(), self.model_file.currentData()
         prompt = " ".join(self.prompt.toPlainText().split())
         negative = " ".join(self.negative.text().split()) if self._negative_used() else ""
@@ -1937,58 +698,28 @@ class ImageEditDialog(QDialog):
         refs = [s.path for s in self.cpics[:FAMILIES[fam]["refs"]] if s.path] if self.use_refs.isChecked() else []
         self._remember_loras()                    # what it was made with is offered next time
         w, h = size_for(fam, self.aspect.currentData() or 1.0)
-        strength, tags = self.ref_strength.value(), self.tags.isChecked()
-        sampling = self.sampling()
-        edits = self.project / EDITS_DIR
-        sig, connect = self._sig, self.connect_create
+        plan = CreatePlan(self.project / EDITS_DIR, self.connect_create, prompt, quality, n, [], runs, run_words,
+                          refs, jobs, family=fam, model_file=model, negative=negative, width=w, height=h,
+                          strength=self.ref_strength.value(), tags=self.tags.isChecked(), sampling=self.sampling())
+        self._start_worker(CreateWorker(plan), base_n,
+                           f"Connecting to ComfyUI … (the first image loads {FAMILIES[fam]['label']}, which takes a "
+                           "while)")
+
+    def _start_worker(self, worker: GenerateWorker, base_n: int, text: str):
+        """Run a Generate: on_start first (a refusal ends it), then the seeds (a refused Generate keeps the seed)."""
         if not self._run_on_start():
             return
-        seeds = self._seeds(base_n)                    # (after the checks: a refused Generate keeps the seed)
+        worker.plan.seeds = self._seeds(base_n)
+        self._worker, self._skipped = worker, worker.skipped
+        worker.progress.connect(self._progress)
+        worker.result.connect(self._result)
+        worker.finished.connect(self._finished)
         self.bar.setValue(0)
         self.bar.show()
         self.b_start_comfy.hide()
-        self.state.setText(f"Connecting to ComfyUI … (the first image loads {FAMILIES[fam]['label']}, which takes a "
-                           "while)")
+        self.state.setText(text)
         self._update_buttons()
-
-        run = uuid.uuid4().hex[:12]                  # this Generate's results belong together
-
-        def work():
-            try:
-                edits.mkdir(parents=True, exist_ok=True)
-                cur = {"k": 1}
-                self.editor = connect(lambda i, st: sig.progress.emit(cur["k"], n, i, st))
-                kept = None
-                if refs:                              # the first picture is shown as the "original"
-                    kept = edits / "sources" / (f"source_{time.strftime('%Y%m%d-%H%M%S')}_{uuid.uuid4().hex[:6]}"
-                                                f"{Path(refs[0]).suffix.lower() or '.png'}")
-                    kept.parent.mkdir(exist_ok=True)
-                    kept.write_bytes(Path(refs[0]).read_bytes())
-                for k in range(1, n + 1):
-                    if self._cancel:
-                        break
-                    cur["k"] = k
-                    b, r = divmod(k - 1, len(runs))
-                    loras, words = runs[r], run_words[r]
-                    seed = seeds[b]
-                    out = edits / f"new_{time.strftime('%Y%m%d-%H%M%S')}_{seed}.png"
-                    if out.exists() or out.with_suffix(".json").exists():
-                        out = out.with_name(f"{out.stem}_{k}.png")   # (the same seed again within a second)
-                    job = jobs[b] if jobs else None
-                    neg_k = (" ".join(job.negative.split()) if negative else "") if job else negative
-                    meta = self.editor.create(fam, model, with_triggers(job.prompt if job else prompt, words), out, seed,
-                                              quality, w, h, neg_k, loras, [Path(r) for r in refs], strength, tags,
-                                              sampling)
-                    meta.update({"run": run, "prompt": job.prompt if job else prompt, "trigger_words": words,
-                                 "seed": seed, "refs": refs, **(self._variation_meta(job, prompt, job.key) if job else {}),
-                                 "tags": tags,
-                                 "source_copy": str(kept) if kept else None})
-                    write_meta(out.with_suffix(".json"), meta)
-                    sig.result.emit(str(out), meta)
-                sig.finished.emit("")
-            except Exception as e:  # noqa: BLE001
-                safe_emit(sig.finished, "cancelled" if self._cancel else str(e))
-        threading.Thread(target=work, daemon=True).start()
+        worker.start()
 
     def _run_on_start(self) -> bool:
         try:
@@ -2004,11 +735,9 @@ class ImageEditDialog(QDialog):
     def cancel(self):
         if not self._busy:
             return
-        self._cancel = True
         self.state.setText("Cancelling …")
-        ed = self.editor
-        if ed is not None:
-            threading.Thread(target=ed.interrupt, daemon=True).start()
+        if self._worker is not None:
+            self._worker.cancel()
 
     def _progress(self, k: int, n: int, i: int, steps: int):
         if k == 0:
@@ -2024,11 +753,12 @@ class ImageEditDialog(QDialog):
     def _result(self, png: str, meta: dict):
         if isinstance(meta.get("variation"), dict) and meta["variation"].get("step") is not None:
             self.variations.done(int(meta["variation"]["step"]), meta["variation"].get("key"))   # continues after
-        self._load_results(select=png)
+        self._result_added(png, meta)
         self.b_before.setChecked(False)
 
     def _finished(self, error: str):
         self._busy = False
+        self._worker = None
         self.bar.hide()
         if error == "cancelled":
             self.state.setText("Cancelled.")
@@ -2062,120 +792,6 @@ class ImageEditDialog(QDialog):
         if self.on_use(kind, sel[0]):
             self.used = (kind, sel[0])
             self.accept()
-
-    # ---- deleting bad results
-    def delete_selected(self):
-        """Delete the selected result if it is not in use; it can be brought back until the window closes."""
-        sel = self.selected()
-        if sel is None or self._busy or self.uses(sel[1]):
-            return
-        png = Path(sel[0])
-        self._empty_trash()
-        trash = self.project / EDITS_DIR / ".deleted"
-        trash.mkdir(exist_ok=True)
-        row = self.results.currentRow()
-        for f in (png, png.with_suffix(".json")):
-            if f.exists():
-                f.replace(trash / f.name)
-        self._trash = trash / png.name
-        self._load_results()
-        if self.results.count():
-            self.results.setCurrentRow(min(row, self.results.count() - 1))
-        self.b_undo.show()
-        self.state.setText(f"Deleted {png.name}.")
-
-    def undo_delete(self):
-        if self._trash is None:
-            return
-        back = self.project / EDITS_DIR / self._trash.name
-        for f in (self._trash, self._trash.with_suffix(".json")):
-            if f.exists():
-                f.replace(back.with_suffix(f.suffix))
-        self._trash = None
-        self.b_undo.hide()
-        self._load_results(select=str(back))
-        self.state.setText(f"{back.name} is back.")
-
-    def _empty_trash(self, keep_sources: bool = False):
-        """Delete for good what was deleted before, and originals no result needs any more."""
-        trash = self.project / EDITS_DIR / ".deleted"
-        if trash.is_dir():
-            for f in trash.iterdir():
-                f.unlink(missing_ok=True)
-            trash.rmdir()
-        self._trash = None
-        if keep_sources:
-            return
-        needed = {m.get(k) for _p, m in project_edits(self.project) for k in ("source_copy", "mask")}
-        for f in (self.project / EDITS_DIR / "sources").glob("*") if (self.project / EDITS_DIR / "sources").is_dir() \
-                else []:
-            if str(f) not in needed and f.stat().st_mtime < time.time() - 5:
-                f.unlink(missing_ok=True)
-
-    def _use_example(self, text: str):
-        """An example prompt from the LoRA window replaces the prompt (one step Ctrl+Z takes back)."""
-        from .prompt_refiner import replace_text
-        replace_text(self.prompt, text)
-
-    def prompt_kind(self) -> str:
-        return "image" if self.mode() == "create" else "edit"
-
-    def _refine_prompt(self):
-        if self.refine is None:
-            return
-        import inspect
-        try:
-            params = inspect.signature(self.refine).parameters
-        except (TypeError, ValueError):
-            params = {}
-        more = {"pictures": self._refine_pictures()} if "pictures" in params else {}
-        if "loras" in params:                      # the refiner is told what is known of the chosen LoRAs
-            more["loras"] = [it["path"] for it in self.loras.items()]
-        new = self.refine(self.prompt.toPlainText(), self.prompt_kind(), **more)
-        if isinstance(new, list) and new:
-            self.use_ideas(new)
-        elif new:
-            from .prompt_refiner import replace_text
-            replace_text(self.prompt, new)
-
-    def use_ideas(self, prompts: list[str]):
-        """All ideas from the refiner as one Generate: the prompt becomes {idea}, its values the ideas, every
-        combination once (Ctrl+Z in the prompt brings the bullet points back)."""
-        from ..variations import Value, Variable
-        from .prompt_refiner import replace_text
-        p = self.variations
-        name, k = "idea", 1
-        while p.variable(name) is not None and [v.text for v in p.variable(name).values] != prompts:
-            k += 1                                  # (an {idea} with other values stays: {idea2} …)
-            name = f"idea{k}"
-        replace_text(self.prompt, "{" + name + "}")
-        p.vars = [v for v in p.vars if v.name != name] + [Variable(name, [Value(t) for t in prompts])]
-        p.on.setChecked(True)
-        p.mode_buttons["order"].setChecked(True)
-        p.repeat.setValue(1)
-        p.all.setChecked(True)
-        self._templates_changed()
-        p._rebuild()
-        self.state.setText(f"{len(prompts)} ideas are the values of {{{name}}} in Variations: Generate makes one image "
-                           "each. Ctrl+Z in the prompt brings your bullet points back ({" + name + "} stays in "
-                           "Variations until you remove it).")
-
-    def _refine_pictures(self) -> list[tuple[str, str, bool]]:
-        """What the refiner's model may see: the image to edit and the extra pictures (edit), the reference
-        pictures (create), and the selected result (off at first)."""
-        out = []
-        if self.mode() == "edit":
-            if self.source:
-                out.append(("The image to edit (Picture 1)", self.source, True))
-            for k, p in ((2, self.pic2.path), (3, self.pic3.path)):
-                if p:
-                    out.append((f"Picture {k}", p, True))
-        elif self.use_refs.isChecked():
-            out += [(f"Reference picture {k + 1}", s.path, True) for k, s in enumerate(self.cpics) if s.path]
-        sel = self.selected()
-        if sel is not None:
-            out.append(("A result made here", sel[0], False))
-        return out
 
     def _add_reference(self):
         """The selected result as one more face reference; the dialog stays open."""
@@ -2245,83 +861,6 @@ class ImageEditDialog(QDialog):
         else:
             self.prompt.setPlainText(meta.get("prompt", ""))
         self.loras.set_items(self._known(), meta.get("loras") or [])
-        self._remember_loras()
-
-    # ---- LoRAs
-    def _trigger_words(self, loras: list | None = None) -> list[str]:
-        """The trigger words of the chosen LoRAs, or of `loras` [(path, strength)] (put before the prompt when the
-        project wants them)."""
-        if not self.use_triggers:
-            return []
-        return stack_words([it["path"] for it in self.loras.items()] if loras is None else [p for p, _s in loras])
-
-    def _lora_runs(self) -> list[list[tuple[str, float]]]:
-        """The LoRAs of each image in turn: one list with all of them, or (One image per LoRA) each alone."""
-        loras = [(it["path"], it["strength"]) for it in self.loras.items()]
-        if self.lora_each.isChecked() and loras:
-            return [[lo] for lo in loras]
-        return [loras]
-
-    def _lora_key(self) -> str:
-        if self.mode() == "create":
-            return f"createLoras_{self.family.currentData()}"
-        return "editLoras" if self.edit_model.currentData() == "2511" else f"editLoras_{self.edit_model.currentData()}"
-
-    def _known(self) -> list[tuple[str, str]]:
-        """The LoRAs ComfyUI has for this mode (edit: Qwen; create: the chosen family), then LoRA files chosen here
-        earlier (from other folders)."""
-        if self.mode() == "create":
-            fam = self.family.currentData()
-            out = list(self.family_loras.get(LORA_FAMILY.get(fam, fam), []))
-        elif self.edit_model.currentData() in ("qwen21", "moss"):
-            out = list(self.family_loras.get(self.edit_model.currentData(), []))   # their own (found by contents)
-        else:
-            out = list(self.known_loras)
-        listed = {p for p, _ in out}
-        for p in self._recent_files():
-            if p not in listed and Path(p).is_file():
-                out.append((p, lora_label(p)))
-        return out
-
-    def _recent_key(self) -> str:
-        return self._lora_key().replace("Loras", "LoraFiles")       # per mode / family
-
-    def _recent_files(self) -> list[str]:
-        try:
-            return [p for p in json.loads(self.qs.value(self._recent_key(), "[]", type=str)) if isinstance(p, str)]
-        except (ValueError, AttributeError):
-            return []
-
-    def _remembered_loras(self) -> list[dict]:
-        try:
-            items = json.loads(self.qs.value(self._lora_key(), "[]", type=str)) if self.qs is not None else []
-        except ValueError:
-            items = []
-        return [it for it in items if isinstance(it, dict) and it.get("path") and Path(it["path"]).is_file()]
-
-    def _remember_loras(self):
-        if self.qs is not None:
-            self.qs.setValue(self._lora_key(), json.dumps(self.loras.items()))
-
-    def _lora_picked(self, path: str):
-        """A file from another folder chosen in the picker: offered again next time (in this mode / family); a
-        warning if ComfyUI cannot load it."""
-        fam = self.family.currentData()
-        listed = {p for p, _ in (self.family_loras.get(LORA_FAMILY.get(fam, fam), []) if self.mode() == "create"
-                                 else self.known_loras)}
-        if path not in listed and self.qs is not None:
-            self.qs.setValue(self._recent_key(), json.dumps([path] + [r for r in self._recent_files() if r != path][:11]))
-        if self.check_lora is not None and self.check_lora(path) is False:
-            self.state.setText(f"{Path(path).name} is not in ComfyUI's LoRA folders, so ComfyUI cannot load it: "
-                               "copy or link it there (then Rescan LoRAs in the main window).")
-
-    def add_lora_file(self, path: str, strength: float = 1.0):
-        """A LoRA file from any folder at the end of the list (ComfyUI must find it in its LoRA folders)."""
-        import os
-        p = os.path.abspath(path)
-        if self.qs is not None:
-            self.qs.setValue(self._recent_key(), json.dumps([p] + [r for r in self._recent_files() if r != p][:11]))
-        self.loras.set_items(self._known(), self.loras.items() + [{"path": p, "strength": float(strength)}])
         self._remember_loras()
 
     def reject(self):
