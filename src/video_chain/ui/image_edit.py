@@ -394,7 +394,7 @@ class ImageEditDialog(QDialog):
         self.prompt = QPlainTextEdit()
         self.prompt.setPlaceholderText(PROMPT_HINT)
         self.prompt.setMinimumHeight(110)
-        self.prompt.textChanged.connect(self._update_buttons)
+        self.prompt.textChanged.connect(self._update_generate_button)   # (typing changes nothing else)
         left.addWidget(self.prompt, 1)
         self.negative = QLineEdit()
         self.negative.setPlaceholderText("Avoid (optional negative prompt; empty: the model's usual one)")
@@ -1268,8 +1268,8 @@ class ImageEditDialog(QDialog):
             self.b_fav.setChecked(bool(meta.get("favorite")))
         self._update_buttons()
 
-    def _update_buttons(self):
-        has = self.selected() is not None
+    def _update_generate_button(self):
+        """Generate and Paint mask: what the prompt, source and model decide (no disk reads: used while typing)."""
         idle = not self._busy
         text = bool(self.prompt.toPlainText().strip())
         if self.mode() == "create":
@@ -1283,13 +1283,19 @@ class ImageEditDialog(QDialog):
             why = self._mask_problem() or "Choose the image to edit and write what should change"
         self.b_gen.setEnabled(ok)
         self.b_mask.setEnabled(bool(self.source) and idle and not self.batch)
-        if not ok:
-            self.b_gen.setToolTip(why if idle else "Working …")
+        self.b_gen.setToolTip(("Make the image (Ctrl+Enter)" if self.mode() == "create" else
+                               "Edit the image with this prompt (Ctrl+Enter)") if ok else
+                              why if idle else "Working …")
         self.b_cancel.setEnabled(not idle)
+
+    def _update_buttons(self):
+        self._update_generate_button()
+        idle = not self._busy
+        sel = self.selected()
+        has = sel is not None
         for b in (self.b_use_start, self.b_use_ref, self.b_further, self.b_again, self.b_before, self.b_fav):
             b.setEnabled(has)
         self.b_use_end.setEnabled(has and self.end_target is not None)
-        sel = self.selected()
         where = self.uses(sel[1]) if sel is not None else []
         self.b_delete.setEnabled(has and idle and not where)
         self.b_delete.setToolTip("Delete this result (Del); Undo delete brings it back" if not where else
