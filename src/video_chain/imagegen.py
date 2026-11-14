@@ -560,8 +560,8 @@ class ComfyImageCreator(ComfyGenerator):
                 if ws is not None:
                     try:
                         ws.close()
-                    except Exception:  # noqa: BLE001
-                        pass
+                    except Exception as e:  # noqa: BLE001
+                        logger.debug("closing the websocket: %s", e)
                 self.current = None
             out = self._first_file((entry.get("outputs") or {}).get("create_save"))
             if out is None:

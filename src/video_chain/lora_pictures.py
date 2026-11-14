@@ -147,8 +147,8 @@ def kept(db=None) -> tuple[int, int]:
             if f.is_file():
                 n += 1
                 size += f.stat().st_size
-    except OSError:
-        pass
+    except OSError as e:
+        logger.debug("cache size unknown: %s", e)
     return n, size
 
 
@@ -160,6 +160,6 @@ def forget(db=None) -> int:
             if f.is_file() and f.suffix in (".jpg", ".part"):
                 f.unlink(missing_ok=True)
                 n += 1
-    except OSError:
-        pass
+    except OSError as e:
+        logger.warning("cache not fully cleared: %s", e)
     return n

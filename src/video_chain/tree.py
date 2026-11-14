@@ -543,8 +543,8 @@ def _sync_dir(d: Path) -> None:
         return
     try:
         os.fsync(fd)
-    except OSError:
-        pass
+    except OSError as e:
+        logger.debug("fsync of the folder failed: %s", e)
     finally:
         os.close(fd)
 
@@ -558,8 +558,8 @@ def _write_lock(project: Path):
         f = open(project / (TREE_FILE + ".lock"), "a")
         if fcntl is not None:
             fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-    except OSError:
-        pass
+    except OSError as e:
+        logger.warning("project lock not taken: %s", e)
     try:
         yield
     finally:
@@ -2013,8 +2013,8 @@ def prepared_start(project: Path, width: int, height: int, source: Path | None =
     try:
         if dst.is_file() and json.loads(rec.read_text(encoding="utf-8")).get("source") == sig:
             return dst
-    except (OSError, ValueError):
-        pass
+    except (OSError, ValueError) as e:
+        logger.debug("cached record unreadable: %s", e)
     for old in src.parent.glob(f"{stem}_*x*.png"):         # (one prepared copy at a time)
         if old != dst:
             old.unlink(missing_ok=True)
@@ -2134,8 +2134,8 @@ def video_key(node: Node, base: dict) -> dict:
     try:
         st = Path(src.get("file") or "").stat()
         key["size"], key["mtime_ns"] = st.st_size, st.st_mtime_ns
-    except OSError:
-        pass
+    except OSError as e:
+        logger.debug("source not stat-able: %s", e)
     return key
 
 

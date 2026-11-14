@@ -613,8 +613,8 @@ class RunpodSession:
                         self.url = url
                         self.note("RunPod: connected")
                         return
-            except Exception:  # noqa: BLE001  (not forwarded yet)
-                pass
+            except Exception as e:  # noqa: BLE001  (not forwarded yet)
+                logger.debug("tunnel not ready: %s", e)
             time.sleep(1)
         raise RunpodError("ComfyUI on the pod does not answer through the SSH tunnel")
 
@@ -626,8 +626,8 @@ class RunpodSession:
         path = REMOTE_IO / kind / SUBFOLDER / filename
         try:
             self.run(f"rm -f -- {shlex.quote(str(path))}", timeout=30)
-        except (subprocess.TimeoutExpired, OSError):
-            pass
+        except (subprocess.TimeoutExpired, OSError) as e:
+            logger.warning("could not remove %s on the pod: %s", path, e)
 
     def ram_free(self) -> int:
         """RAM the pod's container may still use, in bytes, from its cgroup (ComfyUI sees the host's RAM in a

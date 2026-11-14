@@ -314,7 +314,8 @@ class Film:
                 t = T.load(d)
                 T.set_start_image(d, frame, t)
                 T.save(d, t)
-            except (OSError, ValueError):          # (one damaged scene: the others still follow their before)
+            except (OSError, ValueError) as e:          # (one damaged scene: the others still follow their before)
+                logger.warning("a scene kept its start picture: %s", e)
                 continue
             sc.from_sha = sha
             out.append(sc.id)
@@ -432,8 +433,8 @@ def summary(film: Film, sid: str, tree: "T.Tree | None" = None, status_of: dict 
         cuts = T.path_cuts(t, path, bool(t.options.get("keep_repeated")), planned=True)
         frames = sum(max(0, T.clip_length(t, n) - a - b) for n, (a, b) in zip(path, cuts))
         out["secs"] = round(frames / chain.FPS, 1)
-    except (OSError, ValueError, RuntimeError, KeyError):   # (a scene that cannot be checked still gets its card)
-        pass
+    except (OSError, ValueError, RuntimeError, KeyError) as e:   # (a scene that cannot be checked still gets its card)
+        logger.warning("a scene could not be checked: %s", e)
     if start.is_file():
         out["thumb"] = start
     elif path and path[0].made:
@@ -510,8 +511,8 @@ def join_film(film: Film, out: Path, keep: bool = False) -> Path:
     try:
         if out.exists() and stamp.exists() and stamp.read_text(encoding="utf-8") == key:
             return out
-    except (OSError, ValueError):
-        pass                                                   # (an unreadable stamp: joined again)
+    except (OSError, ValueError) as e:
+        logger.debug("join stamp unreadable: %s", e)  # (an unreadable stamp: joined again)
     chain.replace_kept(film.root, out, write)
     tmp = stamp.with_name(stamp.name + ".part")
     tmp.write_text(key, encoding="utf-8")

@@ -442,8 +442,8 @@ class TriggerDB:
             if isinstance(d, dict):
                 self.data = {"version": 1, "by_sha": dict(d.get("by_sha") or {}), "files": dict(d.get("files") or {})}
                 self._mtime = st.st_mtime_ns
-        except (OSError, ValueError):
-            pass
+        except (OSError, ValueError) as e:
+            logger.warning("the trigger database is not readable: %s", e)
 
     def save(self):
         """Write the database; what another process added in between is kept (merged, ours first)."""
@@ -649,8 +649,8 @@ class TriggerDB:
             for path in paths:
                 try:
                     total += os.path.isfile(path) and self.needs_lookup(path, key)
-                except (OSError, ValueError, TypeError, AttributeError):
-                    pass
+                except (OSError, ValueError, TypeError, AttributeError) as e:
+                    logger.debug("lookup count: %s", e)
 
         def flush(force=False):
             nonlocal dirty
@@ -694,8 +694,8 @@ class TriggerDB:
                 if progress:
                     try:
                         progress(n["looked"], max(total, n["looked"]), Path(path).name)
-                    except Exception:  # noqa: BLE001  (a window that is gone: the scan goes on)
-                        pass
+                    except Exception as e:  # noqa: BLE001  (a window that is gone: the scan goes on)
+                        logger.warning("the progress callback failed: %s", e)
                 try:
                     hit = lookup(sha) if lookup is not civitai_lookup else civitai_lookup(sha, stop=stop)
                 except OSError:
@@ -735,19 +735,20 @@ class TriggerDB:
                                                 new[part] = prev[part]
                                         if len(prev.get("examples") or []) > len(new.get("examples") or []):
                                             new["examples"] = prev["examples"]     # (a gallery read only in part)
-                                    except (OSError, ValueError):
-                                        pass
+                                    except (OSError, ValueError) as e:
+                                        logger.debug("merge of earlier details failed: %s", e)
                                 self._save_details(sha, new)
                                 rec["details"] = True
                                 base = (hit["details"].get("version") or {}).get("baseModel")
                                 if base:
                                     rec["base_model"] = str(base)
-                            except (OSError, TypeError, ValueError):
-                                pass
+                            except (OSError, TypeError, ValueError) as e:
+                                logger.debug("details not read: %s", e)
                         n["found"] += bool(hit["words"])
                     dirty += 1
                 flush()
-            except (OSError, ValueError, TypeError, AttributeError):
+            except (OSError, ValueError, TypeError, AttributeError) as e:
+                logger.warning("scan of a file failed: %s", e)
                 continue                               # a file that vanished or cannot be read: the next one
         flush(force=True)
         n["key_rejected"] = key_rejected() if online else False

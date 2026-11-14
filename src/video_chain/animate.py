@@ -276,8 +276,8 @@ class ComfyAnimator(ComfyGenerator):
                 if ws is not None:
                     try:
                         ws.close()
-                    except Exception:  # noqa: BLE001
-                        pass
+                    except Exception as e:  # noqa: BLE001
+                        logger.debug("closing the websocket: %s", e)
                 self.current = None
             for node, dest in outs.items():
                 f = self._first_file((entry.get("outputs") or {}).get(node))

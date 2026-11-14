@@ -780,8 +780,8 @@ class ComfyGenerator:
             if ws is not None:
                 try:
                     ws.close()
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("closing the websocket: %s", e)
             self.current = None
 
     def interrupt(self) -> None:
@@ -966,8 +966,8 @@ class ComfyGenerator:
             if same_size and target.stat().st_size != local.stat().st_size:
                 return
             target.unlink()
-        except OSError:
-            pass
+        except OSError as e:
+            logger.warning("could not remove the uploaded copy: %s", e)
 
     @staticmethod
     def _first_file(out: dict | None) -> dict | None:
@@ -1111,8 +1111,8 @@ class ComfyGenerator:
         if ws is not None:
             try:
                 ws.close()
-            except Exception:  # noqa: BLE001  (a socket that is gone already)
-                pass
+            except Exception as e:  # noqa: BLE001  (a socket that is gone already)
+                logger.debug("closing the websocket: %s", e)
 
 
 # ----------------------------------------------------------------------------- image edit (Qwen Image Edit)
@@ -1605,8 +1605,8 @@ class ComfyImageEditor(ComfyGenerator):
                 uploads.append((self.upload(Path(mask)), Path(mask)))
                 try:
                     feather = inpaint_feather(mw, mh)
-                except (RuntimeError, ValueError, OSError):
-                    pass
+                except (RuntimeError, ValueError, OSError) as e:
+                    logger.warning("mask feather not computed: %s", e)
                 inpaint = {"patch": self.inpaint_patch, "mask": uploads[-1][0], "strength": 1.0,
                            "feather": feather, "reference": "hole"}
             wf = build_qwen21_workflow(files=self.files21, prompt=prompt, seed=seed, quality=quality,

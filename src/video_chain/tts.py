@@ -193,8 +193,8 @@ class LocalTTS:
             if line.startswith("@@TTS "):
                 try:
                     answers.put(json.loads(line[6:]))
-                except ValueError:
-                    pass
+                except ValueError as e:
+                    logger.debug("not a JSON answer line: %s", e)
         answers.put({"ok": False, "error": "the TTS worker stopped", "dead": True})
 
     def _wait(self, timeout: float, want: int | None = None) -> dict:

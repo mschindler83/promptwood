@@ -275,8 +275,8 @@ def rotate_log(path: Path, limit: int = LOG_LIMIT) -> None:
     try:
         if path.stat().st_size > limit:
             os.replace(path, path.with_name(path.name + ".1"))
-    except OSError:
-        pass
+    except OSError as e:
+        logger.debug("log not rotated: %s", e)
 
 
 def _proc_stat(pid: int) -> tuple[str, str] | None:
@@ -325,8 +325,8 @@ def _reap(p, grace: float) -> None:
         try:
             os.killpg(p.pid, signal.SIGKILL)
             p.wait(timeout=10)                         # (the port is free before a restart)
-        except (OSError, subprocess.TimeoutExpired):
-            pass
+        except (OSError, subprocess.TimeoutExpired) as e:
+            logger.warning("SIGKILL of the llama-server failed: %s", e)
 
 
 @atexit.register
@@ -336,14 +336,14 @@ def _stop_all() -> None:
     for srv in list(_LIVE):
         try:
             srv._kill(srv._take(), grace=5)
-        except Exception:  # noqa: BLE001  (exiting: nothing more to do about it)
-            pass
+        except Exception as e:  # noqa: BLE001  (exiting: nothing more to do about it)
+            logger.warning("stopping a llama-server at exit failed: %s", e)
     for p in list(_DYING):
         try:
             if p.poll() is None:
                 _reap(p, 5)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            logger.warning("reaping a llama-server at exit failed: %s", e)
 
 
 class LlamaServer:
@@ -420,8 +420,8 @@ class LlamaServer:
             return
         try:
             path.write_text(json.dumps({"pid": proc.pid, "started": st[1], "cmd": self._command(), "port": self.port}))
-        except OSError:
-            pass
+        except OSError as e:
+            logger.warning("could not write the server record: %s", e)
 
     def _forget(self) -> None:
         path = self._pidfile()
@@ -443,8 +443,8 @@ class LlamaServer:
             if st is not None and st[0] != "Z" and st[1] == started and cmd and argv[-len(cmd):] == cmd \
                     and os.getpgid(pid) == pid:
                 return _Adopted(pid, started), cmd
-        except (OSError, ValueError, KeyError, TypeError):
-            pass
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            logger.debug("no adoptable server: %s", e)
         self._forget()
         return None
 

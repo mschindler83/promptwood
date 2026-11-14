@@ -371,7 +371,8 @@ def make_notes(paths: list[str], complete: Callable[[str, str, int], str], db=No
         system, user = note_messages(mat)
         try:
             note = clean_note(complete(system, user, NOTE_TOKENS))
-        except Exception:  # noqa: BLE001  (the refine goes on with the example prompts alone)
+        except Exception as e:  # noqa: BLE001  (the refine goes on with the example prompts alone)
+            logger.warning("no note for %s: %s", mat["name"], e)
             continue
         if not note:
             continue

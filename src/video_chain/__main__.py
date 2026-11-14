@@ -463,8 +463,8 @@ def _main_serve(a, emit) -> int:
         try:
             if gen is not None and hasattr(gen, "interrupt"):
                 gen.interrupt()
-        except Exception:  # noqa: BLE001  (Stop must end the worker whatever ComfyUI answers)
-            pass
+        except Exception as e:  # noqa: BLE001  (Stop must end the worker whatever ComfyUI answers)
+            logger.warning("interrupt on stop failed: %s", e)
         finally:
             raise SystemExit(143)
     signal.signal(signal.SIGTERM, on_term)
