@@ -17,22 +17,25 @@ from __future__ import annotations
 import html
 import queue
 import threading
+from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QUrl, Signal
+from PySide6.QtCore import QObject, QSettings, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QGuiApplication, QImage, QPixmap
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
-                               QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton, QScrollArea, QSplitter,
+                               QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSplitter,
                                QTabWidget, QTextBrowser, QToolButton, QVBoxLayout, QWidget)
 
 from .. import lora_notes, lora_pictures, triggers
-from .lora_details import details_html
+from .lora_details import details_html, themed
 from .widgets import guard_wheel, label
 
 PER_PAGE = 8
 PICTURE = 200                    # pixels: the side of a card's picture
 SHOW = (("off", "Off"), ("safe", "Safe only"), ("all", "All"))
 LOADERS = 4
+TYPING_MS = 200                  # the wait after the last key in "Find in the prompts" before the cards are rebuilt
+ARROW_MS = 120                   # the wait on a LoRA in the list before its files are read (arrow keys pass by)
 
 
 class _Sig(QObject):
@@ -141,9 +144,12 @@ class LoraWindow(QDialog):
     into the prompt; adapt(example) has the prompt rewritten in the example's manner (the window closes);
     strengths {path: strength} of the LoRAs in the prompt's stack and set_strength(path, value) -> bool."""
 
-    def __init__(self, parent=None, loras=(), current: str | None = None, settings=None, prompt: str = "",
-                 told: str = "", told_title: str = "What the language model was told", fetch=None, db=None,
-                 use_prompt=None, adapt=None, strengths: dict | None = None, set_strength=None):
+    def __init__(self, parent=None, loras=(), current: str | None = None, settings: QSettings | None = None,
+                 prompt: str = "", told: str = "", told_title: str = "What the language model was told",
+                 fetch: Callable[[dict], Path | str | None] | None = None, db: triggers.TriggerDB | None = None,
+                 use_prompt: Callable[[str], None] | None = None, adapt: Callable[[str], None] | None = None,
+                 strengths: dict[str, float] | None = None,
+                 set_strength: Callable[[str, float], bool] | None = None):
         super().__init__(parent)
         self.setWindowTitle("LoRAs: what is known of them")
         self.resize(1180, 780)
@@ -165,6 +171,15 @@ class LoraWindow(QDialog):
         self.page = 0
         self._gen = 0                              # (answers of an earlier page or LoRA are dropped)
         self._closed = threading.Event()
+        self._kept_of: dict = {}                   # (is a kept still on disk? per example: looked up once)
+        self._ctx = None                           # (details, info, mat, k) of the LoRA shown
+        self._pending: str | None = None           # the LoRA chosen in the list, shown when the arrow keys rest
+        self._reverting = False
+        self._find_timer, self._pick_timer = QTimer(self), QTimer(self)
+        for timer, ms, fn in ((self._find_timer, TYPING_MS, self._refill), (self._pick_timer, ARROW_MS, self._show_pending)):
+            timer.setSingleShot(True)
+            timer.setInterval(ms)
+            timer.timeout.connect(fn)
         self._jobs: queue.Queue = queue.Queue()
         self._sig = _Sig()
         self._sig.known.connect(self._known)
@@ -181,7 +196,7 @@ class LoraWindow(QDialog):
         self.find_lora.textChanged.connect(self._filter_loras)
         lv.addWidget(self.find_lora)
         self.list = QListWidget()
-        self.list.currentItemChanged.connect(lambda cur, _old: self.show_lora(cur.data(Qt.UserRole)) if cur else None)
+        self.list.currentItemChanged.connect(self._selected)
         lv.addWidget(self.list, 1)
         self.total = label("", level="tertiary")
         self.total.setWordWrap(True)
@@ -210,7 +225,7 @@ class LoraWindow(QDialog):
         self.find = QLineEdit()
         self.find.setPlaceholderText("Find in the prompts, e.g. “rain night” (all words)")
         self.find.setClearButtonEnabled(True)
-        self.find.textChanged.connect(lambda *_: self._refill())
+        self.find.textChanged.connect(lambda *_: self._find_timer.start())
         bar.addWidget(self.find, 1)
         self.sort = QComboBox()
         self.sort.addItem("Most liked first", "liked")
@@ -288,7 +303,7 @@ class LoraWindow(QDialog):
         self.b_rewrite = QPushButton("Let the model write the note again")
         self.b_rewrite.setToolTip("Forget this note (yours or the model's); the language model writes a new one at "
                                   "the next refine with this LoRA. Your remarks stay.")
-        self.b_rewrite.clicked.connect(lambda: self.save_note(forget=True))
+        self.b_rewrite.clicked.connect(self._forget_note)
         nrow.addWidget(self.b_save)
         nrow.addWidget(self.b_rewrite)
         nrow.addStretch(1)
@@ -315,7 +330,7 @@ class LoraWindow(QDialog):
         v.addWidget(self.state)
         buttons = QDialogButtonBox(QDialogButtonBox.Close, self)
         buttons.rejected.connect(self.reject)
-        self.b_forget = buttons.addButton("Delete the kept pictures", QDialogButtonBox.ResetRole)
+        self.b_forget = buttons.addButton("Delete the kept pictures", QDialogButtonBox.ActionRole)
         self.b_forget.setToolTip("Delete the stills kept on disk (they are loaded again when shown)")
         self.b_forget.clicked.connect(self._forget_pictures)
         v.addWidget(buttons)
@@ -328,12 +343,12 @@ class LoraWindow(QDialog):
             it.setToolTip(path)
             self.list.addItem(it)
         self._known_of: dict[str, dict] = {}
-        for _ in range(LOADERS):
-            threading.Thread(target=self._load_pictures, daemon=True).start()
+        self._loaders: list[threading.Thread] = []      # (started when the first picture is wanted)
         self._read_all()
         first = str(current) if current else (self.loras[0][0] if self.loras else None)
         if first:
             self._select(first)
+            self.flush()
         else:
             self.title.setText("No LoRA")
             self.facts.setText("Add a LoRA to a clip or an image first.")
@@ -344,6 +359,38 @@ class LoraWindow(QDialog):
             if self.list.item(i).data(Qt.UserRole) == path:
                 self.list.setCurrentRow(i)
                 return
+
+    def flush(self):
+        """Do now what the typing / arrow-key waits still hold back."""
+        if self._pick_timer.isActive():
+            self._pick_timer.stop()
+            self._show_pending()
+        if self._find_timer.isActive():
+            self._find_timer.stop()
+            self._refill()
+
+    def _selected(self, cur, old):
+        """The list's choice changed: ask about unsaved edits first, then show the LoRA when the keys rest."""
+        if self._reverting or cur is None:
+            return
+        path = cur.data(Qt.UserRole)
+        if path != self.path and not self._leave_ok():
+            self._pending = None
+            self._pick_timer.stop()
+            self._reverting = True
+            try:
+                if old is not None:
+                    self.list.setCurrentItem(old)
+            finally:
+                self._reverting = False
+            return
+        self._pending = path
+        self._pick_timer.start()
+
+    def _show_pending(self):
+        path, self._pending = self._pending, None
+        if path and path != self.path:
+            self.show_lora(path)
 
     def _read_all(self):
         """What is known of every listed LoRA, read in the background (each has a file of its own)."""
@@ -385,6 +432,7 @@ class LoraWindow(QDialog):
     def show_lora(self, path: str):
         self.path = path
         self._gen += 1
+        self._kept_of = {}
         details = self.db.details(path)
         info = self.db.info(path) or {}
         k = lora_notes.what_is_known(path, self.db)
@@ -411,6 +459,7 @@ class LoraWindow(QDialog):
                     lora_notes._cut(e["clean"], lora_notes.GUIDE_EXAMPLE_CHARS) in self.told}
         for e in self.examples:
             e["told"] = e["clean"] in told
+        self._ctx = (details, info, mat, k)
         self.how.setHtml(self._how_html(path, details, info, mat, k))
         n = lora_notes.note_of(self.db, path, mat)
         self._saved = {"note": n["note"], "remarks": n["remarks"]}
@@ -468,7 +517,7 @@ class LoraWindow(QDialog):
                        "<pre style='white-space:pre-wrap'>" + e(guide) + "</pre>")
         else:
             out.append("<p><i>Nothing: the app knows nothing that helps writing a prompt for it.</i></p>")
-        return "\n".join(out)
+        return themed("\n".join(out))
 
     def _link(self, url: QUrl):
         s = url.toString()
@@ -480,7 +529,8 @@ class LoraWindow(QDialog):
             if self.set_strength(self.path, value):
                 self.strengths[self.path] = value
                 self.state.setText(f"{self.title.text()}: strength set to {value:.2f} in this prompt's LoRAs.")
-                self.show_lora(self.path)
+                if self._ctx is not None:          # (only the How tab changes: what is typed in the note stays)
+                    self.how.setHtml(self._how_html(self.path, *self._ctx[:3], self._ctx[3]))
             else:
                 self.state.setText("The strength could not be set (the LoRA is not in the stack, or the clip "
                                    "cannot be changed now).")
@@ -494,22 +544,50 @@ class LoraWindow(QDialog):
         self.b_save.setEnabled(bool(self.path) and changed)
         self.b_rewrite.setEnabled(bool(self.path) and bool(self._saved["note"]))
 
-    def save_note(self, forget: bool = False):
+    def _confirm(self, title: str, text: str) -> bool:
+        return QMessageBox.question(self, title, text, QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes
+
+    def _forget_note(self):
+        if self._confirm("Forget the note", "Forget this note (yours or the model's)? The language model writes a "
+                         "new one at the next refine with this LoRA. Your remarks stay."):
+            self.save_note(forget=True)
+
+    def _unsaved(self) -> bool:
+        return bool(self.path) and (self.note_edit.toPlainText().strip() != self._saved["note"]
+                                    or self.remarks_edit.toPlainText().strip() != self._saved["remarks"])
+
+    def _ask_unsaved(self) -> str:
+        """"save", "discard" or "cancel": what to do with the note and remarks typed but not kept."""
+        box = QMessageBox(QMessageBox.Question, "LoRAs", "The note or remarks of this LoRA are not kept yet.",
+                          QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel, self)
+        box.setDefaultButton(QMessageBox.Save)
+        got = box.exec()
+        return "save" if got == QMessageBox.Save else "discard" if got == QMessageBox.Discard else "cancel"
+
+    def _leave_ok(self) -> bool:
+        """True when the shown LoRA may be left: nothing unsaved, or kept / thrown away as the user chose."""
+        if not self._unsaved():
+            return True
+        answer = self._ask_unsaved()
+        return self.save_note() if answer == "save" else answer == "discard"
+
+    def save_note(self, forget: bool = False) -> bool:
         """Keep the note as edited and the remarks (forget: no note, so the model writes one again)."""
         if not self.path:
-            return
+            return False
         note = "" if forget else self.note_edit.toPlainText()
         same = not forget and note.strip() == self._saved["note"]
         ok = lora_notes.save_user(self.db, self.path, None if same else note, self.remarks_edit.toPlainText())
         if not ok:
             self.state.setText("Could not be kept: the app has not looked at this LoRA file yet (it does so in the "
                                "background after a LoRA scan). Try again in a moment.")
-            return
+            return False
         self.state.setText("The note is forgotten; the language model writes a new one at the next refine with "
                            "this LoRA. Your remarks stay." if forget else
                            "Kept. The prompt refiner is given this from the next refine on.")
         self.show_lora(self.path)
         self._read_all()
+        return True
 
     def _use(self, text: str):
         if self.use_prompt is not None:
@@ -570,6 +648,7 @@ class LoraWindow(QDialog):
                 card.show_text("CivitAI gave no picture for it")
             else:
                 card.show_text("Loading …")
+                self._start_loaders()
                 self._jobs.put((self._gen, i, item))
         self.box_v.addStretch(1)
         self.scroll.verticalScrollBar().setValue(0)
@@ -587,9 +666,19 @@ class LoraWindow(QDialog):
                                 "each with the prompt that made it.")
                                + " The prompt refiner reads the prompts without weights and LoRA tags.")
 
+    def _start_loaders(self):
+        if not self._loaders:
+            for _ in range(LOADERS):
+                t = threading.Thread(target=self._load_pictures, daemon=True)
+                t.start()
+                self._loaders.append(t)
+
     def _kept(self, item: dict) -> bool:
-        f = lora_pictures.cached(item, self.db)
-        return bool(f and f.is_file())
+        key = item.get("id", id(item))
+        if key not in self._kept_of:
+            f = lora_pictures.cached(item, self.db)
+            self._kept_of[key] = bool(f and f.is_file())
+        return self._kept_of[key]
 
     def _load_pictures(self):
         """A loader thread: the stills of the page shown, one after the other."""
@@ -622,7 +711,11 @@ class LoraWindow(QDialog):
         self.show_page(self.page)
 
     def _forget_pictures(self):
+        if not self._confirm("Delete the kept pictures", "Delete the pictures kept on disk? They are loaded from "
+                             "CivitAI again when shown."):
+            return
         n = lora_pictures.forget(self.db)
+        self._kept_of = {}
         self.state.setText(f"{n} kept picture{'s' if n != 1 else ''} deleted.")
         self.show_page(self.page)
 
@@ -631,6 +724,8 @@ class LoraWindow(QDialog):
         self.state.setText("Copied: " + (text if len(text) <= 90 else text[:88] + "…"))
 
     def done(self, result: int):                   # noqa: N802  (Qt naming)
+        if not self._closed.is_set() and not self._leave_ok():
+            return                                 # (the user chose to stay with the unsaved edits)
         self._closed.set()
         self._gen += 1
         super().done(result)

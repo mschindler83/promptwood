@@ -60,8 +60,13 @@ def add_example(edit: QPlainTextEdit, text: str) -> None:
 def camera_menu_items() -> list[tuple[str, list[tuple[str, str]]]]:
     """The camera moves for the Camera button: (move in plain words, [(variant in plain words, token)])."""
     out = []
+    by_move: dict[str, list[str]] = {}               # (each token parsed once: which move it belongs to)
+    for t in CAM.tokens():
+        parsed = CAM.parse(t)
+        if parsed:
+            by_move.setdefault(parsed[0], []).append(t)
     for slug, (text, _w, mods) in CAM.MOVES.items():
-        variants = [(CAM.label(t), t) for t in CAM.tokens() if CAM.parse(t) and CAM.parse(t)[0] == slug]
+        variants = [(CAM.label(t), t) for t in by_move.get(slug, [])]
         out.append((text, variants if mods else [(text, slug)]))
     return out
 
@@ -98,6 +103,8 @@ class ProblemBox(QFrame):
                     if w is not None:
                         w.setParent(None)
                         w.deleteLater()
+                lay.setParent(None)
+                lay.deleteLater()
         self.rows = []
         error = any(p.get("error") for p in items)
         self.setProperty("severity", "error" if error else "warning")

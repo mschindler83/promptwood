@@ -3,6 +3,7 @@ names, other files), and the helpers to fill a LoRA combo box. Used by the clip 
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
@@ -20,6 +21,11 @@ def lora_path(p: str) -> str:
     """How a chosen LoRA file is stored: absolute, links kept as they are (a link in ComfyUI's LoRA folder keeps
     its own name)."""
     return os.path.abspath(os.path.expanduser(p))
+
+
+def clean_words(text: str) -> list[str]:
+    """Trigger words typed comma-separated: trimmed, empty ones dropped."""
+    return [w.strip() for w in text.split(",") if w.strip()]
 
 
 def lora_label(path: str | None) -> str:
@@ -186,7 +192,7 @@ class LoraStack(QWidget):
         self.known: list[tuple[str, str]] = []
         self.file_dir = ""
         self.rows: list[tuple[QWidget, QPushButton, QDoubleSpinBox]] = []
-        self.use_prompt = None                     # set by the owner: put a text into the prompt these LoRAs are for
+        self.use_prompt: Callable[[str], None] | None = None     # set by the owner: put a text into the prompt these LoRAs are for
         self.v = QVBoxLayout(self)
         self.v.setContentsMargins(0, 0, 0, 0)
         self.v.setSpacing(4)
@@ -206,6 +212,10 @@ class LoraStack(QWidget):
 
     def set_items(self, known: list[tuple[str, str]], items: list[dict]):
         self.known = list(known)
+        wanted = [(it["path"], round(float(it.get("strength", 1.0)), 2)) for it in items or [] if it.get("path")]
+        if wanted and wanted == [(b.property("path"), round(s.value(), 2)) for _w, b, s in self.rows]:
+            self.filled.emit()                         # (the same list: the rows, and the reading of their files, stay)
+            return
         for w, _b, _s in self.rows:
             self.v.removeWidget(w)
             w.setParent(None)
@@ -229,7 +239,7 @@ class LoraStack(QWidget):
 
     def _choose_again(self, button: QPushButton):
         path = self.pick(self.window(), self.known, button.property("path"), self._used(), self.file_dir)
-        if path and path != button.property("path"):
+        if path and lora_path(path) != lora_path(button.property("path") or ""):
             self._set_button(button, lora_path(path))
             self.changed.emit()
             self.picked.emit(lora_path(path))
@@ -323,7 +333,7 @@ class LoraStack(QWidget):
                     text=", ".join(triggers.db().words(path) or info.get("suggested") or []))
                 if not ok:
                     return
-                triggers.db().set_user(path, [w for w in words.split(",") if w.strip()])
+                triggers.db().set_user(path, clean_words(words))
             elif chosen is a_reset:
                 triggers.db().set_user(path, None)
             else:
@@ -364,6 +374,7 @@ class LoraStack(QWidget):
         spin.setToolTip(f"Strength of this LoRA ({LORA_MIN:g} … {LORA_MAX:g}; negative values reverse its effect, "
                         "e.g. for slider LoRAs)")
         rm = icon_button("x", "Remove this LoRA", w)
+        w.remove_button = rm                           # (setEnabled reaches it through the row's widget)
         h.addWidget(button, 1)
         h.addWidget(spin)
         h.addWidget(rm)
@@ -392,6 +403,7 @@ class LoraStack(QWidget):
     def setEnabled(self, on: bool):          # noqa: N802  (Qt naming)
         self._enabled = on
         self.b_add.setEnabled(on)
-        for _w, b, spin in self.rows:
+        for w, b, spin in self.rows:
             b.setEnabled(on)
             spin.setEnabled(on)
+            w.remove_button.setEnabled(on)
