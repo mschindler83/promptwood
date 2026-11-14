@@ -72,6 +72,10 @@ class PathMixin:
         self._update_cards()
         self._show_focus()
 
+    def _card_of(self, nid: str | None, kind: type | None = None):
+        """The card of a clip on the path (of this kind, e.g. PromptCard), or None."""
+        return next((c for c in self.cards if c.nid == nid and (kind is None or isinstance(c, kind))), None)
+
     @staticmethod
     def _fit_card(card):
         """A card in the inspector takes its width (it had a fixed width in a row)."""
@@ -79,7 +83,7 @@ class PathMixin:
         card.setMaximumWidth(QWIDGETSIZE_MAX)
 
     def _show_focus(self):
-        card = next((c for c in self.cards if c.nid == self.focus), None)
+        card = self._card_of(self.focus)
         self.card_stack.setCurrentWidget(card if card is not None else self.path_hint)
         self.card_stack.updateGeometry()
         ids = [c.nid for c in self.cards]
@@ -136,7 +140,7 @@ class PathMixin:
 
     def _show_card_of(self, nid: str):
         self.focus_clip(nid)
-        card = next((c for c in self.cards if c.nid == nid), None)
+        card = self._card_of(nid)
         if isinstance(card, PromptCard):
             card.edit.setFocus()
 
@@ -367,7 +371,7 @@ class PathMixin:
         self.refresh()
 
     def _card_edited(self, nid: str):
-        card = next((c for c in self.cards if c.nid == nid and isinstance(c, PromptCard)), None)
+        card = self._card_of(nid, PromptCard)
         if card is None or self.tree is None or nid not in self.tree.nodes:
             return
         if self.tree.nodes[nid].frozen:

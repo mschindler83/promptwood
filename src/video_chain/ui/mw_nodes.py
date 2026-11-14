@@ -95,7 +95,7 @@ class NodeMixin:
             self.speak_clip_window(node.id)
             return
         if action == "refine" and node is not None and not node.is_video:
-            card = next((c for c in self.cards if c.nid == node.id and isinstance(c, PromptCard)), None)
+            card = self._card_of(node.id, PromptCard)
             if card is not None:
                 ck = T.Checker(self.project, self.tree)
                 start = ck.start_frame(node)

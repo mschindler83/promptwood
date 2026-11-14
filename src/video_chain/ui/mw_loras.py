@@ -24,7 +24,7 @@ class LorasMixin:
         """The LoRA window: every LoRA the app offers, with what is known of each (its gallery's prompts with their
         pictures, the prompt refiner's note, the settings its examples were made with)."""
         from .lora_window import LoraWindow      # (lazy: a rarely opened window)
-        card = next((c for c in self.cards if c.nid == self.focus and isinstance(c, PromptCard)), None)
+        card = self._card_of(self.focus, PromptCard)
         more = card.loras.window_args() if card is not None else {}    # (the clip in focus: its LoRAs, its prompt)
         LoraWindow(self, self.known_loras(), current=current, settings=self.qs, **more).exec()
         for card in self.cards:

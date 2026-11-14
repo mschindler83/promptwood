@@ -130,7 +130,7 @@ class ViewMixin:
             return
         self.select(first.id)
         self.focus_clip(first.id)
-        card = next((c for c in self.cards if c.nid == first.id and isinstance(c, PromptCard)), None)
+        card = self._card_of(first.id, PromptCard)
         if card is not None:
             card.edit.setFocus(Qt.OtherFocusReason)
 

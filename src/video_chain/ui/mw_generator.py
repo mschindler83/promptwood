@@ -499,7 +499,7 @@ class GeneratorMixin:
         if item is not None:
             item.info.progress = frac
             item.update()
-        card = next((c for c in self.cards if c.nid == nid), None)
+        card = self._card_of(nid)
         if card is not None:
             text = None
             if upscaling:

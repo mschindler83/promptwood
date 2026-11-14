@@ -273,7 +273,7 @@ class InspectorMixin:
 
     def fix_problem(self, action: str, nid: str):
         """A problem's button on a card: the place that fixes it (or the action itself)."""
-        card = next((c for c in self.cards if c.nid == nid and isinstance(c, PromptCard)), None)
+        card = self._card_of(nid, PromptCard)
         if action == "log":
             self.show_log()
         elif action == "start_engine":
@@ -346,7 +346,7 @@ class InspectorMixin:
             return
         lead = T.lead_of(self.tree)
         T.set_lead_on(node, bool(on))
-        card = next((c for c in self.cards if c.nid == nid), None)
+        card = self._card_of(nid)
         if isinstance(card, PromptCard):
             card.ov = dict(node.overrides or {})
         before = self._done_clips()
