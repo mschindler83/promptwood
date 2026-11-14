@@ -474,7 +474,6 @@ def _one(mat: dict, note: str, budget: int, prompt: str = "", remarks: str = "")
         lines.append("Its creator says: " + _cut(mat["about"], GUIDE_ABOUT_CHARS))
     if remarks:
         lines.append("The user's own remarks on this LoRA (follow them): " + remarks)
-    sett = settings_text(mat.get("settings") or {})
     used = sum(len(x) + 1 for x in lines)
     examples: list[str] = []
     for p in nearest(mat, prompt, GUIDE_EXAMPLES + (0 if note else 1)):
