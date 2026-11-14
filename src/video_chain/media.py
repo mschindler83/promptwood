@@ -19,7 +19,7 @@ import tempfile
 import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Callable, Iterator, Literal, overload
 
 FFMPEG_TIMEOUT = 3600           # seconds an ffmpeg job on a clip may take
 FFPROBE_TIMEOUT = 120           # seconds ffprobe may take (it reads the container, not the frames)
@@ -50,6 +50,10 @@ def require_ffmpeg() -> None:
                          + " not installed (ffmpeg is needed to read, prepare and join videos)")
 
 
+@overload
+def run(cmd: list[str], *, timeout: float | None = None, text: Literal[True] = True) -> str: ...
+@overload
+def run(cmd: list[str], *, timeout: float | None = None, text: Literal[False]) -> bytes: ...
 def run(cmd: list[str], *, timeout: float | None = None, text: bool = True) -> str | bytes:
     """Run a command, return its stdout (text or bytes). MediaError: the binary is missing, it exits non-zero
     (the message ends with its last stderr lines) or it does not finish within timeout seconds."""
@@ -69,6 +73,10 @@ def run(cmd: list[str], *, timeout: float | None = None, text: bool = True) -> s
     return r.stdout
 
 
+@overload
+def ffmpeg(args: list, *, timeout: float | None = FFMPEG_TIMEOUT, text: Literal[True] = True) -> str: ...
+@overload
+def ffmpeg(args: list, *, timeout: float | None = FFMPEG_TIMEOUT, text: Literal[False]) -> bytes: ...
 def ffmpeg(args: list, *, timeout: float | None = FFMPEG_TIMEOUT, text: bool = True) -> str | bytes:
     """ffmpeg without stdin, quiet (-nostdin -v error), with a time limit. Pass -y yourself to overwrite."""
     return run(["ffmpeg", "-nostdin", "-v", "error", *map(str, args)], timeout=timeout, text=text)
@@ -214,6 +222,7 @@ def iter_frames(path: str | Path, size: tuple[int, int], pix_fmt: str = "rgb24",
             if cancelled is not None and cancelled():
                 stopped = True
                 return
+            assert proc.stdout is not None          # (stdout=PIPE above)
             buf = proc.stdout.read(per)
             if len(buf) < per:
                 break
@@ -223,7 +232,8 @@ def iter_frames(path: str | Path, size: tuple[int, int], pix_fmt: str = "rgb24",
             timer.cancel()
         if proc.poll() is None:
             proc.kill()
-        proc.stdout.close()
+        if proc.stdout is not None:
+            proc.stdout.close()
         code = proc.wait()
         err.seek(0)
         msg = tail(err.read(65536))

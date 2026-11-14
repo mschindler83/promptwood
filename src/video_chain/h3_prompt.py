@@ -172,6 +172,7 @@ def _sound_cut(text: str) -> tuple[int, str | None, str | None]:
         if i < 0:
             break
         m = _SOUND_LABEL.match(rows[i][1])
+        assert m is not None                        # the loop above stopped on a match
         label, own = m.group(1).lower(), m.group(2).strip()
         if label in found or (own and i != end - 1):
             break                                  # body text (a label with words of its own is one line)
@@ -303,7 +304,7 @@ def _render(text: str, cut: int, lines: list[Line], resolve: Callable[[str], str
             t += f", {descs[name]}" + ("" if at is not None and (not nxt or nxt in ".,;:!?)") else ",")
         return t
 
-    def names(a: str, b: int) -> str:
+    def names(a: int, b: int) -> str:
         out, last = "", a
         for m in MENTION.finditer(text, a, b):
             name = resolve(m.group(1))
@@ -404,8 +405,8 @@ def compose(body: str, *, start: bool = False, end: bool = False, seconds: float
     missing = _missing_triggers(triggers, user_text)
     trig = ", ".join(missing)
     tail = ""
-    for s in extra:
-        tail = _join(tail, s)
+    for piece in extra:
+        tail = _join(tail, piece)
 
     if not reference:
         shot1 = _join(pre, rest)
@@ -452,16 +453,16 @@ def compose(body: str, *, start: bool = False, end: bool = False, seconds: float
         return got or sorted({int(m.group(1)) for m in marks}) or [1]
 
     defs, keep = [], []
-    for s in subs:
-        k = subj_no[s.name]
-        d = f" ({s.desc.rstrip('.').strip()})" if s.desc else ""
-        pics = _listing([f"<Picture {p}>" for p in s.pictures]) if s.pictures else ""
-        defs.append(f"<Subject {k}> is {s.name}{d}" + (f", {_DEFINES[s.kind]} {pics}." if pics else "."))
-        if s.pictures:
-            reason = {"person": f"{s.name}'s face and identity are retained.",
-                      "place": f"the layout and look of {s.name} are retained.",
-                      "object": f"the shape and look of {s.name} are retained.",
-                      "style": f"the visual style of {s.name} is retained."}[s.kind]
+    for sub in subs:
+        k = subj_no[sub.name]
+        d = f" ({sub.desc.rstrip('.').strip()})" if sub.desc else ""
+        pics = _listing([f"<Picture {p}>" for p in sub.pictures]) if sub.pictures else ""
+        defs.append(f"<Subject {k}> is {sub.name}{d}" + (f", {_DEFINES[sub.kind]} {pics}." if pics else "."))
+        if sub.pictures:
+            reason = {"person": f"{sub.name}'s face and identity are retained.",
+                      "place": f"the layout and look of {sub.name} are retained.",
+                      "object": f"the shape and look of {sub.name} are retained.",
+                      "style": f"the visual style of {sub.name} is retained."}[sub.kind]
             where = ", ".join(f"[Shot {x}]" for x in shots_of(k))
             keep.append(f"<Subject {k}> (appears in {where}): fully_preserved - {reason}")
     if p_start is not None:
@@ -479,7 +480,7 @@ def compose(body: str, *, start: bool = False, end: bool = False, seconds: float
     defs += [f"<Audio {k}> is a sound reference, used as the description says." for k in range(1, sounds + 1)]
     keep += [f"<Audio {k}>: reference - it is used as the description says, without copying the original signal."
              for k in range(1, sounds + 1)]
-    voiced = sorted(audio_no, key=audio_no.get)
+    voiced = sorted(audio_no, key=lambda v: audio_no[v])
     defs += [f"<Audio {audio_no[v]}> is the voice-timbre reference for {token(v)}, the voice of one speaker."
              for v in voiced]
     keep += [f"<Audio {audio_no[v]}>: reference - its vocal timbre guides the dialogue delivery of "

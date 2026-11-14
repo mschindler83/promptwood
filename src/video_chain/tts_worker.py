@@ -21,7 +21,7 @@ sys.stdout = sys.stderr
 
 import torch  # noqa: E402
 
-_loaded = {"path": None, "model": None}
+_loaded: dict = {"path": None, "model": None}
 _prompts: dict = {}                                   # voice clone prompts by (file, size, mtime, text)
 
 
@@ -101,7 +101,7 @@ def handle(r: dict) -> dict:
                 why = (e.stderr or b"").decode("utf-8", "replace").strip()[-300:]
                 raise RuntimeError(f"ffmpeg could not read the voice sample: {why or e}") from None
             audio, sr = sf.read(wav16, dtype="float32")
-        kw = {"generate_kwargs": {"language": r["language"].lower()}} if r.get("language") else {}
+        kw: dict = {"generate_kwargs": {"language": r["language"].lower()}} if r.get("language") else {}
         if len(audio) > 30 * sr:                      # (more than Whisper's 30 s window: its long-form mode)
             kw["return_timestamps"] = True
         text = p({"raw": audio, "sampling_rate": sr}, **kw)["text"].strip()

@@ -34,7 +34,7 @@ def setup(file: Path | None = None, level: int = logging.INFO, to_file: bool = T
             print(f"video-chain: no log file ({e})", file=sys.stderr)
     for h in handlers:
         h.setFormatter(fmt)
-        h._video_chain = True          # noqa: SLF001  (marks ours: setup() is idempotent)
+        setattr(h, "_video_chain", True)   # (marks ours: setup() is idempotent)
         root.addHandler(h)
     if root.level == logging.NOTSET or root.level > level:
         root.setLevel(level)

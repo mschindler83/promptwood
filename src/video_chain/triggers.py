@@ -31,7 +31,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from . import keys, media, net
 from .h3_prompt import contains_word
@@ -115,7 +115,7 @@ def default_path() -> Path:
 
 
 def _clean(words) -> list[str]:
-    out = []
+    out: list[str] = []
     for w in words or []:
         for part in str(w).split(","):
             part = " ".join(part.split()).strip()
@@ -224,7 +224,7 @@ def _kw(stop) -> dict:
 
 def _retry_after(e: urllib.error.HTTPError) -> float:
     try:
-        wait = float((e.headers or {}).get("Retry-After") or 2)
+        wait = float((e.headers.get("Retry-After") if e.headers is not None else None) or 2)
     except (TypeError, ValueError, AttributeError):
         wait = 2.0
     return min(max(wait, 0.0), RETRY_WAIT_MAX)
@@ -312,7 +312,10 @@ def gallery(version_id: int, timeout: float = 20.0, gap: float = REQUEST_GAP, pa
     be asked (what was read so far is returned). Raises OSError when the first page could not be asked."""
     base = (f"/api/v1/images?modelVersionId={int(version_id)}&limit={EXAMPLE_PAGE}&sort=Most%20Reactions"
             "&period=AllTime&nsfw=X&withMeta=true")
-    out, seen, looked, cursor = [], set(), 0, None
+    out: list = []
+    seen: set = set()
+    looked = 0
+    cursor = None
     for page in range(max(1, pages)):
         if page and stop():
             return out, looked, False
@@ -399,7 +402,7 @@ def example_prompts(details: dict | None) -> list[dict]:
     return out
 
 
-KEEP = object()        # update_note: leave the note as it is
+KEEP: Any = object()        # update_note: leave the note as it is
 
 
 class TriggerDB:
@@ -409,8 +412,8 @@ class TriggerDB:
     def __init__(self, path: Path | None = None):
         self.path = Path(path) if path else default_path()
         self._lock = threading.RLock()
-        self._mtime = None
-        self.data = {"version": 1, "by_sha": {}, "files": {}}
+        self._mtime: int | None = None
+        self.data: dict[str, Any] = {"version": 1, "by_sha": {}, "files": {}}
         self._load()
 
     def _load(self):
@@ -496,7 +499,7 @@ class TriggerDB:
         except OSError:
             return False
 
-    def update_note(self, path: str, change: Callable[[dict | None], object]) -> bool:
+    def update_note(self, path: str, change: Callable[[dict | None], dict | None]) -> bool:
         """Read, change and write a LoRA's note under one lock, so that two writers (the user's save and a
         background note job) cannot overwrite each other. change(current note or None) returns the new note
         (None: forget it) or KEEP (write nothing). False when nothing was written."""

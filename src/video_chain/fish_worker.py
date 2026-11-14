@@ -32,7 +32,7 @@ logger.remove()                                       # fish-speech logs every t
 logger.add(sys.stderr, level="WARNING", colorize=False)
 
 CONTEXT = 8192
-_state = {"model": None, "engine": None}
+_state: dict = {"model": None, "engine": None}
 
 
 def _patch_loaders():

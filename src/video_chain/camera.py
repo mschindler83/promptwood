@@ -61,6 +61,8 @@ def sentence(camera: dict | None) -> str:
     if cam is None:
         return ""
     p = phrase(cam["move"], cam.get("amplitude"), cam.get("speed"))
+    if p is None:
+        return ""
     return p[0].upper() + p[1:] + "."
 
 
@@ -87,6 +89,8 @@ def expand(text: str) -> str:
         if p is None:
             return m.group(0)
         words = phrase(*p)
+        if words is None:
+            return m.group(0)
         before = text[:m.start()].rstrip(" \t")        # (a line break stays: a new line starts a sentence)
         start = not before or before[-1] in ".!?]:\n"
         return words[0].upper() + words[1:] if start else words
