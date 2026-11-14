@@ -67,10 +67,10 @@ class EndsMixin(MainWindowHost):
 
     # ---- AI image edit
     def edit_image(self, nid: str | None = None, from_node: bool = False, start: bool = False,
-                   dialog: bool = True, mode: str = "auto", character: str | None = None) -> ImageEditDialog | None:
+                   mode: str = "auto", character: str | None = None) -> ImageEditDialog | None:
         """The image edit dialog. nid: the clip whose end image a result can become (its frame is offered first);
         start: the start image first; character: opened for a face picture of this character (its name on the
-        face button). Returns the dialog (dialog=False: not shown, for tests)."""
+        face button). Returns the dialog (not run when modal_dialogs is off)."""
         if self.project is None or self.tree is None:
             self.status.setText("Open or create a project folder first.")
             return None
@@ -180,7 +180,7 @@ class EndsMixin(MainWindowHost):
         if character:
             pc = T.character(self.tree, character)
             dlg.b_use_ref.setText(f"Add as {'face' if T.kind_of(pc) == 'person' else 'picture'} of @{character}")
-        if dialog:
+        if self.modal_dialogs:
             dlg.exec()
             dlg.deleteLater()
             self.edits_closed()
@@ -312,7 +312,7 @@ class EndsMixin(MainWindowHost):
             self._report_error(f"Cannot read {Path(video).name}: {e}")
             return None
 
-    def end_from_video(self, nid: str, video: str | None = None, dialog: bool = True):
+    def end_from_video(self, nid: str, video: str | None = None):
         """End image from a video: choose a video (the project's real videos and clips first, or any file), then
         one of its frames; that frame at the video's full size becomes the clip's end image."""
         node = self.tree.nodes.get(nid) if self.tree else None
@@ -329,7 +329,7 @@ class EndsMixin(MainWindowHost):
         dlg = self._frame_dialog(video, f"End image of clip #{T.short_id(nid)}: a frame of {Path(video).name}")
         if dlg is None:
             return None
-        if not dialog:
+        if not self.modal_dialogs:
             return dlg
         try:
             if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -425,7 +425,7 @@ class EndsMixin(MainWindowHost):
             self.status.setText(f"Clip #{T.short_id(nid)}: keyframe at {at:.2f} s removed.")
 
     def _keyframe_from_video(self, nid: str, at: float, index: int | None, own: bool = False,
-                             video: str | None = None, dialog: bool = True):
+                             video: str | None = None):
         """A keyframe from a frame of a video. own: this clip's frame at that moment ("keep this moment": its time
         follows the frame chosen); else any video (the project's first), the keyframe stays at its time."""
         assert self.tree is not None
@@ -447,7 +447,7 @@ class EndsMixin(MainWindowHost):
             return None
         if own:
             dlg.slider.setValue(min(dlg.frames - 2, max(1, T.keyframe_frame(at))))
-        if not dialog:
+        if not self.modal_dialogs:
             return dlg
         try:
             if dlg.exec() != QDialog.DialogCode.Accepted:

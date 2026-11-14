@@ -381,7 +381,7 @@ class InspectorMixin(MainWindowHost):
 
     def show_model_prompt(self, nid: str) -> QDialog | None:
         """The Model prompt window of a clip: the exact text the model gets and its numbered pictures / sounds.
-        Returns the dialog (kept modeless and not run in tests: _dialogs_modeless)."""
+        Returns the dialog (not run when modal_dialogs is off)."""
         node = self.tree.nodes.get(nid) if self.tree is not None else None
         info = self._clip_inputs(node) if node is not None else None
         if info is None:
@@ -389,7 +389,7 @@ class InspectorMixin(MainWindowHost):
             return None
         dlg = ModelPromptDialog(self, nid, info)
         self._model_prompt_dialog = dlg            # (tests look at it)
-        if not self._dialogs_modeless:
+        if self.modal_dialogs:
             dlg.exec()
             dlg.deleteLater()
         return dlg

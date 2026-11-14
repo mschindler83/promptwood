@@ -74,7 +74,8 @@ if TYPE_CHECKING:
         _comfy_timer: QTimer
         _converts: dict[str, str]
         _copying: str | None
-        _dialogs_modeless: bool
+        modal_dialogs: bool
+        audio_player: bool
         _eleven_row: QWidget
         _error: str
         _failures: dict[str, Problem]

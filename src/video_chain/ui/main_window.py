@@ -60,8 +60,13 @@ class MainWindow(BuildMixin, GeneratorMixin, ComfyMixin, ExportMixin, VideosMixi
 
     viewChanged = Signal(bool)                  # the view was switched: True = Simple (after the controls follow)
 
-    def __init__(self, settings: QSettings, command: list[str] | None = None):
+    def __init__(self, settings: QSettings, command: list[str] | None = None, *, modal_dialogs: bool = True,
+                 audio_player: bool = True):
+        """modal_dialogs: the edit windows run (exec) and block; False: they are made and handed back, nobody runs
+        them (a test drives them). audio_player: the audio editors play the sound (False: no media player)."""
         super().__init__()
+        self.modal_dialogs = modal_dialogs
+        self.audio_player = audio_player
         self.setWindowTitle("Promptwood")
         self.qs = settings
         # Simple or Advanced, decided once: Simple on a first run (no settings yet), Advanced for settings from
@@ -176,7 +181,6 @@ class MainWindow(BuildMixin, GeneratorMixin, ComfyMixin, ExportMixin, VideosMixi
     _canvas = None                              # the clips' size as _update_size_info last worked it out
     _llama = None                               # the llama.cpp server of this window
     _runpod_loading = False                     # the settings are being loaded (the RunPod fields change unsaved)
-    _dialogs_modeless = False                   # tests: dialogs are not run, they are handed back
     # the generator run (mw_generator): checking the project first, then the clips
     _checking = False                           # Generate is checking the project (in the background)
     _check_gen = 0

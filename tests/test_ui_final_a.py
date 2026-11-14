@@ -204,3 +204,22 @@ def test_a_good_worker_event_reaches_its_handler(app, tmp_path):
         w._event({"e": "somethingnew", "x": 1})                  # an unknown kind is not an error
     finally:
         w.close()
+
+
+# ------------------------------------------------------------------ MWC-17: no test seams in production code
+def test_production_code_does_not_read_the_test_environment():
+    hits = [f.name for f in UI.glob("*.py") if "QT_QPA_PLATFORM" in f.read_text(encoding="utf-8")]
+    assert hits == []
+
+
+def test_dialog_policy_is_a_constructor_argument(app, tmp_path):
+    from video_chain.ui.main_window import MainWindow
+    w = MainWindow(settings(tmp_path), command=FAKE, modal_dialogs=False, audio_player=False)
+    v = MainWindow(settings(tmp_path), command=FAKE)
+    try:
+        assert w.modal_dialogs is False and w.audio_player is False
+        assert v.modal_dialogs is True and v.audio_player is True
+        assert w._track_dialog().want_player is False and v._track_dialog().want_player is True
+    finally:
+        w.close()
+        v.close()

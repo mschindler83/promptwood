@@ -55,7 +55,7 @@ def win(app, tmp_path, monkeypatch):
     played = []
     monkeypatch.setattr(Preview, "open", lambda self, path, title, autoplay=True: played.append(Path(path)))
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
-    w = MainWindow(settings(tmp_path), command=FAKE)
+    w = MainWindow(settings(tmp_path), command=FAKE, audio_player=False)
     w.played = played
     w.show()
     yield w

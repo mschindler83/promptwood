@@ -276,7 +276,8 @@ def test_the_frame_window_of_an_own_clip_does_not_probe(app, win, tmp_path, imag
     monkeypatch.setattr(M.VideoFrameDialog, "exec", lambda self: 0)
     win.end_from_video(ids[1], video=str(clip))
     assert probed == []
-    dlg = win.end_from_video(ids[1], video=str(clip), dialog=False)
+    win.modal_dialogs = False
+    dlg = win.end_from_video(ids[1], video=str(clip))
     assert dlg is not None and dlg.frames == win.tree.nodes[ids[0]].made["frames"]
     dlg.deleteLater()
 

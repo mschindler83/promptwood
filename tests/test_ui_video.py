@@ -629,7 +629,8 @@ def test_middle_keyframes_on_the_card(app, win, tmp_path, image, monkeypatch):
     if node.made.get("cuts"):                                     # (the fake clip's coloured last frame is a jump)
         assert card.key_warn.isVisibleTo(card) and "cuts at" in card.key_warn.text()
     # keep a moment of the made clip: its frame, pinned at its time
-    dlg = win._keyframe_from_video(nid, 0.5, None, own=True, dialog=False)
+    win.modal_dialogs = False
+    dlg = win._keyframe_from_video(nid, 0.5, None, own=True)
     assert dlg is not None and dlg.slider.value() == 12
     dlg.slider.setValue(6)
     assert win._keyframe_from_dialog(nid, dlg, 0.5, None, True)
@@ -700,7 +701,7 @@ def test_continue_the_clip_before_on_the_card(app, win, tmp_path, image):
     assert chips == ["Start frame · Picture 1", "Continues clip before · Video 1", "With reference pictures"]
     assert card.chips.chips[1].toolTip().startswith(f"The end of clip #{ids[0][1:]} (its last 1.6 s, 39 frames")
     assert T.Checker(win.project, win.tree).settings(ids[1])["continue"] == {"frames": 39}
-    win._dialogs_modeless = True
+    win.modal_dialogs = False
     card.chips.b_prompt.click()
     dlg = win._model_prompt_dialog
     assert dlg.inputs.text().splitlines() == ["<Picture 1> — start frame (" + Path(str(T.clip_inputs(

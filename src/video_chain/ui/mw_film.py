@@ -360,7 +360,7 @@ class FilmMixin(MainWindowHost):
         v.addWidget(buttons)
         dlg.resize(min(900, 160 + 120 * len(rows)), min(600, 140 + 30 * len(names)))
         self._film_cast_dialog = dlg               # (tests look at it)
-        if not self._dialogs_modeless:
+        if self.modal_dialogs:
             dlg.exec()
             dlg.deleteLater()
 
