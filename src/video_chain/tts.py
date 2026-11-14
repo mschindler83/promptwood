@@ -608,7 +608,7 @@ def _speaker(d: dict[str, Any]) -> CastEntry:
     return c
 
 
-def _set_voice_fields(tree: T.Tree, name: str, **fields) -> None:
+def set_voice_fields(tree: T.Tree, name: str, **fields) -> None:
     """Fields kept with a character's voice (its transcript) or in its "tts" entry (its ElevenLabs voice)."""
     cast: list[CastEntry] = []
     for c in T.cast_of(tree):
@@ -783,7 +783,7 @@ def apply_lines(project: Path, tree: T.Tree, nid: str, r: dict[str, Any]) -> dic
         c = T.character(tree, name)
         files = r.get("voice_files") or {}
         if c is not None and c.get("voice") and (name not in files or files[name] == c["voice"]["file"]):
-            _set_voice_fields(tree, name, text=text)   # (not for a voice replaced while the lines were made)
+            set_voice_fields(tree, name, text=text)   # (not for a voice replaced while the lines were made)
     old = T.track_id(node)
     old_tr = T.track_of(tree, old) if old else None
     have = {t["id"] for t in T.tracks(tree)}
@@ -830,8 +830,8 @@ def use_sample(project: Path, tree: T.Tree, name: str, wav: Path, label: str, te
     ElevenLabs voice (without: no ElevenLabs voice any more). Returns the voice entry (tree.set_voice)."""
     entry = T.set_voice(project, tree, name, Path(wav), label=label)
     if not entry.get("cut"):
-        _set_voice_fields(tree, name, text=text)
-    _set_voice_fields(tree, name, eleven=eleven)
+        set_voice_fields(tree, name, text=text)
+    set_voice_fields(tree, name, eleven=eleven)
     return entry
 
 
@@ -855,5 +855,5 @@ def set_eleven(tree: T.Tree, name: str, voice: dict) -> bool:
     c = T.character(tree, name)
     if c is None or (c.get("voice") or {}).get("file") != voice.get("file"):
         return False
-    _set_voice_fields(tree, name, eleven={"id": voice["id"], "name": voice["name"]})
+    set_voice_fields(tree, name, eleven={"id": voice["id"], "name": voice["name"]})
     return True

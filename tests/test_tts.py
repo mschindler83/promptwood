@@ -193,7 +193,7 @@ def test_takes_and_how_lines_are_spoken(project, tmp_path):
     tts.render_lines(project, t, n.id, loc, speak={"delivery": "steady"})
     assert loc.calls[-1][6] == {"temperature": 0.7}
     t.options["tts"] = {"provider": "elevenlabs", "speak": {"delivery": "steady", "speed": 1.1}}     # the project's
-    tts._set_voice_fields(t, "Anna", eleven={"id": "v1", "name": "Rachel"})
+    tts.set_voice_fields(t, "Anna", eleven={"id": "v1", "name": "Rachel"})
     el = FakeEleven()
     r = tts.render_lines(project, t, n.id, el)
     assert el.calls[-1][6] == {"settings": {"stability": 0.8, "speed": 1.1}} and r["speak"]["speed"] == 1.1

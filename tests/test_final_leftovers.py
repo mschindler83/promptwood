@@ -46,3 +46,11 @@ def test_speed_mode_is_read_and_set_in_the_tree():
         assert [m for m in ("turbo", "hyperflow", "pika") if o[m]["on"]] == ([] if mode == "normal" else [mode])
     with pytest.raises(ValueError):
         T.set_speed_mode(o, "warp")
+
+
+def test_tts_has_a_public_set_voice_fields():
+    from video_chain import tts
+    assert callable(getattr(tts, "set_voice_fields", None))
+    import inspect
+    from video_chain.ui import mw_tts
+    assert "_set_voice_fields" not in inspect.getsource(mw_tts)
