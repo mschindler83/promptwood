@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QSettings, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QIcon, QImage, QImageReader, QPixmap
+from PySide6.QtGui import QColor, QIcon, QImage, QImageReader, QPainter, QPixmap
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QMenu, QSlider, QSplitter, QStyle, QVBoxLayout, QWidget)
 
@@ -36,6 +36,22 @@ THREADS = 8                        # parallel reads: on a network share every fi
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "video-chain" / "thumbs"
 DESKTOP_THUMBS = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "thumbnails"
 MAX_CACHED = 20000                 # beyond this many cached thumbnails the oldest are removed
+
+
+class _Preview(QLabel):
+    """The preview; its background is read from the theme when it is painted (not baked into a stylesheet)."""
+
+    def background(self) -> QColor:
+        return theme().bgSunken
+
+    def paintEvent(self, e):                    # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setBrush(self.background())
+        p.setPen(Qt.NoPen)
+        p.drawRoundedRect(self.rect(), 6, 6)
+        p.end()
+        super().paintEvent(e)
 
 
 class _Thumbs(QObject):
@@ -221,10 +237,9 @@ class ImagePickerDialog(QDialog):
         side = QWidget()
         sv = QVBoxLayout(side)
         sv.setContentsMargins(6, 0, 0, 0)
-        self.preview = QLabel()
+        self.preview = _Preview()
         self.preview.setAlignment(Qt.AlignCenter)
         self.preview.setMinimumSize(280, 280)
-        self.preview.setStyleSheet(f"background: {theme().bgSunken.name()}; border-radius: 6px;")
         self.info = label("", level="secondary")
         self.info.setWordWrap(True)
         sv.addWidget(self.preview, 1)

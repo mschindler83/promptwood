@@ -212,3 +212,31 @@ def test_crop_says_when_the_picture_could_not_be_turned(app, tmp_path, monkeypat
     wait(app, lambda: not dlg.loading)
     assert "upright" in dlg.info.text()
     dlg.deleteLater()
+
+
+def test_h3_trim_gets_the_clips_frame_rate(app, tmp_path, monkeypatch):
+    """GEN-12: the made video is cut at the clip's own frame rate (a 30 fps clip is not retimed to 24)."""
+    from video_chain import swap
+    dlg = _swap_dialog(tmp_path, app)
+    pic = tmp_path / "ref.png"
+    Image.new("RGB", (64, 64), (90, 80, 70)).save(pic)
+    dlg.heads = {"size": (160, 90), "track": [], "boxes": [], "frames": 6, "found": 0, "fps": 30.0}
+    dlg.ref, dlg.ref_png, dlg.ref_crop = str(pic), pic, None
+
+    class Gen:
+        def generate(self, prompt, start, out, png, seed, settings=None):
+            out.write_bytes(b"x")
+    dlg.h3 = {"lora": "l.safetensors", "turbo": "t.safetensors", "settings": {}, "connect": lambda p: Gen(),
+              "describe": None}
+    dlg.method.setCurrentIndex(dlg.method.findData("h3"))
+    dlg.prompt.setText("a face")
+    seen = {}
+
+    def trim(made, clip, out, frames, **kw):
+        seen.update(kw)
+        raise RuntimeError("stop here")
+    monkeypatch.setattr(swap, "trim_with_sound", trim)
+    dlg.generate()
+    wait(app, lambda: not dlg._busy, timeout=20)
+    assert seen.get("fps") == 30.0
+    dlg.done(0)

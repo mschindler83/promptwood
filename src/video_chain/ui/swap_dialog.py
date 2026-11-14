@@ -545,7 +545,7 @@ class SwapDialog(QDialog):
                     gen.generate(swap.head_swap_prompt(details), None, made_raw, out_dir / f"{stem}_h3.png", seed,
                                  settings=st)
                     check()
-                    swap.trim_with_sound(made_raw, clip, out, n)
+                    swap.trim_with_sound(made_raw, clip, out, n, fps=fps)
                     meta = {"method": "h3", "lora": self.h3["lora"], "frames_made": length, "details": details,
                             "steps": st.get("steps"), "seed": seed}
                 elif method == "face":

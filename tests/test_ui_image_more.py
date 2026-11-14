@@ -73,3 +73,87 @@ def test_crop_wheel_is_accepted(app):
     e.ignore()
     v.wheelEvent(e)
     assert e.isAccepted()
+
+
+def groups(names):
+    return [{"title": "g", "prompt": "p", "items": [(n, {"prompt": f"prompt {n}"}, 0.0) for n in names],
+             "oldest": 0, "model": "m"}]
+
+
+def test_gallery_keeps_its_thumb_widgets_on_a_rebuild(app):
+    from video_chain.ui.results_gallery import ResultGallery
+    g = ResultGallery()
+    g.set_groups(groups(["a.png", "b.png"]), set())
+    a, b = g.thumbs["a.png"], g.thumbs["b.png"]
+    g.set_groups(groups(["c.png", "a.png", "b.png"]), {"a.png"})        # a new result arrives
+    assert g.thumbs["a.png"] is a and g.thumbs["b.png"] is b and "c.png" in g.thumbs
+    assert a.in_use and not b.in_use
+    g.set_groups(groups(["b.png"]), set())                              # a filter hides one
+    assert list(g.thumbs) == ["b.png"] and g.thumbs["b.png"] is b
+
+
+def test_gallery_keys_home_end_page(app):
+    from video_chain.ui.results_gallery import ResultGallery
+    g = ResultGallery()
+    names = [f"{i}.png" for i in range(6)]
+    g.set_groups(groups(names), set())
+    got = []
+    g.clicked.connect(got.append)
+    g._selected = "2.png"
+    g.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Home, Qt.NoModifier))
+    g.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_End, Qt.NoModifier))
+    assert got == ["0.png", "5.png"]
+    assert g.thumbs["0.png"].accessibleName() == "prompt 0.png"
+
+
+def test_result_view_is_quick_while_resizing_then_smooth(app):
+    from video_chain.ui.results_gallery import ResultView
+    v = ResultView()
+    img = QImage(800, 600, QImage.Format_RGB32)
+    img.fill(0x336699)
+    v.resize(400, 300)
+    v.set_image(img)
+    v._pixmap()
+    assert v._scaled[2] is True                                          # at rest: smooth
+    v.resize(380, 285)
+    v.resizeEvent(None)
+    v._pixmap()
+    assert v._scaled[2] is False                                         # while the edge is dragged: fast
+    v._settled()
+    v._pixmap()
+    assert v._scaled[2] is True
+
+
+def test_info_card_colours_come_from_the_theme_when_painted(app):
+    from PySide6.QtGui import QColor
+
+    from video_chain.ui.results_gallery import InfoCard
+    from video_chain.ui.theme import theme
+    c = InfoCard()
+    assert c.styleSheet() == ""
+    t = theme()
+    old = t.bgRaised
+    try:
+        t.bgRaised = QColor(1, 2, 3)
+        assert c.colours()[0] == QColor(1, 2, 3)
+    finally:
+        t.bgRaised = old
+
+
+def test_picker_preview_background_comes_from_the_theme(app, tmp_path):
+    from PySide6.QtGui import QColor
+    from PySide6.QtCore import QSettings
+
+    from video_chain.ui import image_picker as IP
+    from video_chain.ui.theme import theme
+    q = QSettings(str(tmp_path / "s.ini"), QSettings.IniFormat)
+    dlg = IP.ImagePickerDialog(None, "x", str(tmp_path), q, cache_dir=None, desktop_thumbs=None)
+    assert dlg.preview.styleSheet() == ""
+    t = theme()
+    old = t.bgSunken
+    try:
+        t.bgSunken = QColor(4, 5, 6)
+        assert dlg.preview.background() == QColor(4, 5, 6)
+    finally:
+        t.bgSunken = old
+    dlg.deleteLater()
