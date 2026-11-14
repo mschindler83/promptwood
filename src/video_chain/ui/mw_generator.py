@@ -12,6 +12,7 @@ from typing import Any
 from PySide6.QtCore import QProcess, QProcessEnvironment, QTimer
 
 from .workers import run_in_background
+from . import settings_keys as SK
 from .. import comfy as CMF, runpod as RP, tree as T
 from ..__main__ import COMFY_DOWN
 from .generator_state import (
@@ -69,11 +70,11 @@ class GeneratorMixin(MainWindowHost):
         export: GPU, volume, fallback, SeedVR2 size); a change needs a new worker."""
         refine = self._refine or {}
         if refine.get("cloud"):
-            return RunpodBinding(qs_value(self.qs, "runpodGpu", RP.DEFAULT_GPU, str),
-                                 qs_value(self.qs, "runpodVolume", "", str).strip(),
-                                 qs_value(self.qs, "runpodFallback", True, bool),
+            return RunpodBinding(qs_value(self.qs, SK.RUNPOD_GPU, RP.DEFAULT_GPU, str),
+                                 qs_value(self.qs, SK.RUNPOD_VOLUME, "", str).strip(),
+                                 qs_value(self.qs, SK.RUNPOD_FALLBACK, True, bool),
                                  CMF.SEEDVR_METHODS.get(refine.get("method") or "", "7b"),
-                                 qs_value(self.qs, "runpodWithoutVolume", True, bool))
+                                 qs_value(self.qs, SK.RUNPOD_WITHOUT_VOLUME, True, bool))
         return ComfyBinding((self.comfy_url.text().strip() or DEFAULT_COMFY_URL), self.comfy_dir.text().strip(),
                             self.comfy_cleanup.isChecked())
 

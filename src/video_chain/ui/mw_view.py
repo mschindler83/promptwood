@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QApplication, QLineEdit, QMessageBox, QPlainTextEd
 
 from .. import tree as T
 from . import shortcuts as S
+from . import settings_keys as SK
 from .clip_cards import PromptCard
 from .graph import START
 from .mw_nodes import NODE_ACTIONS
@@ -56,7 +57,7 @@ class ViewMixin(MainWindowHost):
 
     def set_simple(self, on: bool):
         """Switch the view (stored in the app's settings). It only shows / hides controls, never changes a value."""
-        self.qs.setValue("viewMode", "simple" if on else "advanced")
+        self.qs.setValue(SK.VIEW_MODE, "simple" if on else "advanced")
         self.view.set_simple(on)
         self._show_view()
 
@@ -83,7 +84,7 @@ class ViewMixin(MainWindowHost):
     # ------------------------------------------------------------------ guided start
     def _guide_store(self) -> dict:
         try:
-            d = json.loads(qs_value(self.qs, "guideChoices", "{}", str) or "{}")
+            d = json.loads(qs_value(self.qs, SK.GUIDE_CHOICES, "{}", str) or "{}")
         except ValueError:
             d = {}
         return d if isinstance(d, dict) else {}
@@ -105,7 +106,7 @@ class ViewMixin(MainWindowHost):
             return
         d, key = self._guide_store(), self._guide_key()
         d[key] = sorted(set(d.pop(key, [])) | set(d.pop(str(self.project), [])) | {what})
-        self.qs.setValue("guideChoices", json.dumps(dict(list(d.items())[-50:])))     # (the last 50 projects)
+        self.qs.setValue(SK.GUIDE_CHOICES, json.dumps(dict(list(d.items())[-50:])))     # (the last 50 projects)
         self._update_guide()
 
     def _guide_text_only(self):
@@ -146,7 +147,7 @@ class ViewMixin(MainWindowHost):
 
     def show_guide(self, on: bool):
         """Hide guide / View → Getting started (stored in the app's settings)."""
-        self.qs.setValue("guideHidden", not on)
+        self.qs.setValue(SK.GUIDE_HIDDEN, not on)
         if on:
             self._show_left_tab(0)
         self._update_guide()
@@ -156,7 +157,7 @@ class ViewMixin(MainWindowHost):
     def _update_guide(self):
         """The guide while the project has no made clip (step 0 without a project), its steps ticked from the real
         state; the "how to go on" line once after the first made clip."""
-        hidden = qs_value(self.qs, "guideHidden", False, bool)
+        hidden = qs_value(self.qs, SK.GUIDE_HIDDEN, False, bool)
         if self.tree is None or self.project is None:
             self.guide_panel.set_state(project=False)
             self.guide_panel.setVisible(not hidden)
@@ -178,12 +179,12 @@ class ViewMixin(MainWindowHost):
             if not isinstance(fw, (QPlainTextEdit, QLineEdit)):
                 self.b_gen.setFocus(Qt.FocusReason.OtherFocusReason)
         self._guide_ready = ready
-        if len(self.tree.nodes) >= 2 and not qs_value(self.qs, "nextHintDone", False, bool):
-            self.qs.setValue("nextHintDone", True)          # a second clip exists: the user knows how to go on
-        self.next_hint.setVisible(made and not qs_value(self.qs, "nextHintDone", False, bool))
+        if len(self.tree.nodes) >= 2 and not qs_value(self.qs, SK.NEXT_HINT_DONE, False, bool):
+            self.qs.setValue(SK.NEXT_HINT_DONE, True)          # a second clip exists: the user knows how to go on
+        self.next_hint.setVisible(made and not qs_value(self.qs, SK.NEXT_HINT_DONE, False, bool))
 
     def _next_hint_done(self):
-        self.qs.setValue("nextHintDone", True)
+        self.qs.setValue(SK.NEXT_HINT_DONE, True)
         self.next_hint.hide()
 
     def _engine_can_start(self) -> bool:
@@ -380,7 +381,7 @@ class ViewMixin(MainWindowHost):
     def _restore_layout(self):
         """The layout of the last session; the default one if there is none, it was saved by an older version or
         it is damaged."""
-        saved = LayoutState.from_json(qs_value(self.qs, "layout", "", str))
+        saved = LayoutState.from_json(qs_value(self.qs, SK.LAYOUT, "", str))
         if saved is None:
             self.apply_layout("edit")
             return

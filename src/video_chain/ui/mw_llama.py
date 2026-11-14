@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import NamedTuple
 
 from .workers import post, run_in_background
+from . import settings_keys as SK
 from .. import comfy as CMF, llm_server as LLM, runpod as RP, triggers, tts as TTS
 from . import dialogs as D
 from .ui_logic import (
@@ -215,7 +216,7 @@ class LlamaMixin(MainWindowHost):
     def _runpod_changed(self):
         if self._runpod_loading:
             return
-        self.qs.setValue("runpodGpu", self._runpod_gpu_id())
-        self.qs.setValue("runpodFallback", self.runpod_fallback.isChecked())
-        self.qs.setValue("runpodVolume", self.runpod_volume.text().strip())
-        self.qs.setValue("runpodWithoutVolume", self.runpod_without_volume.isChecked())
+        self.qs.setValue(SK.RUNPOD_GPU, self._runpod_gpu_id())
+        self.qs.setValue(SK.RUNPOD_FALLBACK, self.runpod_fallback.isChecked())
+        self.qs.setValue(SK.RUNPOD_VOLUME, self.runpod_volume.text().strip())
+        self.qs.setValue(SK.RUNPOD_WITHOUT_VOLUME, self.runpod_without_volume.isChecked())

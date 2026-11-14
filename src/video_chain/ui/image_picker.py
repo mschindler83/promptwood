@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QHBoxLayout
 
 from .. import config, media
 from .imageio import file_facts, read_scaled
+from . import settings_keys as SK
 from .theme import icon, theme
 from .widgets import fit_size, format_time, icon_button, label, remember_geometry, safe_emit, label_for
 from .qsvalue import qs_value
@@ -175,7 +176,7 @@ class ImagePickerDialog(QDialog):
         self._zoom_save = QTimer(self)
         self._zoom_save.setSingleShot(True)
         self._zoom_save.setInterval(400)
-        self._zoom_save.timeout.connect(lambda: self.qs.setValue("pickerZoom", self._zoom_px))
+        self._zoom_save.timeout.connect(lambda: self.qs.setValue(SK.PICKER_ZOOM, self._zoom_px))
         self._pool = ThreadPoolExecutor(max_workers=THREADS)
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self.desktop_thumbs = Path(desktop_thumbs) if desktop_thumbs else None
@@ -260,7 +261,7 @@ class ImagePickerDialog(QDialog):
         self.buttons.button(QDialogButtonBox.StandardButton.Open).setEnabled(False)
         v.addWidget(self.buttons)
 
-        self.zoom.setValue(qs_value(self.qs, "pickerZoom", 150, int))
+        self.zoom.setValue(qs_value(self.qs, SK.PICKER_ZOOM, 150, int))
         self.zoom.valueChanged.connect(self._zoomed)
         self._zoomed(self.zoom.value())
         self._fill_places()
@@ -286,12 +287,12 @@ class ImagePickerDialog(QDialog):
     def favorites(self) -> list[str]:
         """The favorite folders (shared by every kind of browser), in the order they were added."""
         try:
-            return [d for d in json.loads(qs_value(self.qs, "pickerFavorites", "[]", str)) if isinstance(d, str)]
+            return [d for d in json.loads(qs_value(self.qs, SK.PICKER_FAVORITES, "[]", str)) if isinstance(d, str)]
         except ValueError:
             return []
 
     def _set_favorites(self, dirs: list[str]):
-        self.qs.setValue("pickerFavorites", json.dumps(dirs))
+        self.qs.setValue(SK.PICKER_FAVORITES, json.dumps(dirs))
         self._fill_places()
         self._update_fav()
 
@@ -322,7 +323,7 @@ class ImagePickerDialog(QDialog):
 
     def _recent_dirs(self) -> list[str]:
         try:
-            return [d for d in json.loads(qs_value(self.qs, "pickerRecent", "[]", str)) if isinstance(d, str)]
+            return [d for d in json.loads(qs_value(self.qs, SK.PICKER_RECENT, "[]", str)) if isinstance(d, str)]
         except ValueError:
             return []
 
@@ -653,7 +654,7 @@ class ImagePickerDialog(QDialog):
             self.qs.setValue(self._place_key, "dir")
             self.qs.setValue(self.dir_key, str(self.folder))
             recent = [str(self.folder)] + [d for d in self._recent_dirs() if d != str(self.folder)]
-            self.qs.setValue("pickerRecent", json.dumps(recent[:MAX_RECENT_DIRS]))
+            self.qs.setValue(SK.PICKER_RECENT, json.dumps(recent[:MAX_RECENT_DIRS]))
         self.accept()
 
     def chosen(self) -> str | None:
@@ -663,7 +664,7 @@ class ImagePickerDialog(QDialog):
         self._gen += 1                           # pending thumbnails are dropped
         if self._zoom_save.isActive():           # a zoom change still waiting to be written
             self._zoom_save.stop()
-            self.qs.setValue("pickerZoom", self._zoom_px)
+            self.qs.setValue(SK.PICKER_ZOOM, self._zoom_px)
         self._pool.shutdown(wait=False, cancel_futures=True)
         super().done(r)
 
@@ -699,7 +700,7 @@ def pick_image(parent, title: str, settings: QSettings | None, start_dir: str | 
     The thumbnail cache can be moved with the setting 'thumbCacheDir' (empty = no disk cache). settings None: the
     picker remembers nothing (scratch_settings)."""
     qs = settings if settings is not None else scratch_settings()
-    cache: Any = qs.value("thumbCacheDir", None)
+    cache: Any = qs.value(SK.THUMB_CACHE_DIR, None)
     cache_dir = CACHE_DIR if cache is None else (Path(cache) if cache else None)
     dlg = ImagePickerDialog(parent, title, start_dir, qs, places, cache_dir=cache_dir, collections=collections,
                             kind=kind)

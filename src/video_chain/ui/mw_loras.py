@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QFileDialog
 
 from .. import chain, comfy as CMF, imagegen, tree as T
 from .lora_stack import fill_lora_combo, lora_label, lora_path
+from . import settings_keys as SK
 from . import ui_logic as UL
 from .clip_cards import PromptCard
 from .ui_logic import MAX_RECENT_LORAS, REMIX_DELAY_MS, STEPS_TIP, label_loras, plural
@@ -42,7 +43,7 @@ class LorasMixin(MainWindowHost):
         out = label_loras(self.h3_loras)
         listed = {p for p, _ in out} | {os.path.realpath(p) for p, _ in out}
         try:
-            recent = json.loads(qs_value(self.qs, "recentLoras", "[]", str))
+            recent = json.loads(qs_value(self.qs, SK.RECENT_LORAS, "[]", str))
         except ValueError:
             recent = []
         cands = ([p for n in self.tree.nodes.values() for p, _st in T.node_loras(n)] if self.tree else []) + recent
@@ -160,11 +161,11 @@ class LorasMixin(MainWindowHost):
 
     def _remember_lora(self, path: str):
         try:
-            recent = json.loads(qs_value(self.qs, "recentLoras", "[]", str))
+            recent = json.loads(qs_value(self.qs, SK.RECENT_LORAS, "[]", str))
         except ValueError:
             recent = []
         recent = [path] + [r for r in recent if r != path]
-        self.qs.setValue("recentLoras", json.dumps(recent[:MAX_RECENT_LORAS]))
+        self.qs.setValue(SK.RECENT_LORAS, json.dumps(recent[:MAX_RECENT_LORAS]))
 
     def _overrides_changed(self, nid: str, ov: dict):
         if self.tree and nid in self.tree.nodes and not self.tree.nodes[nid].frozen:

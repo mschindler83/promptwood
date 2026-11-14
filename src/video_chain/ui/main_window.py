@@ -35,6 +35,7 @@ from PySide6.QtWidgets import QDialog, QMainWindow, QMessageBox, QProgressDialog
 from .. import tree as T, tts as TTS
 # (re-exported: the tests patch and import these names on main_window)
 from .clip_dialogs import SplitDialog, VideoFrameDialog  # noqa: F401
+from . import settings_keys as SK
 from .video_editor import VideoRangeDialog  # noqa: F401
 from .ui_logic import Problem
 from .view_mode import ViewMode
@@ -88,10 +89,10 @@ class MainWindow(BuildMixin, GeneratorMixin, ComfyMixin, ExportMixin, VideosMixi
         self.qs = settings
         # Simple or Advanced, decided once: Simple on a first run (no settings yet), Advanced for settings from
         # before the views existed (that user knows every control); stored at once, so it never flips later
-        mode = qs_value(self.qs, "viewMode", "", str)
+        mode = qs_value(self.qs, SK.VIEW_MODE, "", str)
         if mode not in ("simple", "advanced"):
             mode = "advanced" if self.qs.allKeys() else "simple"
-            self.qs.setValue("viewMode", mode)
+            self.qs.setValue(SK.VIEW_MODE, mode)
         self.view = ViewMode(mode == "simple", self)
         self.view.changed.connect(self._view_switched)
         self._build_menu()

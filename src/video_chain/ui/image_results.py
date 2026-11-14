@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QListWidgetItem
 from .. import edits
 from ..edits import ResultRecord
 from .image_common import RESULT_ICON
+from . import settings_keys as SK
 from .imageio import upright
 from .lora_stack import lora_label
 from .results_gallery import badged, model_key, model_name, run_groups
@@ -154,7 +155,7 @@ class ResultsMixin(ImageEditHost):
         (self.b_gallery if gallery else self.b_single).setChecked(True)
         self.thumb_size.setVisible(gallery)
         if remember and self.qs is not None:
-            self.qs.setValue("resultsView", "gallery" if gallery else "single")
+            self.qs.setValue(SK.RESULTS_VIEW, "gallery" if gallery else "single")
         sel = self.selected()
         if gallery:
             self.gallery.set_selected(sel[0] if sel else None)
@@ -171,7 +172,7 @@ class ResultsMixin(ImageEditHost):
     def _thumb_size_changed(self, px: int):
         self.gallery.set_thumb_size(px)
         if self.qs is not None:
-            self.qs.setValue("resultsThumb", px)
+            self.qs.setValue(SK.RESULTS_THUMB, px)
 
     def _select_png(self, png: str):
         for i in range(self.results.count()):

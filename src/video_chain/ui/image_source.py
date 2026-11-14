@@ -10,6 +10,7 @@ from PySide6.QtGui import QImage, QImageReader
 from PySide6.QtWidgets import QDialog, QFileDialog
 
 from .image_common import FOLDER_ITEM, FOLDER_PREFIX
+from . import settings_keys as SK
 from .image_picker import IMAGE_EXTS, pick_image
 from .imageio import upright
 from .mask_painter import MaskPainterDialog, mask_area, overlay
@@ -41,7 +42,7 @@ class SourceMixin(ImageEditHost):
             self.set_source(path)
 
     def _choose_folder(self):
-        start = qs_value(self.qs, "editFolder", "", str) if self.qs is not None else ""
+        start = qs_value(self.qs, SK.EDIT_FOLDER, "", str) if self.qs is not None else ""
         d = QFileDialog.getExistingDirectory(self, "Folder of images to edit (each one in turn)", start)
         if d:
             self.set_folder(d)
@@ -79,7 +80,7 @@ class SourceMixin(ImageEditHost):
             self._select_source_item()
             return False
         if self.qs is not None:
-            self.qs.setValue("editFolder", str(folder))
+            self.qs.setValue(SK.EDIT_FOLDER, str(folder))
         self.set_source(first)
         self.batch, self._batch_dir = imgs, str(folder)
         self.set_mask(None)                           # (a mask belongs to one picture)

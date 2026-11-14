@@ -8,6 +8,7 @@ from PySide6.QtCore import QProcess
 from PySide6.QtWidgets import QDialog
 
 from .workers import run_in_background
+from . import settings_keys as SK
 from .. import chain, media, runpod as RP, tree as T
 from .theme import repolish
 from .widgets import format_time
@@ -96,9 +97,9 @@ class ExportMixin(MainWindowHost):
         default = str(self.project / f"{self.project.name}-{path[-1].id}{'-clip' if single else ''}.mp4")
         assert self.tree is not None
         base = T.Checker(self.project, self.tree).base()
-        strength = qs_value(self.qs, "refineStrength", "natural", str)
-        method = qs_value(self.qs, "exportUpscaler", "seedvr2_7b", str)
-        denoise = qs_value(self.qs, "exportDenoise", False, bool)
+        strength = qs_value(self.qs, SK.REFINE_STRENGTH, "natural", str)
+        method = qs_value(self.qs, SK.EXPORT_UPSCALER, "seedvr2_7b", str)
+        denoise = qs_value(self.qs, SK.EXPORT_DENOISE, False, bool)
 
         def ready(size, how, strength_, denoise_=False):   # every generated clip has a kept copy made this way
             def kept(n):
@@ -115,7 +116,7 @@ class ExportMixin(MainWindowHost):
         swapped = sum(1 for n in path if T.swapped_video(n))
         dlg = ExportDialog(self, default, (base["width"], base["height"]) if base else None, ready, swapped,
                            strength, method, denoise, cloud=True if RP.api_key() else None,
-                           cloud_on=qs_value(self.qs, "exportCloud", False, bool), simple=self.simple, settings=self.qs)
+                           cloud_on=qs_value(self.qs, SK.EXPORT_CLOUD, False, bool), simple=self.simple, settings=self.qs)
         if single is not None:
             dlg.setWindowTitle(f"Export {'video' if path[0].is_video else 'clip'} #{T.short_id(single)}")
         try:
@@ -125,11 +126,11 @@ class ExportMixin(MainWindowHost):
         finally:
             dlg.deleteLater()
         if req.size != "made":
-            self.qs.setValue("refineStrength", req.strength)
-            self.qs.setValue("exportUpscaler", req.method)
-            self.qs.setValue("exportDenoise", req.denoise)
+            self.qs.setValue(SK.REFINE_STRENGTH, req.strength)
+            self.qs.setValue(SK.EXPORT_UPSCALER, req.method)
+            self.qs.setValue(SK.EXPORT_DENOISE, req.denoise)
             if req.method != "refine":
-                self.qs.setValue("exportCloud", req.cloud)
+                self.qs.setValue(SK.EXPORT_CLOUD, req.cloud)
         self.export(req.out, req.size, req.fast, req.swapped, req.strength, req.method, single,
                     req.denoise and req.method != "refine", cloud=req.cloud and req.method != "refine")
 

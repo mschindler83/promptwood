@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFormLayout
                                QLineEdit, QPushButton, QVBoxLayout)
 
 from . import shortcuts as S
+from . import settings_keys as SK
 from .workers import run_in_background
 from .. import chain, media
 from ..tree import AUDIO_REF_MIN, VOICE_MAX_SECS, VOICE_REF_MAX_SECS
@@ -212,7 +213,7 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
     # ---- file
     def choose(self):
         folder = str(Path(self.file).parent) if self.file else (
-            qs_value(self.settings, "soundDir", "", str) if self.settings is not None else "")
+            qs_value(self.settings, SK.SOUND_DIR, "", str) if self.settings is not None else "")
         from .image_picker import pick_image, scratch_settings
         f = pick_image(self, "A recording of the voice (audio or video)" if self.voice else "Sound for an audio track",
                        self.settings if self.settings is not None else scratch_settings(), folder or None,

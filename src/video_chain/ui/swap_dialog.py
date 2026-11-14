@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QF
                                QProgressBar, QPushButton, QVBoxLayout)
 
 from .workers import post, run_in_background
+from . import settings_keys as SK
 from .. import chain, faces as F, media, swap
 from .. import tree as T
 from ..animate import DEFAULT_PROMPT, SIZES, gen_size, window_count
@@ -118,7 +119,7 @@ class SwapDialog(QDialog):
         self.head_size = QDoubleSpinBox()
         self.head_size.setRange(0.7, 2.0)
         self.head_size.setSingleStep(0.05)
-        self.head_size.setValue(float(qs_value(settings, "swapHeadSize", 1.0, float)) if settings else 1.0)
+        self.head_size.setValue(float(qs_value(settings, SK.SWAP_HEAD_SIZE, 1.0, float)) if settings else 1.0)
         self.head_size.setToolTip("The head area around the found face: larger takes in more hair, the ears and "
                                   "the neck; everything outside it stays as it is")
         self.head_size.valueChanged.connect(self._resize_heads)
@@ -168,7 +169,7 @@ class SwapDialog(QDialog):
         self.method = QComboBox()
         for key, text in METHODS:
             self.method.addItem(text, key)
-        self.method.setCurrentIndex(max(0, self.method.findData(qs_value(settings, "swapMethod", "animate+lock", str)
+        self.method.setCurrentIndex(max(0, self.method.findData(qs_value(settings, SK.SWAP_METHOD, "animate+lock", str)
                                                                 if settings else "animate+lock")))
         self.method.setToolTip(
             "<p><b>Head + face lock</b>: Wan 2.2 Animate draws the new head (face, hair, head shape), then a face "
@@ -180,19 +181,19 @@ class SwapDialog(QDialog):
         self.method.currentIndexChanged.connect(lambda *_: (self._forget_auto_details(), self._update()))
         form.addRow("Method", self.method)
         self.body = QCheckBox("Follow the body pose")
-        self.body.setChecked(qs_value(settings, "swapBody", True, bool) if settings else True)
+        self.body.setChecked(qs_value(settings, SK.SWAP_BODY, True, bool) if settings else True)
         self.body.setToolTip("On: the body skeleton (DWPose) drives Animate too. Off: only the face motion; the "
                              "body stays as in the clip anyway (only the head is drawn anew): better when the body "
                              "is in unusual poses DWPose gets wrong")
         form.addRow("", self.body)
         self.sharpen = QCheckBox("Sharpen the face (GPEN)")
-        self.sharpen.setChecked(qs_value(settings, "swapSharpen", True, bool) if settings else True)
+        self.sharpen.setChecked(qs_value(settings, SK.SWAP_SHARPEN, True, bool) if settings else True)
         self.sharpen.setToolTip("Face restoration after the face swap (GPEN-BFR-512, 80 %): a sharper face")
         form.addRow("", self.sharpen)
         self.size = QComboBox()
         for key in SIZES:
             self.size.addItem(SIZE_LABELS.get(key, key), key)
-        self.size.setCurrentIndex(max(0, self.size.findData(qs_value(settings, "swapSize", DEFAULT_SIZE, str)
+        self.size.setCurrentIndex(max(0, self.size.findData(qs_value(settings, SK.SWAP_SIZE, DEFAULT_SIZE, str)
                                                             if settings else DEFAULT_SIZE)))
         self.size.setToolTip("The size the new head is made at (only the head area: the rest of the clip keeps "
                              "its own size and sharpness)")
@@ -294,7 +295,7 @@ class SwapDialog(QDialog):
 
     def _resize_heads(self, *_):
         if self.qs is not None:
-            self.qs.setValue("swapHeadSize", self.head_size.value())
+            self.qs.setValue(SK.SWAP_HEAD_SIZE, self.head_size.value())
         if self.heads is not None:
             w, h = self.heads["size"]
             self.boxes = swap.head_boxes(self.heads["track"], w, h, self.head_size.value())
@@ -484,8 +485,8 @@ class SwapDialog(QDialog):
                 self.state.setText(f"Cannot start: {e}")
                 return
         if self.qs is not None:
-            for k, v in (("swapSize", self.size.currentData()), ("swapMethod", self.method.currentData()),
-                         ("swapBody", self.body.isChecked()), ("swapSharpen", self.sharpen.isChecked())):
+            for k, v in ((SK.SWAP_SIZE, self.size.currentData()), (SK.SWAP_METHOD, self.method.currentData()),
+                         ("swapBody", self.body.isChecked()), (SK.SWAP_SHARPEN, self.sharpen.isChecked())):
                 self.qs.setValue(k, v)
         self._busy, self._cancel = True, False
         out_dir = self.project / swap.SWAPS_DIR

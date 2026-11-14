@@ -32,6 +32,7 @@ from ..edits import (EDITS_DIR, MOSS_EDIT_QUALITIES, QUALITY_TEXT, ResultRecord,
                      project_edits, record_use, scale_to, uses_index, uses_of, write_meta)
 from ..imagegen import FAMILIES, size_for
 from . import shortcuts as S
+from . import settings_keys as SK
 from .dialogs import button_row, confirm as ask
 from .image_common import (ASK_ABOVE, CREATE_HINT, FAMILY_RETRIES, FAMILY_RETRY_MS, FOLDER_ITEM, FOLDER_PREFIX,  # noqa: F401
                            MAX_RESULTS, PROMPT_HINT, RESULT_GRID, RESULT_ICON, RESULT_STRIP_HEIGHT, SEED_MAX,
@@ -213,10 +214,10 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         self.edit_model.setToolTip("Qwen-Image-Edit 2511: the proven edit model. Qwen-Image 2.1 (2026): newer and "
                                    "smaller, one model for creating and editing; research licence (non-commercial). "
                                    "MOSS-Image Edit (2026, 5B, Apache 2.0): MOSS-Image with its edit LoRA")
-        saved = qs_value(self.qs, "editModel", "", str) if self.qs is not None else ""
+        saved = qs_value(self.qs, SK.EDIT_MODEL, "", str) if self.qs is not None else ""
         self.edit_model.setCurrentIndex(max(0, self.edit_model.findData(saved)))
         self.edit_model.currentIndexChanged.connect(self._edit_model_changed)
-        self.edit_model.activated.connect(lambda _i: self._remember("editModel", self.edit_model.currentData()))
+        self.edit_model.activated.connect(lambda _i: self._remember(SK.EDIT_MODEL, self.edit_model.currentData()))
         erow.addWidget(label_for("Model", self.edit_model, level="tertiary"))
         erow.addWidget(self.edit_model, 1)
         ev.addLayout(erow)
@@ -248,7 +249,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         self.family.setToolTip("The model family; unavailable ones say what is missing")
         self.family.addItem("looking for models in ComfyUI …", None)
         self.family.currentIndexChanged.connect(self._family_changed)
-        self.family.activated.connect(lambda _i: self._remember("createFamily", self.family.currentData(),
+        self.family.activated.connect(lambda _i: self._remember(SK.CREATE_FAMILY, self.family.currentData(),
                                                                 needs_value=True))
         self.model_file = QComboBox()
         self.model_file.setToolTip("The model file (the recommended one first; fine-tunes of the family too)")
@@ -364,8 +365,8 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
             "its trigger words. The seed, prompt and every other setting stay the same, so the LoRAs can be "
             "compared side by side.<br>With more results (or variations), each one is made with every LoRA in "
             "turn.</p>")
-        self.lora_each.setChecked(self.qs is not None and qs_value(self.qs, "loraEach", False, bool))
-        self.lora_each.toggled.connect(lambda on: self._remember("loraEach", on))
+        self.lora_each.setChecked(self.qs is not None and qs_value(self.qs, SK.LORA_EACH, False, bool))
+        self.lora_each.toggled.connect(lambda on: self._remember(SK.LORA_EACH, on))
         self.lora_each.toggled.connect(lambda _on: self._variations_changed())
         self.loras.changed.connect(lambda: self._variations_changed())
         self.loras.filled.connect(lambda: self._variations_changed())
@@ -602,13 +603,13 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
     def _restore(self, source: str | None, sources: list[tuple[str, str]], mode: str):
         """What the user had last time: sizes, variations, view, the image to edit, the mode; then the first look."""
         if self.qs is not None:
-            self.thumb_size.setValue(qs_value(self.qs, "resultsThumb", 200, int))
+            self.thumb_size.setValue(qs_value(self.qs, SK.RESULTS_THUMB, 200, int))
             try:
-                self.variations.set_state(json.loads(qs_value(self.qs, "promptVariations", "{}", str) or "{}"))
+                self.variations.set_state(json.loads(qs_value(self.qs, SK.PROMPT_VARIATIONS, "{}", str) or "{}"))
             except ValueError:
                 pass
         self._load_results()
-        self.set_view(qs_value(self.qs, "resultsView", "single", str) if self.qs is not None else "single",
+        self.set_view(qs_value(self.qs, SK.RESULTS_VIEW, "single", str) if self.qs is not None else "single",
                       remember=False)
         if source:
             i = self.src_combo.findData(source)
@@ -619,9 +620,9 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
             self.set_source(sources[0][1])
         self.modes.idClicked.connect(self._mode_clicked)
         self.m_create.setEnabled(self.connect_create is not None)
-        saved = qs_value(self.qs, "imageMode", "", str) if self.qs is not None else ""
+        saved = qs_value(self.qs, SK.IMAGE_MODE, "", str) if self.qs is not None else ""
         if mode != "auto" and self.qs is not None:
-            self.qs.setValue("imageMode", mode)       # opened from its Edit / Create button: the user's choice
+            self.qs.setValue(SK.IMAGE_MODE, mode)       # opened from its Edit / Create button: the user's choice
         self.set_mode(mode if mode != "auto" else (saved or "edit"))
         if self.connect_create is not None:
             self._load_families()

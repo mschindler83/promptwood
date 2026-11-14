@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QDoubleSpin
                                QStyledItemDelegate, QToolButton, QVBoxLayout, QWidget)
 
 from .workers import post, run_in_background
+from . import settings_keys as SK
 from .. import tree as T
 from .dialogs import add_action, button_row, failed
 from .widgets import fit_size, guard_wheel, icon_button, label
@@ -218,7 +219,7 @@ class LoraPickerDialog(QDialog):
         self.pictures.setAccessibleName("Pictures")
         for key, text in SHOW:
             self.pictures.addItem(text, key)
-        saved = qs_value(self.qs, "loraPictures", "safe", str) if self.qs is not None else "safe"
+        saved = qs_value(self.qs, SK.LORA_PICTURES, "safe", str) if self.qs is not None else "safe"
         self.pictures.setCurrentIndex(max(0, self.pictures.findData(saved)))
         self.pictures.setToolTip("Each LoRA's cover is the first picture of its CivitAI page, loaded once and kept "
                                  "on disk (this tells CivitAI which pictures you look at).\nSafe only: pictures "
@@ -368,7 +369,7 @@ class LoraPickerDialog(QDialog):
 
     def _pictures_changed(self, *_):
         if self.qs is not None:
-            self.qs.setValue("loraPictures", self.show_mode())
+            self.qs.setValue(SK.LORA_PICTURES, self.show_mode())
         for it in self._items.values():
             it.setData(self.COVER, None)
         self._want_covers()

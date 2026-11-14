@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
                                QPushButton, QSpinBox, QTextBrowser, QToolButton, QVBoxLayout, QWidget)
 
 from . import shortcuts as S
+from . import settings_keys as SK
 from .workers import post, run_in_background
 from ..tree import refine_problems
 from .lora_details import themed
@@ -132,7 +133,7 @@ class RefineDialog(QDialog):
         self.b_mode_ideas.clicked.connect(lambda: self.set_ideas_mode(True))
         v.addLayout(top)
         self.use_loras = QCheckBox("Write for the LoRAs")
-        self.use_loras.setChecked(qs_value(self.qs, "refinerLoraKnowledge", True, bool) if self.qs is not None
+        self.use_loras.setChecked(qs_value(self.qs, SK.REFINER_LORA_KNOWLEDGE, True, bool) if self.qs is not None
                                   else True)
         self.use_loras.toggled.connect(self._remember_loras)
         self.b_loras = QToolButton()
@@ -418,7 +419,7 @@ class RefineDialog(QDialog):
         for m in models:
             self.model.addItem(m["label"] + f"  —  {Path(m['file'].split(':', 1)[-1]).name}", m["file"])
             self.model.setItemData(self.model.count() - 1, m["file"], Qt.ItemDataRole.ToolTipRole)
-        saved = qs_value(self.qs, "refinerModel", "", str) if self.qs is not None else ""
+        saved = qs_value(self.qs, SK.REFINER_MODEL, "", str) if self.qs is not None else ""
         i = self.model.findData(saved)
         self.model.setCurrentIndex(i if i >= 0 else 0)
         self.model.blockSignals(False)
@@ -513,7 +514,7 @@ class RefineDialog(QDialog):
 
     def _remember_loras(self, on: bool):
         if self.qs is not None:
-            self.qs.setValue("refinerLoraKnowledge", bool(on))
+            self.qs.setValue(SK.REFINER_LORA_KNOWLEDGE, bool(on))
 
     def _lora_guide(self, text: str = ""):
         """-> a function for the worker thread: the LoRA part of the instruction ("" when off or nothing is
@@ -557,7 +558,7 @@ class RefineDialog(QDialog):
 
     def _remember(self, *_):
         if self.qs is not None and self.model.currentData():
-            self.qs.setValue("refinerModel", self.model.currentData())
+            self.qs.setValue(SK.REFINER_MODEL, self.model.currentData())
 
     def _start_comfy(self):
         if self.start_comfy and self.start_comfy():
