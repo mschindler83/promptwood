@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import copy
 import logging
-import os
 from pathlib import Path
 
 from PySide6.QtGui import QImage

@@ -20,7 +20,7 @@ from .lora_details import themed
 from .theme import repolish, theme
 from .dialogs import add_action, button_row
 from .text_edit import replace_text  # noqa: F401  (main_window and image_edit import it from here)
-from .widgets import fit_size, guard_wheel, icon_button, label, safe_emit, shortcut
+from .widgets import fit_size, guard_wheel, label, safe_emit, shortcut
 from .qsvalue import qs_value
 
 LIKE_EXAMPLE = ("Rewrite my prompt in the manner of this example prompt, which is known to work with the LoRA: take "
@@ -307,7 +307,8 @@ class RefineDialog(QDialog):
     def _show_pictures(self):
         while self.pics_row.count():
             it = self.pics_row.takeAt(0)
-            w = it.widget() if it is not None else None                        # (after setParent(None) the item no longer knows it)
+            # (after setParent(None) the item no longer knows it)
+            w = it.widget() if it is not None else None
             if w is not None:
                 w.setParent(None)
                 w.deleteLater()
@@ -318,7 +319,8 @@ class RefineDialog(QDialog):
             b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
             img = QImage(pic["path"])
             if not img.isNull():
-                b.setIcon(QIcon(QPixmap.fromImage(img.scaled(96, 64, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))))
+                b.setIcon(QIcon(QPixmap.fromImage(img.scaled(96, 64, Qt.AspectRatioMode.KeepAspectRatio,
+                                                             Qt.TransformationMode.SmoothTransformation))))
                 b.setIconSize(QSize(96, 64))
             b.setText(pic["title"] if len(pic["title"]) <= 22 else pic["title"][:20] + "…")
             b.setToolTip(f"{pic['title']}\n{pic['path']}\nClick: the model sees it (on) or not (off); right-click: "

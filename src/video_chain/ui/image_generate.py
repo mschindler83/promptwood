@@ -158,7 +158,8 @@ class EditWorker(GenerateWorker):
             self._copies.append(entry)
             if p.mask is not None:                           # the mask too (white = drawn anew)
                 entry[1] = edits.mask_path(kept)
-                if not p.mask.save(str(entry[1]), "PNG"):  # type: ignore[call-overload]  # (the stubs want bytes as the format, PySide6 6.12 only takes str)
+                # (the stubs want bytes as the format, PySide6 6.12 only takes str)
+                if not p.mask.save(str(entry[1]), "PNG"):  # type: ignore[call-overload]
                     raise RuntimeError("could not save the mask")
             for j in range(p.per):
                 if self.cancelled:

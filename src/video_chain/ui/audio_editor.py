@@ -375,7 +375,8 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
         self.b_play_sel.setEnabled(on and self._can_play())
         long = self.end - self.start >= AUDIO_REF_MIN - 1e-6
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(on and long and not self.clean_busy)
-        self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setEnabled(not self.clean_busy)   # (its thread is writing)
+        # (its thread is writing)
+        self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setEnabled(not self.clean_busy)
         self.b_clean.setEnabled(on and long and not self.clean_busy and self._isolate is not None)
         self.b_clean_play.setEnabled(self.clean is not None and self.want_player and not self.clean_busy)
         self.use_clean.setEnabled(self.clean is not None and not self.clean_busy)

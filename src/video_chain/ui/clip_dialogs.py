@@ -257,7 +257,8 @@ class CompareDialog(QDialog):
 
     def _ended(self, p, status):
         from PySide6.QtMultimedia import QMediaPlayer
-        over = (QMediaPlayer.MediaStatus.EndOfMedia, QMediaPlayer.MediaStatus.InvalidMedia, QMediaPlayer.MediaStatus.NoMedia)
+        over = (QMediaPlayer.MediaStatus.EndOfMedia, QMediaPlayer.MediaStatus.InvalidMedia,
+                QMediaPlayer.MediaStatus.NoMedia)
         if status not in over[:2] or not self.loop.isChecked():
             return
         # the clips may differ in length: start all again once the longest one has ended (one that cannot be

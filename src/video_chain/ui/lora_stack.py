@@ -139,7 +139,8 @@ class _CardDelegate(QStyledItemDelegate):
         p.setPen(t.textPrimary)
         fm = QFontMetrics(f)
         box = QRectF(r.x() + 7, pic.bottom() + 5, r.width() - 14, fm.height() * 2 + 1)
-        p.drawText(box, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWrapAnywhere, elide_lines(name, fm, int(box.width()), 2))
+        p.drawText(box, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWrapAnywhere,
+                   elide_lines(name, fm, int(box.width()), 2))
         sub = index.data(LoraPickerDialog.SUBTITLE) or ""
         if sub:
             f2 = QFont(option.font)
@@ -148,7 +149,8 @@ class _CardDelegate(QStyledItemDelegate):
             p.setPen(t.textTertiary)
             fm2 = QFontMetrics(f2)
             line = QRectF(r.x() + 7, r.bottom() - fm2.height() - 4, r.width() - 14, fm2.height())
-            p.drawText(line, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, fm2.elidedText(sub, Qt.TextElideMode.ElideRight, int(line.width())))
+            p.drawText(line, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, fm2.elidedText(sub,
+                                                                                                           Qt.TextElideMode.ElideRight, int(line.width())))
         p.restore()
 
 
@@ -178,7 +180,8 @@ def elide_lines(text: str, fm: QFontMetrics, width: int, lines: int) -> str:
 
 def _square(img: QImage, side: int) -> QImage:
     """The middle of a picture, as a square of `side` pixels (the cover fills its card)."""
-    img = img.scaled(side, side, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
+    img = img.scaled(side, side, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                     Qt.TransformationMode.SmoothTransformation)
     return img.copy((img.width() - side) // 2, (img.height() - side) // 2, side, side)
 
 
@@ -400,6 +403,7 @@ class LoraPickerDialog(QDialog):
         return False
 
     def visible_paths(self) -> list[str]:
+        """The LoRAs the search leaves in the list (no caller in the window itself: the tests ask)."""
         return [self.list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.list.count())
                 if not self.list.item(i).isHidden()]
 
@@ -505,7 +509,8 @@ class LoraStack(QWidget):
         self.known: list[tuple[str, str]] = []
         self.file_dir = ""
         self.rows: list[tuple[_LoraRow, QPushButton, QDoubleSpinBox]] = []
-        self.use_prompt: Callable[[str], None] | None = None     # set by the owner: put a text into the prompt these LoRAs are for
+        # set by the owner: put a text into the prompt these LoRAs are for
+        self.use_prompt: Callable[[str], None] | None = None
         self.v = QVBoxLayout(self)
         self.v.setContentsMargins(0, 0, 0, 0)
         self.v.setSpacing(4)
@@ -674,7 +679,8 @@ class LoraStack(QWidget):
         button.setStyleSheet("text-align: left; padding-left: 6px;")
         button.setMinimumWidth(60)
         from PySide6.QtWidgets import QSizePolicy
-        button.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)        # long names shorten, the row stays
+        # long names shorten, the row stays
+        button.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self._set_button(button, path)
         button.clicked.connect(lambda: self._choose_again(button))
         button.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)

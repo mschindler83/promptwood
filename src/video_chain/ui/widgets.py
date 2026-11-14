@@ -429,7 +429,8 @@ class FrameTile(QLabel):
             return
         self._img = img
         dpr = self.devicePixelRatioF()
-        pm = QPixmap.fromImage(img).scaled(self.size() * dpr, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        pm = QPixmap.fromImage(img).scaled(self.size() * dpr, Qt.AspectRatioMode.KeepAspectRatio,
+                                           Qt.TransformationMode.SmoothTransformation)
         pm.setDevicePixelRatio(dpr)
         self.setText("")
         self.setPixmap(pm)

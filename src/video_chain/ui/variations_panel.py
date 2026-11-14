@@ -79,7 +79,8 @@ class PlaceholderHighlighter(QSyntaxHighlighter):
                 bg.setAlpha(55)
                 f.setBackground(bg)
                 f.setForeground(c.lighter(125))
-                f.setUnderlineStyle(QTextCharFormat.UnderlineStyle.SingleUnderline)          # (a cue besides the colour)
+                # (a cue besides the colour)
+                f.setUnderlineStyle(QTextCharFormat.UnderlineStyle.SingleUnderline)
                 f.setUnderlineColor(c)
                 f.setToolTip(f"Variable {{{name}}} (number {names.index(name) + 1 if name in names else 0})")
             f.setFontWeight(600)
@@ -97,7 +98,8 @@ class Pill(QFrame):
         self.setObjectName("pill")
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)      # (Space switches, F2 / Enter edits, Delete removes, Menu: weight)
+        # (Space switches, F2 / Enter edits, Delete removes, Menu: weight)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._look = None
         h = QHBoxLayout(self)
         h.setContentsMargins(8, 1, 2, 1)
@@ -352,7 +354,8 @@ class VariableCard(QFrame):
         return f"{n} value{'s' if n != 1 else ''}"
 
     def clear_values(self):
-        if len(self.var.values) > FEW_VALUES and not confirm(self, "Variations", f"Remove all {self._lost()} of {{{self.var.name}}}?"):
+        if len(self.var.values) > FEW_VALUES and not confirm(self, "Variations",
+                                                             f"Remove all {self._lost()} of {{{self.var.name}}}?"):
             return
         self.var.values.clear()
         self.changed.emit()
@@ -684,7 +687,8 @@ class VariationsPanel(QFrame):
     def _rebuild(self):
         while self.cards_box.count():
             it = self.cards_box.takeAt(0)
-            w = it.widget() if it is not None else None                        # (after setParent(None) the item no longer knows it)
+            # (after setParent(None) the item no longer knows it)
+            w = it.widget() if it is not None else None
             if w is not None:
                 w.hide()
                 w.setParent(None)

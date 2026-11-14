@@ -65,11 +65,6 @@ def image_size(path) -> QSize:
     return QImageReader(str(path)).size()
 
 
-def can_read(path) -> bool:
-    """Whether Qt can read the file as an image (the header only)."""
-    return QImageReader(str(path)).canRead()
-
-
 def file_facts(path) -> tuple[float, str]:
     """(size in MB, modified 'YYYY-MM-DD HH:MM') of a file; (0.0, '') if it cannot be read."""
     try:

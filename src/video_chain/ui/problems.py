@@ -39,7 +39,8 @@ def add_example(edit: QPlainTextEdit, text: str) -> None:
     else:
         cur.movePosition(QTextCursor.MoveOperation.End)
         tail = old.rstrip()
-        cur.movePosition(QTextCursor.MoveOperation.Left, QTextCursor.MoveMode.KeepAnchor, len(old) - len(tail))   # (trailing spaces go)
+        # (trailing spaces go)
+        cur.movePosition(QTextCursor.MoveOperation.Left, QTextCursor.MoveMode.KeepAnchor, len(old) - len(tail))
         cur.insertText(("" if tail[-1] in ".!?\"'" else ".") + " " + text)
     cur.endEditBlock()
     edit.setTextCursor(cur)

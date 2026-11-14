@@ -59,12 +59,15 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
     on_use(kind 'start' | 'end', png) -> bool; start_comfy() -> bool."""
 
     def __init__(self, parent, project: Path, sources: list[tuple[str, str]], source: str | None,
-                 end_target: str | None, connect: Callable[[Callable | None], object], on_use: Callable[[str, str], bool],
+                 end_target: str | None, connect: Callable[[Callable | None], object], on_use: Callable[[str, str],
+                                                                                                        bool],
                  settings: QSettings | None = None, places: list[tuple[str, str]] | None = None,
                  start_comfy: Callable[[], bool] | None = None, on_start: Callable[[], None] | None = None,
                  known_loras: list[tuple[str, str]] | None = None, lora_dir: str = "",
-                 uses: Callable[[ResultRecord], list[str]] | None = None, refine: Callable[..., str | list[str] | None] | None = None,
-                 connect_create: Callable[[Callable | None], object] | None = None, family_loras: dict[str, list] | None = None,
+                 uses: Callable[[ResultRecord], list[str]] | None = None, refine: Callable[...,
+                                                                                           str | list[str] | None] | None = None,
+                 connect_create: Callable[[Callable | None], object] | None = None, family_loras: dict[str,
+                                                                                                       list] | None = None,
                  start_aspect: float | None = None, mode: str = "edit",
                  check_lora: Callable[[str | None], bool | None] | None = None,
                  use_triggers: bool = True, collections: Callable[[], list] | None = None):
@@ -230,7 +233,8 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         self.family.setToolTip("The model family; unavailable ones say what is missing")
         self.family.addItem("looking for models in ComfyUI …", None)
         self.family.currentIndexChanged.connect(self._family_changed)
-        self.family.activated.connect(lambda _i: self._remember("createFamily", self.family.currentData(), needs_value=True))
+        self.family.activated.connect(lambda _i: self._remember("createFamily", self.family.currentData(),
+                                                                needs_value=True))
         self.model_file = QComboBox()
         self.model_file.setToolTip("The model file (the recommended one first; fine-tunes of the family too)")
         crow.addWidget(self.family, 1)
@@ -614,7 +618,8 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         text = bool(self.prompt.toPlainText().strip())
         if self.mode() == "create":
             fam = self.family.currentData()
-            refs_ok = not self.use_refs.isChecked() or any(s.path for s in self.cpics[:FAMILIES.get(fam, {}).get("refs", 0)])
+            refs_ok = not self.use_refs.isChecked() or any(s.path for s in self.cpics[:FAMILIES.get(fam,
+                                                                                                    {}).get("refs", 0)])
             ok = idle and text and fam in FAMILIES and "models" in (self.families.get(fam) or {}) and refs_ok
             why = ("Choose an available model" if fam not in FAMILIES or "models" not in (self.families.get(fam) or {})
                    else "Add a reference picture" if not refs_ok else "Describe the image")

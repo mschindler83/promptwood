@@ -41,7 +41,8 @@ def letterbox(src: str, dest, size: int, crop: tuple[int, int, int] | None = Non
     if crop is not None:
         x, y, side = crop
         img = img.copy(int(x), int(y), int(side), int(side))
-    fit = img.convertToFormat(QImage.Format.Format_RGB32).scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+    fit = img.convertToFormat(QImage.Format.Format_RGB32).scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio,
+                                                                 Qt.TransformationMode.SmoothTransformation)
     out = QImage(size, size, QImage.Format.Format_RGB32)
     out.fill(QColor(0, 0, 0))
     p = QPainter(out)
@@ -70,7 +71,8 @@ class SwapDialog(QDialog):
     def __init__(self, parent, project: Path, nid: str, clip: Path, detector: Path | None,
                  pictures: list[tuple[str, str]], connect: Callable, settings: QSettings | None = None,
                  on_start: Callable[[], None] | None = None,
-                 source: dict | None = None, pick: Callable[[str], str | None] | None = None, groups: list[list[str]] | None = None,
+                 source: dict | None = None, pick: Callable[[str],
+                                                            str | None] | None = None, groups: list[list[str]] | None = None,
                  h3: dict | None = None):
         super().__init__(parent)
         self.setWindowTitle(f"Replace a person in video #{T.short_id(nid)}")
@@ -397,10 +399,6 @@ class SwapDialog(QDialog):
             return None
         w, h = F.image_size(png)
         return F.face_square(found[0], w, h, swap.HEAD_CROP_MARGIN)
-
-    def head_picture(self) -> str | None:
-        """The picture the H3 head swap gets: the upright picture, cut to the head square when cropping is on."""
-        return str(self.ref_png) if self.ref_png else None
 
     def adjust_crop(self):
         if not self.ref_png:

@@ -191,7 +191,7 @@ class TtsMixin(MainWindowHost):
 
     def speak_clip(self, nid: str) -> bool:
         """Speak a clip's lines with text to speech right away (one take, in a thread); _lines_spoken makes them
-        its sound."""
+        its sound. The window (speak_clip_window) is what the menus open; this is the quick way for the tests."""
         eng = self._speak_engine(nid)
         if eng is None:
             return False
@@ -242,7 +242,8 @@ class TtsMixin(MainWindowHost):
         self._write_tree()
         self.refresh(rebuild_path=True)
         msg = (f"Clip #{T.short_id(nid)}: {plural(done['lines'], 'line')} spoken ({done['secs']:.1f} s)"
-               f" and made its sound (track “{(T.track_of(self.tree, done['track']) or {}).get('name')}”); the picture is made "
+               f" and made its sound (track “{(T.track_of(self.tree,
+                                                          done['track']) or {}).get('name')}”); the picture is made "
                "to it, lips in sync.")
         if done["frames"]:
             msg += f" The clip is now {done['frames'] / chain.FPS:.1f} s long, so the lines fit."

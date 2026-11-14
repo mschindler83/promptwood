@@ -84,7 +84,8 @@ class _Lane(QWidget):
         key = (pm.cacheKey(), w, h, dpr)
         hit = self._thumbs.get(b.nid)
         if hit is None or hit[0] != key:
-            sc = pm.scaled(max(1, int(w * dpr)), max(1, int(h * dpr)), Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            sc = pm.scaled(max(1, int(w * dpr)), max(1, int(h * dpr)), Qt.AspectRatioMode.IgnoreAspectRatio,
+                           Qt.TransformationMode.SmoothTransformation)
             sc.setDevicePixelRatio(dpr)
             hit = self._thumbs[b.nid] = (key, sc)
         return hit[1]

@@ -127,7 +127,8 @@ class MaskCanvas(QWidget):
         if self._cursor is not None:
             r = self.brush / 2 * f.width() / self.image.width()
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
-            p.setPen(QPen(QColor(255, 255, 255, 200), 1.5, Qt.PenStyle.DashLine if self.erase else Qt.PenStyle.SolidLine))
+            p.setPen(QPen(QColor(255, 255, 255, 200), 1.5,
+                          Qt.PenStyle.DashLine if self.erase else Qt.PenStyle.SolidLine))
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawEllipse(self._cursor, r, r)
 
@@ -290,7 +291,8 @@ class MaskPainterDialog(QDialog):
         self.size_text = label("", level="tertiary")
         row.addWidget(self.size_text)
         row.addSpacing(12)
-        for text, fn in (("Undo", self.canvas.undo), ("Redo", self.canvas.redo), ("Clear", self.canvas.clear), ("Invert", self.canvas.invert)):
+        for text, fn in (("Undo", self.canvas.undo), ("Redo", self.canvas.redo), ("Clear", self.canvas.clear),
+                         ("Invert", self.canvas.invert)):
             b = QPushButton(text)
             b.clicked.connect(fn)
             row.addWidget(b)

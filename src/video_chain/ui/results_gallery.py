@@ -106,7 +106,8 @@ def badged(pix: QPixmap, size: QSize, tag: str, fav: bool, in_use: bool, selecte
     clip.addRoundedRect(r.adjusted(1, 1, -1, -1), 6, 6)
     p.fillPath(clip, t.bgSunken)
     if not pix.isNull():                   # filled (cropped to the tile's shape), as photo galleries do
-        img = pix.scaled(size * dpr, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
+        img = pix.scaled(size * dpr, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                         Qt.TransformationMode.SmoothTransformation)
         img.setDevicePixelRatio(dpr)
         w, h = img.width() / dpr, img.height() / dpr
         p.setClipPath(clip)

@@ -14,7 +14,10 @@ if TYPE_CHECKING:
 
     from PySide6.QtCore import QProcess, QSettings, QTimer
     from PySide6.QtGui import QAction, QPixmap
-    from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFormLayout, QLabel, QLineEdit, QListWidget, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSpinBox, QSplitter, QTabWidget, QToolButton, QWidget
+    from PySide6.QtWidgets import (
+        QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFormLayout, QLabel, QLineEdit, QListWidget,
+        QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSpinBox,
+        QSplitter, QTabWidget, QToolButton, QWidget)
     from pathlib import Path
     from threading import Lock
     from ..film import Film
@@ -23,7 +26,7 @@ if TYPE_CHECKING:
     from ..tts import FishTTS, LocalTTS
     from .cast_strip import CastStrip
     from .clip_cards import PromptCard, VideoCard
-    from .generator_state import ComfyModel, Job, ModelState, ModelSwitch, Phase, WorkerBinding
+    from .generator_state import ComfyModel, Job, ModelState, ModelSwitch, WorkerBinding
     from .graph import GraphView
     from .guide import EngineBanner, GuidePanel, NextHint
     from .mw_support import _Bridge, _CurrentStack

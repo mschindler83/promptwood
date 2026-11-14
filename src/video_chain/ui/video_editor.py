@@ -12,7 +12,7 @@ import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from PySide6.QtCore import QObject, QPointF, QRectF, QSettings, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QObject, QPointF, QRectF, QSettings, Qt, QUrl, Signal
 from PySide6.QtGui import QImage, QPainter, QPen
 from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QDoubleSpinBox, QHBoxLayout, QLabel, QLineEdit,
                                QPushButton, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
@@ -394,7 +394,8 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
         self.buttons, _ok = button_row(self, "Use this range")
         v.addWidget(self.buttons)
         for key, fn in (("Space", self.toggle), ("Left", lambda: self.step_frames(-1)),
-                        ("Right", lambda: self.step_frames(1)), ("[", lambda: self.set_range(self.position(), self.end)),
+                        ("Right", lambda: self.step_frames(1)), ("[", lambda: self.set_range(self.position(),
+                                                                                             self.end)),
                         ("]", lambda: self.set_range(self.start, self.position(), moved="end")),
                         ("R", lambda: self.set_rotation(self.rotate + 90)),
                         ("Shift+R", lambda: self.set_rotation(self.rotate - 90))):
@@ -706,7 +707,8 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
                     proc.kill()
                     proc.communicate()
                     return None if gen != self._gen else QImage()
-        return QImage.fromData(out, "PNG") if proc.returncode == 0 else QImage()  # type: ignore[arg-type]  # (stubs: bytes, runtime: str)
+        # (the stubs want bytes as the format, PySide6 6.12 only takes str)
+        return QImage.fromData(out, "PNG") if proc.returncode == 0 else QImage()  # type: ignore[arg-type]
 
     def _frame_ready(self, gen: int, which: str, img: QImage):
         if gen != self._gen:

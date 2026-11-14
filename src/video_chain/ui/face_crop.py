@@ -162,7 +162,8 @@ class CropView(QWidget):
             return super().keyPressEvent(e)
         x, y, side = self.crop
         step = 10 if e.modifiers() & Qt.KeyboardModifier.ShiftModifier else 1
-        moves = {Qt.Key.Key_Left: (-step, 0), Qt.Key.Key_Right: (step, 0), Qt.Key.Key_Up: (0, -step), Qt.Key.Key_Down: (0, step)}
+        moves = {Qt.Key.Key_Left: (-step, 0), Qt.Key.Key_Right: (step, 0), Qt.Key.Key_Up: (0, -step),
+                 Qt.Key.Key_Down: (0, step)}
         if e.key() in moves:
             dx, dy = moves[e.key()]
             self.set_crop((x + dx, y + dy, side))

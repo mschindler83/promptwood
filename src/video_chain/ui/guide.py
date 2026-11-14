@@ -58,7 +58,8 @@ class _Step(QWidget):
             self.mark.setToolTip("Done")
         else:
             self.mark.setPixmap(QPixmap())
-            self.mark.setText(str(self.number) if self.number else "")      # (not by its dot alone: a number says "step 2")
+            # (not by its dot alone: a number says "step 2")
+            self.mark.setText(str(self.number) if self.number else "")
             self.mark.setToolTip("Still to do")
         self.text.setProperty("level", "secondary" if on else "")
         repolish(self.text)

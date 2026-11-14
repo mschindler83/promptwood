@@ -144,7 +144,8 @@ class ComfyMixin(MainWindowHost):
         if not Path(cmd).is_file():
             self.status.setText(f"ComfyUI launcher not found: {cmd}")
             return False
-        started: Any = QProcess.startDetached(cmd, [])      # (a bool; PySide6 6.x returns (bool, pid) for another overload)
+        # (a bool; PySide6 6.x returns (bool, pid) for another overload)
+        started: Any = QProcess.startDetached(cmd, [])
         ok = started[0] if isinstance(started, tuple) else started
         if not ok:
             self._report_error(f"Could not start {cmd}")

@@ -14,7 +14,9 @@ if TYPE_CHECKING:
 
     from PySide6.QtCore import QSettings, QTimer
     from PySide6.QtGui import QImage, QPixmap
-    from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QLabel, QLineEdit, QListWidget, QPlainTextEdit, QPushButton, QSlider, QSpinBox, QStackedWidget, QToolButton, QWidget
+    from PySide6.QtWidgets import (
+        QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QLabel, QLineEdit, QListWidget, QPlainTextEdit,
+        QPushButton, QSlider, QSpinBox, QStackedWidget, QToolButton, QWidget)
     from pathlib import Path
     from ..edits import ResultRecord
     from .image_common import PictureSlot

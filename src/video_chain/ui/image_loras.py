@@ -80,13 +80,15 @@ class LorasMixin(ImageEditHost):
         listed = {p for p, _ in (self.family_loras.get(LORA_FAMILY.get(fam, fam), []) if self.mode() == "create"
                                  else self.known_loras)}
         if path not in listed and self.qs is not None:
-            self.qs.setValue(self._recent_key(), json.dumps([path] + [r for r in self._recent_files() if r != path][:11]))
+            self.qs.setValue(self._recent_key(),
+                             json.dumps([path] + [r for r in self._recent_files() if r != path][:11]))
         if self.check_lora is not None and self.check_lora(path) is False:
             self.state.setText(f"{Path(path).name} is not in ComfyUI's LoRA folders, so ComfyUI cannot load it: "
                                "copy or link it there (then Rescan LoRAs in the main window).")
 
     def add_lora_file(self, path: str, strength: float = 1.0):
-        """A LoRA file from any folder at the end of the list (ComfyUI must find it in its LoRA folders)."""
+        """A LoRA file from any folder at the end of the list (ComfyUI must find it in its LoRA folders). No button
+        calls it any more (the picker adds files itself); the tests use it to fill the list."""
         p = os.path.abspath(path)
         if self.qs is not None:
             self.qs.setValue(self._recent_key(), json.dumps([p] + [r for r in self._recent_files() if r != p][:11]))

@@ -50,7 +50,8 @@ class ResultsMixin(ImageEditHost):
         self._shown = shown
         self.results.blockSignals(True)
         self.results.clear()
-        self._strip_items: dict[str, QListWidgetItem] = {}      # png -> its item (a thumbnail arriving finds it at once)
+        # png -> its item (a thumbnail arriving finds it at once)
+        self._strip_items: dict[str, QListWidgetItem] = {}
         for png, meta, _t, ns in shown:
             self.results.addItem(self._strip_item(png, meta, ns))
         self.results.blockSignals(False)

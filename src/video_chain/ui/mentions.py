@@ -18,7 +18,8 @@ from .theme import theme
 
 _TYPING = re.compile(r"(?<![\w@])@(\w[\w-]*)?$")      # an @mention being typed right before the cursor
 _TYPING_CAM = re.compile(r"(?<![\w#&/])#([A-Za-z][\w-]*)?$")   # a #camera token being typed
-INSERT = Qt.ItemDataRole.UserRole + 1                               # the list's role with the text that is put in (its match too)
+# the list's role with the text that is put in (its match too)
+INSERT = Qt.ItemDataRole.UserRole + 1
 
 
 class MentionHighlighter(QSyntaxHighlighter):

@@ -59,4 +59,5 @@ def button_row(dialog: QDialog, ok_text: str | None = None, *, cancel_text: str 
 
 def add_action(box: QDialogButtonBox, text: str, *, destructive: bool = False) -> QPushButton:
     """An extra button of the row: an action of its own (not accept / reject)."""
-    return box.addButton(text, QDialogButtonBox.ButtonRole.DestructiveRole if destructive else QDialogButtonBox.ButtonRole.ActionRole)
+    return box.addButton(text,
+                         QDialogButtonBox.ButtonRole.DestructiveRole if destructive else QDialogButtonBox.ButtonRole.ActionRole)

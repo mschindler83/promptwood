@@ -239,7 +239,8 @@ class GraphView(QGraphicsView):
         self._playing: str | None = None
         self._parent_of: dict[str, str | None] = {}
         self._kids_of: dict[str, list[str]] = {}
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)         # the keyboard reaches the branches too (see keyPressEvent)
+        # the keyboard reaches the branches too (see keyPressEvent)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     def set_playing(self, nid: str | None) -> None:
         """Mark the clip the played path is at (None: nothing is played), and bring it into view."""
@@ -345,7 +346,8 @@ class GraphView(QGraphicsView):
     def keyPressEvent(self, e):
         key = e.key()
         cur = self._focus if self._focus in self.items_by_id else None
-        if key in (Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Home) and self.items_by_id:
+        if key in (Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_Left, Qt.Key.Key_Right,
+                   Qt.Key.Key_Home) and self.items_by_id:
             if cur is None:
                 self._go(self._order()[0])
             elif key in (Qt.Key.Key_Up, Qt.Key.Key_Down):
@@ -371,7 +373,8 @@ class GraphView(QGraphicsView):
             e.accept()
         elif key == Qt.Key.Key_Menu and cur is not None:
             item = self.items_by_id[cur]
-            self.contextMenu.emit(cur, self.viewport().mapToGlobal(self.mapFromScene(item.sceneBoundingRect().center())))
+            self.contextMenu.emit(cur,
+                                  self.viewport().mapToGlobal(self.mapFromScene(item.sceneBoundingRect().center())))
             e.accept()
         else:
             super().keyPressEvent(e)

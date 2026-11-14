@@ -51,9 +51,6 @@ class Theme(SimpleNamespace):
     def accent_line(self):
         return with_alpha(self.accent, self.accentLineAlpha)
 
-    def accent_scrub(self):
-        return with_alpha(self.accent, self.accentScrubAlpha)
-
     def hover(self):
         return with_alpha(QColor(255, 255, 255), self.hoverAlpha)
 
@@ -99,7 +96,8 @@ def load_tokens(accent: str | None = None) -> Theme:
         setattr(t, k, v)
     t.labelWidth = tok["metrics"]["labelWidthMin"]
     ty = tok["type"]
-    t.font = SimpleNamespace(**{k: ty[k]["px"] for k in ("micro", "small", "body", "title", "heading", "display", "mono")})
+    t.font = SimpleNamespace(**{k: ty[k]["px"] for k in ("micro", "small", "body", "title", "heading", "display",
+                                                         "mono")})
     t.uiFamily, t.monoFamily = ty["uiFamily"], ty["monoFamily"]
     return t
 

@@ -35,7 +35,6 @@ DEFAULT_SIZE = (672, 384)    # a clip's size when nothing says another (width, h
 ASPECT_TOLERANCE = 0.05      # an end image this far from the canvas' aspect ratio is cut to it
 # H3's 17n+5 frame grid from 3 s to 15 s (362 frames = 15.1 s, the top of its trained range of ~124-362)
 FRAME_CHOICES = [17 * n + 5 for n in range(4, 22)]
-IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff)"
 
 
 def app_cache_dir() -> Path:

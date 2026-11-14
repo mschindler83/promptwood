@@ -54,7 +54,8 @@ class LlamaMixin(MainWindowHost):
         url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL).rstrip("/")
         llama = self._llama
         assert llama is not None
-        llama.before_launch = lambda llama=llama: self._room_for_llama(llama, url)  # type: ignore[assignment]  # (llm_server.py types the hook as None)
+        # (llm_server.py types the hook as None)
+        llama.before_launch = lambda llama=llama: self._room_for_llama(llama, url)  # type: ignore[assignment]
         return llama
 
     def _end_leftover_llama(self):

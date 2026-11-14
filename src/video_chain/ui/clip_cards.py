@@ -773,7 +773,8 @@ class PromptCard(_ClipCardBase):
         ov, names = self.ov, []
         for key, name, target in (("loras", "LoRAs", (self.link_form, self.loras)),
                                   ("guide", "Carry-over", (self.link_form, self.guide)),
-                                  ("continue", "Continue", (self.link_form, self.cont)), ("steps", "Steps", self.steps)):
+                                  ("continue", "Continue", (self.link_form, self.cont)), ("steps", "Steps",
+                                                                                          self.steps)):
             if ov.get(key) and self.view.is_advanced(target):
                 names.append(name)
         if self.keys.items and self.view.is_advanced((self.link_form, self.keys_row)):

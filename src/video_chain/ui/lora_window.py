@@ -178,11 +178,13 @@ class LoraWindow(QDialog):
         self._gen = 0                              # (answers of an earlier page or LoRA are dropped)
         self._closed = threading.Event()
         self._kept_of: dict = {}                   # (is a kept still on disk? per example: looked up once)
-        self._ctx: tuple[dict | None, dict, dict | None, dict] | None = None                           # (details, info, mat, k) of the LoRA shown
+        # (details, info, mat, k) of the LoRA shown
+        self._ctx: tuple[dict | None, dict, dict | None, dict] | None = None
         self._pending: str | None = None           # the LoRA chosen in the list, shown when the arrow keys rest
         self._reverting = False
         self._find_timer, self._pick_timer = QTimer(self), QTimer(self)
-        for timer, ms, fn in ((self._find_timer, TYPING_MS, self._refill), (self._pick_timer, ARROW_MS, self._show_pending)):
+        for timer, ms, fn in ((self._find_timer, TYPING_MS, self._refill), (self._pick_timer, ARROW_MS,
+                                                                            self._show_pending)):
             timer.setSingleShot(True)
             timer.setInterval(ms)
             timer.timeout.connect(fn)

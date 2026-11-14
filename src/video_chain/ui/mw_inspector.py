@@ -278,10 +278,6 @@ class InspectorMixin(MainWindowHost):
             fail = self._failures.get(c.nid)
             c.set_problems(([fail] if fail else []) + ([] if self.running else self.clip_problems(c.nid)))
 
-    def _clear_failure(self, nid: str):
-        if self._failures.pop(nid, None) is not None:
-            self._update_problems()
-
     def fix_problem(self, action: str, nid: str):
         """A problem's button on a card: the place that fixes it (or the action itself)."""
         card = self._card_of(nid, PromptCard)

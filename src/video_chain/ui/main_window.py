@@ -13,12 +13,13 @@ import threading
 from pathlib import Path
 
 from PySide6.QtCore import QProcess, QSettings, QTimer, Signal
-from PySide6.QtGui import QImage, QPixmap
-from PySide6.QtWidgets import QDialog, QMainWindow, QMessageBox
+from PySide6.QtGui import QImage, QPixmap  # noqa: F401
+from PySide6.QtWidgets import QDialog, QMainWindow, QMessageBox  # noqa: F401
 
 from .. import tree as T, tts as TTS
-from .clip_dialogs import SplitDialog, VideoFrameDialog
-from .video_editor import VideoRangeDialog
+# (re-exported: the tests patch and import these names on main_window)
+from .clip_dialogs import SplitDialog, VideoFrameDialog  # noqa: F401
+from .video_editor import VideoRangeDialog  # noqa: F401
 from .view_mode import ViewMode
 from .clip_cards import PromptCard, VideoCard
 from .generator_state import ComfyModel, Job, ModelState, ModelSwitch, Phase, WorkerBinding
@@ -43,9 +44,9 @@ from .mw_support import _Bridge
 from .mw_tts import TtsMixin
 from .mw_videos import VideosMixin
 from .mw_view import ViewMixin
-from .preview import Preview
-from .project_dialogs import ExportDialog, NewProjectDialog, VariantsDialog
-from .ui_logic import (
+from .preview import Preview  # noqa: F401
+from .project_dialogs import ExportDialog, NewProjectDialog, VariantsDialog  # noqa: F401
+from .ui_logic import (  # noqa: F401
     CARD_WIDTH, CONTINUE_CLASSIC_TIP, CONTINUE_FIRST_TIP, CONTINUE_TIP, KILL_GRACE_MS, LAYOUT_VERSION, MIX_TIP,
     REMIX_DELAY_MS, STATE_TIP, find_gguf_models, fmt_left, label_loras, row_start, row_start_of, time_left)
 from .qsvalue import qs_value

@@ -508,7 +508,8 @@ class ImagePickerDialog(QDialog):
             return
         box = self.preview.size()
         if not img.isNull():
-            self.preview.setPixmap(QPixmap.fromImage(img).scaled(box, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+            self.preview.setPixmap(QPixmap.fromImage(img).scaled(box, Qt.AspectRatioMode.KeepAspectRatio,
+                                                                 Qt.TransformationMode.SmoothTransformation))
         else:
             self.preview.setPixmap(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaVolume).pixmap(96, 96))
         mb, when = file_facts(path)
