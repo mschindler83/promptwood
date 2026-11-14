@@ -24,6 +24,11 @@ SCENES_DIR = "scenes"
 SHARED_OPTIONS = ("cast", "identity", "audio_refs", "tracks", "resolution", "audio")
 JOINS = {"cut": "Cut", "fade": "Crossfade", "continue": "Continue"}   # how a scene follows the one before
 FADE_SECS = 0.5
+JOIN_VERSION = 1                                     # bumped when how a film is joined changes (the stamp then differs)
+
+
+class SceneNotFound(KeyError, ValueError):
+    """No scene with this id (a KeyError; a ValueError too, as the window's handlers catch those)."""
 
 
 @dataclass
@@ -141,7 +146,10 @@ class Film:
 
     # ---- scenes
     def scene(self, sid: str) -> Scene:
-        return next(s for s in self.scenes if s.id == sid)
+        sc = next((s for s in self.scenes if s.id == sid), None)
+        if sc is None:
+            raise SceneNotFound(f"no scene {sid}")
+        return sc
 
     def path(self, sid: str) -> Path:
         return (self.root / self.scene(sid).dir).resolve()
@@ -263,7 +271,9 @@ class Film:
         self.save()
 
     def before(self, sid: str) -> Scene | None:
-        k = next(i for i, s in enumerate(self.scenes) if s.id == sid)
+        k = next((i for i, s in enumerate(self.scenes) if s.id == sid), None)
+        if k is None:
+            raise SceneNotFound(f"no scene {sid}")
         return self.scenes[k - 1] if k else None
 
     def end_frame(self, sid: str) -> Path | None:
@@ -286,7 +296,6 @@ class Film:
     def update_continues(self) -> list[str]:
         """Scenes that continue the scene before them start from its end frame: their start image is set again when
         that frame changed (their clips then count as changed). Returns the ids of the scenes updated."""
-        from . import chain
         out = []
         for k, sc in enumerate(self.scenes):
             if k == 0 or sc.join != "continue":
@@ -298,9 +307,12 @@ class Film:
             d = self.path(sc.id)
             if sha == sc.from_sha and (d / T.START_FILE).is_file():
                 continue
-            t = T.load(d)
-            T.set_start_image(d, frame, t)
-            T.save(d, t)
+            try:
+                t = T.load(d)
+                T.set_start_image(d, frame, t)
+                T.save(d, t)
+            except (OSError, ValueError):          # (one damaged scene: the others still follow their before)
+                continue
             sc.from_sha = sha
             out.append(sc.id)
         if out:
@@ -333,7 +345,7 @@ class Film:
         d = self.path(sid)
         if (self.root / SCENES_DIR).resolve() not in d.parents:
             raise ValueError("this scene's folder is not inside the film")
-        before = self._befores()
+        before, was_current, at = self._befores(), self.current, self.scenes.index(s)
         self.scenes.remove(s)                      # out of the film first: a failed delete leaves no broken entry
         self._keep_joins(before)
         if self.current == sid:
@@ -342,7 +354,12 @@ class Film:
         link = d / T.REFS_DIR
         if link.is_symlink():
             link.unlink()                          # (only the link to the shared refs)
-        chain.keep_aside(self.root, d)             # the scene's clips are never deleted: its folder goes to old/
+        if not chain.keep_aside(self.root, d):     # the scene's clips are never deleted: its folder goes to old/
+            self.scenes.insert(at, s)              # (still in scenes/: listed again, or it would come back unasked)
+            self.current = was_current
+            self.save()
+            raise OSError(f"the folder of scene {s.title} could not be moved to old/ (open somewhere?): "
+                          "the scene stays")
 
     # ---- shared settings
     def shared(self, options: dict) -> dict:
@@ -411,8 +428,8 @@ def summary(film: Film, sid: str, tree: "T.Tree | None" = None, status_of: dict 
             out[st if st in ("done", "changed", "new") else "changed"] += 1
         cuts = T.path_cuts(t, path, bool(t.options.get("keep_repeated")), planned=True)
         frames = sum(max(0, T.clip_length(t, n) - a - b) for n, (a, b) in zip(path, cuts))
-        out["secs"] = round(frames / 24, 1)
-    except Exception:  # noqa: BLE001  (a scene that cannot be checked still gets its card)
+        out["secs"] = round(frames / chain.FPS, 1)
+    except (OSError, ValueError, RuntimeError, KeyError):   # (a scene that cannot be checked still gets its card)
         pass
     if start.is_file():
         out["thumb"] = start
@@ -423,8 +440,9 @@ def summary(film: Film, sid: str, tree: "T.Tree | None" = None, status_of: dict 
     return out
 
 
-def film_problems(film: Film) -> list[str]:
-    """Why the film cannot be played / exported yet (a scene without clips, clips not made)."""
+def film_problems(film: Film, trees: dict | None = None) -> list[str]:
+    """Why the film cannot be played / exported yet (a scene without clips, clips not made). trees: filled with
+    each scene's loaded tree (scene id -> Tree), so the caller does not read them again."""
     out = []
     for k, sc in enumerate(film.scenes, start=1):
         if k > 1 and sc.join == "continue":
@@ -432,7 +450,6 @@ def film_problems(film: Film) -> list[str]:
             if end is None:
                 out.append(f"scene {k} ({sc.title}) continues scene {k - 1}, which is not made yet")
                 continue
-            from . import chain
             if chain.file_signature(end) != sc.from_sha:
                 out.append(f"scene {k} ({sc.title}) continues scene {k - 1}, whose end changed: it has to be "
                            "made again from there (Generate film)")
@@ -443,6 +460,8 @@ def film_problems(film: Film) -> list[str]:
         except (OSError, ValueError) as e:
             out.append(f"scene {k} ({sc.title}) cannot be read: {e}")
             continue
+        if trees is not None:
+            trees[sc.id] = t
         take = film.take_of(sc.id, t)
         if take is None:
             out.append(f"scene {k} ({sc.title}) has no clip yet")
@@ -460,19 +479,19 @@ def join_film(film: Film, out: Path, keep: bool = False) -> Path:
     continuing: its repeated first frame left out). Scenes of another size than the first are fitted into its frame
     (black bars). keep: out is the app's own file of the film (played again and again): it is joined again only
     when something changed, and the join before is then moved to old/ in the film's folder, never deleted."""
-    problems = film_problems(film)
+    trees: dict = {}
+    problems = film_problems(film, trees)
     if problems:
         raise ValueError(problems[0])
     parts = []
     for sc in film.scenes:
         d = film.path(sc.id)
-        t = T.load(d)
+        t = trees.get(sc.id) or T.load(d)
         take = film.take_of(sc.id, t)
         if take is None:
             raise ValueError(f"scene {sc.title} has no clip yet")
         parts.append(T.join_path(d, t, take))
-    from . import chain
-    first = chain.probe(parts[0])
+    first = chain.probe_source(parts[0])                       # (the size from the header: no decoding)
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
     size = (first["width"] // 2 * 2, first["height"] // 2 * 2)     # even (the video codec needs it)
@@ -483,12 +502,17 @@ def join_film(film: Film, out: Path, keep: bool = False) -> Path:
     if not keep:
         write(out)
         return out
-    key = json.dumps([[str(p), p.stat().st_mtime_ns] for p in parts] + [joins, list(size)])
+    key = json.dumps([[str(p), p.stat().st_mtime_ns] for p in parts] + [joins, list(size), FADE_SECS, JOIN_VERSION])
     stamp = out.with_suffix(".json")
-    if out.exists() and stamp.exists() and stamp.read_text() == key:
-        return out
+    try:
+        if out.exists() and stamp.exists() and stamp.read_text(encoding="utf-8") == key:
+            return out
+    except (OSError, ValueError):
+        pass                                                   # (an unreadable stamp: joined again)
     chain.replace_kept(film.root, out, write)
-    stamp.write_text(key)
+    tmp = stamp.with_name(stamp.name + ".part")
+    tmp.write_text(key, encoding="utf-8")
+    tmp.replace(stamp)
     return out
 
 
