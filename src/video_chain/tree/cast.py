@@ -290,7 +290,8 @@ def _drop_voice(project: Path, voice: dict, tree: Tree) -> None:
 def set_voice(project: Path, tree: Tree, name: str, source: Path, start: float = 0.0,
               label: str | None = None, end: float | None = None) -> dict:
     """Copy the sound of an audio or video file into refs/ as the voice of a character (from start, at most
-    VOICE_MAX_SECS, not past end); it replaces the character's old voice. Returns the entry, with "cut": the source was longer.
+    VOICE_MAX_SECS, not past end); it replaces the character's old voice. Returns the entry, with "cut": the source
+    was longer.
     A clip uses the voice when the character says a line in it ("..." after @Name). Of a longer source, up to
     VOICE_REF_MAX_SECS (from the same start) are kept next to it as the clone reference ("ref"): text to speech
     clones the voice from that, the clip model still hears the short voice."""

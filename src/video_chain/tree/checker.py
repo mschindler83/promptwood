@@ -77,7 +77,8 @@ def keyframe_problem(tree: Tree, checker: Checker, todo: list[str]) -> str | Non
             f = keyframe_frame(k["at"])
             where = f"clip #{short_id(nid)}'s keyframe at {k['at']:.2f} s"
             if f > hi:
-                return (f"{where} is at or past its end ({frames / chain.FPS:.2f} s{', minus its carry-over' if hi < frames - 2 else ''}): "
+                minus = ", minus its carry-over" if hi < frames - 2 else ""
+                return (f"{where} is at or past its end ({frames / chain.FPS:.2f} s{minus}): "
                         "move it earlier or make the clip longer")
             if f < lo:
                 return f"{where} is {'inside its carry-over' if lo > 1 else 'on its first frame'}: move it later"
@@ -269,7 +270,6 @@ class Checker:
     def remix_due(self, nid: str) -> bool:
         """The clip is done, but its sound has to be built again for its current sound settings (remix_sound)."""
         return self.status(nid) == "done" and nid in self._remix
-
 
     def seam_problem(self, node: Node) -> str | None:
         """Why a made generated clip no longer joins the clips around it as made (None: it does): what it starts

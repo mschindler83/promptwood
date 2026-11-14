@@ -159,7 +159,8 @@ def clear_start_image(project: Path, tree: Tree) -> None:
 def set_start_image(project: Path, image: Path, tree: Tree) -> None:
     start = Path(project) / START_FILE
     if start.is_file() and Path(image).resolve() != start.resolve():
-        new = start.with_name("start.new.part.png")     # (converted first: a picture that cannot be read changes nothing)
+        # (converted first: a picture that cannot be read changes nothing)
+        new = start.with_name("start.new.part.png")
         try:
             chain.to_png(Path(image), new)
             chain.keep_aside(project, start)        # the start image before: never deleted, moved to old/

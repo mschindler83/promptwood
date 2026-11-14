@@ -30,7 +30,7 @@ class Node:
     parent: str | None             # None: starts from the start image
     prompt: str = ""
     seed: int = 42
-    made: MadeRecord | None = None       # what the current files were made from (prompt, seed, settings, start_sha1, files)
+    made: MadeRecord | None = None       # what the current files were made from (prompt, seed, settings, files)
     overrides: Overrides = field(default_factory=dict)   # loras [{"path", "strength"}], frames, steps, guide
     kind: str = AI                 # AI: generated clip; VIDEO: a range of a real video file
     source: Source | None = None     # VIDEO: {"file": absolute path, "start": s, "end": s}

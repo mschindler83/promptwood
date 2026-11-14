@@ -106,7 +106,8 @@ def _cut_track(project: Path, source: Path, start: float, end: float | None) -> 
     start = max(0.0, float(start))
     end = length if end is None else min(float(end), length)
     if end - start < AUDIO_REF_MIN:
-        raise ValueError(f"an audio track needs at least {AUDIO_REF_MIN:.0f} s (the range has {max(0, end - start):.1f} s)")
+        raise ValueError(f"an audio track needs at least {AUDIO_REF_MIN:.0f} s "
+                         f"(the range has {max(0, end - start):.1f} s)")
     d = Path(project) / REFS_DIR
     d.mkdir(parents=True, exist_ok=True)
     rel = f"{REFS_DIR}/track_{uuid.uuid4().hex[:8]}.wav"
@@ -218,7 +219,8 @@ def previous_sound_span(tree: Tree, node: Node, project: Path | None = None) -> 
     else:
         file, base = "", 0.0
     n = (made_frames(p) if not p.is_video else 0) or clip_length(tree, p)
-    a, b = path_cuts(tree, path, bool(tree.options.get("keep_repeated")), planned=not (p.made or p.is_video))[k]   # (as planned until it is made)
+    # (as planned until it is made)
+    a, b = path_cuts(tree, path, bool(tree.options.get("keep_repeated")), planned=not (p.made or p.is_video))[k]
     loop = max(1, n - a - b) / chain.FPS
     out = {"file": file, "start": round(base + a / chain.FPS, 3), "secs": secs, "loop": round(loop, 3),
            "offset": round((loop - lead) % loop, 3), "video": p.id, "mode": "previous"}
@@ -272,14 +274,15 @@ def source_sound_problems(tree: Tree, todo: list[str], project: Path | None = No
                 out.append(f"clip #{short_id(nid)} is shorter than {AUDIO_REF_MIN:.0f} s, the least sound the model "
                            "takes; make it longer to repeat the sound of the clip before")
             if span["loop"] < REPEAT_MIN:
-                out.append(f"the clip before clip #{short_id(nid)} plays only {span['loop']:.2f} s in the film, too short "
-                           f"to repeat (at least {REPEAT_MIN} s)")
+                out.append(f"the clip before clip #{short_id(nid)} plays only {span['loop']:.2f} s in the film, "
+                           f"too short to repeat (at least {REPEAT_MIN} s)")
             if not over:
                 out += _sound_room(tree, node, span)
             if not before.is_video and before.id in todo:   # made (again) first in this run: checked then
                 continue
             if not span["file"]:
-                out.append(f"clip #{short_id(nid)} repeats the sound of clip #{short_id(before.id)}, which is not made yet")
+                out.append(f"clip #{short_id(nid)} repeats the sound of clip #{short_id(before.id)}, "
+                           "which is not made yet")
                 continue
             if not sound_file(project, span).is_file():
                 out.append(f"the video file of clip #{short_id(nid)}'s sound is missing ({Path(span['file']).name})")

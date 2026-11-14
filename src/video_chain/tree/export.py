@@ -227,7 +227,8 @@ def refine_path(generator: RefineGenerator, project: Path, nid: str, size: str, 
     if single and nid not in tree.nodes:
         raise ValueError(f"no clip {nid}")
     path = [tree.nodes[nid]] if single else tree.path_to(nid)
-    if remix_sounds(project, tree, [n.id for n in path], checker, log=log):   # (the refined copies take the clip's sound)
+    # (the refined copies take the clip's sound)
+    if remix_sounds(project, tree, [n.id for n in path], checker, log=log):
         checker = Checker(project, tree)
     missing = [n.id for n in path if checker.status(n.id) != "done"]
     if missing:

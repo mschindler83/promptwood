@@ -220,8 +220,8 @@ def _guides(project: Path, tree: Tree, node: Node, settings: dict, tmp: Path) ->
         end_image = project / node.end_image
     used = sum(g["frames"] for g in guides)
     if used and used >= frames:
-        raise ValueError(f"clip #{short_id(node.id)} ({frames} frames) is too short for its carry-over ({used} frames); "
-                         "make it longer or the carry-over shorter")
+        raise ValueError(f"clip #{short_id(node.id)} ({frames} frames) is too short for its carry-over "
+                         f"({used} frames); make it longer or the carry-over shorter")
     return guides, end_image
 
 
