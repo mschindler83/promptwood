@@ -74,12 +74,13 @@ def track(found: list[list[Face]]) -> list[Box | None]:
     """One person through the clip: the largest face of the first frame that has one, then in every frame the face
     nearest to where it was (None where it is not found; a face far away is someone else)."""
     path: list[Box | None] = []
-    last, gap = None, 0
+    last: Face | None = None
+    gap = 0
 
     def dist(f, cx, cy):
         return ((f[0] + f[2]) / 2 - cx) ** 2 + ((f[1] + f[3]) / 2 - cy) ** 2
     for fs in found:
-        pick = None
+        pick: Face | None = None
         if fs:
             if last is None:
                 pick = fs[0]
@@ -90,7 +91,7 @@ def track(found: list[list[Face]]) -> list[Box | None]:
                 pick = near if dist(near, cx, cy) <= ((1.5 + 0.5 * gap) * lw) ** 2 else None
         if fs and pick is None and gap > LOST:      # lost for long: the largest face again (after a cut)
             pick = fs[0]
-        path.append(tuple(pick[:4]) if pick else None)
+        path.append((pick[0], pick[1], pick[2], pick[3]) if pick else None)
         if pick:
             last, gap = pick, 0
         else:
@@ -106,20 +107,26 @@ def head_boxes(faces_track: list[Box | None], width: int, height: int, scale: fl
     known = [i for i, f in enumerate(faces_track) if f is not None]
     if not known:
         raise ValueError("no face found in this clip")
-    filled = []
+    filled: list[Box] = []
     for i in range(n):
-        if faces_track[i] is not None:
-            filled.append(faces_track[i])
+        here = faces_track[i]
+        if here is not None:
+            filled.append(here)
             continue
         at = bisect.bisect_left(known, i)             # (i itself is not known here: known[at - 1] < i < known[at])
         before = known[at - 1] if at > 0 else None
         after = known[at] if at < len(known) else None
         if before is None or after is None:
-            filled.append(faces_track[after if before is None else before])
+            edge = faces_track[after] if before is None and after is not None else \
+                faces_track[before] if before is not None else None
+            assert edge is not None                   # (known holds only frames with a face)
+            filled.append(edge)
         else:
             t = (i - before) / (after - before)
             a, b = faces_track[before], faces_track[after]
-            filled.append(tuple(a[j] + (b[j] - a[j]) * t for j in range(4)))
+            assert a is not None and b is not None
+            filled.append((a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t,
+                           a[2] + (b[2] - a[2]) * t, a[3] + (b[3] - a[3]) * t))
     half = SMOOTH // 2
     out = []
     for i in range(n):
@@ -153,6 +160,7 @@ def write_mask(boxes: list[Box], width: int, height: int, out: Path, fps: float 
                            stdin=subprocess.PIPE, stderr=err)
         try:
             try:
+                assert proc.stdin is not None             # (stdin=PIPE above)
                 for b in boxes:
                     proc.stdin.write(mask_frame(b, width, height).tobytes())
                 proc.stdin.close()

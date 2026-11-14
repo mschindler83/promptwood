@@ -19,7 +19,7 @@ import tempfile
 import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Callable, Iterator, Literal, overload
+from typing import Callable, Generator, Iterator, Literal, overload
 
 FFMPEG_TIMEOUT = 3600           # seconds an ffmpeg job on a clip may take
 FFPROBE_TIMEOUT = 120           # seconds ffprobe may take (it reads the container, not the frames)
@@ -188,7 +188,7 @@ def audio_seconds(path: str | Path) -> float | None:
 def iter_frames(path: str | Path, size: tuple[int, int], pix_fmt: str = "rgb24", *, flags: str | None = "area",
                 passthrough: bool = False, cancelled: Callable[[], bool] | None = None,
                 on_start: Callable[[subprocess.Popen], None] | None = None,
-                timeout: float | None = None) -> Iterator[bytes]:
+                timeout: float | None = None) -> Generator[bytes, None, None]:
     """The frames of a video, one by one, scaled to size, as raw bytes of pix_fmt ("rgb24", "gray": width x height
     x bytes per pixel each). The reader is streamed (little memory) and killed when the iterator is closed,
     cancelled() turns true (the iteration just ends) or timeout seconds have passed. passthrough: every frame
