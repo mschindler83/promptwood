@@ -277,3 +277,50 @@ def test_the_swap_letterbox_turns_a_phone_photo_upright(app, tmp_path):
     got = Image.open(out).convert("RGB")
     # upright = 20 wide x 40 high: red in the middle columns, black bars left and right
     assert got.getpixel((50, 50))[0] > 200 and got.getpixel((5, 50)) == (0, 0, 0)
+
+
+def test_a_rebuilt_problem_box_frees_its_old_layouts(app):
+    from PySide6.QtCore import QEvent
+    from PySide6.QtWidgets import QHBoxLayout
+
+    from video_chain.ui.problems import ProblemBox
+    box = ProblemBox()
+    many = [{"text": f"p{i}", "action": "x", "button": "Fix"} for i in range(6)]
+    for _ in range(3):
+        box.set_items(many)
+        app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    box.set_items([{"text": "only"}])
+    app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    assert len(box.findChildren(QHBoxLayout)) == 1          # (the one row of the one item: nothing of the old rows)
+
+
+def test_picture_slots_and_the_mask_say_what_the_button_removes(app, tmp_path):
+    from video_chain.ui.image_common import PictureSlot
+    slot = PictureSlot("Picture 2", lambda title: None)
+    assert slot.b_clear.toolTip() == "Remove Picture 2" and slot.b_clear.accessibleName() == "Remove Picture 2"
+    from test_image_edit_split import _dialog
+    dlg = _dialog(tmp_path)
+    assert dlg.b_mask_clear.text() == "Remove mask"
+    dlg.reject()
+
+
+def test_the_thumbnail_counters_stay_exact_under_threads(app, tmp_path):
+    import threading
+
+    from PySide6.QtCore import QSettings
+
+    from video_chain.ui import image_picker as IP
+    q = QSettings(str(tmp_path / "s.ini"), QSettings.IniFormat)
+    dlg = IP.ImagePickerDialog(None, "x", str(tmp_path), q, cache_dir=None, desktop_thumbs=None, kind="image")
+    before = dict(dlg.stats)
+
+    def work():
+        for _ in range(2000):
+            dlg._count("memory")
+    threads = [threading.Thread(target=work) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert dlg.stats["memory"] == before["memory"] + 16000
+    dlg.reject()
