@@ -276,6 +276,7 @@ def test_stopping_an_export_leaves_the_clips_as_they_are(app, win, tmp_path, ima
 def test_start_explains_what_is_missing(app, win, tmp_path, image):
     win.open_project(tmp_path / "proj")
     win.generate_path()
+    wait(app, lambda: not win.running)                  # (the check runs in the background)
     assert not win.running and "start image" not in win.status.text() and "prompt of clip #1" in win.status.text()
 
 
@@ -340,6 +341,7 @@ def test_missing_node_lora_stops_the_start(app, win, tmp_path, image):
     ids = new_project(win, tmp_path, image, ("a",))
     win.tree.nodes[ids[0]].overrides = {"loras": [{"path": str(tmp_path / "gone.safetensors"), "strength": 1}]}
     win.generate_path()
+    wait(app, lambda: not win.running)
     assert not win.running and "LoRA file does not exist (gone.safetensors)" in win.status.text()
 
 
@@ -465,9 +467,11 @@ def test_comfyui_is_started_when_generating(app, win, tmp_path, image, monkeypat
     win.comfy_autostart.setChecked(True)
     win._comfy_state(False)
     win.generate_path()
+    wait(app, lambda: not win.running)                        # (the check of the project runs in the background)
     assert started == [1] and not win.running and win._waiting_comfy == [ids[0]]
     assert "generating begins as soon as it runs" in win.status.text()
     win.generate_path()                                       # pressed again while it starts: no second start
+    wait(app, lambda: not win.running)
     assert started == [1]
     win._comfy_state(True)                                    # ComfyUI answers: the generation begins
     wait(app, lambda: win.running or win.state(ids[0]) == "done", timeout=10)
@@ -619,6 +623,7 @@ def test_identity_references_in_the_window(app, win, tmp_path, image, monkeypatc
     flush(app, win)
     win.select(ids[1])
     win.generate_path()
+    wait(app, lambda: not win.running)
     assert not win.running and "did you mean @Ben? (Cast)" in win.status.text()
     type_prompt(win, ids[1], "@Ben waves")
     flush(app, win)
@@ -811,6 +816,7 @@ def test_sound_references_in_the_window(app, win, tmp_path, image, monkeypatch):
     flush(app, win)
     assert win.state(ids[1]) == "changed"
     win.generate_path()
+    wait(app, lambda: not win.running)                                        # (checked in the background)
     assert not win.running and "names <Audio 2>, but there is only 1 sound reference" in win.status.text()
     type_prompt(win, ids[1], "b, in the voice of <Audio 1>")
     flush(app, win)
@@ -1568,6 +1574,7 @@ def test_waiting_for_comfyui_can_be_cancelled(app, win, tmp_path, image, monkeyp
     win.comfy_autostart.setChecked(True)
     monkeypatch.setattr(win, "start_comfy", lambda: True)
     win.generate_path()
+    wait(app, lambda: not win.running)
     assert win._waiting_comfy == [ids[0]] and not win.running and win.b_stop.isEnabled()
     win.stop()
     assert win._waiting_comfy is None and not win.b_stop.isEnabled() and "Cancelled" in win.status.text()
@@ -1898,6 +1905,7 @@ def test_export_on_runpod(app, win, tmp_path, image, monkeypatch):
     wait(app, lambda: not win._joins, timeout=30)
     out = tmp_path / "cloud-2k.mp4"
     win.export(out, "2k", cloud=True)
+    wait(app, lambda: not win.running)
     assert not win.running and "RunPod API key" in win.status.text()        # no key: not started
     monkeypatch.setattr(RP, "api_key", lambda: "k-123")
     win.runpod_gpu.setCurrentIndex(win.runpod_gpu.findData("NVIDIA L40S"))
@@ -1907,6 +1915,7 @@ def test_export_on_runpod(app, win, tmp_path, image, monkeypatch):
     win.comfy_up = False                                                     # no local ComfyUI: not needed
     monkeypatch.setenv("FAKE_LOAD_DELAY", "0.5")                             # (the pod "prepares" a moment)
     win.export(out, "2k", method="seedvr2_3b", cloud=True)
+    wait(app, lambda: win._job is not None)                                   # (checked in the background first)
     assert win.running and win._worker_key()[0] == "runpod"
     seen = []
     wait(app, lambda: seen.append(win.status.text()) or not win.running, timeout=120)
