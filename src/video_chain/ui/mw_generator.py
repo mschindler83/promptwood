@@ -297,7 +297,7 @@ class GeneratorMixin(MainWindowHost):
             self._write_job(cmd)
             self._update_model_label()
             return
-        self._qwen_timer.stop()
+        self.stop_idle_unload()
         hyper = speed_mode(as_dict(self.tree.options)) == "hyperflow" and not self._job.refine \
             if self.tree is not None else False
         self.comfy.model = ComfyModel.H3_HYPERFLOW if hyper else ComfyModel.H3

@@ -212,3 +212,21 @@ def test_all_missing_loras_of_a_clip_are_named(app, tmp_path, monkeypatch):
         assert "gone1.safetensors" in one[0].text and "gone2" not in one[0].text
     finally:
         w.close()
+
+
+# ------------------------------------------------------------------ MWC-13: the idle unload timer has one place
+def test_the_idle_unload_timer_is_started_and_stopped_in_one_place(app, tmp_path):
+    from video_chain.ui.main_window import MainWindow
+    w = MainWindow(settings(tmp_path), command=FAKE)
+    try:
+        w.idle_minutes.setValue(3)
+        w.keep_loaded.setChecked(True)
+        w.start_idle_unload()
+        assert w._qwen_timer.isActive() and w._qwen_timer.interval() == 3 * 60_000
+        w.stop_idle_unload()
+        assert not w._qwen_timer.isActive()
+        w.keep_loaded.setChecked(False)
+        w.start_idle_unload()                              # (not kept loaded: nothing waits for the idle time)
+        assert not w._qwen_timer.isActive()
+    finally:
+        w.close()

@@ -64,8 +64,7 @@ class EndsMixin(MainWindowHost):
             if dlg.refined_any and not self.running and self.comfy.model != ComfyModel.QWEN:
                 # a language model is in ComfyUI now: unloaded before the next clips, idle time as usual
                 self.comfy.language_model_loaded()
-                if self.keep_loaded.isChecked():
-                    self._qwen_timer.start(self.idle_minutes.value() * 60_000)
+                self.start_idle_unload()
                 self._update_model_label()
             dlg.deleteLater()
 
@@ -120,7 +119,7 @@ class EndsMixin(MainWindowHost):
         switch = ModelSwitch()
 
         def before_edit():                          # GUI thread, before each Generate
-            self._qwen_timer.stop()
+            self.stop_idle_unload()
             self.stop_llama("its memory is needed for the image")
             switch.prepare(self.comfy.model)       # (the clip model is unloaded once, before the first image)
             if self.worker_alive and not self.running:
@@ -198,7 +197,7 @@ class EndsMixin(MainWindowHost):
         if self.comfy.model != ComfyModel.QWEN or self.running:
             return
         if self.keep_loaded.isChecked():
-            self._qwen_timer.start(self.idle_minutes.value() * 60_000)
+            self.start_idle_unload()
         else:
             self._free_comfy()
         self._update_model_label()

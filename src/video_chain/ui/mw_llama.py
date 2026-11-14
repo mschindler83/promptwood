@@ -127,7 +127,7 @@ class LlamaMixin(MainWindowHost):
 
     def _room_made(self, msg: str):
         self.comfy.forget()                    # (nothing of this app is loaded in ComfyUI any more)
-        self._qwen_timer.stop()
+        self.stop_idle_unload()
         if self.worker_alive and not self.running:
             self._quit_worker(free=False)           # its model is gone; a new worker starts for the next clips
         self._update_model_label()

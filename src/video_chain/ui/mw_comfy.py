@@ -36,11 +36,19 @@ class ComfyMixin(MainWindowHost):
             self.status.setText("Unloading the image model …")
             self._free_comfy()
 
+    def start_idle_unload(self):
+        """The model stays loaded for the idle time ('Keep the model loaded'); not kept: nothing waits."""
+        if self.keep_loaded.isChecked():
+            self._qwen_timer.start(self.idle_minutes.value() * 60_000)
+
+    def stop_idle_unload(self):
+        """Something uses the model again (or it is gone): no unload after the idle time."""
+        self._qwen_timer.stop()
+
     def _free_comfy(self):
         """Ask ComfyUI to unload its models (in the background)."""
         url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL).rstrip("/")
-        self._qwen_timer.stop()
-
+        self.stop_idle_unload()
         run_in_background(lambda: CMF.free_models(url, timeout=10), on_done=self._comfy_freed,
                           on_error=self._free_failed, owner=self)
 
