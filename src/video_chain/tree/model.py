@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import random
 import re
+from typing import Any, cast
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -31,7 +32,7 @@ class Node:
     prompt: str = ""
     seed: int = 42
     made: MadeRecord | None = None       # what the current files were made from (prompt, seed, settings, files)
-    overrides: Overrides = field(default_factory=dict)   # loras [{"path", "strength"}], frames, steps, guide
+    overrides: Overrides = field(default_factory=lambda: Overrides())   # loras [{"path", "strength"}], frames, steps, guide
     kind: str = AI                 # AI: generated clip; VIDEO: a range of a real video file
     source: Source | None = None     # VIDEO: {"file": absolute path, "start": s, "end": s}
     end_image: str | None = None   # AI: its own end image (ends/..., project-relative); a video after it wins
@@ -122,7 +123,8 @@ class Tree:
         """A real video (file, start..end seconds, turned clockwise by rotate degrees) after parent. A generated clip
         can lead into one video only."""
         if not self.can_add_video(parent):
-            raise ValueError(f"clip #{short_id(parent)} already leads into a video")
+            raise ValueError(f"{'the start image' if parent is None else 'clip #' + short_id(parent)} "
+                             "already leads into a video")
         if float(end) <= float(start):
             raise ValueError("the end of the range must be after its start")
         from .sources import video_source               # (the modules below this one import this module)
@@ -139,12 +141,13 @@ class Tree:
         v = self.nodes[nid]
         if not v.is_video:
             raise ValueError(f"#{short_id(nid)} is not a real video")
+        assert v.source is not None                   # (a real video has its source)
         start, end = float(v.source["start"]), float(v.source["end"])
         at = round(float(at), 4)
         if not start + 1 / chain.FPS <= at <= end - 1 / chain.FPS:
             raise ValueError("split inside the video's range (not at its first or last frame)")
         kids = self.children(nid)
-        rest_source = {**v.source, "start": at, "end": round(end, 4)}
+        rest_source: Source = {**v.source, "start": at, "end": round(end, 4)}
         v.source = {**v.source, "end": at}
         rep = v.source.get("replaced")
         if isinstance(rep, dict) and isinstance(rep.get("original"), dict):   # the original's range, split too
@@ -173,8 +176,9 @@ class Tree:
             if project is not None:
                 for f in list(node_files(project, g)) + clip_files(project, node):
                     chain.keep_aside(project, f)        # (never deleted: moved to old/)
-                for rel in ({node.end_image, (node.made or {}).get("end_image")} | keyframe_files(node)) - {None}:
-                    retire(project, ENDS_DIR, rel, resolved=False)
+                for rel in {node.end_image, (node.made or {}).get("end_image")} | keyframe_files(node):
+                    if rel is not None:
+                        retire(project, ENDS_DIR, rel, resolved=False)
                 _drop_start_file(project, node.start_image)
                 chain.keep_aside(project, Path(project) / "paths" / f"{g}.mp4")     # its joined path too
                 _unlink(Path(project) / "paths" / f"{g}.json")
@@ -256,8 +260,8 @@ def _node_from_json(nd: object, project_loras: dict, taken: dict[str, Node]) -> 
         if isinstance(made, dict) and isinstance(made.get("overrides"), dict):   # what Undo goes back to
             made["overrides"] = {k: v for k, v in migrate_loras(project_loras, made["overrides"]).items()
                                  if k in OVERRIDE_KEYS and v is not None}
-    ov = {k: v for k, v in raw.items() if k in OVERRIDE_KEYS and v is not None}
-    src = nd.get("source")
+    ov: Any = {k: v for k, v in raw.items() if k in OVERRIDE_KEYS and v is not None}
+    src: Any = nd.get("source")
     if kind not in (AI, VIDEO):
         raise ValueError(f"node {nd['id']} has an unknown kind {kind!r}")
     if kind == VIDEO and not (isinstance(src, dict) and src.get("file") and "start" in src and "end" in src):
@@ -271,7 +275,7 @@ def _node_from_json(nd: object, project_loras: dict, taken: dict[str, Node]) -> 
         and own.startswith(STARTS_DIR + "/") else None
     row = nd.get("row") if isinstance(nd.get("row"), str) and re.fullmatch(r"n\d+", nd["row"]) else None
     n = Node(nd["id"], nd.get("parent"), nd.get("prompt", ""), _int_or(nd.get("seed"), 42), nd.get("made"), ov,
-             kind, dict(src) if kind == VIDEO else None, end, at,
+             kind, cast(Source, dict(src)) if kind == VIDEO else None, end, at,
              clean_keyframes(nd.get("keyframes")) if kind == AI else [],
              bool(nd.get("frozen")) and isinstance(nd.get("made"), dict), own,
              row if kind == AI and nd.get("parent") is None else None)
@@ -284,7 +288,8 @@ def _check_graph(nodes: dict[str, Node]) -> None:
         if n.parent is not None and n.parent not in nodes:
             raise ValueError(f"node {n.id} has a missing parent {n.parent}")
     for n in nodes.values():                 # every chain of parents must end at the start image
-        seen, cur = set(), n.id
+        seen: set[str] = set()
+        cur: str | None = n.id
         while cur is not None:
             if cur in seen:
                 raise ValueError(f"node {n.id} is part of a loop")
