@@ -17,9 +17,8 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QDialog, QDialogButtonBo
                                QSizePolicy, QSpinBox, QTextBrowser, QToolButton, QVBoxLayout, QWidget)
 
 from .. import variations as V
-from .results_gallery import FlowBox
 from .theme import theme
-from .widgets import guard_wheel, icon_button, label
+from .widgets import FlowBox, guard_wheel, icon_button, label
 
 COLORS = ("#e8a33d", "#5aa9e6", "#7bc96f", "#e46f8e", "#a98be0", "#4fc3b9", "#e07b53", "#c9c44f")
 MAX_ALL = 200                    # "every combination" above this asks first

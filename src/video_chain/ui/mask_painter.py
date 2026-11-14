@@ -10,7 +10,7 @@ from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QShortcu
 from PySide6.QtWidgets import (QButtonGroup, QDialog, QDialogButtonBox, QHBoxLayout, QPushButton, QMessageBox,
                                QSlider, QVBoxLayout, QWidget)
 
-from .widgets import label
+from .widgets import label, smooth_scaled
 
 MASK_COLOUR = QColor(255, 40, 40, 120)
 UNDO_STEPS = 30                 # steps kept; each holds only the area it changed (Clear and Invert: the whole mask)
@@ -103,7 +103,7 @@ class MaskCanvas(QWidget):
         dpr = self.devicePixelRatioF()
         dev = QSize(round(size.width() * dpr), round(size.height() * dpr))     # (device pixels: sharp on HiDPI)
         if self._shown is None or self._shown[0] != (size, dpr):   # the image at the frame's size, once per size
-            shown = self.image.scaled(dev, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+            shown = QImage(smooth_scaled(self.image, dev, Qt.IgnoreAspectRatio))
             shown.setDevicePixelRatio(dpr)
             self._shown = ((size, dpr), shown)
             self._tint = None

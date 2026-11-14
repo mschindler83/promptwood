@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QDialog, QDialogButtonBox, QHBoxLayout, QPushButto
 from .. import chain, media
 from .. import faces as F
 from .theme import theme
-from .widgets import label
+from .widgets import label, smooth_scaled
 
 MIN_SIDE = 32
 SMALL_SIDE = 160           # below this the face picture is soft for the model
@@ -73,7 +73,7 @@ class CropView(QWidget):
         dpr = self.devicePixelRatioF()
         size = QSize(round(self.image.width() * s * dpr), round(self.image.height() * s * dpr))
         if self._shown is None or self._shown.size() != size or self._shown.devicePixelRatio() != dpr:
-            self._shown = self.image.scaled(size, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+            self._shown = QImage(smooth_scaled(self.image, size, Qt.IgnoreAspectRatio))
             self._shown.setDevicePixelRatio(dpr)
 
     def paintEvent(self, _e):

@@ -10,8 +10,7 @@ from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QPlainTe
                                QToolButton, QVBoxLayout, QWidget)
 
 from .. import tree as T
-from .results_gallery import FlowBox
-from .widgets import label
+from .widgets import FlowBox, label
 
 KIND_NAMES = {"person": "Person", "place": "Place", "object": "Object", "style": "Style"}
 FORMAT_NAMES = {"h3": "official", "classic": "classic"}

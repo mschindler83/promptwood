@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPus
                                QToolButton, QVBoxLayout, QWidget)
 
 from .theme import theme
-from .widgets import label
+from .widgets import FlowBox, label, smooth_scaled
 
 THUMB_DECODE = 400                    # thumbnails are decoded once at this size (the gallery's largest)
 RUN_GAP = 15 * 60                     # older results without a run id: the same prompt within 15 min is one run
@@ -138,54 +138,6 @@ def badged(pix: QPixmap, size: QSize, tag: str, fav: bool, in_use: bool, selecte
     return out
 
 
-class FlowBox(QWidget):
-    """Places its child widgets left to right and wraps them into rows; its height follows its width. (A widget
-    that places its children itself: a Python QLayout subclass crashed in PySide when items were taken out.)"""
-
-    def __init__(self, parent=None, spacing: int = 8):
-        super().__init__(parent)
-        self.items: list[QWidget] = []
-        self.spacing = spacing
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-
-    def add(self, w: QWidget):
-        w.setParent(self)
-        w.show()
-        self.items.append(w)
-        self._place()
-
-    def clear(self):
-        for w in self.items:
-            w.hide()
-            w.setParent(None)
-            w.deleteLater()
-        self.items = []
-        self._place()
-
-    def _place(self):
-        width = max(1, self.width())
-        x = y = row = 0
-        for w in self.items:
-            hint = w.sizeHint().expandedTo(w.minimumSize())
-            if w.maximumWidth() < hint.width():
-                hint.setWidth(w.maximumWidth())
-            if x + hint.width() > width and row > 0:
-                x, y, row = 0, y + row + self.spacing, 0
-            w.setGeometry(x, y, hint.width(), hint.height())
-            x += hint.width() + self.spacing
-            row = max(row, hint.height())
-        h = y + row
-        if self.minimumHeight() != h:
-            self.setFixedHeight(h)
-
-    def resizeEvent(self, e):                    # noqa: N802  (Qt naming)
-        super().resizeEvent(e)
-        self._place()
-
-    def sizeHint(self):                          # noqa: N802
-        return QSize(200, self.minimumHeight())
-
-
 class ResultView(QWidget):
     """The selected result large: fitted into all the space there is (kept in proportion), a text when empty."""
 
@@ -227,8 +179,9 @@ class ResultView(QWidget):
         smooth = not self._resizing
         key = (self._img.cacheKey(), target.width(), target.height())
         if self._scaled is None or self._scaled[0] != key or (smooth and not self._scaled[2]):
-            mode = Qt.SmoothTransformation if smooth else Qt.FastTransformation
-            pm = QPixmap.fromImage(self._img.scaled(target, Qt.KeepAspectRatio, mode))
+            scaled = smooth_scaled(self._img, target) if smooth else \
+                self._img.scaled(target, Qt.KeepAspectRatio, Qt.FastTransformation)
+            pm = QPixmap.fromImage(scaled)
             pm.setDevicePixelRatio(dpr)
             self._scaled = (key, pm, smooth)
         return self._scaled[1]

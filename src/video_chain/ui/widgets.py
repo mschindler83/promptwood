@@ -1,12 +1,88 @@
 """Small themed widgets shared by the windows (same conventions as another app / the design)."""
 from __future__ import annotations
 
+from collections import OrderedDict
+
 from PySide6.QtCore import QEvent, QObject, QRect, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPixmap, QTransform
+from PySide6.QtGui import QColor, QFont, QFontInfo, QImage, QKeySequence, QPainter, QPixmap, QShortcut, QTransform
 from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QHBoxLayout, QLabel, QSizePolicy,
-                               QToolButton, QVBoxLayout, QWidget)
+                               QSlider, QToolButton, QVBoxLayout, QWidget)
 
 from .theme import icon, theme
+
+# The words of the interface, one per thing (counted over the app's own texts; main_window follows, see the notes).
+# A test scans the ui files for the rejected words.
+TERMS = {
+    "start image": "the picture a path starts from (never 'start picture'); likewise 'end image'",
+    "image": "a picture made or edited by the AI (Edit an image, Variations of images); 'picture' only inside plain "
+             "sentences about files the user chose",
+    "clip": "one made piece of video in the tree; 'video' is a real recording the user added (a 'real video')",
+    "variant": "another take of a clip (same prompt, other seed): a branch of the tree",
+    "variations": "prompt variations: {placeholders} with values (the Variations panel); never for clips",
+    "range": "the start-to-end part of a video or sound that is used (never 'part' or 'track' for it); a 'track' "
+             "is a whole sound of the project",
+    "hand over": "the frame where the next clip takes over (verb 'hand over', noun 'hand-over'); never the model's "
+                 "internal name",
+    "Remove / Delete": "Remove takes something out of a list (cast, track, picture); Delete throws a file or a "
+                       "clip away",
+    "dialog buttons": "the action says what it does ('Use this range', 'Save'); Cancel when closing discards "
+                      "something, Close when nothing is held back; 'Hide' dismisses a hint",
+}
+
+
+def safe_emit(signal, *args) -> bool:
+    """Emit a signal from a worker thread. A window that is already closed has no receiver any more (PySide then
+    raises RuntimeError): there is nobody to tell. True when it was emitted."""
+    try:
+        signal.emit(*args)
+        return True
+    except RuntimeError:
+        return False
+
+
+def capped_size(width: int, height: int, avail: QSize | None = None, share: float = 0.9) -> QSize:
+    """A wished window size kept within share of the available screen (a 1366x768 screen cannot show 1240x820)."""
+    if avail is None:
+        screen = QApplication.primaryScreen()
+        avail = screen.availableGeometry().size() if screen is not None else QSize(width, height)
+    return QSize(min(width, int(avail.width() * share)), min(height, int(avail.height() * share)))
+
+
+def fit_size(widget: QWidget, width: int, height: int) -> None:
+    """widget.resize(width, height), capped to the screen the widget is on."""
+    screen = widget.screen() if widget.window() is not None else None
+    avail = screen.availableGeometry().size() if screen is not None else None
+    widget.resize(capped_size(width, height, avail))
+
+
+def small_font(base: QFont, scale: float = 0.8) -> QFont:
+    """base made smaller by scale, but never below the theme's small text size (labels at 6.5 pt were unreadable)."""
+    f = QFont(base)
+    px = base.pixelSize() if base.pixelSize() > 0 else QFontInfo(base).pixelSize()
+    f.setPixelSize(max(round(px * scale), theme().font.small))
+    return f
+
+
+_SCALED: OrderedDict = OrderedDict()
+
+
+def smooth_scaled(img: QImage, size: QSize, mode=Qt.KeepAspectRatio) -> QImage:
+    """img scaled with Qt's smooth (area-averaging) scaling, remembered per picture, size and mode (the last few):
+    the same picture asked for again at the same size (repaints, scrubbing) is not scaled again. The very image
+    when it already has that size."""
+    target = img.size().scaled(size, mode) if mode != Qt.IgnoreAspectRatio else size
+    if target == img.size():
+        return img
+    key = (img.cacheKey(), target.width(), target.height())
+    hit = _SCALED.get(key)
+    if hit is not None:
+        _SCALED.move_to_end(key)
+        return hit[1]
+    out = img.scaled(target, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+    _SCALED[key] = (img, out)                  # (the source is kept so its cache key cannot be given to another image)
+    while len(_SCALED) > 16:
+        _SCALED.popitem(last=False)
+    return out
 
 
 def format_time(seconds: float, precision: int = 0) -> str:
@@ -189,8 +265,7 @@ class VideoView(QWidget):
         target = self._img.size().scaled(self.size() * dpr, Qt.KeepAspectRatio)
         key = (self._img.cacheKey(), target.width(), target.height())
         if self._shown is None or self._shown[0] != key:
-            img = self._img if target == self._img.size() else \
-                self._img.scaled(target, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            img = QImage(smooth_scaled(self._img, target))
             img.setDevicePixelRatio(dpr)
             self._shown = (key, img)
         return self._shown[1]
@@ -267,9 +342,19 @@ def icon_button(name: str, tip: str, parent=None, checkable: bool = False) -> QT
     b.setIcon(icon(name))
     b.setIconSize(QSize(16, 16))
     b.setToolTip(tip)
+    b.setAccessibleName(tip.split(":")[0].split(" (")[0].strip())     # (an icon says nothing to a screen reader)
     b.setAutoRaise(True)
     b.setCheckable(checkable)
     return b
+
+
+def label_for(text: str, field: QWidget, **kw) -> QLabel:
+    """A label that belongs to a field: the label is its buddy (a screen reader reads it with the field)."""
+    lab = label(text, **kw)
+    lab.setBuddy(field)
+    if not field.accessibleName():
+        field.setAccessibleName(text.rstrip(":… ").strip())
+    return lab
 
 
 def section_bar(title: str, parent=None) -> tuple[QWidget, QHBoxLayout]:
@@ -323,3 +408,116 @@ class FrameTile(QLabel):
         if e.button() == Qt.LeftButton:
             self.clicked.emit(self.t)
         super().mousePressEvent(e)
+
+
+class FlowBox(QWidget):
+    """Places its child widgets left to right and wraps them into rows; its height follows its width. (A widget
+    that places its children itself: a Python QLayout subclass crashed in PySide when items were taken out.)"""
+
+    def __init__(self, parent=None, spacing: int = 8):
+        super().__init__(parent)
+        self.items: list[QWidget] = []
+        self.spacing = spacing
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    def add(self, w: QWidget):
+        w.setParent(self)
+        w.show()
+        self.items.append(w)
+        self._place()
+
+    def clear(self):
+        for w in self.items:
+            w.hide()
+            w.setParent(None)
+            w.deleteLater()
+        self.items = []
+        self._place()
+
+    def _place(self):
+        width = max(1, self.width())
+        x = y = row = 0
+        for w in self.items:
+            hint = w.sizeHint().expandedTo(w.minimumSize())
+            if w.maximumWidth() < hint.width():
+                hint.setWidth(w.maximumWidth())
+            if x + hint.width() > width and row > 0:
+                x, y, row = 0, y + row + self.spacing, 0
+            w.setGeometry(x, y, hint.width(), hint.height())
+            x += hint.width() + self.spacing
+            row = max(row, hint.height())
+        h = y + row
+        if self.minimumHeight() != h:
+            self.setFixedHeight(h)
+
+    def resizeEvent(self, e):                    # noqa: N802  (Qt naming)
+        super().resizeEvent(e)
+        self._place()
+
+    def sizeHint(self):                          # noqa: N802
+        return QSize(200, self.minimumHeight())
+
+
+class FrameStepper(QWidget):
+    """A slider over frames with a second back / frame back / frame on / second on button on each side, the frame
+    label ("frame 3 / 120 · 0.08 s"), and the keys Left / Right (one frame) and Shift+Left / Shift+Right (one
+    second) on the host window. HandoverDialog and VideoFrameDialog share it."""
+    valueChanged = Signal(int)
+
+    def __init__(self, host: QWidget, fps: float = 24.0, parent=None):
+        super().__init__(parent or host)
+        self.fps = float(fps)
+        sec = max(1, round(self.fps))
+        self.slider = QSlider(Qt.Horizontal)
+        self.slider.setEnabled(False)
+        self.label = label("", level="secondary", type_="mono")
+        self.b_back_s = self._button("«", "One second back (Shift+Left)", -sec)
+        self.b_back1 = self._button("‹", "One frame back (Left)", -1)
+        self.b_fwd1 = self._button("›", "One frame on (Right)", 1)
+        self.b_fwd_s = self._button("»", "One second on (Shift+Right)", sec)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        for b in (self.b_back_s, self.b_back1):
+            row.addWidget(b)
+        row.addWidget(self.slider, 1)
+        for b in (self.b_fwd1, self.b_fwd_s):
+            row.addWidget(b)
+        row.addWidget(self.label)
+        for key, step in (("Left", -1), ("Right", 1), ("Shift+Left", -sec), ("Shift+Right", sec)):
+            QShortcut(QKeySequence(key), host, activated=lambda s=step: self.step(s))
+        self.slider.valueChanged.connect(self._moved)
+        self.slider.valueChanged.connect(self.valueChanged)
+
+    def _button(self, text: str, tip: str, step: int) -> QToolButton:
+        b = QToolButton()
+        b.setProperty("role", "iconButton")
+        b.setText(text)
+        b.setToolTip(tip)
+        b.setAccessibleName(tip.split(" (")[0])
+        b.setFixedWidth(34)
+        b.clicked.connect(lambda _c=False, s=step: self.step(s))
+        return b
+
+    def step(self, n: int) -> None:
+        self.slider.setValue(self.slider.value() + n)       # (the slider keeps it inside its range)
+
+    def set_range(self, lo: int, hi: int) -> None:
+        self.slider.setRange(int(lo), int(hi))
+        self._moved(self.slider.value())
+
+    def setValue(self, k: int) -> None:         # noqa: N802  (as QSlider)
+        self.slider.setValue(int(k))
+
+    def value(self) -> int:
+        return self.slider.value()
+
+    def maximum(self) -> int:
+        return self.slider.maximum()
+
+    def setEnabled(self, on: bool) -> None:     # noqa: N802
+        self.slider.setEnabled(on)
+        for b in (self.b_back_s, self.b_back1, self.b_fwd1, self.b_fwd_s):
+            b.setEnabled(on)
+
+    def _moved(self, k: int) -> None:
+        self.label.setText(f"frame {k + 1} / {self.slider.maximum() + 1} · {k / self.fps:.2f} s")
