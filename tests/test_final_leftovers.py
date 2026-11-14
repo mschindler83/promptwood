@@ -8,6 +8,7 @@ os.environ["QT_QPA_PLATFORM"] = "offscreen"
 import pytest
 from PIL import Image
 
+from ui_helpers import app, image, win  # noqa: F401  (fixtures)
 from video_chain import tree as T
 
 
@@ -78,3 +79,61 @@ def test_event_builders_make_events_the_window_accepts():
                E.error("x", comfy_down=True), E.idle(60.0, 1.5), E.bye("idle")):
         assert E.event_problem(ev) is None
     assert E.error("x") == {"e": "error", "msg": "x"} and E.idle(None) == {"e": "idle", "timeout": None}
+
+
+# ------------------------------------------------------------------ MWB-19: project copy with progress and Cancel
+def _little_project(root):
+    (root / "clips").mkdir(parents=True)
+    for i in range(5):
+        (root / "clips" / f"c{i}.mp4").write_bytes(b"x" * 10)
+    (root / "clips" / "c0.mp4.part").write_bytes(b"x")      # (never copied)
+    return root
+
+
+def test_copy_reports_progress_and_can_be_cancelled(tmp_path):
+    import threading
+    from video_chain import project_copy as PC
+    src = _little_project(tmp_path / "src")
+    seen = []
+    PC.copy_project(src, tmp_path / "ok", progress=lambda done, total: seen.append((done, total)),
+                    cancel=threading.Event())
+    assert (tmp_path / "ok/clips/c4.mp4").is_file() and not (tmp_path / "ok/clips/c0.mp4.part").exists()
+    assert seen and seen[-1][0] == seen[-1][1] == 5 and [d for d, _ in seen] == sorted(d for d, _ in seen)
+    stop = threading.Event()
+
+    def progress(done, total):
+        if done == 2:
+            stop.set()
+    with pytest.raises(PC.CopyCancelled):
+        PC.copy_project(src, tmp_path / "cut", progress=progress, cancel=stop)
+    assert not (tmp_path / "cut").exists()                  # the partial copy is gone
+    (tmp_path / "empty").mkdir()
+    stop = threading.Event()
+    with pytest.raises(PC.CopyCancelled):
+        PC.copy_project(src, tmp_path / "empty", progress=progress, cancel=stop)
+    assert (tmp_path / "empty").is_dir() and not any((tmp_path / "empty").iterdir())    # a folder that was there stays
+
+
+def test_save_as_can_be_cancelled_and_leaves_no_copy(app, win, tmp_path, image, monkeypatch):
+    import threading
+    import time
+    from video_chain import project_copy as PC
+    from ui_helpers import new_project, wait
+    new_project(win, tmp_path, image, ("a",))
+    gate = threading.Event()
+    real = PC.copy_file
+
+    def slow(s, d):
+        gate.wait(10)
+        return real(s, d)
+    monkeypatch.setattr(PC, "copy_file", slow)
+    target = tmp_path / "projects" / "cancelled-copy"
+    here = win.project
+    win.copy_project_to(target)
+    assert win._copying and win.act_cancel_copy.isEnabled()
+    win.cancel_copy()
+    gate.set()
+    wait(app, lambda: win._copying is None, timeout=20)
+    time.sleep(0.05)
+    assert not target.exists() and win.project == here and "cancel" in win.status.text().lower()
+    assert not win.act_cancel_copy.isEnabled()

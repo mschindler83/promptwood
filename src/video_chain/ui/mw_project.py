@@ -3,17 +3,18 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
+import threading
 import time
 from pathlib import Path
 from typing import cast
 
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QInputDialog, QLineEdit, QMessageBox, QPlainTextEdit
+from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog, QInputDialog, QLineEdit, QMessageBox, QPlainTextEdit,
+                               QProgressDialog)
 
-from .workers import run_in_background
-from .. import film as F, tree as T
+from .workers import post, run_in_background
+from .. import film as F, project_copy as PC, tree as T
 from . import dialogs as D
 from .graph import START
 from .project_dialogs import NewProjectDialog
@@ -117,40 +118,58 @@ class ProjectMixin(MainWindowHost):
         self._copy_scene = scene_rel
         cur = self.film.scene_of(self.project) if self.film else None
         self._copy_scene_id = cur.id if cur else None
-        existed = target.exists()
         self.status.setText(f"Copying the project to {target} …")
         self.act_save_as.setEnabled(False)
         self._copying = str(source)
+        cancel = self._copy_cancel = threading.Event()
+        self.act_cancel_copy.setEnabled(True)
+        dialog = self._copy_dialog = QProgressDialog(f"Copying the project to {target} …", "Cancel", 0, 0, self)
+        dialog.setWindowTitle("Save as")
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        dialog.canceled.connect(self.cancel_copy)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
 
+        def progress(done: int, total: int):
+            post(self, self._copy_progress, done, total, str(target))
 
         def work():
             try:
-                skip = shutil.ignore_patterns("*.part", "*.part.*", "video-chain-*")
-
-                def ignore(d, names):
-                    out = set(skip(d, names))
-                    if Path(d).parent.name == F.SCENES_DIR and T.REFS_DIR in names:
-                        out.add(T.REFS_DIR)           # a scene's link to the film's refs/: made again below
-                    return out
-                shutil.copytree(source, target, dirs_exist_ok=True, ignore=ignore)
-                for sc in F.Film.load(target).scenes:  # the copy remembers where its start images came from
-                    d = (target / sc.dir).resolve()
-                    if sc.dir != "." and not (d / T.REFS_DIR).exists():
-                        (target / T.REFS_DIR).mkdir(exist_ok=True)
-                        os.symlink(os.path.relpath(target / T.REFS_DIR, d), d / T.REFS_DIR, target_is_directory=True)
-                    if (d / T.TREE_FILE).is_file():
-                        T.save(d, T.load(d))
-            except BaseException:  # noqa: BLE001  (the answer ends "copying")
-                if not existed:                       # a half copy would block the next try
-                    shutil.rmtree(target, ignore_errors=True)
-                raise
-        run_in_background(work, on_done=lambda _r: self._copied(str(target), ""),
+                PC.copy_project(source, target, progress=progress, cancel=cancel)
+            except PC.CopyCancelled:
+                return False
+            return True
+        run_in_background(work, on_done=lambda ok: self._copied(str(target), "" if ok else None),
                           on_error=lambda e: self._copied(str(target), str(e)), owner=self)
 
-    def _copied(self, target: str, error: str):
+    def cancel_copy(self):
+        """Stop Save as: the files copied so far are removed."""
+        if self._copy_cancel is not None:
+            self._copy_cancel.set()
+            self.status.setText("Cancelling the copy …")
+
+    def _copy_progress(self, done: int, total: int, target: str):
+        if self._copy_cancel is None or self._copy_cancel.is_set():
+            return
+        self.status.setText(f"Copying the project to {target}: {done} of {total} files …")
+        if self._copy_dialog is not None:
+            self._copy_dialog.setMaximum(total)
+            self._copy_dialog.setValue(done)
+
+    def _copied(self, target: str, error: str | None):
+        """The copy ended: error "" is success, None is a cancel, text is what went wrong."""
         source, self._copying = self._copying, None
+        self._copy_cancel = None
+        self.act_cancel_copy.setEnabled(False)
+        if self._copy_dialog is not None:
+            self._copy_dialog.reset()
+            self._copy_dialog.deleteLater()
+            self._copy_dialog = None
         self.act_save_as.setEnabled(True)
         self._update_buttons()
+        if error is None:
+            self.status.setText("Copying cancelled; nothing was kept.")
+            return
         if error:
             self._report_error(f"Could not copy the project: {error}")
             return

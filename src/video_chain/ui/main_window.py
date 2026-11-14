@@ -28,7 +28,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QProcess, QSettings, QTimer, Signal
 from PySide6.QtGui import QImage, QPixmap  # noqa: F401
-from PySide6.QtWidgets import QDialog, QMainWindow, QMessageBox  # noqa: F401
+from PySide6.QtWidgets import QDialog, QMainWindow, QMessageBox, QProgressDialog  # noqa: F401
 
 from .. import tree as T, tts as TTS
 # (re-exported: the tests patch and import these names on main_window)
@@ -113,6 +113,8 @@ class MainWindow(BuildMixin, GeneratorMixin, ComfyMixin, ExportMixin, VideosMixi
         self._loading = False
         self._tree_stamp: tuple | None = None   # tree.json as this window last read or wrote it
         self._copying: str | None = None        # Save as in progress (the source project)
+        self._copy_cancel: threading.Event | None = None   # set: Save as stops and removes its partial copy
+        self._copy_dialog: QProgressDialog | None = None
         self._worker_leaving = False            # the worker said bye (idle timeout) and is quitting
         self._job: Job | None = None            # the generation in progress
         self._worker_idle = False
