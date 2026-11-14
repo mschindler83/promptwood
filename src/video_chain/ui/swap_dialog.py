@@ -447,18 +447,18 @@ class SwapDialog(QDialog):
         self.b_stop.setEnabled(self._busy)
         self.b_play.setEnabled(self.result is not None and not self._busy)
         self.b_use.setEnabled(self.result is not None and not self._busy)
-        for w in (self.head_size, self.ref_combo, self.size, self.prompt, self.method, self.body, self.sharpen):
-            w.setEnabled(not self._busy)
         m = self.method.currentData()
         animate = m in ("animate", "animate+lock")
-        for w in (self.size, self.body, self.head_size):
-            w.setEnabled(not self._busy and animate)
+        idle = not self._busy
+        # one rule per control: busy and the method decide (nothing is enabled and then switched off again)
+        for w, on in ((self.ref_combo, True), (self.method, True), (self.head_size, animate), (self.size, animate),
+                      (self.body, animate), (self.prompt, m != "face"),
+                      (self.sharpen, m in ("face", "animate+lock")),
+                      (self.head_crop, bool(self.ref_png)), (self.b_crop, bool(self.ref_png))):
+            w.setEnabled(idle and on)
         for w in (self.head_crop, self.b_crop):           # (the H3 head swap's picture)
             w.setVisible(m == "h3")
-            w.setEnabled(not self._busy and bool(self.ref_png))
         self.crop_info.setVisible(m == "h3")
-        self.prompt.setEnabled(not self._busy and m != "face")
-        self.sharpen.setEnabled(not self._busy and m in ("face", "animate+lock"))
         self.prompt.setPlaceholderText("The new person's face (empty: described automatically), e.g. “Male, oval "
                                        "face, short black hair, dark beard, brown eyes”" if m == "h3" else DEFAULT_PROMPT)
         why = ""

@@ -171,6 +171,39 @@ def record_use(png: str | Path, use: dict) -> None:
     write_meta(meta_file, meta)
 
 
+def how_made(meta: dict) -> str:
+    """The model and quality a result was made with, in words (for the result's facts)."""
+    if meta.get("mode") == "create":
+        fam = FAMILIES.get(meta.get("family"), {})
+        return f"{fam.get('label', '')} {fam.get('qualities', {}).get(meta.get('quality'), '')}"
+    if meta.get("edit_model") == "qwen21":
+        return f"{EDIT_MODELS['qwen21']} {FAMILIES['qwen21']['qualities'].get(meta.get('quality'), '')}"
+    if meta.get("edit_model") == "moss":
+        return f"{EDIT_MODELS['moss']} {MOSS_EDIT_QUALITIES['standard']}"
+    return QUALITY_TEXT.get(meta.get("quality"), "")
+
+
+def lora_note(mode: str, family: dict | None, fam: str, edit_model: str, family_loras: dict) -> str:
+    """The line above the LoRA list: which LoRAs fit the chosen model, and how many were found."""
+    if mode == "create":
+        if not family:
+            return ""
+        found = len(family_loras.get(LORA_FAMILY.get(fam, fam), []))
+        if fam == "chroma":
+            return ("LoRAs (optional): Chroma and FLUX.1 LoRAs (the same layer names, so they are listed together; "
+                    f"FLUX.1 LoRAs often work on Chroma, not always; {found} found), applied in this order.")
+        return (f"LoRAs (optional): {family['label']} LoRAs from ComfyUI's LoRA folders (found by their contents; "
+                f"{found} found), applied in this order.")
+    if edit_model == "qwen21":
+        return ("LoRAs (optional): Qwen-Image 2.1 LoRAs from ComfyUI's LoRA folders (found by their contents; "
+                f"{len(family_loras.get('qwen21', []))} found), applied in this order.")
+    if edit_model == "moss":
+        return ("LoRAs (optional): MOSS-Image LoRAs from ComfyUI's LoRA folders (found by their contents; "
+                f"{len(family_loras.get('moss', []))} found), applied before its edit LoRA.")
+    return ("LoRAs (optional): Qwen Image / Image Edit LoRAs from ComfyUI's LoRA folders, applied in this order. "
+            "Text-to-image Qwen LoRAs often work for edits too, not always.")
+
+
 def uses_index(tree) -> dict:
     """What `uses_of` looks up, built once for the whole project (a reload asks once per result): who owns each
     face picture, and which clips have which end image."""
@@ -286,6 +319,7 @@ class ImageEditDialog(QDialog):
         self._requested: set[tuple[str, int]] = set()
         self._failed: set[tuple[str, int]] = set()
         self._entries: list[tuple[str, dict, float]] = []
+        self._strip_items: dict[str, QListWidgetItem] = {}
         self._loader = ThumbLoader(self)
         self._loader.ready.connect(self._thumb_ready)
         self.closed = False
@@ -928,24 +962,8 @@ class ImageEditDialog(QDialog):
         if f:
             w, h = size_for(fam, self.aspect.currentData() or 1.0)
             self.size_text.setText(f"{w}×{h}")
-        if create:
-            found = len(self.family_loras.get(LORA_FAMILY.get(fam, fam), [])) if f else 0
-            self.lora_text.setText(
-                f"LoRAs (optional): Chroma and FLUX.1 LoRAs (the same layer names, so they are listed together; "
-                f"FLUX.1 LoRAs often work on Chroma, not always; {found} found), applied in this order."
-                if fam == "chroma" else
-                f"LoRAs (optional): {f['label']} LoRAs from ComfyUI's LoRA folders (found by their contents; "
-                f"{found} found), applied in this order." if f else "")
-        else:
-            self.lora_text.setText(
-                f"LoRAs (optional): Qwen-Image 2.1 LoRAs from ComfyUI's LoRA folders (found by their contents; "
-                f"{len(self.family_loras.get('qwen21', []))} found), applied in this order."
-                if self.edit_model.currentData() == "qwen21" else
-                f"LoRAs (optional): MOSS-Image LoRAs from ComfyUI's LoRA folders (found by their contents; "
-                f"{len(self.family_loras.get('moss', []))} found), applied before its edit LoRA."
-                if self.edit_model.currentData() == "moss" else
-                "LoRAs (optional): Qwen Image / Image Edit LoRAs from ComfyUI's LoRA folders, applied in this order. "
-                "Text-to-image Qwen LoRAs often work for edits too, not always.")
+        self.lora_text.setText(lora_note("create" if create else "edit", f, fam, self.edit_model.currentData(),
+                                         self.family_loras))
         self.b_gen.setToolTip("Make the image (Ctrl+Enter)" if create else
                               "Edit the image with this prompt (Ctrl+Enter)")
         self._update_buttons()
@@ -1136,11 +1154,13 @@ class ImageEditDialog(QDialog):
         shown = [(p, m, t, ns) for p, m, t, ns in entries if keep_it(p, m)]
         self.results.blockSignals(True)
         self.results.clear()
+        self._strip_items = {}                       # png -> its item (a thumbnail arriving finds it at once)
         for png, meta, _t, ns in shown:
             it = QListWidgetItem(self._strip_icon(png, meta), "")
             it.setData(Qt.UserRole, (png, meta))
             it.setToolTip(meta.get("prompt", Path(png).name))
             self.results.addItem(it)
+            self._strip_items[png] = it
             if self._thumbs.get(png, (None,))[0] != ns and (png, ns) not in self._requested \
                     and (png, ns) not in self._failed:
                 self._requested.add((png, ns))
@@ -1181,11 +1201,9 @@ class ImageEditDialog(QDialog):
             return
         pix = QPixmap.fromImage(img)
         self._thumbs[png] = (ns, pix)
-        for i in range(self.results.count()):
-            it = self.results.item(i)
-            if it.data(Qt.UserRole)[0] == png:
-                it.setIcon(self._strip_icon(png, it.data(Qt.UserRole)[1], it is self.results.currentItem()))
-                break
+        it = self._strip_items.get(png)
+        if it is not None:
+            it.setIcon(self._strip_icon(png, it.data(Qt.UserRole)[1], it is self.results.currentItem()))
         self.gallery.set_thumb(png, pix)
 
     # ---- views, favourites
@@ -1297,13 +1315,7 @@ class ImageEditDialog(QDialog):
             show = orig if self.b_before.isChecked() and orig and Path(orig).is_file() else png
             img = upright(show)                      # (a phone photo turned, like the result)
             self.view.set_image(img)
-            how = (f"{FAMILIES.get(meta.get('family'), {}).get('label', '')} "
-                   f"{FAMILIES.get(meta.get('family'), {}).get('qualities', {}).get(meta.get('quality'), '')}"
-                   if meta.get("mode") == "create" else
-                   f"{EDIT_MODELS['qwen21']} {FAMILIES['qwen21']['qualities'].get(meta.get('quality'), '')}"
-                   if meta.get("edit_model") == "qwen21" else
-                   f"{EDIT_MODELS['moss']} {MOSS_EDIT_QUALITIES['standard']}" if meta.get("edit_model") == "moss"
-                   else QUALITY_TEXT.get(meta.get("quality"), ""))
+            how = how_made(meta)
             smp = " · ".join(x for x in (f"{meta['steps']} steps" if meta.get("steps") else "",
                                          f"CFG {meta['cfg']:g}" if isinstance(meta.get("cfg"), (int, float)) else "",
                                          meta.get("sampler") or "", meta.get("scheduler") or "") if x)

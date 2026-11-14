@@ -240,3 +240,27 @@ def test_h3_trim_gets_the_clips_frame_rate(app, tmp_path, monkeypatch):
     wait(app, lambda: not dlg._busy, timeout=20)
     assert seen.get("fps") == 30.0
     dlg.done(0)
+
+
+@pytest.mark.parametrize("busy", [False, True])
+@pytest.mark.parametrize("method", ["animate+lock", "animate", "face", "h3"])
+def test_swap_controls_by_method_and_busy(app, tmp_path, busy, method):
+    """Which controls are usable: one rule per control (busy and method decide)."""
+    dlg = _swap_dialog(tmp_path, app)
+    dlg.ref_png = tmp_path / "r.png"
+    dlg._busy = busy
+    dlg.method.setCurrentIndex(dlg.method.findData(method))
+    dlg._update()
+    animate = method in ("animate", "animate+lock")
+    assert dlg.head_size.isEnabled() == (not busy and animate)
+    assert dlg.size.isEnabled() == (not busy and animate)
+    assert dlg.body.isEnabled() == (not busy and animate)
+    assert dlg.ref_combo.isEnabled() == (not busy)
+    assert dlg.method.isEnabled() == (not busy)
+    assert dlg.prompt.isEnabled() == (not busy and method != "face")
+    assert dlg.sharpen.isEnabled() == (not busy and method in ("face", "animate+lock"))
+    assert dlg.head_crop.isEnabled() == (not busy) and dlg.b_crop.isEnabled() == (not busy)    # (shown for h3 only)
+    assert dlg.head_crop.isVisibleTo(dlg) == (method == "h3")
+    assert dlg.b_stop.isEnabled() == busy
+    dlg._busy = False
+    dlg.done(0)

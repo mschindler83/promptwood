@@ -378,3 +378,39 @@ def test_source_picture_is_decoded_once(app, tmp_path, monkeypatch):
     dlg.set_source(str(src))
     assert len(reads) == 2
     dlg.reject()
+
+
+def test_text_builders():
+    from video_chain.ui import image_edit as IE
+    assert IE.how_made({"mode": "create", "family": "qwen21", "quality": "fast"}).startswith(
+        IE.FAMILIES["qwen21"]["label"])
+    assert IE.how_made({"edit_model": "qwen21", "quality": "fast"}) == (
+        f"{IE.EDIT_MODELS['qwen21']} {IE.FAMILIES['qwen21']['qualities'].get('fast', '')}")
+    assert IE.how_made({"edit_model": "moss"}) == f"{IE.EDIT_MODELS['moss']} {IE.MOSS_EDIT_QUALITIES['standard']}"
+    assert IE.how_made({"quality": "fast"}) == IE.QUALITY_TEXT.get("fast", "")
+    assert "Qwen-Image 2.1 LoRAs" in IE.lora_note("edit", None, "", "qwen21", {"qwen21": [1, 2]}) \
+        and "2 found" in IE.lora_note("edit", None, "", "qwen21", {"qwen21": [1, 2]})
+    assert "applied before its edit LoRA" in IE.lora_note("edit", None, "", "moss", {})
+    assert "Text-to-image Qwen LoRAs" in IE.lora_note("edit", None, "", "2511", {})
+    assert "Chroma and FLUX.1" in IE.lora_note("create", {"label": "Chroma"}, "chroma", "", {})
+    assert IE.lora_note("create", None, "x", "", {}) == ""
+
+
+def test_thumbnail_arrival_finds_its_item_directly(app, tmp_path):
+    from PIL import Image
+    from PySide6.QtGui import QImage
+
+    from video_chain.ui.image_edit import EDITS_DIR
+    edits = tmp_path / EDITS_DIR
+    edits.mkdir()
+    for i in range(3):
+        Image.new("RGB", (16, 16), "red").save(edits / f"r{i}.png")
+        (edits / f"r{i}.json").write_text(json.dumps({"prompt": str(i)}))
+    dlg = _dialog(tmp_path)
+    assert set(dlg._strip_items) == {str(edits / f"r{i}.png") for i in range(3)}
+    img = QImage(8, 8, QImage.Format_RGB32)
+    img.fill(0xff0000)
+    png = str(edits / "r1.png")
+    dlg._thumb_ready(png, 5, img)
+    assert not dlg._strip_items[png].icon().isNull()
+    dlg.reject()
