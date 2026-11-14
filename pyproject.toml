@@ -11,7 +11,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-timeout", "pytest-xdist", "pillow", "numpy", "safetensors", "mypy"]
+dev = ["pytest", "pytest-timeout", "pytest-xdist", "pillow", "numpy", "safetensors", "mypy", "ruff"]
 # "Crop to face" for face pictures: insightface's SCRFD detector (from ComfyUI's models folder) on the CPU
 faces = ["onnxruntime>=1.18", "numpy"]
 
@@ -51,7 +51,7 @@ check_untyped_defs = true
 
 # The linter: what mypy does not see. Silent broad excepts (BLE001 / S110 / S112 / E722: say why with a comment and
 # "# noqa: BLE001", or log it), unused imports / variables and undefined names (pyflakes).
-# (ruff is not in the dev extras yet: it needs a uv.lock update; the test skips without it)
+# (ruff is in the dev extras; the test skips without it)
 [tool.ruff]
 target-version = "py312"
 src = ["src", "tests"]
