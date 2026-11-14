@@ -46,3 +46,21 @@ def test_lora_notes_cut_is_public_and_the_window_uses_it():
     from video_chain import lora_notes
     assert lora_notes.cut("word " * 100, 20).endswith("…") or len(lora_notes.cut("word " * 100, 20)) <= 21
     assert not hasattr(lora_notes, "_cut")
+
+
+def test_the_conversation_shows_a_short_label_for_the_long_example_instruction():
+    from video_chain.ui import prompt_refiner as PR
+    long = PR.LIKE_EXAMPLE.format(example="a cat, 4k")
+    assert PR.shown_ask(long) == "like an example prompt of the LoRA"
+    assert PR.shown_ask("make it shorter") == "make it shorter" and PR.shown_ask("") == ""
+
+
+def test_a_failing_guidance_is_logged_not_swallowed(app, caplog, monkeypatch, tmp_path):
+    import logging
+
+    from video_chain import lora_notes
+    from video_chain.ui import prompt_refiner as PR
+    monkeypatch.setattr(lora_notes, "guidance", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("unreadable")))
+    with caplog.at_level(logging.WARNING):
+        assert PR.guidance_or_empty(["/x/a.safetensors"], "a prompt") == ""
+    assert any("could not be read" in r.getMessage() for r in caplog.records)

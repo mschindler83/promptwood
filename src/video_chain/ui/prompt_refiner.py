@@ -30,6 +30,24 @@ LIKE_EXAMPLE = ("Rewrite my prompt in the manner of this example prompt, which i
                 "its wording, its structure and its level of detail. Keep what my prompt is about (my subjects, my "
                 "cast, the place and what happens) and take nothing of the example's content. The example: "
                 "\"{example}\"")
+LIKE_EXAMPLE_LABEL = "like an example prompt of the LoRA"
+
+
+def shown_ask(ask: str) -> str:
+    """What the conversation shows for a message: the long fixed instruction for "write like this example" as a short label."""
+    return LIKE_EXAMPLE_LABEL if ask.startswith(LIKE_EXAMPLE.split("{example}")[0]) else ask
+
+
+def guidance_or_empty(loras: list, prompt: str) -> str:
+    """What the language model is told about the LoRAs (nothing when their data cannot be read: a plain refine)."""
+    from .. import lora_notes
+    try:
+        return lora_notes.guidance(loras, prompt=prompt)
+    except Exception:  # noqa: BLE001
+        log.warning("what the LoRAs' notes say could not be read", exc_info=True)
+        return ""
+
+
 KIND_TEXT = {"video": "video clip prompt", "video_h3": "video clip prompt", "image": "image prompt",
              "edit": "edit instruction"}
 
@@ -445,10 +463,7 @@ class RefineDialog(QDialog):
         on = self.use_loras.isEnabled() and self.use_loras.isChecked()
         told, title = self._told, "What the language model was told"
         if not told and on:
-            try:
-                told = lora_notes.guidance(self.loras, prompt=self.original.toPlainText())
-            except Exception:  # noqa: BLE001
-                told = ""
+            told = guidance_or_empty(self.loras, self.original.toPlainText())
             title = "What the language model will be told"
         wanted: list[str] = []                     # (an example to rewrite like: asked once the window is closed)
         idle = not self._busy and self.refiner is not None and not self.ideas_mode()
@@ -572,7 +587,7 @@ class RefineDialog(QDialog):
         for k, (ask, version) in enumerate(self.turns):
             cur = k == self.base
             short = html.escape(version if len(version) <= 220 else version[:218] + "…")
-            rows.append(f"<p style='margin:4px 0 0 0'><b>You:</b> {html.escape(ask) if ask else '<i>improve it</i>'}</p>"
+            rows.append(f"<p style='margin:4px 0 0 0'><b>You:</b> {html.escape(shown_ask(ask)) if ask else '<i>improve it</i>'}</p>"
                         f"<p style='margin:0 0 6px 12px'><a href='v:{k}' style='text-decoration:none'>"
                         f"<b>{'▶ ' if cur else ''}Version {k + 1}</b></a>"
                         f"{' <i>(edited by you)</i>' if self._edited.get(k) else ''}<br>"
