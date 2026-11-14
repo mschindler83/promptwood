@@ -112,3 +112,17 @@ def test_a_refresh_builds_the_plan_once(monkeypatch):
     monkeypatch.setattr(V, "Plan", lambda *a, **k: (built.append(1), real(*a, **k))[1])
     p._refresh()
     assert len(built) <= 1
+
+
+def test_a_placeholder_without_values_is_underlined_in_the_themes_negative_colour(monkeypatch):
+    from video_chain.ui.theme import theme
+    p = panel(())
+    seen = []
+    monkeypatch.setattr(VP.PlaceholderHighlighter, "setFormat", lambda self, s, n, f: seen.append(f))
+    VP.PlaceholderHighlighter(None, p).highlightBlock("a {x} here")
+    assert seen and seen[0].underlineColor() == theme().negative
+
+
+def test_the_help_does_not_promise_that_a_typed_comma_splits():
+    step = VP.HELP.split("2.", 1)[1].split("<br>", 1)[0]
+    assert "a comma stays in the value" in step and "list button" in step

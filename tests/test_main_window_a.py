@@ -250,6 +250,17 @@ def test_guide_choices_survive_a_path_spelled_differently(win, tmp_path):
     assert "no_cast" in win._guide_choices()
 
 
+def test_guide_choices_stored_before_the_resolved_key_are_still_found(win, tmp_path):
+    p = tmp_path / "proj" / ".." / "proj"
+    (tmp_path / "proj").mkdir()
+    win.qs.setValue("guideChoices", json.dumps({str(p): ["text_only"]}))     # (as stored by earlier versions)
+    win.project, win.tree = p, None
+    assert "text_only" in win._guide_choices()
+    win._guide_mark("no_cast")                       # a new mark moves the old entry to the resolved key
+    d = json.loads(win.qs.value("guideChoices", type=str))
+    assert d == {str(p.resolve()): ["no_cast", "text_only"]}
+
+
 # ------------------------------------------------------------------ MWA-7
 def test_enter_in_an_api_key_field_saves_it(win, monkeypatch):
     saved = []

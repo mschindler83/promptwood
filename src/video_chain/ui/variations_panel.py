@@ -27,7 +27,7 @@ POSITIONS_KEPT = 60
 FEW_VALUES = 3                   # removing more values than this at once asks first
 HELP = """<b>Prompt variations</b> make many prompts from one.<br><br>
 1. Write <b>{name}</b> in the prompt where something should vary, e.g. <i>a {animal} in the {place}</i>.<br>
-2. Give each name its values below: type one and press Enter, or paste a list (one per line, or comma-separated).<br>
+2. Give each name its values below: type one and press Enter (a comma stays in the value), or add a list with the list button (one per line, or comma-separated).<br>
 3. Generate makes one image per combination: 3 animals × 2 places = 6 images.<br><br>
 <b>Order</b>: <i>In order</i> goes through every combination and continues there next time; <i>Shuffled</i> takes
 every combination once in a random order; <i>Random</i> picks freely (weights count: a value ×3 comes three times as
@@ -76,7 +76,7 @@ class PlaceholderHighlighter(QSyntaxHighlighter):
             var = self.panel.variable(name)
             if var is None or not var.active():
                 f.setUnderlineStyle(QTextCharFormat.WaveUnderline)
-                f.setUnderlineColor(theme().colour("danger") or QColor("#e05555"))
+                f.setUnderlineColor(theme().negative)
                 f.setToolTip(f"{{{name}}} has no values yet: add them in Variations")
             else:
                 c = color_of(name, names)

@@ -2993,7 +2993,10 @@ class MainWindow(QMainWindow):
     def _guide_choices(self) -> set[str]:
         """What the guide was told for this project ("text_only", "no_cast"); kept in the app's settings, not in
         the project (it changes nothing the clips are made with)."""
-        return set(self._guide_store().get(self._guide_key(), [])) if self.project is not None else set()
+        if self.project is None:
+            return set()
+        d = self._guide_store()
+        return set(d.get(self._guide_key(), [])) | set(d.get(str(self.project), []))    # (+ the key used before)
 
     def _guide_key(self) -> str:
         return str(self.project.resolve())      # (the same folder spelled another way is the same project)
@@ -3002,7 +3005,7 @@ class MainWindow(QMainWindow):
         if self.project is None:
             return
         d, key = self._guide_store(), self._guide_key()
-        d[key] = sorted(set(d.pop(key, [])) | {what})
+        d[key] = sorted(set(d.pop(key, [])) | set(d.pop(str(self.project), [])) | {what})
         self.qs.setValue("guideChoices", json.dumps(dict(list(d.items())[-50:])))     # (the last 50 projects)
         self._update_guide()
 
