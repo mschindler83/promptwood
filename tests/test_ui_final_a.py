@@ -316,3 +316,31 @@ def test_only_the_newest_lora_scan_counts(app, tmp_path, monkeypatch):
     finally:
         first_go.set()
         w.close()
+
+
+# ------------------------------------------------------------------ MWA-3: the model folders are searched in the background
+def test_gguf_models_are_found_off_the_gui_thread(app, tmp_path, monkeypatch):
+    import threading
+    import time
+    from pathlib import Path
+
+    from video_chain.ui import ui_logic as UL
+    from video_chain.ui.main_window import MainWindow
+    threads = []
+
+    def fake(roots=None):
+        threads.append(threading.current_thread())
+        return [Path("/models/a-Q4.gguf"), Path("/models/b-Q4.gguf")]
+    monkeypatch.setattr(UL, "find_gguf_models", fake)
+    w = MainWindow(settings(tmp_path), command=FAKE)
+    try:
+        assert w.llm_model.count() == 0 or threads            # (nothing was searched on the way up)
+        deadline = time.time() + 10
+        while time.time() < deadline and w.llm_model.count() < 2:
+            app.processEvents()
+            time.sleep(0.01)
+        assert [w.llm_model.itemText(i) for i in range(2)] == ["a-Q4.gguf", "b-Q4.gguf"]
+        assert threads and all(t is not threading.main_thread() for t in threads)
+        assert w.llm_on.isChecked()                            # a model was found and nothing was saved: on
+    finally:
+        w.close()

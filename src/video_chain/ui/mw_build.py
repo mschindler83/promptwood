@@ -24,7 +24,7 @@ from .mw_support import FileDrop, _CurrentStack
 from .preview import Preview, StartTile
 from .ui_logic import (
     DEFAULT_COMFY_LAUNCHER, DEFAULT_COMFY_URL, FRAME_CHOICES, LLM_DEFAULT_PORT, LLM_DEFAULT_SERVER, STEPS_TIP,
-    find_gguf_models, frames_text)
+    frames_text)
 from .mw_host import MainWindowHost
 
 
@@ -642,9 +642,7 @@ class BuildMixin(MainWindowHost):
         self.llm_model = QComboBox()
         self.llm_model.setEditable(True)
         self.llm_model.setToolTip("The GGUF model file (found in the model folders; a path can be typed too)")
-        for f in find_gguf_models():
-            self.llm_model.addItem(f.name, str(f))
-            self.llm_model.setItemData(self.llm_model.count() - 1, str(f), Qt.ItemDataRole.ToolTipRole)
+        # (the model folders are searched in the background after the settings are loaded: _scan_gguf_models)
         self.llm_port = QSpinBox()
         self.llm_port.setRange(1024, 65535)
         self.llm_port.setValue(LLM_DEFAULT_PORT)

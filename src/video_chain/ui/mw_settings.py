@@ -4,18 +4,40 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from PySide6.QtCore import Qt
+
 from .. import runpod as RP, tree as T, triggers
 from . import ui_logic as UL
 from .ui_logic import (
     DEFAULT_COMFY_LAUNCHER, DEFAULT_COMFY_URL, LAYOUT_VERSION, LLM_DEFAULT_PORT, LLM_DEFAULT_SERVER, MAX_RECENT)
 from .mw_host import MainWindowHost
 from .qsvalue import qs_value
+from .workers import run_in_background
 
 
 class SettingsMixin(MainWindowHost):
     """Window settings (QSettings), recent projects, the title."""
 
     # ------------------------------------------------------------------ settings
+    def _scan_gguf_models(self):
+        """Look for GGUF language models in the model folders, in the background (many folders, slow disks)."""
+        run_in_background(UL.find_gguf_models, on_done=self._gguf_found, owner=self)
+
+    def _gguf_found(self, files: list[Path]):
+        """The model folders were searched: fill the model list, keeping what is chosen or typed."""
+        text, data = self.llm_model.currentText(), self.llm_model.currentData()
+        for f in files:
+            if self.llm_model.findData(str(f)) < 0:
+                self.llm_model.addItem(f.name, str(f))
+                self.llm_model.setItemData(self.llm_model.count() - 1, str(f), Qt.ItemDataRole.ToolTipRole)
+        i = self.llm_model.findData(data) if data else -1
+        if i >= 0:
+            self.llm_model.setCurrentIndex(i)
+        elif text:
+            self.llm_model.setEditText(text)
+        if files and not self._llm_on_saved:
+            self.llm_on.setChecked(True)
+
     def _load_settings(self):
         q = self.qs
         self.keep_loaded.setChecked(qs_value(q, "keepLoaded", True, bool))
@@ -29,7 +51,8 @@ class SettingsMixin(MainWindowHost):
         self.civitai_site.setCurrentIndex(max(0, self.civitai_site.findData(
             triggers.set_site(qs_value(q, "civitaiSite", "", str)))))
         self.civitai_site.blockSignals(False)
-        self.llm_on.setChecked(qs_value(q, "llmServerOn", self.llm_model.count() > 0, bool))  # on when one is found
+        self._llm_on_saved = q.contains("llmServerOn")      # (not saved yet: on when a model is found, see _gguf_found)
+        self.llm_on.setChecked(qs_value(q, "llmServerOn", False, bool))
         self.llm_server.setText(qs_value(q, "llmServer", LLM_DEFAULT_SERVER, str))
         saved = qs_value(q, "llmModel", "", str)
         if saved:

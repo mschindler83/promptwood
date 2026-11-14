@@ -103,6 +103,7 @@ if TYPE_CHECKING:
         _remix_stuck: set[str]
         _remix_timer: QTimer
         _remixing: bool
+        _llm_on_saved: bool
         _runpod_loading: bool
         _runpod_section: tuple[QWidget, QWidget]
         _save_timer: QTimer

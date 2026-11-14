@@ -156,6 +156,7 @@ class MainWindow(BuildMixin, GeneratorMixin, ComfyMixin, ExportMixin, VideosMixi
         self.plugins = PluginHost(self)          # (before the settings: they open the last project, and the
         self.plugins.start()                     # plugins hear that)
         self._load_settings()
+        self._scan_gguf_models()
         self._end_leftover_llama()
         self._gpu_timer.start()
         self._comfy_timer.start()
@@ -191,6 +192,7 @@ class MainWindow(BuildMixin, GeneratorMixin, ComfyMixin, ExportMixin, VideosMixi
     _tracks_shown = None                        # what the audio tracks list shows (a signature)
     _canvas = None                              # the clips' size as _update_size_info last worked it out
     _llama = None                               # the llama.cpp server of this window
+    _llm_on_saved = False                       # a "llmServerOn" setting was saved
     _runpod_loading = False                     # the settings are being loaded (the RunPod fields change unsaved)
     # the generator run (mw_generator): checking the project first, then the clips
     _checking = False                           # Generate is checking the project (in the background)
