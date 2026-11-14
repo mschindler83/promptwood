@@ -19,6 +19,8 @@ import json
 import math
 import os
 import shutil
+import tempfile
+import threading
 import subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -173,11 +175,10 @@ def last_frame(video: Path, png: Path) -> None:
     n = probe(video)["frames"]
     if n < 1:
         raise RuntimeError(f"{video} has no frames")
-    Path(png).unlink(missing_ok=True)              # an older PNG there must not pass as this frame
-    _run(["ffmpeg", "-v", "error", "-y", "-i", str(video), "-vf", f"select=eq(n\\,{n - 1})", "-frames:v", "1",
-          str(png)])
-    if not Path(png).is_file():
-        raise RuntimeError(f"could not read the last frame of {Path(video).name}")
+    try:
+        frame_at(video, n - 1, png)
+    except RuntimeError as e:
+        raise RuntimeError(f"could not read the last frame of {Path(video).name}") from e
 
 
 START_BACKGROUND = "0x808080"   # what transparent parts of a start image become (H3 drops the alpha channel)
@@ -370,6 +371,7 @@ def convert_range(source: Path, out: Path, start: float, end: float, width: int,
 
 def frame_at(video: Path, index: int, png: Path) -> None:
     """Frame number index (0-based) of a video as PNG."""
+    Path(png).unlink(missing_ok=True)              # an older PNG there must not pass as this frame
     _run(["ffmpeg", "-v", "error", "-y", "-i", str(video), "-vf", f"select=eq(n\\,{int(index)})", "-frames:v", "1",
           "-update", "1", str(png)])
     if not Path(png).is_file():
@@ -607,6 +609,8 @@ def join_parts(videos: list[Path], out: Path, size: tuple[int, int], joins: list
 
 
 _SHA_CACHE: dict[tuple, str] = {}
+_SHA_CACHE_MAX = 4096
+_SHA_LOCK = threading.Lock()
 
 
 def file_signature(path: str | Path | None) -> str | None:
@@ -618,9 +622,15 @@ def file_signature(path: str | Path | None) -> str | None:
     except OSError:
         return None
     key = (str(path), st.st_size, st.st_mtime_ns)
-    if key not in _SHA_CACHE:
-        _SHA_CACHE[key] = sha1_file(Path(path))
-    return _SHA_CACHE[key]
+    with _SHA_LOCK:
+        if key in _SHA_CACHE:
+            return _SHA_CACHE[key]
+    digest = sha1_file(Path(path))
+    with _SHA_LOCK:
+        if len(_SHA_CACHE) >= _SHA_CACHE_MAX:
+            _SHA_CACHE.pop(next(iter(_SHA_CACHE)))      # (the oldest goes; dicts keep their order)
+        _SHA_CACHE[key] = digest
+    return digest
 
 
 def sha1_file(path: Path) -> str:
@@ -787,6 +797,40 @@ def keep_aside(root: Path, f: Path) -> bool:
         return False
 
 
+def keep_copy(root: Path, f: Path) -> bool:
+    """keep_aside for a file that stays where it is (a clip rebuilt in place): a copy of it goes to old/, under the
+    same naming. Returns False when the copy could not be made."""
+    f = Path(f)
+    try:
+        real = f.resolve()
+        rel = real.relative_to(Path(root).resolve())
+        target = Path(root).resolve() / OLD_DIR / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        k = 2
+        while target.exists():
+            target = target.with_name(f"{Path(rel.name).stem}_{k}{Path(rel.name).suffix}")
+            k += 1
+        shutil.copy2(real, target)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    """Write a small text file whole or not at all (a name of its own, on disk, then renamed over the old file): a
+    crash leaves the old text, not a cut-off one."""
+    path = Path(path)
+    fd, name = tempfile.mkstemp(prefix=path.name + ".", suffix=".part", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(name, path)
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
 def replace_kept(root: Path, target: Path, write: Callable[[Path], None]) -> None:
     """Write a video the app keeps under a fixed name (a joined path, the joined film) again: write(file) makes the
     new one next to it, the one before goes to old/ (keep_aside: never deleted), then the new one takes its name.
@@ -850,8 +894,10 @@ def run_chain(generator: Generator, image: Path, prompts: list[str], out_dir: Pa
             generator.generate(prompt, current, new_video, new_last, s, settings=settings or None)
             if not new_video.exists() or not new_last.exists():
                 raise RuntimeError(f"the generator did not write {video.name} and {last.name}")
-            for f in (video, last):               # the old clip is never deleted: it goes to old/
-                keep_aside(out_dir, f)
+            stuck = [f for f in (video, last) if not keep_aside(out_dir, f)]   # never deleted: it goes to old/
+            if stuck:                             # (open in a player on a share: the new clip stays as .new)
+                raise RuntimeError(f"{stuck[0].name} could not be moved to {OLD_DIR}/ (is it open?); the new clip "
+                                   f"is kept as {new_video.name}")
             new_video.replace(video)              # ... once the new one exists
             new_last.replace(last)
             emit({"e": "clip", "k": k, "n": len(prompts), "state": "done", "video": str(video), "frame": str(last)})
