@@ -800,7 +800,7 @@ def apply_lines(project: Path, tree: T.Tree, nid: str, r: dict[str, Any]) -> dic
     node.overrides = cast(T.schema.Overrides, ov)
     if old and old_tr and (old_tr.get("tts") or {}).get("clip") == nid \
             and not [u for u in T.track_users(tree, old) if u != nid]:
-        T.remove_track(project, tree, old)
+        T.remove_track(tree, old)
     return {"track": tid, "secs": r["secs"], "frames": frames, "lines": len(r["lines"])}
 
 

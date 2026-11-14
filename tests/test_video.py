@@ -449,7 +449,7 @@ def test_audio_track_carried_on_from_clip_to_clip(project, tmp_path):
     e = t.add(d.id, "after the end")
     e.overrides = {"source_sound": f"track:{tid}"}
     assert any("has ended before clip" in m for m in T.source_sound_problems(t, [d.id, e.id], project))
-    T.remove_track(project, t, tid)
+    T.remove_track(t, tid)
     assert any("was removed" in m for m in T.source_sound_problems(t, [a.id], project))
     assert T.add_track(project, t, src, 0.0, 3.0)["id"] != tid       # ids are never reused
     with pytest.raises(ValueError, match="at least 2 s"):

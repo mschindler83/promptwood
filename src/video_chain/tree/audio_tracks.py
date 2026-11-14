@@ -166,7 +166,7 @@ def recut_track(project: Path, tree: Tree, tid: str, source: Path, start: float,
     return entry
 
 
-def remove_track(project: Path, tree: Tree, tid: str) -> None:
+def remove_track(tree: Tree, tid: str) -> None:
     """Take a track out of the list; its file stays until no scene lists it (unused_track_files)."""
     tree.options["tracks"] = [t for t in tracks(tree) if t["id"] != tid]
 

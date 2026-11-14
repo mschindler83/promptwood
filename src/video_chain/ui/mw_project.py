@@ -234,6 +234,7 @@ class ProjectMixin(MainWindowHost):
             else:
                 film.current = (film.scene_of(folder) or film.scenes[0]).id
             tree = T.load(folder)
+            T.sweep_scratch(folder)                # (the job folders a killed run left in nodes/)
         except (OSError, ValueError) as e:
             msg = f"Could not open the project: {e}"
             self._report_error(msg)

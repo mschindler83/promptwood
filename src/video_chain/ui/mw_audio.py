@@ -382,7 +382,7 @@ class AudioMixin(MainWindowHost):
             return
         try:
             assert self.tree is not None
-            T.remove_track(self.project, self.tree, tr["id"])
+            T.remove_track(self.tree, tr["id"])
         except (OSError, RuntimeError, ValueError) as e:
             self._report_error(f"Could not remove the audio track: {e}")
             return
