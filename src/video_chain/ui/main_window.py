@@ -181,7 +181,8 @@ class MainWindow(BuildMixin, GeneratorMixin, ComfyMixin, ExportMixin, VideosMixi
     _cmp_memo: dict | None = None
     # what a frozen clip / video cannot do: it would change the clip as made (or what it ends at)
     FROZEN_LOCKED = {"end_image", "end_video", "end_ai", "end_clear", "revert", "refine", "speak", "handover",
-                     "handover_clear", "edit", "split", "swap", "swap_undo", "video", "keyframe"}
+                     "handover_clear", "edit", "split", "swap", "swap_undo", "video", "keyframe", "start_own",
+                     "start_own_clear"}
     _trigger_scan_online = True                 # the running trigger word scan may ask CivitAI
     _left_w = 0                                 # the width of the left panel (kept while it is hidden)
     _shared_sent = None                         # the shared settings last written into the film's other scenes

@@ -427,6 +427,9 @@ class NodeMixin:
             acts = {m.addAction("Another picture for this row…"): "start_own",
                     m.addAction("Start from the project's start image instead"): "start_own_clear",
                     m.addAction("More start images… (the same clip for each)"): "start_rows"}
+            for a_, what in acts.items():            # (a frozen clip refuses to change its start image)
+                if self._is_locked(self.tree.nodes[own], what):
+                    a_.setEnabled(False)
             chosen = self._exec_menu(m, pos.toPoint() if hasattr(pos, "toPoint") else pos)
             if chosen in acts:
                 act = acts[chosen]
