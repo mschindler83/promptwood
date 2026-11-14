@@ -507,3 +507,73 @@ def test_lay_the_sound_over(project, tmp_path):
     assert T.Checker(project, t).status(a.id) == "done"
     t.nodes[a.id].overrides.pop("sound_over")                         # lip sync again: made again
     assert T.Checker(project, t).status(a.id) == "changed"
+
+
+def make_split_source(path: Path, size="160x90") -> Path:
+    """A synthetic video, red on the left half and blue on the right (one second, 30 fps): shows a turn."""
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"color=red:s={size}:r=30:d=1",
+                    "-f", "lavfi", "-i", f"color=blue:s={size}:r=30:d=1", "-filter_complex", "[0:v][1:v]hstack[v]",
+                    "-map", "[v]", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(path)], check=True)
+    return path
+
+
+def at(png: Path, x: float, y: float):
+    im = Image.open(png).convert("RGB")
+    return im.getpixel((int(x * (im.width - 1)), int(y * (im.height - 1))))
+
+
+@pytest.mark.parametrize("rotate, top, bottom", [(90, "red", "blue"), (270, "blue", "red")])
+def test_convert_range_rotated(tmp_path, rotate, top, bottom):
+    """A quarter turn: the 320x180 video (red left, blue right) becomes a portrait clip; clockwise the left half
+    is on top."""
+    src = make_split_source(tmp_path / "split.mp4")
+    out = tmp_path / "c.mp4"
+    n = chain.convert_range(src, out, 0.0, 1.0, 224, 384, rotate=rotate)
+    info = chain.probe(out)
+    assert n == 24 and (info["width"], info["height"]) == (224, 384)
+    chain.frame_at(out, 0, tmp_path / "f.png")
+    assert is_colour(at(tmp_path / "f.png", 0.5, 0.1), top) and is_colour(at(tmp_path / "f.png", 0.5, 0.9), bottom)
+
+
+def test_convert_range_half_turn(tmp_path):
+    src = make_split_source(tmp_path / "split.mp4")
+    out = tmp_path / "c.mp4"
+    chain.convert_range(src, out, 0.0, 1.0, 384, 224, rotate=180)
+    chain.frame_at(out, 0, tmp_path / "f.png")
+    assert is_colour(at(tmp_path / "f.png", 0.1, 0.5), "blue") and is_colour(at(tmp_path / "f.png", 0.9, 0.5), "red")
+
+
+def test_rotation_values():
+    assert [chain.rotation(v) for v in (0, 90, 180, 270, 360, -90, 450, 45, "x", None)] == \
+        [0, 90, 180, 270, 0, 270, 90, 0, 0, 0]
+    assert chain.rotated_size(320, 180, 90) == (180, 320) and chain.rotated_size(320, 180, 180) == (320, 180)
+    assert chain.rotate_filter(0) == ""
+
+
+def test_rotated_video_node(project, tmp_path):
+    """The turn is kept in the node's source (left out when not turned, so older keys stay the same), the size
+    follows the turned video, the conversion is turned, and it survives saving, copying and splitting."""
+    src = make_split_source(tmp_path / "split.mp4")
+    t = T.load(project)
+    plain = t.add_video(None, str(src), 0.0, 1.0)
+    assert "rotate" not in plain.source and T.size_source(project, t) == (320, 90)     # two 160x90 halves
+    base = T.current_settings(project, t.options, t)
+    key = T.video_key(plain, base)
+    assert "rotate" not in key
+    plain.source = T.video_source(src, 0.0, 1.0, 90)
+    assert plain.source["rotate"] == 90 and T.size_source(project, t) == (90, 320)
+    base = T.current_settings(project, t.options, t)
+    assert base["height"] > base["width"]                     # the clips follow the portrait video now
+    assert T.video_key(plain, base)["rotate"] == 90 and T.video_key(plain, base) != key
+    made = T.make_video(project, plain, base)
+    chain.frame_at(project / made["video"], 0, tmp_path / "f.png")
+    assert is_colour(at(tmp_path / "f.png", 0.5, 0.1), "red") and is_colour(at(tmp_path / "f.png", 0.5, 0.9), "blue")
+    plain.made = made
+    T.save(project, t)
+    t2 = T.load(project)
+    v = t2.nodes[plain.id]
+    assert v.source["rotate"] == 90 and T.Checker(project, t2).status(v.id) == "done"
+    c = T.copy_video(project, t2, v, None)
+    assert c.source["rotate"] == 90 and T.Checker(project, t2).status(c.id) == "done"
+    _clip, rest = t2.split_video(v.id, 0.5)
+    assert v.source["rotate"] == 90 and rest.source["rotate"] == 90

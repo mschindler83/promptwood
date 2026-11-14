@@ -1362,6 +1362,98 @@ def test_video_range_dialog(app, tmp_path):
     dlg.close()
 
 
+def test_video_range_dialog_rotation(app, tmp_path):
+    """A quarter turn in the range window: the size it reports, the chain's size worked out again, the face
+    picture and the first / last frame are turned; R and Shift+R turn it back."""
+    from video_chain.ui.video_editor import VideoRangeDialog
+    src = make_real_video(tmp_path / "real.mp4", secs=2.0)              # 320x180
+    asked, got = [], []
+
+    def canvas_for(file, rot):
+        asked.append(rot)
+        w, h = chain.rotated_size(320, 180, rot)
+        return chain.canvas_size(w, h, 512)
+    dlg = VideoRangeDialog(None, str(src), canvas=(672, 384), player=False, canvas_for=canvas_for,
+                           on_reference=lambda p: got.append(QImage(p).size().toTuple()) or True)
+    from PySide6.QtGui import QImage
+    assert dlg.rotate == 0 and dlg.b_rot_right.isEnabled() and dlg.info_label.text().startswith("320×180 ·")
+    dlg.b_rot_right.click()
+    assert dlg.rotate == 90 and asked[-1] == 90 and dlg.canvas == (384, 672)
+    assert dlg.info_label.text().startswith("180×320 · turned 90° right")
+    assert "turned 90° right, cut to 384×672" in dlg.summary.text()
+    assert dlg.reference_here() and got == [(180, 320)]
+    dlg._update_frames()
+    wait(app, lambda: dlg.first_tile.has_image() and dlg.last_tile.has_image(), timeout=30)
+    dlg.b_rot_left.click()
+    dlg.b_rot_left.click()
+    assert dlg.rotate == 270 and dlg.canvas == (384, 672)
+    dlg.set_rotation(360)
+    assert dlg.rotate == 0 and dlg.canvas == (672, 384) and "turned" not in dlg.summary.text()
+    dlg.close()
+    again = VideoRangeDialog(None, str(src), 0.0, 1.0, canvas=(384, 672), player=False, rotate=180)
+    assert again.rotate == 180 and "turned 180° right" in again.info_label.text()
+    again.close()
+
+
+def test_video_view_rotation(app, tmp_path):
+    """The preview turns on top of what the player gives; a phone video's own rotation flag is applied as ffmpeg
+    applies it (red left / blue right, flagged 90° counter-clockwise: blue on top)."""
+    import subprocess
+
+    from PySide6.QtCore import QUrl
+    from PySide6.QtGui import QImage
+    from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame, QVideoSink
+
+    from video_chain.ui.widgets import VideoView, frame_image
+    cpu = VideoView(gpu=False)
+    cpu._raw = QImage(320, 180, QImage.Format_RGB888)
+    cpu.set_rotation(90)
+    assert cpu.image().size().toTuple() == (180, 320)
+    cpu.set_rotation(180)
+    assert cpu.image().size().toTuple() == (320, 180)
+    with pytest.raises(RuntimeError):
+        VideoView(gpu=True).set_rotation(90)
+    split, phone = tmp_path / "split.mp4", tmp_path / "phone.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=red:s=32x36:r=30:d=0.5", "-f", "lavfi",
+                    "-i", "color=blue:s=32x36:r=30:d=0.5", "-filter_complex", "[0:v][1:v]hstack", "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p", str(split)], check=True)
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-display_rotation", "90", "-i", str(split), "-c", "copy",
+                    str(phone)], check=True)
+    sink, player, got = QVideoSink(), QMediaPlayer(), []
+    player.setVideoOutput(sink)
+    sink.videoFrameChanged.connect(lambda f: f.isValid() and not got and got.append(QVideoFrame(f)))
+    player.setSource(QUrl.fromLocalFile(str(phone)))
+    player.pause()                                  # (the first frame, without playing: the tests never play)
+    wait(app, lambda: got, timeout=15)
+    player.stop()
+    img = frame_image(got[0])
+    assert img.size().toTuple() == (36, 64) == got[0].toImage().size().toTuple()
+    assert img.pixelColor(18, 3).blue() > 200 and img.pixelColor(18, 60).red() > 200
+
+
+def test_rotated_real_video_in_window(app, win, tmp_path):
+    """A video added turned: the clips follow its portrait size; turning it back converts it again, unturned."""
+    src = make_real_video(tmp_path / "real.mp4")
+    win.open_project(tmp_path / "proj")
+    win.node_action("delete", "n1")
+    v = win.add_video(None, str(src), 0.0, 1.0, rotate=90)
+    wait(app, lambda: not win._converts)
+    node = win.tree.nodes[v]
+    assert win.state(v) == "done" and node.source["rotate"] == 90 and node.made["key"]["rotate"] == 90
+    info = chain.probe(win.project / node.made["video"])
+    assert info["height"] > info["width"]
+    assert "turned 90° right" in win.cards[0].range.text()
+    assert win._canvas_for(str(src), 0, v)[0] > win._canvas_for(str(src), 0, v)[1]   # as if it were not turned
+    win.set_video_range(v, str(src), 0.0, 1.0)                 # (no rotation given: kept)
+    assert win.state(v) == "done" and win.tree.nodes[v].source["rotate"] == 90
+    win.set_video_range(v, str(src), 0.0, 1.0, 0)
+    wait(app, lambda: not win._converts)
+    node = win.tree.nodes[v]
+    assert "rotate" not in node.source and win.state(v) == "done"
+    info = chain.probe(win.project / node.made["video"])
+    assert info["width"] > info["height"]
+
+
 def test_picker_cells_show_whole_thumbnails(app, tmp_path):
     """Every cell has room for the whole thumbnail (the first item, a folder icon, used to set a tiny size for
     all of them), also after zooming."""

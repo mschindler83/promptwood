@@ -299,16 +299,40 @@ def probe_source(path: Path) -> dict:
             "audio": any(s.get("codec_type") == "audio" for s in streams)}
 
 
+ROTATIONS = (0, 90, 180, 270)                         # a real video turned clockwise by this many degrees
+_ROTATE_VF = {90: "transpose=clock", 180: "hflip,vflip", 270: "transpose=cclock"}
+
+
+def rotation(value) -> int:
+    """A rotation setting as 0, 90, 180 or 270 (clockwise; anything else: 0)."""
+    try:
+        r = int(value) % 360
+    except (TypeError, ValueError):
+        return 0
+    return r if r in ROTATIONS else 0
+
+
+def rotate_filter(degrees) -> str:
+    """The ffmpeg filter that turns the picture clockwise by degrees ("" for none). ffmpeg has already applied a
+    phone video's own rotation flag before it, so this turns the picture as the player shows it."""
+    return _ROTATE_VF.get(rotation(degrees), "")
+
+
+def rotated_size(width: int, height: int, degrees) -> tuple[int, int]:
+    return (height, width) if rotation(degrees) % 180 else (width, height)
+
+
 def range_frames(start: float, end: float, fps: int = FPS) -> int:
     """Frames of a time range at the chain's frame rate."""
     return max(0, round((float(end) - float(start)) * fps))
 
 
 def convert_range(source: Path, out: Path, start: float, end: float, width: int, height: int,
-                  fps: int = FPS) -> int:
+                  fps: int = FPS, rotate: int = 0) -> int:
     """Cut start..end (seconds) out of a real video and turn it into a chain clip: fps frames per second (frames
-    dropped or repeated, no interpolation), scaled to fill width x height and cut to it at the centre, sound as
-    48 kHz stereo (if the source has sound). Written under a temporary name first. Returns the frame count."""
+    dropped or repeated, no interpolation), turned clockwise by rotate degrees (0/90/180/270: lossless, before the
+    scaling), scaled to fill width x height and cut to it at the centre, sound as 48 kHz stereo (if the source has
+    sound). Written under a temporary name first. Returns the frame count."""
     info = probe_source(source)
     if info["duration"] and float(end) > info["duration"]:
         end = info["duration"]                       # the sound is cut to the frames, not to the asked range
@@ -317,7 +341,8 @@ def convert_range(source: Path, out: Path, start: float, end: float, width: int,
         raise ValueError("the range is shorter than one frame")
     out = Path(out)
     tmp = out.with_name(out.stem + ".part" + out.suffix)
-    vf = (f"fps={fps},scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,"
+    turn = rotate_filter(rotate)
+    vf = (f"fps={fps},{turn + ',' if turn else ''}scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,"
           f"crop={width}:{height},setsar=1,format=yuv420p")
     cmd = ["ffmpeg", "-v", "error", "-y", "-ss", f"{float(start):.6f}", "-i", str(source), "-map", "0:v:0",
            "-vf", vf, "-frames:v", str(n), "-c:v", "libx264", "-crf", "12", "-preset", "slow"]

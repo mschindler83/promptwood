@@ -1222,8 +1222,9 @@ class VideoCard(QFrame):
         self.file.setText(f.name + ("" if f.is_file() else "  (file not found)"))
         self.file.setToolTip(str(f))
         n = chain.range_frames(src.get("start", 0), src.get("end", 0))
+        rot = T.source_rotation(src)
         self.range.setText(f"{fmt_time(src.get('start', 0))} – {fmt_time(src.get('end', 0))} of the file · "
-                           f"{n} frames at 24 fps")
+                           f"{n} frames at 24 fps" + (f" · turned {rot}° right" if rot else ""))
 
     def set_state(self, state: str, pixmap: QPixmap | None, step: str = ""):
         self.state = state
@@ -4990,7 +4991,8 @@ class MainWindow(QMainWindow):
             text = n.prompt
             if n.is_video:
                 text = (f"{Path(n.source['file']).name} · {fmt_time(n.source['start'])}–"
-                        f"{fmt_time(n.source['end'])}")
+                        f"{fmt_time(n.source['end'])}"
+                        + (f" · ↻{T.source_rotation(n.source)}°" if T.source_rotation(n.source) else ""))
             infos.append(NodeInfo(n.id, n.parent or START,
                                   f"{'Video' if n.is_video else 'Clip'} {self.tree.depth(n.id)}", f"#{n.id[1:]}",
                                   text, self.state(n.id), self._pixmap(self._node_frame(n)),
@@ -6410,15 +6412,23 @@ class MainWindow(QMainWindow):
         return True
 
     # ---- real videos
-    def _canvas_for(self, file: str | None = None) -> tuple[int, int] | None:
-        """The video size clips are made in; without a start image or video yet, the one this file would give."""
+    def _canvas_for(self, file: str | None = None, rotate: int = 0, nid: str | None = None) -> tuple[int, int] | None:
+        """The video size clips are made in; without a start image or video yet, the one this file would give
+        (turned clockwise by rotate). nid: the video node being edited, as if it had this file and rotation (the
+        size may follow it)."""
         try:
-            base = T.Checker(self.project, self.tree).base()
+            tree = self.tree
+            if nid is not None and nid in tree.nodes and tree.nodes[nid].is_video:
+                tree = copy.deepcopy(tree)
+                src = tree.nodes[nid].source
+                tree.nodes[nid].source = T.video_source(file or src["file"], src["start"], src["end"], rotate)
+            base = T.Checker(self.project, tree).base()
             if base is not None:
                 return base["width"], base["height"]
             if file:
                 info = chain.probe_source(Path(file))
-                return chain.canvas_size(info["width"], info["height"], int(self.tree.options.get("resolution", 512)))
+                w, h = chain.rotated_size(info["width"], info["height"], rotate)
+                return chain.canvas_size(w, h, int(self.tree.options.get("resolution", 512)))
         except Exception:  # noqa: BLE001
             pass
         return None
@@ -6435,17 +6445,19 @@ class MainWindow(QMainWindow):
         f = choose_video(self, self.qs, places=self._picker_places(), collections=self.project_media("video"))
         if not f:
             return
-        dlg = VideoRangeDialog(self, f, canvas=self._canvas_for(f), settings=self.qs)
+        dlg = VideoRangeDialog(self, f, canvas=self._canvas_for(f), settings=self.qs,
+                               canvas_for=lambda file, rot: self._canvas_for(file, rot))
         if dlg.exec() != QDialog.Accepted or not dlg.file:
             return
-        self.add_video(parent, dlg.file, dlg.start, dlg.end)
+        self.add_video(parent, dlg.file, dlg.start, dlg.end, dlg.rotate)
 
-    def add_video(self, parent: str | None, file: str, start: float, end: float) -> str | None:
-        """Put a range of a real video after parent (None: at the start) and convert it right away."""
+    def add_video(self, parent: str | None, file: str, start: float, end: float, rotate: int = 0) -> str | None:
+        """Put a range of a real video (turned clockwise by rotate degrees) after parent (None: at the start) and
+        convert it right away."""
         if self.tree is None or self.running:
             return None
         try:
-            node = self.tree.add_video(parent, os.path.abspath(file), start, end)
+            node = self.tree.add_video(parent, os.path.abspath(file), start, end, rotate)
         except ValueError as e:
             self.status.setText(str(e))
             return None
@@ -6466,17 +6478,22 @@ class MainWindow(QMainWindow):
         f = src["file"]
         if not Path(f).is_file():
             self.status.setText(f"{Path(f).name} is not there any more; choose the file again.")
+        rot = T.source_rotation(src)
         dlg = VideoRangeDialog(self, f if Path(f).is_file() else "", src["start"], src["end"],
-                               canvas=self._canvas_for(f), settings=self.qs, on_reference=self.add_reference)
+                               canvas=self._canvas_for(f, rot, nid), settings=self.qs, on_reference=self.add_reference,
+                               rotate=rot, canvas_for=lambda file, r: self._canvas_for(file, r, nid))
         if dlg.exec() != QDialog.Accepted or not dlg.file:
             return
-        self.set_video_range(nid, dlg.file, dlg.start, dlg.end)
+        self.set_video_range(nid, dlg.file, dlg.start, dlg.end, dlg.rotate)
 
-    def set_video_range(self, nid: str, file: str, start: float, end: float) -> None:
+    def set_video_range(self, nid: str, file: str, start: float, end: float, rotate: int | None = None) -> None:
+        """A video node's file, range and rotation (None: as it is turned now)."""
         if self.tree is None or self.running or nid not in self.tree.nodes:
             return
         node = self.tree.nodes[nid]
-        new = {"file": os.path.abspath(file), "start": round(float(start), 4), "end": round(float(end), 4)}
+        if rotate is None:
+            rotate = T.source_rotation(node.source)
+        new = T.video_source(os.path.abspath(file), start, end, rotate)
         if new["end"] <= new["start"]:
             self.status.setText("The end of the range must be after its start.")
             return
@@ -6545,7 +6562,8 @@ class MainWindow(QMainWindow):
             return
         key = made.get("key") or {}
         if {k: key.get(k) for k in ("file", "start", "end")} != {k: (node.source or {}).get(k)
-                                                               for k in ("file", "start", "end")}:   # changed meanwhile
+                                                               for k in ("file", "start", "end")} \
+                or chain.rotation(key.get("rotate", 0)) != T.source_rotation(node.source):   # changed meanwhile
             discard()
             self.refresh()
             return

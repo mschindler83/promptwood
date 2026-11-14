@@ -196,15 +196,16 @@ class Tree:
     def can_add_video(self, parent: str | None) -> bool:
         return self.video_child(parent) is None
 
-    def add_video(self, parent: str | None, file: str, start: float, end: float) -> Node:
-        """A real video (file, start..end seconds) after parent. A generated clip can lead into one video only."""
+    def add_video(self, parent: str | None, file: str, start: float, end: float, rotate: int = 0) -> Node:
+        """A real video (file, start..end seconds, turned clockwise by rotate degrees) after parent. A generated clip
+        can lead into one video only."""
         if not self.can_add_video(parent):
             raise ValueError(f"clip #{parent[1:]} already leads into a video")
         if float(end) <= float(start):
             raise ValueError("the end of the range must be after its start")
         node = self.add(parent, "")
         node.kind = VIDEO
-        node.source = {"file": str(file), "start": round(float(start), 4), "end": round(float(end), 4)}
+        node.source = video_source(file, start, end, rotate)
         return node
 
     def split_video(self, nid: str, at: float) -> tuple[Node, Node]:
@@ -1578,6 +1579,19 @@ def set_start_image(project: Path, image: Path, tree: Tree) -> None:
     tree.image = str(Path(image).resolve())
 
 
+def video_source(file: str, start: float, end: float, rotate: int = 0) -> dict:
+    """A video node's source: the file, the range (seconds) and, when it is turned, "rotate" (clockwise degrees;
+    left out at 0, so videos without it keep the records and keys they had)."""
+    src = {"file": str(file), "start": round(float(start), 4), "end": round(float(end), 4)}
+    if chain.rotation(rotate):
+        src["rotate"] = chain.rotation(rotate)
+    return src
+
+
+def source_rotation(src: dict | None) -> int:
+    return chain.rotation((src or {}).get("rotate", 0))
+
+
 # ----------------------------------------------------------------------------- state
 
 _SRC_INFO: dict[tuple, dict] = {}
@@ -1629,8 +1643,8 @@ def size_source(project: Path, tree: "Tree | None") -> tuple[int, int] | None:
             if not n.is_video:
                 continue
             info = source_info(n.source["file"])
-            if info:
-                return info["width"], info["height"]
+            if info:                                 # (as the video is turned)
+                return chain.rotated_size(info["width"], info["height"], source_rotation(n.source))
             key = (n.made or {}).get("key") or {}
             if key.get("width") and key.get("height"):     # the file is gone, its converted clip is still here
                 return int(key["width"]), int(key["height"])
@@ -1640,10 +1654,13 @@ def size_source(project: Path, tree: "Tree | None") -> tuple[int, int] | None:
 
 
 def video_key(node: Node, base: dict) -> dict:
-    """What a video node's converted clip depends on: the source file (by size and date), the range and the size."""
+    """What a video node's converted clip depends on: the source file (by size and date), the range, its rotation
+    (only when turned) and the size."""
     src = node.source or {}
     key = {"file": src.get("file"), "start": src.get("start"), "end": src.get("end"),
            "width": base["width"], "height": base["height"], "size": None, "mtime_ns": None}
+    if source_rotation(src):
+        key["rotate"] = source_rotation(src)
     try:
         st = Path(src.get("file") or "").stat()
         key["size"], key["mtime_ns"] = st.st_size, st.st_mtime_ns
@@ -2346,7 +2363,8 @@ def make_video(project: Path, node: Node, base: dict) -> dict:
     first = frame.with_name(frame.stem + "_first.png")
     video.parent.mkdir(parents=True, exist_ok=True)
     try:
-        n = chain.convert_range(Path(src["file"]), video, src["start"], src["end"], base["width"], base["height"])
+        n = chain.convert_range(Path(src["file"]), video, src["start"], src["end"], base["width"], base["height"],
+                                rotate=source_rotation(src))
         chain.frame_at(video, 0, first)
         chain.frame_at(video, n - 1, frame)
     except BaseException:
@@ -2360,7 +2378,8 @@ def make_video(project: Path, node: Node, base: dict) -> dict:
 def copy_video(project: Path, tree: Tree, src: Node, parent: str | None) -> Node:
     """A copy of a video node (same file and range) after parent; its converted files are copied too (new names),
     so the copy is ready at once and deleting one never touches the other's files."""
-    node = tree.add_video(parent, src.source["file"], src.source["start"], src.source["end"])
+    node = tree.add_video(parent, src.source["file"], src.source["start"], src.source["end"],
+                          source_rotation(src.source))
     if src.made and all((Path(project) / src.made[k]).is_file() for k in ("video", "frame", "first")):
         video, frame = new_clip_files(project, node.id)
         first = frame.with_name(frame.stem + "_first.png")
@@ -2904,7 +2923,8 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
                 key = node.made.get("key") or {}
                 w, h = refine_size(int(key["width"]), int(key["height"]), size)
                 log(f"[{k}/{len(order)}] {node.id}: converting {Path(src['file']).name} at {w}x{h}")
-                chain.convert_range(Path(src["file"]), target, src["start"], src["end"], w, h)
+                chain.convert_range(Path(src["file"]), target, src["start"], src["end"], w, h,
+                                    rotate=source_rotation(src))
             else:
                 s = node.made.get("settings") or {}
                 w, h = refine_size(int(s["width"]), int(s["height"]), size)

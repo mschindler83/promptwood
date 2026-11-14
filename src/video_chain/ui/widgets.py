@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QObject, QRect, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
+from PySide6.QtGui import QColor, QImage, QPainter, QPixmap, QTransform
 from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QHBoxLayout, QLabel, QSizePolicy,
                                QToolButton, QVBoxLayout, QWidget)
 
@@ -12,6 +12,7 @@ from .theme import icon, theme
 def frame_image(frame) -> QImage:
     """A decoded video frame as an RGB image, converted on the CPU (YUV420P / NV12, limited or full range, BT.709
     when the frame says so, else BT.601 as Qt does): QVideoFrame.toImage() may use a GPU (OpenGL through the EGL driver that crashed).
+    Turned by the stream's rotation (a phone video's flag, in the frame's format), as toImage() and ffmpeg turn it.
     Other formats fall back to toImage()."""
     from PySide6.QtMultimedia import QVideoFrame, QVideoFrameFormat
     try:
@@ -55,7 +56,9 @@ def frame_image(frame) -> QImage:
     rgb[..., 1] = y - cgu * u - cgv * v
     rgb[..., 2] = y + cb * u
     out = np.ascontiguousarray(rgb.clip(0, 255).astype(np.uint8))
-    return QImage(out.data, w, h, w * 3, QImage.Format_RGB888).copy()
+    img = QImage(out.data, w, h, w * 3, QImage.Format_RGB888).copy()
+    turn = sf.rotation().value if hasattr(sf, "rotation") else 0
+    return img.transformed(QTransform().rotate(turn)) if turn else img
 
 
 GPU_VIDEO = False          # set at start-up from the setting (app.py): players draw through Qt's GPU video surface
@@ -73,12 +76,16 @@ class VideoView(QWidget):
     clips, but it renders through its own EGL/OpenGL window, and NVIDIA's EGL driver crashed there once (segfault
     in libnvidia-eglcore while the first frame was drawn) when ComfyUI held nearly all GPU memory after a long clip.
     CPU: frames come through a QVideoSink and are painted like an image (kept in proportion, black around): never
-    crashes, but decoding, colour conversion and smooth scaling of every frame on the CPU lag with large clips."""
+    crashes, but decoding, colour conversion and smooth scaling of every frame on the CPU lag with large clips.
+
+    set_rotation (CPU only) turns the picture clockwise on top of what the player shows."""
 
     def __init__(self, parent=None, gpu: bool | None = None):
         super().__init__(parent)
         self.gpu = GPU_VIDEO if gpu is None else bool(gpu)
         self._img = QImage()
+        self._raw = QImage()                       # (CPU: the frame before the turn)
+        self.rotation = 0
         self._shown: tuple | None = None           # (the frame, the size) -> the frame scaled to fit, for painting
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         if self.gpu:
@@ -99,8 +106,21 @@ class VideoView(QWidget):
     def _frame(self, frame):
         if not frame.isValid():                    # (the end of a clip: its last frame stays, as in QVideoWidget)
             return
-        self._img = frame_image(frame)
+        self._raw = frame_image(frame)
+        self._turn()
+
+    def _turn(self):
+        self._img = self._raw.transformed(QTransform().rotate(self.rotation)) if self.rotation and \
+            not self._raw.isNull() else self._raw
         self.update()
+
+    def set_rotation(self, degrees: int) -> None:
+        """Turn the picture clockwise by 0, 90, 180 or 270 degrees (CPU views only: Qt's video widget draws the
+        frames itself, and its frames' rotation setting was not seen to take effect)."""
+        if self.gpu:
+            raise RuntimeError("a GPU video view cannot be turned; use VideoView(gpu=False)")
+        self.rotation = int(degrees) % 360
+        self._turn()
 
     def image(self) -> QImage:
         """The frame shown (GPU: converted only when asked)."""
@@ -110,7 +130,7 @@ class VideoView(QWidget):
         return self._img
 
     def clear(self):
-        self._img = QImage()
+        self._img = self._raw = QImage()
         if self.gpu:
             from PySide6.QtMultimedia import QVideoFrame
             self.sink.setVideoFrame(QVideoFrame())

@@ -1,8 +1,9 @@
 """Video range editor: choose the part of a real video that goes into the chain.
 
 A player with a timeline (drag the two handles or set them at the playhead), frame steps in the source's own frame
-rate, and the first and last frame of the range as the chain will see them (24 fps, cut to the chain's size):
-the first frame is where a generated clip before the video ends, the last one where a clip after it starts.
+rate, a quarter turn either way for a video filmed sideways, and the first and last frame of the range as the
+chain will see them (24 fps, turned, cut to the chain's size): the first frame is where a generated clip before the
+video ends, the last one where a clip after it starts.
 """
 from __future__ import annotations
 
@@ -127,15 +128,20 @@ class _Frames(QObject):
 
 
 class VideoRangeDialog(QDialog):
-    """Pick a video file and a range of it. file / start / end hold the result."""
+    """Pick a video file, a range of it and its rotation. file / start / end / rotate hold the result.
+
+    canvas: the chain's video size; canvas_for(file, rotate) -> size or None, when given, works it out again for
+    the file and rotation chosen (the size may follow this video)."""
 
     def __init__(self, parent=None, file: str = "", start: float | None = None, end: float | None = None,
                  canvas: tuple[int, int] | None = None, settings: QSettings | None = None, player: bool = True,
-                 on_reference=None):
+                 on_reference=None, rotate: int = 0, canvas_for=None):
         super().__init__(parent)
         self.setWindowTitle("Real video")
         self.resize(980, 760)
         self.settings, self.canvas, self.want_player = settings, canvas, player
+        self.canvas_for = canvas_for
+        self.rotate = chain.rotation(rotate)
         self.on_reference = on_reference              # callable(png path) -> bool: crop and add a face picture
         self.file, self.info = "", None
         self.start, self.end = 0.0, 0.0
@@ -187,6 +193,15 @@ class VideoRangeDialog(QDialog):
         crow.addSpacing(8)
         crow.addWidget(self.time)
         crow.addStretch(1)
+        self.b_rot_left = QPushButton("↺ 90°")
+        self.b_rot_left.setToolTip("Turn the video a quarter turn to the left (Shift+R); the chain gets it turned")
+        self.b_rot_left.clicked.connect(lambda: self.set_rotation(self.rotate - 90))
+        self.b_rot_right = QPushButton("↻ 90°")
+        self.b_rot_right.setToolTip("Turn the video a quarter turn to the right (R); the chain gets it turned")
+        self.b_rot_right.clicked.connect(lambda: self.set_rotation(self.rotate + 90))
+        crow.addWidget(self.b_rot_left)
+        crow.addWidget(self.b_rot_right)
+        crow.addSpacing(16)
         self.b_play_sel = QPushButton("Play range")
         self.b_play_sel.setToolTip("Play from the start to the end of the range")
         self.b_play_sel.clicked.connect(self.play_range)
@@ -244,11 +259,14 @@ class VideoRangeDialog(QDialog):
         v.addWidget(self.buttons)
         for key, fn in (("Space", self.toggle), ("Left", lambda: self.step_frames(-1)),
                         ("Right", lambda: self.step_frames(1)), ("[", lambda: self.set_range(self.position(), self.end)),
-                        ("]", lambda: self.set_range(self.start, self.position(), moved="end"))):
+                        ("]", lambda: self.set_range(self.start, self.position(), moved="end")),
+                        ("R", lambda: self.set_rotation(self.rotate + 90)),
+                        ("Shift+R", lambda: self.set_rotation(self.rotate - 90))):
             from PySide6.QtGui import QKeySequence, QShortcut
             QShortcut(QKeySequence(key), self, activated=fn)
         self._pos = 0.0
-        self._keep = None if file else (start, end)   # a missing file: its range is kept for the one chosen again
+        self._keep = None if file else (start, end)   # a missing file: its range (and turn) is kept for the one
+                                                      # chosen again
         if file:
             self.load(file, start, end)
         self._update_enabled()
@@ -267,6 +285,8 @@ class VideoRangeDialog(QDialog):
         f = choose_video(self, self.settings, str(Path(self.file).parent) if self.file else None)
         if f:
             keep = self._keep or (None, None)
+            if self._keep is None and f != self.file:
+                self.rotate = 0                     # another video: not turned until it is turned
             if self.load(f, *keep):
                 self._keep = None                  # (a file that cannot be read keeps the saved range)
 
@@ -281,8 +301,7 @@ class VideoRangeDialog(QDialog):
             return False
         self.file, self.info = str(file), info
         self.path.setText(self.file)
-        self.info_label.setText(f"{info['width']}×{info['height']} · {info['fps']:.3f} fps · {fmt(info['duration'])}"
-                                f" · {'with sound' if info['audio'] else 'no sound'}")
+        self._show_info()
         for s in (self.start_spin, self.end_spin):
             s.blockSignals(True)
             s.setRange(0.0, info["duration"])
@@ -292,6 +311,7 @@ class VideoRangeDialog(QDialog):
         st = 0.0 if start is None else float(start)
         en = info["duration"] if end is None else float(end)
         self._open_player()
+        self._apply_rotation()
         self.set_range(st, en)
         self.seek(st)
         self._update_enabled()
@@ -307,7 +327,7 @@ class VideoRangeDialog(QDialog):
                 self.placeholder.setText("Video playback is not available (QtMultimedia missing); "
                                          "the frames below show the range.")
                 return
-            self.video = VideoView()                # (painted frames: no native GPU window, see VideoView)
+            self.video = VideoView(gpu=False)       # (painted frames, so the picture can be turned; see VideoView)
             self.stack.addWidget(self.video)
             self.audio = QAudioOutput(self)
             self.player = QMediaPlayer(self)
@@ -318,10 +338,39 @@ class VideoRangeDialog(QDialog):
         self.player.setSource(QUrl.fromLocalFile(self.file))
         self.stack.setCurrentWidget(self.video)
 
+    # ---- rotation
+    def set_rotation(self, degrees: int) -> None:
+        """Turn the video clockwise by degrees (0/90/180/270): the player, the frames and the chain's clip."""
+        degrees = int(degrees) % 360
+        if self.info is None or degrees == self.rotate:
+            return
+        self.rotate = chain.rotation(degrees)
+        self._apply_rotation()
+        self.set_range(self.start, self.end)       # (the summary and the first / last frame again)
+
+    def _apply_rotation(self):
+        if self.canvas_for is not None and self.file:
+            try:
+                self.canvas = self.canvas_for(self.file, self.rotate) or self.canvas
+            except Exception:  # noqa: BLE001  (the size stays as it was)
+                pass
+        if self.player is not None:
+            self.video.set_rotation(self.rotate)
+        self._show_info()
+
+    def _show_info(self):
+        info = self.info
+        if info is None:
+            return
+        w, h = chain.rotated_size(info["width"], info["height"], self.rotate)
+        turned = f" · turned {self.rotate}° right" if self.rotate else ""
+        self.info_label.setText(f"{w}×{h}{turned} · {info['fps']:.3f} fps · {fmt(info['duration'])}"
+                                f" · {'with sound' if info['audio'] else 'no sound'}")
+
     def _update_enabled(self):
         on = self.info is not None
         for w in (self.bar, self.b_prev, self.b_play, self.b_next, self.b_back1, self.b_fwd1, self.b_play_sel,
-                  self.start_spin, self.end_spin, self.b_ref):
+                  self.start_spin, self.end_spin, self.b_ref, self.b_rot_left, self.b_rot_right):
             w.setEnabled(on)
         self.b_play.setEnabled(on and self.player is not None)
         self.b_play_sel.setEnabled(on and self.player is not None)
@@ -329,15 +378,18 @@ class VideoRangeDialog(QDialog):
 
     # ---- face picture
     def reference_here(self) -> bool:
-        """The frame at the playhead at the source's size, handed to on_reference (which opens the crop window)."""
+        """The frame at the playhead at the source's size (turned as set), handed to on_reference (which opens the
+        crop window)."""
         if self.info is None or self.on_reference is None:
             return False
         t = self.position()
         with tempfile.TemporaryDirectory(prefix="video-chain-ref-") as d:
             png = Path(d) / "frame.png"
             try:
-                subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{t:.4f}", "-i", self.file, "-frames:v", "1",
-                                "-update", "1", str(png)], capture_output=True, timeout=60)
+                turn = chain.rotate_filter(self.rotate)
+                subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{t:.4f}", "-i", self.file]
+                               + (["-vf", turn] if turn else []) + ["-frames:v", "1", "-update", "1", str(png)],
+                               capture_output=True, timeout=60)
             except (OSError, subprocess.SubprocessError):
                 pass
             if not png.is_file():
@@ -378,8 +430,9 @@ class VideoRangeDialog(QDialog):
                 spin.blockSignals(False)
         n = self.frames()
         size = f", cut to {self.canvas[0]}×{self.canvas[1]} at the centre" if self.canvas else ""
+        turned = f", turned {self.rotate}° right" if self.rotate else ""
         self.summary.setText(f"Range {fmt(self.start)} – {fmt(self.end)}: {self.end - self.start:.3f} s → {n} frames "
-                             f"at {FPS} fps{size}." + ("" if self.info["audio"] else " No sound."))
+                             f"at {FPS} fps{turned}{size}." + ("" if self.info["audio"] else " No sound."))
         self._update_enabled()
         self._frame_timer.start()
 
@@ -391,12 +444,14 @@ class VideoRangeDialog(QDialog):
         n = self.frames()
         start = self.start
         w, h = self.canvas or (self.info["width"], self.info["height"])
-        size = (f",scale={w}:{h}:force_original_aspect_ratio=increase:flags=lanczos,crop={w}:{h}"
-                if self.canvas else "")
+        turn = chain.rotate_filter(self.rotate)
+        size = (f",{turn}" if turn else "") + \
+            (f",scale={w}:{h}:force_original_aspect_ratio=increase:flags=lanczos,crop={w}:{h}" if self.canvas else "")
 
         def work():
             # the frames exactly as the conversion picks them (chain.convert_range): seek to the start, then the
-            # 24 fps filter, then frame number 0 / n-1 of its output (decodes the range: exact, a bit slower)
+            # 24 fps filter, then frame number 0 / n-1 of its output, turned and cut as the conversion does it
+            # (decodes the range: exact, a bit slower)
             for which, idx in (("first", 0), ("last", max(0, n - 1))):
                 if gen != self._gen:                      # the range moved on: skip the stale frame
                     return
