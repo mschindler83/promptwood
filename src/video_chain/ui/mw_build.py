@@ -1,6 +1,8 @@
 """The window's widgets."""
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QShortcut
 from PySide6.QtWidgets import (
@@ -26,42 +28,69 @@ from .ui_logic import (
     find_gguf_models, frames_text)
 
 
+def _panel() -> tuple[QWidget, QVBoxLayout]:
+    """A panel without margins and its vertical layout."""
+    w = QWidget()
+    v = QVBoxLayout(w)
+    v.setContentsMargins(0, 0, 0, 0)
+    v.setSpacing(0)
+    return w, v
+
+
+def _scrolled(w: QWidget) -> QScrollArea:
+    sa = QScrollArea()
+    sa.setWidgetResizable(True)
+    sa.setFrameShape(QFrame.NoFrame)
+    sa.setWidget(w)
+    return sa
+
+
 class BuildMixin:
     """The window's widgets."""
 
     # ------------------------------------------------------------------ layout
     def _build(self):
+        shared = SimpleNamespace()          # what the sections of the build hand to each other
         self.resize(1560, 940)
-        split = QSplitter(Qt.Horizontal, self)
-        split.setChildrenCollapsible(False)
-        self.setCentralWidget(split)
-        self.split = split
+        shared.split = QSplitter(Qt.Horizontal, self)
+        shared.split.setChildrenCollapsible(False)
+        self.setCentralWidget(shared.split)
+        self.split = shared.split
 
         # panels (an editor's layout): left tabs (clips graph, cast, sounds), the viewer in the middle with the
         # film / path / log below, the project's settings on the right; ComfyUI's settings in Preferences
-        def panel():
-            w = QWidget()
-            v = QVBoxLayout(w)
-            v.setContentsMargins(0, 0, 0, 0)
-            v.setSpacing(0)
-            return w, v
-
-        def scrolled(w):
-            sa = QScrollArea()
-            sa.setWidgetResizable(True)
-            sa.setFrameShape(QFrame.NoFrame)
-            sa.setWidget(w)
-            return sa
-        left = QWidget()                                    # (parent of the section bars below)
-        proj_w, proj_v = panel()
-        cast_w, cast_v = panel()
-        sound_w, sound_v = panel()
+        shared.left = QWidget()                                    # (parent of the section bars below)
+        shared.proj_w, shared.proj_v = _panel()
+        shared.cast_w, shared.cast_v = _panel()
+        shared.sound_w, shared.sound_v = _panel()
         self.prefs = QDialog(self)
         self.prefs.setWindowTitle("Preferences")
-        prefs_v = QVBoxLayout(self.prefs)
+        shared.prefs_v = QVBoxLayout(self.prefs)
+        self._build_project_panel(shared)
+        self._build_start_image(shared)
+        self._build_cast_panel(shared)
+        self._build_tracks_panel(shared)
+        self._build_sound_panel(shared)
+        self._build_clip_settings(shared)
+        self._build_engine_prefs(shared)
+        self._build_runpod_prefs(shared)
+        self._build_inspector_tabs(shared)
+        self._build_film_strip(shared)
+        self._build_graph_panel(shared)
+        self._build_path_panel(shared)
+        self._build_clip_tab(shared)
+        self._build_viewer(shared)
+        self._build_toolbar(shared)
+        self._build_shortcuts(shared)
+        self._register_advanced()
+        self._show_view()
+        self._update_buttons()
+        self._update_guide()
 
-        bar, _ = section_bar("Project folder", left)
-        proj_v.addWidget(bar)
+    def _build_project_panel(self, shared):
+        """Build the Project tab: the folder."""
+        bar, _ = section_bar("Project folder", shared.left)
+        shared.proj_v.addWidget(bar)
         pw = QWidget()
         pf = QFormLayout(pw)
         pf.setContentsMargins(10, 6, 10, 8)
@@ -92,10 +121,12 @@ class BuildMixin:
             brow.addWidget(b)
         brow.addStretch(1)
         pf.addRow("", brow)
-        proj_v.addWidget(pw)
+        shared.proj_v.addWidget(pw)
 
-        bar, _ = section_bar("Start image", left)
-        proj_v.addWidget(bar)
+    def _build_start_image(self, shared):
+        """Build the start image tile."""
+        bar, _ = section_bar("Start image", shared.left)
+        shared.proj_v.addWidget(bar)
         sw = QWidget()
         sv = QVBoxLayout(sw)
         sv.setContentsMargins(10, 8, 10, 8)
@@ -122,10 +153,12 @@ class BuildMixin:
         self.b_start_clear.clicked.connect(lambda: self.clear_image(confirm=True))
         airow.addWidget(self.b_start_clear)
         sv.addLayout(airow)
-        proj_v.addWidget(sw)
+        shared.proj_v.addWidget(sw)
 
-        bar, _ = section_bar("Cast & references", left)
-        cast_v.addWidget(bar)
+    def _build_cast_panel(self, shared):
+        """Build the Cast & references tab."""
+        bar, _ = section_bar("Cast & references", shared.left)
+        shared.cast_v.addWidget(bar)
         iw = QWidget()
         iv = QVBoxLayout(iw)
         iv.setContentsMargins(10, 6, 10, 8)
@@ -297,7 +330,7 @@ class BuildMixin:
         self.ident_info = label("", level="tertiary")
         self.ident_info.setWordWrap(True)
         iv.addWidget(self.ident_info)
-        cast_v.addWidget(iw)
+        shared.cast_v.addWidget(iw)
         self.ref_size.currentIndexChanged.connect(self._identity_changed)
         self.ref_hint.toggled.connect(self._identity_changed)
         self.dialogue_lang.activated.connect(self._identity_changed)          # a finished choice, not each key
@@ -305,8 +338,10 @@ class BuildMixin:
         self.eleven_model.currentIndexChanged.connect(self._tts_changed)
         self.dialogue_lang.lineEdit().editingFinished.connect(self._identity_changed)
 
-        bar, _ = section_bar("Audio tracks", left)
-        sound_v.addWidget(bar)
+    def _build_tracks_panel(self, shared):
+        """Build the audio tracks."""
+        bar, _ = section_bar("Audio tracks", shared.left)
+        shared.sound_v.addWidget(bar)
         tw = QWidget()
         tv = QVBoxLayout(tw)
         tv.setContentsMargins(10, 6, 10, 8)
@@ -345,10 +380,12 @@ class BuildMixin:
         self.track_info = label("", level="tertiary")
         self.track_info.setWordWrap(True)
         tv.addWidget(self.track_info)
-        sound_v.addWidget(tw)
+        shared.sound_v.addWidget(tw)
 
-        bar, _ = section_bar("Sound reference", left)
-        sound_v.addWidget(bar)
+    def _build_sound_panel(self, shared):
+        """Build the sound reference."""
+        bar, _ = section_bar("Sound reference", shared.left)
+        shared.sound_v.addWidget(bar)
         aw = QWidget()
         av = QVBoxLayout(aw)
         av.setContentsMargins(10, 6, 10, 8)
@@ -385,10 +422,12 @@ class BuildMixin:
         self.sound_info = label("", level="tertiary")
         self.sound_info.setWordWrap(True)
         av.addWidget(self.sound_info)
-        sound_v.addWidget(aw)
+        shared.sound_v.addWidget(aw)
 
-        bar, _ = section_bar("Clip settings (the project's defaults)", left)
-        proj_v.addWidget(bar)
+    def _build_clip_settings(self, shared):
+        """Build the clip settings (the project's defaults)."""
+        bar, _ = section_bar("Clip settings (the project's defaults)", shared.left)
+        shared.proj_v.addWidget(bar)
         cw = QWidget()
         c = QFormLayout(cw)
         c.setContentsMargins(10, 6, 10, 8)
@@ -529,10 +568,12 @@ class BuildMixin:
                                       "Clips record them, so new words make those clips again")
         self.lora_triggers.toggled.connect(self._lora_triggers_changed)
         c.addRow("", self.lora_triggers)
-        proj_v.addWidget(cw)
+        shared.proj_v.addWidget(cw)
 
-        bar, _ = section_bar("Video engine (ComfyUI)", left)
-        prefs_v.addWidget(bar)
+    def _build_engine_prefs(self, shared):
+        """Build Preferences: the video engine (ComfyUI)."""
+        bar, _ = section_bar("Video engine (ComfyUI)", shared.left)
+        shared.prefs_v.addWidget(bar)
         aw = QWidget()
         a = QFormLayout(aw)
         a.setContentsMargins(10, 6, 10, 8)
@@ -680,10 +721,12 @@ class BuildMixin:
         self._keep_row = row_widget(krow)
         a.addRow("", self._keep_row)
         self.keep_loaded.toggled.connect(self.idle_minutes.setEnabled)
-        prefs_v.addWidget(aw)
+        shared.prefs_v.addWidget(aw)
 
-        bar, _ = section_bar("Cloud upscaling (RunPod)", left)
-        prefs_v.addWidget(bar)
+    def _build_runpod_prefs(self, shared):
+        """Build Preferences: cloud upscaling (RunPod)."""
+        bar, _ = section_bar("Cloud upscaling (RunPod)", shared.left)
+        shared.prefs_v.addWidget(bar)
         rw = QWidget()
         self._runpod_section = (bar, rw)
         r = QFormLayout(rw)
@@ -739,35 +782,40 @@ class BuildMixin:
         self.runpod_fallback.toggled.connect(lambda *_: self._runpod_changed())
         self.runpod_without_volume.toggled.connect(lambda *_: self._runpod_changed())
         self.runpod_volume.editingFinished.connect(self._runpod_changed)
-        prefs_v.addWidget(rw)
+        shared.prefs_v.addWidget(rw)
         self._show_runpod_key()
+
+    def _build_inspector_tabs(self, shared):
+        """Build the left and the right tab widgets."""
         pb = QDialogButtonBox(QDialogButtonBox.Close)
         pb.button(QDialogButtonBox.Close).setAutoDefault(False)     # Enter in a field must not close it
         pb.button(QDialogButtonBox.Close).setDefault(False)
         pb.rejected.connect(self.prefs.reject)
-        prefs_v.addWidget(pb)
-        for v in (proj_v, cast_v, sound_v):
+        shared.prefs_v.addWidget(pb)
+        for v in (shared.proj_v, shared.cast_v, shared.sound_v):
             v.addStretch(1)
         self.left_tabs = QTabWidget()
         self.left_tabs.setDocumentMode(True)
-        cast_scroll, sound_scroll, proj_scroll = scrolled(cast_w), scrolled(sound_w), scrolled(proj_w)
+        shared.cast_scroll, shared.sound_scroll, proj_scroll = _scrolled(shared.cast_w), _scrolled(shared.sound_w), _scrolled(shared.proj_w)
         self.inspector = QTabWidget()
         self.inspector.setDocumentMode(True)
         self.inspector.addTab(proj_scroll, "Project")
         self.proj_scroll = proj_scroll
         self.inspector.setMinimumWidth(380)
-        self._panels = (proj_w, cast_w, sound_w)
+        self._panels = (shared.proj_w, shared.cast_w, shared.sound_w)
 
+    def _build_film_strip(self, shared):
+        """Build the film strip under the viewer."""
         # the clips graph (left tab), the film strip (under the viewer)
-        gw = QWidget()
-        gv = QVBoxLayout(gw)
-        gv.setContentsMargins(0, 0, 0, 0)
-        gv.setSpacing(0)
-        film_w = QWidget()
-        film_v = QVBoxLayout(film_w)
+        shared.gw = QWidget()
+        shared.gv = QVBoxLayout(shared.gw)
+        shared.gv.setContentsMargins(0, 0, 0, 0)
+        shared.gv.setSpacing(0)
+        shared.film_w = QWidget()
+        film_v = QVBoxLayout(shared.film_w)
         film_v.setContentsMargins(0, 0, 0, 0)
         film_v.setSpacing(0)
-        fbar, fbh = section_bar("Film", film_w)
+        fbar, fbh = section_bar("Film", shared.film_w)
         self.film_info = label("", level="tertiary")
         fbh.addWidget(self.film_info)
         film_v.addWidget(fbar)
@@ -796,7 +844,10 @@ class BuildMixin:
             fbh.addWidget(b)
         film_v.addWidget(self.storyboard)
         self.film = None
-        bar, bh = section_bar("Clips", gw)
+
+    def _build_graph_panel(self, shared):
+        """Build the clips graph with the engine banner and the guide."""
+        bar, bh = section_bar("Clips", shared.gw)
         self.tree_info = label("", level="tertiary")
         bh.addWidget(self.tree_info)
         bh.addSpacing(8)
@@ -815,7 +866,7 @@ class BuildMixin:
         bh.addSpacing(6)
         self.b_fit.clicked.connect(lambda: self.graph.fit())
         bh.addWidget(self.b_fit)
-        gv.addWidget(bar)
+        shared.gv.addWidget(bar)
         # above the clips: the engine banner (engine not reachable), the guide (no made clip yet), the one-time
         # "how to go on" line (after the first made clip)
         notes = QVBoxLayout()
@@ -841,23 +892,25 @@ class BuildMixin:
         self.next_hint.hide()
         for w in (self.engine_banner, self.guide_panel, self.next_hint):
             notes.addWidget(w)
-        gv.addLayout(notes)
+        shared.gv.addLayout(notes)
         self._guide_ready = False                  # every needed step of the guide is done (Generate is next)
         self.graph = GraphView()
         self.graph.selected.connect(self._graph_clicked)
         self.graph.activated.connect(self._activate)
         self.graph.contextMenu.connect(self._context)
-        gv.addWidget(self.graph, 1)
-        self.left_tabs.addTab(gw, "Clips")
-        self.left_tabs.addTab(cast_scroll, "Cast & references")
-        self.left_tabs.addTab(sound_scroll, "Sounds")
+        shared.gv.addWidget(self.graph, 1)
+        self.left_tabs.addTab(shared.gw, "Clips")
+        self.left_tabs.addTab(shared.cast_scroll, "Cast & references")
+        self.left_tabs.addTab(shared.sound_scroll, "Sounds")
         self.left_tabs.setMinimumWidth(340)
 
-        pw2 = QWidget()
-        pv = QVBoxLayout(pw2)
+    def _build_path_panel(self, shared):
+        """Build the selected path: cast strip and timeline."""
+        shared.pw2 = QWidget()
+        pv = QVBoxLayout(shared.pw2)
         pv.setContentsMargins(0, 0, 0, 0)
         pv.setSpacing(0)
-        bar, bh = section_bar("Selected path", pw2)
+        bar, bh = section_bar("Selected path", shared.pw2)
         self.path_info = label("", level="tertiary")
         bh.addWidget(self.path_info)
         pv.addWidget(bar)
@@ -871,6 +924,9 @@ class BuildMixin:
         self.timeline.menu.connect(self._context)
         pv.addWidget(self.timeline)
         pv.addStretch(1)
+
+    def _build_clip_tab(self, shared):
+        """Build the inspector's Clip tab."""
         # the inspector's Clip tab: the card of the clip in focus (one at a time; the path's other cards wait in
         # the stack), with ‹ › to step along the path
         clip_tab = QWidget()
@@ -904,6 +960,8 @@ class BuildMixin:
         self.inspector.setCurrentIndex(0)
         self.focus: str | None = None
 
+    def _build_viewer(self, shared):
+        """Build the viewer, the bottom tabs and the splitters."""
         # the viewer (the biggest area), under it the film and the selected path / the log
         rp = QWidget()
         rv = QVBoxLayout(rp)
@@ -945,13 +1003,13 @@ class BuildMixin:
         self.log.setMaximumBlockCount(5000)
         self.tabs = QTabWidget()                            # under the viewer: the selected path, the log
         self.tabs.setDocumentMode(True)
-        self.tabs.addTab(pw2, "Selected path")
+        self.tabs.addTab(shared.pw2, "Selected path")
         self.tabs.addTab(self.log, "Log")
         bottom = QWidget()
         bv = QVBoxLayout(bottom)
         bv.setContentsMargins(0, 0, 0, 0)
         bv.setSpacing(0)
-        bv.addWidget(film_w)
+        bv.addWidget(shared.film_w)
         bv.addWidget(self.tabs, 1)
         center = QSplitter(Qt.Vertical)
         center.setChildrenCollapsible(False)
@@ -960,13 +1018,15 @@ class BuildMixin:
         center.setStretchFactor(0, 3)
         center.setStretchFactor(1, 2)
         self.center = center
-        split.addWidget(self.left_tabs)
-        split.addWidget(center)
-        split.addWidget(self.inspector)
-        split.setStretchFactor(1, 1)
-        split.setSizes([400, 1300, 420])
+        shared.split.addWidget(self.left_tabs)
+        shared.split.addWidget(center)
+        shared.split.addWidget(self.inspector)
+        shared.split.setStretchFactor(1, 1)
+        shared.split.setSizes([400, 1300, 420])
         self.viewer = rp
 
+    def _build_toolbar(self, shared):
+        """Build the status bar, the run toolbar, the view buttons."""
         sb = self.statusBar()
         self.b_gen = QPushButton("Generate path")
         self.b_gen.setProperty("variant", "primary")
@@ -1037,6 +1097,9 @@ class BuildMixin:
                     self.turbo_lora.currentIndexChanged, self.turbo_steps.valueChanged,
                     self.turbo_strength.valueChanged, self.clip_cfg.valueChanged):
             sig.connect(self._options_changed)
+
+    def _build_shortcuts(self, shared):
+        """Build the shortcuts."""
         for sid, fn in (("continue", lambda: self.node_action("continue", self.target_id())),
                         ("add_video", lambda: self.node_action("video", self.target_id())),
                         ("branch", lambda: self.node_action("branch", self.target_id())),
@@ -1052,7 +1115,3 @@ class BuildMixin:
                         ("graph_fit", self.graph.fit)):
             sc = QShortcut(S.sequence(sid), self.graph, activated=fn)
             sc.setContext(Qt.WidgetWithChildrenShortcut)
-        self._register_advanced()
-        self._show_view()
-        self._update_buttons()
-        self._update_guide()
