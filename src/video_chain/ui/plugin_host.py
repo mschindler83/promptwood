@@ -47,7 +47,7 @@ class PluginHost:
             try:
                 fn(self)
             except Exception as e:  # noqa: BLE001  (the app starts without this plugin's part)
-                plugins.failed(p, "setup()", e)
+                plugins.failed(p, "setup()", e, fatal=True)
             finally:
                 self._current = None
         if self.plugins:
@@ -175,14 +175,16 @@ class PluginHost:
         lines = []
         for p in self.plugins:
             lines.append(f"{p.name}  ({p.source}, module {p.target})\n    "
-                         + (f"not in use: {p.error}" if p.error else "in use"))
+                         + (f"not in use: {p.error}" if p.error else "in use")
+                         + "".join(f"\n    {x}" for x in p.problems))
         return "\n\n".join(lines)
 
     def show_about(self) -> None:
         box = QMessageBox(QMessageBox.Information, "Plugins", "Plugins add features that are not part of the app "
                           "itself. They are separately installed Python packages.", QMessageBox.Ok, self.window)
         box.setInformativeText(self.about_text())
-        traces = "\n\n".join(f"{p.name}:\n{getattr(p, 'trace', '')}" for p in self.plugins if p.error)
+        traces = "\n\n".join(f"{p.name}:\n{getattr(p, 'trace', '')}" for p in self.plugins
+                             if p.error or p.problems)
         if traces:
             box.setDetailedText(traces)
         box.exec()

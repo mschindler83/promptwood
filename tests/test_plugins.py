@@ -162,8 +162,20 @@ def test_what_a_plugin_adds_to_the_window(made_up, tmp_path, monkeypatch):
         assert ("clip_made", nid) in calls and ("run_finished", 0) in calls and not win.running
         assert "run_finished listener failed and was switched off (plug_good)" in win.status.text()
         assert len(host._heard["run_finished"]) == 1
+        good = next(p for p in host.plugins if p.name == "plug_good")     # still in use; the failure is listed
+        assert good.loaded and good.problems == ["its run_finished listener failed: ZeroDivisionError: division by zero"]
+        assert "in use\n    its run_finished listener failed" in host.about_text()
         # its own settings, apart from the app's
         assert qs.value("plugins/good/seen", 0, type=int) == 1
+        # the next start opens the last project by itself: the window comes up and the plugin hears it too
+        calls.clear()
+        qs.setValue("project", str(win.project))
+        qs.sync()
+        again = MainWindow(qs, command=FAKE)
+        try:
+            assert again.project == win.project and ("project_opened", win.project) in calls
+        finally:
+            again.close()
     finally:
         win.close()
 
@@ -176,8 +188,11 @@ def test_without_plugins_the_window_has_no_plugins_menu(tmp_path, monkeypatch):
     for k, v in (("viewMode", "advanced"), ("comfyDir", str(tmp_path / "no-comfyui")), ("comfyAutoStart", False),
                  ("thumbCacheDir", str(tmp_path / "thumbs")), ("loraTriggersOnline", False)):
         qs.setValue(k, v)
+    (tmp_path / "last").mkdir()
+    qs.setValue("project", str(tmp_path / "last"))                   # (a last project is opened at the start)
     win = MainWindow(qs, command=FAKE)
     try:
+        assert win.project == tmp_path / "last"
         assert win.plugins.plugins == [] and "&Plugins" not in [a.text() for a in win.menuBar().actions()]
         assert win.plugins.about_text() == "No plugins are installed."
         win.plugins.emit("run_finished", 0)                          # (nobody listens: nothing happens)

@@ -1832,10 +1832,10 @@ class MainWindow(QMainWindow):
         self.remix_due: set[str] = set()
         self._remix_stuck: set[str] = set()     # the due clips whose remix failed (tried again after an edit)
         self._build()
-        self._load_settings()
         from .plugin_host import PluginHost      # separately installed features (plugins.py); none: nothing added
-        self.plugins = PluginHost(self)
-        self.plugins.start()
+        self.plugins = PluginHost(self)          # (before the settings: they open the last project, and the
+        self.plugins.start()                     # plugins hear that)
+        self._load_settings()
         self._gpu_proc: QProcess | None = None
         self._gpu_timer = QTimer(self, interval=4000, timeout=self._poll_gpu)
         self._gpu_timer.start()

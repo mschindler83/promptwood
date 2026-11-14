@@ -24,7 +24,7 @@ from __future__ import annotations
 import importlib
 import os
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import metadata
 from types import ModuleType
 
@@ -39,6 +39,7 @@ class Plugin:
     target: str                     # the module to import
     module: ModuleType | None = None
     error: str = ""                 # why it is not in use ("" = loaded)
+    problems: list = field(default_factory=list)   # what failed while it was in use (it stays in use)
 
     @property
     def loaded(self) -> bool:
@@ -100,10 +101,16 @@ def reset() -> None:
     _LOADED = None
 
 
-def failed(p: Plugin, what: str, e: BaseException) -> None:
-    """Note that a plugin failed in one of its functions (it stays listed with the error)."""
-    p.error = f"{what} failed: {type(e).__name__}: {e}"
+def failed(p: Plugin, what: str, e: BaseException, fatal: bool = False) -> str:
+    """Note that one of a plugin's functions failed: -> the sentence about it. fatal (its setup): the plugin is
+    not in use; else it stays in use and the failure is listed with it."""
+    text = f"{what} failed: {type(e).__name__}: {e}"
+    if fatal:
+        p.error = text
+    elif text not in p.problems:
+        p.problems.append(text)
     p.trace = traceback.format_exc()
+    return text
 
 
 def wrap_generator(gen, args, log=None):
@@ -116,9 +123,9 @@ def wrap_generator(gen, args, log=None):
         try:
             new = fn(gen, args)
         except Exception as e:  # noqa: BLE001
-            failed(p, "generator()", e)
+            text = failed(p, "generator()", e)
             if log:
-                log(f"Plugin {p.name}: {p.error}")
+                log(f"Plugin {p.name}: {text}")
             continue
         if new is not None:
             gen = new
