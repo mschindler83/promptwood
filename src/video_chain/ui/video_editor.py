@@ -370,7 +370,7 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
                                  ("Last frame", self.last_tile, "Where a generated clip after the video starts")):
             col = QVBoxLayout()
             col.addWidget(label(title, level="tertiary"))
-            tile.setToolTip(tip + " (as the chain sees it: 24 fps, cut to the video size)")
+            tile.setToolTip(tip + f" (as the chain sees it: {FPS} fps, cut to the video size)")
             col.addWidget(tile)
             tiles.addLayout(col)
         tiles.addStretch(1)
