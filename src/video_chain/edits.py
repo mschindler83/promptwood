@@ -63,7 +63,7 @@ def scale_to(src: Path, dst: Path, size: tuple[int, int]) -> None:
                      timeout=120)
 
 
-def _mtime(p: Path) -> float:
+def mtime(p: Path) -> float:
     try:
         return p.stat().st_mtime
     except OSError:
@@ -79,7 +79,7 @@ def project_edits(project: Path) -> list[tuple[Path, ResultRecord]]:
             continue
         meta = _record(png.with_suffix(".json"))
         out.append((png, meta))
-    return sorted(out, key=lambda x: _mtime(x[0]), reverse=True)
+    return sorted(out, key=lambda x: mtime(x[0]), reverse=True)
 
 
 _RECORDS: dict[str, tuple[tuple[int, int], ResultRecord]] = {}     # record file -> ((mtime_ns, size), parsed)
@@ -231,9 +231,9 @@ def drop_unused_copies(copies: list[tuple[Path, Path | None, int]]) -> None:
 
 # ---- deleting bad results
 def trash_result(project: Path, png: str | Path) -> Path:
-    """Move a result and its record to the trash (the folder is emptied before: one level); returns the trashed png."""
+    """Move a result and its record to the trash (earlier ones stay: several deletes can be undone); returns the
+    trashed png."""
     png = Path(png)
-    empty_trash(project)
     trash = Path(project) / EDITS_DIR / TRASH_DIR
     trash.mkdir(exist_ok=True)
     for f in (png, png.with_suffix(".json")):
