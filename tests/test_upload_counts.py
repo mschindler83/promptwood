@@ -46,3 +46,20 @@ def test_animator_run_outputs_drops_its_upload_through_the_count(server, pic, tm
     assert not _there(server)
     name2 = an.upload(pic)
     assert (server.root / "input" / name2).is_file()
+
+
+def test_a_fifth_picture_of_the_person_is_said_not_dropped_silently(server, pic, tmp_path):
+    import subprocess
+
+    from video_chain.comfy import ComfyError
+    v = tmp_path / "v.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=24", "-frames:v", "10",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", str(v)], check=True)
+    an = A.ComfyAnimator(server.url)
+    logged = []
+    an.log = logged.append
+    an.face_only(v, tmp_path / "o.mp4", [pic] * 5, 24.0, 0.0)
+    assert any("4 pictures" in line for line in logged)
+    assert "person_5" not in server.faced["lock"]["inputs"]
+    with pytest.raises(ComfyError, match="at most 4"):
+        A.face_lock_nodes({}, ["x", 0], {"swapper": "s", "persons": ["a"] * 5})

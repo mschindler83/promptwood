@@ -250,14 +250,26 @@ def store_pose(project: Path, key: str, parts: dict, info: dict) -> dict:
     entry is never used). Returns all parts stored for key now."""
     d = Path(project) / POSE_CACHE_DIR / key
     d.mkdir(parents=True, exist_ok=True)
+    moved: list[tuple[Path, Path]] = []
     for name, f in parts.items():
         if Path(f).is_file():
             shutil.move(str(f), d / f"{name}.mkv")        # (replace() fails across file systems)
+            moved.append((Path(f), d / f"{name}.mkv"))
     try:                                        # (the info of the run that made a part first stays)
         before = json.loads((d / "info.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         before = {}
-    media.atomic_write_json(d / "info.json", {**info, **before, "parts": sorted(set(before.get("parts", [])) | set(parts))})
+    try:
+        media.atomic_write_json(d / "info.json",
+                                {**info, **before, "parts": sorted(set(before.get("parts", [])) | set(parts))})
+    except BaseException:
+        if not before:                          # (no entry without info.json: the parts go back, no orphan files)
+            for src, dest in moved:
+                try:
+                    shutil.move(str(dest), src)
+                except OSError:
+                    dest.unlink(missing_ok=True)
+        raise
     return cached_pose(project, key)
 
 

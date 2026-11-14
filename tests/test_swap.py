@@ -199,3 +199,19 @@ def test_track_widens_and_reacquires_after_a_gap():
     far = (600, 50, 640, 100, .9)
     found = [[a]] + [[]] * (swap.LOST + 1) + [[far]]
     assert swap.track(found)[-1] == far[:4]       # lost for long: the largest face again
+
+
+def test_store_pose_moves_nothing_when_info_cannot_be_written(tmp_path, monkeypatch):
+    """The parts are moved in only after info.json is written: a failing write leaves no orphan .mkv and keeps the
+    source files where they were."""
+    from video_chain import media
+    face = tmp_path / "face.mkv"
+    face.write_bytes(b"f")
+
+    def broken(*_a, **_k):
+        raise OSError("disk full")
+    monkeypatch.setattr(media, "atomic_write_json", broken)
+    with pytest.raises(OSError):
+        swap.store_pose(tmp_path / "p", "k", {"face": face}, {"source": "s"})
+    assert face.exists()
+    assert not list((tmp_path / "p").rglob("*.mkv"))
