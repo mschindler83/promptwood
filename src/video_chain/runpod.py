@@ -33,6 +33,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path, PurePosixPath
+from typing import IO
 
 from .comfy import (SEEDVR_FULL_VRAM, SEEDVR_METHODS, SEEDVR_NODES, SEEDVR_PRECISION_FULL, SUBFOLDER, ComfyError,
                     ComfyGenerator)
@@ -160,7 +161,8 @@ class RunpodApi:
                 raise
 
     def list_pods(self) -> list[dict]:
-        pods, cursor = [], None
+        pods: list[dict] = []
+        cursor = None
         while True:
             q = "?" + urllib.parse.urlencode({"cursor": cursor}) if cursor else ""
             res = self.call("GET", f"/pods{q}") or {}
@@ -338,8 +340,8 @@ class RunpodSession:
         self.host: tuple[str, int] | None = None
         self.url: str | None = None
         self.tunnel: subprocess.Popen | None = None
-        self._tunnel_err = None
-        self.started = None
+        self._tunnel_err: IO[bytes] | None = None
+        self.started: float | None = None
         self._tmp = media.scratch("runpod")
         self.known_hosts = Path(self._tmp.name) / "known_hosts"
         self._closed = False
@@ -367,6 +369,7 @@ class RunpodSession:
             except RunpodError as e:
                 self.log(str(e))
             raise
+        assert self.url is not None              # (_open_tunnel sets it)
         return self.url
 
     def _candidates(self) -> list[str]:
@@ -451,6 +454,7 @@ class RunpodSession:
                           + (f" (last answer: {last})" if last else "") + "; try again in a minute")
 
     def _wait_running(self) -> tuple[str, int]:
+        assert self.pod_id is not None                   # (set by _create)
         self.note("RunPod: starting the pod")
         end = time.monotonic() + self.boot_timeout
         while time.monotonic() < end:
@@ -468,6 +472,7 @@ class RunpodSession:
     def _trust_host(self) -> None:
         """The pod's SSH host keys, read through the API (HTTPS with the API key) into a known_hosts file of this
         session only: the SSH connection then verifies the pod, nothing is trusted on first use."""
+        assert self.pod_id is not None and self.host is not None     # (set by _create / _wait_running)
         end = time.monotonic() + 180
         last = ""
         while time.monotonic() < end:
@@ -487,6 +492,7 @@ class RunpodSession:
                           "not connecting to an unverified host")
 
     def ssh_args(self, *extra: str) -> list[str]:
+        assert self.host is not None             # (after _wait_running)
         host, port = self.host
         return [self.ssh_bin, "-i", str(self.key), "-p", str(port),
                 "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
@@ -551,12 +557,14 @@ class RunpodSession:
 
         def feed():                              # (apart: ssh's answer is read meanwhile, a dead ssh must not block)
             try:
+                assert p.stdin is not None               # (stdin=PIPE above)
                 p.stdin.write(Path(self.setup_script).read_bytes())
                 p.stdin.close()
             except (BrokenPipeError, OSError):
                 pass
         threading.Thread(target=feed, daemon=True).start()
         try:
+            assert p.stdout is not None                  # (stdout=PIPE above)
             for raw in p.stdout:
                 line = raw.decode(errors="replace").rstrip()
                 if line.startswith("@@ "):
@@ -589,17 +597,17 @@ class RunpodSession:
 
     def _open_tunnel_once(self) -> None:
         port = free_port()
-        self._tunnel_err = tempfile.TemporaryFile()      # (a file, not a pipe: nobody reads it while the tunnel lives)
+        tunnel_err = self._tunnel_err = tempfile.TemporaryFile()   # (a file, not a pipe: nobody reads it while the tunnel lives)
         self.tunnel = subprocess.Popen(
             self.ssh_args("-N", "-o", "ExitOnForwardFailure=yes",
                           "-L", f"127.0.0.1:{port}:127.0.0.1:{self.remote_port}"),
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=self._tunnel_err)
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=tunnel_err)
         url = f"http://127.0.0.1:{port}"
         end = time.monotonic() + 60
         while time.monotonic() < end:
             if self.tunnel.poll() is not None:
-                self._tunnel_err.seek(0)
-                err = self._tunnel_err.read().decode(errors="replace").strip()
+                tunnel_err.seek(0)
+                err = tunnel_err.read().decode(errors="replace").strip()
                 raise RunpodError(f"the SSH tunnel to the pod ended: {err}")
             try:
                 with net.urlopen(urllib.request.Request(url + "/system_stats"), 5) as r:
@@ -718,6 +726,7 @@ class RunpodSession:
 
     def _status(self) -> str | None:
         try:
+            assert self.pod_id is not None
             return self.api.get_pod(self.pod_id).get("status")
         except RunpodError as e:
             if e.status == 404:
@@ -744,6 +753,7 @@ class CloudUpscaler(ComfyGenerator):
 
     def __init__(self, session: RunpodSession, log=print, progress=None, timeout: float = 3600):
         self.session = session
+        assert session.url is not None           # (the session is open)
         super().__init__(session.url, log=log, progress=progress, timeout=timeout, comfy_dir=None, cleanup=False)
         self.cleanup = True
         self.input_dir, self.output_dir = REMOTE_IO / "input", REMOTE_IO / "output"

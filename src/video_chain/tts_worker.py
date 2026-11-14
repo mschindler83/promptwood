@@ -77,7 +77,7 @@ def handle(r: dict) -> dict:
             _prompts[key] = m.create_voice_clone_prompt(ref_audio=r["ref_audio"], ref_text=text,
                                                         x_vector_only_mode=text is None)
         _seed(r.get("seed"))
-        kw = {"temperature": float(r["temperature"])} if r.get("temperature") else {}     # (else the model's own)
+        kw: dict[str, float] = {"temperature": float(r["temperature"])} if r.get("temperature") else {}      # (else the model's own)
         # " ..." after the line: the model stops speaking where its text ends, and without it that is often before
         # the last consonant is out (German most of all: "Par" for "Park."). Measured with a designed voice, 30
         # German lines: 17 without their last consonant as they are, 2 with " ..."; the same words are heard, the
@@ -101,10 +101,10 @@ def handle(r: dict) -> dict:
                 why = (e.stderr or b"").decode("utf-8", "replace").strip()[-300:]
                 raise RuntimeError(f"ffmpeg could not read the voice sample: {why or e}") from None
             audio, sr = sf.read(wav16, dtype="float32")
-        kw: dict = {"generate_kwargs": {"language": r["language"].lower()}} if r.get("language") else {}
+        asr_kw: dict = {"generate_kwargs": {"language": r["language"].lower()}} if r.get("language") else {}
         if len(audio) > 30 * sr:                      # (more than Whisper's 30 s window: its long-form mode)
-            kw["return_timestamps"] = True
-        text = p({"raw": audio, "sampling_rate": sr}, **kw)["text"].strip()
+            asr_kw["return_timestamps"] = True
+        text = p({"raw": audio, "sampling_rate": sr}, **asr_kw)["text"].strip()
         _free()                                       # (only needed once per voice sample)
         return {"ok": True, "text": text}
     if cmd == "isolate":

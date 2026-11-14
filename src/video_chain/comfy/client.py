@@ -21,7 +21,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePath
 
 from .. import media, net
 from .errors import ComfyError, ComfyJobFailed, ComfyUnavailable, LocalWriteError
@@ -120,9 +120,9 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
         base = self.comfy_dir
         if base is not None and _arg(argv, "--base-directory"):
             base = Path(_arg(argv, "--base-directory")).expanduser()
-        self.output_dir = (Path(_arg(argv, "--output-directory")).expanduser() if _arg(argv, "--output-directory")
+        self.output_dir: PurePath | None = (Path(_arg(argv, "--output-directory")).expanduser() if _arg(argv, "--output-directory")
                            else (base / "output" if base else None))
-        self.input_dir = (Path(_arg(argv, "--input-directory")).expanduser() if _arg(argv, "--input-directory")
+        self.input_dir: PurePath | None = (Path(_arg(argv, "--input-directory")).expanduser() if _arg(argv, "--input-directory")
                           else (base / "input" if base else None))
 
     # ---- HTTP
@@ -579,7 +579,7 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
             self._remove(self.output_dir, video, Path(out_video))
             self._remove(self.output_dir, frame, Path(out_last_frame))
 
-    def _remove(self, top: Path | None, f: dict, local: Path, same_size: bool = True) -> None:
+    def _remove(self, top: PurePath | None, f: dict, local: Path, same_size: bool = True) -> None:
         """Delete ComfyUI's copy of a file, only inside its video-chain subfolder and (for outputs) only if the
         downloaded file has the same size."""
         if top is None:
