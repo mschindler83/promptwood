@@ -79,3 +79,44 @@ def test_options_without_a_value_show_the_default_options(app, tmp_path, monkeyp
         _check_widgets(w)
     finally:
         w.close()
+
+
+# ------------------------------------------------------------------ MWB-9: typing in a spin box does the heavy work once
+def test_spin_box_ticks_are_settled_once_with_the_last_value(app, tmp_path, monkeypatch):
+    from PIL import Image
+    from video_chain.ui.main_window import MainWindow
+    img = tmp_path / "s.jpg"
+    Image.new("RGB", (64, 36)).save(img)
+    w = MainWindow(settings(tmp_path), command=FAKE)
+    try:
+        assert w.create_project(tmp_path / "p", str(img))
+        calls = []
+        monkeypatch.setattr(w, "_refresh_card_choices", lambda: calls.append("cards"))
+        monkeypatch.setattr(w, "_show_references", lambda *a, **k: calls.append("refs"))
+        for v in (31, 32, 33, 34, 35):
+            w.steps.setValue(v)
+        assert w.tree.options["steps"] == 35            # the value is never lost
+        assert calls == []                              # ... the heavy chain waits for a pause
+        w._options_timer.timeout.emit()
+        assert calls.count("cards") == 1 and calls.count("refs") == 1
+        assert w.tree.options["steps"] == 35
+        w.frames.setCurrentIndex(w.frames.currentIndex() + 1)      # a combo box is not typing: at once
+        assert calls.count("cards") == 2
+    finally:
+        w.close()
+
+
+def test_leaving_the_project_settles_a_pending_option_change(app, tmp_path):
+    from PIL import Image
+    from video_chain.ui.main_window import MainWindow
+    img = tmp_path / "s.jpg"
+    Image.new("RGB", (64, 36)).save(img)
+    w = MainWindow(settings(tmp_path), command=FAKE)
+    try:
+        assert w.create_project(tmp_path / "p", str(img))
+        w.steps.setValue(41)
+        assert w._options_timer.isActive()
+        assert w._may_leave_project()
+        assert not w._options_timer.isActive()
+    finally:
+        w.close()

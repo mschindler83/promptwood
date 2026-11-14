@@ -85,7 +85,9 @@ def wait_for_joined_path(app, win, last: str, timeout=30):
 
 
 def flush(app, win):
-    """Run the debounced save/refresh now."""
+    """Run the debounced save/refresh now (a settled burst of option ticks first: it starts those two)."""
+    if win._options_timer.isActive():
+        win._options_settled()
     for t in (win._save_timer, win._refresh_timer):
         if t.isActive():
             t.stop()

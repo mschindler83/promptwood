@@ -41,6 +41,7 @@ class StateMixin(MainWindowHost):
 
     def _may_leave_project(self) -> bool:
         """Save before the project is closed or replaced; if that fails, ask before its edits are dropped."""
+        self._options_settled()                     # (a change still waiting for its pause is part of what is saved)
         self._save_timer.stop()
         if self._save_tree():
             return True

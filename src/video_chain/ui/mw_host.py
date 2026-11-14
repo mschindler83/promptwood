@@ -91,6 +91,8 @@ if TYPE_CHECKING:
         _model_timer: QTimer
         _notices: list[QMessageBox]
         _pix: dict[tuple[Any, ...], QPixmap]
+        _options_before: set[str] | None
+        _options_timer: QTimer
         _qwen_timer: QTimer
         _refresh_timer: QTimer
         _remade_note: str

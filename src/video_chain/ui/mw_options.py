@@ -105,10 +105,16 @@ class OptionsMixin(MainWindowHost):
         self.cfg_note.setText(f"for {name}: off (one pass per step)" if abs(v - 1) < 1e-6 else
                               f"for {name}: two passes per step (about twice as slow)")
 
-    def _options_changed(self, *_):
+    def _options_typing(self, *_):
+        """A spin box ticked (typing, arrow keys, the wheel): the value is taken at once, the heavy follow-up work
+        (references, card choices, saving, what is remade) waits for a short pause and runs once (MWB-9)."""
+        self._options_changed(defer=True)
+
+    def _options_changed(self, *_, defer: bool = False):
         if self._loading or self.tree is None or self.running:
             return
-        before = self._done_clips()
+        if self._options_before is None:            # (what was done before the first tick of this burst)
+            self._options_before = self._done_clips()
         mode = self.speed.currentData()
         if mode != self._cfg_mode:                  # another speed mode: its own CFG into the field (not this one's)
             self._cfg_mode = mode
@@ -132,8 +138,19 @@ class OptionsMixin(MainWindowHost):
         else:
             as_dict(self.tree.options)[mode]["cfg"] = cfg
         self._update_size_info()
-        self._show_references()
         self._turbo_widgets()
+        if defer:
+            self._options_timer.start()
+        else:
+            self._options_settled()
+
+    def _options_settled(self):
+        """The burst of option changes is over (or a combo box / check box changed): the follow-up work, once."""
+        self._options_timer.stop()
+        before, self._options_before = self._options_before, None
+        if before is None or self.tree is None:
+            return
+        self._show_references()
         self._refresh_card_choices()
         self._changed()
         if not self._report_remade(before, "Project settings changed"):

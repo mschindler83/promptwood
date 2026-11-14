@@ -1098,12 +1098,12 @@ class BuildMixin(MainWindowHost):
         FileDrop(self, self._dropped_on_window)         # a project folder dropped anywhere on the window
         self.start_tile.dropped.connect(lambda f: self.set_image(f, confirm=True))
         for sig in (self.frames.currentIndexChanged, self.resolution.currentIndexChanged,
-                    self.aspect.currentIndexChanged,
-                    self.steps.valueChanged, self.audio.toggled, self.keep_rep.toggled,
-                    self.speed.currentIndexChanged, self.veda.toggled,
-                    self.turbo_lora.currentIndexChanged, self.turbo_steps.valueChanged,
-                    self.turbo_strength.valueChanged, self.clip_cfg.valueChanged):
+                    self.aspect.currentIndexChanged, self.audio.toggled, self.keep_rep.toggled,
+                    self.speed.currentIndexChanged, self.veda.toggled, self.turbo_lora.currentIndexChanged):
             sig.connect(self._options_changed)
+        for sig in (self.steps.valueChanged, self.turbo_steps.valueChanged, self.turbo_strength.valueChanged,
+                    self.clip_cfg.valueChanged):             # (spin boxes tick many times: settled after a pause)
+            sig.connect(self._options_typing)
 
     def _build_shortcuts(self, shared):
         """Build the shortcuts."""

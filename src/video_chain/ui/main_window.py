@@ -132,6 +132,8 @@ class MainWindow(BuildMixin, GeneratorMixin, ComfyMixin, ExportMixin, VideosMixi
         self._join_lock = threading.Lock()      # joins run one after another (play after generating + export)
         self._save_timer = timer(self, self._save_tree, 400, single=True)
         self._refresh_timer = timer(self, self.refresh, 250, single=True)
+        self._options_timer = timer(self, self._options_settled, 350, single=True)   # (spin box ticks settle once)
+        self._options_before: set[str] | None = None    # (the clips done before the first tick of a burst)
         # a made clip's sound mode / level changed: its sound is mixed again (no new generation), once the level
         # settles; remix_due: the clips waiting for that (refresh)
         self._remix_timer = timer(self, self._start_remix, REMIX_DELAY_MS, single=True)
