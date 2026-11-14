@@ -86,3 +86,21 @@ def help_html() -> str:
             last = s.where
         out.append(f"<p><b>{html.escape(s.keys)}</b> &nbsp; {html.escape(s.text)}</p>")
     return "".join(out)
+
+
+def shortcuts_dialog(parent=None):
+    """The Help → Keyboard shortcuts window (a Close-only dialog showing the table). The caller runs exec() / show()."""
+    from PySide6.QtWidgets import QDialog, QTextBrowser, QVBoxLayout
+
+    from .dialogs import button_row
+    from .widgets import fit_size
+    dlg = QDialog(parent)
+    dlg.setWindowTitle("Keyboard shortcuts")
+    fit_size(dlg, 520, 640)
+    v = QVBoxLayout(dlg)
+    view = QTextBrowser()
+    view.setHtml(help_html())
+    v.addWidget(view)
+    box, _none = button_row(dlg)
+    v.addWidget(box)
+    return dlg

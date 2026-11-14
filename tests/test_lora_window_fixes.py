@@ -130,14 +130,16 @@ def test_kept_pictures_are_looked_up_once(tmp_path, monkeypatch):
     w.done(0)
 
 
-def test_forgetting_a_note_and_deleting_pictures_ask_first(tmp_path):
+def test_forgetting_a_note_and_deleting_pictures_ask_first(tmp_path, monkeypatch):
     from video_chain import lora_notes as LN
     w, db, p, other = window(tmp_path)
     assert LN.save_user(db, p, note="Does: mine.")
     w.show_lora(p)
     asked = []
     answer = [False]
-    w._confirm = lambda title, text: (asked.append(title), answer[0])[1]
+    from PySide6.QtWidgets import QMessageBox
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: (asked.append(a[1]), QMessageBox.Yes if answer[0]
+                                                                  else QMessageBox.No)[1])
     w.b_rewrite.click()
     assert asked and db.note(p)["note"] == "Does: mine."               # "no": the note stays
     answer[0] = True

@@ -377,3 +377,11 @@ def test_a_variable_in_the_prompt_is_not_marked_by_colour_alone():
     h.highlightBlock("a {x} cat")
     assert got and got[0].underlineStyle() == got[0].UnderlineStyle.SingleUnderline
     assert "{x}" in got[0].toolTip()
+
+
+def test_the_shortcuts_dialog_lists_the_table_and_only_closes():
+    from video_chain.ui import shortcuts
+    dlg = shortcuts.shortcuts_dialog()
+    from PySide6.QtWidgets import QTextBrowser
+    assert "Ctrl+Shift+N" in dlg.findChild(QTextBrowser).toPlainText()
+    assert dlg.findChild(QDialogButtonBox).button(QDialogButtonBox.Close) is not None

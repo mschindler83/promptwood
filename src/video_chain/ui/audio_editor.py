@@ -102,6 +102,10 @@ class WaveBar(RangeBar):
         p.drawLine(QPointF(x, 2), QPointF(x, h - 2))
 
 
+class _Probed(QObject):
+    ready = Signal(int, float, str)               # generation, the sound's length (0), error
+
+
 class _Peaks(QObject):
     ready = Signal(int, list)
 
@@ -139,6 +143,11 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
         self._pos = 0.0
         self._stop_at: float | None = None
         self._gen = 0
+        self._probed = _Probed()
+        self._probed.ready.connect(self._probe_done)
+        self._load_gen = 0
+        self.loading = False                          # the file is being read off the UI thread
+        self._pending: tuple = ()
         self._peaks = _Peaks()
         self._peaks.ready.connect(self._peaks_ready)
         self._named = bool(name)                       # a name typed (or given): a new file does not replace it
@@ -259,16 +268,48 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
                        self.settings if self.settings is not None else scratch_settings(), folder or None,
                        kind="media")
         if f:
-            self.load(f)
+            self.load_async(f)
+
+    def load_async(self, file: str, start: float | None = None, end: float | None = None) -> None:
+        """load(), with ffprobe run off the UI thread (busy text, the dialog cannot be accepted meanwhile; an answer
+        that comes after another load or after closing is dropped)."""
+        self._load_gen += 1
+        gen, sig = self._load_gen, self._probed
+        self._pending = (str(file), start, end)
+        self.loading = True
+        self.info_label.setText(f"Reading {Path(file).name} …")
+        self.buttons.button(QDialogButtonBox.Ok).setEnabled(False)
+
+        def work():
+            try:
+                dur, err = chain.audio_seconds(Path(file)), ""
+            except (RuntimeError, OSError, ValueError) as e:
+                dur, err = 0.0, str(e)
+            safe_emit(sig.ready, gen, float(dur or 0.0), err)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _probe_done(self, gen: int, dur: float, err: str) -> None:
+        if gen != self._load_gen:
+            return
+        file, start, end = self._pending
+        self.loading = False
+        self._finish_load(file, dur, err, start, end)
 
     def load(self, file: str, start: float | None = None, end: float | None = None) -> bool:
         try:
-            dur = chain.audio_seconds(Path(file))
+            dur, err = chain.audio_seconds(Path(file)), ""
         except (RuntimeError, OSError, ValueError) as e:
-            self.info_label.setText(f"Cannot read {Path(file).name}: {e}")
+            dur, err = 0.0, str(e)
+        return self._finish_load(file, dur, err, start, end)
+
+    def _finish_load(self, file: str, dur, err: str, start, end) -> bool:
+        if err:
+            self.info_label.setText(f"Cannot read {Path(file).name}: {err}")
+            self._update_enabled()
             return False
         if not dur or dur <= 0:
             self.info_label.setText(f"{Path(file).name} has no sound.")
+            self._update_enabled()
             return False
         self.file, self.duration = str(file), float(dur)
         self.path.setText(self.file)
@@ -509,6 +550,7 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
             self.clean_info.setText("Removing the music… wait until it is done.")
             return
         self._gen += 1
+        self._load_gen += 1                             # a probe still running is dropped
         self._stop_cleaned()
         if self.player is not None:
             self.player.stop()

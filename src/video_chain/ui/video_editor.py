@@ -214,6 +214,14 @@ class RangePlayerMixin:
         self.b_play.setIcon(icon("pause" if st == QMediaPlayer.PlayingState else "play"))
 
 
+class _Probed(QObject):
+    ready = Signal(int, object, str)        # generation, the source's info (None), error
+
+
+class _Grabbed(QObject):
+    ready = Signal(int, str)                # generation, error ("" = the frame file is there)
+
+
 class _Frames(QObject):
     ready = Signal(int, str, QImage)        # generation, "first" | "last", frame
 
@@ -242,6 +250,13 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
         self.video = None
         self._closed = False
         self._gen = 0
+        self._probed = _Probed()
+        self._probed.ready.connect(self._probe_done)
+        self._grabbed = _Grabbed()
+        self._grabbed.ready.connect(self._grab_done)
+        self._load_gen = 0
+        self.loading = False                          # a file is being read (probe or frame grab) off the UI thread
+        self._pending: tuple = ()
         self._frames = _Frames()
         self._frames.ready.connect(self._frame_ready)
         self._frame_timer = QTimer(self, singleShot=True, interval=300, timeout=self._update_frames)
@@ -324,7 +339,7 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
         self.b_ref.setToolTip("Crop a face from the frame at the playhead (the face is found for you, or set the "
                               "square by hand) and add it to the character selected in Cast & references; clips that "
                               "mention that character get this face")
-        self.b_ref.clicked.connect(self.reference_here)
+        self.b_ref.clicked.connect(self.reference_here_async)
         self.face = True                              # set_reference_kind: a person's face, else a whole picture
         self.b_ref.setVisible(on_reference is not None)
         rrow.addWidget(self.b_ref)
@@ -374,8 +389,44 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
             keep = self._keep or (None, None)
             if self._keep is None and f != self.file:
                 self.rotate = 0                     # another video: not turned until it is turned
-            if self.load(f, *keep):
-                self._keep = None                  # (a file that cannot be read keeps the saved range)
+            self.load_async(f, *keep)
+
+    def _set_loading(self, on: bool, text: str = "") -> None:
+        self.loading = on
+        if on:
+            self.info_label.setText(text)
+            self.buttons.button(QDialogButtonBox.Ok).setEnabled(False)
+            self.b_ref.setEnabled(False)
+        else:
+            self._update_enabled()
+
+    def load_async(self, file: str, start: float | None = None, end: float | None = None) -> None:
+        """load(), with ffprobe run off the UI thread: the dialog shows "Reading …" and cannot be accepted meanwhile.
+        An answer that arrives after another load began or the dialog closed is dropped."""
+        self._load_gen += 1
+        gen, sig = self._load_gen, self._probed
+        self._pending = (str(file), start, end)
+        self._set_loading(True, f"Reading {Path(file).name} …")
+
+        def work():
+            try:
+                info, err = chain.probe_source(Path(file)), ""
+            except (RuntimeError, OSError, ValueError) as e:
+                info, err = None, str(e)
+            safe_emit(sig.ready, gen, info, err)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _probe_done(self, gen: int, info, err: str) -> None:
+        if gen != self._load_gen or self._closed:
+            return
+        file, start, end = self._pending
+        self.loading = False
+        if info is None:
+            self.info_label.setText(f"Cannot read {Path(file).name}: {err}")
+            self._update_enabled()
+            return
+        if self._load_info(file, info, start, end):
+            self._keep = None                      # (a file that cannot be read keeps the saved range)
 
     def load(self, file: str, start: float | None = None, end: float | None = None) -> bool:
         try:
@@ -383,6 +434,9 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
         except (RuntimeError, OSError, ValueError) as e:
             self.info_label.setText(f"Cannot read {Path(file).name}: {e}")
             return False
+        return self._load_info(file, info, start, end)
+
+    def _load_info(self, file: str, info: dict, start: float | None, end: float | None) -> bool:
         if info["duration"] <= 0:
             self.info_label.setText(f"{Path(file).name} has no known length.")
             return False
@@ -474,6 +528,51 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
             self.b_ref.setText(f"Add as picture of @{name}")
             self.b_ref.setToolTip(f"Add the whole frame at the playhead as a picture of @{name} (a {kind}); clips "
                                   "that mention it get this picture")
+
+    def reference_here_async(self) -> None:
+        """reference_here with the frame read by ffmpeg off the UI thread (the button's action)."""
+        if self.info is None or self.on_reference is None or self.loading:
+            return
+        t = self.position()
+        ctx = media.scratch("ref")
+        d = ctx.__enter__()
+        png = Path(d) / "frame.png"
+        turn = chain.rotate_filter(self.rotate)
+        cmd = ["-y", "-ss", f"{t:.4f}", "-i", self.file] + (["-vf", turn] if turn else []) + \
+              ["-frames:v", "1", "-update", "1", png]
+        self._load_gen += 1
+        gen, sig = self._load_gen, self._grabbed
+        self._pending = (ctx, png, t)
+        self._set_loading(True, "Reading the frame …")
+
+        def work():
+            try:
+                media.ffmpeg(cmd, timeout=60)
+            except (OSError, media.MediaError):
+                pass
+            safe_emit(sig.ready, gen, "" if png.is_file() else "missing")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _grab_done(self, gen: int, err: str) -> None:
+        ctx, png, t = self._pending
+        if gen != self._load_gen or self._closed:
+            ctx.__exit__(None, None, None)
+            return
+        self.loading = False
+        try:
+            if err:
+                self.summary.setText(f"Could not read the frame at {fmt(t)}.")
+                ok = False
+            else:
+                ok = bool(self.on_reference(str(png)))
+                what = "face picture" if self.face else "picture"
+                where = "(see the Cast & references tab, Alt+2)"
+                self.summary.setText((f"The face from the frame at {fmt(t)} was added {where}." if self.face
+                                      else f"The frame at {fmt(t)} was added as a picture {where}.") if ok
+                                     else f"The frame at {fmt(t)} was not added as a {what}.")
+        finally:
+            ctx.__exit__(None, None, None)
+            self._update_enabled()
 
     def reference_here(self) -> bool:
         """The frame at the playhead at the source's size (turned as set), handed to on_reference (which opens the
@@ -616,6 +715,7 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
 
     def done(self, r):                                  # stop playback and the file handle with the dialog
         self._closed = True
+        self._load_gen += 1                             # a probe or frame grab still running is dropped
         self._frame_timer.stop()                        # (a decode must not start for a dialog nobody sees)
         self._gen += 1                                  # running frame decodes stop
         if self.player is not None:
