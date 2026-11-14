@@ -66,6 +66,131 @@ def _refined_sound(project: Path, node: Node, target: Path, tmp: Path, log: Call
         chain.replace_audio(target, wav)
 
 
+def _pin_frames(project: Path, tree: Tree, path: list[Node], node: Node, size: str,
+                tmp: Path) -> tuple[Path | None, Path | None]:
+    """The frames a refined clip is pinned to: its first (the start image, or the frame the refined clip before it
+    hands over at) and its last (the first frame of the refined video after it)."""
+    from ..comfy import refine_size
+    first = last = None
+    i = path.index(node)
+    if i == 0:
+        s0 = node.made.get("settings") or {}
+        first = prepared_start(project, *refine_size(int(s0["width"]), int(s0["height"]), size),
+                               source=start_source(project, node)) \
+            if s0.get("width") and s0.get("height") else None
+    else:
+        before = path[i - 1]
+        n_before = made_frames(before) or _clip_frames(project, before)
+        at = handover_index(tree, before, n_before)
+        first = tmp / f"{node.id}_first.png"
+        chain.frame_at(refined_file(project, before, size), n_before - 1 if at is None else at, first)
+    vc = tree.video_child(node.id)
+    if vc is not None and vc in path:
+        last = tmp / f"{node.id}_last.png"
+        chain.frame_at(refined_file(project, vc, size), 0, last)
+    return first, last
+
+
+def _refine_choices(generator: RefineGenerator, method: str, strength: str, fast_attention: bool,
+                    denoise: bool) -> dict:
+    """What a re-rendered copy records of how it was made (a copy is reused only while these are the same)."""
+    pins: dict = {}
+    if method != "refine":
+        pins["method"] = method
+        if denoise:
+            pins["denoise"] = True
+        variant = getattr(generator, "seedvr_variant", None)   # (RunPod's big GPUs: fp16, whole frames)
+        if variant:
+            pins["variant"] = variant
+    else:
+        pins["strength"] = strength
+        if fast_attention:
+            pins["attention"] = "sol-attn"
+    return pins
+
+
+def _check_recorded_size(node: Node) -> None:
+    s = node.made.get("settings") or {}
+    if node.is_video and not all(k_ in (node.made.get("key") or {}) for k_ in ("width", "height")) or \
+            not node.is_video and not all(k_ in s for k_ in ("width", "height")):
+        raise ValueError(f"{'video' if node.is_video else 'clip'} #{short_id(node.id)} has no recorded size; "
+                         "make it again, then export")
+
+
+def _seedvr_clip(generator: RefineGenerator, project: Path, node: Node, target: Path, size: str, method: str,
+                 denoise: bool, log: Callable[[str], None], who: str) -> None:
+    """The clip as made, restored at the size by SeedVR2."""
+    from ..comfy import SEEDVR_METHODS, refine_size
+    dims = node.made.get("key") if node.is_video else node.made.get("settings") or {}
+    w, h = refine_size(int(dims["width"]), int(dims["height"]), size)
+    name = "SeedVR2 " + SEEDVR_METHODS[method].upper()
+    log(f"{who}: upscaling with {name} to {w}x{h}")
+    generator.seedvr(project / node.made["video"], target, (w, h), method, seed=node.seed, denoise=denoise)
+
+
+def _refine_swapped(generator: RefineGenerator, project: Path, node: Node, target: Path, size: str, tmp: Path,
+                    fast_attention: bool, strength: str, log: Callable[[str], None], who: str) -> None:
+    """A video whose person was replaced, re-rendered like a generated clip (with the recorded sound)."""
+    from ..comfy import SOL_TAU, refine_size
+    key = node.made.get("key") or {}
+    w, h = refine_size(int(key["width"]), int(key["height"]), size)
+    info = swapped_video(node)
+    prompt = info.get("details") or info.get("prompt") or SWAPPED_REFINE_PROMPT
+    log(f"{who}: refining the video with the replaced person at {w}x{h}")
+    draft, n = project / node.made["video"], _clip_frames(project, node)
+    grid = n if n <= 5 else chain.h3_frames(n)       # H3's 17n+5 frame grid
+    padded = tmp / f"{node.id}_draft.mp4"
+    if grid != n:                            # the last frame held to the grid, cut off again after
+        media.ffmpeg(["-y", "-i", draft, "-vf", f"tpad=stop_mode=clone:stop={grid - n}", "-c:v", "libx264",
+                      "-crf", "10", "-pix_fmt", "yuv420p", "-c:a", "copy", padded])
+    made = tmp / f"{node.id}_refined.mp4" if grid != n else target
+    generator.refine(padded if grid != n else draft, prompt, made, int(info.get("seed") or 0), (w, h),
+                     grid, [], None, None, sparse=SOL_TAU if fast_attention else None, strength=strength)
+    if grid != n:
+        media.ffmpeg(["-y", "-i", made, "-frames:v", str(n), "-c:v", "libx264", "-crf", "12", "-pix_fmt",
+                      "yuv420p", "-an", target])
+    if chain.audio_seconds(draft):                # the recorded sound exactly, not the model's
+        wav = tmp / f"{node.id}_sound.wav"
+        chain.to_wav(draft, wav)
+        chain.replace_audio(target, wav)
+
+
+def _convert_video(project: Path, node: Node, target: Path, size: str, log: Callable[[str], None],
+                   who: str) -> None:
+    """A real video converted again from its file at the size."""
+    from ..comfy import refine_size
+    src = node.source
+    if not Path(src["file"]).is_file():
+        raise FileNotFoundError(f"video file not found: {src['file']}")
+    key = node.made.get("key") or {}
+    w, h = refine_size(int(key["width"]), int(key["height"]), size)
+    log(f"{who}: converting {Path(src['file']).name} at {w}x{h}")
+    chain.convert_range(Path(src["file"]), target, src["start"], src["end"], w, h, rotate=source_rotation(src))
+
+
+def _refine_clip(generator: RefineGenerator, project: Path, node: Node, target: Path, size: str, tmp: Path,
+                 first: Path | None, last: Path | None, fast_attention: bool, strength: str,
+                 log: Callable[[str], None], who: str) -> None:
+    """A generated clip re-rendered as it was made (its prompt, style text, LoRAs, seed), with its sound."""
+    from ..comfy import SOL_TAU, refine_size
+    s = node.made.get("settings") or {}
+    w, h = refine_size(int(s["width"]), int(s["height"]), size)
+    made_prompt = node.made.get("prompt", node.prompt)
+    if s.get("prompt_format") == "h3" and not _h3.is_structured(made_prompt):
+        made_prompt = _h3.split_sound_sections(made_prompt)[0]   # (the camera sentence before them)
+    made_prompt = _camera.apply(made_prompt, s.get("camera"))
+    prompt = " ".join(x for x in (s.get("prompt_prefix", ""), made_prompt, s.get("prompt_suffix", "")) if x)
+    from ..triggers import with_triggers
+    prompt = with_triggers(prompt, list(s.get("lora_triggers") or []))   # as the clip was made
+    loras = ([(s["lora"], s.get("strength", 1.0))] if s.get("lora") else []) + \
+        [(e["lora"], e.get("strength", 1.0)) for e in s.get("extra_loras") or []]
+    log(f"{who}: refining at {w}x{h}")
+    generator.refine(project / node.made["video"], prompt, target, node.seed, (w, h),
+                     made_frames(node) or _clip_frames(project, node), loras, first, last,
+                     sparse=SOL_TAU if fast_attention else None, strength=strength)
+    _refined_sound(project, node, target, tmp, log, who)
+
+
 def refine_path(generator: RefineGenerator, project: Path, nid: str, size: str, out: Path,
                 events: Callable[[dict], None] | None = None, log: Callable[[str], None] = print,
                 pin: bool = True, fast_attention: bool = False, refine_swapped: bool = False,
@@ -90,7 +215,7 @@ def refine_path(generator: RefineGenerator, project: Path, nid: str, size: str, 
     single: only the clip nid itself (whole, nothing left out); its kept copy is shared with path exports, except a
     refine without one: that is made unpinned (no neighbours) into a temporary file, the path's copy stays.
     Then the path is joined (the same frames left out as at the normal size) into out."""
-    from ..comfy import SEEDVR_METHODS, refine_size
+    from ..comfy import SEEDVR_METHODS
     if method != "refine" and method not in SEEDVR_METHODS:
         raise ValueError(f"unknown method {method!r}")
     if size not in REFINED:
@@ -117,37 +242,13 @@ def refine_path(generator: RefineGenerator, project: Path, nid: str, size: str, 
             target = refined_file(project, node, size)
             first = last = None
             if pin and not single and not node.is_video and method == "refine":
-                i = path.index(node)
-                if i == 0:
-                    s0 = node.made.get("settings") or {}
-                    first = prepared_start(project, *refine_size(int(s0["width"]), int(s0["height"]), size),
-                                           source=start_source(project, node)) \
-                        if s0.get("width") and s0.get("height") else None
-                else:
-                    before = path[i - 1]
-                    n_before = made_frames(before) or _clip_frames(project, before)
-                    at = handover_index(tree, before, n_before)
-                    first = tmp / f"{node.id}_first.png"
-                    chain.frame_at(refined_file(project, before, size), n_before - 1 if at is None else at, first)
-                vc = tree.video_child(node.id)
-                if vc is not None and vc in path:
-                    last = tmp / f"{node.id}_last.png"
-                    chain.frame_at(refined_file(project, vc, size), 0, last)
+                first, last = _pin_frames(project, tree, path, node, size, tmp)
             pins = {"first": chain.file_signature(first), "last": chain.file_signature(last)}
             regen = not node.is_video or bool(refine_swapped and swapped_video(node))
             if node.is_video:
                 pins["video"] = "refined" if regen else "converted"
-            if regen and method != "refine":
-                pins["method"] = method
-                if denoise:
-                    pins["denoise"] = True
-                variant = getattr(generator, "seedvr_variant", None)   # (RunPod's big GPUs: fp16, whole frames)
-                if variant:
-                    pins["variant"] = variant
-            elif regen:
-                pins["strength"] = strength
-                if fast_attention:
-                    pins["attention"] = "sol-attn"
+            if regen:
+                pins.update(_refine_choices(generator, method, strength, fast_attention, denoise))
             record = refine_record(target)
             sound_rev = None if node.is_video else node.made.get("sound_rev")   # (its sound mixed again since)
             copy_rev = record.pop("sound", None)
@@ -171,68 +272,17 @@ def refine_path(generator: RefineGenerator, project: Path, nid: str, size: str, 
                 continue
             emit({"e": "node", "id": node.id, "state": "generating", "k": k, "n": len(order)})
             target.with_suffix(".json").unlink(missing_ok=True)   # a copy made now must not keep older pins
-            s = node.made.get("settings") or {}
-            if node.is_video and not all(k_ in (node.made.get("key") or {}) for k_ in ("width", "height")) or \
-                    not node.is_video and not all(k_ in s for k_ in ("width", "height")):
-                raise ValueError(f"{'video' if node.is_video else 'clip'} #{short_id(node.id)} has no recorded size; "
-                                 "make it again, then export")
+            _check_recorded_size(node)
+            who = f"[{k}/{len(order)}] {node.id}"
             if regen and method != "refine":             # SeedVR2: the clip as made, restored at the size
-                dims = node.made.get("key") if node.is_video else s
-                w, h = refine_size(int(dims["width"]), int(dims["height"]), size)
-                name = "SeedVR2 " + SEEDVR_METHODS[method].upper()
-                log(f"[{k}/{len(order)}] {node.id}: upscaling with {name} to {w}x{h}")
-                generator.seedvr(project / node.made["video"], target, (w, h), method, seed=node.seed,
-                                 denoise=denoise)
+                _seedvr_clip(generator, project, node, target, size, method, denoise, log, who)
             elif node.is_video and regen:                # a replaced person: re-rendered like a generated clip
-                key = node.made.get("key") or {}
-                w, h = refine_size(int(key["width"]), int(key["height"]), size)
-                info = swapped_video(node)
-                prompt = info.get("details") or info.get("prompt") or SWAPPED_REFINE_PROMPT
-                log(f"[{k}/{len(order)}] {node.id}: refining the video with the replaced person at {w}x{h}")
-                from ..comfy import SOL_TAU
-                draft, n = project / node.made["video"], _clip_frames(project, node)
-                grid = n if n <= 5 else chain.h3_frames(n)       # H3's 17n+5 frame grid
-                padded = tmp / f"{node.id}_draft.mp4"
-                if grid != n:                            # the last frame held to the grid, cut off again after
-                    media.ffmpeg(["-y", "-i", draft, "-vf", f"tpad=stop_mode=clone:stop={grid - n}", "-c:v", "libx264",
-                                  "-crf", "10", "-pix_fmt", "yuv420p", "-c:a", "copy", padded])
-                made = tmp / f"{node.id}_refined.mp4" if grid != n else target
-                generator.refine(padded if grid != n else draft, prompt, made, int(info.get("seed") or 0), (w, h),
-                                 grid, [], None, None, sparse=SOL_TAU if fast_attention else None, strength=strength)
-                if grid != n:
-                    media.ffmpeg(["-y", "-i", made, "-frames:v", str(n), "-c:v", "libx264", "-crf", "12", "-pix_fmt",
-                                  "yuv420p", "-an", target])
-                if chain.audio_seconds(draft):                # the recorded sound exactly, not the model's
-                    wav = tmp / f"{node.id}_sound.wav"
-                    chain.to_wav(draft, wav)
-                    chain.replace_audio(target, wav)
+                _refine_swapped(generator, project, node, target, size, tmp, fast_attention, strength, log, who)
             elif node.is_video:
-                src = node.source
-                if not Path(src["file"]).is_file():
-                    raise FileNotFoundError(f"video file not found: {src['file']}")
-                key = node.made.get("key") or {}
-                w, h = refine_size(int(key["width"]), int(key["height"]), size)
-                log(f"[{k}/{len(order)}] {node.id}: converting {Path(src['file']).name} at {w}x{h}")
-                chain.convert_range(Path(src["file"]), target, src["start"], src["end"], w, h,
-                                    rotate=source_rotation(src))
+                _convert_video(project, node, target, size, log, who)
             else:
-                s = node.made.get("settings") or {}
-                w, h = refine_size(int(s["width"]), int(s["height"]), size)
-                made_prompt = node.made.get("prompt", node.prompt)
-                if s.get("prompt_format") == "h3" and not _h3.is_structured(made_prompt):
-                    made_prompt = _h3.split_sound_sections(made_prompt)[0]   # (the camera sentence before them)
-                made_prompt = _camera.apply(made_prompt, s.get("camera"))
-                prompt = " ".join(x for x in (s.get("prompt_prefix", ""), made_prompt, s.get("prompt_suffix", "")) if x)
-                from ..triggers import with_triggers
-                prompt = with_triggers(prompt, list(s.get("lora_triggers") or []))   # as the clip was made
-                loras = ([(s["lora"], s.get("strength", 1.0))] if s.get("lora") else []) + \
-                    [(e["lora"], e.get("strength", 1.0)) for e in s.get("extra_loras") or []]
-                log(f"[{k}/{len(order)}] {node.id}: refining at {w}x{h}")
-                from ..comfy import SOL_TAU
-                generator.refine(project / node.made["video"], prompt, target, node.seed, (w, h),
-                                 made_frames(node) or _clip_frames(project, node), loras, first, last,
-                                 sparse=SOL_TAU if fast_attention else None, strength=strength)
-                _refined_sound(project, node, target, tmp, log, f"[{k}/{len(order)}] {node.id}")
+                _refine_clip(generator, project, node, target, size, tmp, first, last, fast_attention, strength, log,
+                             who)
             if sound_rev:
                 pins["sound"] = sound_rev
             chain.atomic_write_text(target.with_suffix(".json"), json.dumps(pins))
