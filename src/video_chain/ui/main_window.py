@@ -1772,7 +1772,7 @@ class VideoCard(QFrame):
         self.file.setToolTip(str(f))
         n = chain.range_frames(src.get("start", 0), src.get("end", 0))
         rot = T.source_rotation(src)
-        self.range.setText(f"{format_time(src.get('start', 0), 3)} – {format_time(src.get('end', 0), 3)} of the file · "
+        self.range.setText(f"{format_time(src.get('start', 0), 1)} – {format_time(src.get('end', 0), 1)} of the file · "
                            f"{n} frames at {chain.FPS} fps" + (f" · turned {rot}° right" if rot else ""))
 
     def set_state(self, state: str, pixmap: QPixmap | None, step: str = ""):
@@ -1957,7 +1957,7 @@ class Preview(QWidget):
         self.moved.emit(ms / 1000)
         if not self.slider.isSliderDown():
             self.slider.setValue(int(ms))
-        self.time.setText(f"{format_time(ms / 1000)} / {format_time(self.player.duration() / 1000)}")
+        self.time.setText(f"{format_time(ms / 1000, 1)} / {format_time(self.player.duration() / 1000, 1)}")
 
     def _state(self, st):
         self.b_play.setIcon(icon("pause" if st == QMediaPlayer.PlayingState else "play"))
@@ -3595,10 +3595,10 @@ class MainWindow(QMainWindow):
             secs = 0.0
         if purpose == "play":
             self.preview.open(Path(path), f"Film · {len(self.film.scenes) if self.film else 1} scenes · "
-                                          f"{format_time(secs)}")
-            self.status.setText(f"Film joined: {format_time(secs)}.")
+                                          f"{format_time(secs, 1)}")
+            self.status.setText(f"Film joined: {format_time(secs, 1)}.")
         else:
-            self.status.setText(f"Exported the film: {Path(path).name} ({format_time(secs)}).")
+            self.status.setText(f"Exported the film: {Path(path).name} ({format_time(secs, 1)}).")
 
     def export_film(self):
         if self.film is None or not self._idle_or_say():
@@ -6332,8 +6332,8 @@ class MainWindow(QMainWindow):
         for n in sorted(self.tree.nodes.values(), key=lambda n: self.tree.number(n.id)):
             text = n.prompt
             if n.is_video:
-                text = (f"{Path(n.source['file']).name} · {format_time(n.source['start'], 3)}–"
-                        f"{format_time(n.source['end'], 3)}"
+                text = (f"{Path(n.source['file']).name} · {format_time(n.source['start'], 1)}–"
+                        f"{format_time(n.source['end'], 1)}"
                         + (f" · ↻{T.source_rotation(n.source)}°" if T.source_rotation(n.source) else ""))
             parent = n.parent or START
             if n.parent is None and n.start_image:          # a first clip with its own start image: its own row
@@ -6922,7 +6922,7 @@ class MainWindow(QMainWindow):
             cut = cuts.get(n.id, (0, 0))
             length = max(0, frames - cut[0] - cut[1]) / chain.FPS
             card.title.setText(f"{'Video' if n.is_video else 'Clip'} {k + 1}")
-            span = f"{format_time(t, 3)} – {format_time(t + length, 3)} in this path"
+            span = f"{format_time(t, 1)} – {format_time(t + length, 1)} in this path"
             vc = self.tree.video_child(n.id)
             if vc is not None:
                 span += f" · ends at video #{T.short_id(vc.id)}"
@@ -7007,7 +7007,7 @@ class MainWindow(QMainWindow):
         path = self.selected_path()
         if path:
             todo = sum(1 for n in path if self.state(n.id) != "done")
-            self.path_info.setText(f"{len(path)} clips · {format_time(t)}" + (f" · {todo} to make" if todo
+            self.path_info.setText(f"{len(path)} clips · {format_time(t, 1)}" + (f" · {todo} to make" if todo
                                                                            else " · all made"))
         else:
             self.path_info.setText("")
@@ -8891,10 +8891,10 @@ class MainWindow(QMainWindow):
         path, secs, spans = path
         if purpose == "play":
             self._played_path = (str(path), spans)  # (before it opens: the clip it is at is marked while it plays)
-            self.preview.open(path, f"Path to clip #{T.short_id(Path(path).stem)} · {format_time(secs)}")
-            self.status.setText(f"{pre}Path joined: {format_time(secs)}.")
+            self.preview.open(path, f"Path to clip #{T.short_id(Path(path).stem)} · {format_time(secs, 1)}")
+            self.status.setText(f"{pre}Path joined: {format_time(secs, 1)}.")
         else:
-            self.status.setText(f"{pre}Exported {Path(path).name} ({format_time(secs)}).")
+            self.status.setText(f"{pre}Exported {Path(path).name} ({format_time(secs, 1)}).")
 
     def _preview_opened(self, path: str):
         if self._played_path is not None and self._played_path[0] != path:

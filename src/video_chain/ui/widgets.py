@@ -86,7 +86,8 @@ def smooth_scaled(img: QImage, size: QSize, mode=Qt.KeepAspectRatio) -> QImage:
 
 
 def format_time(seconds: float, precision: int = 0) -> str:
-    """m:ss (precision 0) or m:ss.mmm (precision 3). Rounded first, then split: 59.6 s is 1:00, never 0:60."""
+    """m:ss with `precision` decimals (0: m:ss, 1: m:ss.s as the main window shows times, 3: m:ss.mmm for
+    frame-exact editors). Rounded first, then split: 59.96 s at precision 1 is 1:00.0, never 0:60.0."""
     q = 10 ** precision
     total = round(max(0.0, float(seconds)) * q)
     whole, frac = divmod(total, q)

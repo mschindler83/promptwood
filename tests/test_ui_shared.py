@@ -385,3 +385,9 @@ def test_the_shortcuts_dialog_lists_the_table_and_only_closes():
     from PySide6.QtWidgets import QTextBrowser
     assert "Ctrl+Shift+N" in dlg.findChild(QTextBrowser).toPlainText()
     assert dlg.findChild(QDialogButtonBox).button(QDialogButtonBox.Close) is not None
+
+
+def test_format_time_with_one_decimal_as_the_main_window_shows_times():
+    from video_chain.ui.widgets import format_time
+    assert format_time(3.04, 1) == "0:03.0" and format_time(15.083, 1) == "0:15.1"
+    assert format_time(59.96, 1) == "1:00.0" and format_time(0, 1) == "0:00.0"
