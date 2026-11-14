@@ -83,7 +83,7 @@ class TtsMixin:
         VRAM), then ComfyUI is asked to unload its models (_make_room)."""
         cur = self._llama
         if cur is not None and cur.stop(wait=True):
-            self.bridge.tts_log.emit("stopped the llama.cpp server: Fish S2 Pro needs its RAM and VRAM")
+            safe_emit(self.bridge.tts_log, "stopped the llama.cpp server: Fish S2 Pro needs its RAM and VRAM")
         self._make_room(TTS.FISH_VRAM_MB, url, "Fish S2 Pro", TTS.TtsError, "speak the lines after the run")
 
     def stop_tts(self, why: str = "") -> bool:
@@ -202,7 +202,7 @@ class TtsMixin:
 
         def work():
             try:
-                r = TTS.render_lines(project, snap, nid, eng, log=self.bridge.tts_log.emit)
+                r = TTS.render_lines(project, snap, nid, eng, log=lambda m: safe_emit(self.bridge.tts_log, m))
                 safe_emit(self.bridge.spoken, nid, r, "", str(project))
             except BaseException as e:  # noqa: BLE001  (the answer ends "busy")
                 safe_emit(self.bridge.spoken, nid, None, str(e) or type(e).__name__, str(project))

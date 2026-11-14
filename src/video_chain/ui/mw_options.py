@@ -220,7 +220,7 @@ class OptionsMixin:
             counts = {}
             try:
                 counts = triggers.db().scan(paths, online=online, stop=stop.is_set,
-                                            progress=bridge.trigger_progress.emit)
+                                            progress=lambda *a: safe_emit(bridge.trigger_progress, *a))
             except Exception as e:  # noqa: BLE001  (the scan ends; what went wrong is in the log)
                 logging.getLogger(__name__).warning("trigger word scan failed", exc_info=True)
                 safe_emit(bridge.log, f"The trigger word scan failed: {type(e).__name__}: {e}")

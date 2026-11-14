@@ -183,7 +183,7 @@ class EndsMixin:
         """The edit dialog is closed: the image model stays loaded for the idle time ('Keep the model loaded'), else
         it is unloaded now."""
         sw = self._edit_switch
-        if sw is not None and sw.loaded:                      # an image job connected (also when it finished after closing)
+        if sw is not None and sw.loaded:          # an image job connected (also when it finished after closing)
             self._comfy_model = ComfyModel.QWEN
         if self._comfy_model != ComfyModel.QWEN or self.running:
             return
