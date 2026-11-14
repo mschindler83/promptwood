@@ -2056,7 +2056,7 @@ class ImageEditDialog(QDialog):
         self._trash = None
         if keep_sources:
             return
-        needed = {m.get("source_copy") for _p, m in project_edits(self.project)}
+        needed = {m.get(k) for _p, m in project_edits(self.project) for k in ("source_copy", "mask")}
         for f in (self.project / EDITS_DIR / "sources").glob("*") if (self.project / EDITS_DIR / "sources").is_dir() \
                 else []:
             if str(f) not in needed and f.stat().st_mtime < time.time() - 5:

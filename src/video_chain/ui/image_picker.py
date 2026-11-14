@@ -327,7 +327,8 @@ class ImagePickerDialog(QDialog):
             head.setFlags(Qt.NoItemFlags)
             self.places.addItem(head)
         entries = [("Home", str(Path.home()))]
-        for name in {"image": ("Pictures",), "video": ("Videos",), "media": ("Music", "Videos")}[self.kind]:
+        for name in {"image": ("Pictures",), "video": ("Videos",), "media": ("Music", "Videos"),
+                     "text": ("Documents",)}.get(self.kind, ()):
             if (Path.home() / name).is_dir():
                 entries.append((name, str(Path.home() / name)))
         entries += list(self._extra_places)
