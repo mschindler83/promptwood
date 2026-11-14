@@ -495,3 +495,30 @@ def test_a_picture_is_encoded_once_per_file_state(tmp_path, monkeypatch):
     Image.new("RGB", (50, 30), "blue").save(f)
     os.utime(f, ns=(1, 2 * 10**9))
     assert L.image_part(f) != a
+
+
+def test_a_server_of_another_running_instance_is_never_touched(fake_server_files, tmp_path):
+    """Two windows of the app: the second one's start-up clean-up must not end the first one's server."""
+    script, model = fake_server_files
+    port = free_port()
+    logs = tmp_path / "log"
+    first = L.LlamaServer(str(script), str(model), port, log_dir=logs)
+    first.start(timeout=30)
+    pid = first.proc.pid
+    other_app = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])   # (the other instance)
+    try:
+        rec = json.loads((logs / "llama-server.pid").read_text())
+        rec["owner"], rec["owner_started"] = other_app.pid, Path_state_start(other_app.pid)
+        (logs / "llama-server.pid").write_text(json.dumps(rec))
+        second = L.LlamaServer(str(script), str(model), port, log_dir=logs)
+        assert second.stop() is False                                  # not a leftover: its app still runs
+        assert _alive(pid) and (logs / "llama-server.pid").is_file()
+    finally:
+        other_app.kill()
+        other_app.wait()
+        if first.proc.poll() is None:
+            os.killpg(pid, signal.SIGKILL)
+
+
+def Path_state_start(pid):
+    return open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()[19]

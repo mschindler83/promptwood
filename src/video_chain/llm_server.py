@@ -485,7 +485,9 @@ class LlamaServer:
         if path is None or st is None:
             return
         try:
-            path.write_text(json.dumps({"pid": proc.pid, "started": st[1], "cmd": self._command(), "port": self.port}))
+            me = _proc_stat(os.getpid())
+            path.write_text(json.dumps({"pid": proc.pid, "started": st[1], "cmd": self._command(), "port": self.port,
+                                        "owner": os.getpid(), "owner_started": me[1] if me else None}))
         except OSError as e:
             logger.warning("could not write the server record: %s", e)
 
@@ -504,6 +506,11 @@ class LlamaServer:
         try:
             d = json.loads(path.read_text())
             pid, started, cmd = int(d["pid"]), str(d["started"]), [str(x) for x in d["cmd"]]
+            owner = d.get("owner")
+            if owner is not None and int(owner) != os.getpid():
+                o = _proc_stat(int(owner))
+                if o is not None and o[0] != "Z" and o[1] == str(d.get("owner_started")):
+                    return None                     # another running app's server: not a leftover, never touched
             st = _proc_stat(pid)
             argv = Path(f"/proc/{pid}/cmdline").read_bytes().decode("utf-8", "replace").split("\0")[:-1]
             if st is not None and st[0] != "Z" and st[1] == started and cmd and argv[-len(cmd):] == cmd \
