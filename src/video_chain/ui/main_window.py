@@ -20,7 +20,6 @@ import stat as stat_module
 import sys
 import threading
 import time
-import urllib.request
 from pathlib import Path
 from typing import NamedTuple
 
@@ -37,6 +36,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
 from .. import chain
 from .. import comfy as CMF
 from .. import media
+from .. import net
 from .. import config
 from .. import film as F
 from .. import camera as CAM
@@ -9598,7 +9598,7 @@ class MainWindow(QMainWindow):
 
         def check():
             try:
-                with urllib.request.urlopen(url + "/system_stats", timeout=1.5) as r:
+                with net.urlopen(url + "/system_stats", timeout=1.5) as r:
                     ok = r.status == 200
             except Exception:  # noqa: BLE001
                 ok = False

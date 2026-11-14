@@ -437,3 +437,33 @@ def test_a_failed_single_export_says_why(app, win, tmp_path, image, monkeypatch)
     win.export(blocker / "clip.mp4", "made", single=ids[0])      # (its folder is a file)
     wait(app, lambda: "Could not export" in win.status.text())
     assert win._joins == 0
+
+
+def test_a_project_of_a_newer_version_is_refused_with_its_reason(app, win, tmp_path, monkeypatch):
+    import json
+    folder = tmp_path / "newer"
+    folder.mkdir()
+    (folder / T.TREE_FILE).write_text(json.dumps({"version": T.TREE_VERSION + 5, "nodes": []}))
+    told = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda parent, title, text, *a: told.append(text))
+    assert win.open_project(folder) is False
+    assert told and "newer version" in told[0] and win.project is None
+
+
+def test_the_comfy_poll_goes_through_net_without_a_proxy(app, win, monkeypatch):
+    from video_chain import net
+    seen = []
+
+    class Answer:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+    monkeypatch.setattr(net, "urlopen", lambda req, timeout: seen.append(str(req)) or Answer())
+    win._comfy_polling = False
+    win._poll_comfy()
+    wait(app, lambda: win.comfy_up is True)
+    assert seen and seen[0].endswith("/system_stats")
