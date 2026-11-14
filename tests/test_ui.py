@@ -12,6 +12,7 @@ from PIL import Image  # noqa: E402
 from PySide6.QtGui import QTextCursor  # noqa: E402
 from PySide6.QtWidgets import QApplication, QInputDialog, QMessageBox  # noqa: E402
 
+from video_chain.ui.generator_state import Job, RunpodBinding  # noqa: E402
 from video_chain import chain  # noqa: E402
 from conftest import settings  # noqa: E402,F401  (the shared isolated settings file)
 from video_chain import tree as T  # noqa: E402
@@ -1924,7 +1925,7 @@ def test_export_on_runpod(app, win, tmp_path, image, monkeypatch):
     monkeypatch.setenv("FAKE_LOAD_DELAY", "0.5")                             # (the pod "prepares" a moment)
     win.export(out, "2k", method="seedvr2_3b", cloud=True)
     wait(app, lambda: win._job is not None)                                   # (checked in the background first)
-    assert win.running and win._worker_key()[0] == "runpod"
+    assert win.running and isinstance(win._worker_key(), RunpodBinding)
     seen = []
     wait(app, lambda: seen.append(win.status.text()) or not win.running, timeout=120)
     assert any(t.startswith("RunPod: downloading") for t in seen)
@@ -3255,7 +3256,7 @@ def test_progress_says_what_runs_and_how_long_it_still_takes(app, win, tmp_path,
     ids = new_project(win, tmp_path, image, ("a", "b"))
     clock = [1000.0]
     monkeypatch.setattr("time.monotonic", lambda: clock[0])
-    win._job, win._plan = {"refine": {"size": "2k"}}, list(ids)            # (an export of 2 clips)
+    win._job, win._plan = Job(list(ids), {"size": "2k"}), list(ids)            # (an export of 2 clips)
     win._run_started = clock[0]
     win._event({"e": "node", "id": ids[0], "state": "generating"})
     win._event({"e": "note", "id": ids[0], "text": "SeedVR2 piece 2 of 5"})

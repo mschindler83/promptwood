@@ -14,6 +14,7 @@ from . import dialogs as D, shortcuts as S, image_picker as IP, prompt_refiner a
 from .clip_dialogs import HandoverDialog, VideoFrameDialog
 from .image_edit import ImageEditDialog, record_use
 from .video_editor import choose_video
+from .generator_state import CLIP_MODELS, ComfyModel
 from .ui_logic import ASPECT_TOLERANCE, DEFAULT_COMFY_URL, label_loras
 
 
@@ -53,9 +54,9 @@ class EndsMixin:
         finally:
             # the llama.cpp model goes with the window: it slows image / clip generation down while it is loaded
             self.stop_llama("the prompt refiner was closed")
-            if dlg.refined_any and not self.running and self._comfy_model not in ("qwen",):
+            if dlg.refined_any and not self.running and self._comfy_model != ComfyModel.QWEN:
                 # a language model is in ComfyUI now: unloaded before the next clips, idle time as usual
-                self._comfy_model = "llm"
+                self._comfy_model = ComfyModel.LLM
                 if self.keep_loaded.isChecked():
                     self._qwen_timer.start(self.idle_minutes.value() * 60_000)
                 self._update_model_label()
@@ -115,7 +116,7 @@ class EndsMixin:
             self._qwen_timer.stop()
             self.stop_llama("its memory is needed for the image")
             # the clip model is loaded: unload it (once: after the first image of this window it is gone)
-            switch["free"] = not switch["loaded"] and self._comfy_model in ("h3", "h3-hyperflow")
+            switch["free"] = not switch["loaded"] and self._comfy_model in CLIP_MODELS
             if self.worker_alive and not self.running:
                 self._quit_worker(free=False)               # its model goes now; it is started again for clips
 
@@ -187,8 +188,8 @@ class EndsMixin:
         it is unloaded now."""
         sw = self._edit_switch or {}
         if sw.get("loaded"):                      # an image job connected (also when it finished after closing)
-            self._comfy_model = "qwen"
-        if self._comfy_model != "qwen" or self.running:
+            self._comfy_model = ComfyModel.QWEN
+        if self._comfy_model != ComfyModel.QWEN or self.running:
             return
         if self.keep_loaded.isChecked():
             self._qwen_timer.start(self.idle_minutes.value() * 60_000)

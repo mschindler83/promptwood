@@ -21,6 +21,7 @@ from .clip_dialogs import SplitDialog, VideoFrameDialog
 from .video_editor import VideoRangeDialog
 from .view_mode import ViewMode
 from .clip_cards import PromptCard, VideoCard
+from .generator_state import ComfyModel, Job, ModelState, Phase, WorkerBinding
 from .mw_audio import AudioMixin
 from .mw_build import BuildMixin
 from .mw_cast import CastMixin
@@ -81,7 +82,7 @@ class MainWindow(BuildMixin, GeneratorMixin, ComfyMixin, ExportMixin, VideosMixi
         self.proc: QProcess | None = None
         self._buf, self._ebuf = b"", ""
         self._stopping = False
-        self._phase = ""
+        self._phase = Phase.IDLE
         self._error = ""
         self._plan: list[str] = []
         self._made_now: set[str] = set()
@@ -90,12 +91,12 @@ class MainWindow(BuildMixin, GeneratorMixin, ComfyMixin, ExportMixin, VideosMixi
         self._tree_stamp: tuple | None = None   # tree.json as this window last read or wrote it
         self._copying: str | None = None        # Save as in progress (the source project)
         self._worker_leaving = False            # the worker said bye (idle timeout) and is quitting
-        self._job: dict | None = None           # the generation in progress
+        self._job: Job | None = None            # the generation in progress
         self._worker_idle = False
-        self._worker_bound: tuple | None = None
+        self._worker_bound: WorkerBinding | None = None
         self._replace_worker = False
         self._idle_since, self._idle_timeout = 0.0, None
-        self._model_state = ""
+        self._model_state = ModelState.NONE
         self._joins = 0                         # path joins still running
         self._converts: dict[str, str] = {}     # video node -> token of its conversion in progress
         self._kill_timer = QTimer(self, singleShot=True, interval=KILL_GRACE_MS, timeout=self._kill)
@@ -142,7 +143,7 @@ class MainWindow(BuildMixin, GeneratorMixin, ComfyMixin, ExportMixin, VideosMixi
         # the model this app last used in ComfyUI ("h3" clips, "qwen" image edits, None: none / unloaded). ComfyUI
         # is asked to unload only when it changes: switching models frees the other one first instead of letting
         # both fight over the memory; the same model again is used as it is (no reload)
-        self._comfy_model: str | None = None
+        self._comfy_model: ComfyModel | None = None
         self._quit_frees = True                 # the worker's next quit unloads the model
         self._qwen_timer = QTimer(self, singleShot=True, timeout=self._qwen_idle)
         self._join_lock = threading.Lock()      # joins run one after another (play after generating + export)

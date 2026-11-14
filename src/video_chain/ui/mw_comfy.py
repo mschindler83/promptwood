@@ -14,6 +14,7 @@ from .. import comfy as CMF, net
 from . import dialogs as D, shortcuts as S
 from .theme import repolish
 from .widgets import safe_emit
+from .generator_state import ComfyModel, IMAGE_MODELS, ModelState
 from .ui_logic import CLOSE_GRACE, COMFY_START_TIMEOUT, DEFAULT_COMFY_LAUNCHER, DEFAULT_COMFY_URL
 
 
@@ -24,7 +25,7 @@ class ComfyMixin:
         if self.worker_alive and not self.running:
             self.status.setText("Unloading the model …")
             self._quit_worker()
-        elif self._comfy_model in ("qwen", "llm") and not self.running:
+        elif self._comfy_model in IMAGE_MODELS and not self.running:
             self.status.setText("Unloading the image model …")
             self._free_comfy()
 
@@ -52,7 +53,7 @@ class ComfyMixin:
         self._update_model_label()
 
     def _qwen_idle(self):
-        if self._comfy_model in ("qwen", "llm") and not self.running:
+        if self._comfy_model in IMAGE_MODELS and not self.running:
             self._free_comfy()
             self.status.setText("The image model was unloaded after the idle time.")
 
@@ -146,14 +147,14 @@ class ComfyMixin:
         return True
 
     def _update_model_label(self):
-        if not self.worker_alive and self._comfy_model in ("qwen", "llm"):
+        if not self.worker_alive and self._comfy_model in IMAGE_MODELS:
             left = self._qwen_timer.remainingTime() if self._qwen_timer.isActive() else -1
-            text, sev = (("Model: language model (prompt refiner) loaded in ComfyUI" if self._comfy_model == "llm"
+            text, sev = (("Model: language model (prompt refiner) loaded in ComfyUI" if self._comfy_model == ComfyModel.LLM
                           else "Model: image model loaded in ComfyUI") +
                          (f" · unloads in {max(1, round(left / 60000))} min" if left >= 0 else "")), ""
         elif not self.worker_alive:
             text, sev = "Model: not loaded", ""
-        elif self.running and self._model_state == "loading":
+        elif self.running and self._model_state == ModelState.LOADING:
             text, sev = "Model: loading …", "warning"
         elif self.running or not self._worker_idle:
             text, sev = "Model: working", ""
@@ -166,7 +167,7 @@ class ComfyMixin:
         self.model_label.setProperty("severity", sev)
         repolish(self.model_label)
         self.b_unload.setVisible((self.worker_alive and not self.running and self._worker_idle) or
-                                 (not self.worker_alive and self._comfy_model in ("qwen", "llm")))
+                                 (not self.worker_alive and self._comfy_model in IMAGE_MODELS))
 
     def changeEvent(self, e):
         """Back in this window (e.g. after training a LoRA): look for new LoRAs, at most every 30 s."""
@@ -262,7 +263,7 @@ class ComfyMixin:
             gp.kill()
             gp.waitForFinished(1000)
         freed = None
-        if self._comfy_model in ("qwen", "llm"):              # nor the image edit model
+        if self._comfy_model in IMAGE_MODELS:              # nor the image edit model
             freed = threading.Event()
             self._post_free((self.comfy_url.text().strip() or DEFAULT_COMFY_URL), freed)
             self._comfy_model = None

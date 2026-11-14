@@ -13,6 +13,8 @@ from PySide6.QtCore import QProcess, QProcessEnvironment, QTimer
 from .. import comfy as CMF, runpod as RP, tree as T
 from ..__main__ import COMFY_DOWN
 from .widgets import safe_emit
+from .generator_state import (
+    CLIP_MODELS, ComfyBinding, ComfyModel, IMAGE_MODELS, Job, ModelState, Phase, RunpodBinding, WorkerBinding)
 from .ui_logic import CLOUD_KILL_GRACE_MS, DEFAULT_COMFY_URL, KILL_GRACE_MS, fmt_left, time_left
 
 
@@ -39,23 +41,28 @@ class GeneratorMixin:
         if self.tree is not None:
             self._start([n.id for n in self.tree.leaves()])
 
-    def _worker_key(self) -> tuple:
+    @property
+    def _refine(self) -> dict | None:
+        """The refine settings of the export in progress (None: no job, or a normal run)."""
+        return self._job.refine if self._job is not None else None
+
+    def _worker_key(self) -> WorkerBinding:
         """What a running worker is bound to (which ComfyUI, its folder, cleanup; or the RunPod pod of a cloud
         export: GPU, volume, fallback, SeedVR2 size); a change needs a new worker."""
-        refine = (self._job or {}).get("refine") or {}
+        refine = self._refine or {}
         if refine.get("cloud"):
-            return ("runpod", self.qs.value("runpodGpu", RP.DEFAULT_GPU, type=str),
-                    self.qs.value("runpodVolume", "", type=str).strip(),
-                    self.qs.value("runpodFallback", True, type=bool),
-                    CMF.SEEDVR_METHODS.get(refine.get("method"), "7b"),
-                    self.qs.value("runpodWithoutVolume", True, type=bool))
-        return ((self.comfy_url.text().strip() or DEFAULT_COMFY_URL), self.comfy_dir.text().strip(),
-                self.comfy_cleanup.isChecked())
+            return RunpodBinding(self.qs.value("runpodGpu", RP.DEFAULT_GPU, type=str),
+                                 self.qs.value("runpodVolume", "", type=str).strip(),
+                                 self.qs.value("runpodFallback", True, type=bool),
+                                 CMF.SEEDVR_METHODS.get(refine.get("method"), "7b"),
+                                 self.qs.value("runpodWithoutVolume", True, type=bool))
+        return ComfyBinding((self.comfy_url.text().strip() or DEFAULT_COMFY_URL), self.comfy_dir.text().strip(),
+                            self.comfy_cleanup.isChecked())
 
     @property
     def _cloud_worker(self) -> bool:
         """The running worker is a RunPod one (it ends, and its pod with it, after its export)."""
-        return bool(self.proc is not None and self._worker_bound and self._worker_bound[0] == "runpod")
+        return bool(self.proc is not None and isinstance(self._worker_bound, RunpodBinding))
 
     def _start(self, targets: list[str], refine: dict | None = None):
         if self.running or self.tree is None:
@@ -183,10 +190,10 @@ class GeneratorMixin:
             self._cancel_check()
             return
         self.save_settings()
-        self._job = {"targets": targets, "sent": False, "refine": refine}
+        self._job = Job(targets, refine)
         self._run_started, self._clip_started, self._clip_note = time.monotonic(), time.monotonic(), ""
         self._exported = None
-        self._error, self._stopping, self._phase = "", False, "starting"
+        self._error, self._stopping, self._phase = Phase.IDLE, False, Phase.STARTING
         self._targets, self._plan = targets, []
         for n in nodes:                            # made again now: what went wrong last time goes
             self._failures.pop(n, None)
@@ -231,23 +238,22 @@ class GeneratorMixin:
         self._worker_idle, self._worker_bound, self._replace_worker = False, self._worker_key(), False
         self._worker_leaving = False
         minutes = self.idle_minutes.value() if self.keep_loaded.isChecked() else 0
-        if self._worker_bound[0] == "runpod":         # a pod for this export only: never idles, quits after it
-            _, gpu, volume, fallback, models, without_volume = self._worker_bound
-            args = pre + ["--serve", "--events", "--idle-minutes", "0", "--cloud", "runpod", "--runpod-gpu", gpu,
-                          "--runpod-models", models]
-            if volume:
-                args += ["--runpod-volume", volume]
-            if not fallback:
+        bound = self._worker_bound
+        if isinstance(bound, RunpodBinding):          # a pod for this export only: never idles, quits after it
+            args = pre + ["--serve", "--events", "--idle-minutes", "0", "--cloud", "runpod", "--runpod-gpu", bound.gpu,
+                          "--runpod-models", bound.models]
+            if bound.volume:
+                args += ["--runpod-volume", bound.volume]
+            if not bound.fallback:
                 args.append("--runpod-no-fallback")
-            if volume and without_volume:
+            if bound.volume and bound.without_volume:
                 args.append("--runpod-without-volume")
             self._kill_timer.setInterval(CLOUD_KILL_GRACE_MS)        # (time to terminate the pod on Stop)
         else:
-            url, comfy_dir, cleanup = self._worker_bound
-            args = pre + ["--serve", "--events", "--idle-minutes", f"{minutes:g}", "--comfy-url", url]
-            if comfy_dir:
-                args += ["--comfy-dir", os.path.expanduser(comfy_dir)]
-            if not cleanup:
+            args = pre + ["--serve", "--events", "--idle-minutes", f"{minutes:g}", "--comfy-url", bound.url]
+            if bound.comfy_dir:
+                args += ["--comfy-dir", os.path.expanduser(bound.comfy_dir)]
+            if not bound.cleanup:
                 args.append("--keep-comfy-copies")
             self._kill_timer.setInterval(KILL_GRACE_MS)
         self.log.appendPlainText("$ " + " ".join([program, *args]))
@@ -260,15 +266,15 @@ class GeneratorMixin:
             return
         if self.proc.state() != QProcess.Running:    # (it ended meanwhile: _finished starts a new one)
             return
-        self._job["sent"] = True
+        self._job.sent = True
         self._worker_idle = False
         self.stop_llama("its RAM and VRAM are needed for the clips")
-        cmd = {"cmd": "run", "tree": str(self.project), "targets": self._job["targets"],
-               "free_first": self._comfy_model in ("qwen", "llm")}          # an image edit model is loaded: unload it
-        if self._comfy_model in ("h3", "h3-hyperflow"):             # earlier workers: was HyperFlow last?
-            cmd["last_hyperflow"] = self._comfy_model == "h3-hyperflow"
-        if self._job.get("refine"):                                # export refined: re-render the path's clips
-            cmd.update({"cmd": "refine", "target": self._job["targets"][0], **self._job["refine"]})
+        cmd = {"cmd": "run", "tree": str(self.project), "targets": self._job.targets,
+               "free_first": self._comfy_model in IMAGE_MODELS}          # an image edit model is loaded: unload it
+        if self._comfy_model in CLIP_MODELS:                        # earlier workers: was HyperFlow last?
+            cmd["last_hyperflow"] = self._comfy_model == ComfyModel.H3_HYPERFLOW
+        if self._job.refine:                                       # export refined: re-render the path's clips
+            cmd.update({"cmd": "refine", "target": self._job.targets[0], **self._job.refine})
         if self._cloud_worker:                                     # the local ComfyUI is not touched
             cmd.pop("free_first", None)
             cmd.pop("last_hyperflow", None)
@@ -276,9 +282,9 @@ class GeneratorMixin:
             self._update_model_label()
             return
         self._qwen_timer.stop()
-        hyper = bool((self.tree.options.get("hyperflow") or {}).get("on")) and not self._job.get("refine") \
+        hyper = bool((self.tree.options.get("hyperflow") or {}).get("on")) and not self._job.refine \
             if self.tree is not None else False
-        self._comfy_model = "h3-hyperflow" if hyper else "h3"
+        self._comfy_model = ComfyModel.H3_HYPERFLOW if hyper else ComfyModel.H3
         self._write_job(cmd)
         self._update_model_label()
 
@@ -388,17 +394,17 @@ class GeneratorMixin:
             self._worker_idle = False
             self.status.setText("Starting a RunPod pod …" if ev.get("what") == "runpod" else "Connecting to ComfyUI …")
             self.progress.setRange(0, 0)
-            self._model_state = "loading"
+            self._model_state = ModelState.LOADING
             self._update_model_label()
         elif e == "loaded":
             self.status.setText("Connected to the RunPod pod." if ev.get("what") == "runpod" else
                                 "Connected to ComfyUI.")
-            self._model_state = "loaded"
+            self._model_state = ModelState.LOADED
         elif e == "idle":
             self._worker_idle = True
             self._idle_since = time.monotonic()
             self._idle_timeout = ev.get("timeout")
-            if self._job is not None and not self._job["sent"]:
+            if self._job is not None and not self._job.sent:
                 self._send_job()
             elif self._job is not None:
                 self._job_finished()
@@ -406,9 +412,9 @@ class GeneratorMixin:
         elif e == "bye":
             self._worker_idle = False
             self._worker_leaving = True
-            if self._job is not None and self._job.get("sent") and self._phase != "done":
+            if self._job is not None and self._job.sent and self._phase != Phase.DONE:
                 self._replace_worker = True               # our job crossed its goodbye: a new worker takes it
-            if self._comfy_model in ("h3", "h3-hyperflow") and (ev.get("reason") == "idle" or self._quit_frees):
+            if self._comfy_model in CLIP_MODELS and (ev.get("reason") == "idle" or self._quit_frees):
                 self._comfy_model = None                       # it unloaded the clip model
             if ev.get("reason") == "idle" and not self.running:
                 self.status.setText("The model was unloaded after the idle time.")
@@ -427,7 +433,7 @@ class GeneratorMixin:
                 k = self._plan.index(nid) + 1 if nid in self._plan else 1
                 self._overall(k, 0)
                 node = self.tree.nodes.get(nid) if self.tree else None
-                fast = node is not None and self.veda_used(node) and not (self._job or {}).get("refine")
+                fast = node is not None and self.veda_used(node) and not self._refine
                 self.status.setText(f"Clip #{T.short_id(nid)} ({k} of {len(self._plan)}) …"
                                     + (" with ⚡ Veda fast attention (a large clip)" if fast else ""))
             else:
@@ -446,7 +452,7 @@ class GeneratorMixin:
                 self.progress_of[nid] = frac
                 k = self._plan.index(nid) + 1 if nid in self._plan else 1
                 self._overall(k, frac)
-                upscaling = bool((self._job or {}).get("refine"))
+                upscaling = bool(self._refine)
                 now = time.monotonic()
                 left = time_left(now - self._clip_started, frac)
                 n_plan = max(1, len(self._plan))
@@ -469,10 +475,10 @@ class GeneratorMixin:
                     card.set_progress(ev["i"], ev["n"], text)
         elif e == "note":                              # what the generator is doing now (e.g. a SeedVR2 piece)
             self._clip_note = str(ev.get("text") or "")
-            if self._model_state == "loading":         # (preparing the RunPod pod: each step in the status bar)
+            if self._model_state == ModelState.LOADING:         # (preparing the RunPod pod: each step in the status bar)
                 self.status.setText(self._clip_note + " …")
         elif e == "done":
-            self._phase = "done"
+            self._phase = Phase.DONE
         elif e == "exported":
             self._exported = ev.get("file")
         elif e == "joining":
@@ -492,10 +498,10 @@ class GeneratorMixin:
 
     def _job_finished(self, code: int = 0):
         """End of a job: the worker reported idle again (code 0), or the worker ended (its exit code)."""
-        ok = self._phase == "done" and code == 0 and not self._error
+        ok = self._phase == Phase.DONE and code == 0 and not self._error
         result = 0 if ok else (int(code) or 1)           # (told to the plugins once the window is up to date)
         QTimer.singleShot(0, lambda: self._tell_plugins_finished(result))
-        refine = (self._job or {}).get("refine")         # an export at a refined size
+        refine = self._refine         # an export at a refined size
         for nid in [n for n, s in self.live.items() if s == "generating"]:
             if refine:                                   # an export never touches the clip itself, only its upscaled
                 self.live.pop(nid, None)                 # copy: the clip stays as it is (it was marked "stopped" and
@@ -573,12 +579,12 @@ class GeneratorMixin:
             p.deleteLater()
         self._buf, self._ebuf = b"", ""
         self._worker_idle = False
-        self._model_state = ""
+        self._model_state = ModelState.NONE
         if self._job is not None and self._replace_worker and not self._stopping:
-            self._job["sent"] = False
+            self._job.sent = False
             self._start_worker()
         elif self._job is not None:
-            refine = self._job.get("refine")                # an export stays an export when it waits for ComfyUI
+            refine = self._job.refine                # an export stays an export when it waits for ComfyUI
             film_rest = list(self._film_queue) if self._film_queue is not None else None
             self._job_finished(code if code else 1)
             if code == COMFY_DOWN:

@@ -117,7 +117,7 @@ class PluginHost:
                             + (f" ({p.name})" if p is not None else "") + f": {e}")
         # (the clips of an export or an upscale are made again at another size: not new clips)
         if event == "run_event" and isinstance(args[0], dict) and args[0].get("e") == "node" \
-                and args[0].get("state") == "done" and not (getattr(self.window, "_job", None) or {}).get("refine"):
+                and args[0].get("state") == "done" and not getattr(self.window, "_refine", None):
             self.emit("clip_made", args[0].get("id"))
 
     def context_actions(self, menu: QMenu, nid: str) -> dict:

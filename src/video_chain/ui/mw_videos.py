@@ -14,6 +14,7 @@ from .clip_dialogs import SplitDialog
 from .swap_dialog import SwapDialog
 from .video_editor import VideoRangeDialog, choose_video
 from .widgets import safe_emit
+from .generator_state import CLIP_MODELS
 from .ui_logic import DEFAULT_COMFY_URL, DEFAULT_SIZE
 
 
@@ -270,7 +271,7 @@ class VideosMixin:
 
         def before():                               # GUI thread: the clip model makes room
             self._qwen_timer.stop()
-            switch["free"] = not switch["loaded"] and self._comfy_model in ("h3", "h3-hyperflow")
+            switch["free"] = not switch["loaded"] and self._comfy_model in CLIP_MODELS
             if self.worker_alive and not self.running:
                 self._quit_worker(free=False)
 
