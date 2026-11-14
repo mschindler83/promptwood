@@ -206,9 +206,8 @@ class Tree:
     def from_json(cls, d: dict) -> Tree:
         """Raises ValueError for a tree that cannot be right (duplicate ids, missing parents, cycles)."""
         from .cast import _migrate_cast
-        from .files import _int_or, _merged_options, migrate_loras
+        from .files import _merged_options
         from .freezing import heal_frozen
-        from .keyframes import clean_keyframes
         if not isinstance(d, dict):
             raise ValueError("not a tree file")
         if isinstance(d.get("version"), int) and d["version"] > TREE_VERSION:
@@ -225,55 +224,69 @@ class Tree:
             t.options["prompt_format"] = "classic"   # a project from before the setting: as it was made
         _migrate_cast(t.options, "cast" in stored)
         for nd in copy.deepcopy(d.get("nodes", [])):        # (a copy: the caller's dict is not changed)
-            if not isinstance(nd, dict) or not nd.get("id"):
-                raise ValueError("a node without id")
-            if not re.fullmatch(r"n\d+", str(nd["id"])) or (
-                    nd.get("parent") is not None and not re.fullmatch(r"n\d+", str(nd["parent"]))):
-                raise ValueError(f"node {str(nd['id'])[:20]!r} has an invalid id")       # ids become file names
-            if nd.get("made") is not None and not isinstance(nd.get("made"), dict):
-                raise ValueError(f"node {nd['id']} has a damaged record")
-            if nd["id"] in t.nodes:
-                raise ValueError(f"node {nd['id']} appears twice")
-            kind = nd.get("kind") or AI
-            raw = dict(nd.get("overrides") or {})
-            if kind == AI:
-                raw = migrate_loras(project_loras, raw)
-                made = nd.get("made")
-                if isinstance(made, dict) and isinstance(made.get("overrides"), dict):   # what Undo goes back to
-                    made["overrides"] = {k: v for k, v in migrate_loras(project_loras, made["overrides"]).items()
-                                         if k in OVERRIDE_KEYS and v is not None}
-            ov = {k: v for k, v in raw.items() if k in OVERRIDE_KEYS and v is not None}
-            src = nd.get("source")
-            if kind not in (AI, VIDEO):
-                raise ValueError(f"node {nd['id']} has an unknown kind {kind!r}")
-            if kind == VIDEO and not (isinstance(src, dict) and src.get("file") and "start" in src and "end" in src):
-                raise ValueError(f"video node {nd['id']} has no source")
-            end = nd.get("end_image") if kind == AI and isinstance(nd.get("end_image"), str) else None
-            at = nd.get("end_at")
-            at = int(at) if kind == AI and isinstance(at, (int, float)) and not isinstance(at, bool) and at >= 1 \
-                else None
-            own = nd.get("start_image")
-            own = own if kind == AI and nd.get("parent") is None and isinstance(own, str) \
-                and own.startswith(STARTS_DIR + "/") else None
-            row = nd.get("row") if isinstance(nd.get("row"), str) and re.fullmatch(r"n\d+", nd["row"]) else None
-            n = Node(nd["id"], nd.get("parent"), nd.get("prompt", ""), _int_or(nd.get("seed"), 42), nd.get("made"), ov,
-                     kind, dict(src) if kind == VIDEO else None, end, at,
-                     clean_keyframes(nd.get("keyframes")) if kind == AI else [],
-                     bool(nd.get("frozen")) and isinstance(nd.get("made"), dict), own,
-                     row if kind == AI and nd.get("parent") is None else None)
+            n = _node_from_json(nd, project_loras, t.nodes)
             t.nodes[n.id] = n
-        for n in t.nodes.values():
-            if n.parent is not None and n.parent not in t.nodes:
-                raise ValueError(f"node {n.id} has a missing parent {n.parent}")
-        for n in t.nodes.values():                 # every chain of parents must end at the start image
-            seen, cur = set(), n.id
-            while cur is not None:
-                if cur in seen:
-                    raise ValueError(f"node {n.id} is part of a loop")
-                seen.add(cur)
-                cur = t.nodes[cur].parent
+        _check_graph(t.nodes)
         t.next_num = max([t.next_num] + [t.number(i) + 1 for i in t.nodes])
         heal_frozen(t)
         if t.selected not in t.nodes:
             t.selected = None
         return t
+
+
+def _node_from_json(nd: object, project_loras: dict, taken: dict[str, Node]) -> Node:
+    """One node of tree.json, checked and cleaned (a value that does not fit is dropped or refused). taken: the
+    nodes read before it (an id appears once)."""
+    from .files import _int_or, migrate_loras
+    from .keyframes import clean_keyframes
+    if not isinstance(nd, dict) or not nd.get("id"):
+        raise ValueError("a node without id")
+    if not re.fullmatch(r"n\d+", str(nd["id"])) or (
+            nd.get("parent") is not None and not re.fullmatch(r"n\d+", str(nd["parent"]))):
+        raise ValueError(f"node {str(nd['id'])[:20]!r} has an invalid id")       # ids become file names
+    if nd.get("made") is not None and not isinstance(nd.get("made"), dict):
+        raise ValueError(f"node {nd['id']} has a damaged record")
+    if nd["id"] in taken:
+        raise ValueError(f"node {nd['id']} appears twice")
+    kind = nd.get("kind") or AI
+    raw = dict(nd.get("overrides") or {})
+    if kind == AI:
+        raw = migrate_loras(project_loras, raw)
+        made = nd.get("made")
+        if isinstance(made, dict) and isinstance(made.get("overrides"), dict):   # what Undo goes back to
+            made["overrides"] = {k: v for k, v in migrate_loras(project_loras, made["overrides"]).items()
+                                 if k in OVERRIDE_KEYS and v is not None}
+    ov = {k: v for k, v in raw.items() if k in OVERRIDE_KEYS and v is not None}
+    src = nd.get("source")
+    if kind not in (AI, VIDEO):
+        raise ValueError(f"node {nd['id']} has an unknown kind {kind!r}")
+    if kind == VIDEO and not (isinstance(src, dict) and src.get("file") and "start" in src and "end" in src):
+        raise ValueError(f"video node {nd['id']} has no source")
+    end = nd.get("end_image") if kind == AI and isinstance(nd.get("end_image"), str) else None
+    at = nd.get("end_at")
+    at = int(at) if kind == AI and isinstance(at, (int, float)) and not isinstance(at, bool) and at >= 1 \
+        else None
+    own = nd.get("start_image")
+    own = own if kind == AI and nd.get("parent") is None and isinstance(own, str) \
+        and own.startswith(STARTS_DIR + "/") else None
+    row = nd.get("row") if isinstance(nd.get("row"), str) and re.fullmatch(r"n\d+", nd["row"]) else None
+    n = Node(nd["id"], nd.get("parent"), nd.get("prompt", ""), _int_or(nd.get("seed"), 42), nd.get("made"), ov,
+             kind, dict(src) if kind == VIDEO else None, end, at,
+             clean_keyframes(nd.get("keyframes")) if kind == AI else [],
+             bool(nd.get("frozen")) and isinstance(nd.get("made"), dict), own,
+             row if kind == AI and nd.get("parent") is None else None)
+    return n
+
+
+def _check_graph(nodes: dict[str, Node]) -> None:
+    """Every parent is there and every chain of parents ends at the start image."""
+    for n in nodes.values():
+        if n.parent is not None and n.parent not in nodes:
+            raise ValueError(f"node {n.id} has a missing parent {n.parent}")
+    for n in nodes.values():                 # every chain of parents must end at the start image
+        seen, cur = set(), n.id
+        while cur is not None:
+            if cur in seen:
+                raise ValueError(f"node {n.id} is part of a loop")
+            seen.add(cur)
+            cur = nodes[cur].parent

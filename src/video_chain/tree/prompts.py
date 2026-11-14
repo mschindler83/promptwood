@@ -124,27 +124,17 @@ def _picture_tags(found: list[dict]) -> tuple[dict, list[str]]:
     return tags, images
 
 
-def _voiced_prompt(options: dict, text: str, found: list[dict], lines: list[dict], n_sounds: int,
-                   implicit: bool) -> tuple[str, list[str], list[str]]:
-    """MiniMax's structured reference format (the only one a voice took effect with in the tests): subjects,
-    <Audio N> as the voice-timbre reference of a speaker (S1, S2 ... in speaking order), each line as
-    <d>[Language] ...</d>. The voices come after the n_sounds sounds the prompt names itself.
-    Returns (prompt, pictures, voice files)."""
-    lang = ((options.get("identity") or {}).get("language") or "English").strip() or "English"
-    hint = (options.get("identity") or {}).get("hint", True)
-    tags, images = _picture_tags(found)
-    subj = {c["name"]: k for k, c in enumerate(found, start=1)}
-    order: list[str] = []
-    for d in lines:
-        sp = d["speaker"]
-        if sp is not None and sp["name"] in subj and sp["name"] not in order:
-            order.append(sp["name"])
-    sid = {n: k for k, n in enumerate(order, start=1)}
-    voiced = [n for n in order if character(options, n).get("voice")]
-    audio_no = {n: n_sounds + k for k, n in enumerate(voiced, start=1)}
+def _subject_token(subj: dict[str, int], sid: dict[str, int], name: str) -> str:
+    """<Subject 1> (S1): a character in the structured prompt, with its speaker number when it speaks."""
+    return f"<Subject {subj[name]}>" + (f" (S{sid[name]})" if name in sid else "")
 
+
+def _body_with_speakers(options: dict, text: str, lines: list[dict], subj: dict[str, int], sid: dict[str, int],
+                        audio_no: dict[str, int], lang: str) -> str:
+    """The prompt text with @Names as <Subject N> and each spoken line as <d>[Language] ...</d>, led by who says it
+    (and by the voice timbre reference the first time a voiced speaker speaks)."""
     def token(name: str) -> str:
-        return f"<Subject {subj[name]}>" + (f" (S{sid[name]})" if name in sid else "")
+        return _subject_token(subj, sid, name)
 
     def names(t: str) -> str:
         def one(m):
@@ -183,6 +173,32 @@ def _voiced_prompt(options: dict, text: str, found: list[dict], lines: list[dict
             body += say
         pos = end
     body += names(text[pos:])
+    return body
+
+
+def _voiced_prompt(options: dict, text: str, found: list[dict], lines: list[dict], n_sounds: int,
+                   implicit: bool) -> tuple[str, list[str], list[str]]:
+    """MiniMax's structured reference format (the only one a voice took effect with in the tests): subjects,
+    <Audio N> as the voice-timbre reference of a speaker (S1, S2 ... in speaking order), each line as
+    <d>[Language] ...</d>. The voices come after the n_sounds sounds the prompt names itself.
+    Returns (prompt, pictures, voice files)."""
+    lang = ((options.get("identity") or {}).get("language") or "English").strip() or "English"
+    hint = (options.get("identity") or {}).get("hint", True)
+    tags, images = _picture_tags(found)
+    subj = {c["name"]: k for k, c in enumerate(found, start=1)}
+    order: list[str] = []
+    for d in lines:
+        sp = d["speaker"]
+        if sp is not None and sp["name"] in subj and sp["name"] not in order:
+            order.append(sp["name"])
+    sid = {n: k for k, n in enumerate(order, start=1)}
+    voiced = [n for n in order if character(options, n).get("voice")]
+    audio_no = {n: n_sounds + k for k, n in enumerate(voiced, start=1)}
+
+    body = _body_with_speakers(options, text, lines, subj, sid, audio_no, lang)
+
+    def token(name: str) -> str:
+        return _subject_token(subj, sid, name)
 
     defs = []
     for c in found:

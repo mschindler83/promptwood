@@ -23,6 +23,39 @@ from .inputs import empty_prompts, frame_numbers, loras_needed, model_prompt, pl
 from .checker import Checker, keyframe_problem, video_key
 
 
+def _clip_sounds(tree: Tree, node: Node, s: dict, use: dict) -> tuple[list[dict], dict]:
+    """The <Audio N> list of clip_inputs (the sounds the prompt names, the voices, the soundtrack) and the number of
+    each voice by its character's name."""
+    sounds_n = audio_mentioned(full_prompt(tree.options, node.prompt))
+    pool = audio_refs(tree)
+    sounds = [{"n": k, "file": pool[k - 1]["file"] if k <= len(pool) else None, "what": "sound"}
+              for k in range(1, sounds_n + 1)]
+    by_voice = {c["voice"]["file"]: c["name"] for c in cast_of(tree) if c.get("voice")}
+    voice_no = {}
+    for f in use["voices"]:
+        voice_no[by_voice.get(f)] = len(sounds) + 1
+        sounds.append({"n": len(sounds) + 1, "file": f, "what": f"voice of @{by_voice.get(f)}"})
+    ss = s.get("source_sound")
+    if ss and not ss.get("overlay"):
+        sounds.append({"n": len(s.get("audio_refs") or []) + 1, "file": None, "what": "soundtrack"})
+    return sounds, voice_no
+
+
+def _clip_subjects(use: dict, mentioned: set[str], voice_no: dict) -> tuple[list[dict], list[dict]]:
+    """The subjects of clip_inputs and the pictures they bring (in ref_images order)."""
+    subjects, pictures, k = [], [], 0
+    for c in use["characters"]:
+        if use["mode"] == "tags" and not c["images"] and c["name"] not in mentioned:
+            continue                                 # (classic tags: the whole cast, those without pictures unused)
+        n = list(range(k + 1, k + 1 + len(c["images"])))
+        k += len(c["images"])
+        subjects.append({"name": c["name"], "kind": kind_of(c), "pictures": n, "files": list(c["images"]),
+                         "lead": use["mode"] != "tags" and c["name"] not in mentioned,
+                         "voice": voice_no.get(c["name"])})
+        pictures += [{"n": i, "file": f, "what": f"@{c['name']}"} for i, f in zip(n, c["images"])]
+    return subjects, pictures
+
+
 def clip_inputs(project: Path, tree: Tree, nid: str, checker: Checker | None = None) -> dict:
     """What a generated clip is made with, in the order the model gets it, and the exact prompt (for the clip card's
     chips and the "Model prompt" dialog; nothing is made or written). Either format.
@@ -54,28 +87,8 @@ def clip_inputs(project: Path, tree: Tree, nid: str, checker: Checker | None = N
     end = {"given": "frame" if plain[1] else "guide" if guide and vc is not None else None,
            "file": end_file if plain[1] else None, "picture": nums.get("end")}
     mentioned = {c["name"] for c in mentions(tree.options, full_prompt(tree.options, node.prompt))[0]}
-    sounds_n = audio_mentioned(full_prompt(tree.options, node.prompt))
-    pool = audio_refs(tree)
-    sounds = [{"n": k, "file": pool[k - 1]["file"] if k <= len(pool) else None, "what": "sound"}
-              for k in range(1, sounds_n + 1)]
-    by_voice = {c["voice"]["file"]: c["name"] for c in cast_of(tree) if c.get("voice")}
-    voice_no = {}
-    for f in use["voices"]:
-        voice_no[by_voice.get(f)] = len(sounds) + 1
-        sounds.append({"n": len(sounds) + 1, "file": f, "what": f"voice of @{by_voice.get(f)}"})
-    ss = s.get("source_sound")
-    if ss and not ss.get("overlay"):
-        sounds.append({"n": len(s.get("audio_refs") or []) + 1, "file": None, "what": "soundtrack"})
-    subjects, pictures, k = [], [], 0
-    for c in use["characters"]:
-        if use["mode"] == "tags" and not c["images"] and c["name"] not in mentioned:
-            continue                                 # (classic tags: the whole cast, those without pictures unused)
-        n = list(range(k + 1, k + 1 + len(c["images"])))
-        k += len(c["images"])
-        subjects.append({"name": c["name"], "kind": kind_of(c), "pictures": n, "files": list(c["images"]),
-                         "lead": use["mode"] != "tags" and c["name"] not in mentioned,
-                         "voice": voice_no.get(c["name"])})
-        pictures += [{"n": i, "file": f, "what": f"@{c['name']}"} for i, f in zip(n, c["images"])]
+    sounds, voice_no = _clip_sounds(tree, node, s, use)
+    subjects, pictures = _clip_subjects(use, mentioned, voice_no)
     for f, d, what in (("start", start, "start frame"), ("end", end, "end frame")):
         if d["picture"] is not None:
             pictures.append({"n": d["picture"], "file": d["file"], "what": what})
