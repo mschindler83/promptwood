@@ -13,6 +13,7 @@ from PySide6.QtGui import QTextCursor  # noqa: E402
 from PySide6.QtWidgets import QApplication, QInputDialog, QMessageBox  # noqa: E402
 
 from video_chain import chain  # noqa: E402
+from conftest import settings  # noqa: E402,F401  (the shared isolated settings file)
 from video_chain import tree as T  # noqa: E402
 
 FAKE = [sys.executable, str(Path(__file__).resolve().parent / "fake_backend.py")]
@@ -24,31 +25,6 @@ def app():
     from video_chain.ui.theme import ThemeManager
     ThemeManager.instance().apply(a)
     return a
-
-
-def settings(tmp_path, name="s.ini", view="advanced"):
-    """The test's own settings file. view: the window's view ("advanced": every control, as the tests were written
-    for; "simple"; None: none stored, the window decides as on a first run / an update)."""
-    from PySide6.QtCore import QSettings
-    q = QSettings(str(tmp_path / name), QSettings.IniFormat)
-    if view and q.value("viewMode") is None:
-        q.setValue("viewMode", view)
-    if q.value("comfyDir") is None:                  # never the real ComfyUI folder in tests
-        q.setValue("comfyDir", str(tmp_path / "no-comfyui"))
-    if q.value("thumbCacheDir") is None:             # nor the real thumbnail cache
-        q.setValue("thumbCacheDir", str(tmp_path / "thumb-cache"))
-    if q.value("comfyAutoStart") is None:            # never start the real ComfyUI from a test
-        q.setValue("comfyAutoStart", False)
-    if q.value("loraTriggersOnline") is None:        # never ask CivitAI from a test
-        q.setValue("loraTriggersOnline", False)
-    return q
-
-
-@pytest.fixture(autouse=True)
-def no_runpod_key(monkeypatch):
-    """Never the real RunPod key from the system keyring in a test (a test that needs one sets its own)."""
-    from video_chain import runpod as RP
-    monkeypatch.setattr(RP, "api_key", lambda: "")
 
 
 @pytest.fixture(autouse=True)
@@ -396,8 +372,9 @@ def test_outside_change_is_not_overwritten(app, win, tmp_path, image):
     f = tmp_path / "proj" / T.TREE_FILE
     other = T.load(tmp_path / "proj")
     other.nodes[ids[0]].prompt = "changed elsewhere"
-    time.sleep(0.01)
     T.save(tmp_path / "proj", other)                                  # e.g. a second window
+    st = f.stat()                                                     # (a newer date set outright: no waiting for a
+    os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns + 2_000_000_000))  # clock tick, coarse on some drives)
     type_prompt(win, ids[0], "edited here")
     flush(app, win)
     assert T.load(tmp_path / "proj").nodes[ids[0]].prompt == "changed elsewhere"

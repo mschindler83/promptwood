@@ -6,6 +6,8 @@ import sys
 
 import pytest
 
+from conftest import settings
+from fakes import free_port
 from video_chain import llm_server as L
 
 FAKE = r'''
@@ -35,12 +37,6 @@ class H(BaseHTTPRequestHandler):
         self._send({"choices": [{"message": {"content": "<think>x</think>Here is the refined prompt: \"@Anna runs along the shore.\""}}]})
 HTTPServer(("127.0.0.1", port), H).serve_forever()
 '''
-
-
-def free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 @pytest.fixture
@@ -114,7 +110,6 @@ def test_missing_files_and_combined_list(tmp_path, fake_server):
 
 def test_main_window_settings_and_stop(fake_server, tmp_path, monkeypatch):
     os.environ["QT_QPA_PLATFORM"] = "offscreen"
-    from PySide6.QtCore import QSettings
     from PySide6.QtWidgets import QApplication
     QApplication.instance() or QApplication([])
     from video_chain.ui import main_window as MW
@@ -124,7 +119,7 @@ def test_main_window_settings_and_stop(fake_server, tmp_path, monkeypatch):
         (root / n).write_bytes(b"GGUF")
     assert [f.name for f in MW.find_gguf_models([tmp_path / "hub"])] == ["A-Q6_K.gguf"]
     script, model = fake_server
-    win = MW.MainWindow(QSettings(str(tmp_path / "s.ini"), QSettings.IniFormat))
+    win = MW.MainWindow(settings(tmp_path, view=None))
     try:
         win.llm_on.setChecked(False)
         assert win.llama_server() is None                                # off: no server
@@ -464,7 +459,6 @@ def test_room_in_vram_before_the_server_starts(fake_server, tmp_path, monkeypatc
     generated: then the refine is refused); enough: nothing is unloaded. The hook runs only for a new process."""
     os.environ["QT_QPA_PLATFORM"] = "offscreen"
     from pathlib import Path
-    from PySide6.QtCore import QSettings
     from PySide6.QtWidgets import QApplication
     QApplication.instance() or QApplication([])
     sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -477,7 +471,7 @@ def test_room_in_vram_before_the_server_starts(fake_server, tmp_path, monkeypatc
     assert L.vram_needed_mb(str(model), False) == 1500 and L.vram_needed_mb(str(model), True, str(tmp_path / "x")) == 4000
 
     server = FakeComfy(tmp_path / "comfy")
-    win = MW.MainWindow(QSettings(str(tmp_path / "s.ini"), QSettings.IniFormat))
+    win = MW.MainWindow(settings(tmp_path, view=None))
     vram = []
     monkeypatch.setattr(L, "free_vram_mb", lambda: vram.pop(0) if vram else 20000)
     frees = lambda: sum(1 for c in server.calls if c[:2] == ("BODY", "/free"))   # noqa: E731

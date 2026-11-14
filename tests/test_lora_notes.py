@@ -354,16 +354,17 @@ def test_lora_window_shows_what_is_known(tmp_path):
             raise OSError("CivitAI answered 500")
         return still
     told = LN.guidance([p], db, prompt="oranges at a market stall")
-    from PySide6.QtCore import QSettings
-    qs = QSettings(str(tmp_path / "s.ini"), QSettings.IniFormat)
+    from conftest import settings
+    qs = settings(tmp_path, view=None)
     w = LoraWindow(None, [(p, "inksketch_v2"), (other, "unknown")], current=p, settings=qs, db=db, fetch=fetch,
                    prompt="oranges at a market stall", told=told)
 
     def settle(until=lambda: True):
-        end = time.time() + 5
+        end = time.time() + 30
         while time.time() < end and not until():
             app.processEvents()
             time.sleep(0.01)
+        assert until(), "settle: the window did not reach the awaited state in 30 s"
         app.processEvents()
     settle(lambda: len(w._known_of) == 2 and len(loaded) >= 6)
     # the list: every LoRA with what is known of it
