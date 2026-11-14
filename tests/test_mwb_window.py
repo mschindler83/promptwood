@@ -184,7 +184,10 @@ def test_start_image_size_is_read_from_header(win, tmp_path, image, monkeypatch)
     class NoDecode:
         def __init__(self, *a, **k):
             raise AssertionError("the picture was decoded")
-    monkeypatch.setattr(M, "QImage", NoDecode)
+    import sys
+    for name, mod in list(sys.modules.items()):          # (the window's code lives in the mw_* modules)
+        if name.startswith("video_chain.ui.mw_") and hasattr(mod, "QImage"):
+            monkeypatch.setattr(mod, "QImage", NoDecode)
     win._update_size_info()
     assert "192×108" in win.size_info.text()
     assert win.add_reference(str(tmp_path / "nope.png")) is False

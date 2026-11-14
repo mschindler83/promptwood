@@ -21,7 +21,6 @@ from .prompt_refiner import replace_text
 from .theme import icon, repolish, theme
 from .view_mode import AdvancedNote, ViewMode, row_widget
 from .widgets import FrameTile, format_time, guard_wheel, icon_button, label
-
 from .mw_support import FileDrop, select_frames
 from .ui_logic import (
     CARD_WIDTH, CONTINUE_FIRST_TIP, CONTINUE_SHORT_TIP, CONTINUE_TIP, END_TIP, FRAME_CHOICES, FREEZE_TIP,

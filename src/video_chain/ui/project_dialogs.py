@@ -14,7 +14,6 @@ from ..comfy import refine_size
 from .lora_stack import LORA_MAX, LORA_MIN, lora_label
 from .widgets import guard_wheel, icon_button, label
 from . import image_picker as IP
-
 from .ui_logic import repeated_variants, variant_strengths
 
 

@@ -3254,7 +3254,7 @@ def test_progress_says_what_runs_and_how_long_it_still_takes(app, win, tmp_path,
     assert time_left(100, 0.01) is None and time_left(1, 0.5) is None and time_left(60, 0.25) == 180
     ids = new_project(win, tmp_path, image, ("a", "b"))
     clock = [1000.0]
-    monkeypatch.setattr("video_chain.ui.main_window.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("time.monotonic", lambda: clock[0])
     win._job, win._plan = {"refine": {"size": "2k"}}, list(ids)            # (an export of 2 clips)
     win._run_started = clock[0]
     win._event({"e": "node", "id": ids[0], "state": "generating"})
