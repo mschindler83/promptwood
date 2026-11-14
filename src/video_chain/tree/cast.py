@@ -326,14 +326,21 @@ def set_voice(project: Path, tree: Tree, name: str, source: Path, start: float =
     while (d / f"voice{k}.wav").exists() or f"{REFS_DIR}/voice{k}.wav" in used:
         k += 1
     rel = f"{REFS_DIR}/voice{k}.wav"
-    chain.to_wav(Path(source), Path(project) / rel, start, secs if have > secs or cut_end else None)
-    real = chain.audio_seconds(Path(project) / rel) or secs
-    entry: Voice = {"file": rel, "name": label or Path(source).name, "secs": round(real, 2)}
-    if have >= secs + 1.0:                          # (worth it: at least a second more to clone from)
-        long = min(have, VOICE_REF_MAX_SECS)
-        ref = f"{REFS_DIR}/voice{k}_ref.wav"
-        chain.to_wav(Path(source), Path(project) / ref, start, long if have > long or cut_end else None)
-        entry["ref"] = {"file": ref, "secs": round(chain.audio_seconds(Path(project) / ref) or long, 2)}
+    made_files = [Path(project) / rel]           # (a failure after the first file takes the new files with it)
+    try:
+        chain.to_wav(Path(source), Path(project) / rel, start, secs if have > secs or cut_end else None)
+        real = chain.audio_seconds(Path(project) / rel) or secs
+        entry: Voice = {"file": rel, "name": label or Path(source).name, "secs": round(real, 2)}
+        if have >= secs + 1.0:                          # (worth it: at least a second more to clone from)
+            long = min(have, VOICE_REF_MAX_SECS)
+            ref = f"{REFS_DIR}/voice{k}_ref.wav"
+            made_files.append(Path(project) / ref)
+            chain.to_wav(Path(source), Path(project) / ref, start, long if have > long or cut_end else None)
+            entry["ref"] = {"file": ref, "secs": round(chain.audio_seconds(Path(project) / ref) or long, 2)}
+    except BaseException:
+        for f in made_files:
+            f.unlink(missing_ok=True)
+        raise
     old = c.get("voice")
     _set_cast(tree, [{**x, "voice": entry} if x is c else x for x in cast_of(tree)])
     if old:

@@ -110,7 +110,7 @@ def test_status_of_a_very_deep_chain_does_not_hit_the_recursion_limit(tmp_path, 
         nid = t.add(nid, f"p{k}").id
         t.nodes[nid].made = {"prompt": f"p{k}", "seed": t.nodes[nid].seed, "settings": None, "start_sha1": None}
     ck = T.Checker(tmp_path, t)
-    ck._files_there = lambda node: True
+    ck.files_there = lambda node: True
     ck.settings = lambda nid: None
     ck.start_frame = lambda node: None
     ck.end_key = lambda node: None
