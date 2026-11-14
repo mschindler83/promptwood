@@ -63,3 +63,15 @@ def test_a_fifth_picture_of_the_person_is_said_not_dropped_silently(server, pic,
     assert "person_5" not in server.faced["lock"]["inputs"]
     with pytest.raises(ComfyError, match="at most 4"):
         A.face_lock_nodes({}, ["x", 0], {"swapper": "s", "persons": ["a"] * 5})
+
+
+def test_a_setting_of_another_shape_is_a_clear_error_not_a_key_error(server, pic, tmp_path):
+    from video_chain import comfy as C
+    from video_chain import tree
+    from video_chain.comfy import settings as CS
+    assert CS.DEFAULT_FRAMES == tree.DEFAULT_FRAMES                   # (two copies of one number)
+    gen = C.ComfyGenerator(server.url, comfy_dir=server.root)
+    base = dict(frames=39, steps=20, width=672, height=384)
+    for bad in ({"turbo": {"strength": 1.0}}, {"hyperflow": "x"}, {"pika": 0.5}):
+        with pytest.raises(C.ComfyError):
+            gen.generate("x", pic, tmp_path / "v.mp4", tmp_path / "v.png", 1, {**base, **bad})
