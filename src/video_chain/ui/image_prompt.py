@@ -47,7 +47,7 @@ class PromptMixin(ImageEditHost):
         self.tries.setToolTip("Variations decide how many images are made (Make … below the prompt)" if active
                               else f"How many results at once (1 … {MAX_RESULTS}; each with the next seed), to "
                                    "pick the best one. They are made one after another and each appears when it "
-                                   "is ready; Cancel stops after the current one")
+                                   "is ready; Stop ends it after the current one")
         per = len(self._lora_runs())
         if self.batch and self.mode() == "edit":
             per *= len(self.batch)

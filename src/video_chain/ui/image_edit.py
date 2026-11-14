@@ -395,7 +395,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         self.tries.valueChanged.connect(lambda _v: self._variations_changed())
         self.tries.setToolTip(f"How many results at once (1 … {MAX_RESULTS}; each with the next seed), to pick the "
                               "best one. They are made one after another and each appears when it is ready; "
-                              "Cancel stops after the current one")
+                              "Stop ends it after the current one")
         self.keep_size = QCheckBox("Keep the size of the image to edit")
         self.keep_size.setChecked(True)
         self.keep_size.setToolTip("The model works at about 1 megapixel in its own aspect steps; this scales the "
@@ -435,7 +435,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         self.b_gen.setProperty("variant", "primary")
         self.b_gen.setToolTip("Edit the image with this prompt (Ctrl+Enter)")
         self.b_gen.clicked.connect(self.generate)
-        self.b_cancel = QPushButton("Cancel")
+        self.b_cancel = QPushButton("Stop")
         self.b_cancel.clicked.connect(self.cancel)
         self.b_cancel.setEnabled(False)
         self.b_start_comfy = QPushButton("Start ComfyUI")
@@ -699,7 +699,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         n = per * len(sources)
         if len(sources) > 1 and n > ASK_ABOVE and not ask(
                 self, "Edit a folder", f"This makes {n:,} images: {len(sources)} pictures × {per} each. "
-                "They are made one after another (Cancel stops after the current one). Start?"):
+                "They are made one after another (Stop ends it after the current one). Start?"):
             self._busy = False
             return
         run_words = [self._trigger_words(r) for r in runs]
@@ -773,7 +773,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
     def cancel(self):
         if not self._busy:
             return
-        self.state.setText("Cancelling …")
+        self.state.setText("Stopping …")
         if self._worker is not None:
             self._worker.cancel()
 
@@ -799,7 +799,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         self._worker = None
         self.bar.hide()
         if error == "cancelled":
-            self.state.setText("Cancelled.")
+            self.state.setText("Stopped.")
         elif error:
             down = "not reachable" in error
             self.state.setText(("ComfyUI is not running. " if down else "") + f"Could not edit the image: {error}")

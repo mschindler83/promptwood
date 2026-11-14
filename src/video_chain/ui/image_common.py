@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from .imageio import upright
 from .widgets import FrameTile, icon_button, label
 
-MAX_RESULTS = 20                           # results per Generate (made one after another, Cancel stops)
+MAX_RESULTS = 20                           # results per Generate (made one after another, Stop ends it)
 SEED_MAX = 2**31 - 1                       # (the seeds ComfyUI's image samplers take here)
 FOLDER_ITEM, FOLDER_PREFIX = "\x00choose-folder", "\x00folder:"   # the source list's folder entries
 ASK_ABOVE = 10                             # a folder Generate of more images than this asks first

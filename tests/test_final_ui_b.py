@@ -324,3 +324,10 @@ def test_the_thumbnail_counters_stay_exact_under_threads(app, tmp_path):
         t.join()
     assert dlg.stats["memory"] == before["memory"] + 16000
     dlg.reject()
+
+
+def test_the_image_dialog_stops_a_running_job_with_stop_like_the_other_windows(app, tmp_path):
+    from test_image_edit_split import _dialog
+    dlg = _dialog(tmp_path)
+    assert dlg.b_cancel.text() == "Stop"
+    dlg.reject()
