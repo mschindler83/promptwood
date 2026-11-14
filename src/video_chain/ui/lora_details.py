@@ -36,8 +36,10 @@ def _size(kb) -> str:
     return f"{kb / 1024 / 1024:.2f} GB" if kb >= 1024 * 1024 else f"{kb / 1024:.0f} MB"
 
 
-def details_html(details: dict, prompts: list[dict]) -> str:
-    """The page of a LoRA's CivitAI details (prompts: triggers.example_prompts; link copy:N copies prompt N)."""
+def details_html(details: dict, prompts: list[dict], note: str = "", settings: str = "") -> str:
+    """The page of a LoRA's CivitAI details (prompts: triggers.example_prompts; link copy:N copies prompt N).
+    note, settings: the prompt refiner's note on the LoRA and the settings its example pictures were made with
+    (lora_notes)."""
     v = details.get("version") or {}
     m = details.get("model") or {}
     e = html.escape
@@ -66,6 +68,11 @@ def details_html(details: dict, prompts: list[dict]) -> str:
     words = v.get("trainedWords") or []
     out.append("<h3>Trigger words</h3><p>" + (e(", ".join(str(w) for w in words)) if words else
                                                "<i>none given</i>") + "</p>")
+    if settings:
+        out.append(f"<h3>Settings of the example pictures</h3><p>{e(settings)}</p>")
+    if note:
+        out.append("<h3>How to prompt it (the prompt refiner's note, written from this page)</h3><p>"
+                   + "<br>".join(e(x) for x in note.splitlines()) + "</p>")
     if v.get("description"):
         out.append("<h3>About this version</h3>" + clean_html(v["description"]))
     if m.get("description"):
@@ -104,7 +111,15 @@ class LoraDetailsDialog(QDialog):
         self.note = label("", level="tertiary")
         v.addWidget(self.note)
         if self.details:
-            self.view.setHtml(details_html(self.details, self.prompts))
+            from .. import lora_notes
+            try:
+                mat = lora_notes.material(self.details, None, path) or {}
+                note = triggers.db().note(path) or {}
+                note = note.get("note", "") if note.get("stamp") == mat.get("stamp") else ""
+                settings = lora_notes.settings_text(mat.get("settings") or {})
+            except Exception:  # noqa: BLE001  (the page shows without them)
+                note, settings = "", ""
+            self.view.setHtml(details_html(self.details, self.prompts, note, settings))
             self.note.setText("Click [copy] to copy an example prompt. Links open in your browser.")
         else:
             info = triggers.db().info(path) or {}

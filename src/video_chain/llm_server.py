@@ -75,19 +75,25 @@ CHAT_RULES = ("This is a conversation about one prompt. The user's first message
               "use what you see when the user asks for it.")
 
 
+def _lora_part(loras: str) -> str:
+    """What is known of the LoRAs (lora_notes.guidance), after the rules: the long material comes last."""
+    return "\n\n" + loras.strip() if loras.strip() else ""
+
+
 def chat_messages(*, prompt: str, kind: str, turns: list[tuple[str, str]], instruction: str,
                   pictures: list[tuple[str, str]] = (), cast: list[dict] | None = None,
-                  seconds: float | None = None, start_image: str | None = None) -> list[dict]:
+                  seconds: float | None = None, start_image: str | None = None, loras: str = "") -> list[dict]:
     """The conversation for the model. turns: the earlier [(instruction, version)]; the last version is the current
     prompt (also when the user edited it). The first user message holds the user's prompt, the pictures (labelled)
     and the first instruction; then the turns alternate; the new instruction comes last.
     seconds, start_image ("video_h3"): the clip's length and first frame; the model is told it sees that frame
-    when it is among the pictures (else not to invent its look)."""
+    when it is among the pictures (else not to invent its look). loras: lora_notes.guidance."""
     start = None
     if kind == "video_h3" and start_image:
         start = "seen" if str(start_image) in [str(p) for _t, p in pictures] else "unseen"
     system, first = refine_messages(prompt=prompt, kind=kind, cast=cast,
                                     seconds=seconds if kind == "video_h3" else None, start=start)
+    system += " " + CHAT_RULES + _lora_part(loras)
     asks = [a for a, _v in turns] + [instruction]
 
     def ask_text(a: str) -> str:
@@ -96,7 +102,7 @@ def chat_messages(*, prompt: str, kind: str, turns: list[tuple[str, str]], instr
     content: list[dict] = [{"type": "text", "text": opening}]
     for title, path in pictures:
         content += [{"type": "text", "text": f"\n[{title}]"}, image_part(path)]
-    msgs = [{"role": "system", "content": system + " " + CHAT_RULES},
+    msgs = [{"role": "system", "content": system},
             {"role": "user", "content": content if pictures else opening}]
     for i, (_ask, version) in enumerate(turns):
         msgs.append({"role": "assistant", "content": version})
@@ -114,14 +120,15 @@ IDEA_RULES = ("Now the user gives bullet points instead of a prompt. Make {n} cr
 
 
 def idea_messages(*, bullets: str, n: int, wish: str = "", pictures: list[tuple[str, str]] = (),
-                  cast: list[dict] | None = None) -> list[dict]:
+                  cast: list[dict] | None = None, loras: str = "") -> list[dict]:
     """The request for n image ideas from bullet points (kind 'image': the refiner's image rules apply)."""
     system, _first = refine_messages(prompt=bullets, kind="image", cast=cast)
     text = (f"My bullet points:\n{bullets.strip()}" + (f"\n\nAlso: {wish.strip()}" if wish.strip() else ""))
     content: list[dict] = [{"type": "text", "text": text}]
     for title, path in pictures:
         content += [{"type": "text", "text": f"\n[{title}]"}, image_part(path)]
-    return [{"role": "system", "content": system + " " + IDEA_RULES.format(n=int(n))},
+    system += " " + IDEA_RULES.format(n=int(n)) + _lora_part(loras)
+    return [{"role": "system", "content": system},
             {"role": "user", "content": content if pictures else text}]
 
 
@@ -387,12 +394,13 @@ class LlamaServer:
     def refine_prompt(self, prompt: str, kind: str, model_file: str | None = None, seed: int = 0,
                       hint: str = "", cast: list[dict] | None = None, temperature: float = 0.5,
                       timeout: float = 300.0, seconds: float | None = None,
-                      start_image: str | None = None) -> str:
+                      start_image: str | None = None, loras: str = "") -> str:
         """One refine (text only; the refine window holds a conversation with llama.cpp models, see chat, where
         pictures are shown). start_image ("video_h3"): the model is told the clip starts from a frame it cannot see."""
         system, user = refine_messages(prompt=prompt, kind=kind, hint=hint, cast=cast,
                                        seconds=seconds if kind == "video_h3" else None,
-                                       start="unseen" if kind == "video_h3" and start_image else None)
+                                       start="unseen" if kind == "video_h3" and start_image else None,
+                                       loras=loras)
         return self._complete([{"role": "system", "content": system}, {"role": "user", "content": user}], seed,
                               temperature, timeout, max_tokens=LONG_TOKENS.get(kind, MAX_TOKENS),
                               lines=kind == "video_h3")
@@ -400,27 +408,35 @@ class LlamaServer:
     def chat(self, prompt: str, kind: str, turns: list[tuple[str, str]], instruction: str,
              pictures: list[tuple[str, str]] = (), cast: list[dict] | None = None, seed: int = 0,
              temperature: float = 0.5, timeout: float = 300.0, seconds: float | None = None,
-             start_image: str | None = None) -> str:
+             start_image: str | None = None, loras: str = "") -> str:
         """The next version in a refine conversation (see chat_messages); pictures need the vision projector."""
         if pictures and not self.mmproj:
             raise LlmServerError("this model has no vision part (mmproj file) next to it: it cannot see pictures")
         return self._complete(chat_messages(prompt=prompt, kind=kind, turns=turns, instruction=instruction,
-                                            pictures=pictures, cast=cast, seconds=seconds, start_image=start_image),
+                                            pictures=pictures, cast=cast, seconds=seconds, start_image=start_image,
+                                            loras=loras),
                               seed, temperature, timeout, max_tokens=LONG_TOKENS.get(kind, MAX_TOKENS),
                               lines=kind == "video_h3")
 
     def ideas(self, bullets: str, n: int = 5, wish: str = "", pictures: list[tuple[str, str]] = (),
               cast: list[dict] | None = None, seed: int = 0, temperature: float = 0.9,
-              timeout: float = 600.0) -> list[dict]:
+              timeout: float = 600.0, loras: str = "") -> list[dict]:
         """n distinct image ideas from bullet points (see IDEA_RULES): [{"title", "angle", "prompt"}]."""
         if pictures and not self.mmproj:
             raise LlmServerError("this model has no vision part (mmproj file) next to it: it cannot see pictures")
         item = {"type": "object", "properties": {k: {"type": "string"} for k in ("title", "angle", "prompt")},
                 "required": ["title", "angle", "prompt"]}
         shape = {"type": "array", "items": item, "minItems": int(n), "maxItems": int(n)}   # the answer's form
-        raw = self._complete(idea_messages(bullets=bullets, n=n, wish=wish, pictures=pictures, cast=cast), seed,
+        raw = self._complete(idea_messages(bullets=bullets, n=n, wish=wish, pictures=pictures, cast=cast,
+                                           loras=loras), seed,
                              temperature, timeout, max_tokens=300 * int(n) + 300, clean=False, schema=shape)
         return parse_ideas(raw)
+
+    def complete(self, system: str, user: str, max_tokens: int = 512, model_file: str | None = None,
+                 seed: int = 0, temperature: float = 0.2, timeout: float = 300.0) -> str:
+        """The model's raw answer to one question (text only; e.g. a LoRA's note, lora_notes)."""
+        return self._complete([{"role": "system", "content": system}, {"role": "user", "content": user}], seed,
+                              temperature, timeout, max_tokens=max_tokens, clean=False)
 
     def interrupt(self):
         """A load in progress is cancelled (the request of a closed window is not awaited)."""
@@ -485,6 +501,14 @@ class CombinedRefiner:
                 raise LlmServerError("the llama.cpp server is not set up")
             return self.llama.refine_prompt(prompt, kind, model_file, seed, hint, cast, **clip)
         return self.comfy.refine_prompt(prompt, kind, model_file, seed, hint, cast, **clip)
+
+    def complete(self, system, user, max_tokens=512, model_file=None, seed=0, **k):
+        """One plain question, to the backend of the model (a LoRA's note is written by the model that refines)."""
+        if (model_file or "").startswith(PREFIX) or self.comfy is None:
+            if self.llama is None:
+                raise LlmServerError("the llama.cpp server is not set up")
+            return self.llama.complete(system, user, max_tokens, model_file, seed, **k)
+        return self.comfy.complete(system, user, max_tokens, model_file, seed, **k)
 
     def ideas(self, *a, **k):
         if self.llama is None:

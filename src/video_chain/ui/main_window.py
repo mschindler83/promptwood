@@ -6297,7 +6297,8 @@ class MainWindow(QMainWindow):
                 h3 = self.tree.options.get("prompt_format") == "h3"   # the official H3 format: its own refine
                 frames = int((node.overrides or {}).get("frames", self.tree.options.get("frames", 73)))
                 new = self.refine_text(card.edit.toPlainText(), "video_h3" if h3 else "video", pictures=pics,
-                                       seconds=frames / 24, start_image=start)
+                                       seconds=frames / 24, start_image=start,
+                                       loras=[p for p, _s in T.node_loras(node)])
                 if new:
                     replace_text(card.edit, new)          # Ctrl+Z in the prompt takes it back
                     self.status.setText(f"Clip #{node.id[1:]}: prompt refined (Ctrl+Z in the prompt undoes it).")
@@ -6450,9 +6451,10 @@ class MainWindow(QMainWindow):
 
     # ---- prompt refiner
     def refine_text(self, text: str, kind: str, pictures: list | None = None, seconds: float | None = None,
-                    start_image: Path | None = None) -> str | list[str] | None:
+                    start_image: Path | None = None, loras: list[str] | None = None) -> str | list[str] | None:
         """Open the prompt refiner for a prompt ('video' / 'video_h3' / 'image' / 'edit'); the text to use, or None.
-        seconds, start_image: the clip's length and the frame it starts from (used by 'video_h3')."""
+        seconds, start_image: the clip's length and the frame it starts from (used by 'video_h3'). loras: the
+        paths of the LoRAs the result is made with (the refiner is told what is known of them)."""
         if not text.strip():
             self.status.setText("Write a prompt first; the refiner improves it.")
             return None
@@ -6473,7 +6475,7 @@ class MainWindow(QMainWindow):
             return CombinedRefiner(comfy, llama, err)
         cast = T.refiner_cast(self.tree) if self.tree is not None and kind in ("video", "video_h3") else []
         dlg = RefineDialog(self, text, kind, connect, self.qs, start_comfy=self.start_comfy, cast=cast,
-                           pictures=pictures or [], seconds=seconds, start_image=start_image)
+                           pictures=pictures or [], seconds=seconds, start_image=start_image, loras=loras)
         try:
             if dlg.exec() != QDialog.Accepted:
                 return None

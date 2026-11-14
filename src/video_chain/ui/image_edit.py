@@ -2069,11 +2069,13 @@ class ImageEditDialog(QDialog):
             return
         import inspect
         try:
-            takes = "pictures" in inspect.signature(self.refine).parameters
+            params = inspect.signature(self.refine).parameters
         except (TypeError, ValueError):
-            takes = False
-        new = self.refine(self.prompt.toPlainText(), self.prompt_kind(),
-                          **({"pictures": self._refine_pictures()} if takes else {}))
+            params = {}
+        more = {"pictures": self._refine_pictures()} if "pictures" in params else {}
+        if "loras" in params:                      # the refiner is told what is known of the chosen LoRAs
+            more["loras"] = [it["path"] for it in self.loras.items()]
+        new = self.refine(self.prompt.toPlainText(), self.prompt_kind(), **more)
         if isinstance(new, list) and new:
             self.use_ideas(new)
         elif new:

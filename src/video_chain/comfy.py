@@ -2246,10 +2246,11 @@ def clip_instruction(seconds: float | None, start: str | None) -> str:
 
 
 def refine_messages(*, prompt: str, kind: str, hint: str = "", cast: list[dict] | None = None,
-                    seconds: float | None = None, start: str | None = None) -> tuple[str, str]:
+                    seconds: float | None = None, start: str | None = None, loras: str = "") -> tuple[str, str]:
     """The refiner's (system instruction, user message) for this kind of prompt (any backend).
     cast: the project's characters (video prompts), see cast_instruction. seconds, start: the clip ("video_h3"
-    only), see clip_instruction."""
+    only), see clip_instruction. loras: what is known of the LoRAs the result is made with (lora_notes.guidance),
+    put last."""
     system = REFINE_INSTRUCTIONS[kind] + " " + _SAFETY
     if cast and kind in ("video", "video_h3"):
         system += " " + cast_instruction(cast)
@@ -2259,6 +2260,8 @@ def refine_messages(*, prompt: str, kind: str, hint: str = "", cast: list[dict] 
     tokens += re.findall(r"(?<![\w@])@\w[\w-]*", prompt)    # @Anna: the cast, mentioned by name
     if tokens:
         system += f" Keep these tokens exactly as they are, where they are: {', '.join(dict.fromkeys(tokens))}."
+    if loras.strip():
+        system += "\n\n" + loras.strip()
     user = prompt.strip() + (f"\n\nWhat the user wants changed in the prompt: {hint.strip()}" if hint.strip() else "")
     return system, user
 
@@ -2266,10 +2269,11 @@ def refine_messages(*, prompt: str, kind: str, hint: str = "", cast: list[dict] 
 def build_refine_prompt_workflow(*, prompt: str, kind: str, model: dict, seed: int, hint: str = "",
                                  temperature: float = 0.5, cast: list[dict] | None = None,
                                  seconds: float | None = None, start: str | None = None,
-                                 image: str | None = None) -> dict:
+                                 image: str | None = None, loras: str = "") -> dict:
     """CLIPLoader (the LLM) -> TextGenerate with the instruction for this kind of prompt -> PreviewAny (text out).
     image: an uploaded picture the model sees (a vision model: the clip's first frame, start "seen")."""
-    system, user = refine_messages(prompt=prompt, kind=kind, hint=hint, cast=cast, seconds=seconds, start=start)
+    system, user = refine_messages(prompt=prompt, kind=kind, hint=hint, cast=cast, seconds=seconds, start=start,
+                                   loras=loras)
     wf = {
         "llm": {"class_type": "CLIPLoader", "inputs": {"clip_name": model["file"], "type": model["type"],
                                                        "device": "default"}},
@@ -2365,11 +2369,37 @@ class ComfyPromptRefiner(ComfyGenerator):
             raise ComfyError("the vision model gave no face description")
         return text[:600]
 
+    def complete(self, system: str, user: str, max_tokens: int = 512, model_file: str | None = None,
+                 seed: int = 0, temperature: float = 0.2) -> str:
+        """The model's raw answer to one question (text only; e.g. a LoRA's note, lora_notes)."""
+        model = next((m for m in self.models if m["file"] == model_file), self.models[0])
+        wf = build_refine_prompt_workflow(prompt=user, kind="image", model=model, seed=seed,
+                                          temperature=temperature)
+        wf["gen"]["inputs"].update({"system_prompt": system, "prompt": user, "max_length": int(max_tokens)})
+        self._queue(wf)
+        ws = self._connect_ws()
+        try:
+            entry = self._wait(self.current, ws)
+        except ComfyJobFailed:
+            raise
+        except Exception:
+            self.interrupt()
+            raise
+        finally:
+            self.current = None
+            if ws is not None:
+                try:
+                    ws.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        text = (((entry.get("outputs") or {}).get("show") or {}).get("text") or [""])[0]
+        return text if isinstance(text, str) else str(text)
+
     def refine_prompt(self, prompt: str, kind: str, model_file: str | None = None, seed: int = 0,
                       hint: str = "", cast: list[dict] | None = None, seconds: float | None = None,
-                      start_image: Path | str | None = None) -> str:
+                      start_image: Path | str | None = None, loras: str = "") -> str:
         """seconds, start_image (the "video_h3" kind): the clip's length and the frame it starts from; a vision
-        model sees that frame, any other is told not to invent how it looks."""
+        model sees that frame, any other is told not to invent how it looks. loras: lora_notes.guidance."""
         model = next((m for m in self.models if m["file"] == model_file), self.models[0])
         start, uploads = None, []
         if kind == "video_h3" and start_image:     # (a frame still to be made: there, but not to be seen yet)
@@ -2380,7 +2410,7 @@ class ComfyPromptRefiner(ComfyGenerator):
         try:
             wf = build_refine_prompt_workflow(prompt=prompt, kind=kind, model=model, seed=seed, hint=hint, cast=cast,
                                               seconds=seconds if kind == "video_h3" else None, start=start,
-                                              image=uploads[0][0] if uploads else None)
+                                              image=uploads[0][0] if uploads else None, loras=loras)
             self._queue(wf)
             ws = self._connect_ws()
             try:

@@ -10,7 +10,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QIcon, QImage, QKeySequence, QPixmap, QShortcut, QTextCursor
-from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLineEdit, QPlainTextEdit,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLineEdit, QPlainTextEdit,
                                QPushButton, QSpinBox, QTextBrowser, QToolButton, QVBoxLayout)
 
 from ..tree import refine_problems
@@ -40,6 +40,8 @@ class _Sig(QObject):
     models = Signal(object, str)          # [model dicts], error
     result = Signal(str, str)             # text, error
     ideas = Signal(object, str)           # [idea dicts], error
+    loras = Signal(object)                # lora_notes.summary of the LoRA stack
+    progress = Signal(str)                # what is being done before the answer (a LoRA is read up on)
 
 
 class RefineDialog(QDialog):
@@ -48,11 +50,14 @@ class RefineDialog(QDialog):
     message changes the current version, every version stays and can be continued from, and pictures (the clip's
     start frame, the image to edit, …) can be shown to a model that sees. chosen() -> the text to use, or None.
     pictures: [(title, path, on)] offered at the start. seconds, start_image: the clip's length and the frame it
-    starts from (kind "video_h3": the refiner fits the action to the length and anchors on that frame)."""
+    starts from (kind "video_h3": the refiner fits the action to the length and anchors on that frame).
+    loras: the paths of the LoRAs the result is made with; the model is told what is known of them (lora_notes:
+    their creators' words and prompts that work with them), and writes a note on each once."""
 
     def __init__(self, parent, text: str, kind: str, connect, settings=None, start_comfy=None, cast=None,
-                 pictures=None, seconds: float | None = None, start_image=None):
+                 pictures=None, seconds: float | None = None, start_image=None, loras=None):
         super().__init__(parent)
+        self.loras = [str(p) for p in (loras or []) if p]
         self.cast = cast or []                    # the project's characters: the refiner keeps @Name, writes lines
         self.seconds, self.start_image = seconds, (str(start_image) if start_image else None)
         self.setWindowTitle(f"Refine the {KIND_TEXT.get(kind, 'prompt')}")
@@ -73,6 +78,8 @@ class RefineDialog(QDialog):
         self._sig.models.connect(self._models)
         self._sig.result.connect(self._result)
         self._sig.ideas.connect(self._ideas_ready)
+        self._sig.loras.connect(self._loras_known)
+        self._sig.progress.connect(self._progress)
         self.ideas: list[dict] = []
         self._chosen_ideas: list[str] | None = None
         v = QVBoxLayout(self)
@@ -101,6 +108,12 @@ class RefineDialog(QDialog):
         self.b_mode_refine.clicked.connect(lambda: self.set_ideas_mode(False))
         self.b_mode_ideas.clicked.connect(lambda: self.set_ideas_mode(True))
         v.addLayout(top)
+        self.use_loras = QCheckBox("Write for the LoRAs")
+        self.use_loras.setChecked(self.qs.value("refinerLoraKnowledge", True, type=bool) if self.qs is not None
+                                  else True)
+        self.use_loras.toggled.connect(self._remember_loras)
+        self.use_loras.hide()                     # (shown when something is known of a LoRA in the stack)
+        v.addWidget(self.use_loras)
         row = QHBoxLayout()
         left, right = QVBoxLayout(), QVBoxLayout()
         self.original_title = label("Your prompt", level="tertiary")
@@ -312,9 +325,15 @@ class RefineDialog(QDialog):
     # ---- models
     def _load_models(self):
         self.state.setText("Connecting …")
-        sig, connect = self._sig, self.connect
+        sig, connect, loras = self._sig, self.connect, list(self.loras)
 
         def work():
+            if loras:
+                try:
+                    from .. import lora_notes
+                    sig.loras.emit(lora_notes.summary(loras))
+                except Exception:  # noqa: BLE001  (nothing known of the LoRAs: a plain refine)
+                    pass
             try:
                 self.refiner = connect()
                 sig.models.emit(self.refiner.models, "")
@@ -352,6 +371,62 @@ class RefineDialog(QDialog):
                             if self.chatting() else "Choose a model and press Refine (Ctrl+Enter). ")
                            + "The first answer loads the model, which takes a moment.")
         self.b_refine.setFocus()
+
+    # ---- the LoRAs the result is made with
+    def _loras_known(self, info: dict):
+        """Offer what is known of the stack's LoRAs (lora_notes.summary; called once the files are read)."""
+        names = info.get("known") or []
+        if not names:
+            return
+        shown = ", ".join(names[:3]) + (f" and {len(names) - 3} more" if len(names) > 3 else "")
+        self.use_loras.setText(f"Write for the LoRA{'s' if len(names) > 1 else ''}: {shown}")
+        tip = ("The model is told what is known of these LoRAs: their trigger words, what their creators say and "
+               "prompts that work with them (from CivitAI), and takes their wording where it fits your prompt. It "
+               "never takes the content of those prompts.")
+        if info.get("missing"):
+            tip += (f"\n\nThe first answer takes longer: the model reads up on {info['missing']} LoRA"
+                    f"{'s' if info['missing'] > 1 else ''} first and keeps a note on each (once per LoRA).")
+        if info.get("settings"):
+            tip += "\n\nSettings its example pictures were made with:\n" + "\n".join(
+                f"{n}: {t}" for n, t in info["settings"])
+        self.use_loras.setToolTip(tip)
+        self.use_loras.show()
+
+    def _remember_loras(self, on: bool):
+        if self.qs is not None:
+            self.qs.setValue("refinerLoraKnowledge", bool(on))
+
+    def _lora_guide(self):
+        """-> a function for the worker thread: the LoRA part of the instruction ("" when off or nothing is
+        known). The model first writes the notes that are missing (see lora_notes.make_notes)."""
+        paths = list(self.loras) if self.use_loras.isVisibleTo(self) and self.use_loras.isChecked() else []
+        refiner, model, sig = self.refiner, self.model.currentData(), self._sig
+
+        def guide() -> str:
+            if not paths:
+                return ""
+            try:
+                from .. import lora_notes
+                if hasattr(refiner, "complete"):
+                    def said(name, i, n):
+                        try:
+                            sig.progress.emit(f"Reading up on the LoRA {name} ({i} of {n}; once per LoRA) …")
+                        except RuntimeError:
+                            pass
+                    lora_notes.make_notes(paths, lambda system, user, n: refiner.complete(
+                        system, user, n, model_file=model), progress=said)
+                    try:
+                        sig.progress.emit("")
+                    except RuntimeError:
+                        pass
+                return lora_notes.guidance(paths)
+            except Exception:  # noqa: BLE001  (the LoRAs' data cannot be read: a plain refine)
+                return ""
+        return guide
+
+    def _progress(self, text: str):
+        if self._busy:
+            self.state.setText(text or ("Thinking …" if self.chatting() else "Refining …"))
 
     def _remember(self, *_):
         if self.qs is not None and self.model.currentData():
@@ -446,15 +521,17 @@ class RefineDialog(QDialog):
         self._pending = ask
         sig, refiner, seed, cast = self._sig, self.refiner, random.randint(0, 2**31 - 1), self.cast
         turns, pics = list(self.turns[:self.base + 1]), self.chosen_pictures()
-        clip = self._clip()
+        clip, guide = self._clip(), self._lora_guide()
 
         def work():
             try:
+                loras = guide()
+                more = {**clip, **({"loras": loras} if loras else {})}
                 if chat:
-                    out = refiner.chat(text, kind, turns, ask, pictures=pics, cast=cast or None, seed=seed, **clip)
+                    out = refiner.chat(text, kind, turns, ask, pictures=pics, cast=cast or None, seed=seed, **more)
                 else:
                     out = refiner.refine_prompt(text, kind, model, seed, ask, **({"cast": cast} if cast else {}),
-                                                **clip)
+                                                **more)
                 sig.result.emit(out, "")
             except Exception as e:  # noqa: BLE001
                 try:
@@ -519,10 +596,13 @@ class RefineDialog(QDialog):
         repolish(self.state)
         sig, refiner, seed, cast, pics = self._sig, self.refiner, random.randint(0, 2**31 - 1), self.cast, \
             self.chosen_pictures()
+        guide = self._lora_guide()
 
         def work():
             try:
-                sig.ideas.emit(refiner.ideas(bullets, n, wish, pictures=pics, cast=cast or None, seed=seed), "")
+                loras = guide()
+                sig.ideas.emit(refiner.ideas(bullets, n, wish, pictures=pics, cast=cast or None, seed=seed,
+                                             **({"loras": loras} if loras else {})), "")
             except Exception as e:  # noqa: BLE001
                 try:
                     sig.ideas.emit([], str(e))

@@ -12,7 +12,7 @@ each path is cached by (size, date).
 Everything CivitAI tells about a LoRA is kept too (details_path(): one JSON file per hash next to the database): the
 model version (base model, description, files, images), the model page (its description, often with sample prompts,
 tags, creator, license) and the generation data of its example images (prompts, seeds, settings; text only, no
-pictures are downloaded). LoRAs whose files name their trigger are looked up for these details as well."""
+pictures are downloaded). Next to it, <hash>.note.json: the prompt refiner's own note on the LoRA (lora_notes.py). LoRAs whose files name their trigger are looked up for these details as well."""
 from __future__ import annotations
 
 import hashlib
@@ -255,8 +255,9 @@ def example_prompts(details: dict | None) -> list[dict]:
     """The generation data of a LoRA's example images (details from civitai_lookup), each prompt once:
     [{"prompt", "negative", "seed", "steps", "cfg", "sampler", "image"}], the most liked first."""
     out, seen = [], set()
-    for it in (details or {}).get("examples") or []:
-        meta = (it or {}).get("meta") or {}
+    items = (details or {}).get("examples")
+    for it in items if isinstance(items, list) else []:
+        meta = it.get("meta") if isinstance(it, dict) else None
         if not isinstance(meta, dict):
             continue
         prompt = str(meta.get("prompt") or "").strip()
@@ -337,9 +338,43 @@ class TriggerDB:
         except (OSError, ValueError):
             return None
 
-    def _save_details(self, sha: str, details: dict):
+    def note_path(self, sha: str) -> Path:
+        return self.details_path(sha).with_suffix(".note.json")
+
+    def _sha(self, path: str) -> str | None:
+        with self._lock:
+            self._load()
+            return (self._file(path) or {}).get("sha256")
+
+    def note(self, path: str) -> dict | None:
+        """The prompt writer's note on a LoRA (lora_notes: {"note", "stamp", "made"}), None when there is none."""
+        sha = self._sha(path)
+        if not sha:
+            return None
+        try:
+            d = json.loads(self.note_path(sha).read_text(encoding="utf-8"))
+            return d if isinstance(d, dict) and isinstance(d.get("note"), str) else None
+        except (OSError, ValueError):
+            return None
+
+    def set_note(self, path: str, note: dict | None) -> bool:
+        """Keep (None: forget) a LoRA's note, by its content hash; False when the hash is not known yet or the
+        file cannot be written."""
+        sha = self._sha(path)
+        if not sha:
+            return False
+        try:
+            if note is None:
+                self.note_path(sha).unlink(missing_ok=True)
+            else:
+                self._save_details(sha, note, self.note_path(sha))
+            return True
+        except OSError:
+            return False
+
+    def _save_details(self, sha: str, details: dict, target: Path | None = None):
         import tempfile
-        target = self.details_path(sha)
+        target = target or self.details_path(sha)
         target.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix=target.name + ".", suffix=".part", dir=str(target.parent))
         try:
