@@ -2826,7 +2826,6 @@ def test_paint_a_mask_and_inpaint(app, tmp_path, image, monkeypatch):
         c = painter.canvas
         assert c.mask.size() == src.size() and mask_area(c.mask) == 0
         c.set_brush(20)
-        c._undo.append(c.mask.copy())
         c._dab(QPointF(10, 10), QPointF(src.width() / 2, src.height() / 2), False)
         painted = mask_area(c.mask)
         assert 0 < painted < 0.5

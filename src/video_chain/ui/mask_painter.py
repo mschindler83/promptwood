@@ -5,14 +5,16 @@ Erase tool) takes it away; Ctrl + wheel changes the brush. The mask is kept at t
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QShortcut
-from PySide6.QtWidgets import (QButtonGroup, QDialog, QDialogButtonBox, QHBoxLayout, QPushButton, QSlider,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QButtonGroup, QDialog, QDialogButtonBox, QHBoxLayout, QPushButton, QMessageBox,
+                               QSlider, QVBoxLayout, QWidget)
 
 from .widgets import label
 
 MASK_COLOUR = QColor(255, 40, 40, 120)
+UNDO_STEPS = 30                 # steps kept; each holds only the area it changed (Clear and Invert: the whole mask)
+UNDO_BYTES = 96 * 1024 * 1024    # and never more than this much memory
 
 
 def empty_mask(size) -> QImage:
@@ -67,7 +69,9 @@ class MaskCanvas(QWidget):
         self.mask = self.mask.convertToFormat(QImage.Format_Grayscale8)
         self.brush = max(4, min(image.width(), image.height()) // 20)      # diameter in image pixels
         self.erase = False
-        self._undo: list[QImage] = []
+        self._undo: list[tuple[QRect, QImage]] = []     # (area, the mask's pixels there before the step)
+        self._redo: list[tuple[QRect, QImage]] = []
+        self._dirty: QRect | None = None            # the area the stroke in progress touched
         self._last: QPointF | None = None
         self._stroke_erase = False
         self._cursor: QPointF | None = None
@@ -92,16 +96,21 @@ class MaskCanvas(QWidget):
                        (pos.y() - f.y()) / f.height() * self.image.height())
 
     # ---- drawing
-    def paintEvent(self, _e):
-        p = QPainter(self)
-        p.fillRect(self.rect(), QColor(20, 20, 22))
-        f = self._frame()
-        size = f.size().toSize()
+    def _ensure_display(self) -> None:
+        """The image and the red mask at the frame's size. Strokes paint into the red picture themselves (`_dab`), so
+        it is made anew only when the size changes or the mask is replaced (undo, clear, invert)."""
+        size = self._frame().size().toSize()
         if self._shown is None or self._shown[0] != size:      # the image at the frame's size, once per size
             self._shown = (size, self.image.scaled(size, Qt.IgnoreAspectRatio, Qt.SmoothTransformation))
             self._tint = None
         if self._tint is None or self._tint.size() != size:
             self._tint = tinted(self.mask, size)
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(20, 20, 22))
+        f = self._frame()
+        self._ensure_display()
         p.drawImage(f.topLeft(), self._shown[1])
         p.setOpacity(MASK_COLOUR.alphaF())
         p.drawImage(f.topLeft(), self._tint)
@@ -120,34 +129,65 @@ class MaskCanvas(QWidget):
                       Qt.RoundJoin))
         p.drawLine(a, b)
         p.end()
-        self._tint = None
+        pad = int(self.brush / 2) + 2
+        box = QRect(int(min(a.x(), b.x())) - pad, int(min(a.y(), b.y())) - pad,
+                    int(abs(a.x() - b.x())) + 2 * pad + 1, int(abs(a.y() - b.y())) + 2 * pad + 1)
+        box = box.intersected(self.mask.rect())
+        self._dirty = box if self._dirty is None else self._dirty.united(box)
+        if self._tint is not None:                   # the same line into the red picture (no full re-scale)
+            k = self._tint.width() / self.image.width()
+            t = QPainter(self._tint)
+            t.setRenderHint(QPainter.Antialiasing)
+            t.setCompositionMode(QPainter.CompositionMode_Clear if erase else QPainter.CompositionMode_Source)
+            t.setPen(QPen(QColor(MASK_COLOUR.red(), MASK_COLOUR.green(), MASK_COLOUR.blue()), self.brush * k,
+                          Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            t.drawLine(QPointF(a.x() * k, a.y() * k), QPointF(b.x() * k, b.y() * k))
+            t.end()
 
     def mousePressEvent(self, e):
         if e.button() not in (Qt.LeftButton, Qt.RightButton) or self._last is not None:
             return                                     # (a second button during a stroke: ignored)
-        self._before = self.mask.copy()
-        self._stroke_erase = self.erase or e.button() == Qt.RightButton
         self._stroke_button = e.button()
-        self._last = self._to_image(e.position())
-        self._dab(self._last, self._last, self._stroke_erase)
+        self._begin_stroke(self._to_image(e.position()), self.erase or e.button() == Qt.RightButton)
         self.update()
+
+    def _begin_stroke(self, pos: QPointF, erase: bool) -> None:
+        self._before = self.mask.copy()               # (kept only for the area the stroke touches, see below)
+        self._dirty = None
+        self._stroke_erase = erase
+        self._last = pos
+        self._dab(pos, pos, erase)
+
+    def _stroke_to(self, pt: QPointF) -> None:
+        self._dab(self._last, pt, self._stroke_erase)
+        self._last = pt
+
+    def _finish_stroke(self) -> None:
+        self._last = None
+        if self._before is not None and self._dirty is not None:
+            old, now = self._before.copy(self._dirty), self.mask.copy(self._dirty)
+            if old != now:                            # (a stroke that changed nothing: no undo)
+                self._push_undo(self._dirty, old)
+        self._before, self._dirty = None, None
+        self.changed.emit()
 
     def mouseMoveEvent(self, e):
         self._cursor = e.position()
         if self._last is not None:
-            pt = self._to_image(e.position())
-            self._dab(self._last, pt, self._stroke_erase)
-            self._last = pt
+            self._stroke_to(self._to_image(e.position()))
         self.update()
 
     def mouseReleaseEvent(self, e):
         if self._last is not None and e.button() == self._stroke_button:
-            self._last = None
-            if self._before is not None and self._before != self.mask:   # (a stroke that changed nothing: no undo)
-                self._undo.append(self._before)
-                del self._undo[:-30]
-            self._before = None
-            self.changed.emit()
+            self._finish_stroke()
+
+    def _push_undo(self, rect: QRect, before: QImage) -> None:
+        """One undo step; every step goes through here (the same caps), and a new step ends the redo line."""
+        self._undo.append((rect, before))
+        self._redo.clear()
+        del self._undo[:-UNDO_STEPS]
+        while len(self._undo) > 1 and sum(img.sizeInBytes() for _r, img in self._undo) > UNDO_BYTES:
+            del self._undo[0]
 
     def leaveEvent(self, _e):
         self._cursor = None
@@ -172,25 +212,38 @@ class MaskCanvas(QWidget):
     def clear(self):
         if mask_area(self.mask) == 0:
             return
-        self._undo.append(self.mask.copy())
+        self._push_undo(self.mask.rect(), self.mask.copy())
         self.mask.fill(0)
         self._tint = None
         self.update()
         self.changed.emit()
 
     def invert(self):
-        self._undo.append(self.mask.copy())
+        self._push_undo(self.mask.rect(), self.mask.copy())
         self.mask.invertPixels()
         self._tint = None
         self.update()
         self.changed.emit()
 
+    def _swap(self, take: list, give: list) -> None:
+        """Put the last step of `take` back and keep what it replaced in `give` (undo and redo are the same move)."""
+        if not take:
+            return
+        rect, img = take.pop()
+        give.append((rect, self.mask.copy(rect)))
+        p = QPainter(self.mask)
+        p.setCompositionMode(QPainter.CompositionMode_Source)
+        p.drawImage(rect.topLeft(), img)
+        p.end()
+        self._tint = None
+        self.update()
+        self.changed.emit()
+
     def undo(self):
-        if self._undo:
-            self.mask = self._undo.pop()
-            self._tint = None
-            self.update()
-            self.changed.emit()
+        self._swap(self._undo, self._redo)
+
+    def redo(self):
+        self._swap(self._redo, self._undo)
 
 
 class MaskPainterDialog(QDialog):
@@ -202,7 +255,8 @@ class MaskPainterDialog(QDialog):
         self.resize(1100, 800)
         v = QVBoxLayout(self)
         v.addWidget(label("Paint over what should change (red). The rest stays exactly as it is. Left mouse "
-                          "paints, right mouse erases; Ctrl + wheel: brush size; Ctrl+Z: undo.", level="secondary"))
+                          "paints, right mouse erases; Ctrl + wheel or [ and ]: brush size; B / E: paint / erase; Ctrl+Z: undo, "
+                          "Ctrl+Shift+Z: redo.", level="secondary"))
         self.canvas = MaskCanvas(image, mask)
         v.addWidget(self.canvas, 1)
         row = QHBoxLayout()
@@ -225,7 +279,7 @@ class MaskPainterDialog(QDialog):
         self.size_text = label("", level="tertiary")
         row.addWidget(self.size_text)
         row.addSpacing(12)
-        for text, fn in (("Undo", self.canvas.undo), ("Clear", self.canvas.clear), ("Invert", self.canvas.invert)):
+        for text, fn in (("Undo", self.canvas.undo), ("Redo", self.canvas.redo), ("Clear", self.canvas.clear), ("Invert", self.canvas.invert)):
             b = QPushButton(text)
             b.clicked.connect(fn)
             row.addWidget(b)
@@ -239,8 +293,22 @@ class MaskPainterDialog(QDialog):
         buttons.rejected.connect(self.reject)
         v.addWidget(buttons)
         QShortcut(QKeySequence.Undo, self, activated=self.canvas.undo)
+        for key in (QKeySequence.Redo, QKeySequence("Ctrl+Y")):
+            QShortcut(key, self, activated=self.canvas.redo)
+        QShortcut(QKeySequence("["), self, activated=lambda: self.canvas.set_brush(round(self.canvas.brush / 1.15) - 1))
+        QShortcut(QKeySequence("]"), self, activated=lambda: self.canvas.set_brush(round(self.canvas.brush * 1.15) + 1))
+        QShortcut(QKeySequence("B"), self, activated=self.b_paint.click)
+        QShortcut(QKeySequence("E"), self, activated=self.b_erase.click)
+        self._start = self.canvas.mask.copy()            # (to tell, when closing, whether work would be lost)
         self.canvas.changed.connect(self._show_area)
         self._show_area()
+
+    def reject(self):
+        """Cancel, Esc, the window's close button: painted work is only dropped after asking."""
+        if self.canvas.mask != self._start and QMessageBox.question(
+                self, "Mask", "Discard the changes to the mask?") != QMessageBox.Yes:
+            return
+        super().reject()
 
     def _show_area(self):
         self.size_text.setText(f"{self.canvas.brush} px")

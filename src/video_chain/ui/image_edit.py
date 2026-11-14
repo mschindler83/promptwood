@@ -189,7 +189,7 @@ class PictureSlot(QWidget):
         row = QHBoxLayout()
         row.addWidget(label(title, level="tertiary"))
         row.addStretch(1)
-        self.b_clear = icon_button("x", f"No {title}")
+        self.b_clear = icon_button("x", f"Remove {title}")
         self.b_clear.clicked.connect(lambda: self.set(None))
         self.b_clear.setEnabled(False)
         row.addWidget(self.b_clear)
@@ -323,7 +323,7 @@ class ImageEditDialog(QDialog):
         self.b_mask.setToolTip("Paint the part that should change; the rest stays exactly as it is (inpainting "
                                "with Qwen-Image 2.1 and its Fun ControlNet)")
         self.b_mask.clicked.connect(self.paint_mask)
-        self.b_mask_clear = QPushButton("No mask")
+        self.b_mask_clear = QPushButton("Remove mask")
         self.b_mask_clear.setToolTip("Edit the whole image again")
         self.b_mask_clear.clicked.connect(lambda: self.set_mask(None))
         self.mask_info = label("", level="tertiary")
