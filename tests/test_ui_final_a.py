@@ -120,3 +120,48 @@ def test_leaving_the_project_settles_a_pending_option_change(app, tmp_path):
         assert not w._options_timer.isActive()
     finally:
         w.close()
+
+
+# ------------------------------------------------------------------ MWB-14 / MWB-15: problems with a kind
+def test_cast_problems_are_classified_in_one_place():
+    from video_chain.ui.ui_logic import CastProblem, ProblemKind, classify_cast_problem
+    assert classify_cast_problem("clip #2 mentions @Anan, but there is no such character — did you mean @Anna?") == \
+        CastProblem(ProblemKind.CAST_UNKNOWN, "Anan", "Anna")
+    assert classify_cast_problem("clip #2 mentions @Bob, but there is no such character") == \
+        CastProblem(ProblemKind.CAST_UNKNOWN, "Bob", "")
+    assert classify_cast_problem("@Anna (clip #2) has no picture yet") == CastProblem(ProblemKind.CAST_NO_PICTURE, "Anna", "")
+    assert classify_cast_problem("@Anna (clip #2) has no face picture or voice yet").kind is ProblemKind.CAST_NO_PICTURE
+    assert classify_cast_problem("something else").kind is ProblemKind.CAST
+
+
+def test_clip_problems_carry_a_kind_and_make_the_card_items(app, tmp_path):
+    from PIL import Image
+    from video_chain.ui.main_window import MainWindow
+    from video_chain.ui.ui_logic import Problem, ProblemKind
+    img = tmp_path / "s.jpg"
+    Image.new("RGB", (64, 36)).save(img)
+    w = MainWindow(settings(tmp_path), command=FAKE)
+    try:
+        assert w.create_project(tmp_path / "p", str(img))
+        w.tree.options["turbo"] = {**w.tree.options["turbo"], "on": True, "lora": None}
+        ps = w.clip_problems(w.tree.selected)
+        assert ps and isinstance(ps[0], Problem) and ps[0].kind is ProblemKind.TURBO
+        item = ps[0].item()
+        assert item["action"] == "turbo" and item["button"] == "Show" and item["text"] == ps[0].text
+    finally:
+        w.close()
+
+
+def test_a_check_that_fails_is_said_not_swallowed(app, tmp_path, monkeypatch, caplog):
+    from PIL import Image
+    from video_chain.ui.main_window import MainWindow
+    img = tmp_path / "s.jpg"
+    Image.new("RGB", (64, 36)).save(img)
+    w = MainWindow(settings(tmp_path), command=FAKE)
+    try:
+        assert w.create_project(tmp_path / "p", str(img))
+        monkeypatch.setattr(T, "guide_problem", lambda *a, **k: 1 / 0)
+        ps = w.clip_problems(w.tree.selected)
+        assert any("could not be checked" in p.text for p in ps)      # the card says it, not only the log
+    finally:
+        w.close()

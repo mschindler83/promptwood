@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import copy
+import re
 from collections import Counter
+from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, NamedTuple, cast
 
@@ -217,6 +220,63 @@ def plain_problem(raw: str, nid: str) -> str:
     t = " ".join(t.split())
     t = t[:1].upper() + t[1:]
     return t if t.endswith((".", "?", "!")) else t + "."
+
+
+class ProblemKind(StrEnum):
+    """What a problem on a clip's card is about (it decides the button's action)."""
+    TURBO = "turbo"
+    START_IMAGE = "start_image"
+    CARRY = "carry"
+    END_IMAGE = "end_image"
+    SOUND_REF = "sounds"
+    SOURCE_SOUND = "sound"
+    CAST_UNKNOWN = "cast_new"
+    CAST_NO_PICTURE = "cast_picture"
+    CAST = "cast"
+    LORA = "loras"
+    CHECK = "check"                 # the check itself could not be made
+    FAILURE = "log"                 # a run failed (the button opens the log)
+
+
+@dataclass(frozen=True)
+class Problem:
+    """One thing that blocks a clip or went wrong when it was made: a plain sentence, the technical text for its
+    tooltip, and the button that helps (action is a ProblemKind's value, or "cast:<name>" for a picture of that
+    person)."""
+    kind: ProblemKind
+    text: str
+    tip: str = ""
+    action: str | None = None
+    button: str | None = None
+    error: bool = False
+    more: tuple[tuple[str, str], ...] = ()
+
+    def item(self) -> dict[str, Any]:
+        """The dict the card's ProblemBox shows."""
+        d: dict[str, Any] = {"text": self.text, "tip": self.tip, "action": self.action, "button": self.button}
+        if self.error:
+            d["error"] = True
+        if self.more:
+            d["more"] = list(self.more)
+        return d
+
+
+class CastProblem(NamedTuple):
+    kind: ProblemKind
+    name: str = ""                  # the @name the message is about
+    suggestion: str = ""            # CAST_UNKNOWN: the name it may have meant
+    person: bool = False            # CAST_NO_PICTURE: the message is about a person (a face picture or voice)
+
+
+def classify_cast_problem(raw: str) -> CastProblem:
+    """What a cast check's message (tree.cast_problems: text only) is about. The one place that reads its wording."""
+    m = re.search(r"mentions @([\w-]+), but there is no such character(?: — did you mean @([\w-]+)\?)?", raw)
+    if m:
+        return CastProblem(ProblemKind.CAST_UNKNOWN, m.group(1), m.group(2) or "")
+    pic = re.match(r"@([\w-]+) \(clip #\d+\) has no (picture|face picture or voice) yet", raw)
+    if pic:
+        return CastProblem(ProblemKind.CAST_NO_PICTURE, pic.group(1), person=pic.group(2) != "picture")
+    return CastProblem(ProblemKind.CAST)
 
 
 def speed_mode(o: dict) -> str:

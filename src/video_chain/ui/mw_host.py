@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from .preview import Preview, StartTile
     from .storyboard import Storyboard
     from .timeline import Timeline
+    from .ui_logic import Problem
     from .view_mode import AdvancedNote, ViewMode
 
     class MainWindowHost(QMainWindow):
@@ -76,7 +77,7 @@ if TYPE_CHECKING:
         _dialogs_modeless: bool
         _eleven_row: QWidget
         _error: str
-        _failures: dict[str, dict]
+        _failures: dict[str, Problem]
         _gpu_timer: QTimer
         _idle_since: float
         _idle_timeout: float | None

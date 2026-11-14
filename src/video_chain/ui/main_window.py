@@ -20,6 +20,7 @@ from .. import tree as T, tts as TTS
 # (re-exported: the tests patch and import these names on main_window)
 from .clip_dialogs import SplitDialog, VideoFrameDialog  # noqa: F401
 from .video_editor import VideoRangeDialog  # noqa: F401
+from .ui_logic import Problem
 from .view_mode import ViewMode
 from .clip_cards import PromptCard, VideoCard
 from .generator_state import ComfyModel, Job, ModelState, ModelSwitch, Phase, WorkerBinding
@@ -120,7 +121,7 @@ class MainWindow(BuildMixin, GeneratorMixin, ComfyMixin, ExportMixin, VideosMixi
         self._comfy_polling = False
         self._comfy_starting = 0.0
         self._remade_note = ""                       # what the last change said about CHANGED clips
-        self._failures: dict[str, dict] = {}    # clip -> what went wrong when it was made (on its card until it is
+        self._failures: dict[str, Problem] = {}    # clip -> what went wrong when it was made (on its card until it is
         #                                         made again or edited)
         self._waiting_comfy: list[str] | None = None   # targets to generate once ComfyUI answers
         # the model this app last used in ComfyUI ("h3" clips, "qwen" image edits, None: none / unloaded). ComfyUI

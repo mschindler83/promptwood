@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QMessageBox  # noqa: E402
 
 from ui_helpers import (app, crop_accepted, image, silent_player, win)  # noqa: E402,F401
 from video_chain import tree as T  # noqa: E402
+from video_chain.ui.ui_logic import Problem, ProblemKind as PK  # noqa: E402
 
 
 def opened(win, tmp_path, image, name="p"):
@@ -19,10 +20,10 @@ def opened(win, tmp_path, image, name="p"):
 
 def test_failures_cleared_on_close_and_open(win, tmp_path, image):
     opened(win, tmp_path, image)
-    win._failures["n1"] = {"text": "x", "tip": "x", "error": True, "action": "log", "button": "Details"}
+    win._failures["n1"] = Problem(PK.FAILURE, "x", "x", "log", "Details", True)
     win.close_project()
     assert win._failures == {}
-    win._failures["n1"] = {"text": "x"}
+    win._failures["n1"] = Problem(PK.FAILURE, "x")
     assert win.open_project(tmp_path / "p")
     assert win._failures == {}
 
@@ -127,10 +128,10 @@ def test_failure_classification_not_loose(win, tmp_path, image):
     win._targets = [nid]
     win._error = "CUDA out of memory while loading model"
     win._note_failure(1)
-    assert "missing something" not in win._failures[nid]["text"]
+    assert "missing something" not in win._failures[nid].text
     win._error = "Missing model: foo.safetensors"
     win._note_failure(1)
-    assert "missing something" in win._failures[nid]["text"]
+    assert "missing something" in win._failures[nid].text
 
 
 def test_busy_guards_say_why(win, tmp_path, image, monkeypatch):
