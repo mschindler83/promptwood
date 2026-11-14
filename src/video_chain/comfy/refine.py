@@ -8,6 +8,7 @@ from pathlib import Path
 from .. import media
 from ..chain import canvas_size
 from .errors import ComfyError
+from .host import ComfyHost
 from .ffutil import with_audio
 from .loras import is_ic_lora
 from .video import AUDIO_VAE, TEXT_ENCODER, UNET, VIDEO_VAE
@@ -149,7 +150,7 @@ def refine_size(width: int, height: int, target: str) -> tuple[int, int]:
 
 
 
-class RefineMixin:
+class RefineMixin(ComfyHost):
     """ComfyGenerator.refine (needs the generator's upload / _run_workflow / _save ...)."""
 
     def refine(self, draft: Path, prompt: str, out: Path, seed: int, size: tuple[int, int], frames: int,

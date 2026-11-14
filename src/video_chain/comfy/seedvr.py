@@ -9,6 +9,7 @@ from pathlib import Path
 from .. import media
 from ..chain import probe
 from .errors import ComfyError
+from .host import ComfyHost
 from .ffutil import ffmpeg, with_audio
 from .wfb import (FPS, SEEDVR_SAVE_ID, SUBFOLDER, combo_options, loader_unet, loader_vae, save_video)
 
@@ -139,7 +140,8 @@ class SeedvrProgress:
 
     def __init__(self, pieces: int, out=None):
         self.pieces, self.out = max(1, int(pieces)), out
-        self.k, self.phase, self.last, self.best = 0, 0, None, 0
+        self.k, self.phase, self.best = 0, 0, 0
+        self.last: tuple[int, int] | None = None
 
     def piece(self, k: int, note=None):
         self.k, self.phase, self.last = int(k), 0, None
@@ -231,7 +233,7 @@ def seedvr_timing(size, unet, up_bytes, t_up, t_run, down_bytes, t_down, node_ti
             + (f" [{nodes}]" if nodes else "") + f"; download {rate(down_bytes, t_down)}")
 
 
-class SeedvrMixin:
+class SeedvrMixin(ComfyHost):
     """ComfyGenerator.seedvr (needs the generator's upload / _run_workflow / _save / free ...)."""
 
     def seedvr(self, draft: Path, out: Path, size: tuple[int, int], method: str = SEEDVR_DEFAULT_METHOD,

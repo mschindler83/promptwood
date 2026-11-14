@@ -98,7 +98,7 @@ def _safetensors_keys(path: Path) -> frozenset[str] | None:
     return _safetensors_keys_cached(str(path), st.st_size, st.st_mtime_ns)
 
 
-_safetensors_keys.cache_clear = _safetensors_keys_cached.cache_clear
+_safetensors_keys.cache_clear = _safetensors_keys_cached.cache_clear   # type: ignore[attr-defined]  # (tests clear the cache through the plain function)
 
 
 def is_turbo_lora(path: Path) -> bool:

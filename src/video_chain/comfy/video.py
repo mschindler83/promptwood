@@ -1,7 +1,7 @@
 """The workflow of one MiniMax-H3 clip, as ComfyUI's blueprint "Image to Video (MiniMax H3)" (see __init__)."""
 from __future__ import annotations
 
-from typing import Callable, Sequence
+from typing import Any, Callable, Sequence
 
 from .wfb import (FPS, SAVE_LAST_ID, SAVE_VIDEO_ID, loader_clip, loader_unet, loader_vae, lora_chain, save_video)
 
@@ -119,7 +119,7 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
         wf["end"] = {"class_type": "LoadImage", "inputs": {"image": end_image}}
     if audio or audio_refs:
         wf["audio_vae"] = loader_vae(AUDIO_VAE)
-    cond = dict(prompt=prompt, width=width, height=height, frames=frames, use_start=use_start, use_end=use_end)
+    cond: dict[str, Any] = dict(prompt=prompt, width=width, height=height, frames=frames, use_start=use_start, use_end=use_end)
     if has_refs:
         latent, positive = _conditioning_refs(wf, **cond, refs=refs, ref_size=ref_size, ref_key=ref_key,
                                               audio_refs=audio_refs, audio_key=audio_key, frame_refs=frame_refs,
@@ -173,7 +173,7 @@ def _conditioning_refs(wf: dict, *, prompt: str, width: int, height: int, frames
                        use_end: bool, refs: Sequence[str], ref_size: str, ref_key: Callable[[int], str],
                        audio_refs: Sequence[str], audio_key: Callable[[int], str], frame_refs: Sequence[str],
                        start_pin: int, ref_videos: Sequence[str] = (),
-                       video_key: Callable[[int], str] = None) -> tuple[list, list]:
+                       video_key: Callable[[int], str] | None = None) -> tuple[list, list]:
     """The reference model: MiniMaxH3ReferenceToVideo with the pictures and sounds, the start frame pinned at 0 and
     the end frame at -1 by MiniMaxH3AddGuide. Returns (latent, positive) as node outputs."""
     inputs = {"clip": ["clip", 0], "vae": ["vae", 0], "prompt": prompt, "width": int(width),
@@ -183,7 +183,8 @@ def _conditioning_refs(wf: dict, *, prompt: str, width: int, height: int, frames
         inputs[ref_key(i)] = [f"ref{i}", 0]
     for i, f in enumerate([f for f in ("start", "end") if f in frame_refs], start=len(refs)):
         inputs[ref_key(i)] = [f, 0]                # the same LoadImage the guide pins
-    for i, clip in enumerate(ref_videos):          # pictures only (see build_workflow: no ref_video_audios)
+    for i, clip in enumerate(ref_videos):          # pictures only
+        assert video_key is not None                # (given with the videos) (see build_workflow: no ref_video_audios)
         wf[f"rvideo{i}"] = {"class_type": "LoadVideo", "inputs": {"file": clip}}
         wf[f"rvparts{i}"] = {"class_type": "GetVideoComponents", "inputs": {"video": [f"rvideo{i}", 0]}}
         inputs[video_key(i)] = [f"rvparts{i}", 0]
