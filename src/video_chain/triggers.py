@@ -33,7 +33,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable
 
-from . import keys, media, net
+from . import config, keys, media, net
 from .h3_prompt import contains_word
 
 logger = logging.getLogger(__name__)
@@ -110,8 +110,7 @@ def default_path() -> Path:
     env = os.environ.get("VIDEO_CHAIN_TRIGGERS")
     if env:
         return Path(env)
-    base = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
-    return base / "video-chain" / "lora_triggers.json"
+    return config.data_dir() / "lora_triggers.json"
 
 
 def _clean(words) -> list[str]:

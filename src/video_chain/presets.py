@@ -12,7 +12,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import media
+from . import config, media
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +23,7 @@ def default_path() -> Path:
     env = os.environ.get("VIDEO_CHAIN_PRESETS")
     if env:
         return Path(env)
-    base = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
-    return base / "video-chain" / "lora_presets.json"
+    return config.data_dir() / "lora_presets.json"
 
 
 def lora_key(path: str) -> str:

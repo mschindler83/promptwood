@@ -2,17 +2,17 @@
 from __future__ import annotations
 
 import logging
-import os
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+
+from . import config
 
 FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 
 def default_log_file() -> Path:
-    base = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
-    return base / "video-chain" / "video-chain.log"
+    return config.state_dir() / "video-chain.log"
 
 
 def setup(file: Path | None = None, level: int = logging.INFO, to_file: bool = True) -> None:
