@@ -78,24 +78,38 @@ class VideoView(QWidget):
     CPU: frames come through a QVideoSink and are painted like an image (kept in proportion, black around): never
     crashes, but decoding, colour conversion and smooth scaling of every frame on the CPU lag with large clips.
 
-    set_rotation (CPU only) turns the picture clockwise on top of what the player shows."""
+    turnable: set_rotation turns the picture clockwise on top of what the player shows. CPU: the painted image is
+    turned. GPU: Qt Quick's VideoOutput (in a QQuickWidget) instead of the QVideoWidget, turned with its own
+    orientation property; the frames stay on the GPU (never converted here: converting hardware-decoded frames is
+    what crashed). (Not the frames' own rotation setting: QVideoWidget then turns the picture's shape, but not the
+    picture, which comes out stretched.)"""
 
-    def __init__(self, parent=None, gpu: bool | None = None):
+    QML = (b"import QtQuick\nimport QtMultimedia\n"
+           b"Rectangle { color: 'black'\n"
+           b"  VideoOutput { objectName: 'out'; anchors.fill: parent; fillMode: VideoOutput.PreserveAspectFit } }\n")
+
+    def __init__(self, parent=None, gpu: bool | None = None, turnable: bool = False):
         super().__init__(parent)
         self.gpu = GPU_VIDEO if gpu is None else bool(gpu)
+        self.turnable = bool(turnable)
         self._img = QImage()
         self._raw = QImage()                       # (CPU: the frame before the turn)
         self.rotation = 0
+        self._out = None                           # (GPU, turnable: the VideoOutput item)
         self._shown: tuple | None = None           # (the frame, the size) -> the frame scaled to fit, for painting
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         if self.gpu:
-            from PySide6.QtMultimediaWidgets import QVideoWidget
             lay = QVBoxLayout(self)
             lay.setContentsMargins(0, 0, 0, 0)
-            self.widget = QVideoWidget(self)
-            self.widget.setAspectRatioMode(Qt.KeepAspectRatio)
+            if self.turnable:
+                self.widget = self._quick_output()
+                self.sink = self._out.property("videoSink")
+            else:
+                from PySide6.QtMultimediaWidgets import QVideoWidget
+                self.widget = QVideoWidget(self)
+                self.widget.setAspectRatioMode(Qt.KeepAspectRatio)
+                self.sink = self.widget.videoSink()
             lay.addWidget(self.widget)
-            self.sink = self.widget.videoSink()
             return
         from PySide6.QtMultimedia import QVideoSink
         self.widget = None
@@ -114,13 +128,32 @@ class VideoView(QWidget):
             not self._raw.isNull() else self._raw
         self.update()
 
+    def _quick_output(self):
+        from PySide6.QtCore import QUrl
+        from PySide6.QtQml import QQmlComponent
+        from PySide6.QtQuickWidgets import QQuickWidget
+        view = QQuickWidget(self)
+        view.setResizeMode(QQuickWidget.SizeRootObjectToView)
+        view.setClearColor(QColor(0, 0, 0))
+        comp = QQmlComponent(view.engine())
+        comp.setData(self.QML, QUrl())
+        root = comp.create()
+        if root is None:
+            raise RuntimeError("Qt Quick video output: " + "; ".join(e.toString() for e in comp.errors()))
+        view.setContent(QUrl(), comp, root)
+        self._root, self._comp = root, comp        # (kept alive with the view)
+        self._out = root.findChild(QObject, "out")
+        return view
+
     def set_rotation(self, degrees: int) -> None:
-        """Turn the picture clockwise by 0, 90, 180 or 270 degrees (CPU views only: Qt's video widget draws the
-        frames itself, and its frames' rotation setting was not seen to take effect)."""
-        if self.gpu:
-            raise RuntimeError("a GPU video view cannot be turned; use VideoView(gpu=False)")
+        """Turn the picture clockwise by 0, 90, 180 or 270 degrees (a view made with turnable=True)."""
+        if not self.turnable:
+            raise RuntimeError("this video view was not made turnable")
         self.rotation = int(degrees) % 360
-        self._turn()
+        if self.gpu:
+            self._out.setProperty("orientation", self.rotation)      # (clockwise, as Qt's documentation says)
+        else:
+            self._turn()
 
     def image(self) -> QImage:
         """The frame shown (GPU: converted only when asked)."""

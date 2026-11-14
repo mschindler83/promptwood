@@ -1402,17 +1402,30 @@ def test_video_view_rotation(app, tmp_path):
 
     from PySide6.QtCore import QUrl
     from PySide6.QtGui import QImage
-    from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame, QVideoSink
+    from PySide6.QtMultimedia import QMediaPlayer, QtVideo, QVideoFrame, QVideoSink
 
     from video_chain.ui.widgets import VideoView, frame_image
-    cpu = VideoView(gpu=False)
+    cpu = VideoView(gpu=False, turnable=True)
     cpu._raw = QImage(320, 180, QImage.Format_RGB888)
     cpu.set_rotation(90)
     assert cpu.image().size().toTuple() == (180, 320)
     cpu.set_rotation(180)
     assert cpu.image().size().toTuple() == (320, 180)
     with pytest.raises(RuntimeError):
-        VideoView(gpu=True).set_rotation(90)
+        VideoView(gpu=False).set_rotation(90)
+    plain = VideoView(gpu=True)                                            # the other players: as they were
+    assert plain.sink is plain.widget.videoSink()
+    gpu = VideoView(gpu=True, turnable=True)          # Qt Quick's VideoOutput, turned by its orientation
+    assert gpu._out.property("videoSink") is not None and gpu.sink is gpu._out.property("videoSink")
+    img = QImage(32, 18, QImage.Format_RGB32)
+    img.fill(0)
+    gpu.sink.setVideoFrame(QVideoFrame(img))
+    for deg in (90, 270, 0):
+        gpu.set_rotation(deg)
+        assert gpu._out.property("orientation") == deg
+    assert gpu.sink.videoFrame().rotation() == QtVideo.Rotation.None_     # (the frames themselves are left alone)
+    gpu.clear()
+    assert not gpu.sink.videoFrame().isValid()
     split, phone = tmp_path / "split.mp4", tmp_path / "phone.mp4"
     subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=red:s=32x36:r=30:d=0.5", "-f", "lavfi",
                     "-i", "color=blue:s=32x36:r=30:d=0.5", "-filter_complex", "[0:v][1:v]hstack", "-c:v", "libx264",

@@ -327,7 +327,7 @@ class VideoRangeDialog(QDialog):
                 self.placeholder.setText("Video playback is not available (QtMultimedia missing); "
                                          "the frames below show the range.")
                 return
-            self.video = VideoView(gpu=False)       # (painted frames, so the picture can be turned; see VideoView)
+            self.video = VideoView(turnable=True)   # (GPU or CPU as set; either can be turned, see VideoView)
             self.stack.addWidget(self.video)
             self.audio = QAudioOutput(self)
             self.player = QMediaPlayer(self)
