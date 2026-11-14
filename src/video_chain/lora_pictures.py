@@ -116,7 +116,8 @@ def covers(details: dict | None, show: str) -> list[dict]:
     showcase on its page, then the gallery; only those `show` allows and that have a still to load."""
     if not isinstance(details, dict) or show == "off":
         return []
-    version = details.get("version") if isinstance(details.get("version"), dict) else {}
+    v = details.get("version")
+    version = v if isinstance(v, dict) else {}
     out = []
     for group in (version.get("images"), details.get("examples")):
         for it in group if isinstance(group, list) else []:
