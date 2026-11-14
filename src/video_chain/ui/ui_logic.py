@@ -4,7 +4,7 @@ from __future__ import annotations
 import copy
 from collections import Counter
 from pathlib import Path
-from typing import Any, NamedTuple, TypeVar, cast
+from typing import Any, NamedTuple
 
 from .. import chain, config, llm_server as LLM, tree as T, tts as TTS
 from .graph import START
@@ -270,11 +270,3 @@ def project_setting_changes(o: dict) -> list[tuple[str, str]]:
 
 
 CARD_WIDTH = 330                           # a card's width in a row; the header must fit it
-
-
-_V = TypeVar("_V")
-
-
-def qs_value(qs: Any, key: str, default: _V, kind: type[_V]) -> _V:
-    """QSettings.value(key, default, type=kind), typed (the PySide6 stubs return object)."""
-    return cast(_V, qs.value(key, default, type=kind))

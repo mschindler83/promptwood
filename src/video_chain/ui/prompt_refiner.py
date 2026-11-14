@@ -19,6 +19,7 @@ from .theme import repolish, theme
 from .dialogs import add_action, button_row
 from .text_edit import replace_text  # noqa: F401  (main_window and image_edit import it from here)
 from .widgets import fit_size, guard_wheel, icon_button, label, safe_emit, shortcut
+from .qsvalue import qs_value
 
 LIKE_EXAMPLE = ("Rewrite my prompt in the manner of this example prompt, which is known to work with the LoRA: take "
                 "its wording, its structure and its level of detail. Keep what my prompt is about (my subjects, my "
@@ -116,7 +117,7 @@ class RefineDialog(QDialog):
         self.b_mode_ideas.clicked.connect(lambda: self.set_ideas_mode(True))
         v.addLayout(top)
         self.use_loras = QCheckBox("Write for the LoRAs")
-        self.use_loras.setChecked(self.qs.value("refinerLoraKnowledge", True, type=bool) if self.qs is not None
+        self.use_loras.setChecked(qs_value(self.qs, "refinerLoraKnowledge", True, bool) if self.qs is not None
                                   else True)
         self.use_loras.toggled.connect(self._remember_loras)
         self.b_loras = QToolButton()
@@ -390,7 +391,7 @@ class RefineDialog(QDialog):
         for m in models:
             self.model.addItem(m["label"] + f"  —  {Path(m['file'].split(':', 1)[-1]).name}", m["file"])
             self.model.setItemData(self.model.count() - 1, m["file"], Qt.ItemDataRole.ToolTipRole)
-        saved = self.qs.value("refinerModel", "", type=str) if self.qs is not None else ""
+        saved = qs_value(self.qs, "refinerModel", "", str) if self.qs is not None else ""
         i = self.model.findData(saved)
         self.model.setCurrentIndex(i if i >= 0 else 0)
         self.model.blockSignals(False)

@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QDoubleSpin
 from .. import tree as T
 from .dialogs import add_action, button_row, failed
 from .widgets import fit_size, guard_wheel, icon_button, label
+from .qsvalue import qs_value
 
 
 LORA_MIN, LORA_MAX = -10.0, 10.0       # strengths (ComfyUI allows -100..100 for LoRAs, -10..10 for the turbo LoRA)
@@ -215,7 +216,7 @@ class LoraPickerDialog(QDialog):
         self.pictures = QComboBox()
         for key, text in SHOW:
             self.pictures.addItem(text, key)
-        saved = self.qs.value("loraPictures", "safe", type=str) if self.qs is not None else "safe"
+        saved = qs_value(self.qs, "loraPictures", "safe", str) if self.qs is not None else "safe"
         self.pictures.setCurrentIndex(max(0, self.pictures.findData(saved)))
         self.pictures.setToolTip("Each LoRA's cover is the first picture of its CivitAI page, loaded once and kept "
                                  "on disk (this tells CivitAI which pictures you look at).\nSafe only: pictures "

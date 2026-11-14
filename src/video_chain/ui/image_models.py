@@ -14,6 +14,7 @@ from ..imagegen import FAMILIES, size_for
 from .image_common import CREATE_HINT, PROMPT_HINT
 from .widgets import safe_emit
 from .image_host import ImageEditHost
+from .qsvalue import qs_value
 
 
 
@@ -56,7 +57,7 @@ class ModelsMixin(ImageEditHost):
         else:
             for q in ("fast", "standard", "best"):
                 self.quality.addItem(QUALITY_TEXT[q], q)
-        saved = self.qs.value(self._quality_key(), "", type=str) if self.qs is not None else ""
+        saved = qs_value(self.qs, self._quality_key(), "", str) if self.qs is not None else ""
         i = self.quality.findData(saved)
         self.quality.setCurrentIndex(i if i >= 0 else 0)
         self.quality.blockSignals(False)
@@ -141,7 +142,7 @@ class ModelsMixin(ImageEditHost):
             self.family.setItemData(k, info.get("missing", f["label"]), Qt.ItemDataRole.ToolTipRole)
             if "models" not in info:
                 self.family.model().item(k).setEnabled(False)
-        saved = self.qs.value("createFamily", "", type=str) if self.qs is not None else ""
+        saved = qs_value(self.qs, "createFamily", "", str) if self.qs is not None else ""
         avail = [i for i in range(self.family.count()) if self.family.model().item(i).isEnabled()
                  and self.family.itemData(i)]
         i = self.family.findData(saved)

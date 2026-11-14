@@ -31,6 +31,7 @@ from .lora_details import details_html, themed
 from .dialogs import add_action, button_row, confirm
 from .lora_stack import lora_label
 from .widgets import fit_size, guard_wheel, label, safe_emit
+from .qsvalue import qs_value
 
 PER_PAGE = 8
 PICTURE = 200                    # pixels: the side of a card's picture
@@ -241,7 +242,7 @@ class LoraWindow(QDialog):
         self.pictures = QComboBox()
         for key, text in SHOW:
             self.pictures.addItem(text, key)
-        saved = self.qs.value("loraPictures", "safe", type=str) if self.qs is not None else "safe"
+        saved = qs_value(self.qs, "loraPictures", "safe", str) if self.qs is not None else "safe"
         self.pictures.setCurrentIndex(max(0, self.pictures.findData(saved)))
         self.pictures.setToolTip("The pictures are small stills loaded from CivitAI when a page is shown (a video: "
                                  "one frame of it) and kept on disk, so each is loaded once. This tells CivitAI "

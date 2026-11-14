@@ -13,8 +13,9 @@ from PySide6.QtWidgets import QApplication, QLineEdit, QPlainTextEdit
 from .. import tree as T
 from . import shortcuts as S
 from .clip_cards import PromptCard
-from .ui_logic import COMFY_START_TIMEOUT, DEFAULT_COMFY_LAUNCHER, LAYOUTS, LAYOUT_VERSION, project_setting_changes, qs_value
+from .ui_logic import COMFY_START_TIMEOUT, DEFAULT_COMFY_LAUNCHER, LAYOUTS, LAYOUT_VERSION, project_setting_changes
 from .mw_host import MainWindowHost
+from .qsvalue import qs_value
 
 
 class ViewMixin(MainWindowHost):
@@ -148,7 +149,7 @@ class ViewMixin(MainWindowHost):
     def _update_guide(self):
         """The guide while the project has no made clip (step 0 without a project), its steps ticked from the real
         state; the "how to go on" line once after the first made clip."""
-        hidden = self.qs.value("guideHidden", False, type=bool)
+        hidden = qs_value(self.qs, "guideHidden", False, bool)
         if self.tree is None or self.project is None:
             self.guide_panel.set_state(project=False)
             self.guide_panel.setVisible(not hidden)
@@ -170,9 +171,9 @@ class ViewMixin(MainWindowHost):
             if not isinstance(fw, (QPlainTextEdit, QLineEdit)):
                 self.b_gen.setFocus(Qt.FocusReason.OtherFocusReason)
         self._guide_ready = ready
-        if len(self.tree.nodes) >= 2 and not self.qs.value("nextHintDone", False, type=bool):
+        if len(self.tree.nodes) >= 2 and not qs_value(self.qs, "nextHintDone", False, bool):
             self.qs.setValue("nextHintDone", True)          # a second clip exists: the user knows how to go on
-        self.next_hint.setVisible(made and not self.qs.value("nextHintDone", False, type=bool))
+        self.next_hint.setVisible(made and not qs_value(self.qs, "nextHintDone", False, bool))
 
     def _next_hint_done(self):
         self.qs.setValue("nextHintDone", True)

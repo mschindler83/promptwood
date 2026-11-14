@@ -12,7 +12,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import Any
 
-    from PySide6.QtCore import QSettings, QTimer
+    from PySide6.QtCore import QSettings
+    from PySide6.QtGui import QImage, QTimer
     from PySide6.QtGui import QPixmap
     from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QLabel, QLineEdit, QListWidget, QPlainTextEdit, QPushButton, QSlider, QSpinBox, QStackedWidget, QToolButton, QWidget
     from pathlib import Path
@@ -44,7 +45,7 @@ if TYPE_CHECKING:
         b_mask_clear: QPushButton
         b_refine: QToolButton
         b_single: QPushButton
-        b_start_comfy: Callable[[], bool] | None
+        b_start_comfy: QPushButton
         b_undo: QPushButton
         batch: list[str]
         check_lora: Callable[[str | None], bool | None] | None
@@ -97,6 +98,7 @@ if TYPE_CHECKING:
         stack: QStackedWidget
         start_comfy: Callable[[], bool] | None
         state: QLabel
+        mask: QImage | None  # type: ignore[assignment]   # (shadows QWidget.mask(), which the dialog never uses)
         tags: QCheckBox
         thumb_size: QSlider
         tries: QSpinBox

@@ -13,6 +13,7 @@ from .image_picker import IMAGE_EXTS, pick_image
 from .imageio import upright
 from .mask_painter import MaskPainterDialog, mask_area, overlay
 from .image_host import ImageEditHost
+from .qsvalue import qs_value
 
 
 
@@ -39,7 +40,7 @@ class SourceMixin(ImageEditHost):
             self.set_source(path)
 
     def _choose_folder(self):
-        start = self.qs.value("editFolder", "", type=str) if self.qs is not None else ""
+        start = qs_value(self.qs, "editFolder", "", str) if self.qs is not None else ""
         d = QFileDialog.getExistingDirectory(self, "Folder of images to edit (each one in turn)", start)
         if d:
             self.set_folder(d)

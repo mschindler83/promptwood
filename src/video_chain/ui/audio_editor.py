@@ -22,6 +22,7 @@ from .theme import theme, with_alpha
 from .video_editor import RangeBar, RangePlayerMixin, fmt
 from .dialogs import button_row
 from .widgets import fit_size, guard_wheel, icon_button, label, safe_emit, shortcut
+from .qsvalue import qs_value
 
 PEAKS = 1200                                    # waveform columns
 
@@ -262,7 +263,7 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
     # ---- file
     def choose(self):
         folder = str(Path(self.file).parent) if self.file else (
-            self.settings.value("soundDir", "", type=str) if self.settings is not None else "")
+            qs_value(self.settings, "soundDir", "", str) if self.settings is not None else "")
         from .image_picker import pick_image, scratch_settings
         f = pick_image(self, "A recording of the voice (audio or video)" if self.voice else "Sound for an audio track",
                        self.settings if self.settings is not None else scratch_settings(), folder or None,

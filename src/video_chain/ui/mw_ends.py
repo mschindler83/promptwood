@@ -17,6 +17,7 @@ from .video_editor import choose_video
 from .generator_state import ComfyModel, ModelSwitch
 from .ui_logic import ASPECT_TOLERANCE, DEFAULT_COMFY_URL, label_loras, plural
 from .mw_host import MainWindowHost
+from .qsvalue import qs_value
 
 
 class EndsMixin(MainWindowHost):
@@ -523,7 +524,7 @@ class EndsMixin(MainWindowHost):
     def _pick_images(self, title: str) -> list[str]:
         """Several pictures from the file dialog (it opens where the start image came from)."""
         start = str(Path(self.tree.image).parent) if self.tree and self.tree.image and \
-            Path(self.tree.image).parent.is_dir() else self.qs.value("startRowsDir", "", type=str)
+            Path(self.tree.image).parent.is_dir() else qs_value(self.qs, "startRowsDir", "", str)
         files, _f = QFileDialog.getOpenFileNames(self, title, start or "",
                                                  "Pictures (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff)")
         if files:

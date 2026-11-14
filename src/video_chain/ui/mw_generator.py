@@ -16,8 +16,9 @@ from ..__main__ import COMFY_DOWN
 from .widgets import safe_emit
 from .generator_state import (
     CLIP_MODELS, ComfyBinding, ComfyModel, IMAGE_MODELS, Job, ModelState, Phase, RunpodBinding, WorkerBinding)
-from .ui_logic import CLOUD_KILL_GRACE_MS, DEFAULT_COMFY_URL, KILL_GRACE_MS, fmt_left, plural, time_left, qs_value
+from .ui_logic import CLOUD_KILL_GRACE_MS, DEFAULT_COMFY_URL, KILL_GRACE_MS, fmt_left, plural, time_left
 from .mw_host import MainWindowHost
+from .qsvalue import qs_value
 
 
 def step_status(nid: str, k: int, total: int, what: str, frac: float, left: float | None,

@@ -7,8 +7,9 @@ from pathlib import Path
 from .. import runpod as RP, tree as T, triggers
 from . import ui_logic as UL
 from .ui_logic import (
-    DEFAULT_COMFY_LAUNCHER, DEFAULT_COMFY_URL, LAYOUT_VERSION, LLM_DEFAULT_PORT, LLM_DEFAULT_SERVER, MAX_RECENT, qs_value)
+    DEFAULT_COMFY_LAUNCHER, DEFAULT_COMFY_URL, LAYOUT_VERSION, LLM_DEFAULT_PORT, LLM_DEFAULT_SERVER, MAX_RECENT)
 from .mw_host import MainWindowHost
+from .qsvalue import qs_value
 
 
 class SettingsMixin(MainWindowHost):
@@ -30,7 +31,7 @@ class SettingsMixin(MainWindowHost):
         self.civitai_site.blockSignals(False)
         self.llm_on.setChecked(qs_value(q, "llmServerOn", self.llm_model.count() > 0, bool))  # on when one is found
         self.llm_server.setText(qs_value(q, "llmServer", LLM_DEFAULT_SERVER, str))
-        saved = q.value("llmModel", "", type=str)
+        saved = qs_value(q, "llmModel", "", str)
         if saved:
             i = self.llm_model.findData(saved)
             if i < 0:
@@ -44,7 +45,7 @@ class SettingsMixin(MainWindowHost):
         self.video_gpu.blockSignals(False)
         self.idle_minutes.setValue(qs_value(q, "idleMinutes", 15, int))
         self._runpod_loading = True
-        gpu = q.value("runpodGpu", RP.DEFAULT_GPU, type=str)
+        gpu = qs_value(q, "runpodGpu", RP.DEFAULT_GPU, str)
         i = self.runpod_gpu.findData(gpu)
         if i >= 0:
             self.runpod_gpu.setCurrentIndex(i)
@@ -58,7 +59,7 @@ class SettingsMixin(MainWindowHost):
             self.restoreGeometry(g)
         self._restore_layout()
         self._fill_recent()
-        proj = q.value("project", "", type=str)
+        proj = qs_value(q, "project", "", str)
         if proj and Path(proj).is_dir():
             self.open_project(Path(proj), quiet=True)
 

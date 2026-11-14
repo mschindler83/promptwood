@@ -48,6 +48,7 @@ from .project_dialogs import ExportDialog, NewProjectDialog, VariantsDialog
 from .ui_logic import (
     CARD_WIDTH, CONTINUE_CLASSIC_TIP, CONTINUE_FIRST_TIP, CONTINUE_TIP, KILL_GRACE_MS, LAYOUT_VERSION, MIX_TIP,
     REMIX_DELAY_MS, STATE_TIP, find_gguf_models, fmt_left, label_loras, row_start, row_start_of, time_left)
+from .qsvalue import qs_value
 
 
 class MainWindow(BuildMixin, GeneratorMixin, ComfyMixin, ExportMixin, VideosMixin, EndsMixin, NodeMixin, LorasMixin,
@@ -63,7 +64,7 @@ class MainWindow(BuildMixin, GeneratorMixin, ComfyMixin, ExportMixin, VideosMixi
         self.qs = settings
         # Simple or Advanced, decided once: Simple on a first run (no settings yet), Advanced for settings from
         # before the views existed (that user knows every control); stored at once, so it never flips later
-        mode = self.qs.value("viewMode", "", type=str)
+        mode = qs_value(self.qs, "viewMode", "", str)
         if mode not in ("simple", "advanced"):
             mode = "advanced" if self.qs.allKeys() else "simple"
             self.qs.setValue("viewMode", mode)

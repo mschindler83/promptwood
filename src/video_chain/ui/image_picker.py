@@ -23,7 +23,7 @@ from .. import media
 from .imageio import file_facts, read_scaled
 from .theme import icon, theme
 from .widgets import fit_size, format_time, icon_button, label, safe_emit
-from .ui_logic import qs_value
+from .qsvalue import qs_value
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mts", ".m2ts", ".wmv", ".flv", ".mpg", ".mpeg"}
@@ -252,11 +252,11 @@ class ImagePickerDialog(QDialog):
         self._fill_places()
         start = Path(os.path.expanduser(start_dir)) if start_dir else None
         if start is None or not start.is_dir():
-            last = self.qs.value(self.dir_key, "", type=str)
+            last = qs_value(self.qs, self.dir_key, "", str)
             start = Path(last) if last and Path(last).is_dir() else Path.home()
         names = [n for n, _items in self.collections]
         self._place_key = "pickerPlace" if self.kind == "image" else f"pickerPlace_{self.kind}"
-        place = self.qs.value(self._place_key, "", type=str)
+        place = qs_value(self.qs, self._place_key, "", str)
         if self.collections and (start_dir is None or place.startswith("col:")):
             # the project's pictures first (the collection used last), unless a folder was used last and given
             self.folder = start

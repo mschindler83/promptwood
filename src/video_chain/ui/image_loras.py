@@ -12,7 +12,7 @@ from ..edits import LORA_FAMILY
 from ..triggers import stack_words
 from .lora_stack import lora_label
 from .image_host import ImageEditHost
-from .ui_logic import qs_value
+from .qsvalue import qs_value
 
 
 
@@ -58,7 +58,7 @@ class LorasMixin(ImageEditHost):
 
     def _recent_files(self) -> list[str]:
         try:
-            return [p for p in json.loads(self.qs.value(self._recent_key(), "[]", type=str)) if isinstance(p, str)]
+            return [p for p in json.loads(qs_value(self.qs, self._recent_key(), "[]", str)) if isinstance(p, str)]
         except (ValueError, AttributeError):
             return []
 

@@ -17,8 +17,9 @@ from . import dialogs as D
 from .graph import START
 from .widgets import safe_emit
 from .project_dialogs import NewProjectDialog
-from .ui_logic import plural, qs_value
+from .ui_logic import plural
 from .mw_host import MainWindowHost
+from .qsvalue import qs_value
 
 
 class ProjectMixin(MainWindowHost):

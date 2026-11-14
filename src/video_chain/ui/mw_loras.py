@@ -14,8 +14,9 @@ from .lora_stack import fill_lora_combo, lora_label, lora_path
 from .widgets import safe_emit
 from . import ui_logic as UL
 from .clip_cards import PromptCard
-from .ui_logic import MAX_RECENT_LORAS, REMIX_DELAY_MS, STEPS_TIP, label_loras, plural, qs_value
+from .ui_logic import MAX_RECENT_LORAS, REMIX_DELAY_MS, STEPS_TIP, label_loras, plural
 from .mw_host import MainWindowHost
+from .qsvalue import qs_value
 
 
 class LorasMixin(MainWindowHost):

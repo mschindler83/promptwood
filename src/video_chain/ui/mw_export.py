@@ -13,7 +13,7 @@ from .theme import repolish
 from .widgets import format_time, safe_emit
 from .project_dialogs import ExportDialog
 from .mw_host import MainWindowHost
-from .ui_logic import qs_value
+from .qsvalue import qs_value
 
 
 class ExportMixin(MainWindowHost):
@@ -98,9 +98,9 @@ class ExportMixin(MainWindowHost):
         default = str(self.project / f"{self.project.name}-{path[-1].id}{'-clip' if single else ''}.mp4")
         assert self.tree is not None
         base = T.Checker(self.project, self.tree).base()
-        strength = self.qs.value("refineStrength", "natural", type=str)
-        method = self.qs.value("exportUpscaler", "seedvr2_7b", type=str)
-        denoise = self.qs.value("exportDenoise", False, type=bool)
+        strength = qs_value(self.qs, "refineStrength", "natural", str)
+        method = qs_value(self.qs, "exportUpscaler", "seedvr2_7b", str)
+        denoise = qs_value(self.qs, "exportDenoise", False, bool)
 
         def ready(size, how, strength_, denoise_=False):   # every generated clip has a kept copy made this way
             def kept(n):

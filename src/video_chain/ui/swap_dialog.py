@@ -24,7 +24,7 @@ from .compare_player import ComparePlayer
 from .dialogs import confirm
 from .theme import theme
 from .widgets import fit_size, FrameTile, guard_wheel, label, safe_emit
-from .ui_logic import qs_value
+from .qsvalue import qs_value
 
 METHODS = (("animate+lock", "Head + face lock (Animate, then face swap)"), ("animate", "Head only (Animate)"),
            ("face", "Face only (face swap, the clip's own motion)"),
@@ -164,7 +164,7 @@ class SwapDialog(QDialog):
         self.method = QComboBox()
         for key, text in METHODS:
             self.method.addItem(text, key)
-        self.method.setCurrentIndex(max(0, self.method.findData(settings.value("swapMethod", "animate+lock", type=str)
+        self.method.setCurrentIndex(max(0, self.method.findData(qs_value(settings, "swapMethod", "animate+lock", str)
                                                                 if settings else "animate+lock")))
         self.method.setToolTip(
             "<p><b>Head + face lock</b>: Wan 2.2 Animate draws the new head (face, hair, head shape), then a face "
@@ -188,7 +188,7 @@ class SwapDialog(QDialog):
         self.size = QComboBox()
         for key in SIZES:
             self.size.addItem({"480p": "480p (faster)", "720p": "720p (sharper, slower)"}.get(key, key), key)
-        self.size.setCurrentIndex(max(0, self.size.findData(settings.value("swapSize", "480p", type=str)
+        self.size.setCurrentIndex(max(0, self.size.findData(qs_value(settings, "swapSize", "480p", str)
                                                             if settings else "480p")))
         self.size.setToolTip("The size the new head is made at (only the head area: the rest of the clip keeps "
                              "its own size and sharpness)")
