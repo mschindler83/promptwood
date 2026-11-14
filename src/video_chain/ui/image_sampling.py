@@ -47,7 +47,7 @@ class SamplingMixin(ImageEditHost):
             grid.addWidget(w, k // 2, (k % 2) * 2 + 1)
             w.setMinimumWidth(60)
             if isinstance(w, QComboBox):
-                w.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+                w.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
                 w.setMinimumContentsLength(8)
         grid.addWidget(b_reset, 0, 4)
         grid.setColumnStretch(1, 1)

@@ -531,14 +531,14 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
             self.player.setPosition(round(self._pos * 1000))
             if self.video is not None:
                 from PySide6.QtMultimedia import QMediaPlayer
-                if self.player.playbackState() == QMediaPlayer.StoppedState:
+                if self.player.playbackState() == QMediaPlayer.PlaybackState.StoppedState:
                     self.player.pause()             # (a stopped player shows no picture: paused, it shows the frame)
 
     def _playing(self) -> bool:
         if self.player is None:
             return False
         from PySide6.QtMultimedia import QMediaPlayer
-        return self.player.playbackState() == QMediaPlayer.PlayingState
+        return self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
 
     def _total(self) -> float:
         return self.duration

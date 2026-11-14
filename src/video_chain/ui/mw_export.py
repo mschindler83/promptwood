@@ -215,7 +215,7 @@ class ExportMixin(MainWindowHost):
             if self._gpu_proc is not p:          # window closing: the query was abandoned
                 return
             try:
-                out = p.readAllStandardOutput().data().decode(errors="replace").strip().splitlines()
+                out = bytes(p.readAllStandardOutput().data()).decode(errors="replace").strip().splitlines()
             except RuntimeError:                 # Qt is destroying the window (and with it the query)
                 return
             self._gpu_proc = None

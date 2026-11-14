@@ -71,7 +71,7 @@ class VideosMixin(MainWindowHost):
         if not Path(f).is_file():
             D.tell(self, "Video missing", f"{Path(f).name} is not there any more; choose the file "
                "again in the next window.")
-        rot = T.source_rotation(src)
+        rot = T.source_rotation(node.source)
         dlg = VideoRangeDialog(self, f if Path(f).is_file() else "", src["start"], src["end"],
                                canvas=self._canvas_for(f, rot, nid), settings=self.qs, on_reference=self.add_reference,
                                rotate=rot, canvas_for=lambda file, r: self._canvas_for(file, r, nid))

@@ -2,6 +2,8 @@
 right-click changes, annotates or removes one. Hard cuts of the made clip show as red marks."""
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QMenu, QSizePolicy, QWidget
@@ -38,7 +40,7 @@ class KeyframeStrip(QWidget):
         return self.minimumSizeHint().expandedTo(self.minimumSize())
 
     # ---- data
-    def set_data(self, duration: float, items: list[dict], cuts: list[float] = (), made: bool = False):
+    def set_data(self, duration: float, items: list[dict], cuts: Sequence[float] = (), made: bool = False):
         self.duration = max(0.25, float(duration))
         self.items, self.cuts, self.made = list(items), list(cuts), made
         self._drag = None

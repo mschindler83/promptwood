@@ -54,7 +54,7 @@ class RefineDialog(QDialog):
     starts from (kind "video_h3": the refiner fits the action to the length and anchors on that frame).
     loras: the paths of the LoRAs the result is made with; the model is told what is known of them (lora_notes:
     their creators' words and prompts that work with them), and writes a note on each once."""
-    connect: Callable  # type: ignore[assignment]   # (shadows QObject.connect, which this dialog never uses)
+    connect: Callable   # (shadows QObject.connect, which this dialog never uses)
 
     def __init__(self, parent, text: str, kind: str, connect, settings=None, start_comfy=None, cast=None,
                  pictures=None, seconds: float | None = None, start_image=None, loras=None):
@@ -638,7 +638,7 @@ class RefineDialog(QDialog):
             self._capture_edit()
         self._busy = True
         self._update_buttons()
-        self.buttons.button(QDialogButtonBox.Ok).setEnabled(False)
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
         self._say("Thinking …" if chat else "Refining …")
         if not str(self.model.currentData() or "").startswith("llama:"):
             self.refined_any = True                # a ComfyUI model is being loaded (unloaded before clips)

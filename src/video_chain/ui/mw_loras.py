@@ -6,7 +6,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from PySide6.QtWidgets import QFileDialog
 
@@ -173,7 +173,7 @@ class LorasMixin(MainWindowHost):
     def _overrides_changed(self, nid: str, ov: dict):
         if self.tree and nid in self.tree.nodes and not self.tree.nodes[nid].frozen:
             before = self.tree.nodes[nid].overrides or {}
-            self.tree.nodes[nid].overrides = dict(ov)
+            self.tree.nodes[nid].overrides = cast(T.Overrides, dict(ov))
             self._failures.pop(nid, None)
             if self.tree.nodes[nid].made and any(before.get(k) != ov.get(k) for k in ("sound_over",
                                                                                        "sound_mix_level")):
@@ -210,7 +210,7 @@ class LorasMixin(MainWindowHost):
         p = lora_path(path)
         ov["loras"] = list(ov.get("loras") or []) + [{"path": p, "strength": float(strength)}]
         self._remember_lora(p)
-        self.tree.nodes[nid].overrides = ov
+        self.tree.nodes[nid].overrides = cast(T.Overrides, ov)
         self._changed()
         self.refresh(rebuild_path=True)
         if self.in_comfy_loras(p) is False:
@@ -268,7 +268,7 @@ class LorasMixin(MainWindowHost):
         if now - miss.get((key, comfy_dir), -1e9) < 30:
             return None                              # (looked for a moment ago: not there)
         try:
-            for root in CMF.comfy_lora_roots(comfy_dir):
+            for root in CMF.comfy_lora_roots(Path(comfy_dir) if comfy_dir else None):
                 for f in sorted(Path(root).rglob("*.safetensors")):
                     if key in f.name.lower():
                         self._lora_hits = {**self._lora_hits, (key, comfy_dir): (str(f), now)}

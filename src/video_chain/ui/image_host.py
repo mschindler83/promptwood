@@ -12,9 +12,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import Any
 
-    from PySide6.QtCore import QSettings
-    from PySide6.QtGui import QImage, QTimer
-    from PySide6.QtGui import QPixmap
+    from PySide6.QtCore import QSettings, QTimer
+    from PySide6.QtGui import QImage, QPixmap
     from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QLabel, QLineEdit, QListWidget, QPlainTextEdit, QPushButton, QSlider, QSpinBox, QStackedWidget, QToolButton, QWidget
     from pathlib import Path
     from ..edits import ResultRecord

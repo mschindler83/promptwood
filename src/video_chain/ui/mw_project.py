@@ -7,6 +7,7 @@ import shutil
 import threading
 import time
 from pathlib import Path
+from typing import cast
 
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
@@ -243,9 +244,9 @@ class ProjectMixin(MainWindowHost):
         if not (folder / T.TREE_FILE).exists() and not tree.nodes:
             try:                                 # a new project starts with the last used settings
                 last = json.loads(qs_value(self.qs, "lastOptions", "{}", str))
-                tree.options.update({k: v for k, v in last.items()
-                                     if k in T.DEFAULT_OPTIONS and k not in ("identity", "cast", "style",
-                                                                             "audio_refs")})
+                tree.options.update(cast(T.Options, {
+                    k: v for k, v in last.items()
+                    if k in T.DEFAULT_OPTIONS and k not in ("identity", "cast", "style", "audio_refs")}))
             except ValueError:
                 pass
         self._clean_options(tree.options)           # (a value that cannot be read must not leave a half-open project)

@@ -52,8 +52,10 @@ class LlamaMixin(MainWindowHost):
                 cur.stop(wait=False)
             self._llama = LLM.LlamaServer(*key, log_dir=app_cache_dir())
         url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL).rstrip("/")
-        self._llama.before_launch = lambda llama=self._llama: self._room_for_llama(llama, url)
-        return self._llama
+        llama = self._llama
+        assert llama is not None
+        llama.before_launch = lambda llama=llama: self._room_for_llama(llama, url)
+        return llama
 
     def _end_leftover_llama(self):
         """At start-up: a llama-server an earlier run left behind (it crashed; found by its pid file) holds RAM and
@@ -92,7 +94,7 @@ class LlamaMixin(MainWindowHost):
                                        f"is free and {what} needs about {gb(need)}.")
             return                                  # (ComfyUI is not up: the VRAM is used by something else)
         end = time.time() + settle
-        now = free
+        now: float | None = free
         while time.time() < end:
             time.sleep(VRAM_POLL_SECONDS)
             now = LLM.free_vram_mb()

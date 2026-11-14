@@ -317,7 +317,7 @@ class ComparePlayer(QWidget):
             return
         before = self.image(k)
         if self.overlay is not None:
-            before = before.convertToFormat(QImage.Format_ARGB32)
+            before = before.convertToFormat(QImage.Format.Format_ARGB32)
             self.overlay(k, before)
         after = self.image(k, True) if self.result is not None else None
         self.view.show_frames(before, after if after is not None and not after.isNull() else None)

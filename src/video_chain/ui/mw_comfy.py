@@ -6,6 +6,7 @@ import os
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 from PySide6.QtCore import QEventLoop, QProcess, Qt, QTimer
 from PySide6.QtWidgets import QApplication, QProgressDialog
@@ -143,8 +144,8 @@ class ComfyMixin(MainWindowHost):
         if not Path(cmd).is_file():
             self.status.setText(f"ComfyUI launcher not found: {cmd}")
             return False
-        ok = QProcess.startDetached(cmd, [])
-        ok = ok[0] if isinstance(ok, tuple) else ok
+        started: Any = QProcess.startDetached(cmd, [])      # (a bool; PySide6 6.x returns (bool, pid) for another overload)
+        ok = started[0] if isinstance(started, tuple) else started
         if not ok:
             self._report_error(f"Could not start {cmd}")
             return False
@@ -167,8 +168,8 @@ class ComfyMixin(MainWindowHost):
         elif self.running or not self._worker_idle:
             text, sev = "Model: working", ""
         elif self._idle_timeout:
-            left = max(0.0, self._idle_timeout - (time.monotonic() - self._idle_since))
-            text, sev = f"Model: loaded in ComfyUI · unloads in {max(1, round(left / 60))} min", ""
+            secs_left = max(0.0, self._idle_timeout - (time.monotonic() - self._idle_since))
+            text, sev = f"Model: loaded in ComfyUI · unloads in {max(1, round(secs_left / 60))} min", ""
         else:
             text, sev = "Model: loaded", ""
         self.model_label.setText(text)

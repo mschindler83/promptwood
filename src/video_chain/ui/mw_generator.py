@@ -69,7 +69,7 @@ class GeneratorMixin(MainWindowHost):
             return RunpodBinding(qs_value(self.qs, "runpodGpu", RP.DEFAULT_GPU, str),
                                  qs_value(self.qs, "runpodVolume", "", str).strip(),
                                  qs_value(self.qs, "runpodFallback", True, bool),
-                                 CMF.SEEDVR_METHODS.get(refine.get("method"), "7b"),
+                                 CMF.SEEDVR_METHODS.get(refine.get("method") or "", "7b"),
                                  qs_value(self.qs, "runpodWithoutVolume", True, bool))
         return ComfyBinding((self.comfy_url.text().strip() or DEFAULT_COMFY_URL), self.comfy_dir.text().strip(),
                             self.comfy_cleanup.isChecked())
@@ -104,6 +104,7 @@ class GeneratorMixin(MainWindowHost):
         self._update_buttons()                     # (running: nothing can be edited while it is checked)
 
         def work():
+            assert project is not None
             problems, empty = self._preflight(project, tree, targets, refine)
             try:
                 safe_emit(bridge.checked, gen, problems, empty)
@@ -141,7 +142,7 @@ class GeneratorMixin(MainWindowHost):
                     problems.append(f"generate the path first ({len(todo)} clip{'s are' if len(todo) != 1 else ' is'} "
                                     "new or changed)")
                 gone = [n for n in todo if tree.nodes[n].is_video
-                        and not Path(tree.nodes[n].source["file"]).is_file()]
+                        and not Path(tree.nodes[n].source_dict()["file"]).is_file()]
                 if gone:
                     problems.append(f"the file of video #{T.short_id(gone[0])} is missing (Edit range… to choose it)")
                 problem = T.guide_problem(tree, checker, todo)
@@ -305,6 +306,7 @@ class GeneratorMixin(MainWindowHost):
 
     def _write_job(self, cmd: dict):
         """Send a command line to the generator; if that fails the generator is ended, so the run fails cleanly."""
+        assert self.proc is not None
         if self.proc.write((json.dumps(cmd) + "\n").encode()) < 0:
             self._report_error("Could not send the job to the generator.")
             self._kill()
@@ -372,7 +374,7 @@ class GeneratorMixin(MainWindowHost):
 
     def _drain_err(self, p: QProcess, final: bool = False):
         """Lines of the worker's error output into the log (a carriage-return progress line shows its last state)."""
-        self._ebuf += p.readAllStandardError().data().decode(errors="replace")
+        self._ebuf += bytes(p.readAllStandardError().data()).decode(errors="replace")
         *lines, self._ebuf = self._ebuf.split("\n")
         if final:
             lines, self._ebuf = lines + [self._ebuf], ""
@@ -583,7 +585,7 @@ class GeneratorMixin(MainWindowHost):
             self.progress.setValue(1000)
             out = Path(self._exported or refine["out"])
             n = len(self._made_now)                # the export lists every clip, but reuses kept copies
-            how = {"seedvr2_7b": "SeedVR2 7B", "seedvr2_3b": "SeedVR2 3B"}.get(refine.get("method"), "refined")
+            how = {"seedvr2_7b": "SeedVR2 7B", "seedvr2_3b": "SeedVR2 3B"}.get(refine.get("method") or "", "refined")
             self.status.setText(f"Exported {out.name} ({refine['size']}, {how}"
                                 + (f"; {plural(n, 'clip')} upscaled now" if n else
                                    "; every clip was upscaled already") + ").")
