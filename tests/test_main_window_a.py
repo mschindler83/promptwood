@@ -226,7 +226,7 @@ def test_hide_guide_says_where_it_went(win):
     assert "Getting started" in win.status.text()
 
 
-def test_guide_wording_uses_the_controls_name():
+def test_guide_wording_uses_the_controls_name(app):
     from video_chain.ui.guide import GuidePanel
     g = GuidePanel()
     assert "Aspect" in g.b_text_only.toolTip()
