@@ -408,6 +408,7 @@ class GeneratorMixin(MainWindowHost):
         except (OSError, ValueError):
             return
         for nid, n in fresh.nodes.items():
+            assert self.tree is not None
             if nid in self.tree.nodes:
                 self.tree.nodes[nid].made = n.made
                 self.tree.nodes[nid].end_at = n.end_at   # a clip made again hands over at its last frame again

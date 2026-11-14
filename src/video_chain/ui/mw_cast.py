@@ -110,6 +110,7 @@ class CastMixin(MainWindowHost):
             return
         before = self._done_clips()
         try:
+            assert self.tree is not None
             T.set_kind(self.tree, c["name"], kind)
         except ValueError as e:
             self._report_error(f"Could not change @{c['name']}: {e}.")
@@ -132,6 +133,7 @@ class CastMixin(MainWindowHost):
         if not ok or new.strip() == c["name"]:
             return
         try:
+            assert self.tree is not None
             T.check_name(self.tree, new, keep=c["name"])
         except ValueError as e:
             self._report_error(f"Could not rename: {e}")
@@ -179,6 +181,7 @@ class CastMixin(MainWindowHost):
             return
         before = self._done_clips()
         try:
+            assert self.tree is not None
             T.remove_character(self.project, self.tree, c["name"])
         except (OSError, RuntimeError, ValueError) as e:
             self._report_error(f"Could not remove @{c['name']}: {e}")
@@ -196,6 +199,7 @@ class CastMixin(MainWindowHost):
         if c is None or self._loading or text == c.get("desc", "") or not self._cast_edit_ok():
             return
         before = self._done_clips()
+        assert self.tree is not None
         T.update_character(self.tree, c["name"], desc=text)
         self._write_tree()
         self._changed()
@@ -208,6 +212,7 @@ class CastMixin(MainWindowHost):
             return
         before = self._done_clips()
         try:
+            assert self.tree is not None
             T.update_character(self.tree, c["name"], lead=on)
         except ValueError as e:
             self._report_error(f"Could not change the lead: {e}.")
@@ -379,6 +384,7 @@ class CastMixin(MainWindowHost):
             return
         before = self._done_clips()
         try:
+            assert self.tree is not None
             T.recrop_picture(self.project, self.tree, rel, crop)
         except (ValueError, OSError, RuntimeError) as e:
             self._report_error(f"Could not crop: {e}")

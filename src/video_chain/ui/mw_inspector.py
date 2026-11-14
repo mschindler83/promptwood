@@ -56,6 +56,7 @@ class InspectorMixin(MainWindowHost):
     def _node_frame(self, n: T.Node) -> Path | None:
         """The frame shown for a node: where the clips after it start (its hand-over frame, else its last)."""
         if n.made and self.project:
+            assert self.tree is not None
             h = T.handover_file(self.project, self.tree, n)
             return h if h is not None and self._is_file(h) else self.project / n.made["frame"]
         return None
@@ -133,6 +134,7 @@ class InspectorMixin(MainWindowHost):
     def badge(self, n: T.Node) -> str:
         """Short text for a clip's own settings, shown on its node ('' = all project defaults)."""
         if n.is_video:
+            assert self.tree is not None
             return ("🔒 frozen · " if n.frozen else "") + f"real video · {T.clip_length(self.tree, n) / chain.FPS:.1f} s"
         ov, parts = n.overrides or {}, self._own_parts(n)
         if ov.get("guide"):
@@ -422,6 +424,7 @@ class InspectorMixin(MainWindowHost):
         laid: the sentence about a sound laid over / mixed in, added at the end."""
         def t(x: float) -> str:
             return f"{int(x // 60)}:{x % 60:04.1f}"
+        assert self.tree is not None
         video = T.source_video(self.tree, n)
         has_video = video is not None
         repeat = n.parent is not None

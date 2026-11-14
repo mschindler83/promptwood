@@ -286,6 +286,7 @@ class StateMixin(MainWindowHost):
         start = self.project / T.START_FILE if self.project else None
         if start and start.is_file():
             self.start_tile.set_image(QImage(str(start)))
+            assert self.tree is not None
             self.start_tile.setToolTip(self.tree.image or str(start))
         else:
             self.start_tile.clear_frame("Click or drop an image")

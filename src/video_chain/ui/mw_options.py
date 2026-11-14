@@ -45,6 +45,7 @@ class OptionsMixin(MainWindowHost):
             del o["cfg"]
 
     def _options_to_widgets(self):
+        assert self.tree is not None
         o = self.tree.options
         self._loading = True
         try:

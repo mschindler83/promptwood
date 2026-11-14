@@ -50,6 +50,7 @@ class PathMixin(MainWindowHost):
             card.lora_picked.connect(self._lora_picked)
             card.loras.file_dir = lora_dir
             card.settings_toggle.toggled.connect(self._show_card_settings)
+            assert self.tree is not None
             card.set_choices(int(self.tree.options.get("frames", 73)), int(self.tree.options.get("steps", 28)),
                              known)
             card.action.connect(self.node_action)
@@ -149,6 +150,7 @@ class PathMixin(MainWindowHost):
         """The path as blocks as long as its clips are in the joined video; the carry-over hatched."""
         blocks = []
         for n in path_nodes:
+            assert self.tree is not None
             frames = T.clip_length(self.tree, n)
             a, b = cuts.get(n.id, (0, 0))
             secs = max(1, frames - a - b) / chain.FPS
@@ -185,6 +187,7 @@ class PathMixin(MainWindowHost):
                 self._stat_memo = self._cmp_memo = None
 
     def _update_cards_now(self):
+        assert self.tree is not None
         path_nodes = [self.tree.nodes[c.nid] for c in self.cards if c.nid in self.tree.nodes]
         self.cast_strip.show_path(self.tree.options, path_nodes)
         cuts = dict(zip([n.id for n in path_nodes],

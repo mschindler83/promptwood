@@ -250,6 +250,7 @@ class NodeMixin(MainWindowHost):
     def _copy_video_child(self, source: str, target: str) -> None:
         """A variant of a clip that leads into a real video leads into its own copy of that video; one with an
         end image gets its own copy of the image."""
+        assert self.tree is not None
         vc = self.tree.video_child(source)
         if vc is not None and self.tree.can_add_video(target):
             T.copy_video(self.project, self.tree, vc, target)
@@ -262,6 +263,7 @@ class NodeMixin(MainWindowHost):
     def _copy_row_start(self, source: str, target: str) -> None:
         """A variant of a first clip with its own start image starts from its own copy of that picture."""
         try:
+            assert self.tree is not None
             T.copy_node_start(self.project, self.tree, source, target)
         except (OSError, RuntimeError, ValueError) as e:
             self._report_error(f"Could not copy the start image: {e}")
@@ -331,6 +333,7 @@ class NodeMixin(MainWindowHost):
         """The shared part of keep_only / keep_branch: delete the branches that start at roots (with what follows
         them), keep nid and select it. question(doomed): the text asked (before it, the made clips are counted);
         done(gone): the status line. Returns the deleted ids."""
+        assert self.tree is not None
         doomed = roots + [d.id for r in roots for d in self.tree.descendants(r)]
         made = sum(1 for d in doomed if self.tree.nodes[d].made)
         if confirm:

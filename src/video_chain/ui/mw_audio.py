@@ -144,6 +144,7 @@ class AudioMixin(MainWindowHost):
             return False
         before = self._done_clips()
         try:
+            assert self.tree is not None
             entry = T.set_voice(self.project, self.tree, c["name"], Path(path), start, label=label, end=end)
         except (ValueError, OSError, RuntimeError) as e:
             self._report_error(f"Could not set the voice: {e}")
@@ -169,6 +170,7 @@ class AudioMixin(MainWindowHost):
             return
         before = self._done_clips()
         try:
+            assert self.tree is not None
             T.remove_voice(self.project, self.tree, c["name"])
         except (OSError, RuntimeError, ValueError) as e:
             self._report_error(f"Could not remove the voice: {e}")
@@ -373,6 +375,7 @@ class AudioMixin(MainWindowHost):
                 + "; set another sound for them before they are made again."):
             return
         try:
+            assert self.tree is not None
             T.remove_track(self.project, self.tree, tr["id"])
         except (OSError, RuntimeError, ValueError) as e:
             self._report_error(f"Could not remove the audio track: {e}")
@@ -389,6 +392,7 @@ class AudioMixin(MainWindowHost):
 
     def _track_users_everywhere(self, tid: str) -> int:
         """Clips that play a track in the open scene (as it is now) and in the film's other scenes (as saved)."""
+        assert self.tree is not None
         n = len(T.track_users(self.tree, tid))
         for d in self._scene_dirs():
             if Path(d) == Path(self.project):
@@ -440,6 +444,7 @@ class AudioMixin(MainWindowHost):
     def _fill_tracks(self, trs: list[dict], cur: str | None):
         self.track_list.clear()
         for tr in trs:
+            assert self.tree is not None
             users = len(T.track_users(self.tree, tr["id"]))
             item = QListWidgetItem(f"{tr['name']}   {float(tr['secs']):.1f} s"
                                    + (f"   · {plural(users, 'clip')}" if users else ""))

@@ -284,6 +284,7 @@ class EndsMixin(MainWindowHost):
 
     def _choose_video_file(self, exclude: str | None = None) -> str | None:
         """Choose a video: the project's real videos and its made clips (not clip exclude) first, or any file."""
+        assert self.tree is not None
         clips = [(str(self.project / n.made["video"]), f"Clip #{T.short_id(n.id)} · {n.prompt[:40]}")
                  for n in sorted(self.tree.nodes.values(), key=lambda n: self.tree.number(n.id))
                  if not n.is_video and n.made and (self.project / n.made["video"]).is_file() and n.id != exclude]
@@ -407,6 +408,7 @@ class EndsMixin(MainWindowHost):
                              video: str | None = None, dialog: bool = True):
         """A keyframe from a frame of a video. own: this clip's frame at that moment ("keep this moment": its time
         follows the frame chosen); else any video (the project's first), the keyframe stays at its time."""
+        assert self.tree is not None
         node = self.tree.nodes[nid]
         if own:
             if not node.made or not (self.project / node.made["video"]).is_file():
@@ -481,6 +483,7 @@ class EndsMixin(MainWindowHost):
         size may follow it)."""
         try:
             tree = self.tree
+            assert self.tree is not None
             if nid is not None and nid in tree.nodes and tree.nodes[nid].is_video:
                 tree = copy.copy(tree)                       # (only this node differs: not a copy of the whole tree)
                 tree.nodes = dict(tree.nodes)

@@ -178,6 +178,7 @@ class TtsMixin(MainWindowHost):
         for r in takes:
             files = r.get("voice_files") or {}
             for name, text in (r.get("texts") or {}).items():
+                assert self.tree is not None
                 c = T.character(self.tree, name)
                 if c is not None and c.get("voice") and files.get(name) == c["voice"]["file"] \
                         and not c["voice"].get("text"):

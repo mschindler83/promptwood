@@ -241,6 +241,7 @@ class LorasMixin(MainWindowHost):
             self._changed()
 
     def _new_seed(self) -> int:
+        assert self.tree is not None
         return self.tree.new_seed()
 
     def _wait_note(self) -> bool:
