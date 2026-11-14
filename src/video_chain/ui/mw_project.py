@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog, QInputDialog,
                                QProgressDialog)
 
 from .workers import post, run_in_background
+from . import settings_keys as SK
 from .. import film as F, project_copy as PC, tree as T
 from . import dialogs as D
 from .graph import START
@@ -204,7 +205,7 @@ class ProjectMixin(MainWindowHost):
         self.film_info.setText("")
         self.project = self.tree = None
         self.project_edit.clear()
-        self.qs.setValue("project", "")
+        self.qs.setValue(SK.PROJECT, "")
         self.focus = self._path_end = None
         self.timeline.show_path([], None)
         self.graph.set_focus(None)
@@ -262,7 +263,7 @@ class ProjectMixin(MainWindowHost):
             return False
         if not (folder / T.TREE_FILE).exists() and not tree.nodes:
             try:                                 # a new project starts with the last used settings
-                last = json.loads(qs_value(self.qs, "lastOptions", "{}", str))
+                last = json.loads(qs_value(self.qs, SK.LAST_OPTIONS, "{}", str))
                 tree.options.update(cast(T.Options, {
                     k: v for k, v in last.items()
                     if k in T.DEFAULT_OPTIONS and k not in ("identity", "cast", "style", "audio_refs")}))
@@ -297,7 +298,7 @@ class ProjectMixin(MainWindowHost):
         self._tree_stamp = self._stamp()
         self._write_tree()
         T.ensure_handovers(folder, tree)          # e.g. deleted by hand: the clips after them stay done
-        self.qs.setValue("project", str(root))
+        self.qs.setValue(SK.PROJECT, str(root))
         self._remember_project(root)
         try:
             film.save()                            # which scene was open (only once there are several)

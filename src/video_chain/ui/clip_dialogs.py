@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
                                QLabel, QPushButton, QSlider, QVBoxLayout, QWidget)
 
 from . import shortcuts as S
+from .audio_devices import follow_default_output
 from .workers import run_in_background
 from .. import chain, media
 from .theme import icon
@@ -154,6 +155,7 @@ class CompareDialog(QDialog):
                 view = VideoView()                 # (painted frames: no native GPU window, see VideoView)
                 view.setMinimumSize(360, 220)
                 out = QAudioOutput(self)
+                follow_default_output(out)
                 out.setMuted(k != 0)
                 p = QMediaPlayer(self)
                 p.setAudioOutput(out)

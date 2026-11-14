@@ -42,7 +42,7 @@ FRAME_CHOICES = [17 * n + 5 for n in range(4, 22)]
 
 def app_cache_dir() -> Path:
     """The folder of this app's logs and caches (the llama.cpp server's log, the speech takes' scratch files)."""
-    return Path.home() / ".cache" / "video-chain"
+    return config.cache_dir()
 
 
 def find_gguf_models(roots=LLM_MODEL_DIRS) -> list[Path]:

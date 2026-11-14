@@ -67,7 +67,7 @@ class _Step(QWidget):
 
 class GuidePanel(QFrame):
     """Getting started: step 0 without a project, else the three steps and the Generate hint. hidden(): Hide guide
-    was pressed (the window stores it; View → Getting started brings the guide back)."""
+    was pressed (the window stores it; Help → Getting started brings the guide back)."""
     hideWanted = Signal()
 
     def __init__(self, parent=None):
@@ -80,7 +80,7 @@ class GuidePanel(QFrame):
         head = QHBoxLayout()
         head.addWidget(label("Getting started", type_="heading"))
         head.addStretch(1)
-        self.b_hide = _button("Hide", "Hide this guide (View → Getting started shows it again)")
+        self.b_hide = _button("Hide", "Hide this guide (Help → Getting started shows it again)")
         self.b_hide.setProperty("variant", "ghost")
         self.b_hide.clicked.connect(self.hideWanted)
         head.addWidget(self.b_hide)

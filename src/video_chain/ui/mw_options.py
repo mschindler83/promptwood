@@ -8,6 +8,7 @@ import threading
 from PySide6.QtCore import QTimer
 
 from .workers import post, run_in_background
+from . import settings_keys as SK
 from .. import tree as T, triggers, tts as TTS
 from ..comfy import REF_HINT
 from .clip_cards import PromptCard
@@ -246,7 +247,7 @@ class OptionsMixin(MainWindowHost):
                           on_done=self._triggers_found, on_error=failed, owner=self)
 
     def _video_gpu_changed(self, on: bool):
-        self.qs.setValue("videoGpu", on)           # at once: read at the next start, also after a crash
+        self.qs.setValue(SK.VIDEO_GPU, on)           # at once: read at the next start, also after a crash
         self.qs.sync()
         self.status.setText("Videos play on the " + ("GPU" if on else "CPU") + " after the app is restarted.")
 
@@ -254,7 +255,7 @@ class OptionsMixin(MainWindowHost):
         """The CivitAI site asked first and linked to (kept at once; LoRAs neither site was asked about yet are
         looked up with the next scan)."""
         chosen = triggers.set_site(self.civitai_site.currentData())
-        self.qs.setValue("civitaiSite", chosen)
+        self.qs.setValue(SK.CIVITAI_SITE, chosen)
         self.status.setText(f"CivitAI: {chosen.split('//', 1)[1]} is asked first and is where links open.")
         for card in self.cards:
             if isinstance(card, PromptCard):

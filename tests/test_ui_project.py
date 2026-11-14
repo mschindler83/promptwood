@@ -410,7 +410,7 @@ def test_guide_steps_tick_with_the_state_and_hide(app, win, tmp_path, image):
     assert g.step1.done and g.step2.done and not g.step3.done
     g.b_hide.click()
     assert not g.isVisibleTo(win) and win.qs.value("guideHidden", type=bool) is True
-    view_menu = next(a.menu() for a in win.menuBar().actions() if a.text() == "&View")
+    view_menu = next(a.menu() for a in win.menuBar().actions() if a.text() == "&Help")
     next(a for a in view_menu.actions() if a.text() == "Getting started").trigger()
     assert g.isVisibleTo(win) and win.qs.value("guideHidden", type=bool) is False and win.left_tabs.currentIndex() == 0
     type_prompt(win, "n1", "A cat jumps.")

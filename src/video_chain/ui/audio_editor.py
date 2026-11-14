@@ -5,8 +5,6 @@ type them in. The cut part becomes an audio track of the project: clips that pla
 """
 from __future__ import annotations
 
-import array
-import subprocess
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -17,6 +15,8 @@ from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFormLayout
                                QLineEdit, QPushButton, QVBoxLayout)
 
 from . import shortcuts as S
+from .audio_devices import follow_default_output
+from . import settings_keys as SK
 from .workers import run_in_background
 from .. import chain, media
 from ..tree import AUDIO_REF_MIN, VOICE_MAX_SECS, VOICE_REF_MAX_SECS
@@ -25,51 +25,11 @@ from .video_editor import RangeBar, RangePlayerMixin, fmt
 from .dialogs import button_row
 from .widgets import VideoView, fit_size, guard_wheel, icon_button, label, remember_geometry, shortcut, label_for
 from .qsvalue import qs_value
+from ..media import waveform
 
 if TYPE_CHECKING:
     from PySide6.QtMultimedia import QMediaPlayer
 
-PEAKS = 1200                                    # waveform columns
-
-
-def waveform(path: str | Path, duration: float, columns: int = PEAKS, rate: int = 4000,
-             cancelled=lambda: False) -> list[float]:
-    """The loudest sample of each of about `columns` equal parts of a file's sound (0..1), read as a stream (long
-    files need little memory); [] if it cannot be read or `cancelled()` turns true."""
-    import math
-    step = max(1, math.ceil(max(duration, 0.001) * rate / columns))     # samples per column
-    try:
-        proc = media.popen(["ffmpeg", "-nostdin", "-v", "error", "-i", str(path), "-map", "0:a:0", "-vn",
-                            "-ac", "1", "-ar", str(rate), "-f", "f32le", "-"],
-                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
-    except (OSError, media.MediaError):
-        return []
-    out, rest = [], b""
-    try:
-        while True:
-            if cancelled():
-                return []
-            assert proc.stdout is not None
-            data = proc.stdout.read(step * 4 * 64)
-            if not data:
-                break
-            data = rest + data
-            n = len(data) // (step * 4) * (step * 4)
-            a = array.array("f")
-            a.frombytes(data[:n])
-            rest = data[n:]
-            for k in range(0, len(a), step):
-                chunk = a[k:k + step]
-                out.append(min(1.0, max(max(chunk), -min(chunk))))
-        if len(rest) >= 4:
-            a = array.array("f")
-            a.frombytes(rest[: len(rest) // 4 * 4])
-            out.append(min(1.0, max(max(a), -min(a))))
-        return out
-    finally:
-        if proc.poll() is None:
-            proc.kill()
-        proc.wait()
 
 
 class WaveBar(RangeBar):
@@ -254,7 +214,7 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
     # ---- file
     def choose(self):
         folder = str(Path(self.file).parent) if self.file else (
-            qs_value(self.settings, "soundDir", "", str) if self.settings is not None else "")
+            qs_value(self.settings, SK.SOUND_DIR, "", str) if self.settings is not None else "")
         from .image_picker import pick_image, scratch_settings
         f = pick_image(self, "A recording of the voice (audio or video)" if self.voice else "Sound for an audio track",
                        self.settings if self.settings is not None else scratch_settings(), folder or None,
@@ -341,6 +301,7 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
             except ImportError:
                 return
             self.audio = QAudioOutput(self)
+            follow_default_output(self.audio)
             self.player = QMediaPlayer(self)
             self.player.setAudioOutput(self.audio)
             if self.video is not None:
@@ -475,6 +436,7 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
             return
         if self.clean_player is None:
             self.clean_audio = QAudioOutput(self)
+            follow_default_output(self.clean_audio)
             self.clean_player = QMediaPlayer(self)
             self.clean_player.setAudioOutput(self.clean_audio)
             self.clean_player.errorOccurred.connect(self._on_clean_error)

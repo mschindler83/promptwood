@@ -9,6 +9,7 @@ from typing import Any
 from PySide6.QtCore import Qt, QTimer
 
 from .workers import run_in_background
+from . import settings_keys as SK
 from ..comfy import EDIT_MODELS
 from ..edits import MOSS_EDIT_QUALITIES, QUALITY_TEXT, lora_note
 from ..imagegen import FAMILIES, size_for
@@ -24,7 +25,7 @@ class ModelsMixin(ImageEditHost):
     def _mode_clicked(self, i: int):
         mode = "create" if i == 1 else "edit"
         if self.qs is not None:
-            self.qs.setValue("imageMode", mode)       # remembered only when the user chooses it
+            self.qs.setValue(SK.IMAGE_MODE, mode)       # remembered only when the user chooses it
         self.set_mode(mode)
 
     def mode(self) -> str:
@@ -144,7 +145,7 @@ class ModelsMixin(ImageEditHost):
             self.family.setItemData(k, info.get("missing", f["label"]), Qt.ItemDataRole.ToolTipRole)
             if "models" not in info:
                 combo_item(self.family, k).setEnabled(False)
-        saved = qs_value(self.qs, "createFamily", "", str) if self.qs is not None else ""
+        saved = qs_value(self.qs, SK.CREATE_FAMILY, "", str) if self.qs is not None else ""
         avail = [i for i in range(self.family.count()) if combo_item(self.family, i).isEnabled()
                  and self.family.itemData(i)]
         i = self.family.findData(saved)

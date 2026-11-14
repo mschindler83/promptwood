@@ -45,6 +45,11 @@ _WEIGHT = re.compile(r"[(\[]\s*([^()\[\]:]+?)\s*:\s*-?\d+(?:\.\d+)?\s*[)\]]")
 _TAG = re.compile(r"(?is)<[^>]{0,400}>")
 
 
+def lora_label(path: str | None) -> str:
+    """A LoRA's name as shown: its file name without the folder and the extension ("none" for no LoRA)."""
+    return Path(path).stem if path else "none"
+
+
 def plain(text) -> str:
     """A CivitAI description (HTML) as plain text on one line."""
     s = re.sub(r"(?is)<(script|style)\b.*?</\1\s*>", " ", str(text or ""))
@@ -172,10 +177,10 @@ def settings_of(details: dict | None, file_name: str = "") -> dict:
     only what the data gives."""
     d = _sound(details)
     v = d["version"]
-    names = {Path(file_name).stem.lower()} if file_name else set()
+    names = {lora_label(file_name).lower()} if file_name else set()
     for f in v.get("files") or []:
         if isinstance(f, dict) and f.get("name"):
-            names.add(Path(str(f["name"])).stem.lower())
+            names.add(lora_label(str(f["name"])).lower())
     names.discard("")
     strength: list[float] = []
     steps: list[float] = []
@@ -223,7 +228,7 @@ def material(details: dict | None, words: list[str] | None = None, path: str = "
     d = _sound(details)
     v, m = d["version"], d["model"]
     inner = v.get("model") if isinstance(v.get("model"), dict) else {}
-    name = _defang(m.get("name") or inner.get("name") or Path(path).stem or "LoRA")
+    name = _defang(m.get("name") or inner.get("name") or lora_label(path) or "LoRA")
     words = [w for w in (_defang(w, 80) for w in (words if words is not None else v.get("trainedWords") or []))
              if w]
     about = _defang(". ".join(x for x in (plain(v.get("description")), plain(m.get("description"))) if x))
@@ -375,7 +380,7 @@ def save_user(db: TriggerDB, path: str, note: str | None = None, remarks: str | 
 
 def _bare(path: str) -> dict:
     """The material of a LoRA nothing is known of (the user's remarks on it are still told)."""
-    return {"name": Path(path).stem or "LoRA", "base": "", "words": [], "about": "", "tags": "", "examples": [],
+    return {"name": lora_label(path) or "LoRA", "base": "", "words": [], "about": "", "tags": "", "examples": [],
             "pool": [], "settings": {"count": 0}, "stamp": "bare"}
 
 
@@ -544,7 +549,7 @@ def what_is_known(path: str, db: TriggerDB | None = None) -> dict:
     "on_civitai" (it knows the file)}."""
     from . import triggers
     db = db or triggers.db()
-    out = {"path": str(path), "name": Path(path).stem, "base": "", "known": False, "words": [], "prompts": 0,
+    out = {"path": str(path), "name": lora_label(path), "base": "", "known": False, "words": [], "prompts": 0,
            "pictures": 0, "seen": 0, "note": False, "note_missing": False, "settings": "", "looked_up": False,
            "on_civitai": False, "edited": False, "remarks": False, "strength": None}
     try:

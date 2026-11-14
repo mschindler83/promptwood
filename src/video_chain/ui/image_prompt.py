@@ -13,6 +13,7 @@ from typing import Any
 from ..variations import MAX_IMAGES, Value, Variable
 
 from .dialogs import confirm as ask
+from . import settings_keys as SK
 from .image_common import MAX_RESULTS, SEED_MAX
 from .image_picker import pick_image
 from .image_host import ImageEditHost
@@ -33,7 +34,7 @@ class PromptMixin(ImageEditHost):
     def _variations_changed(self):
         if self.qs is not None:
             st = self.variations.state()
-            self.qs.setValue("promptVariations", json.dumps(st, ensure_ascii=False))
+            self.qs.setValue(SK.PROMPT_VARIATIONS, json.dumps(st, ensure_ascii=False))
         if not self._rehighlighting:
             self._rehighlighting = True
             try:

@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, 
                                QTabWidget, QTextBrowser, QToolButton, QVBoxLayout, QWidget)
 
 from .workers import post, run_in_background
+from . import settings_keys as SK
 from .. import lora_notes, lora_pictures, triggers
 from .lora_details import details_html, themed
 from .dialogs import add_action, button_row, confirm
@@ -249,7 +250,7 @@ class LoraWindow(QDialog):
         self.pictures.setAccessibleName("Pictures")
         for key, text in SHOW:
             self.pictures.addItem(text, key)
-        saved = qs_value(self.qs, "loraPictures", "safe", str) if self.qs is not None else "safe"
+        saved = qs_value(self.qs, SK.LORA_PICTURES, "safe", str) if self.qs is not None else "safe"
         self.pictures.setCurrentIndex(max(0, self.pictures.findData(saved)))
         self.pictures.setToolTip("The pictures are small stills loaded from CivitAI when a page is shown (a video: "
                                  "one frame of it) and kept on disk, so each is loaded once. This tells CivitAI "
@@ -744,7 +745,7 @@ class LoraWindow(QDialog):
 
     def _pictures_changed(self, *_):
         if self.qs is not None:
-            self.qs.setValue("loraPictures", self.show_mode())
+            self.qs.setValue(SK.LORA_PICTURES, self.show_mode())
         self.show_page(self.page)
 
     def _forget_pictures(self):

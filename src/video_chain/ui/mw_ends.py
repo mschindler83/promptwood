@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QDialog, QFileDialog, QInputDialog
 
 from .. import chain, comfy as CMF, imagegen, llm_server as LLM, media, tree as T
 from . import dialogs as D, shortcuts as S, image_picker as IP, prompt_refiner as PR
+from . import settings_keys as SK
 from .clip_dialogs import HandoverDialog, VideoFrameDialog
 from .image_edit import ImageEditDialog, ImageEditServices, record_use
 from .video_editor import choose_video
@@ -530,11 +531,11 @@ class EndsMixin(MainWindowHost):
     def _pick_images(self, title: str) -> list[str]:
         """Several pictures from the file dialog (it opens where the start image came from)."""
         start = str(Path(self.tree.image).parent) if self.tree and self.tree.image and \
-            Path(self.tree.image).parent.is_dir() else qs_value(self.qs, "startRowsDir", "", str)
+            Path(self.tree.image).parent.is_dir() else qs_value(self.qs, SK.START_ROWS_DIR, "", str)
         files, _f = QFileDialog.getOpenFileNames(self, title, start or "",
                                                  "Pictures (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff)")
         if files:
-            self.qs.setValue("startRowsDir", str(Path(files[0]).parent))
+            self.qs.setValue(SK.START_ROWS_DIR, str(Path(files[0]).parent))
         return list(files)
 
     def add_start_rows(self, nid: str, images: list[str] | None = None, generate: bool | None = None) -> list[str]:

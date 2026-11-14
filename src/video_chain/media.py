@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import array
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -346,3 +348,45 @@ def scratch(name: str, dir: str | Path | None = None) -> tempfile.TemporaryDirec
     """A temporary folder named video-chain-<name>-... (one prefix style everywhere); use it as a context manager
     or call cleanup()."""
     return tempfile.TemporaryDirectory(prefix=f"video-chain-{name}-", dir=str(dir) if dir else None)
+
+
+PEAKS = 1200                                    # waveform columns
+
+
+def waveform(path: str | Path, duration: float, columns: int = PEAKS, rate: int = 4000,
+             cancelled=lambda: False) -> list[float]:
+    """The loudest sample of each of about `columns` equal parts of a file's sound (0..1), read as a stream (long
+    files need little memory); [] if it cannot be read or `cancelled()` turns true."""
+    step = max(1, math.ceil(max(duration, 0.001) * rate / columns))     # samples per column
+    try:
+        proc = popen(["ffmpeg", "-nostdin", "-v", "error", "-i", str(path), "-map", "0:a:0", "-vn",
+                            "-ac", "1", "-ar", str(rate), "-f", "f32le", "-"],
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+    except (OSError, MediaError):
+        return []
+    out, rest = [], b""
+    try:
+        while True:
+            if cancelled():
+                return []
+            assert proc.stdout is not None
+            data = proc.stdout.read(step * 4 * 64)
+            if not data:
+                break
+            data = rest + data
+            n = len(data) // (step * 4) * (step * 4)
+            a = array.array("f")
+            a.frombytes(data[:n])
+            rest = data[n:]
+            for k in range(0, len(a), step):
+                chunk = a[k:k + step]
+                out.append(min(1.0, max(max(chunk), -min(chunk))))
+        if len(rest) >= 4:
+            a = array.array("f")
+            a.frombytes(rest[: len(rest) // 4 * 4])
+            out.append(min(1.0, max(max(a), -min(a))))
+        return out
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()

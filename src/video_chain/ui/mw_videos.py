@@ -8,6 +8,7 @@ from pathlib import Path
 from PySide6.QtWidgets import QDialog
 
 from .workers import run_in_background
+from . import settings_keys as SK
 from .. import animate, chain, comfy as CMF, swap, tree as T
 from . import dialogs as D, image_picker as IP
 from .clip_dialogs import SplitDialog
@@ -105,7 +106,7 @@ class VideosMixin(MainWindowHost):
             self.status.setText(f"Video #{T.short_id(nid)} has a new range: converting.")
 
     def _remember_video(self, file: str):
-        self.qs.setValue("videoDir", str(Path(file).parent))
+        self.qs.setValue(SK.VIDEO_DIR, str(Path(file).parent))
 
     def convert_video(self, nid: str) -> None:
         """Convert a video node's range in the background (the generator does it too if this is not done)."""

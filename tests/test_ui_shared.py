@@ -152,6 +152,9 @@ def test_lora_names_come_from_one_helper():
     for name in ("lora_stack", "lora_window"):
         stems = re.findall(r"Path\([^)]*\)\.stem", (UI / f"{name}.py").read_text())
         assert len(stems) <= (1 if name == "lora_stack" else 0), (name, stems)
+    from video_chain import lora_notes
+    assert lora_notes.lora_label is lora_label
+    assert len(re.findall(r"Path\([^)]*\)\.stem", inspect.getsource(lora_notes))) == 1     # only in lora_label
 
 
 # ---------------------------------------------------------------- settings (XC-14, TST-4)

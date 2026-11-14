@@ -65,7 +65,7 @@ def test_ui_helpers_do_not_crash_without_ffmpeg(tmp_path):
     f = tmp_path / "a.mp4"
     f.write_bytes(b"x")
     assert clip_dialogs.grab_frame(f, 0.5, tmp_path / "o.png") is False
-    assert audio_editor.waveform(f, 1.0) == []
+    assert media.waveform(f, 1.0) == []
     with pytest.raises(media.MediaError, match="not installed"):
         compare_player.decode(f, (16, 12))
     with pytest.raises(media.MediaError, match="not installed"):
