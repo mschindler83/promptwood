@@ -379,3 +379,24 @@ def test_the_audio_editor_and_the_speak_dialog_say_range_not_part():
     bad = [f"{n}:{line}: {s[:50]}" for n in ("audio_editor.py", "speak_dialog.py", "video_editor.py", "tts_dialog.py")
            for line, s in _shown_strings(ui / n) if re.search(r"\bparts?\b", s) and not s.startswith("part")]
     assert not bad, bad
+
+
+def test_every_key_of_the_dialogs_is_in_the_shortcut_table_and_bound_from_it():
+    import re
+
+    from video_chain.ui import shortcuts as S
+    listed = {s.keys for s in S.SHORTCUTS}
+    for k in ("Delete", "B", "F", "[", "]", "Home / End", "Ctrl+Shift+Z / Ctrl+Y", "Up / Down / Left / Right",
+              "Enter", "Menu", "Home"):
+        assert any(k in keys.split(" / ") or k == keys for keys in listed), k
+    where = {s.id: s.where for s in S.SHORTCUTS}
+    assert where["image_delete"] == where["image_before_after"] == where["image_favorite"] == "image dialog"
+    assert where["range_set_start"] == where["range_set_end"] == "range editors"
+    assert where["compare_first_last"] == "compare player" and where["graph_open"] == "clip graph"
+    assert [q.toString() for q in S.sequences("mask_brush")] == ["[", "]"]
+    assert [q.toString() for q in S.sequences("mask_redo")] == ["Ctrl+Shift+Z", "Ctrl+Y"]
+    ui = Path(__file__).parent.parent / "src" / "video_chain" / "ui"
+    for name in ("audio_editor", "video_editor", "image_edit", "mask_painter", "compare_player", "prompt_refiner",
+                 "clip_dialogs"):
+        text = (ui / f"{name}.py").read_text()
+        assert not re.search(r"QKeySequence\(\"", text), f"{name} binds a literal key"

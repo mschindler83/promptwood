@@ -16,6 +16,7 @@ from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QImage, QPainter, QPen
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 
+from . import shortcuts as S
 from .workers import post, run_in_background
 from .. import chain, media
 from .theme import icon, theme
@@ -182,10 +183,10 @@ class ComparePlayer(QWidget):
         row.addWidget(self.hint, 1)
         v.addLayout(row)
         self._controls(False)
-        from PySide6.QtGui import QKeySequence
-        for key, fn in (("Space", self.toggle), ("Home", lambda: self.seek(0)),
-                        ("End", lambda: self.seek(self.count() - 1))):
-            shortcut(QKeySequence(key), self, fn, context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        first, last = S.sequences("compare_first_last")
+        for key, fn in ((S.sequence("play"), self.toggle), (first, lambda: self.seek(0)),
+                        (last, lambda: self.seek(self.count() - 1))):
+            shortcut(key, self, fn, context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
 
     def _controls(self, on: bool):
         self.b_play.setEnabled(on)

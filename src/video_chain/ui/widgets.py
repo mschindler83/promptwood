@@ -6,12 +6,13 @@ from collections import OrderedDict
 from typing import Any, cast
 
 from PySide6.QtCore import QEvent, QObject, QRect, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import (QColor, QFont, QFontInfo, QImage, QKeySequence, QPainter, QPixmap, QShortcut,
+from PySide6.QtGui import (QColor, QFont, QFontInfo, QImage, QPainter, QPixmap, QShortcut,
                            QStandardItem, QStandardItemModel, QTransform)
 from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QHBoxLayout, QLabel, QSizePolicy,
                                QSlider, QToolButton, QVBoxLayout, QWidget)
 
 from .. import chain
+from . import shortcuts as S
 from .theme import icon, theme
 
 # The words of the interface, one per thing (counted over the app's own texts; main_window follows, see the notes).
@@ -516,8 +517,8 @@ class FrameStepper(QWidget):
         for b in (self.b_fwd1, self.b_fwd_s):
             row.addWidget(b)
         row.addWidget(self.label)
-        for key, step in (("Left", -1), ("Right", 1), ("Shift+Left", -sec), ("Shift+Right", sec)):
-            shortcut(QKeySequence(key), host, lambda s=step: self.step(s), context=context)
+        for key, step in (("frame_back", -1), ("frame_on", 1), ("second_back", -sec), ("second_on", sec)):
+            shortcut(S.sequence(key), host, lambda s=step: self.step(s), context=context)
         self.slider.valueChanged.connect(self._moved)
         self.slider.valueChanged.connect(self.valueChanged)
 

@@ -12,10 +12,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QPointF, QRectF, QSettings, Qt, QUrl
-from PySide6.QtGui import QKeySequence, QPainter, QPen
+from PySide6.QtGui import QPainter, QPen
 from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout,
                                QLineEdit, QPushButton, QVBoxLayout)
 
+from . import shortcuts as S
 from .workers import run_in_background
 from .. import chain, media
 from ..tree import AUDIO_REF_MIN, VOICE_MAX_SECS, VOICE_REF_MAX_SECS
@@ -241,9 +242,10 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
 
         self.buttons, _ok = button_row(self, "Use this range")
         v.addWidget(self.buttons)
-        for key, fn in (("Space", self.toggle), ("[", lambda: self.set_range(self.position(), self.end)),
-                        ("]", lambda: self.set_range(self.start, self.position(), moved="end"))):
-            shortcut(QKeySequence(key), self, fn)
+        for key, fn in ((S.sequence("play"), self.toggle),
+                        (S.sequence("range_set_start"), lambda: self.set_range(self.position(), self.end)),
+                        (S.sequence("range_set_end"), lambda: self.set_range(self.start, self.position(), moved="end"))):
+            shortcut(key, self, fn)
         if file:
             self.load(file, start, end)
         self._update_enabled()

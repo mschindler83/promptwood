@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import cast
 
 from PySide6.QtCore import QSettings, QSize, QTimer, Qt
-from PySide6.QtGui import QImage, QKeySequence, QPixmap
+from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFrame, QGridLayout,
                                QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QProgressBar,
                                QPushButton, QScrollArea, QSlider, QSpinBox, QStackedWidget, QVBoxLayout, QWidget)
@@ -31,6 +31,7 @@ from ..comfy import EDIT_MODELS
 from ..edits import (EDITS_DIR, MOSS_EDIT_QUALITIES, QUALITY_TEXT, ResultRecord, how_made, lora_note,  # noqa: F401
                      project_edits, record_use, scale_to, uses_index, uses_of, write_meta)
 from ..imagegen import FAMILIES, size_for
+from . import shortcuts as S
 from .dialogs import button_row, confirm as ask
 from .image_common import (ASK_ABOVE, CREATE_HINT, FOLDER_ITEM, FOLDER_PREFIX, MAX_RESULTS, PROMPT_HINT,  # noqa: F401
                            SEED_MAX, PictureSlot)
@@ -598,11 +599,12 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         return right
 
     def _add_shortcuts(self):
-        shortcut(QKeySequence("Ctrl+Return"), self, self.generate)
-        for key, fn in (("Delete", self.delete_selected), ("B", self.b_before.toggle),
-                        ("F", lambda: self.toggle_favorite())):
+        shortcut(S.sequence("generate_image"), self, self.generate)
+        for key, fn in ((S.sequence("image_delete"), self.delete_selected),
+                        (S.sequence("image_before_after"), self.b_before.toggle),
+                        (S.sequence("image_favorite"), lambda: self.toggle_favorite())):
             for w in (self.results, self.gallery):
-                sc = shortcut(QKeySequence(key), w, fn)
+                sc = shortcut(key, w, fn)
                 sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)  # only while the results have the focus
         for b in self.findChildren(QPushButton):              # Enter in a field must not press a button
             b.setAutoDefault(False)

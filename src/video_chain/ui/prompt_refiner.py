@@ -11,10 +11,11 @@ from typing import Any
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QTimer
-from PySide6.QtGui import QIcon, QImage, QKeySequence, QPixmap
+from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLineEdit, QPlainTextEdit,
                                QPushButton, QSpinBox, QTextBrowser, QToolButton, QVBoxLayout, QWidget)
 
+from . import shortcuts as S
 from .workers import post, run_in_background
 from ..tree import refine_problems
 from .lora_details import themed
@@ -214,7 +215,7 @@ class RefineDialog(QDialog):
         v.addWidget(self.buttons)
         self.out.textChanged.connect(lambda: self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(
             bool(self.out.toPlainText().strip()) and not self._busy))
-        shortcut(QKeySequence("Ctrl+Return"), self, lambda: self.refine())
+        shortcut(S.sequence("refine"), self, lambda: self.refine())
         guard_wheel(self)
         self._show_pictures()
         self._mode_changed()

@@ -6,10 +6,11 @@ import logging
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, QUrl
-from PySide6.QtGui import QImage, QKeySequence
+from PySide6.QtGui import QImage
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QGridLayout, QHBoxLayout,
                                QLabel, QPushButton, QSlider, QVBoxLayout, QWidget)
 
+from . import shortcuts as S
 from .workers import run_in_background
 from .. import chain, media
 from .theme import icon
@@ -203,7 +204,7 @@ class CompareDialog(QDialog):
         v.addLayout(ctl)
         close, _none = button_row(self)
         v.addWidget(close)
-        shortcut(QKeySequence("Space"), self, self.toggle)
+        shortcut(S.sequence("play"), self, self.toggle)
         for control in (self.b_play, self.b_restart, self.slider, self.loop, self.sound):
             control.setEnabled(bool(self.players))
         if self.players:

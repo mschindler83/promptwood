@@ -17,6 +17,7 @@ from PySide6.QtGui import QImage, QPainter, QPen
 from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QDoubleSpinBox, QHBoxLayout, QLabel, QLineEdit,
                                QPushButton, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
+from . import shortcuts as S
 from .workers import post, run_in_background
 from .. import chain, media
 from .theme import icon, theme, with_alpha
@@ -378,14 +379,14 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
 
         self.buttons, _ok = button_row(self, "Use this range")
         v.addWidget(self.buttons)
-        for key, fn in (("Space", self.toggle), ("Left", lambda: self.step_frames(-1)),
-                        ("Right", lambda: self.step_frames(1)), ("[", lambda: self.set_range(self.position(),
-                                                                                             self.end)),
-                        ("]", lambda: self.set_range(self.start, self.position(), moved="end")),
-                        ("R", lambda: self.set_rotation(self.rotate + 90)),
-                        ("Shift+R", lambda: self.set_rotation(self.rotate - 90))):
-            from PySide6.QtGui import QKeySequence
-            shortcut(QKeySequence(key), self, fn)
+        turn_right, turn_left = S.sequences("rotate")
+        for key, fn in ((S.sequence("play"), self.toggle), (S.sequence("frame_back"), lambda: self.step_frames(-1)),
+                        (S.sequence("frame_on"), lambda: self.step_frames(1)),
+                        (S.sequence("range_set_start"), lambda: self.set_range(self.position(), self.end)),
+                        (S.sequence("range_set_end"), lambda: self.set_range(self.start, self.position(), moved="end")),
+                        (turn_right, lambda: self.set_rotation(self.rotate + 90)),
+                        (turn_left, lambda: self.set_rotation(self.rotate - 90))):
+            shortcut(key, self, fn)
         self._pos = 0.0
         self._keep = None if file else (start, end)   # a missing file: its range (and turn) is kept for the one
                                                       # chosen again
