@@ -26,12 +26,17 @@ def row_widget(layout: QLayout) -> QWidget:
     return w
 
 
-def _alive(t) -> bool:
+Target = QWidget | tuple[QFormLayout, QWidget] | tuple[QTabWidget, QWidget]      # what the registry takes
+
+
+def _alive(t: Target) -> bool:
     return all(shiboken6.isValid(x) for x in (t if isinstance(t, tuple) else (t,)))
 
 
-def _shown(t) -> bool:
+def _shown(t: Target) -> bool:
     """The target's own visibility now (not hidden on purpose; a child not shown yet counts as shown)."""
+    if not _alive(t):
+        return False
     if isinstance(t, tuple):
         a, b = t
         if isinstance(a, QTabWidget):
@@ -40,7 +45,9 @@ def _shown(t) -> bool:
     return not t.isHidden()
 
 
-def _set(t, on: bool) -> None:
+def _set(t: Target, on: bool) -> None:
+    if not _alive(t):                  # (a card rebuilt since: nothing left to show or hide)
+        return
     if isinstance(t, tuple):
         a, b = t
         if isinstance(a, QTabWidget):
@@ -81,7 +88,7 @@ class ViewMode(QObject):
         self.apply()
         self.changed.emit(on)
 
-    def advanced(self, *targets) -> None:
+    def advanced(self, *targets: Target) -> None:
         """Register advanced-only controls (hidden in Simple); they follow the current view at once. Their own
         visibility is taken as it is now."""
         self._prune()
@@ -92,10 +99,10 @@ class ViewMode(QObject):
                 self._own[t] = _shown(t)
             _set(t, self.visible(t))
 
-    def is_advanced(self, t) -> bool:
+    def is_advanced(self, t: Target) -> bool:
         return t in self._own
 
-    def show(self, t, on: bool = True) -> None:
+    def show(self, t: Target, on: bool = True) -> None:
         """Set a control's own visibility (use it instead of setVisible / setRowVisible for an advanced-only
         control: Simple keeps it hidden, Advanced shows it as set here). Other controls are shown / hidden plainly."""
         if t in self._own:
@@ -104,13 +111,15 @@ class ViewMode(QObject):
         else:
             _set(t, on)
 
-    def visible(self, t) -> bool:
+    def visible(self, t: Target) -> bool:
         """Whether the control is shown in the current view (its own visibility and the view's)."""
+        if not _alive(t):
+            return False
         if t not in self._own:
             return _shown(t)
         return self._own[t] and (not self._simple or t in self._revealed)
 
-    def reveal(self, t) -> None:
+    def reveal(self, t: Target) -> None:
         """Show an advanced-only control in Simple too, until the view is switched (an explicit request for it)."""
         if t in self._own:
             self._revealed.add(t)

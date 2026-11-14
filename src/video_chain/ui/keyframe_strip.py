@@ -3,12 +3,13 @@ right-click changes, annotates or removes one. Hard cuts of the made clip show a
 from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QMenu, QSizePolicy, QWidget
 
+from .. import chain
 from .theme import theme
 
-FPS = 24
+FPS = chain.FPS
 THUMB_W, THUMB_H = 40, 23
 
 
@@ -30,6 +31,7 @@ class KeyframeStrip(QWidget):
         self._drag_at = 0.0
         self._press = None
         self._hover: int | None = None
+        self._thumbs: dict[int, tuple] = {}   # keyframe index -> ((picture key, scale), the picture cut to a thumbnail)
 
     def sizeHint(self):
         return self.minimumSizeHint().expandedTo(self.minimumSize())
@@ -39,13 +41,14 @@ class KeyframeStrip(QWidget):
         self.duration = max(0.25, float(duration))
         self.items, self.cuts, self.made = list(items), list(cuts), made
         self._drag = None
+        self._thumbs = {}
         self.update()
         tips = [f"{it['at']:.2f} s" + (f": {it['note']}" if it.get("note") else "") +
                 ("" if it.get("ok", True) else " (picture missing)") for it in self.items]
         self.setToolTip("Middle keyframes: pictures the clip passes through at these moments.\n"
                         "Click an empty spot to add one there; drag one to move it; right-click it to change it.\n"
                         "Keep each one reachable by motion from what comes before it (the same place and light): "
-                        "a picture it cannot move to makes H3 cut to it (marked red) or slowly morph the whole scene (not marked)." + ("\n\n" + "\n".join(tips) if tips else ""))
+                        "a picture it cannot move to makes the video model cut to it (marked red) or slowly morph the whole scene (not marked)." + ("\n\n" + "\n".join(tips) if tips else ""))
 
     # ---- geometry
     def _track(self) -> QRectF:
@@ -73,6 +76,20 @@ class KeyframeStrip(QWidget):
                 return i
         return None
 
+    def thumb(self, i: int, dpr: float) -> QPixmap | None:
+        """Keyframe i's picture cut to a thumbnail at the screen's scale, made once (not on every paint)."""
+        pm: QPixmap | None = self.items[i].get("pixmap")
+        if pm is None or pm.isNull():
+            return None
+        key = (pm.cacheKey(), dpr)
+        hit = self._thumbs.get(i)
+        if hit is None or hit[0] != key:
+            sc = pm.scaled(round(THUMB_W * dpr), round(THUMB_H * dpr), Qt.KeepAspectRatioByExpanding,
+                           Qt.SmoothTransformation)
+            sc.setDevicePixelRatio(dpr)
+            hit = self._thumbs[i] = (key, sc)
+        return hit[1]
+
     # ---- painting
     def paintEvent(self, _e):
         t = theme()
@@ -96,7 +113,7 @@ class KeyframeStrip(QWidget):
             s += step
         for c in self.cuts:                                     # hard cuts in the made clip
             x = self.x_of(c)
-            p.setPen(QPen(QColor("#e5534b"), 2))
+            p.setPen(QPen(t.negative, 2))
             p.drawLine(QPointF(x, tr.top()), QPointF(x, tr.bottom()))
         order = [i for i in range(len(self.items)) if i != self._drag] + \
             ([self._drag] if self._drag is not None else [])
@@ -105,19 +122,20 @@ class KeyframeStrip(QWidget):
             r = self._rect(i)
             path = QPainterPath()
             path.addRoundedRect(r, 3, 3)
-            pm: QPixmap | None = it.get("pixmap")
-            if pm is not None and not pm.isNull():
+            dpr = self.devicePixelRatioF()
+            sc = self.thumb(i, dpr)
+            if sc is not None:
                 p.save()
                 p.setClipPath(path)
-                sc = pm.scaled(int(r.width()), int(r.height()), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
-                p.drawPixmap(int(r.center().x() - sc.width() / 2), int(r.center().y() - sc.height() / 2), sc)
+                sw, sh = sc.width() / dpr, sc.height() / dpr
+                p.drawPixmap(QPointF(r.center().x() - sw / 2, r.center().y() - sh / 2), sc)
                 p.restore()
             else:
                 p.setPen(Qt.NoPen)
                 p.setBrush(t.bgRaised)
                 p.drawPath(path)
             ok = it.get("ok", True)
-            border = QColor("#e5534b") if not ok else t.accent if i in (self._hover, self._drag) else t.lineStrong
+            border = t.negative if not ok else t.accent if i in (self._hover, self._drag) else t.lineStrong
             p.setPen(QPen(border, 2 if i in (self._hover, self._drag) or not ok else 1))
             p.setBrush(Qt.NoBrush)
             p.drawPath(path)

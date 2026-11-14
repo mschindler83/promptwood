@@ -21,7 +21,7 @@ def cast_cells(options: dict, nodes: list) -> dict[tuple[str, str], tuple[str, s
                    if c.get("voice") and c["voice"]["file"] in use.get("voices", [])}
         shown = {c["name"] for c in use["characters"] if c["images"]} if use["mode"] in ("voices", "mention", "tags") \
             else set()
-        lead = use["characters"][0]["name"] if use["mode"] == "lead" else None
+        lead = use["characters"][0]["name"] if use["mode"] == "lead" and use["characters"] else None
         for c in T.cast_of(options):
             name, what = c["name"], []
             if name == lead:

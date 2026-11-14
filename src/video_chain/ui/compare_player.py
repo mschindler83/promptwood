@@ -7,14 +7,17 @@ inspected exactly. The stored size keeps the memory below MEMORY_BUDGET."""
 from __future__ import annotations
 
 import subprocess
+import tempfile
 import threading
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QPointF, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen
+from PySide6.QtGui import QFont, QImage, QPainter, QPen
 from PySide6.QtWidgets import QHBoxLayout, QSlider, QToolButton, QVBoxLayout, QWidget
 
-from .theme import icon
+from .. import chain
+from .theme import icon, theme
 from .widgets import icon_button, label
 
 MEMORY_BUDGET = 900 * 2**20               # bytes for the stored frames of both clips (RGB, 3 bytes a pixel)
@@ -33,9 +36,10 @@ def decode(clip: Path, size: tuple[int, int], progress=None, cancelled=None) -> 
     """Every frame of the clip as RGB bytes at size (in the clip's own frame order and count)."""
     w, h = size
     n = w * h * 3
+    err_file = tempfile.TemporaryFile()                  # (a file, not a pipe: a chatty ffmpeg cannot fill it up)
     proc = subprocess.Popen(["ffmpeg", "-nostdin", "-v", "error", "-i", str(clip), "-map", "0:v:0",
                              "-fps_mode", "passthrough", "-vf", f"scale={w}:{h}:flags=area", "-f", "rawvideo",
-                             "-pix_fmt", "rgb24", "-"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                             "-pix_fmt", "rgb24", "-"], stdout=subprocess.PIPE, stderr=err_file)
     frames: list[bytes] = []
     try:
         while True:
@@ -50,9 +54,10 @@ def decode(clip: Path, size: tuple[int, int], progress=None, cancelled=None) -> 
                 progress(len(frames))
     finally:
         proc.stdout.close()
-        err = proc.stderr.read().decode(errors="replace").strip()
-        proc.stderr.close()
         code = proc.wait()
+        err_file.seek(0)
+        err = err_file.read(65536).decode(errors="replace").strip()
+        err_file.close()
     if code and not (cancelled is not None and cancelled()):
         raise RuntimeError(f"cannot read {Path(clip).name}: {err.splitlines()[-1] if err else code}")
     return frames
@@ -92,9 +97,9 @@ class CompareView(QWidget):
 
     def paintEvent(self, _e):
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor(12, 12, 14))
+        p.fillRect(self.rect(), theme().bgSunken)
         if self.before.isNull():
-            p.setPen(QColor(150, 150, 160))
+            p.setPen(theme().textTertiary)
             p.drawText(self.rect(), Qt.AlignCenter | Qt.TextWordWrap, self.text)
             return
         p.setRenderHint(QPainter.SmoothPixmapTransform)
@@ -111,9 +116,9 @@ class CompareView(QWidget):
                     QRectF(cut * self.after.width() / iw, 0, self.after.width() * (1 - self.split),
                            self.after.height()))
         p.setRenderHint(QPainter.Antialiasing)
-        p.setPen(QPen(QColor(255, 255, 255, 230), 2))
+        p.setPen(QPen(theme().overlayInk, 2))
         p.drawLine(QPointF(x, r.top()), QPointF(x, r.bottom()))
-        p.setBrush(QColor(255, 255, 255, 230))
+        p.setBrush(theme().overlayInk)
         p.drawEllipse(QPointF(x, r.center().y()), 7, 7)
         f = QFont(self.font())
         f.setBold(True)
@@ -124,9 +129,9 @@ class CompareView(QWidget):
             if (left and box.right() > x - 4) or (not left and box.left() < x + 4):
                 continue                                 # (no label over the divider)
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor(0, 0, 0, 150))
+            p.setBrush(theme().hudBg)
             p.drawRoundedRect(box, 4, 4)
-            p.setPen(QColor(255, 255, 255))
+            p.setPen(theme().overlayInk)
             p.drawText(box, Qt.AlignCenter, text)
 
     def _move_split(self, x: float):
@@ -157,7 +162,7 @@ class ComparePlayer(QWidget):
 
     frameChanged = Signal(int)
 
-    def __init__(self, parent=None, fps: float = 24.0):
+    def __init__(self, parent=None, fps: float = chain.FPS):
         super().__init__(parent)
         self.fps = fps
         self.overlay = None
@@ -166,7 +171,14 @@ class ComparePlayer(QWidget):
         self.frames: list[bytes] = []
         self.result: list[bytes] | None = None
         self._gen = [0, 0]                               # the current load of the clip / the result
-        self._cancel = threading.Event()
+        self._cancel = threading.Event()                 # stops the clip's decode (and the result's, with the clip)
+        self._result_cancel = threading.Event()          # stops the running decode of the result
+        self._events = [self._cancel, self._result_cancel]
+        events = self._events                            # (a list, so the destroyed hook sees the current ones)
+        self.destroyed.connect(lambda *_: [e.set() for e in events])
+        self._t0 = 0.0                                   # when playing started (monotonic) and at which frame
+        self._k0 = 0
+        self._shown_k = -1
         self._sig = _Sig()
         self._sig.loaded.connect(self._loaded)
         self._sig.progress.connect(self._progress)
@@ -226,8 +238,7 @@ class ComparePlayer(QWidget):
     def load(self, clip: Path, frames: int, size: tuple[int, int]) -> None:
         """The original clip (frames: its frame count, size: its pixel size)."""
         self.pause()
-        self._cancel.set()
-        self._cancel = threading.Event()
+        self._new_events(clip=True)
         self.frames, self.result = [], None
         self.clip_size = (int(size[0]), int(size[1]))
         self.size_ = store_size(size[0], size[1], frames)
@@ -239,20 +250,35 @@ class ComparePlayer(QWidget):
         """The result (the same frames as the original): shown right of the divider."""
         self.pause()
         self.result = None
+        self._new_events(clip=False)                     # an older result decode still running is stopped
         self.hint.setText("Reading the result …")
         self._decode(Path(clip), 1)
+
+    def _new_events(self, clip: bool) -> None:
+        """Stop the running decode(s) this load replaces: the clip's (and with it the result's), or the result's."""
+        for ev in ((self._cancel, self._result_cancel) if clip else (self._result_cancel,)):
+            ev.set()
+        if clip:
+            self._cancel = threading.Event()
+        self._result_cancel = threading.Event()
+        self._events[:] = [self._cancel, self._result_cancel]
 
     def _decode(self, clip: Path, which: int):
         self._gen[which] += 1
         if not which:
             self._gen[1] += 1                            # a result of the clip before is not shown
-        tid, size, cancel, sig = self._gen[which], self.size_, self._cancel, self._sig
+        tid, size, sig = self._gen[which], self.size_, self._sig
+        own = self._result_cancel if which else self._cancel
+        parent = self._cancel
+
+        def cancel() -> bool:                            # (a result also stops with its clip)
+            return own.is_set() or parent.is_set()
 
         def work():
             try:
                 fr = decode(clip, size, lambda k: sig.progress.emit(tid, which, k) if k % 12 == 0 else None,
-                            cancel.is_set)
-                if not cancel.is_set():
+                            cancel)
+                if not cancel():
                     sig.loaded.emit(tid, fr, "", which)
             except Exception as e:  # noqa: BLE001
                 try:
@@ -343,7 +369,9 @@ class ComparePlayer(QWidget):
             return
         if from_start or self.position() >= self.count() - 1:
             self.seek(0)
-        self.timer.start(round(1000 / self.fps))
+        self._t0, self._k0 = time.monotonic(), self.position()
+        self._shown_k = self.position()
+        self.timer.start(max(1, int(1000 / self.fps)))
         self.b_play.setIcon(icon("pause"))
 
     def pause(self):
@@ -354,10 +382,18 @@ class ComparePlayer(QWidget):
         self.pause() if self.playing() else self.play()
 
     def _tick(self):
-        if self.position() >= self.count() - 1:
+        """The frame the clock says (so a slow tick catches up instead of playing slower)."""
+        if self.position() != self._shown_k:             # moved by hand meanwhile: carry on from there
+            self._t0, self._k0 = time.monotonic(), self.position()
+        k = self._k0 + int((time.monotonic() - self._t0) * self.fps)
+        last = self.count() - 1
+        if self.position() >= last or k >= last:
+            self.seek(last)
+            self._shown_k = self.position()
             self.pause()
             return
-        self.slider.setValue(self.position() + 1)
+        self.seek(max(k, self.position()))
+        self._shown_k = self.position()
 
     def stop_loading(self):
         self.pause()

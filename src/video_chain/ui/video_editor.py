@@ -19,14 +19,13 @@ from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QDoubleSpinBox, QHBoxL
 
 from .. import chain
 from .theme import icon, theme, with_alpha
-from .widgets import FrameTile, VideoView, guard_wheel, icon_button, label
+from .widgets import FrameTile, VideoView, format_time, guard_wheel, icon_button, label
 
 FPS = chain.FPS
 
 
 def fmt(t: float) -> str:
-    m, s = divmod(max(0.0, t), 60)
-    return f"{int(m)}:{s:06.3f}"
+    return format_time(t, 3)
 
 
 def choose_video(parent, settings: QSettings | None, start: str | None = None,
@@ -48,6 +47,10 @@ class RangeBar(QWidget):
         super().__init__(parent)
         self.setMinimumHeight(42)
         self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setAccessibleName("Range of the video: start, end and playhead")
+        self.setToolTip("Drag the two handles to set the range. With the keyboard: Ctrl+Left / Ctrl+Right move the "
+                        "start, Ctrl+Shift+Left / Right the end, one frame at a time.")
         self.duration, self.start, self.end, self.pos_ = 1.0, 0.0, 1.0, 0.0
         self._drag: str | None = None
 
@@ -86,10 +89,26 @@ class RangeBar(QWidget):
         p.drawLine(QPointF(x, 2), QPointF(x, h - 2))
 
     def _hit(self, x: float) -> str | None:
-        for name, t in (("start", self.start), ("end", self.end)):
-            if abs(x - self._x(t)) <= 7:
-                return name
-        return None
+        near = [name for name, t in (("start", self.start), ("end", self.end)) if abs(x - self._x(t)) <= 7]
+        if len(near) == 2:                      # the handles overlap: the side of the click decides
+            return "start" if x < (self._x(self.start) + self._x(self.end)) / 2 else "end"
+        return near[0] if near else None
+
+    def keyPressEvent(self, e):
+        step = 1 / FPS
+        sign = {Qt.Key_Left: -1, Qt.Key_Right: 1}.get(e.key())
+        if sign and e.modifiers() & Qt.ControlModifier:
+            if e.modifiers() & Qt.ShiftModifier:
+                self.end = min(self.duration, max(self.start + step, self.end + sign * step))
+                self.seek.emit(self.end)
+            else:
+                self.start = max(0.0, min(self.end - step, self.start + sign * step))
+                self.seek.emit(self.start)
+            self.rangeChanged.emit(self.start, self.end)
+            self.update()
+            e.accept()
+        else:
+            super().keyPressEvent(e)
 
     def mousePressEvent(self, e):
         if e.button() != Qt.LeftButton:
@@ -123,15 +142,88 @@ class RangeBar(QWidget):
         self.update()
 
 
+class RangePlayerMixin:
+    """What the audio and the video range dialogs share: the media player (and what happens when it fails), play /
+    pause, play the range, the playhead, the start / end boxes. The dialog has: player, bar, time, b_play,
+    b_play_sel, info_label, start / end, _stop_at, _pos and _total() (the file's length, 0 when none); it
+    implements _update_enabled(), and _before_play() when something else must stop before the player plays."""
+
+    SPIN_STEP = 0.1                                     # the step of the start / end boxes (seconds)
+    player_error = ""                                   # why the player cannot play this file ("" = it can)
+
+    def _spin(self, tip: str) -> QDoubleSpinBox:
+        s = QDoubleSpinBox()
+        s.setDecimals(3)
+        s.setSingleStep(self.SPIN_STEP)
+        s.setSuffix(" s")
+        s.setToolTip(tip)
+        s.setMinimumWidth(110)
+        return s
+
+    def _total(self) -> float:
+        return 0.0
+
+    def _before_play(self) -> None:
+        pass
+
+    def _can_play(self) -> bool:
+        return self.player is not None and not self.player_error
+
+    def _attach_player(self, player) -> None:
+        player.positionChanged.connect(self._player_pos)
+        player.playbackStateChanged.connect(self._player_state)
+        player.errorOccurred.connect(self._on_player_error)
+
+    def _on_player_error(self, _error, message: str = "") -> None:
+        """A file the player cannot play (no codec, unreadable, no audio device): say so and switch Play off."""
+        self.player_error = message or "the player reported an error"
+        self.info_label.setText(f"Cannot play {Path(self.file).name}: {self.player_error}")
+        self._update_enabled()
+
+    def toggle(self):
+        if not self._can_play():
+            return
+        from PySide6.QtMultimedia import QMediaPlayer
+        self._before_play()
+        if self.player.playbackState() == QMediaPlayer.PlayingState:
+            self.player.pause()
+        else:
+            self._stop_at = None
+            self.player.play()
+
+    def play_range(self):
+        if not self._can_play():
+            return
+        self._before_play()
+        self.seek(self.start)
+        self._stop_at = self.end
+        self.player.play()
+
+    def _player_pos(self, ms: int):
+        self._pos = ms / 1000
+        self.bar.set_pos(self._pos)
+        if self._total() > 0:
+            self.time.setText(f"{fmt(self._pos)} / {fmt(self._total())}")
+        if self._stop_at is not None and self._pos >= self._stop_at:
+            self._stop_at = None
+            self.player.pause()
+
+    def _player_state(self, st):
+        from PySide6.QtMultimedia import QMediaPlayer
+        self.b_play.setIcon(icon("pause" if st == QMediaPlayer.PlayingState else "play"))
+
+
 class _Frames(QObject):
     ready = Signal(int, str, QImage)        # generation, "first" | "last", frame
 
 
-class VideoRangeDialog(QDialog):
+class VideoRangeDialog(RangePlayerMixin, QDialog):
     """Pick a video file, a range of it and its rotation. file / start / end / rotate hold the result.
 
     canvas: the chain's video size; canvas_for(file, rotate) -> size or None, when given, works it out again for
     the file and rotation chosen (the size may follow this video)."""
+
+    SPIN_STEP = 1 / FPS
 
     def __init__(self, parent=None, file: str = "", start: float | None = None, end: float | None = None,
                  canvas: tuple[int, int] | None = None, settings: QSettings | None = None, player: bool = True,
@@ -146,6 +238,8 @@ class VideoRangeDialog(QDialog):
         self.file, self.info = "", None
         self.start, self.end = 0.0, 0.0
         self.player = None
+        self.video = None
+        self._closed = False
         self._gen = 0
         self._frames = _Frames()
         self._frames.ready.connect(self._frame_ready)
@@ -234,6 +328,9 @@ class VideoRangeDialog(QDialog):
         self.b_ref.setVisible(on_reference is not None)
         rrow.addWidget(self.b_ref)
         v.addLayout(rrow)
+        self.keys_hint = label("Keys: Space play / pause · ← → one frame · [ start here · ] end here · "
+                               "R turn right · Shift+R turn left", level="tertiary")
+        v.addWidget(self.keys_hint)
         self.start_spin.valueChanged.connect(lambda x: self.set_range(x, self.end, moved="start"))
         self.end_spin.valueChanged.connect(lambda x: self.set_range(self.start, x, moved="end"))
         guard_wheel(self.start_spin, self.end_spin)
@@ -271,15 +368,6 @@ class VideoRangeDialog(QDialog):
         if file:
             self.load(file, start, end)
         self._update_enabled()
-
-    def _spin(self, tip: str) -> QDoubleSpinBox:
-        s = QDoubleSpinBox()
-        s.setDecimals(3)
-        s.setSingleStep(1 / FPS)
-        s.setSuffix(" s")
-        s.setToolTip(tip)
-        s.setMinimumWidth(110)
-        return s
 
     # ---- file
     def _choose(self):
@@ -328,14 +416,17 @@ class VideoRangeDialog(QDialog):
                 self.placeholder.setText("Video playback is not available (QtMultimedia missing); "
                                          "the frames below show the range.")
                 return
-            self.video = VideoView(turnable=True)   # (GPU or CPU as set; either can be turned, see VideoView)
+            try:
+                self.video = VideoView(turnable=True)   # (GPU or CPU as set; either can be turned, see VideoView)
+            except (ImportError, RuntimeError):         # (a broken Qt Quick set-up: the CPU view still works)
+                self.video = VideoView(turnable=True, gpu=False)
             self.stack.addWidget(self.video)
             self.audio = QAudioOutput(self)
             self.player = QMediaPlayer(self)
             self.player.setAudioOutput(self.audio)
             self.player.setVideoOutput(self.video.sink)
-            self.player.positionChanged.connect(self._player_pos)
-            self.player.playbackStateChanged.connect(self._player_state)
+            self._attach_player(self.player)
+        self.player_error = ""
         self.player.setSource(QUrl.fromLocalFile(self.file))
         self.stack.setCurrentWidget(self.video)
 
@@ -373,8 +464,8 @@ class VideoRangeDialog(QDialog):
         for w in (self.bar, self.b_prev, self.b_play, self.b_next, self.b_back1, self.b_fwd1, self.b_play_sel,
                   self.start_spin, self.end_spin, self.b_ref, self.b_rot_left, self.b_rot_right):
             w.setEnabled(on)
-        self.b_play.setEnabled(on and self.player is not None)
-        self.b_play_sel.setEnabled(on and self.player is not None)
+        self.b_play.setEnabled(on and self._can_play())
+        self.b_play_sel.setEnabled(on and self._can_play())
         self.buttons.button(QDialogButtonBox.Ok).setEnabled(on and self.frames() >= 1)
 
     # ---- face picture
@@ -449,7 +540,7 @@ class VideoRangeDialog(QDialog):
         self._frame_timer.start()
 
     def _update_frames(self):
-        if self.info is None:
+        if self.info is None or self._closed:
             return
         self._gen += 1
         gen, file, sig = self._gen, self.file, self._frames
@@ -509,6 +600,7 @@ class VideoRangeDialog(QDialog):
     def seek(self, t: float):
         if self.info is None:
             return
+        self._stop_at = None                        # a seek ends "play range"
         self._pos = min(max(0.0, t), self.info["duration"])
         self.bar.set_pos(self._pos)
         self.time.setText(f"{fmt(self._pos)} / {fmt(self.info['duration'])}")
@@ -524,37 +616,12 @@ class VideoRangeDialog(QDialog):
         frame = round(self._pos * fps) + k
         self.seek(frame / fps)
 
-    def toggle(self):
-        if self.player is None:
-            return
-        from PySide6.QtMultimedia import QMediaPlayer
-        if self.player.playbackState() == QMediaPlayer.PlayingState:
-            self.player.pause()
-        else:
-            self._stop_at = None
-            self.player.play()
-
-    def play_range(self):
-        if self.player is None:
-            return
-        self.seek(self.start)
-        self._stop_at = self.end
-        self.player.play()
-
-    def _player_pos(self, ms: int):
-        self._pos = ms / 1000
-        self.bar.set_pos(self._pos)
-        if self.info:
-            self.time.setText(f"{fmt(self._pos)} / {fmt(self.info['duration'])}")
-        if self._stop_at is not None and self._pos >= self._stop_at:
-            self._stop_at = None
-            self.player.pause()
-
-    def _player_state(self, st):
-        from PySide6.QtMultimedia import QMediaPlayer
-        self.b_play.setIcon(icon("pause" if st == QMediaPlayer.PlayingState else "play"))
+    def _total(self) -> float:
+        return self.info["duration"] if self.info else 0.0
 
     def done(self, r):                                  # stop playback and the file handle with the dialog
+        self._closed = True
+        self._frame_timer.stop()                        # (a decode must not start for a dialog nobody sees)
         self._gen += 1                                  # running frame decodes stop
         if self.player is not None:
             self.player.stop()

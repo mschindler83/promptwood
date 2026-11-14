@@ -34,6 +34,8 @@ class SpeakLinesDialog(QDialog):
         self.busy = False
         self._stop = False
         self._close_when_done = False
+        self._failed = False                       # a take could not be made (this round)
+        self._left = 0                             # takes still to come in this round
         self._next = 0
         self._sig = _Signals(self)
         self._sig.take.connect(self._take_done)
@@ -121,15 +123,22 @@ class SpeakLinesDialog(QDialog):
         return self.takes[row] if 0 <= row < len(self.takes) else None
 
     def _enable(self):
-        self.b_make.setEnabled(not self.busy and all(self.line_texts()))
-        self.b_make.setText("Make more takes" if self.takes else "Make the takes")
+        if self.busy:                               # the same button stops the round (the takes made stay)
+            self.b_make.setEnabled(not self._stop)
+            self.b_make.setText("Stop")
+        else:
+            self.b_make.setEnabled(all(self.line_texts()))
+            self.b_make.setText("Make more takes" if self.takes else "Make the takes")
         for w in (self.n, self.delivery, self.speed, *self.line_edits):
             w.setEnabled(not self.busy)
         self.b_play.setEnabled(self.selected() is not None)
         self.b_use.setEnabled(not self.busy and self.selected() is not None)
 
     def make(self):
-        if self.busy:
+        if self.busy:                               # the button says "Stop" now
+            self._stop = True
+            self.info.setText("Stopping after this take…")
+            self._enable()
             return
         if not all(self.line_texts()):
             return
@@ -140,6 +149,13 @@ class SpeakLinesDialog(QDialog):
         self.info.setText(f"Speaking take 1 of {n}…" + (" (the model loads first)" if self.provider == "local"
                                                          and not self.takes else ""))
         self._left = n
+        self._failed = False
+
+        def emit(signal, *args):
+            try:
+                signal.emit(*args)
+            except RuntimeError:                    # the dialog is gone
+                pass
 
         def work():
             try:
@@ -147,12 +163,13 @@ class SpeakLinesDialog(QDialog):
                     if self._stop:
                         break
                     try:
-                        self._sig.take.emit(self._render(first + k, how, said), "")
+                        take = self._render(first + k, how, said)
                     except Exception as e:  # noqa: BLE001
-                        self._sig.take.emit(None, str(e))
+                        emit(self._sig.take, None, str(e))
                         break
+                    emit(self._sig.take, take, "")
             finally:
-                self._sig.done.emit()
+                emit(self._sig.done)
         threading.Thread(target=work, daemon=True).start()
 
     def _take_done(self, r, err: str):
@@ -185,7 +202,7 @@ class SpeakLinesDialog(QDialog):
         if self._close_when_done:
             super().reject()
             return
-        if not getattr(self, "_failed", False):
+        if not self._failed:
             n = len(self.takes)
             self.info.setText(f"{n} take{'s' if n != 1 else ''}. Listen (double-click), then use the best one, or "
                               "change the words or settings and make more.")
