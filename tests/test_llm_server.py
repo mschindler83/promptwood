@@ -3,6 +3,7 @@ import json
 import os
 import socket
 import sys
+import time
 
 import pytest
 
@@ -527,3 +528,30 @@ def test_ideas_without_the_list_around_them():
     raw = '{"title": "A", "angle": "x", "prompt": "one\nline"}, {"title": "B", "angle": "y", "prompt": "two"}'
     assert [d["title"] for d in L.parse_ideas(raw)] == ["A", "B"]
     assert L.parse_ideas('[{"title": "A", "prompt": "p\nq"}]')[0]["prompt"] == "p q"   # a line break in a string
+
+
+def test_the_server_gets_one_slot_with_the_whole_context():
+    cmd = L.server_command("s", "m", 1)
+    assert cmd[cmd.index("-np") + 1] == "1"
+
+
+def test_a_start_waiting_behind_another_is_cancelled_by_stop(fake_server, tmp_path):
+    import threading
+    script, model = fake_server
+    srv = L.LlamaServer(str(script), str(model), free_port(), log_dir=tmp_path / "log")
+    errors = []
+    srv._start_lock.acquire()                                  # (another start is busy loading)
+    try:
+        def second():
+            try:
+                srv.start()
+            except L.LlmServerError as e:
+                errors.append(str(e))
+        t = threading.Thread(target=second, daemon=True)
+        t.start()
+        time.sleep(0.2)
+        srv.stop()
+        t.join(5)
+        assert not t.is_alive() and errors == ["cancelled"]
+    finally:
+        srv._start_lock.release()
