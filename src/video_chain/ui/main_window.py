@@ -3625,7 +3625,7 @@ class MainWindow(QMainWindow):
             self.film.sync_shared(self.project, self.tree.options)
             self._shared_sent = now
         except (OSError, ValueError) as e:
-            self.status.setText(f"Could not pass the cast / sound settings on to the other scenes: {e}")
+            self._report_error(f"Could not pass the cast / sound settings on to the other scenes: {e}")
 
     def switch_scene(self, sid: str):
         if self.film is None or self.project is None:
@@ -3651,7 +3651,7 @@ class MainWindow(QMainWindow):
         try:
             scene = self.film.add_scene(title, after=cur.id if cur else None, like=cur.id if cur else None)
         except (OSError, ValueError) as e:
-            self.status.setText(f"Could not add the scene: {e}")
+            self._report_error(f"Could not add the scene: {e}")
             return
         if self.open_project(self.film.root, scene=scene.id):
             self.status.setText(f"Scene “{scene.title}” added: choose its start image (Start image), or begin "
@@ -3666,7 +3666,7 @@ class MainWindow(QMainWindow):
         try:
             self.film.rename(sid, title)
         except (OSError, ValueError) as e:
-            self.status.setText(f"Could not rename the scene: {e}")
+            self._report_error(f"Could not rename the scene: {e}")
             return
         self._show_storyboard()
 
@@ -3692,7 +3692,7 @@ class MainWindow(QMainWindow):
         try:
             self.film.remove(sid)
         except (OSError, ValueError) as e:
-            self.status.setText(f"Could not delete the scene: {e}")
+            self._report_error(f"Could not delete the scene: {e}")
             return
         self._show_storyboard()
         self.status.setText(f"Scene “{sc.title}” deleted.")
@@ -3705,7 +3705,7 @@ class MainWindow(QMainWindow):
         try:
             updated = self.film.update_continues()
         except (OSError, ValueError) as e:
-            self.status.setText(f"Could not update the scenes that continue another: {e}")
+            self._report_error(f"Could not update the scenes that continue another: {e}")
             return []
         cur = self.film.scene_of(self.project) if self.project else None
         if cur is not None and cur.id in updated:
@@ -3738,7 +3738,7 @@ class MainWindow(QMainWindow):
         if self.film is None or str(self.film.root) != root:
             return
         if error:
-            self.status.setText(f"Could not duplicate the scene: {error}")
+            self._report_error(f"Could not duplicate the scene: {error}")
             return
         current = self.film.current
         try:
@@ -3759,7 +3759,7 @@ class MainWindow(QMainWindow):
         try:
             self.film.set_notes(sid, text)
         except OSError as e:
-            self.status.setText(f"Could not save the notes: {e}")
+            self._report_error(f"Could not save the notes: {e}")
             return
         self._show_storyboard()
 
@@ -3809,7 +3809,7 @@ class MainWindow(QMainWindow):
             self.film.set_join(sid, join)
             updated = self.film.update_continues() if join == "continue" else []
         except (OSError, ValueError) as e:
-            self.status.setText(f"Could not change the join: {e}")
+            self._report_error(f"Could not change the join: {e}")
             return
         sc = self.film.scene(sid)
         if self.film.path(sid) == self.project and sid in updated:
@@ -3828,7 +3828,7 @@ class MainWindow(QMainWindow):
         try:
             reset = self.film.reorder(order)
         except (OSError, ValueError) as e:
-            self.status.setText(f"Could not move the scene: {e}")
+            self._report_error(f"Could not move the scene: {e}")
         self._show_storyboard()
         if reset:
             self.status.setText("Moved. " + ", ".join(f"“{self.film.scene(i).title}”" for i in reset) +
@@ -3961,7 +3961,7 @@ class MainWindow(QMainWindow):
         self.act_save_as.setEnabled(True)
         self._update_buttons()
         if error:
-            self.status.setText(f"Could not copy the project: {error}")
+            self._report_error(f"Could not copy the project: {error}")
             return
         here = str(self.film.root if self.film else self.project) if self.project is not None else None
         if here != source:
@@ -4538,7 +4538,7 @@ class MainWindow(QMainWindow):
 
     def _fill_eleven_models(self, models, err: str):
         if models is None:
-            self.status.setText(f"Could not ask ElevenLabs: {err}")
+            self._report_error(f"Could not ask ElevenLabs: {err}")
             return
         cur = self.eleven_model.currentData()
         self.eleven_model.blockSignals(True)
@@ -4587,7 +4587,7 @@ class MainWindow(QMainWindow):
         bad = TTS.line_problems(self.tree, node, eng.name) + eng.problems(
             transcribe=eng.name == "local" and TTS.needs_transcript(self.tree, node))
         if bad:
-            self.status.setText(f"Cannot speak the lines of clip #{T.short_id(nid)}: " + "; ".join(bad) + ".")
+            self._report_error(f"Cannot speak the lines of clip #{T.short_id(nid)}: " + "; ".join(bad) + ".")
             return None
         return eng
 
@@ -4693,7 +4693,7 @@ class MainWindow(QMainWindow):
                 chain.keep_aside(Path(project), Path(project) / r["file"])
             return
         if r is None:
-            self.status.setText(f"Could not speak the lines of clip #{T.short_id(nid)}: {err}")
+            self._report_error(f"Could not speak the lines of clip #{T.short_id(nid)}: {err}")
             return
         node = self.tree.nodes[nid]
         if node.frozen:
@@ -4704,7 +4704,7 @@ class MainWindow(QMainWindow):
             done = TTS.apply_lines(self.project, self.tree, nid, r)
         except (TTS.TtsError, OSError) as e:
             chain.keep_aside(self.project, self.project / r["file"])
-            self.status.setText(f"Could not use the spoken lines of clip #{T.short_id(nid)}: {e}")
+            self._report_error(f"Could not use the spoken lines of clip #{T.short_id(nid)}: {e}")
             return
         self._write_tree()
         self.refresh(rebuild_path=True)
@@ -4740,7 +4740,7 @@ class MainWindow(QMainWindow):
                     entry = TTS.use_sample(self.project, self.tree, c["name"], dlg.wav, dlg.made["label"],
                                            dlg.made["text"], dlg.made["eleven"])
                 except (ValueError, OSError, RuntimeError) as e:
-                    self.status.setText(f"Could not set the voice: {e}")
+                    self._report_error(f"Could not set the voice: {e}")
                     return
                 self._show_references(select=c["name"])
                 self._write_tree()
@@ -4855,7 +4855,7 @@ class MainWindow(QMainWindow):
         try:
             c = T.add_character(self.project, self.tree, name, kind=kind)
         except ValueError as e:
-            self.status.setText(f"Could not add the {'character' if person else kind}: {e}")
+            self._report_error(f"Could not add the {'character' if person else kind}: {e}")
             return
         self._show_references(select=c["name"])
         self._write_tree()
@@ -4876,7 +4876,7 @@ class MainWindow(QMainWindow):
         try:
             T.set_kind(self.tree, c["name"], kind)
         except ValueError as e:
-            self.status.setText(f"Could not change @{c['name']}: {e}.")
+            self._report_error(f"Could not change @{c['name']}: {e}.")
             self._show_character()                 # (the combo back to its kind)
             return
         self._show_references(select=c["name"])
@@ -4898,7 +4898,7 @@ class MainWindow(QMainWindow):
         try:
             T.check_name(self.tree, new, keep=c["name"])
         except ValueError as e:
-            self.status.setText(f"Could not rename: {e}")
+            self._report_error(f"Could not rename: {e}")
             return
         users = self._mentioning(c["name"])
         made = [n for n in users if self.tree.nodes[n].made]
@@ -4912,7 +4912,7 @@ class MainWindow(QMainWindow):
         try:
             T.rename_character(self.tree, c["name"], new)
         except ValueError as e:
-            self.status.setText(f"Could not rename: {e}")
+            self._report_error(f"Could not rename: {e}")
             return
         self._show_references(select=new.strip())
         self._write_tree()
@@ -4973,7 +4973,7 @@ class MainWindow(QMainWindow):
         try:
             T.update_character(self.tree, c["name"], lead=on)
         except ValueError as e:
-            self.status.setText(f"Could not change the lead: {e}.")
+            self._report_error(f"Could not change the lead: {e}.")
             self._show_character()
             return
         self._show_references(select=c["name"])
@@ -5110,7 +5110,7 @@ class MainWindow(QMainWindow):
         try:
             rel = T.add_reference(self.project, Path(path), self.tree, target["name"] if target else None, crop=crop)
         except (ValueError, OSError, RuntimeError) as e:
-            self.status.setText(f"Could not add the {'face' if word == 'face picture' else 'picture'}: {e}")
+            self._report_error(f"Could not add the {'face' if word == 'face picture' else 'picture'}: {e}")
             return False
         owner = next((c["name"] for c in T.cast_of(self.tree) if rel in c["images"]), None)
         if owner is None:
@@ -5141,7 +5141,7 @@ class MainWindow(QMainWindow):
         try:
             T.recrop_picture(self.project, self.tree, rel, crop)
         except (ValueError, OSError, RuntimeError) as e:
-            self.status.setText(f"Could not crop: {e}")
+            self._report_error(f"Could not crop: {e}")
             return
         self._pix.clear()
         c = self._selected_character()
@@ -5345,7 +5345,7 @@ class MainWindow(QMainWindow):
         self._tts_busy = False
         self._update_buttons()
         if voice is None:
-            self.status.setText(f"Could not clone the voice of @{name} at ElevenLabs: {err}")
+            self._report_error(f"Could not clone the voice of @{name} at ElevenLabs: {err}")
             return
         self._eleven_voices = None                  # (the account has one more voice now)
         if (self.project is None or str(self.project) != project or self.tree is None
@@ -5380,7 +5380,7 @@ class MainWindow(QMainWindow):
         self._tts_busy = self._tts_busy or mine
         try:
             if not dlg.file:
-                self.status.setText(f"Could not set the voice: {dlg.info_label.text()}")
+                self._report_error(f"Could not set the voice: {dlg.info_label.text()}")
                 return
             if dlg.exec() == QDialog.Accepted and dlg.file:
                 name = label if label and dlg.file == str(f) else None     # (another file chosen in the window)
@@ -5428,7 +5428,7 @@ class MainWindow(QMainWindow):
         try:
             entry = T.set_voice(self.project, self.tree, c["name"], Path(path), start, label=label, end=end)
         except (ValueError, OSError, RuntimeError) as e:
-            self.status.setText(f"Could not set the voice: {e}")
+            self._report_error(f"Could not set the voice: {e}")
             return False
         self._show_references(select=c["name"])
         self._write_tree()
@@ -5499,7 +5499,7 @@ class MainWindow(QMainWindow):
         try:
             entry = T.add_audio_reference(self.project, Path(path), self.tree, name=name)
         except (ValueError, OSError, RuntimeError) as e:
-            self.status.setText(f"Could not add the sound: {e}")
+            self._report_error(f"Could not add the sound: {e}")
             return False
         n = len(T.audio_refs(self.tree))
         self._show_sounds(select=n - 1)
@@ -5574,7 +5574,7 @@ class MainWindow(QMainWindow):
         try:
             entry = T.add_track(self.project, self.tree, Path(file), start, end, name or None)
         except (ValueError, OSError, RuntimeError) as e:
-            self.status.setText(f"Could not import the sound: {e}")
+            self._report_error(f"Could not import the sound: {e}")
             return None
         self._show_tracks(select=entry["id"])
         self._write_tree()
@@ -5631,7 +5631,7 @@ class MainWindow(QMainWindow):
             try:
                 T.recut_track(self.project, self.tree, tid, Path(file), start, end, name or None)
             except (ValueError, OSError, RuntimeError) as e:
-                self.status.setText(f"Could not cut the audio track: {e}")
+                self._report_error(f"Could not cut the audio track: {e}")
                 return False
         self._show_tracks(select=tid)
         if self._write_tree():
@@ -6020,7 +6020,7 @@ class MainWindow(QMainWindow):
         try:
             T.set_start_image(self.project, Path(path), self.tree)
         except (OSError, RuntimeError) as e:
-            self.status.setText(f"Could not use {Path(path).name}: {e}")
+            self._report_error(f"Could not use {Path(path).name}: {e}")
             return False
         self._pix.clear()
         self._write_tree()
@@ -7210,7 +7210,7 @@ class MainWindow(QMainWindow):
                 try:
                     self.film.set_take(cur.id, nid if action == "take" else None)
                 except OSError as e:
-                    self.status.setText(f"Could not save the scene's ending: {e}")
+                    self._report_error(f"Could not save the scene's ending: {e}")
                     return
                 self._update_continues()               # a scene continuing this one starts from the new end
                 self._show_storyboard()
@@ -7377,7 +7377,7 @@ class MainWindow(QMainWindow):
         what = "video" if self.tree.nodes[nid].is_video else "clip"
         why = T.freeze_problem(self.project, self.tree, nid)
         if why:
-            self.status.setText(f"Cannot freeze {what} #{T.short_id(nid)}: {why}.")
+            self._report_error(f"Cannot freeze {what} #{T.short_id(nid)}: {why}.")
             return []
         edits = T.freeze_edits(self.tree, nid)
         if confirm and edits and not D.confirm(
@@ -7389,7 +7389,7 @@ class MainWindow(QMainWindow):
         try:
             ids = T.freeze(self.project, self.tree, nid)
         except (ValueError, OSError) as e:
-            self.status.setText(f"Cannot freeze {what} #{T.short_id(nid)}: {e}.")
+            self._report_error(f"Cannot freeze {what} #{T.short_id(nid)}: {e}.")
             return []
         self._pix.clear()
         self._write_tree()
@@ -7438,14 +7438,14 @@ class MainWindow(QMainWindow):
             T.copy_end_image(self.project, self.tree, source, target)
             T.copy_keyframes(self.project, self.tree, source, target)
         except (OSError, RuntimeError, ValueError) as e:
-            self.status.setText(f"Could not copy the end image or the keyframes: {e}")
+            self._report_error(f"Could not copy the end image or the keyframes: {e}")
 
     def _copy_row_start(self, source: str, target: str) -> None:
         """A variant of a first clip with its own start image starts from its own copy of that picture."""
         try:
             T.copy_node_start(self.project, self.tree, source, target)
         except (OSError, RuntimeError, ValueError) as e:
-            self.status.setText(f"Could not copy the start image: {e}")
+            self._report_error(f"Could not copy the start image: {e}")
 
     def revert_clip(self, nid: str) -> list[str]:
         """Undo the edits of a made clip (prompt, seed, own settings, end image) so it counts as done again."""
@@ -7690,7 +7690,7 @@ class MainWindow(QMainWindow):
             T.ensure_handover(self.project, self.tree, node)
         except (OSError, RuntimeError) as e:
             node.end_at = None
-            self.status.setText(f"Could not read that frame of clip #{T.short_id(nid)}: {e}")
+            self._report_error(f"Could not read that frame of clip #{T.short_id(nid)}: {e}")
             return False
         self._pix.clear()
         self._write_tree()
@@ -7819,18 +7819,17 @@ class MainWindow(QMainWindow):
             dlg = VideoFrameDialog(self, Path(video), f"End image of clip #{T.short_id(nid)}: a frame of {Path(video).name}",
                                    self._known_info(video))
         except (RuntimeError, OSError) as e:
-            self.status.setText(f"Cannot read {Path(video).name}: {e}")
+            self._report_error(f"Cannot read {Path(video).name}: {e}")
             return None
         if not dialog:
             return dlg
         try:
             if dlg.exec() != QDialog.Accepted:
                 return None
-            import tempfile
-            with tempfile.TemporaryDirectory(prefix="video-chain-end-") as tmp:
+            with media.scratch("end") as tmp:
                 png = Path(tmp) / f"{Path(video).stem}_f{dlg.slider.value()}.png"
                 if not dlg.frame_file(png):
-                    self.status.setText(f"Could not read that frame of {Path(video).name}.")
+                    self._report_error(f"Could not read that frame of {Path(video).name}.")
                     return None
                 if self.set_end_image(nid, str(png)):
                     self.status.setText(f"Clip #{T.short_id(nid)} now ends at frame {dlg.slider.value() + 1} "
@@ -7855,7 +7854,7 @@ class MainWindow(QMainWindow):
                     return False
                 T.set_end_image(self.project, self.tree, nid, Path(image))
         except (ValueError, OSError, RuntimeError) as e:
-            self.status.setText(f"Could not set the end image: {e}")
+            self._report_error(f"Could not set the end image: {e}")
             return False
         self._pix.clear()
         self._write_tree()
@@ -7903,7 +7902,7 @@ class MainWindow(QMainWindow):
             try:
                 T.remove_keyframe(self.project, self.tree, nid, i)
             except (ValueError, OSError, RuntimeError) as e:
-                self.status.setText(f"Could not remove the keyframe: {e}")
+                self._report_error(f"Could not remove the keyframe: {e}")
                 return
             self._write_tree()
             self.refresh()
@@ -7932,7 +7931,7 @@ class MainWindow(QMainWindow):
         try:
             dlg = VideoFrameDialog(self, Path(video), title, self._known_info(video))
         except (RuntimeError, OSError) as e:
-            self.status.setText(f"Cannot read {Path(video).name}: {e}")
+            self._report_error(f"Cannot read {Path(video).name}: {e}")
             return None
         if own:
             dlg.slider.setValue(min(dlg.frames - 2, max(1, T.keyframe_frame(at))))
@@ -7946,16 +7945,15 @@ class MainWindow(QMainWindow):
             dlg.deleteLater()
 
     def _keyframe_from_dialog(self, nid: str, dlg, at: float, index: int | None, own: bool) -> bool:
-        import tempfile
         k = dlg.slider.value()
         if own:                                          # (never its first or last frame)
             k = min(dlg.frames - 2, max(1, k))
             dlg.slider.setValue(k)
             at = k / chain.FPS
-        with tempfile.TemporaryDirectory(prefix="video-chain-key-") as tmp:
+        with media.scratch("key") as tmp:
             png = Path(tmp) / f"key_f{k}.png"
             if not dlg.frame_file(png):
-                self.status.setText("Could not read that frame.")
+                self._report_error("Could not read that frame.")
                 return False
             return self._set_keyframe(nid, str(png), at, index=index)
 
@@ -7972,7 +7970,7 @@ class MainWindow(QMainWindow):
         try:
             T.set_keyframe(self.project, self.tree, nid, Path(image) if image else None, at, note, index)
         except (ValueError, OSError, RuntimeError) as e:
-            self.status.setText(f"Could not set the keyframe: {e}")
+            self._report_error(f"Could not set the keyframe: {e}")
             return False
         self._write_tree()
         self.refresh()
@@ -8104,7 +8102,7 @@ class MainWindow(QMainWindow):
             if base is None or checker.status(nid) == "done" or not Path(node.source["file"]).is_file():
                 return
         except Exception as e:  # noqa: BLE001
-            self.status.setText(f"Could not convert the video: {e}")
+            self._report_error(f"Could not convert the video: {e}")
             return
         token = os.urandom(6).hex()
         self._converts[nid] = token
@@ -8177,7 +8175,7 @@ class MainWindow(QMainWindow):
         if error:
             self._remix_timer.stop()
             self._remix_stuck = set(self.remix_due)          # (not tried again by itself until something changes)
-            self.status.setText(f"Could not mix the sound again: {error}")
+            self._report_error(f"Could not mix the sound again: {error}")
             return
         if not taken:
             return
@@ -8207,7 +8205,7 @@ class MainWindow(QMainWindow):
             self._update_buttons()
             return
         if error:
-            self.status.setText(f"Could not convert video #{T.short_id(nid)}: {error}")
+            self._report_error(f"Could not convert video #{T.short_id(nid)}: {error}")
             self.refresh()
             return
         key = made.get("key") or {}
@@ -8330,7 +8328,7 @@ class MainWindow(QMainWindow):
         try:
             new = T.add_start_rows(self.project, self.tree, nid, [Path(f) for f in images])
         except (OSError, RuntimeError, ValueError) as e:
-            self.status.setText(f"Could not add the start images: {e}")
+            self._report_error(f"Could not add the start images: {e}")
             return []
         ids = [n.id for n in new]
         if not ids:
@@ -8405,7 +8403,7 @@ class MainWindow(QMainWindow):
                     return False
                 T.set_node_start(self.project, self.tree, nid, Path(image))
         except (OSError, RuntimeError, ValueError) as e:
-            self.status.setText(f"Could not set the start image: {e}")
+            self._report_error(f"Could not set the start image: {e}")
             return False
         self._pix.clear()
         self._write_tree()
@@ -8687,7 +8685,7 @@ class MainWindow(QMainWindow):
             try:
                 frames = int(node.made.get("frames") or chain.probe(clip)["frames"])
             except (OSError, RuntimeError) as e:       # (media.MediaError is a RuntimeError)
-                self.status.setText(f"Cannot read video #{T.short_id(nid)}: {e}")
+                self._report_error(f"Cannot read video #{T.short_id(nid)}: {e}")
                 return None
             key = node.made.get("key") or {}
             size = (int(key.get("width") or 0) or 672, int(key.get("height") or 0) or 384)
@@ -8703,7 +8701,7 @@ class MainWindow(QMainWindow):
         try:
             clip_node, rest = self.tree.split_video(nid, at)
         except ValueError as e:
-            self.status.setText(f"Could not split video #{T.short_id(nid)}: {e}")
+            self._report_error(f"Could not split video #{T.short_id(nid)}: {e}")
             return None
         self._write_tree()
         self.refresh(rebuild_path=True)
@@ -8769,7 +8767,7 @@ class MainWindow(QMainWindow):
         if project != (str(self.project) if self.project is not None else ""):   # another project meanwhile
             return
         if error:
-            self.status.setText(f"{pre}Could not join the path: {error}")
+            self._report_error(f"{pre}Could not join the path: {error}")
             return
         path, secs, spans = path
         if purpose == "play":
@@ -9239,7 +9237,7 @@ class MainWindow(QMainWindow):
     def _write_job(self, cmd: dict):
         """Send a command line to the generator; if that fails the generator is ended, so the run fails cleanly."""
         if self.proc.write((json.dumps(cmd) + "\n").encode()) < 0:
-            self.status.setText("Could not send the job to the generator.")
+            self._report_error("Could not send the job to the generator.")
             self._kill()
 
     def _quit_worker(self, free: bool = True):
@@ -9654,7 +9652,7 @@ class MainWindow(QMainWindow):
         ok = QProcess.startDetached(cmd, [])
         ok = ok[0] if isinstance(ok, tuple) else ok
         if not ok:
-            self.status.setText(f"Could not start {cmd}")
+            self._report_error(f"Could not start {cmd}")
             return False
         self._comfy_starting = time.monotonic()
         self.status.setText("Starting ComfyUI … (the clips can be generated once it runs)")
