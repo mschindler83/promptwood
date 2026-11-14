@@ -3,6 +3,7 @@
 A mixin of ImageEditDialog (ui/image_edit.py): the widgets it uses are created there."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from PySide6.QtGui import QImage, QImageReader
@@ -56,14 +57,13 @@ class SourceMixin(ImageEditHost):
     @staticmethod
     def folder_images(folder: str | Path) -> list[str]:
         """The images directly in a folder (not its subfolders), by name (img2 before img10)."""
-        import re as _re
         try:
             files = [f for f in Path(folder).iterdir() if f.is_file() and f.suffix.lower() in IMAGE_EXTS
                      and not f.name.startswith(".")]
         except OSError:
             return []
         return [str(f) for f in sorted(files, key=lambda f: [int(t) if t.isdigit() else t for t in
-                                                             _re.split(r"(\d+)", f.name.lower())])]
+                                                             re.split(r"(\d+)", f.name.lower())])]
 
     def set_folder(self, folder: str) -> bool:
         """Edit every image of a folder in turn (shown: the first). False if it has none."""

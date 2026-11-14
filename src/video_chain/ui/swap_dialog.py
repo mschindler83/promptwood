@@ -19,11 +19,13 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QF
                                QProgressBar, QPushButton, QVBoxLayout)
 
 from .workers import post, run_in_background
-from .. import chain, media, swap
+from .. import chain, faces as F, media, swap
 from .. import tree as T
 from ..animate import DEFAULT_PROMPT, SIZES, gen_size, window_count
 from .compare_player import ComparePlayer
 from .dialogs import confirm
+from .face_crop import FaceCropDialog
+from .image_picker import pick_image
 from .theme import theme
 from .widgets import fit_size, FrameTile, guard_wheel, label
 from .qsvalue import qs_value
@@ -315,7 +317,6 @@ class SwapDialog(QDialog):
             if self.pick is not None:
                 path = self.pick("Picture of the new person")
             else:
-                from .image_picker import pick_image
                 path = pick_image(self, "Picture of the new person", self.qs)
             if not path:                                  # cancelled: the picture before stays shown
                 k = self.ref_combo.findData(self.ref) if self.ref else 0
@@ -380,7 +381,6 @@ class SwapDialog(QDialog):
 
     def _find_head(self, png: Path):
         """The square (x, y, side) around the head in the picture, or None (no face found / no detector)."""
-        from .. import faces as F
         if self.detector is None or F.available(self.detector) is not None:
             return None
         try:
@@ -395,7 +395,6 @@ class SwapDialog(QDialog):
     def adjust_crop(self):
         if not self.ref_png:
             return
-        from .face_crop import FaceCropDialog
         try:
             dlg = FaceCropDialog(self, self.ref_png, self.detector, "Crop to the head (with hair and chin)",
                                  self.ref_crop)

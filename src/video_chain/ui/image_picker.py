@@ -12,6 +12,7 @@ import json
 import os
 import threading
 import urllib.parse
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -174,7 +175,6 @@ class ImagePickerDialog(QDialog):
         self._thumbs.preview.connect(self._preview_ready)
         self._sel = 0                                  # which selection the preview is for (older answers drop)
         self._items: dict[str, QListWidgetItem] = {}
-        from collections import OrderedDict
         self._cache: OrderedDict[tuple, QImage] = OrderedDict()     # the latest thumbnails (bounded)
         self.folder: Path = Path.home()
         self._chosen: str | None = None
