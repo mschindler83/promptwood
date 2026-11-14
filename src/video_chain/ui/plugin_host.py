@@ -254,9 +254,9 @@ class PluginHost:
         return "\n\n".join(lines)
 
     def show_about(self) -> None:
-        box = QMessageBox(QMessageBox.Information, "Plugins", "Plugins add features that are not part of the app "
-                          "itself. They are separately installed Python packages.", QMessageBox.Ok, self.window)
-        box.setTextFormat(Qt.PlainText)                  # (what a plugin says may contain <…>)
+        box = QMessageBox(QMessageBox.Icon.Information, "Plugins", "Plugins add features that are not part of the app "
+                          "itself. They are separately installed Python packages.", QMessageBox.StandardButton.Ok, self.window)
+        box.setTextFormat(Qt.TextFormat.PlainText)                  # (what a plugin says may contain <…>)
         box.setInformativeText(self.about_text())
         traces = "\n\n".join(f"{p.name}:\n{self.state(p).trace or p.trace}" for p in self.plugins
                              if self.error(p) or self.state(p).problems)

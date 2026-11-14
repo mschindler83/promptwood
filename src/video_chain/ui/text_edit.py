@@ -31,7 +31,7 @@ def replace_text(edit: QPlainTextEdit, text: str) -> None:
     """Replace a text field's content as one step Ctrl+Z takes back."""
     cur = edit.textCursor()
     cur.beginEditBlock()
-    cur.select(QTextCursor.Document)
+    cur.select(QTextCursor.SelectionType.Document)
     cur.insertText(text)
     cur.endEditBlock()
     edit.setTextCursor(cur)

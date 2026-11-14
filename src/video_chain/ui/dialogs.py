@@ -13,8 +13,8 @@ from PySide6.QtWidgets import QDialog, QDialogButtonBox, QMessageBox, QPushButto
 
 def confirm(parent, title: str, text: str) -> bool:
     """Ask a yes / no question; No is the default button (Enter does not confirm)."""
-    return QMessageBox.question(parent, title, text, QMessageBox.Yes | QMessageBox.No,
-                                QMessageBox.No) == QMessageBox.Yes
+    return QMessageBox.question(parent, title, text, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes
 
 
 def tell(parent, title: str, text: str) -> None:
@@ -36,14 +36,14 @@ def button_row(dialog: QDialog, ok_text: str | None = None, *, cancel_text: str 
     Cancel; the box and the action button come back (accept: what the action does instead of dialog.accept).
     Without ok_text: a Close button, and None for the action."""
     if ok_text is None:
-        box = QDialogButtonBox(QDialogButtonBox.Close)
+        box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         box.rejected.connect(dialog.reject)
         return box, None
-    box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-    ok = box.button(QDialogButtonBox.Ok)
+    box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+    ok = box.button(QDialogButtonBox.StandardButton.Ok)
     ok.setText(ok_text)
     ok.setEnabled(enabled)
-    box.button(QDialogButtonBox.Cancel).setText(cancel_text)
+    box.button(QDialogButtonBox.StandardButton.Cancel).setText(cancel_text)
     box.accepted.connect(accept or dialog.accept)
     box.rejected.connect(dialog.reject)
     return box, ok
@@ -51,4 +51,4 @@ def button_row(dialog: QDialog, ok_text: str | None = None, *, cancel_text: str 
 
 def add_action(box: QDialogButtonBox, text: str, *, destructive: bool = False) -> QPushButton:
     """An extra button of the row: an action of its own (not accept / reject)."""
-    return box.addButton(text, QDialogButtonBox.DestructiveRole if destructive else QDialogButtonBox.ActionRole)
+    return box.addButton(text, QDialogButtonBox.ButtonRole.DestructiveRole if destructive else QDialogButtonBox.ButtonRole.ActionRole)

@@ -45,7 +45,7 @@ class _Lane(QWidget):
         self._pos: list[tuple[float, float, Block]] = []      # (x, width, block): the layout, made in _layout()
         self._thumbs: dict[str, tuple] = {}                   # block id -> ((picture key, size, scale), scaled)
         self.setMouseTracking(True)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setMinimumHeight(RULER + 64)
 
     def set_blocks(self, blocks: list[Block], focus: str | None, view_width: int):
@@ -84,7 +84,7 @@ class _Lane(QWidget):
         key = (pm.cacheKey(), w, h, dpr)
         hit = self._thumbs.get(b.nid)
         if hit is None or hit[0] != key:
-            sc = pm.scaled(max(1, int(w * dpr)), max(1, int(h * dpr)), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+            sc = pm.scaled(max(1, int(w * dpr)), max(1, int(h * dpr)), Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
             sc.setDevicePixelRatio(dpr)
             hit = self._thumbs[b.nid] = (key, sc)
         return hit[1]
@@ -95,7 +95,7 @@ class _Lane(QWidget):
     def paintEvent(self, _e):
         t = theme()
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.fillRect(self.rect(), t.bgSunken)
         # ruler: one pass over the blocks (they have a minimum width, so time is mapped block by block); ticks
         # spaced to be readable at this zoom
@@ -125,7 +125,7 @@ class _Lane(QWidget):
         font = QFont(self.font())
         font.setBold(True)
         for (bx, bw, b), (r, _b) in zip(pos, self._rects):
-            p.setPen(Qt.NoPen)
+            p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(with_alpha(t.accent, 0.35) if b.is_video else t.bgRaised)
             p.drawRoundedRect(r, 4, 4)
             if b.pixmap is not None and not b.pixmap.isNull() and r.width() > 30:
@@ -135,23 +135,23 @@ class _Lane(QWidget):
                 p.drawPixmap(QRectF(r.left() + 3, r.top() + 15, tw, th), pm, QRectF(pm.rect()))
             if b.lead_secs > 0:                     # the carry-over: repeated from the clip before
                 lw = min(r.width() / 2, b.lead_secs * self.px_per_sec)
-                p.setBrush(QBrush(with_alpha(t.textTertiary, 0.5), Qt.BDiagPattern))
+                p.setBrush(QBrush(with_alpha(t.textTertiary, 0.5), Qt.BrushStyle.BDiagPattern))
                 p.drawRect(QRectF(r.left(), r.top(), lw, r.height()))
             p.setBrush(status_colour(b.state))      # its state, as in the graph
             p.drawRect(QRectF(r.left(), r.bottom() - 4, r.width(), 4))
             p.setFont(font)
             p.setPen(t.textPrimary)
-            p.drawText(QRectF(r.left() + 4, r.top() + 1, r.width() - 8, 14), Qt.AlignLeft | Qt.AlignVCenter,
+            p.drawText(QRectF(r.left() + 4, r.top() + 1, r.width() - 8, 14), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                        ("▶ " if b.is_video else "") + b.label)
             if b.nid == self.focus:
-                p.setBrush(Qt.NoBrush)
+                p.setBrush(Qt.BrushStyle.NoBrush)
                 p.setPen(QPen(t.accent, 2))
                 p.drawRoundedRect(r.adjusted(-1, -1, 1, 1), 5, 5)
             if b.nid == self.playing:               # the played path is at this clip
-                p.setPen(Qt.NoPen)
+                p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(with_alpha(t.accent, 0.3))
                 p.drawRoundedRect(r, 4, 4)
-                p.setBrush(Qt.NoBrush)
+                p.setBrush(Qt.BrushStyle.NoBrush)
                 p.setPen(QPen(t.accent, 3))
                 p.drawRoundedRect(r.adjusted(-1, -1, 1, 1), 5, 5)
 
@@ -162,15 +162,15 @@ class _Lane(QWidget):
         b = self._at(e.position())
         if b is None:
             return
-        if e.button() == Qt.LeftButton:
+        if e.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit(b.nid)
-        elif e.button() == Qt.RightButton:
+        elif e.button() == Qt.MouseButton.RightButton:
             self.clicked.emit(b.nid)                # the clip is selected first, as in the graph
             self.menu.emit(b.nid, e.globalPosition())
 
     def mouseDoubleClickEvent(self, e):
         b = self._at(e.position())
-        if b is not None and e.button() == Qt.LeftButton:   # (the first press already focused it)
+        if b is not None and e.button() == Qt.MouseButton.LeftButton:   # (the first press already focused it)
             self.activated.emit(b.nid)
 
     def mouseMoveEvent(self, e):
@@ -189,8 +189,8 @@ class Timeline(QScrollArea):
         self.lane = _Lane()
         self.setWidget(self.lane)
         self.setWidgetResizable(True)
-        self.setFrameShape(QScrollArea.NoFrame)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setFixedHeight(RULER + 64 + 14)
         self.lane.clicked.connect(self.clicked)
         self.lane.activated.connect(self.activated)

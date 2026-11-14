@@ -57,7 +57,7 @@ class CompareView(QWidget):
 
     def show_frames(self, before: QImage, after: QImage | None = None) -> None:
         self.before, self.after, self.text = before, after, ""
-        self.setCursor(Qt.SplitHCursor if after is not None else Qt.ArrowCursor)
+        self.setCursor(Qt.CursorShape.SplitHCursor if after is not None else Qt.CursorShape.ArrowCursor)
         self.update()
 
     def show_text(self, text: str) -> None:
@@ -77,9 +77,9 @@ class CompareView(QWidget):
         p.fillRect(self.rect(), theme().bgSunken)
         if self.before.isNull():
             p.setPen(theme().textTertiary)
-            p.drawText(self.rect(), Qt.AlignCenter | Qt.TextWordWrap, self.text)
+            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap, self.text)
             return
-        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         r = self.picture_rect()
         if self.after is None or self.after.isNull():
             p.drawImage(r, self.before)
@@ -92,7 +92,7 @@ class CompareView(QWidget):
         p.drawImage(QRectF(x, r.top(), r.right() - x, r.height()), self.after,
                     QRectF(cut * self.after.width() / iw, 0, self.after.width() * (1 - self.split),
                            self.after.height()))
-        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setPen(QPen(theme().overlayInk, 2))
         p.drawLine(QPointF(x, r.top()), QPointF(x, r.bottom()))
         p.setBrush(theme().overlayInk)
@@ -105,11 +105,11 @@ class CompareView(QWidget):
             box = QRectF(r.left() + 8 if left else r.right() - 8 - w, r.top() + 8, w, 20)
             if (left and box.right() > x - 4) or (not left and box.left() < x + 4):
                 continue                                 # (no label over the divider)
-            p.setPen(Qt.NoPen)
+            p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(theme().hudBg)
             p.drawRoundedRect(box, 4, 4)
             p.setPen(theme().overlayInk)
-            p.drawText(box, Qt.AlignCenter, text)
+            p.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
 
     def _move_split(self, x: float):
         r = self.picture_rect()
@@ -119,11 +119,11 @@ class CompareView(QWidget):
         self.update()
 
     def mousePressEvent(self, e):
-        if e.button() == Qt.LeftButton:
+        if e.button() == Qt.MouseButton.LeftButton:
             self._move_split(e.position().x())
 
     def mouseMoveEvent(self, e):
-        if e.buttons() & Qt.LeftButton:
+        if e.buttons() & Qt.MouseButton.LeftButton:
             self._move_split(e.position().x())
 
 
@@ -160,14 +160,14 @@ class ComparePlayer(QWidget):
         self._sig.loaded.connect(self._loaded)
         self._sig.progress.connect(self._progress)
         self.timer = QTimer(self)
-        self.timer.setTimerType(Qt.PreciseTimer)
+        self.timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.timer.timeout.connect(self._tick)
 
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
         self.view = CompareView()
         v.addWidget(self.view, 1)
-        self.slider = QSlider(Qt.Horizontal)
+        self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setEnabled(False)
         self.slider.valueChanged.connect(self._show)
         v.addWidget(self.slider)
@@ -195,7 +195,7 @@ class ComparePlayer(QWidget):
                         ("Shift+Left", lambda: self.step(-round(self.fps))),
                         ("Shift+Right", lambda: self.step(round(self.fps))), ("Home", lambda: self.seek(0)),
                         ("End", lambda: self.seek(self.count() - 1))):
-            QShortcut(QKeySequence(key), self, activated=fn, context=Qt.WidgetWithChildrenShortcut)
+            QShortcut(QKeySequence(key), self, activated=fn, context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
 
     @staticmethod
     def _button(text: str, tip: str, fn) -> QToolButton:
@@ -305,7 +305,7 @@ class ComparePlayer(QWidget):
         if src is None or not 0 <= k < len(src):
             return QImage()
         w, h = self.size_
-        return QImage(src[k], w, h, w * 3, QImage.Format_RGB888).copy()
+        return QImage(src[k], w, h, w * 3, QImage.Format.Format_RGB888).copy()
 
     def position(self) -> int:
         return self.slider.value()

@@ -21,7 +21,7 @@ class StartTile(FrameTile):
     def __init__(self, w, h, parent=None):
         super().__init__(w, h, parent)
         self.setAcceptDrops(True)
-        self.setCursor(Qt.PointingHandCursor)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.clear_frame("Click or drop an image")
 
     def dragEnterEvent(self, e):
@@ -53,7 +53,7 @@ class Preview(QWidget):
         self.stack = QStackedWidget()
         self.placeholder = label("Nothing to play yet.\nDouble-click a clip, or play the selected path.",
                                  level="tertiary")
-        self.placeholder.setAlignment(Qt.AlignCenter)
+        self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.placeholder.setMinimumHeight(200)
         self.stack.addWidget(self.placeholder)
         v.addWidget(self.stack, 1)
@@ -62,7 +62,7 @@ class Preview(QWidget):
         row = QHBoxLayout()
         self.b_play = icon_button("play", "Play / pause")
         self.b_play.setEnabled(False)
-        self.slider = QSlider(Qt.Horizontal)
+        self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setEnabled(False)
         self.time = label("0:00.0 / 0:00.0", level="tertiary", type_="mono")
         row.addWidget(self.b_play)
@@ -131,7 +131,7 @@ class Preview(QWidget):
     def toggle(self):
         if self.player is None:
             return
-        if self.player.playbackState() == QMediaPlayer.PlayingState:
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.player.pause()
         else:
             self.player.play()
@@ -158,6 +158,6 @@ class Preview(QWidget):
         self.time.setText(f"{format_time(ms / 1000, 1)} / {format_time(self.player.duration() / 1000, 1)}")
 
     def _state(self, st):
-        self.b_play.setIcon(icon("pause" if st == QMediaPlayer.PlayingState else "play"))
-        if st == QMediaPlayer.StoppedState:
+        self.b_play.setIcon(icon("pause" if st == QMediaPlayer.PlaybackState.PlayingState else "play"))
+        if st == QMediaPlayer.PlaybackState.StoppedState:
             self.moved.emit(-1.0)                   # (played to its end, or stopped)

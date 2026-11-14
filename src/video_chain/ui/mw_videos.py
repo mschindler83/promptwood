@@ -36,7 +36,7 @@ class VideosMixin:
             return
         dlg = VideoRangeDialog(self, f, canvas=self._canvas_for(f), settings=self.qs,
                                canvas_for=lambda file, rot: self._canvas_for(file, rot))
-        if dlg.exec() != QDialog.Accepted or not dlg.file:
+        if dlg.exec() != QDialog.DialogCode.Accepted or not dlg.file:
             return
         self.add_video(parent, dlg.file, dlg.start, dlg.end, dlg.rotate)
 
@@ -75,7 +75,7 @@ class VideosMixin:
         sel = self._selected_character()
         if sel is not None and T.kind_of(sel) != "person":
             dlg.set_reference_kind(sel["name"], T.kind_of(sel))
-        if dlg.exec() != QDialog.Accepted or not dlg.file:
+        if dlg.exec() != QDialog.DialogCode.Accepted or not dlg.file:
             return
         self.set_video_range(nid, dlg.file, dlg.start, dlg.end, dlg.rotate)
 
@@ -308,7 +308,7 @@ class VideosMixin:
         if not dialog:
             return dlg
         try:
-            if dlg.exec() == QDialog.Accepted and dlg.result is not None:
+            if dlg.exec() == QDialog.DialogCode.Accepted and dlg.result is not None:
                 self.use_replacement(nid, *dlg.result)
         finally:
             self.edits_closed()
@@ -355,7 +355,7 @@ class VideosMixin:
             dlg = SplitDialog(self, clip, frames, size, node.source["start"], node.source["end"],
                               f"Split video #{T.short_id(nid)}")
             try:
-                if dlg.exec() != QDialog.Accepted:
+                if dlg.exec() != QDialog.DialogCode.Accepted:
                     return None
                 at = dlg.at()
             finally:

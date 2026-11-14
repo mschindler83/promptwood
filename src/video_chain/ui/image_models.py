@@ -93,7 +93,7 @@ class ModelsMixin:
                                           if key == "moss" else "")
             self.edit_model.model().item(k).setEnabled(ok)
             self.edit_model.setItemText(k, EDIT_MODELS[key] + ("" if ok else "  (not available)"))
-            self.edit_model.setItemData(k, EDIT_MODELS[key] if ok else why, Qt.ToolTipRole)
+            self.edit_model.setItemData(k, EDIT_MODELS[key] if ok else why, Qt.ItemDataRole.ToolTipRole)
         cur = self.edit_model.currentIndex()
         if not self.edit_model.model().item(cur).isEnabled():   # the chosen one is not there: the first one that is
             ok = [i for i in range(self.edit_model.count()) if self.edit_model.model().item(i).isEnabled()]
@@ -136,7 +136,7 @@ class ModelsMixin:
             info = files.get(key) or {}
             self.family.addItem(f["label"] + ("" if "models" in info else "  (not available)"), key)
             k = self.family.count() - 1
-            self.family.setItemData(k, info.get("missing", f["label"]), Qt.ToolTipRole)
+            self.family.setItemData(k, info.get("missing", f["label"]), Qt.ItemDataRole.ToolTipRole)
             if "models" not in info:
                 self.family.model().item(k).setEnabled(False)
         saved = self.qs.value("createFamily", "", type=str) if self.qs is not None else ""
@@ -156,7 +156,7 @@ class ModelsMixin:
         self.model_file.clear()
         for m in (self.families.get(fam) or {}).get("models") or []:
             self.model_file.addItem(Path(m).stem, m)
-            self.model_file.setItemData(self.model_file.count() - 1, m, Qt.ToolTipRole)
+            self.model_file.setItemData(self.model_file.count() - 1, m, Qt.ItemDataRole.ToolTipRole)
         if self.mode() == "create":
             self.set_mode("create")              # qualities, LoRAs of this family
 

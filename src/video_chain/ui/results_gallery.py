@@ -95,16 +95,16 @@ def badged(pix: QPixmap, size: QSize, tag: str, fav: bool, in_use: bool, selecte
         dpr = QGuiApplication.primaryScreen().devicePixelRatio() if QGuiApplication.primaryScreen() else 1.0
     out = QPixmap(size * dpr)
     out.setDevicePixelRatio(dpr)
-    out.fill(Qt.transparent)
+    out.fill(Qt.GlobalColor.transparent)
     p = QPainter(out)
-    p.setRenderHint(QPainter.Antialiasing)
-    p.setRenderHint(QPainter.SmoothPixmapTransform)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
     r = QRect(QPoint(0, 0), size)
     clip = QPainterPath()
     clip.addRoundedRect(r.adjusted(1, 1, -1, -1), 6, 6)
     p.fillPath(clip, t.bgSunken)
     if not pix.isNull():                   # filled (cropped to the tile's shape), as photo galleries do
-        img = pix.scaled(size * dpr, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+        img = pix.scaled(size * dpr, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
         img.setDevicePixelRatio(dpr)
         w, h = img.width() / dpr, img.height() / dpr
         p.setClipPath(clip)
@@ -123,7 +123,7 @@ def badged(pix: QPixmap, size: QSize, tag: str, fav: bool, in_use: bool, selecte
         path.addRoundedRect(box, 8, 8)
         p.fillPath(path, bg)
         p.setPen(fg)
-        p.drawText(box, Qt.AlignCenter, text)
+        p.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
     dark = QColor(0, 0, 0, 170)
     if tag:
         pill(tag, 5, size.height() - 21, dark, QColor(235, 235, 235))
@@ -133,7 +133,7 @@ def badged(pix: QPixmap, size: QSize, tag: str, fav: bool, in_use: bool, selecte
         pill("★", size.width() - 5, 5, QColor(0, 0, 0, 150), QColor(255, 196, 0), right=True)
     if selected:
         p.setPen(QPen(t.accent, 3))
-        p.setBrush(Qt.NoBrush)
+        p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawRoundedRect(r.adjusted(2, 2, -2, -2), 6, 6)
     p.end()
     return out
@@ -152,7 +152,7 @@ class ResultView(QWidget):
         self._settle.setSingleShot(True)
         self._settle.setInterval(150)
         self._settle.timeout.connect(self._settled)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMinimumSize(320, 200)
 
     def sizeHint(self):                          # noqa: N802
@@ -176,12 +176,12 @@ class ResultView(QWidget):
         """The picture fitted to the view. Smooth (area) scaling once per picture and size; while the window edge is
         being dragged the quick transform is used, and a smooth one follows when the size has settled."""
         dpr = self.devicePixelRatioF()
-        target = self._img.size().scaled(self.size() * dpr, Qt.KeepAspectRatio)
+        target = self._img.size().scaled(self.size() * dpr, Qt.AspectRatioMode.KeepAspectRatio)
         smooth = not self._resizing
         key = (self._img.cacheKey(), target.width(), target.height())
         if self._scaled is None or self._scaled[0] != key or (smooth and not self._scaled[2]):
             scaled = smooth_scaled(self._img, target) if smooth else \
-                self._img.scaled(target, Qt.KeepAspectRatio, Qt.FastTransformation)
+                self._img.scaled(target, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation)
             pm = QPixmap.fromImage(scaled)
             pm.setDevicePixelRatio(dpr)
             self._scaled = (key, pm, smooth)
@@ -200,10 +200,10 @@ class ResultView(QWidget):
     def paintEvent(self, _e):                    # noqa: N802
         t = theme()
         p = QPainter(self)
-        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         if self._img.isNull():
             p.setPen(t.textTertiary)
-            p.drawText(self.rect(), Qt.AlignCenter, self._text)
+            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._text)
             p.end()
             return
         dpr = self.devicePixelRatioF()
@@ -227,7 +227,7 @@ class Thumb(QWidget):
         self.selected = False
         self._size = QSize(200, 150)
         self._cache: tuple | None = None
-        self.setCursor(Qt.PointingHandCursor)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._describe()
 
     def _describe(self) -> None:
@@ -276,14 +276,14 @@ class Thumb(QWidget):
         return pos.x() > self.width() - 30 and pos.y() < 26
 
     def mousePressEvent(self, e):                # noqa: N802
-        if e.button() == Qt.LeftButton:
+        if e.button() == Qt.MouseButton.LeftButton:
             if self._star_hit(e.position().toPoint()):
                 self.starred.emit(self.png)
             else:
                 self.clicked.emit(self.png)
 
     def mouseDoubleClickEvent(self, e):          # noqa: N802
-        if e.button() == Qt.LeftButton and not self._star_hit(e.position().toPoint()):
+        if e.button() == Qt.MouseButton.LeftButton and not self._star_hit(e.position().toPoint()):
             self.opened.emit(self.png)
 
 
@@ -297,9 +297,9 @@ class ResultGallery(QScrollArea):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWidgetResizable(True)
-        self.setFrameShape(QFrame.NoFrame)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setFocusPolicy(Qt.StrongFocus)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.thumbs: dict[str, Thumb] = {}
         self.headers: list[QLabel] = []
         self.size_px = 200
@@ -339,7 +339,7 @@ class ResultGallery(QScrollArea):
             v.addSpacing(6)
         if not groups:
             empty = label("No results here (yet, or not with these filters).", level="tertiary")
-            empty.setAlignment(Qt.AlignCenter)
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
             v.addWidget(empty)
         v.addStretch(1)
         self.setWidget(inner)
@@ -408,24 +408,24 @@ class ResultGallery(QScrollArea):
     def keyPressEvent(self, e):                  # noqa: N802  (arrows step, Home/End, PageUp/Down, Enter opens)
         order = self.order()
         key = e.key()
-        if key in (Qt.Key_Return, Qt.Key_Enter) and self._selected:
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and self._selected:
             self.opened.emit(self._selected)
-        elif key == Qt.Key_Escape:
+        elif key == Qt.Key.Key_Escape:
             self.back.emit()
-        elif key in (Qt.Key_Right, Qt.Key_Left) and order:
+        elif key in (Qt.Key.Key_Right, Qt.Key.Key_Left) and order:
             i = order.index(self._selected) if self._selected in order else -1
-            self.clicked.emit(order[max(0, min(len(order) - 1, i + (1 if key == Qt.Key_Right else -1)))])
-        elif key == Qt.Key_Home and order:
+            self.clicked.emit(order[max(0, min(len(order) - 1, i + (1 if key == Qt.Key.Key_Right else -1)))])
+        elif key == Qt.Key.Key_Home and order:
             self.clicked.emit(order[0])
-        elif key == Qt.Key_End and order:
+        elif key == Qt.Key.Key_End and order:
             self.clicked.emit(order[-1])
-        elif key in (Qt.Key_Down, Qt.Key_Up, Qt.Key_PageDown, Qt.Key_PageUp) and order:
+        elif key in (Qt.Key.Key_Down, Qt.Key.Key_Up, Qt.Key.Key_PageDown, Qt.Key.Key_PageUp) and order:
             if self.thumbs.get(self._selected) is None:
                 self.clicked.emit(order[0])
                 return
-            down = key in (Qt.Key_Down, Qt.Key_PageDown)
+            down = key in (Qt.Key.Key_Down, Qt.Key.Key_PageDown)
             rows = 1
-            if key in (Qt.Key_PageDown, Qt.Key_PageUp):          # a page: as many rows as are in view
+            if key in (Qt.Key.Key_PageDown, Qt.Key.Key_PageUp):          # a page: as many rows as are in view
                 rows = max(1, self.viewport().height() // max(1, self.thumbs[self._selected].height() + 8))
             target = self._selected
             for _ in range(rows):
@@ -482,7 +482,7 @@ class Chip(QLabel):
         if accent:
             self.setProperty("severity", "info")
         self.setToolTip(tip)
-        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
 
 class InfoCard(QFrame):
@@ -493,7 +493,7 @@ class InfoCard(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("infoCard")
-        self.setAttribute(Qt.WA_StyledBackground, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
         v = QVBoxLayout(self)
         v.setContentsMargins(8, 6, 8, 6)
         v.setSpacing(4)
@@ -503,13 +503,13 @@ class InfoCard(QFrame):
         prow.setSpacing(4)
         self.b_prompt = QToolButton()
         self.b_prompt.setCheckable(True)
-        self.b_prompt.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self.b_prompt.setArrowType(Qt.RightArrow)
+        self.b_prompt.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.b_prompt.setArrowType(Qt.ArrowType.RightArrow)
         self.b_prompt.setText("Prompt")
         self.b_prompt.setAutoRaise(True)
         self.b_prompt.toggled.connect(self._toggle)
         self.prompt_line = label("", level="tertiary")
-        self.prompt_line.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.prompt_line.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.b_copy = QPushButton("Copy")
         self.b_copy.setAutoDefault(False)
         self.b_copy.setToolTip("Copy the prompt (as you wrote it) to the clipboard")
@@ -517,7 +517,7 @@ class InfoCard(QFrame):
         prow.addWidget(self.b_prompt)
         prow.addWidget(self.prompt_line, 1)
         self.prompt_gap = QWidget()
-        self.prompt_gap.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.prompt_gap.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.prompt_gap.hide()
         prow.addWidget(self.prompt_gap, 1)
         prow.addWidget(self.b_copy)
@@ -531,7 +531,7 @@ class InfoCard(QFrame):
         self.set(None)
 
     def _toggle(self, on: bool):
-        self.b_prompt.setArrowType(Qt.DownArrow if on else Qt.RightArrow)
+        self.b_prompt.setArrowType(Qt.ArrowType.DownArrow if on else Qt.ArrowType.RightArrow)
         self.prompt_box.setVisible(on and bool(self._prompt))
         self.prompt_line.setVisible(not on)
         self.prompt_gap.setVisible(on)
@@ -549,7 +549,7 @@ class InfoCard(QFrame):
     def paintEvent(self, e):                     # noqa: N802
         fill, line = self.colours()
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setBrush(fill)
         p.setPen(QPen(line, 1))
         p.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 6, 6)
@@ -598,7 +598,7 @@ class InfoCard(QFrame):
             b = QPushButton(f"seed {info['seed']}  ↻")
             b.setAutoDefault(False)
             b.setProperty("role", "chipButton")
-            b.setCursor(Qt.PointingHandCursor)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.setFixedHeight(max(16, self.chips.items[-1].sizeHint().height()) if self.chips.items else 18)
             b.setToolTip("Use this seed for the next Generate (and keep it: New seed after each Generate is "
                          "switched off)")

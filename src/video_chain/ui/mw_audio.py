@@ -99,7 +99,7 @@ class AudioMixin:
             if not dlg.file:
                 self._report_error(f"Could not set the voice: {dlg.info_label.text()}")
                 return
-            if dlg.exec() == QDialog.Accepted and dlg.file:
+            if dlg.exec() == QDialog.DialogCode.Accepted and dlg.file:
                 name = label if label and dlg.file == str(f) else None     # (another file chosen in the window)
                 if dlg.cleaned is not None:
                     self.set_character_voice(str(dlg.cleaned),
@@ -280,7 +280,7 @@ class AudioMixin:
                 dlg.deleteLater()
                 return None
         try:
-            if dlg.exec() != QDialog.Accepted or not dlg.file:
+            if dlg.exec() != QDialog.DialogCode.Accepted or not dlg.file:
                 return None
             return self.add_track(dlg.file, dlg.start, dlg.end, dlg.name.text().strip())
         finally:
@@ -311,7 +311,7 @@ class AudioMixin:
 
     def _selected_track(self) -> dict | None:
         item = self.track_list.currentItem()
-        return T.track_of(self.tree, item.data(Qt.UserRole)) if item is not None and self.tree else None
+        return T.track_of(self.tree, item.data(Qt.ItemDataRole.UserRole)) if item is not None and self.tree else None
 
     def _recut_track(self):
         tr = self._selected_track()
@@ -324,7 +324,7 @@ class AudioMixin:
             dlg = self._track_dialog(str(self.project / tr["file"]), 0.0, float(tr["secs"]), tr["name"],
                                      title="Cut the audio track")
         try:
-            if dlg.exec() == QDialog.Accepted and dlg.file:
+            if dlg.exec() == QDialog.DialogCode.Accepted and dlg.file:
                 self.recut_track(tr["id"], dlg.file, dlg.start, dlg.end, dlg.name.text().strip())
         finally:
             dlg.deleteLater()
@@ -415,7 +415,7 @@ class AudioMixin:
             self.preview.open(self.project / tr["file"], f"Audio track: {tr['name']}")
 
     def _show_tracks(self, select: str | None = None):
-        cur = select or (self.track_list.currentItem().data(Qt.UserRole) if self.track_list.currentItem() else None)
+        cur = select or (self.track_list.currentItem().data(Qt.ItemDataRole.UserRole) if self.track_list.currentItem() else None)
         trs = T.tracks(self.tree) if self.tree else []
         sig = ([(tr["id"], tr["name"], tr["file"], len(T.track_users(self.tree, tr["id"]))) for tr in trs], cur)
         if sig == self._tracks_shown and select is None:
@@ -442,7 +442,7 @@ class AudioMixin:
             users = len(T.track_users(self.tree, tr["id"]))
             item = QListWidgetItem(f"{tr['name']}   {float(tr['secs']):.1f} s"
                                    + (f"   · {plural(users, 'clip')}" if users else ""))
-            item.setData(Qt.UserRole, tr["id"])
+            item.setData(Qt.ItemDataRole.UserRole, tr["id"])
             item.setToolTip(f"{tr.get('source') or tr['file']}\n{float(tr.get('start') or 0):.2f}–"
                             f"{float(tr.get('end') or 0):.2f} s of the file")
             self.track_list.addItem(item)

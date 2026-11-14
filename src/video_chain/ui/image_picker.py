@@ -47,9 +47,9 @@ class _Preview(QLabel):
 
     def paintEvent(self, e):                    # noqa: N802
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setBrush(self.background())
-        p.setPen(Qt.NoPen)
+        p.setPen(Qt.PenStyle.NoPen)
         p.drawRoundedRect(self.rect(), 6, 6)
         p.end()
         super().paintEvent(e)
@@ -192,7 +192,7 @@ class ImagePickerDialog(QDialog):
         self.sort.addItem("Newest first", "date")
         self.sort.currentIndexChanged.connect(lambda *_: self.open_collection(self.collection) if self.collection
                                               else self.open_folder(self.folder))
-        self.zoom = QSlider(Qt.Horizontal)
+        self.zoom = QSlider(Qt.Orientation.Horizontal)
         self.zoom.setRange(80, 260)
         self.zoom.setFixedWidth(140)
         self.zoom.setToolTip("Thumbnail size")
@@ -207,17 +207,17 @@ class ImagePickerDialog(QDialog):
         top.addWidget(self.zoom)
         v.addLayout(top)
 
-        split = QSplitter(Qt.Horizontal)
+        split = QSplitter(Qt.Orientation.Horizontal)
         self.places = QListWidget()
         self.places.setMaximumWidth(240)
         self.places.itemClicked.connect(self._place_clicked)
-        self.places.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.places.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.places.customContextMenuRequested.connect(self._places_menu)
         split.addWidget(self.places)
         self.grid = QListWidget()
-        self.grid.setViewMode(QListWidget.IconMode)
-        self.grid.setResizeMode(QListWidget.Adjust)
-        self.grid.setMovement(QListWidget.Static)
+        self.grid.setViewMode(QListWidget.ViewMode.IconMode)
+        self.grid.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.grid.setMovement(QListWidget.Movement.Static)
         self.grid.setUniformItemSizes(True)     # every cell the size of the grid (see _cell)
         self.grid.setWordWrap(True)
         self.grid.setSpacing(6)
@@ -228,7 +228,7 @@ class ImagePickerDialog(QDialog):
         sv = QVBoxLayout(side)
         sv.setContentsMargins(6, 0, 0, 0)
         self.preview = _Preview()
-        self.preview.setAlignment(Qt.AlignCenter)
+        self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview.setMinimumSize(280, 280)
         self.info = label("", level="secondary")
         self.info.setWordWrap(True)
@@ -239,10 +239,10 @@ class ImagePickerDialog(QDialog):
         split.setSizes([200, 620, 300])
         v.addWidget(split, 1)
 
-        self.buttons = QDialogButtonBox(QDialogButtonBox.Open | QDialogButtonBox.Cancel)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Open | QDialogButtonBox.StandardButton.Cancel)
         self.buttons.accepted.connect(self._accept)
         self.buttons.rejected.connect(self.reject)
-        self.buttons.button(QDialogButtonBox.Open).setEnabled(False)
+        self.buttons.button(QDialogButtonBox.StandardButton.Open).setEnabled(False)
         v.addWidget(self.buttons)
 
         self.zoom.setValue(self.qs.value("pickerZoom", 150, type=int))
@@ -294,7 +294,7 @@ class ImagePickerDialog(QDialog):
 
     def _places_menu(self, pos):
         it = self.places.itemAt(pos)
-        data = it.data(Qt.UserRole) if it is not None else None
+        data = it.data(Qt.ItemDataRole.UserRole) if it is not None else None
         if not isinstance(data, str) or data not in self.favorites():
             return
         m = QMenu(self)
@@ -313,25 +313,25 @@ class ImagePickerDialog(QDialog):
 
     def _fill_places(self):
         self.places.clear()
-        dir_icon = self.style().standardIcon(QStyle.SP_DirIcon)
+        dir_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DirIcon)
         if self.collections:
             head = QListWidgetItem("This project")
-            head.setFlags(Qt.NoItemFlags)
+            head.setFlags(Qt.ItemFlag.NoItemFlags)
             self.places.addItem(head)
-            pic_icon = self.style().standardIcon(QStyle.SP_FileDialogContentsView)
+            pic_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogContentsView)
             for name, items in self.collections:
                 it = QListWidgetItem(pic_icon, f"{name} ({len(items)})")
-                it.setData(Qt.UserRole, ("col", name))
+                it.setData(Qt.ItemDataRole.UserRole, ("col", name))
                 it.setToolTip(f"{len(items)} {self.noun if len(items) != 1 else self.noun[:-1]} of the project")
                 self.places.addItem(it)
         favs = self.favorites()
         if favs:
             head = QListWidgetItem("Favorites")
-            head.setFlags(Qt.NoItemFlags)
+            head.setFlags(Qt.ItemFlag.NoItemFlags)
             self.places.addItem(head)
             for d in favs:
                 it = QListWidgetItem(icon("starf"), Path(d).name or d)
-                it.setData(Qt.UserRole, d)
+                it.setData(Qt.ItemDataRole.UserRole, d)
                 ok = Path(d).is_dir()
                 it.setToolTip(d + ("" if ok else " (not reachable right now)") + " · right-click to remove")
                 if not ok:
@@ -339,7 +339,7 @@ class ImagePickerDialog(QDialog):
                 self.places.addItem(it)
         if self.collections or favs:
             head = QListWidgetItem("Folders")
-            head.setFlags(Qt.NoItemFlags)
+            head.setFlags(Qt.ItemFlag.NoItemFlags)
             self.places.addItem(head)
         entries = [("Home", str(Path.home()))]
         for name in {"image": ("Pictures",), "video": ("Videos",), "media": ("Music", "Videos"),
@@ -350,21 +350,21 @@ class ImagePickerDialog(QDialog):
         recent = [d for d in self._recent_dirs() if Path(d).is_dir()]
         for name, path in entries:
             it = QListWidgetItem(dir_icon, name)
-            it.setData(Qt.UserRole, path)
+            it.setData(Qt.ItemDataRole.UserRole, path)
             it.setToolTip(path)
             self.places.addItem(it)
         if recent:
             head = QListWidgetItem("Recent folders")
-            head.setFlags(Qt.NoItemFlags)
+            head.setFlags(Qt.ItemFlag.NoItemFlags)
             self.places.addItem(head)
             for d in recent:
                 it = QListWidgetItem(dir_icon, Path(d).name or d)
-                it.setData(Qt.UserRole, d)
+                it.setData(Qt.ItemDataRole.UserRole, d)
                 it.setToolTip(d)
                 self.places.addItem(it)
 
     def _place_clicked(self, it):
-        data = it.data(Qt.UserRole)
+        data = it.data(Qt.ItemDataRole.UserRole)
         if isinstance(data, (tuple, list)) and data and data[0] == "col":
             self.open_collection(data[1])
         elif data:
@@ -376,7 +376,7 @@ class ImagePickerDialog(QDialog):
         self._items = {}
         self.preview.clear()
         self.info.setText("")
-        self.buttons.button(QDialogButtonBox.Open).setEnabled(False)
+        self.buttons.button(QDialogButtonBox.StandardButton.Open).setEnabled(False)
 
     def open_collection(self, name: str):
         """Show one kind of the project's pictures (with their captions)."""
@@ -400,8 +400,8 @@ class ImagePickerDialog(QDialog):
             if path in self._items:               # (the same file in two roles: shown once)
                 continue
             it = QListWidgetItem(blank, caption)
-            it.setData(Qt.UserRole, ("img", path))
-            it.setData(Qt.UserRole + 2, caption)
+            it.setData(Qt.ItemDataRole.UserRole, ("img", path))
+            it.setData(Qt.ItemDataRole.UserRole + 2, caption)
             it.setToolTip(f"{caption}\n{path}")
             it.setSizeHint(self._cell())
             self.grid.addItem(it)
@@ -435,16 +435,16 @@ class ImagePickerDialog(QDialog):
             imgs.sort(key=mtime, reverse=True)
         else:
             imgs.sort(key=lambda e: e.name.lower())
-        dir_icon = self.style().standardIcon(QStyle.SP_DirIcon)
+        dir_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DirIcon)
         for e in dirs:
             it = QListWidgetItem(dir_icon, e.name)
-            it.setData(Qt.UserRole, ("dir", e.path))
+            it.setData(Qt.ItemDataRole.UserRole, ("dir", e.path))
             it.setSizeHint(self._cell())
             self.grid.addItem(it)
         blank = self._blank_icon()
         for e in imgs:
             it = QListWidgetItem(blank, e.name)
-            it.setData(Qt.UserRole, ("img", e.path))
+            it.setData(Qt.ItemDataRole.UserRole, ("img", e.path))
             it.setToolTip(e.name)
             it.setSizeHint(self._cell())
             self.grid.addItem(it)
@@ -502,15 +502,15 @@ class ImagePickerDialog(QDialog):
 
     def _preview_ready(self, sel: int, path: str, img: QImage, media: str):
         item = self.grid.currentItem()
-        if sel != self._sel or item is None or item.data(Qt.UserRole)[1] != path:
+        if sel != self._sel or item is None or item.data(Qt.ItemDataRole.UserRole)[1] != path:
             return
         box = self.preview.size()
         if not img.isNull():
-            self.preview.setPixmap(QPixmap.fromImage(img).scaled(box, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            self.preview.setPixmap(QPixmap.fromImage(img).scaled(box, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
         else:
-            self.preview.setPixmap(self.style().standardIcon(QStyle.SP_MediaVolume).pixmap(96, 96))
+            self.preview.setPixmap(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaVolume).pixmap(96, 96))
         mb, when = file_facts(path)
-        caption = item.data(Qt.UserRole + 2)
+        caption = item.data(Qt.ItemDataRole.UserRole + 2)
         self.info.setText((f"{caption}\n" if caption else "") + f"{Path(path).name}\n{media}\n{mb:.1f} MB · {when}")
 
     def _count(self, what: str) -> None:
@@ -525,11 +525,11 @@ class ImagePickerDialog(QDialog):
     def _set_icon(self, item: QListWidgetItem, img: QImage):
         if not img.isNull():
             item.setIcon(QIcon(QPixmap.fromImage(img)))
-            item.setData(Qt.UserRole + 1, f"{img.width()}×{img.height()}")
-        elif Path(item.data(Qt.UserRole)[1]).suffix.lower() in SOUND_EXTS:     # a sound: its icon
-            item.setIcon(self.style().standardIcon(QStyle.SP_MediaVolume))
-        elif Path(item.data(Qt.UserRole)[1]).suffix.lower() in TEXT_EXTS:      # a list: a file icon
-            item.setIcon(self.style().standardIcon(QStyle.SP_FileIcon))
+            item.setData(Qt.ItemDataRole.UserRole + 1, f"{img.width()}×{img.height()}")
+        elif Path(item.data(Qt.ItemDataRole.UserRole)[1]).suffix.lower() in SOUND_EXTS:     # a sound: its icon
+            item.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaVolume))
+        elif Path(item.data(Qt.ItemDataRole.UserRole)[1]).suffix.lower() in TEXT_EXTS:      # a list: a file icon
+            item.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon))
 
     def _blank_icon(self) -> QIcon:
         pm = QPixmap(THUMB_MAX, THUMB_MAX)
@@ -556,12 +556,12 @@ class ImagePickerDialog(QDialog):
     def _selected(self, item, _prev=None):
         if item is None:
             return
-        kind, path = item.data(Qt.UserRole)
+        kind, path = item.data(Qt.ItemDataRole.UserRole)
         self._sel += 1                                       # (a video's details still coming are for another item)
         if kind == "dir":
             self.preview.clear()
             self.info.setText(f"Folder {Path(path).name}")
-            self.buttons.button(QDialogButtonBox.Open).setEnabled(False)
+            self.buttons.button(QDialogButtonBox.StandardButton.Open).setEnabled(False)
             return
         ext = Path(path).suffix.lower()
         if ext in TEXT_EXTS:                                     # a list: its first lines
@@ -570,16 +570,16 @@ class ImagePickerDialog(QDialog):
                     head = fh.read(4000).splitlines()[:14]
             except OSError:
                 head = []
-            self.preview.setPixmap(self.style().standardIcon(QStyle.SP_FileIcon).pixmap(64, 64))
+            self.preview.setPixmap(self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon).pixmap(64, 64))
             self.info.setText(f"{Path(path).name}\n" + "\n".join(line[:80] for line in head))
-            self.buttons.button(QDialogButtonBox.Open).setEnabled(True)
+            self.buttons.button(QDialogButtonBox.StandardButton.Open).setEnabled(True)
             return
         if ext in VIDEO_EXTS or ext in SOUND_EXTS:              # a frame of the video / the sound's icon, its details
             box = self.preview.size()
             self._sel += 1
             self.preview.clear()
             self.info.setText(f"{Path(path).name}\nLoading …")        # (ffmpeg and ffprobe run in the pool)
-            self.buttons.button(QDialogButtonBox.Open).setEnabled(True)
+            self.buttons.button(QDialogButtonBox.StandardButton.Open).setEnabled(True)
             sel, thumbs, size = self._sel, self._thumbs, max(box.width(), box.height())
 
             def work():
@@ -595,12 +595,12 @@ class ImagePickerDialog(QDialog):
             self.preview.setPixmap(QPixmap.fromImage(img))
         mb, when = file_facts(path)
         dims = f"{size.width()}×{size.height()}" if size.isValid() else "?"
-        caption = item.data(Qt.UserRole + 2)
+        caption = item.data(Qt.ItemDataRole.UserRole + 2)
         self.info.setText((f"{caption}\n" if caption else "") + f"{Path(path).name}\n{dims} px · {mb:.1f} MB · {when}")
-        self.buttons.button(QDialogButtonBox.Open).setEnabled(True)
+        self.buttons.button(QDialogButtonBox.StandardButton.Open).setEnabled(True)
 
     def _activated(self, item):
-        kind, path = item.data(Qt.UserRole)
+        kind, path = item.data(Qt.ItemDataRole.UserRole)
         if kind == "dir":
             self.open_folder(Path(path))
         else:
@@ -615,18 +615,18 @@ class ImagePickerDialog(QDialog):
             self.open_folder(self.folder.parent)
 
     def keyPressEvent(self, e):
-        if e.key() == Qt.Key_Backspace and not self.path.hasFocus():
+        if e.key() == Qt.Key.Key_Backspace and not self.path.hasFocus():
             self.go_up()
             return
         super().keyPressEvent(e)
 
     def _accept(self):
         item = self.grid.currentItem()
-        if self._chosen is None and item is not None and item.data(Qt.UserRole)[0] == "img":
-            self._chosen = item.data(Qt.UserRole)[1]
+        if self._chosen is None and item is not None and item.data(Qt.ItemDataRole.UserRole)[0] == "img":
+            self._chosen = item.data(Qt.ItemDataRole.UserRole)[1]
         if self._chosen is None:
-            if item is not None and item.data(Qt.UserRole)[0] == "dir":
-                self.open_folder(Path(item.data(Qt.UserRole)[1]))
+            if item is not None and item.data(Qt.ItemDataRole.UserRole)[0] == "dir":
+                self.open_folder(Path(item.data(Qt.ItemDataRole.UserRole)[1]))
             return
         if self.collection is not None:
             self.qs.setValue(self._place_key, f"col:{self.collection}")
@@ -653,7 +653,7 @@ def scratch_settings() -> QSettings:
     """Settings that live only for this session (a window made without settings of its own: its picker remembers
     nothing; it never reads or writes the user's real store)."""
     import tempfile
-    return QSettings(str(Path(tempfile.mkdtemp(prefix="video-chain-")) / "picker.ini"), QSettings.IniFormat)
+    return QSettings(str(Path(tempfile.mkdtemp(prefix="video-chain-")) / "picker.ini"), QSettings.Format.IniFormat)
 
 
 def pick_image(parent, title: str, settings: QSettings, start_dir: str | None = None,
@@ -667,6 +667,6 @@ def pick_image(parent, title: str, settings: QSettings, start_dir: str | None = 
     dlg = ImagePickerDialog(parent, title, start_dir, qs, places, cache_dir=cache_dir, collections=collections,
                             kind=kind)
     try:
-        return dlg.chosen() if dlg.exec() == QDialog.Accepted else None
+        return dlg.chosen() if dlg.exec() == QDialog.DialogCode.Accepted else None
     finally:
         dlg.deleteLater()

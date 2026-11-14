@@ -85,7 +85,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         self._build_actions(left)
         top.addWidget(self._scrolled(left))
         line = QFrame()
-        line.setFrameShape(QFrame.VLine)
+        line.setFrameShape(QFrame.Shape.VLine)
         top.addWidget(line)
         top.addLayout(self._build_results_panel(), 1)
         self._built = True                               # (every widget the parts above talk to exists now)
@@ -165,7 +165,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         ev.addWidget(label("1  Image to edit", type_="heading"))
         self.src_tile = FrameTile(380, 214)
         self.src_tile.clear_frame("Choose the image to edit")
-        self.src_tile.setCursor(Qt.PointingHandCursor)
+        self.src_tile.setCursor(Qt.CursorShape.PointingHandCursor)
         self.src_tile.clicked.connect(lambda _t: self._choose_source())
         ev.addWidget(self.src_tile)
         self.src_combo = QComboBox()
@@ -423,8 +423,8 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         lw.setLayout(left)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(lw)
         scroll.setFixedWidth(430)
         self.left_scroll = scroll
@@ -447,7 +447,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
             head.addWidget(b)
         self.b_single.setChecked(True)
         self.views.idClicked.connect(lambda i: self.set_view("gallery" if i else "single"))
-        self.thumb_size = QSlider(Qt.Horizontal)
+        self.thumb_size = QSlider(Qt.Orientation.Horizontal)
         self.thumb_size.setRange(120, 360)
         self.thumb_size.setValue(200)
         self.thumb_size.setFixedWidth(120)
@@ -499,13 +499,13 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         self.view.clear_frame("Results appear here")
         sv.addWidget(self.view, 1)
         self.results = QListWidget()
-        self.results.setViewMode(QListWidget.IconMode)
-        self.results.setFlow(QListWidget.LeftToRight)
+        self.results.setViewMode(QListWidget.ViewMode.IconMode)
+        self.results.setFlow(QListWidget.Flow.LeftToRight)
         self.results.setWrapping(False)
         self.results.setIconSize(QSize(150, 100))
         self.results.setGridSize(QSize(158, 108))
         self.results.setFixedHeight(130)
-        self.results.setMovement(QListWidget.Static)
+        self.results.setMovement(QListWidget.Movement.Static)
         self.results.setToolTip("The results shown (newest first); Gallery shows them all, grouped by run")
         self.results.setProperty("role", "resultStrip")      # (the theme styles it: transparent, no frame)
         self.results.currentItemChanged.connect(self._strip_selection)
@@ -567,7 +567,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
                         ("F", lambda: self.toggle_favorite())):
             for w in (self.results, self.gallery):
                 sc = QShortcut(QKeySequence(key), w, activated=fn)
-                sc.setContext(Qt.WidgetWithChildrenShortcut)  # only while the results have the focus
+                sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)  # only while the results have the focus
         for b in self.findChildren(QPushButton):              # Enter in a field must not press a button
             b.setAutoDefault(False)
             b.setDefault(False)
@@ -852,7 +852,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
             self.set_mask(None)                   # (a result made without a mask: none)
             m = meta.get("mask")                  # an inpaint of the image shown: its mask again
             if m and Path(m).is_file() and meta.get("source") == self.source:
-                img = QImage(m).convertToFormat(QImage.Format_Grayscale8)
+                img = QImage(m).convertToFormat(QImage.Format.Format_Grayscale8)
                 if not img.isNull() and img.size() == upright(self.source).size():
                     self.set_mask(img)
         if meta.get("template"):                  # made from variations: the prompt with its placeholders

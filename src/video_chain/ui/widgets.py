@@ -66,11 +66,11 @@ def small_font(base: QFont, scale: float = 0.8) -> QFont:
 _SCALED: OrderedDict = OrderedDict()
 
 
-def smooth_scaled(img: QImage, size: QSize, mode=Qt.KeepAspectRatio) -> QImage:
+def smooth_scaled(img: QImage, size: QSize, mode=Qt.AspectRatioMode.KeepAspectRatio) -> QImage:
     """img scaled with Qt's smooth (area-averaging) scaling, remembered per picture, size and mode (the last few):
     the same picture asked for again at the same size (repaints, scrubbing) is not scaled again. The very image
     when it already has that size."""
-    target = img.size().scaled(size, mode) if mode != Qt.IgnoreAspectRatio else size
+    target = img.size().scaled(size, mode) if mode != Qt.AspectRatioMode.IgnoreAspectRatio else size
     if target == img.size():
         return img
     key = (img.cacheKey(), target.width(), target.height())
@@ -78,7 +78,7 @@ def smooth_scaled(img: QImage, size: QSize, mode=Qt.KeepAspectRatio) -> QImage:
     if hit is not None:
         _SCALED.move_to_end(key)
         return hit[1]
-    out = img.scaled(target, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+    out = img.scaled(target, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
     _SCALED[key] = (img, out)                  # (the source is kept so its cache key cannot be given to another image)
     while len(_SCALED) > 16:
         _SCALED.popitem(last=False)
@@ -106,8 +106,8 @@ def frame_image(frame) -> QImage:
     except ImportError:                            # (numpy is optional for the app)
         return frame.toImage()
     fmt = frame.pixelFormat()
-    if fmt not in (QVideoFrameFormat.Format_YUV420P, QVideoFrameFormat.Format_NV12) or \
-            not frame.map(QVideoFrame.ReadOnly):
+    if fmt not in (QVideoFrameFormat.PixelFormat.Format_YUV420P, QVideoFrameFormat.PixelFormat.Format_NV12) or \
+            not frame.map(QVideoFrame.MapMode.ReadOnly):
         return frame.toImage()
     try:
         w, h = frame.width(), frame.height()
@@ -118,7 +118,7 @@ def frame_image(frame) -> QImage:
             return a[:, :cols * ch].reshape(rows, cols, ch) if ch > 1 else a[:, :cols]
         hw, hh = (w + 1) // 2, (h + 1) // 2
         y = plane(0, h, w).astype(np.float32)
-        if fmt == QVideoFrameFormat.Format_NV12:
+        if fmt == QVideoFrameFormat.PixelFormat.Format_NV12:
             uv = plane(1, hh, hw, 2).astype(np.float32)
             u, v = uv[..., 0], uv[..., 1]
         else:
@@ -128,11 +128,11 @@ def frame_image(frame) -> QImage:
     u = np.repeat(np.repeat(u, 2, axis=0), 2, axis=1)[:h, :w] - 128.0
     v = np.repeat(np.repeat(v, 2, axis=0), 2, axis=1)[:h, :w] - 128.0
     sf = frame.surfaceFormat()
-    if sf.colorRange() == QVideoFrameFormat.ColorRange_Full:
+    if sf.colorRange() == QVideoFrameFormat.ColorRange.ColorRange_Full:
         k, cs = 1.0, 1.0
     else:                                          # limited (video) range: 16-235, chroma 16-240
         y, k, cs = y - 16.0, 255.0 / 219.0, 255.0 / 224.0
-    if sf.colorSpace() == QVideoFrameFormat.ColorSpace_BT709:
+    if sf.colorSpace() == QVideoFrameFormat.ColorSpace.ColorSpace_BT709:
         cr, cgu, cgv, cb = 1.5748, 0.187324, 0.468124, 1.8556
     else:                                          # BT.601: also when the clip does not say (as Qt converts it)
         cr, cgu, cgv, cb = 1.402, 0.344136, 0.714136, 1.772
@@ -142,7 +142,7 @@ def frame_image(frame) -> QImage:
     rgb[..., 1] = y - cgu * u - cgv * v
     rgb[..., 2] = y + cb * u
     out = np.ascontiguousarray(rgb.clip(0, 255).astype(np.uint8))
-    img = QImage(out.data, w, h, w * 3, QImage.Format_RGB888).copy()
+    img = QImage(out.data, w, h, w * 3, QImage.Format.Format_RGB888).copy()
     turn = sf.rotation().value if hasattr(sf, "rotation") else 0
     return img.transformed(QTransform().rotate(turn)) if turn else img
 
@@ -183,7 +183,7 @@ class VideoView(QWidget):
         self.rotation = 0
         self._out = None                           # (GPU, turnable: the VideoOutput item)
         self._shown: tuple | None = None           # (the frame, the size) -> the frame scaled to fit, for painting
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         if self.gpu:
             lay = QVBoxLayout(self)
             lay.setContentsMargins(0, 0, 0, 0)
@@ -193,7 +193,7 @@ class VideoView(QWidget):
             else:
                 from PySide6.QtMultimediaWidgets import QVideoWidget
                 self.widget = QVideoWidget(self)
-                self.widget.setAspectRatioMode(Qt.KeepAspectRatio)
+                self.widget.setAspectRatioMode(Qt.AspectRatioMode.KeepAspectRatio)
                 self.sink = self.widget.videoSink()
             lay.addWidget(self.widget)
             return
@@ -201,7 +201,7 @@ class VideoView(QWidget):
         self.widget = None
         self.sink = QVideoSink(self)
         self.sink.videoFrameChanged.connect(self._frame)
-        self.setAttribute(Qt.WA_OpaquePaintEvent)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
 
     def _frame(self, frame):
         if not frame.isValid():                    # (the end of a clip: its last frame stays, as in QVideoWidget)
@@ -263,7 +263,7 @@ class VideoView(QWidget):
         a painter's bilinear scaling skips most source pixels when it shrinks a lot (a 2K portrait into a small
         preview), and fine detail then shimmers as grain and moving artifacts."""
         dpr = self.devicePixelRatioF()
-        target = self._img.size().scaled(self.size() * dpr, Qt.KeepAspectRatio)
+        target = self._img.size().scaled(self.size() * dpr, Qt.AspectRatioMode.KeepAspectRatio)
         key = (self._img.cacheKey(), target.width(), target.height())
         if self._shown is None or self._shown[0] != key:
             img = QImage(smooth_scaled(self._img, target))
@@ -303,7 +303,7 @@ class _WheelGuard(QObject):
         return w.hasFocus() or (f is not None and w.isAncestorOf(f))
 
     def eventFilter(self, obj, e):                # noqa: N802  (Qt naming)
-        if e.type() == QEvent.Wheel and isinstance(obj, QWidget) and not self.has_focus(obj):
+        if e.type() == QEvent.Type.Wheel and isinstance(obj, QWidget) and not self.has_focus(obj):
             parent = obj.parentWidget()
             if parent is not None:
                 QApplication.sendEvent(parent, e)       # Qt passes it on up to the scroll area
@@ -327,13 +327,13 @@ def guard_wheel(*roots: QWidget) -> None:
         for w in found:
             if isinstance(w, (QComboBox, QAbstractSpinBox)) and not w.property("wheelGuard"):
                 w.setProperty("wheelGuard", True)
-                w.setFocusPolicy(Qt.StrongFocus)
+                w.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
                 w.installEventFilter(_GUARD)
 
 
 def badge(text: str, severity: str | None = None) -> QLabel:
     b = label(text, role="badge", severity=severity)
-    b.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+    b.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
     return b
 
 
@@ -361,7 +361,7 @@ def label_for(text: str, field: QWidget, **kw) -> QLabel:
 def section_bar(title: str, parent=None) -> tuple[QWidget, QHBoxLayout]:
     w = QWidget(parent)
     w.setProperty("role", "sectionBar")
-    w.setAttribute(Qt.WA_StyledBackground)
+    w.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
     w.setFixedHeight(theme().sectionHeader)
     h = QHBoxLayout(w)
     h.setContentsMargins(8, 0, 4, 0)
@@ -379,7 +379,7 @@ class FrameTile(QLabel):
     def __init__(self, w: int, h: int, parent=None):
         super().__init__(parent)
         self.setFixedSize(w, h)
-        self.setAlignment(Qt.AlignCenter)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setObjectName("frameTile")
         self.key = ""
         self.t = 0.0
@@ -400,13 +400,13 @@ class FrameTile(QLabel):
             return
         self._img = img
         dpr = self.devicePixelRatioF()
-        pm = QPixmap.fromImage(img).scaled(self.size() * dpr, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        pm = QPixmap.fromImage(img).scaled(self.size() * dpr, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
         pm.setDevicePixelRatio(dpr)
         self.setText("")
         self.setPixmap(pm)
 
     def mousePressEvent(self, e):
-        if e.button() == Qt.LeftButton:
+        if e.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit(self.t)
         super().mousePressEvent(e)
 
@@ -419,7 +419,7 @@ class FlowBox(QWidget):
         super().__init__(parent)
         self.items: list[QWidget] = []
         self.spacing = spacing
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
     def add(self, w: QWidget):
         w.setParent(self)
@@ -469,7 +469,7 @@ class FrameStepper(QWidget):
         super().__init__(parent or host)
         self.fps = float(fps)
         sec = max(1, round(self.fps))
-        self.slider = QSlider(Qt.Horizontal)
+        self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setEnabled(False)
         self.label = label("", level="secondary", type_="mono")
         self.b_back_s = self._button("«", "One second back (Shift+Left)", -sec)

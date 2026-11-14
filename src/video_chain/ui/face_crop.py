@@ -28,7 +28,7 @@ class CropView(QWidget):
         self.image, self.faces, self.crop = image, faces, crop
         self.setMinimumSize(560, 400)
         self.setMouseTracking(True)
-        self.setFocusPolicy(Qt.StrongFocus)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._shown: QImage | None = None           # the picture scaled to the view (a big photo drags smoothly)
         self._drag: tuple[str, QPointF, tuple[int, int, int]] | None = None
 
@@ -74,13 +74,13 @@ class CropView(QWidget):
         dpr = self.devicePixelRatioF()
         size = QSize(round(self.image.width() * s * dpr), round(self.image.height() * s * dpr))
         if self._shown is None or self._shown.size() != size or self._shown.devicePixelRatio() != dpr:
-            self._shown = QImage(smooth_scaled(self.image, size, Qt.IgnoreAspectRatio))
+            self._shown = QImage(smooth_scaled(self.image, size, Qt.AspectRatioMode.IgnoreAspectRatio))
             self._shown.setDevicePixelRatio(dpr)
 
     def paintEvent(self, _e):
         t = theme()
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
         if self.image.isNull():
             return
         s, ox, oy = self._frame()
@@ -95,7 +95,7 @@ class CropView(QWidget):
         inner.addRect(box)
         p.fillPath(shade.subtracted(inner), QColor(0, 0, 0, 140))
         for f in self.faces:
-            p.setPen(QPen(QColor(255, 255, 255, 170), 1, Qt.DashLine))
+            p.setPen(QPen(QColor(255, 255, 255, 170), 1, Qt.PenStyle.DashLine))
             p.drawRect(self._to_widget(f[0], f[1], f[2] - f[0], f[3] - f[1]))
         p.setPen(QPen(t.accent, 2))
         p.drawRect(box)
@@ -107,7 +107,7 @@ class CropView(QWidget):
         return abs(pos.x() - box.right()) < 12 and abs(pos.y() - box.bottom()) < 12
 
     def mousePressEvent(self, e):
-        if e.button() != Qt.LeftButton or self.image.isNull():
+        if e.button() != Qt.MouseButton.LeftButton or self.image.isNull():
             return
         pos = e.position()
         ix, iy = self._to_image(pos)
@@ -128,8 +128,8 @@ class CropView(QWidget):
         if self._drag is None:
             x, y, side = self.crop
             inside = self._to_widget(x, y, side, side).contains(pos)
-            self.setCursor(Qt.SizeFDiagCursor if self._at_corner(pos) else Qt.SizeAllCursor if inside
-                           else Qt.ArrowCursor)
+            self.setCursor(Qt.CursorShape.SizeFDiagCursor if self._at_corner(pos) else Qt.CursorShape.SizeAllCursor if inside
+                           else Qt.CursorShape.ArrowCursor)
             return
         kind, start, (x, y, side) = self._drag
         s = self._frame()[0]
@@ -160,14 +160,14 @@ class CropView(QWidget):
         if self.image.isNull():
             return super().keyPressEvent(e)
         x, y, side = self.crop
-        step = 10 if e.modifiers() & Qt.ShiftModifier else 1
-        moves = {Qt.Key_Left: (-step, 0), Qt.Key_Right: (step, 0), Qt.Key_Up: (0, -step), Qt.Key_Down: (0, step)}
+        step = 10 if e.modifiers() & Qt.KeyboardModifier.ShiftModifier else 1
+        moves = {Qt.Key.Key_Left: (-step, 0), Qt.Key.Key_Right: (step, 0), Qt.Key.Key_Up: (0, -step), Qt.Key.Key_Down: (0, step)}
         if e.key() in moves:
             dx, dy = moves[e.key()]
             self.set_crop((x + dx, y + dy, side))
-        elif e.key() in (Qt.Key_Plus, Qt.Key_Minus, Qt.Key_Equal):
-            new = round(side * (1.07 if e.key() != Qt.Key_Minus else 0.93))
-            new = max(new, side + 1) if e.key() != Qt.Key_Minus else min(new, side - 1)
+        elif e.key() in (Qt.Key.Key_Plus, Qt.Key.Key_Minus, Qt.Key.Key_Equal):
+            new = round(side * (1.07 if e.key() != Qt.Key.Key_Minus else 0.93))
+            new = max(new, side + 1) if e.key() != Qt.Key.Key_Minus else min(new, side - 1)
             new = int(max(min(new, self.image.width(), self.image.height()),
                           min(MIN_SIDE, self.image.width(), self.image.height())))
             self.set_crop((round(x + (side - new) / 2), round(y + (side - new) / 2), new))
@@ -232,8 +232,8 @@ class FaceCropDialog(QDialog):
     def _set_busy(self, busy: bool) -> None:
         self.loading = busy
         self.b_whole.setEnabled(not busy)
-        self.buttons.button(QDialogButtonBox.Ok).setEnabled(not busy)
-        self.setCursor(Qt.BusyCursor if busy else Qt.ArrowCursor)
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(not busy)
+        self.setCursor(Qt.CursorShape.BusyCursor if busy else Qt.CursorShape.ArrowCursor)
 
     def _work(self, image_path: Path, model: Path | None) -> None:
         """Worker thread: the upright picture, then the faces. A window closed meanwhile just drops the result."""
@@ -271,7 +271,7 @@ class FaceCropDialog(QDialog):
         if image.isNull():
             self.view.set_content(image, [], (0, 0, 0))
             self.info.setText(why or "not an image")
-            self.setCursor(Qt.ArrowCursor)
+            self.setCursor(Qt.CursorShape.ArrowCursor)
             self.loading = False
             return
         self.why = why

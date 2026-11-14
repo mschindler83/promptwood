@@ -159,7 +159,7 @@ class PathMixin:
                 if key not in cache:
                     if len(cache) > THUMB_CACHE_MAX:
                         cache.clear()
-                    cache[key] = pm.scaledToHeight(TIMELINE_THUMB_HEIGHT, Qt.SmoothTransformation)
+                    cache[key] = pm.scaledToHeight(TIMELINE_THUMB_HEIGHT, Qt.TransformationMode.SmoothTransformation)
                 pm = cache[key]
             what = (Path(n.source["file"]).name if n.is_video else (n.prompt or "(no prompt yet)"))
             tip = (f"{'Video' if n.is_video else 'Clip'} #{T.short_id(n.id)} · {secs:.1f} s · {self.state(n.id)}\n"

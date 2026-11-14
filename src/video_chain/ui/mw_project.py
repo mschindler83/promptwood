@@ -30,7 +30,7 @@ class ProjectMixin:
         last = self.recent_projects()
         location = str(Path(last[0]).parent) if last else str(Path.home())
         dlg = NewProjectDialog(self, location, self.qs)
-        if dlg.exec() != QDialog.Accepted:
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         self.create_project(dlg.folder(), dlg.image.text().strip())
 
@@ -298,13 +298,13 @@ class ProjectMixin:
         fw = QApplication.focusWidget() or self.focusWidget()
         typing = isinstance(fw, QPlainTextEdit) or (isinstance(fw, QLineEdit) and not fw.isReadOnly())
         if not typing and self.tree is not None and self.graph.isVisible():
-            self.graph.setFocus(Qt.OtherFocusReason)
+            self.graph.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def showEvent(self, e):
         super().showEvent(e)
         if not self._first_shown:
             self._first_shown = True
-            QTimer.singleShot(0, lambda: self.graph.setFocus(Qt.OtherFocusReason))
+            QTimer.singleShot(0, lambda: self.graph.setFocus(Qt.FocusReason.OtherFocusReason))
 
     def _tell_recovered(self, folder: Path, backup: Path):
         """tree.json was damaged and its backup was opened: said in the status line and the log, and in a notice
@@ -317,8 +317,8 @@ class ProjectMixin:
 
     def notify(self, title: str, text: str):
         """A notice that does not block the window (a message box opened, not run); kept until it is closed."""
-        box = QMessageBox(QMessageBox.Information, title, text, QMessageBox.Ok, self)
-        box.setAttribute(Qt.WA_DeleteOnClose)
+        box = QMessageBox(QMessageBox.Icon.Information, title, text, QMessageBox.StandardButton.Ok, self)
+        box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self._notices.append(box)
         box.destroyed.connect(lambda _=None, b=box: self._notices.remove(b) if b in self._notices else None)
         box.open()

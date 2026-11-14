@@ -124,7 +124,7 @@ class SourceMixin:
         img = upright(self.source)
         dlg = MaskPainterDialog(self, img, self.mask)
         try:
-            if dlg.exec() == QDialog.Accepted:
+            if dlg.exec() == QDialog.DialogCode.Accepted:
                 self.set_mask(dlg.mask if mask_area(dlg.mask) > 0 else None)
         finally:
             dlg.deleteLater()

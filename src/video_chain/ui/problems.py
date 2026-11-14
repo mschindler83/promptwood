@@ -34,12 +34,12 @@ def add_example(edit: QPlainTextEdit, text: str) -> None:
     cur = QTextCursor(edit.document())
     cur.beginEditBlock()
     if not old.strip():
-        cur.select(QTextCursor.Document)
+        cur.select(QTextCursor.SelectionType.Document)
         cur.insertText(text)
     else:
-        cur.movePosition(QTextCursor.End)
+        cur.movePosition(QTextCursor.MoveOperation.End)
         tail = old.rstrip()
-        cur.movePosition(QTextCursor.Left, QTextCursor.KeepAnchor, len(old) - len(tail))   # (trailing spaces go)
+        cur.movePosition(QTextCursor.MoveOperation.Left, QTextCursor.MoveMode.KeepAnchor, len(old) - len(tail))   # (trailing spaces go)
         cur.insertText(("" if tail[-1] in ".!?\"'" else ".") + " " + text)
     cur.endEditBlock()
     edit.setTextCursor(cur)
@@ -70,7 +70,7 @@ class ProblemBox(QFrame):
         super().__init__(parent)
         self.setProperty("role", "notice")
         self.setProperty("severity", "warning")
-        self.setAttribute(Qt.WA_StyledBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         self.v = QVBoxLayout(self)
         self.v.setContentsMargins(8, 6, 6, 6)
         self.v.setSpacing(4)
@@ -106,7 +106,7 @@ class ProblemBox(QFrame):
             text = label(p["text"], severity="error" if p.get("error") else "warning")
             text.setWordWrap(True)
             text.setToolTip(p.get("tip", ""))
-            h.addWidget(mark, 0, Qt.AlignTop)
+            h.addWidget(mark, 0, Qt.AlignmentFlag.AlignTop)
             h.addWidget(text, 1)
             self.v.addLayout(h)
             bs = []

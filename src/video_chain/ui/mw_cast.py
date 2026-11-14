@@ -43,7 +43,7 @@ class CastMixin:
 
     def _selected_character(self) -> dict | None:
         item = self.cast_list.currentItem()
-        return T.character(self.tree, item.data(Qt.UserRole)) if item is not None and self.tree else None
+        return T.character(self.tree, item.data(Qt.ItemDataRole.UserRole)) if item is not None and self.tree else None
 
     def _mention_map(self) -> dict[str, list[str]]:
         """Every character (lower-case name) -> the clips whose prompt (with the style text) mentions @name. One look
@@ -301,7 +301,7 @@ class CastMixin:
             self.status.setText(str(e))
             return False
         try:
-            return dlg.crop() if dlg.exec() == QDialog.Accepted else False
+            return dlg.crop() if dlg.exec() == QDialog.DialogCode.Accepted else False
         finally:
             dlg.deleteLater()
 
@@ -369,7 +369,7 @@ class CastMixin:
         item = self.refs.currentItem()
         if item is None or not self._cast_edit_ok():
             return
-        rel = item.data(Qt.UserRole)
+        rel = item.data(Qt.ItemDataRole.UserRole)
         full = self.project / T.source_of(rel)
         whole = self._ref_word() == "picture"      # a place, object or style: its whole picture again, no window
         crop = None if whole else self.crop_face(str(full if full.is_file() else self.project / rel),
@@ -395,7 +395,7 @@ class CastMixin:
         item = self.refs.currentItem()
         if item is None or not self._cast_edit_ok():
             return
-        rel = item.data(Qt.UserRole)
+        rel = item.data(Qt.ItemDataRole.UserRole)
         before = self._done_clips()
         made = [n for n in before if n in self.tree.nodes and not self.tree.nodes[n].is_video
                 and rel in T.node_cast(self.tree.options, self.tree.nodes[n])["images"]]
@@ -419,7 +419,7 @@ class CastMixin:
 
     def _show_references(self, select: str | None = None):
         """The cast list (keeps the selected character), then the selected one's fields and pictures."""
-        cur = select or (self.cast_list.currentItem().data(Qt.UserRole) if self.cast_list.currentItem() else None)
+        cur = select or (self.cast_list.currentItem().data(Qt.ItemDataRole.UserRole) if self.cast_list.currentItem() else None)
         cast = T.cast_of(self.tree) if self.tree else []
         self.cast_list.blockSignals(True)
         self.cast_list.clear()
@@ -435,7 +435,7 @@ class CastMixin:
                 text = (f"@{c['name']}   {plural(n, 'picture')}" if n else
                         f"@{c['name']}   no picture yet") + f"   · {T.kind_of(c)}"
             item = QListWidgetItem(QIcon(pm) if pm else QIcon(), text)
-            item.setData(Qt.UserRole, c["name"])
+            item.setData(Qt.ItemDataRole.UserRole, c["name"])
             mentions = len(self._mentioning(c["name"], mention_map))
             item.setToolTip((c.get("desc") or "")
                             + f" ({mentions} clip{'s mention' if mentions != 1 else ' mentions'} it)")
@@ -488,7 +488,7 @@ class CastMixin:
         for k, rel in enumerate(c["images"] if c else [], start=1):
             pm = self._pixmap(self.project / rel) if self.project else None
             item = QListWidgetItem(QIcon(pm) if pm else QIcon(), f"{c['name']} {k}")
-            item.setData(Qt.UserRole, rel)
+            item.setData(Qt.ItemDataRole.UserRole, rel)
             item.setToolTip(rel)
             self.refs.addItem(item)
         self._update_ref_start_button()

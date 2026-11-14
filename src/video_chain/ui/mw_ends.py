@@ -47,7 +47,7 @@ class EndsMixin:
         dlg = PR.RefineDialog(self, text, kind, connect, self.qs, start_comfy=self.start_comfy, cast=cast,
                            pictures=pictures or [], seconds=seconds, start_image=start_image, loras=loras)
         try:
-            if dlg.exec() != QDialog.Accepted:
+            if dlg.exec() != QDialog.DialogCode.Accepted:
                 return None
             ideas = dlg.chosen_ideas() if hasattr(dlg, "chosen_ideas") else None
             return ideas if ideas else dlg.chosen()       # (a list: all ideas, for the image window's variations)
@@ -210,7 +210,7 @@ class EndsMixin:
         dlg = HandoverDialog(self, self.project / node.made["video"], f"Hand-over frame of clip #{T.short_id(nid)}",
                              T.handover_index(self.tree, node), min_frame=max(1, need - 1))
         try:
-            if dlg.exec() != QDialog.Accepted:
+            if dlg.exec() != QDialog.DialogCode.Accepted:
                 return
             frame = dlg.frame()
         finally:
@@ -316,7 +316,7 @@ class EndsMixin:
         if not dialog:
             return dlg
         try:
-            if dlg.exec() != QDialog.Accepted:
+            if dlg.exec() != QDialog.DialogCode.Accepted:
                 return None
             with media.scratch("end") as tmp:
                 png = Path(tmp) / f"{Path(video).stem}_f{dlg.slider.value()}.png"
@@ -426,7 +426,7 @@ class EndsMixin:
         if not dialog:
             return dlg
         try:
-            if dlg.exec() != QDialog.Accepted:
+            if dlg.exec() != QDialog.DialogCode.Accepted:
                 return None
             return self._keyframe_from_dialog(nid, dlg, at, index, own)
         finally:

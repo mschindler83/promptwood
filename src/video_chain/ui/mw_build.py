@@ -40,7 +40,7 @@ def _panel() -> tuple[QWidget, QVBoxLayout]:
 def _scrolled(w: QWidget) -> QScrollArea:
     sa = QScrollArea()
     sa.setWidgetResizable(True)
-    sa.setFrameShape(QFrame.NoFrame)
+    sa.setFrameShape(QFrame.Shape.NoFrame)
     sa.setWidget(w)
     return sa
 
@@ -52,7 +52,7 @@ class BuildMixin:
     def _build(self):
         shared = SimpleNamespace()          # what the sections of the build hand to each other
         self.resize(1560, 940)
-        shared.split = QSplitter(Qt.Horizontal, self)
+        shared.split = QSplitter(Qt.Orientation.Horizontal, self)
         shared.split.setChildrenCollapsible(False)
         self.setCentralWidget(shared.split)
         self.split = shared.split
@@ -131,7 +131,7 @@ class BuildMixin:
         sv = QVBoxLayout(sw)
         sv.setContentsMargins(10, 8, 10, 8)
         self.start_tile = StartTile(320, 180)
-        sv.addWidget(self.start_tile, 0, Qt.AlignHCenter)
+        sv.addWidget(self.start_tile, 0, Qt.AlignmentFlag.AlignHCenter)
         self.size_info = label("", level="tertiary")
         self.size_info.setWordWrap(True)
         sv.addWidget(self.size_info)
@@ -166,7 +166,7 @@ class BuildMixin:
         self.cast_list = QListWidget()
         self.cast_list.setIconSize(QSize(40, 40))
         self.cast_list.setFixedHeight(110)
-        self.cast_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.cast_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.cast_list.setToolTip("The characters of this video and the references for places, objects and a "
                                   "style. In a prompt write @Name (typing @ offers the names): the clip is made "
                                   "with exactly the faces and pictures it mentions. A clip that mentions nobody "
@@ -246,11 +246,11 @@ class BuildMixin:
             vrow.addWidget(b)
         iv.addWidget(self._voice_row)
         self.refs = QListWidget()
-        self.refs.setViewMode(QListWidget.IconMode)
+        self.refs.setViewMode(QListWidget.ViewMode.IconMode)
         self.refs.setIconSize(QSize(64, 64))
         self.refs.setFixedHeight(92)
-        self.refs.setMovement(QListWidget.Static)
-        self.refs.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.refs.setMovement(QListWidget.Movement.Static)
+        self.refs.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.refs.setToolTip("Face pictures of the selected character (up to 3, e.g. front and side): best a "
                              "sharp close-up of the face, without the scene around it")
         iv.addWidget(self.refs)
@@ -348,7 +348,7 @@ class BuildMixin:
         tv.setSpacing(6)
         self.track_list = QListWidget()
         self.track_list.setFixedHeight(96)
-        self.track_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.track_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.track_list.setToolTip("Audio tracks: music, speech or a background the clips play as their own sound "
                                    "(a clip's Sound: “Audio track: …”), on from clip to clip. "
                                    "Double-click to cut it again")
@@ -392,7 +392,7 @@ class BuildMixin:
         av.setSpacing(6)
         self.sounds = QListWidget()
         self.sounds.setFixedHeight(70)
-        self.sounds.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.sounds.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.sounds.setToolTip("Sound references: sounds the model listens to (a voice, a sound to copy, a beat). "
                                "In a clip's prompt the first one is <Audio 1>, the second "
                                "<Audio 2> ... Double-click to listen")
@@ -639,7 +639,7 @@ class BuildMixin:
         self.llm_model.setToolTip("The GGUF model file (found in the model folders; a path can be typed too)")
         for f in find_gguf_models():
             self.llm_model.addItem(f.name, str(f))
-            self.llm_model.setItemData(self.llm_model.count() - 1, str(f), Qt.ToolTipRole)
+            self.llm_model.setItemData(self.llm_model.count() - 1, str(f), Qt.ItemDataRole.ToolTipRole)
         self.llm_port = QSpinBox()
         self.llm_port.setRange(1024, 65535)
         self.llm_port.setValue(LLM_DEFAULT_PORT)
@@ -677,7 +677,7 @@ class BuildMixin:
         a.addRow("CivitAI site", self.civitai_site)
         crow = QHBoxLayout()
         self.civitai_key = QLineEdit()
-        self.civitai_key.setEchoMode(QLineEdit.Password)
+        self.civitai_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.civitai_key.setToolTip("Your CivitAI API key (civitai.com → Account settings → API Keys). With it CivitAI "
                                     "answers as your account, e.g. with the prompts of example images it holds back "
                                     "otherwise. Kept in the system keyring, never in a settings file; sent only to "
@@ -693,7 +693,7 @@ class BuildMixin:
         self._show_civitai_key()
         erow = QHBoxLayout()
         self.eleven_key = QLineEdit()
-        self.eleven_key.setEchoMode(QLineEdit.Password)
+        self.eleven_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.eleven_key.setToolTip("Your ElevenLabs API key (elevenlabs.io → Developers → API keys), for text to "
                                    "speech with ElevenLabs. Kept in the system keyring, never in a settings file or "
                                    "a project; sent only to ElevenLabs. ($ELEVENLABS_API_KEY wins when it is set.)")
@@ -734,7 +734,7 @@ class BuildMixin:
         r.setContentsMargins(10, 6, 10, 8)
         rrow = QHBoxLayout()
         self.runpod_key = QLineEdit()
-        self.runpod_key.setEchoMode(QLineEdit.Password)
+        self.runpod_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.runpod_key.setToolTip("Your RunPod API key (runpod.io → Settings → API Keys), for “Upscale on RunPod” "
                                    "in the export. Kept in the system keyring, never in a settings file or a "
                                    "project; sent only to RunPod. ($RUNPOD_API_KEY wins when it is set.)")
@@ -788,9 +788,9 @@ class BuildMixin:
 
     def _build_inspector_tabs(self, shared):
         """Build the left and the right tab widgets."""
-        pb = QDialogButtonBox(QDialogButtonBox.Close)
-        pb.button(QDialogButtonBox.Close).setAutoDefault(False)     # Enter in a field must not close it
-        pb.button(QDialogButtonBox.Close).setDefault(False)
+        pb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        pb.button(QDialogButtonBox.StandardButton.Close).setAutoDefault(False)     # Enter in a field must not close it
+        pb.button(QDialogButtonBox.StandardButton.Close).setDefault(False)
         pb.rejected.connect(self.prefs.reject)
         shared.prefs_v.addWidget(pb)
         for v in (shared.proj_v, shared.cast_v, shared.sound_v):
@@ -886,7 +886,7 @@ class BuildMixin:
         self.guide_panel.b_cast.clicked.connect(self._guide_cast)
         self.guide_panel.b_skip_cast.clicked.connect(lambda: self._guide_mark("no_cast"))
         self.guide_panel.b_write.clicked.connect(self._guide_write)
-        self.guide_panel.b_show_gen.clicked.connect(lambda: self.b_gen.setFocus(Qt.OtherFocusReason))
+        self.guide_panel.b_show_gen.clicked.connect(lambda: self.b_gen.setFocus(Qt.FocusReason.OtherFocusReason))
         self.guide_panel.hide()
         self.next_hint = NextHint()
         self.next_hint.b_next.clicked.connect(lambda: self.node_action("continue", self.target_id()))
@@ -951,11 +951,11 @@ class BuildMixin:
         self.card_stack = _CurrentStack()
         self.path_hint = label("", level="tertiary")
         self.path_hint.setWordWrap(True)
-        self.path_hint.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.path_hint.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         self.card_stack.addWidget(self.path_hint)
         card_scroll = QScrollArea()
         card_scroll.setWidgetResizable(True)
-        card_scroll.setFrameShape(QFrame.NoFrame)
+        card_scroll.setFrameShape(QFrame.Shape.NoFrame)
         card_scroll.setWidget(self.card_stack)
         ctv.addWidget(card_scroll, 1)
         self.inspector.insertTab(0, clip_tab, "Clip")
@@ -1013,7 +1013,7 @@ class BuildMixin:
         bv.setSpacing(0)
         bv.addWidget(shared.film_w)
         bv.addWidget(self.tabs, 1)
-        center = QSplitter(Qt.Vertical)
+        center = QSplitter(Qt.Orientation.Vertical)
         center.setChildrenCollapsible(False)
         center.addWidget(rp)
         center.addWidget(bottom)
@@ -1054,7 +1054,7 @@ class BuildMixin:
         tb.addSeparator()
         tb.addWidget(self.progress)
         spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         tb.addWidget(spacer)
         self.view_buttons = QButtonGroup(self)      # Simple | Advanced, always in sight (also in the View menu)
         self.b_simple = QPushButton("Simple")
@@ -1112,8 +1112,8 @@ class BuildMixin:
         for w in (*self._panels, self.prefs):
             guard_wheel(w)
         # plain keys act only while the graph (or a child) has the focus: in a list or a combo, Delete / F are theirs
-        self.graph.setFocusPolicy(Qt.StrongFocus)
+        self.graph.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         for sid, fn in (("graph_delete", lambda: self.node_action("delete", self.target_id())),
                         ("graph_fit", self.graph.fit)):
             sc = QShortcut(S.sequence(sid), self.graph, activated=fn)
-            sc.setContext(Qt.WidgetWithChildrenShortcut)
+            sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)

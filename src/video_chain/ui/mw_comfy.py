@@ -194,7 +194,7 @@ class ComfyMixin:
         """Wait (the window stays alive and says what it waits for) until the generator process has ended: it gets
         3 s to quit by itself, then is asked to terminate (a cloud worker ends its pod: long), then killed."""
         def over() -> bool:
-            return (p is None or p.state() == QProcess.NotRunning) and (also is None or also.is_set())
+            return (p is None or p.state() == QProcess.ProcessState.NotRunning) and (also is None or also.is_set())
         if over():
             return
         loop = QEventLoop(self)
@@ -211,9 +211,9 @@ class ComfyMixin:
             if over():
                 loop.quit()
         later_ms = 3000 + (45000 if cloud else 5000)
-        if p is not None and p.state() != QProcess.NotRunning:
-            later(3000, lambda: p.terminate() if p.state() != QProcess.NotRunning else None)
-            later(later_ms, lambda: p.kill() if p.state() != QProcess.NotRunning else None)
+        if p is not None and p.state() != QProcess.ProcessState.NotRunning:
+            later(3000, lambda: p.terminate() if p.state() != QProcess.ProcessState.NotRunning else None)
+            later(later_ms, lambda: p.kill() if p.state() != QProcess.ProcessState.NotRunning else None)
         later(later_ms + 3000, loop.quit)
         tick = QTimer(self)
         tick.timeout.connect(check)
@@ -223,7 +223,7 @@ class ComfyMixin:
                                                                if cloud else "") + " …", "", 0, 0, self)
         box.setCancelButton(None)
         box.setWindowTitle("Promptwood")
-        box.setWindowModality(Qt.WindowModal)
+        box.setWindowModality(Qt.WindowModality.WindowModal)
         box.show()
         loop.exec()
         box.close()
@@ -274,7 +274,7 @@ class ComfyMixin:
         if p is not None:                            # never leave the generator (and the model) behind
             self.proc = None
             p.finished.disconnect()
-            if p.state() == QProcess.Running:
+            if p.state() == QProcess.ProcessState.Running:
                 p.write(b'{"cmd": "quit", "free": true}\n')     # ComfyUI: give the memory back too
                 p.closeWriteChannel()
         self._wait_for_shutdown(p, cloud, freed)

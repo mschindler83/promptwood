@@ -126,7 +126,7 @@ class RefineDialog(QDialog):
                                 "LoRAs, their example prompts with the pictures they made, and everything else "
                                 "that is known of them")
         self.b_loras.setAutoRaise(True)
-        self.b_loras.setCursor(Qt.PointingHandCursor)
+        self.b_loras.setCursor(Qt.CursorShape.PointingHandCursor)
         self.b_loras.clicked.connect(lambda: self.show_loras())
         self._lora_row = QWidget()
         lrow = QHBoxLayout(self._lora_row)
@@ -210,7 +210,7 @@ class RefineDialog(QDialog):
         self.b_start.hide()
         self.b_start.clicked.connect(self._start_comfy)
         v.addWidget(self.buttons)
-        self.out.textChanged.connect(lambda: self.buttons.button(QDialogButtonBox.Ok).setEnabled(
+        self.out.textChanged.connect(lambda: self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(
             bool(self.out.toPlainText().strip()) and not self._busy))
         QShortcut(QKeySequence("Ctrl+Return"), self, activated=lambda: self.refine())
         guard_wheel(self)
@@ -264,9 +264,9 @@ class RefineDialog(QDialog):
             w.setVisible(ideas)
         self.b_all.setVisible(ideas)
         self.b_all.setEnabled(ideas and bool(self.ideas) and not self._busy)
-        self.buttons.button(QDialogButtonBox.Ok).setEnabled(not ideas and not self._busy
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(not ideas and not self._busy
                                                             and bool(self.out.toPlainText().strip()))
-        self.buttons.button(QDialogButtonBox.Ok).setToolTip("In Ideas mode: Use this on an idea, or Generate all"
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setToolTip("In Ideas mode: Use this on an idea, or Generate all"
                                                             if ideas else "")
         self._render_ideas()
         self.caps.setText(" · ".join(x for x in ("conversation" if chat else "", "sees pictures" if see else "") if x)
@@ -310,16 +310,16 @@ class RefineDialog(QDialog):
             b = QToolButton()
             b.setCheckable(True)
             b.setChecked(pic["on"])
-            b.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+            b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
             img = QImage(pic["path"])
             if not img.isNull():
-                b.setIcon(QIcon(QPixmap.fromImage(img.scaled(96, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation))))
+                b.setIcon(QIcon(QPixmap.fromImage(img.scaled(96, 64, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))))
                 b.setIconSize(QSize(96, 64))
             b.setText(pic["title"] if len(pic["title"]) <= 22 else pic["title"][:20] + "…")
             b.setToolTip(f"{pic['title']}\n{pic['path']}\nClick: the model sees it (on) or not (off); right-click: "
                          "remove")
             b.toggled.connect(lambda on, i=i: self.pictures[i].update(on=on))
-            b.setContextMenuPolicy(Qt.CustomContextMenu)
+            b.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
             b.customContextMenuRequested.connect(lambda _p, i=i: self._remove_picture(i))
             self.pics_row.addWidget(b)
         add = QToolButton()
@@ -389,7 +389,7 @@ class RefineDialog(QDialog):
         self.model.clear()
         for m in models:
             self.model.addItem(m["label"] + f"  —  {Path(m['file'].split(':', 1)[-1]).name}", m["file"])
-            self.model.setItemData(self.model.count() - 1, m["file"], Qt.ToolTipRole)
+            self.model.setItemData(self.model.count() - 1, m["file"], Qt.ItemDataRole.ToolTipRole)
         saved = self.qs.value("refinerModel", "", type=str) if self.qs is not None else ""
         i = self.model.findData(saved)
         self.model.setCurrentIndex(i if i >= 0 else 0)
@@ -692,7 +692,7 @@ class RefineDialog(QDialog):
                        else f"{len(text.split())} words. Edit it if you like, " + nxt.lower() + "or Use this."),
                       "warning" if lost else "")
         self._mode_changed()
-        self.buttons.button(QDialogButtonBox.Ok).setEnabled(bool(self.out.toPlainText().strip())
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(bool(self.out.toPlainText().strip())
                                                             and not self.ideas_mode())
 
     # ---- ideas from bullet points (image prompts)

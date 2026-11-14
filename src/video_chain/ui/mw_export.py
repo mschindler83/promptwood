@@ -116,7 +116,7 @@ class ExportMixin:
         if single is not None:
             dlg.setWindowTitle(f"Export {'video' if path[0].is_video else 'clip'} #{T.short_id(single)}")
         try:
-            if dlg.exec() != QDialog.Accepted:
+            if dlg.exec() != QDialog.DialogCode.Accepted:
                 return
             req = dlg.request()
         finally:
@@ -224,7 +224,7 @@ class ExportMixin:
             repolish(self.gpu)
 
         def not_started(err):                    # (no "finished" follows a process that never started)
-            if err == QProcess.FailedToStart:
+            if err == QProcess.ProcessError.FailedToStart:
                 failed.append(1)
                 self.gpu.setText("GPU: ?")
                 done()

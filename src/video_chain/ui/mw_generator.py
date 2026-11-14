@@ -277,7 +277,7 @@ class GeneratorMixin:
     def _send_job(self):
         if self._job is None or self.proc is None:
             return
-        if self.proc.state() != QProcess.Running:    # (it ended meanwhile: _finished starts a new one)
+        if self.proc.state() != QProcess.ProcessState.Running:    # (it ended meanwhile: _finished starts a new one)
             return
         self._job.sent = True
         self._worker_idle = False
@@ -313,7 +313,7 @@ class GeneratorMixin:
             return
         self._quit_frees = free
         self._worker_leaving = True                       # no new job for it (a new worker starts instead)
-        if self.proc.state() == QProcess.Running:
+        if self.proc.state() == QProcess.ProcessState.Running:
             self.proc.write(b'{"cmd": "quit", "free": true}\n' if free else b'{"cmd": "quit"}\n')
         self._kill_timer.start()
 
@@ -338,7 +338,7 @@ class GeneratorMixin:
         self._kill_timer.start()
 
     def _kill(self):
-        if self.proc is not None and self.proc.state() != QProcess.NotRunning:
+        if self.proc is not None and self.proc.state() != QProcess.ProcessState.NotRunning:
             self.proc.kill()
 
     def _read_out(self):
@@ -603,7 +603,7 @@ class GeneratorMixin:
                 self._note_failure(code)
 
     def _proc_error(self, err):
-        if err == QProcess.FailedToStart:
+        if err == QProcess.ProcessError.FailedToStart:
             # Qt sends no 'finished' for a process that never started: clean up here
             self._error = f"could not start {self._program()[0]}"
             p = self.proc

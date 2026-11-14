@@ -114,7 +114,7 @@ class ViewMixin:
     def _guide_cast(self):
         """Step 2: Cast & references, with New in focus (it adds a person or a place)."""
         self._show_left_tab(1)
-        self.b_char_new.setFocus(Qt.OtherFocusReason)
+        self.b_char_new.setFocus(Qt.FocusReason.OtherFocusReason)
         self.status.setText("Press New to add a person or a place, then give it pictures.")
 
     def _first_clip(self) -> T.Node | None:
@@ -132,7 +132,7 @@ class ViewMixin:
         self.focus_clip(first.id)
         card = self._card_of(first.id, PromptCard)
         if card is not None:
-            card.edit.setFocus(Qt.OtherFocusReason)
+            card.edit.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def show_guide(self, on: bool):
         """Hide guide / View → Getting started (stored in the app's settings)."""
@@ -166,7 +166,7 @@ class ViewMixin:
         if show and ready and not self._guide_ready:      # Generate is next: the keyboard focus goes there (not
             fw = QApplication.focusWidget()                 # away from a description being typed)
             if not isinstance(fw, (QPlainTextEdit, QLineEdit)):
-                self.b_gen.setFocus(Qt.OtherFocusReason)
+                self.b_gen.setFocus(Qt.FocusReason.OtherFocusReason)
         self._guide_ready = ready
         if len(self.tree.nodes) >= 2 and not self.qs.value("nextHintDone", False, type=bool):
             self.qs.setValue("nextHintDone", True)          # a second clip exists: the user knows how to go on
@@ -269,7 +269,7 @@ class ViewMixin:
     def show_shortcuts(self):
         """Help → Keyboard shortcuts: the table every window binds from (not modal: it stays beside the work)."""
         dlg = S.shortcuts_dialog(self)
-        dlg.setAttribute(Qt.WA_DeleteOnClose)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dlg.open()
 
     def apply_layout(self, name: str):

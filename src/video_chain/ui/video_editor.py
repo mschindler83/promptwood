@@ -48,7 +48,7 @@ class RangeBar(QWidget):
         super().__init__(parent)
         self.setMinimumHeight(42)
         self.setMouseTracking(True)
-        self.setFocusPolicy(Qt.StrongFocus)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAccessibleName("Range of the video: start, end and playhead")
         self.setToolTip("Drag the two handles to set the range. With the keyboard: Ctrl+Left / Ctrl+Right move the "
                         "start, Ctrl+Shift+Left / Right the end, one frame at a time.")
@@ -73,10 +73,10 @@ class RangeBar(QWidget):
     def paintEvent(self, _e):
         t = theme()
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
         h = self.height()
         track = QRectF(self.PAD, h / 2 - 5, self.width() - 2 * self.PAD, 10)
-        p.setPen(Qt.NoPen)
+        p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(t.bgSunken)
         p.drawRoundedRect(track, 4, 4)
         sel = QRectF(QPointF(self._x(self.start), track.top()), QPointF(self._x(self.end), track.bottom()))
@@ -97,9 +97,9 @@ class RangeBar(QWidget):
 
     def keyPressEvent(self, e):
         step = 1 / FPS
-        sign = {Qt.Key_Left: -1, Qt.Key_Right: 1}.get(e.key())
-        if sign and e.modifiers() & Qt.ControlModifier:
-            if e.modifiers() & Qt.ShiftModifier:
+        sign = {Qt.Key.Key_Left: -1, Qt.Key.Key_Right: 1}.get(e.key())
+        if sign and e.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            if e.modifiers() & Qt.KeyboardModifier.ShiftModifier:
                 self.end = min(self.duration, max(self.start + step, self.end + sign * step))
                 self.seek.emit(self.end)
             else:
@@ -112,7 +112,7 @@ class RangeBar(QWidget):
             super().keyPressEvent(e)
 
     def mousePressEvent(self, e):
-        if e.button() != Qt.LeftButton:
+        if e.button() != Qt.MouseButton.LeftButton:
             return
         x = e.position().x()
         self._drag = self._hit(x) or "pos"
@@ -123,7 +123,7 @@ class RangeBar(QWidget):
         if self._drag:
             self._move(x)
         else:
-            self.setCursor(Qt.SizeHorCursor if self._hit(x) else Qt.PointingHandCursor)
+            self.setCursor(Qt.CursorShape.SizeHorCursor if self._hit(x) else Qt.CursorShape.PointingHandCursor)
 
     def mouseReleaseEvent(self, _e):
         self._drag = None
@@ -186,7 +186,7 @@ class RangePlayerMixin:
             return
         from PySide6.QtMultimedia import QMediaPlayer
         self._before_play()
-        if self.player.playbackState() == QMediaPlayer.PlayingState:
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.player.pause()
         else:
             self._stop_at = None
@@ -211,7 +211,7 @@ class RangePlayerMixin:
 
     def _player_state(self, st):
         from PySide6.QtMultimedia import QMediaPlayer
-        self.b_play.setIcon(icon("pause" if st == QMediaPlayer.PlayingState else "play"))
+        self.b_play.setIcon(icon("pause" if st == QMediaPlayer.PlaybackState.PlayingState else "play"))
 
 
 class _Probed(QObject):
@@ -276,7 +276,7 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
 
         self.stack = QStackedWidget()
         self.placeholder = label("Choose a video.", level="tertiary")
-        self.placeholder.setAlignment(Qt.AlignCenter)
+        self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.placeholder.setMinimumHeight(260)
         self.stack.addWidget(self.placeholder)
         v.addWidget(self.stack, 1)
@@ -395,7 +395,7 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
         self.loading = on
         if on:
             self.info_label.setText(text)
-            self.buttons.button(QDialogButtonBox.Ok).setEnabled(False)
+            self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
             self.b_ref.setEnabled(False)
         else:
             self._update_enabled()
@@ -518,7 +518,7 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
             w.setEnabled(on)
         self.b_play.setEnabled(on and self._can_play())
         self.b_play_sel.setEnabled(on and self._can_play())
-        self.buttons.button(QDialogButtonBox.Ok).setEnabled(on and self.frames() >= 1)
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(on and self.frames() >= 1)
 
     # ---- face picture
     def set_reference_kind(self, name: str, kind: str) -> None:

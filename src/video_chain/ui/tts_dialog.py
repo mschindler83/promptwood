@@ -118,7 +118,7 @@ class VoiceTtsDialog(QDialog):
         self.b_make.setEnabled(ok and bool(self.text.text().strip()))
         self.b_voices.setEnabled(not self.busy)
         self.kind.setEnabled(not self.busy)
-        self.buttons.button(QDialogButtonBox.Cancel).setEnabled(not self.busy)   # (a thread is working for it)
+        self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setEnabled(not self.busy)   # (a thread is working for it)
 
     # ---- ElevenLabs voices
     def _load_voices(self):
@@ -209,5 +209,5 @@ class VoiceTtsDialog(QDialog):
 
 
 def run_dialog(dlg: VoiceTtsDialog) -> bool:
-    return dlg.exec() == QDialog.Accepted
+    return dlg.exec() == QDialog.DialogCode.Accepted
 

@@ -55,7 +55,7 @@ def read_scaled(path, box: QSize | int) -> tuple[QImage, QSize]:
     r.setAutoTransform(True)
     size = r.size()
     if size.isValid() and (size.width() > box.width() or size.height() > box.height()):
-        r.setScaledSize(size.scaled(box, Qt.KeepAspectRatio))
+        r.setScaledSize(size.scaled(box, Qt.AspectRatioMode.KeepAspectRatio))
     img = r.read()
     return (img if not img.isNull() else QImage()), size
 

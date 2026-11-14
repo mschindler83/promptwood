@@ -69,7 +69,7 @@ class PlaceholderHighlighter(QSyntaxHighlighter):
             f = QTextCharFormat()
             var = self.panel.variable(name)
             if var is None or not var.active():
-                f.setUnderlineStyle(QTextCharFormat.WaveUnderline)
+                f.setUnderlineStyle(QTextCharFormat.UnderlineStyle.WaveUnderline)
                 f.setUnderlineColor(theme().negative)
                 f.setToolTip(f"{{{name}}} has no values yet: add them in Variations")
             else:
@@ -78,7 +78,7 @@ class PlaceholderHighlighter(QSyntaxHighlighter):
                 bg.setAlpha(55)
                 f.setBackground(bg)
                 f.setForeground(c.lighter(125))
-                f.setUnderlineStyle(QTextCharFormat.SingleUnderline)          # (a cue besides the colour)
+                f.setUnderlineStyle(QTextCharFormat.UnderlineStyle.SingleUnderline)          # (a cue besides the colour)
                 f.setUnderlineColor(c)
                 f.setToolTip(f"Variable {{{name}}} (number {names.index(name) + 1 if name in names else 0})")
             f.setFontWeight(600)
@@ -94,9 +94,9 @@ class Pill(QFrame):
         super().__init__(parent)
         self.value, self.color = value, color
         self.setObjectName("pill")
-        self.setFrameShape(QFrame.NoFrame)
-        self.setCursor(Qt.PointingHandCursor)
-        self.setFocusPolicy(Qt.StrongFocus)      # (Space switches, F2 / Enter edits, Delete removes, Menu: weight)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)      # (Space switches, F2 / Enter edits, Delete removes, Menu: weight)
         self._look = None
         h = QHBoxLayout(self)
         h.setContentsMargins(8, 1, 2, 1)
@@ -138,42 +138,42 @@ class Pill(QFrame):
         border = QColor(c)
         border.setAlpha(255 if on else 90)
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.setPen(QPen(border, 1, Qt.SolidLine if on else Qt.DashLine))
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(QPen(border, 1, Qt.PenStyle.SolidLine if on else Qt.PenStyle.DashLine))
         p.setBrush(bg)
         r = self.rect().adjusted(0, 0, -1, -1)
         p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
         if self.hasFocus():                      # (the focus ring for keyboard users)
             p.setPen(QPen(theme().accent, 2))
-            p.setBrush(Qt.NoBrush)
+            p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRoundedRect(r.adjusted(1, 1, -1, -1), r.height() / 2, r.height() / 2)
         p.end()
 
     def keyPressEvent(self, e):                  # noqa: N802
         k = e.key()
-        if k == Qt.Key_Space:
+        if k == Qt.Key.Key_Space:
             self.value.on = not self.value.on
             self.refresh()
             self.changed.emit()
-        elif k in (Qt.Key_F2, Qt.Key_Return, Qt.Key_Enter):
+        elif k in (Qt.Key.Key_F2, Qt.Key.Key_Return, Qt.Key.Key_Enter):
             self.edit()
-        elif k in (Qt.Key_Delete, Qt.Key_Backspace):
+        elif k in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             self.removed.emit(self)
-        elif k == Qt.Key_Menu:
+        elif k == Qt.Key.Key_Menu:
             self._menu(self.mapToGlobal(self.rect().bottomLeft()))
         else:
             super().keyPressEvent(e)
 
     def mousePressEvent(self, e):                # noqa: N802
-        if e.button() == Qt.LeftButton:
+        if e.button() == Qt.MouseButton.LeftButton:
             self.value.on = not self.value.on
             self.refresh()
             self.changed.emit()
-        elif e.button() == Qt.RightButton:
+        elif e.button() == Qt.MouseButton.RightButton:
             self._menu(e.globalPosition().toPoint())
 
     def mouseDoubleClickEvent(self, e):          # noqa: N802
-        if e.button() == Qt.LeftButton:
+        if e.button() == Qt.MouseButton.LeftButton:
             self.value.on = not self.value.on    # (the first click of the double-click switched it)
             self.edit(notify=False)              # (the dialog first: a rebuild meanwhile would delete this pill)
             self.changed.emit()                  # once, edited or cancelled
@@ -298,7 +298,7 @@ class VariableCard(QFrame):
         lay.addWidget(box)
         bb, _ok = button_row(dlg, "Add")
         lay.addWidget(bb)
-        if dlg.exec() == QDialog.Accepted:
+        if dlg.exec() == QDialog.DialogCode.Accepted:
             text = "\n".join(x for x in box.toPlainText().splitlines() if not x.strip().startswith("#"))
             self.add_values(V.split_values(text))
         dlg.deleteLater()
@@ -390,7 +390,7 @@ class VariationsPanel(QFrame):
         self.on.toggled.connect(lambda _on: self._rebuild())
         head.addWidget(self.on)
         self.summary = label("", level="tertiary")
-        self.summary.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.summary.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         head.addWidget(self.summary, 1)
         b_new = icon_button("plus", "New variable: a name for {name}, written into the prompt at the cursor")
         b_new.clicked.connect(lambda: self.new_variable())

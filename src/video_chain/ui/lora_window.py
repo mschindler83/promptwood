@@ -60,22 +60,22 @@ class ExampleCard(QFrame):
         h.setSpacing(10)
         self.picture = QLabel()
         self.picture.setFixedSize(PICTURE, PICTURE)
-        self.picture.setAlignment(Qt.AlignCenter)
+        self.picture.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.picture.setWordWrap(True)
         self.picture.setProperty("level", "tertiary")
-        h.addWidget(self.picture, 0, Qt.AlignTop)
+        h.addWidget(self.picture, 0, Qt.AlignmentFlag.AlignTop)
         v = QVBoxLayout()
         v.setSpacing(4)
         if told:
             v.addWidget(label("Told to the language model in this refine", severity="positive"))
         self.prompt = QLabel(ex["prompt"])
         self.prompt.setWordWrap(True)
-        self.prompt.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        self.prompt.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard)
         v.addWidget(self.prompt)
         if ex["negative"]:
             neg = label("Negative: " + ex["negative"], level="tertiary")
             neg.setWordWrap(True)
-            neg.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            neg.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             v.addWidget(neg)
         item = ex["item"]
         facts = [x for x in ("video" if lora_pictures.is_video(item) else "picture",
@@ -132,8 +132,8 @@ class ExampleCard(QFrame):
         if img.isNull():
             return False
         self.picture.setText("")
-        self.picture.setPixmap(QPixmap.fromImage(img.scaled(PICTURE, PICTURE, Qt.KeepAspectRatio,
-                                                            Qt.SmoothTransformation)))
+        self.picture.setPixmap(QPixmap.fromImage(img.scaled(PICTURE, PICTURE, Qt.AspectRatioMode.KeepAspectRatio,
+                                                            Qt.TransformationMode.SmoothTransformation)))
         return True
 
 
@@ -188,7 +188,7 @@ class LoraWindow(QDialog):
         self._sig.picture.connect(self._picture)
 
         v = QVBoxLayout(self)
-        split = QSplitter(Qt.Horizontal)
+        split = QSplitter(Qt.Orientation.Horizontal)
         left = QWidget()
         lv = QVBoxLayout(left)
         lv.setContentsMargins(0, 0, 0, 0)
@@ -255,7 +255,7 @@ class LoraWindow(QDialog):
         ev.addWidget(self.count)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
-        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.box = QWidget()
         self.box_v = QVBoxLayout(self.box)
         self.box_v.setContentsMargins(0, 0, 6, 0)
@@ -339,8 +339,8 @@ class LoraWindow(QDialog):
 
         for path, text in self.loras:
             it = QListWidgetItem(text)
-            it.setData(Qt.UserRole, path)
-            it.setData(Qt.UserRole + 1, text)
+            it.setData(Qt.ItemDataRole.UserRole, path)
+            it.setData(Qt.ItemDataRole.UserRole + 1, text)
             it.setToolTip(path)
             self.list.addItem(it)
         self._known_of: dict[str, dict] = {}
@@ -357,7 +357,7 @@ class LoraWindow(QDialog):
     # ---- the list
     def _select(self, path: str):
         for i in range(self.list.count()):
-            if self.list.item(i).data(Qt.UserRole) == path:
+            if self.list.item(i).data(Qt.ItemDataRole.UserRole) == path:
                 self.list.setCurrentRow(i)
                 return
 
@@ -374,7 +374,7 @@ class LoraWindow(QDialog):
         """The list's choice changed: ask about unsaved edits first, then show the LoRA when the keys rest."""
         if self._reverting or cur is None:
             return
-        path = cur.data(Qt.UserRole)
+        path = cur.data(Qt.ItemDataRole.UserRole)
         if path != self.path and not self._leave_ok():
             self._pending = None
             self._pick_timer.stop()
@@ -410,8 +410,8 @@ class LoraWindow(QDialog):
         self._known_of[k["path"]] = k
         for i in range(self.list.count()):
             it = self.list.item(i)
-            if it.data(Qt.UserRole) == k["path"]:
-                it.setText(f"{it.data(Qt.UserRole + 1)}\n   {lora_notes.known_text(k)}")
+            if it.data(Qt.ItemDataRole.UserRole) == k["path"]:
+                it.setText(f"{it.data(Qt.ItemDataRole.UserRole + 1)}\n   {lora_notes.known_text(k)}")
                 it.setToolTip(f"{k['path']}\n{k['name']}" + (f" (for {k['base']})" if k["base"] else ""))
         ks = list(self._known_of.values())
         if len(ks) == len({p for p, _l in self.loras}):
@@ -424,7 +424,7 @@ class LoraWindow(QDialog):
         words = text.lower().split()
         for i in range(self.list.count()):
             it = self.list.item(i)
-            hay = (it.text() + " " + str(it.data(Qt.UserRole))).lower()
+            hay = (it.text() + " " + str(it.data(Qt.ItemDataRole.UserRole))).lower()
             it.setHidden(not all(w in hay for w in words))
 
     # ---- one LoRA
@@ -554,11 +554,11 @@ class LoraWindow(QDialog):
 
     def _ask_unsaved(self) -> str:
         """"save", "discard" or "cancel": what to do with the note and remarks typed but not kept."""
-        box = QMessageBox(QMessageBox.Question, "LoRAs", "The note or remarks of this LoRA are not kept yet.",
-                          QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel, self)
-        box.setDefaultButton(QMessageBox.Save)
+        box = QMessageBox(QMessageBox.Icon.Question, "LoRAs", "The note or remarks of this LoRA are not kept yet.",
+                          QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel, self)
+        box.setDefaultButton(QMessageBox.StandardButton.Save)
         got = box.exec()
-        return "save" if got == QMessageBox.Save else "discard" if got == QMessageBox.Discard else "cancel"
+        return "save" if got == QMessageBox.StandardButton.Save else "discard" if got == QMessageBox.StandardButton.Discard else "cancel"
 
     def _leave_ok(self) -> bool:
         """True when the shown LoRA may be left: nothing unsaved, or kept / thrown away as the user chose."""

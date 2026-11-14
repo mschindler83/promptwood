@@ -150,7 +150,7 @@ def _icon_pixmap(name: str, px: int, rgba: int, dpr: float) -> QPixmap:
     tint = QColor.fromRgba(rgba)
     r = QSvgRenderer(QByteArray(tinted_svg(name, tint, px)))
     pm = QPixmap(round(px * dpr), round(px * dpr))
-    pm.fill(Qt.transparent)
+    pm.fill(Qt.GlobalColor.transparent)
     if r.isValid():
         p = QPainter(pm)
         r.render(p, QRectF(0, 0, pm.width(), pm.height()))
@@ -214,11 +214,11 @@ class ThemeManager:
         self._fonts: tuple[str, str] | None = None       # (UI family, mono family), registered once
 
     def _icon_file(self, name: str, c: QColor) -> str:
-        d = Path(QStandardPaths.writableLocation(QStandardPaths.CacheLocation)) / "theme-icons"
+        d = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.CacheLocation)) / "theme-icons"
         d.mkdir(parents=True, exist_ok=True)
         svg = tinted_svg(name, c, 32)
         # the name carries a hash of the content: a changed icon is a new file, never the stale one
-        f = d / f"{name}_{c.name(QColor.HexArgb)[1:]}_{zlib.crc32(svg):08x}.svg"
+        f = d / f"{name}_{c.name(QColor.NameFormat.HexArgb)[1:]}_{zlib.crc32(svg):08x}.svg"
         if not f.exists():
             f.write_bytes(svg)
         return f.as_posix()
@@ -265,7 +265,7 @@ class ThemeManager:
     @staticmethod
     def palette(t: Theme) -> QPalette:
         p = QPalette()
-        groups = (QPalette.Active, QPalette.Inactive, QPalette.Disabled)
+        groups = (QPalette.ColorGroup.Active, QPalette.ColorGroup.Inactive, QPalette.ColorGroup.Disabled)
 
         def all_(role, c):
             for g in groups:
@@ -293,9 +293,9 @@ class ThemeManager:
         all_(R.Dark, t.bgSunken)
         all_(R.Shadow, t.bgApp)
         for role in (R.Text, R.ButtonText, R.WindowText):
-            p.setColor(QPalette.Disabled, role, t.textDisabled)
-        p.setColor(QPalette.Disabled, R.Button, t.bgRaised)
-        p.setColor(QPalette.Inactive, R.Highlight, t.sel_inactive())
+            p.setColor(QPalette.ColorGroup.Disabled, role, t.textDisabled)
+        p.setColor(QPalette.ColorGroup.Disabled, R.Button, t.bgRaised)
+        p.setColor(QPalette.ColorGroup.Inactive, R.Highlight, t.sel_inactive())
         return p
 
     def apply(self, app: QApplication) -> None:
@@ -315,7 +315,7 @@ class ThemeManager:
         t = self.theme
         f = QFont(t.uiFamily)
         f.setPixelSize(t.font.body)
-        f.setHintingPreference(QFont.PreferNoHinting)
+        f.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
         for tag, on in ((b"tnum", 1), (b"cv11", 1), (b"ss03", 1)):
             try:
                 f.setFeature(QFont.Tag(tag.decode()), on)

@@ -44,14 +44,8 @@ faulthandler_timeout = 50
 [tool.mypy]
 python_version = "3.12"
 files = ["src/video_chain", "comfy_nodes"]
-# the ui/ package is being restructured by another agent; it removes this line when it is done
-exclude = ["^src/video_chain/ui/"]
 ignore_missing_imports = true
 warn_unused_ignores = true
 no_implicit_optional = true
 check_untyped_defs = true
 
-# ui/ is imported by non-UI modules, so "exclude" alone does not silence it; the ui agent removes this override too
-[[tool.mypy.overrides]]
-module = ["video_chain.ui", "video_chain.ui.*"]
-ignore_errors = true

@@ -61,7 +61,7 @@ class ResultsMixin:
             del self._thumbs[png]
         if self.results.count():
             k = next((i for i in range(self.results.count())
-                      if self.results.item(i).data(Qt.UserRole)[0] == select), 0)
+                      if self.results.item(i).data(Qt.ItemDataRole.UserRole)[0] == select), 0)
             self.results.blockSignals(True)            # (shown once below, not also through the signal)
             self.results.setCurrentRow(k)
             self.results.blockSignals(False)
@@ -86,7 +86,7 @@ class ResultsMixin:
     def _strip_item(self, png: str, meta: ResultRecord, ns: int) -> QListWidgetItem:
         """A strip item for a result; its thumbnail is asked for unless it is there or was asked (or failed)."""
         it = QListWidgetItem(self._strip_icon(png, meta), "")
-        it.setData(Qt.UserRole, (png, meta))
+        it.setData(Qt.ItemDataRole.UserRole, (png, meta))
         it.setToolTip(meta.get("prompt", Path(png).name))
         self._strip_items[png] = it
         if self._thumbs.get(png, (None,))[0] != ns and (png, ns) not in self._requested \
@@ -129,7 +129,7 @@ class ResultsMixin:
     def _strip_selection(self, cur, prev):
         for it, on in ((prev, False), (cur, True)):
             if it is not None:
-                png, meta = it.data(Qt.UserRole)
+                png, meta = it.data(Qt.ItemDataRole.UserRole)
                 it.setIcon(self._strip_icon(png, meta, on))
 
     def _thumb_ready(self, png: str, ns: int, img: QImage):
@@ -141,7 +141,7 @@ class ResultsMixin:
         self._thumbs[png] = (ns, pix)
         it = self._strip_items.get(png)
         if it is not None:
-            it.setIcon(self._strip_icon(png, it.data(Qt.UserRole)[1], it is self.results.currentItem()))
+            it.setIcon(self._strip_icon(png, it.data(Qt.ItemDataRole.UserRole)[1], it is self.results.currentItem()))
         self.gallery.set_thumb(png, pix)
 
     def set_view(self, view: str, remember: bool = True):
@@ -171,7 +171,7 @@ class ResultsMixin:
 
     def _select_png(self, png: str):
         for i in range(self.results.count()):
-            if self.results.item(i).data(Qt.UserRole)[0] == png:
+            if self.results.item(i).data(Qt.ItemDataRole.UserRole)[0] == png:
                 self.results.setCurrentRow(i)
                 return
 
@@ -207,8 +207,8 @@ class ResultsMixin:
         else:                                          # in place: no rebuild, the view stays where it is
             for i in range(self.results.count()):
                 it = self.results.item(i)
-                if it.data(Qt.UserRole)[0] == png:
-                    it.setData(Qt.UserRole, (png, meta))
+                if it.data(Qt.ItemDataRole.UserRole)[0] == png:
+                    it.setData(Qt.ItemDataRole.UserRole, (png, meta))
                     it.setIcon(self._strip_icon(png, meta, it is self.results.currentItem()))
             self.gallery.update_thumb(png, meta)
             if sel is not None and sel[0] == png:
@@ -227,7 +227,7 @@ class ResultsMixin:
         it = self.results.currentItem()
         if it is None:
             return None
-        png, meta = it.data(Qt.UserRole)
+        png, meta = it.data(Qt.ItemDataRole.UserRole)
         return png, edits.read_meta(png) or meta
 
     def _show_selected(self):

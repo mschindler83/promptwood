@@ -73,7 +73,7 @@ def shown(id: str) -> str:
     """The key as the user's platform writes it (a tooltip's text)."""
     s = keys(id)
     q = QKeySequence(s)
-    return q.toString(QKeySequence.NativeText) if " / " not in s and not q.isEmpty() else s
+    return q.toString(QKeySequence.SequenceFormat.NativeText) if " / " not in s and not q.isEmpty() else s
 
 
 def tip(text: str, id: str) -> str:

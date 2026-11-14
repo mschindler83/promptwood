@@ -80,7 +80,7 @@ class WaveBar(RangeBar):
     def paintEvent(self, e):
         t = theme()
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
         h, w = self.height(), self.width() - 2 * self.PAD
         p.fillRect(QRectF(self.PAD, 4, w, h - 8), t.bgSunken)
         x0, x1 = self._x(self.start), self._x(self.end)
@@ -94,7 +94,7 @@ class WaveBar(RangeBar):
                 p.setPen(QPen(t.accent if inside else t.textTertiary, max(1.0, w / n)))
                 p.drawLine(QPointF(x, mid - v * (mid - 8)), QPointF(x, mid + v * (mid - 8)))
         for x in (x0, x1):
-            p.setPen(Qt.NoPen)
+            p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(t.accent)
             p.drawRoundedRect(QRectF(x - 3, 2, 6, h - 4), 3, 3)
         p.setPen(QPen(t.textPrimary, 2))
@@ -278,7 +278,7 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
         self._pending = (str(file), start, end)
         self.loading = True
         self.info_label.setText(f"Reading {Path(file).name} …")
-        self.buttons.button(QDialogButtonBox.Ok).setEnabled(False)
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
 
         def work():
             try:
@@ -368,8 +368,8 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
         self.b_play.setEnabled(on and self._can_play())
         self.b_play_sel.setEnabled(on and self._can_play())
         long = self.end - self.start >= AUDIO_REF_MIN - 1e-6
-        self.buttons.button(QDialogButtonBox.Ok).setEnabled(on and long and not self.clean_busy)
-        self.buttons.button(QDialogButtonBox.Cancel).setEnabled(not self.clean_busy)   # (its thread is writing)
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(on and long and not self.clean_busy)
+        self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setEnabled(not self.clean_busy)   # (its thread is writing)
         self.b_clean.setEnabled(on and long and not self.clean_busy and self._isolate is not None)
         self.b_clean_play.setEnabled(self.clean is not None and self.want_player and not self.clean_busy)
         self.use_clean.setEnabled(self.clean is not None and not self.clean_busy)
@@ -487,8 +487,8 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
             self.clean_player = QMediaPlayer(self)
             self.clean_player.setAudioOutput(self.clean_audio)
             self.clean_player.playbackStateChanged.connect(
-                lambda st: self.b_clean_play.setText("Stop" if st == QMediaPlayer.PlayingState else "Play cleaned"))
-        if self.clean_player.playbackState() == QMediaPlayer.PlayingState:
+                lambda st: self.b_clean_play.setText("Stop" if st == QMediaPlayer.PlaybackState.PlayingState else "Play cleaned"))
+        if self.clean_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.clean_player.stop()
             return
         if self.player is not None:

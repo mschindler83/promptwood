@@ -343,17 +343,17 @@ class FilmMixin:
         table = QTableWidget(len(names), len(rows))
         table.setHorizontalHeaderLabels([f"{k}  {title}" for k, (title, _m) in enumerate(rows, start=1)])
         table.setVerticalHeaderLabels([f"@{n}" for n in names])
-        table.setEditTriggers(QTableWidget.NoEditTriggers)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         sym = {"face": "●", "voice": "♪", "face+voice": "●♪", "picture": "◆"}
         for c, (_title, marks) in enumerate(rows):
             for r, n in enumerate(names):
                 item = QTableWidgetItem(sym.get(marks.get(n, ""), ""))
-                item.setTextAlignment(Qt.AlignCenter)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 table.setItem(r, c, item)
         table.resizeColumnsToContents()
         v.addWidget(table)
         v.addWidget(label("● face   ◆ picture (a place, object or style)   ♪ speaks with its voice", level="tertiary"))
-        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(dlg.reject)
         v.addWidget(buttons)
         dlg.resize(min(900, 160 + 120 * len(rows)), min(600, 140 + 30 * len(names)))

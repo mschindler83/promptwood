@@ -285,12 +285,12 @@ class InspectorMixin:
         elif action in ("cast", "cast_new"):
             self._show_left_tab(1)
             if action == "cast_new":
-                self.b_char_new.setFocus(Qt.OtherFocusReason)
+                self.b_char_new.setFocus(Qt.FocusReason.OtherFocusReason)
                 self.status.setText("Press New to add a person or a place (its name is what you write after @).")
         elif action.startswith("cast:"):
             self._show_left_tab(1)
             self._show_references(select=action[5:])
-            self.b_ref_add.setFocus(Qt.OtherFocusReason)
+            self.b_ref_add.setFocus(Qt.FocusReason.OtherFocusReason)
             self.status.setText(f"Add a picture of @{action[5:]}: Image…, Start image or Selected clip.")
         elif action == "sounds":
             self._show_left_tab(2)
@@ -302,13 +302,13 @@ class InspectorMixin:
                 self.view.reveal(t)
             self.inspector.setCurrentWidget(self.proj_scroll)
             QTimer.singleShot(0, lambda: self.proj_scroll.ensureWidgetVisible(self.turbo_lora, 0, 40))
-            self.turbo_lora.setFocus(Qt.OtherFocusReason)
+            self.turbo_lora.setFocus(Qt.FocusReason.OtherFocusReason)
         elif action in ("sound", "carry", "loras") and card is not None:
             w = {"sound": card.src_sound, "carry": card.guide, "loras": card.loras}[action]
             if action != "sound":
                 self.view.reveal((card.link_form, w))         # (an advanced setting: shown in Simple until a switch)
             self.focus_clip(nid)
-            w.setFocus(Qt.OtherFocusReason)
+            w.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _sent_guess(self, n: T.Node, use: dict) -> str:
         """The prompt the model gets, from the clip alone (when clip_inputs cannot be worked out)."""

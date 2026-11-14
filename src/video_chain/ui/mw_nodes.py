@@ -130,7 +130,7 @@ class NodeMixin:
             new = self.tree.add(node.id if node else None, "")
         elif action == "variants" and node is not None:
             dlg = VariantsDialog(self, node)
-            if dlg.exec() == QDialog.Accepted:
+            if dlg.exec() == QDialog.DialogCode.Accepted:
                 self.create_variants(node.id, dlg.count.value(), dlg.generate.isChecked(),
                                      strength_steps=dlg.strength_steps(), keep_seed=dlg.keep_seed())
             return

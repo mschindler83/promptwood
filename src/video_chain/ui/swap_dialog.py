@@ -39,8 +39,8 @@ def letterbox(src: str, dest, size: int, crop: tuple[int, int, int] | None = Non
     if crop is not None:
         x, y, side = crop
         img = img.copy(int(x), int(y), int(side), int(side))
-    fit = img.convertToFormat(QImage.Format_RGB32).scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-    out = QImage(size, size, QImage.Format_RGB32)
+    fit = img.convertToFormat(QImage.Format.Format_RGB32).scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+    out = QImage(size, size, QImage.Format.Format_RGB32)
     out.fill(QColor(0, 0, 0))
     p = QPainter(out)
     p.drawImage((size - fit.width()) // 2, (size - fit.height()) // 2, fit)
@@ -298,7 +298,7 @@ class SwapDialog(QDialog):
             return
         x1, y1, x2, y2 = (v * self.player.scale() for v in self.boxes[k])
         p = QPainter(img)
-        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setPen(QPen(theme().negative, max(2, img.width() // 300)))
         p.setBrush(QColor(255, 40, 40, 70))
         p.drawEllipse(QRectF(x1, y1, x2 - x1, y2 - y1))
@@ -406,7 +406,7 @@ class SwapDialog(QDialog):
         except ValueError:
             return
         try:
-            if dlg.exec() == QDialog.Accepted:
+            if dlg.exec() == QDialog.DialogCode.Accepted:
                 self.ref_crop = dlg.crop()
                 self.head_crop.setChecked(self.ref_crop is not None)
                 self._show_reference()
@@ -418,7 +418,7 @@ class SwapDialog(QDialog):
             self.ref_tile.clear_frame("Choose a picture of the person")
             self.crop_info.setText("")
             return
-        img = QImage(str(self.ref_png)).convertToFormat(QImage.Format_ARGB32)
+        img = QImage(str(self.ref_png)).convertToFormat(QImage.Format.Format_ARGB32)
         crop = self.ref_crop if self.head_crop.isChecked() else None
         if crop is not None:
             x, y, side = crop
