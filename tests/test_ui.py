@@ -4295,7 +4295,7 @@ def test_continue_the_clip_before_on_the_card(app, win, tmp_path, image):
     dlg.deleteLater()
     win.set_simple(True)                                                 # Simple: hidden, the note counts it
     card = next(c for c in win.cards if c.nid == ids[1])
-    assert _row_hidden(card._link, card.cont) and card.adv_note.text.text() == "1 advanced setting is active:"
+    assert _row_hidden(card.link_form, card.cont) and card.adv_note.text.text() == "1 advanced setting is active:"
     win.set_simple(False)
     win.prompt_format.setCurrentIndex(win.prompt_format.findData("classic"))   # set, but classic: no effect
     flush(app, win)
@@ -4367,13 +4367,13 @@ def test_simple_view_hides_the_expert_controls_also_on_rebuilt_cards(app, win, t
     for w in (card.seed, card.b_seed, card.seed_label, card.steps, card.chips.model_chip, card.chips.b_prompt):
         assert w.isHidden(), w
     for f in (card.loras, card.guide, card.keys_row, card.hand_row):
-        assert _row_hidden(card._link, f)
+        assert _row_hidden(card.link_form, f)
     for w in (card.edit, card.cam_move, card.b_end, card.length, card.b_variant, card.b_more, card.b_refine,
               card.settings_toggle):
         assert not w.isHidden(), w
     win._rebuild_path()                                                   # new cards: in the current view at once
     new = win.cards[-1]
-    assert new is not card and new.seed.isHidden() and _row_hidden(new._link, new.loras)
+    assert new is not card and new.seed.isHidden() and _row_hidden(new.link_form, new.loras)
     win.speed.setCurrentIndex(win.speed.findData("turbo"))                # the app shows the turbo rows: Simple wins
     assert _row_hidden(c, win.turbo_lora) and _row_hidden(c, win._turbo_row)
     win.speed.setCurrentIndex(win.speed.findData("normal"))
@@ -4384,7 +4384,7 @@ def test_simple_view_hides_the_expert_controls_also_on_rebuilt_cards(app, win, t
     win.act_advanced.trigger()
     assert seen == [False] and not win.simple and win.qs.value("viewMode") == "advanced"
     new = win.cards[-1]
-    assert not new.seed.isHidden() and not _row_hidden(new._link, new.loras) and not _row_hidden(c, win.steps)
+    assert not new.seed.isHidden() and not _row_hidden(new.link_form, new.loras) and not _row_hidden(c, win.steps)
     assert new.chips.model_chip is not None and not new.chips.model_chip.isHidden()
     assert _row_hidden(c, win.turbo_lora)                                 # not turbo: hidden by the app itself
     assert win.steps.value() == steps_before and win.tabs.isTabVisible(win.tabs.indexOf(win.log))
