@@ -1,4 +1,4 @@
-"""A film: scenes in an order. Each scene is a project as tree.py knows it (its own tree.json, start image and
+"""A film: scenes in an order. Each scene is a project as tree/ knows it (its own tree.json, start image and
 clips); the film folder is the first scene, further scenes live in scenes/<id>/. film.json (written once there is
 more than one scene) holds their order and titles.
 

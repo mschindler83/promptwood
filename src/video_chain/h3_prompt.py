@@ -27,7 +27,7 @@ with "overall_soundscape:" and / or "non_diegetic_music:" (either order; a label
 after it). They are cut off the body and fill those fields; a missing one gets DEFAULT_SOUNDSCAPE, and music N/A or,
 when the body itself talks about music (talks_about_music), MUSIC_IN_SHOTS, so the default never contradicts it.
 
-The contract with the caller (tree.py), compose(body, ...):
+The contract with the caller (tree/), compose(body, ...):
   body        the clip's text as the model should read it, BEFORE any tag is put in: the project's style prefix,
               the user's prompt (camera #tokens expanded), the style suffix (full_prompt). The user's trailing sound
               lines must be split off the user's prompt first (split_sound_sections) and handed over as
@@ -91,7 +91,7 @@ DEFAULT_SOUNDSCAPE = "Natural ambient sound that fits the scene."
 MUSIC_IN_SHOTS = "As described in the shots."
 NO_MUSIC = "N/A"
 
-# the same patterns as tree.py (a test keeps them equal); copied so this module stays free of tree.py
+# the same patterns as tree/ (a test keeps them equal); copied so this module stays free of tree/
 MENTION = re.compile(r"(?<![\w@])@(\w[\w-]*)")
 SAID_BY = re.compile(r"[ \t]*,?[ \t]*(says|said|asks|asked|answers|answered|replies|replied|whispers|whispered|"
                      r"shouts|shouted|calls|called|adds|added|cries|cried|murmurs|murmured|mutters|muttered|laughs|"

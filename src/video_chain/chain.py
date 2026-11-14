@@ -2,7 +2,7 @@
 clip before. Writes every clip on its own and all of them joined into one video.
 
 This module knows nothing about the model: a generator object makes one clip from (prompt, start image, seed) and
-saves the clip's last frame as a lossless PNG. The MiniMax-H3 generator (through ComfyUI) lives in comfy.py.
+saves the clip's last frame as a lossless PNG. The MiniMax-H3 generator (through ComfyUI) lives in comfy/.
 
 Output folder:
   start.png          the reference image as given (converted to PNG)
@@ -726,7 +726,7 @@ def keep_copy(root: Path, f: Path) -> bool:
         return False
 
 
-atomic_write_text = media.atomic_write_text     # (kept here: tree.py and others call it as chain.atomic_write_text)
+atomic_write_text = media.atomic_write_text     # (kept here: tree/ and others call it as chain.atomic_write_text)
 
 
 def replace_kept(root: Path, target: Path, write: Callable[[Path], None]) -> None:

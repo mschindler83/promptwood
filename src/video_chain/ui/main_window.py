@@ -3,7 +3,7 @@ before it; any clip can be continued in several ways (branches). A path from the
 Real videos can be put into the chain too (a range of a file): a generated clip before one ends at its first frame,
 one after it starts from its last frame.
 
-The project folder holds tree.json, start.png and the clips (see tree.py). Clips are rendered by ComfyUI; a small
+The project folder holds tree.json, start.png and the clips (see tree/). Clips are rendered by ComfyUI; a small
 worker process (python -m video_chain --serve) talks to it and reports '@@ {json}' events; Stop ends that process
 and cancels the clip in ComfyUI.
 """
@@ -92,6 +92,10 @@ LLM_MODEL_DIRS = (config.hf_cache(), Path.home() / ".cache" / "huggingface" / "h
 CLOSE_GRACE = 3.0          # seconds llama-server gets to end after SIGTERM when the window closes
 CHAT_HINTS = ("instruct", "chat", "-it-", "-it.", "_it_", "abliterated", "uncensored")
 MAX_RECENT = 10
+UNLOAD_TIMEOUT = 10        # seconds ComfyUI is given to answer "unload your models"
+VRAM_POLL_SECONDS = 0.5    # how often the free VRAM is looked at while ComfyUI lets go
+AUDIO_REF_RANGE = f"{T.AUDIO_REF_MIN:g}-{T.AUDIO_REF_TOTAL:g} s"   # what one sound reference may last
+_SELECTED = object()         # "the selected character" as a default argument (None means: no character)
 MAX_RECENT_LORAS = 12      # LoRAs kept in the "recent" list of the pickers
 COMFY_START_TIMEOUT = 180  # seconds ComfyUI is given to come up after it was started
 KILL_GRACE_MS = 8000       # how long the generator process may take to end after Stop
@@ -644,7 +648,7 @@ class _Bridge(QObject):
     remixed = Signal(object, str, str)         # [(clip id, its new record)], error ('' = done), project
     exported = Signal(str, str, str)           # a single clip was copied out: its id, the file, error ('' = done)
     freed = Signal(bool)                       # ComfyUI's answer to "unload your models" (True: done)
-    llm_room = Signal(str)                     # ComfyUI's models were unloaded for the llama.cpp server (why)
+    room_made = Signal(str)                     # ComfyUI's models were unloaded for a model of this app (the llama.cpp server, text to speech)
     spoken = Signal(str, object, str, str)     # clip id, rendered lines (tts.render_lines) or None, error, project
     tts_log = Signal(str)                      # a step of text to speech
     eleven_models = Signal(object, str)        # ElevenLabs' TTS models or None, error
@@ -1957,7 +1961,7 @@ class MainWindow(QMainWindow):
         self.bridge.copied.connect(self._copied)
         self.bridge.converted.connect(self._converted)
         self.bridge.remixed.connect(self._remixed)
-        self.bridge.llm_room.connect(self._llm_room_made)
+        self.bridge.room_made.connect(self._room_made)
         self.bridge.freed.connect(self._comfy_freed)
         self.bridge.exported.connect(self._clip_copied)
         self.bridge.spoken.connect(self._lines_spoken)
@@ -1978,6 +1982,7 @@ class MainWindow(QMainWindow):
         self.comfy_up: bool | None = None
         self._comfy_polling = False
         self._comfy_starting = 0.0
+        self._remade_note = ""                       # what the last change said about CHANGED clips
         self._failures: dict[str, dict] = {}    # clip -> what went wrong when it was made (on its card until it is
         #                                         made again or edited)
         self._waiting_comfy: list[str] | None = None   # targets to generate once ComfyUI answers
@@ -2760,7 +2765,7 @@ class MainWindow(QMainWindow):
         self.b_film_gen = QPushButton("Generate film")
         self.b_film_gen.setToolTip("Make every scene's missing clips, scene after scene (up to each scene's ending)")
         self.b_film_gen.clicked.connect(self.generate_film)
-        self.b_film_play = QPushButton("▶ Play film")
+        self.b_film_play = QPushButton("Play film")
         self.b_film_play.setToolTip("Join all scenes in their order (hard cuts) and play the film")
         self.b_film_play.clicked.connect(lambda: self.join_film("play"))
         self.b_film_export = QPushButton("Export film…")
@@ -2949,7 +2954,7 @@ class MainWindow(QMainWindow):
         self.b_gen.setProperty("variant", "primary")
         self.b_gen.setToolTip(S.tip("Make every clip on the selected path that is not made yet", "generate"))
         self.b_gen.clicked.connect(self.generate_path)
-        self.b_gen_all = QPushButton("Generate all")
+        self.b_gen_all = QPushButton("Generate all branches")
         self.b_gen_all.setToolTip(S.tip("Make every clip of every branch that is not made yet", "generate_all"))
         self.b_gen_all.clicked.connect(self.generate_all)
         self.b_stop = QPushButton("Stop")
@@ -3556,7 +3561,7 @@ class MainWindow(QMainWindow):
             self.status.setText(f"Scene “{empty[0]}” has no clip yet: write its first clip, or remove the scene.")
             return
         if not todo:
-            self.status.setText("Every scene is made: ▶ Play film.")
+            self.status.setText("Every scene is made: Play film.")
             return
         ids = [sc.id for sc in self.film.scenes]          # from the first scene with work on, each one checked when
         self._film_queue = ids[ids.index(todo[0]):]       # its turn comes (a continuing one may need it by then)
@@ -3566,14 +3571,14 @@ class MainWindow(QMainWindow):
     def _film_next(self):
         if not self._film_queue:
             self._film_queue = None
-            self.status.setText("The film is made: ▶ Play film.")
+            self.status.setText("The film is made: Play film.")
             self._show_storyboard()
             return
         if self.film is not None and len(self.film.scenes) > 1:
             try:
                 self.film.update_continues()       # the scenes after a new end start from it
-            except (OSError, ValueError):
-                pass
+            except (OSError, ValueError) as e:
+                self._report_error(f"Could not update the scenes that continue another: {e}")
         if self.film is None:
             self._film_queue = None                # (the film was closed meanwhile)
             return
@@ -4051,8 +4056,8 @@ class MainWindow(QMainWindow):
             if len(film.scenes) > 1 and not film.problem:
                 try:
                     film.update_continues()        # scenes that continue the one before: its current end
-                except (OSError, ValueError):
-                    pass
+                except (OSError, ValueError) as e:
+                    self._report_error(f"Could not update the scenes that continue another: {e}")
             if scene is not None and any(x.id == scene for x in film.scenes):
                 film.current = scene
                 folder = film.path(scene)
@@ -4409,27 +4414,28 @@ class MainWindow(QMainWindow):
         self._make_room(LLM.vram_needed_mb(llama.model, llama.cpu_moe, llama.mmproj), url, "the llama.cpp model",
                         LLM.LlmServerError, "refine after the run, or choose a ComfyUI model", settle)
 
-    def _make_room(self, need: int, url: str, what: str, error=RuntimeError, later: str = "try again after the run",
-                   settle: float = 15.0) -> None:
+    def _make_room(self, need: int, url: str, what: str, error: type[Exception] = RuntimeError,
+                   later: str = "try again after the run", settle: float = 15.0) -> None:
         """(a worker thread, before a model of this app starts) Too little free VRAM for need MB: ComfyUI is asked to
         unload its models; while clips are generated: error instead (their run keeps its VRAM)."""
         free = LLM.free_vram_mb()
         if free is None or free >= need:
             return
-        gb = lambda mb: f"{mb / 1024:.1f} GB"   # noqa: E731
+        def gb(mb: float) -> str:
+            return f"{mb / 1024:.1f} GB"
         if self.running:
             raise error(f"only {gb(free)} of VRAM is free while clips are generated and {what} needs about "
                         f"{gb(need)}; {later}")
-        if not CMF.free_models(url, timeout=10):
+        if not CMF.free_models(url, timeout=UNLOAD_TIMEOUT):
             return                                  # (ComfyUI is not up: the VRAM is used by something else)
         end = time.time() + settle
         now = free
         while time.time() < end:
-            time.sleep(0.5)
+            time.sleep(VRAM_POLL_SECONDS)
             now = LLM.free_vram_mb()
             if now is None or now >= need:
                 break
-        safe_emit(self.bridge.llm_room,
+        safe_emit(self.bridge.room_made,
                   f"ComfyUI's models were unloaded for {what} (it needs about {gb(need)} of VRAM, "
                   f"{gb(free)} was free" + (f", now {gb(now)}" if now is not None else "") +
                   "); the clip model loads again before the next clips.")
@@ -4439,7 +4445,7 @@ class MainWindow(QMainWindow):
         self.log.appendPlainText("TTS: " + message)
         self.status.setText(message + "…")
 
-    def _llm_room_made(self, msg: str):
+    def _room_made(self, msg: str):
         self._comfy_model = None                    # (nothing of this app is loaded in ComfyUI any more)
         self._qwen_timer.stop()
         if self.worker_alive and not self.running:
@@ -4850,10 +4856,10 @@ class MainWindow(QMainWindow):
             return False
         return True
 
-    def _ref_word(self, c: dict | None = "selected") -> str:
+    def _ref_word(self, c: dict | None = _SELECTED) -> str:
         """How the pictures of a cast entry are called: "face picture" for a person (and for none: a picture then
         goes to the lead or a new person), "picture" for a place, object or style."""
-        c = self._selected_character() if c == "selected" else c
+        c = self._selected_character() if c is _SELECTED else c
         return "picture" if c is not None and T.kind_of(c) != "person" else "face picture"
 
     def _new_character(self, kind: str = "person"):
@@ -5001,7 +5007,9 @@ class MainWindow(QMainWindow):
 
     def _report_remade(self, before: set[str], what: str) -> int:
         """Say how many made clips a change turned CHANGED (they are made again with their paths), and how many
-        are done again (a setting set back)."""
+        are done again (a setting set back). What it said about CHANGED clips stays in self._remade_note (empty when
+        none), so callers need not read it back from the status label."""
+        self._remade_note = ""
         if self.tree is None:
             return 0
         try:
@@ -5019,6 +5027,8 @@ class MainWindow(QMainWindow):
             parts.append(f"{len(back)} clip{'s are' if len(back) != 1 else ' is'} DONE again")
         if parts:
             self._say(f"{what}: " + "; ".join(parts) + ".")
+            if lost and not self._write_error:
+                self._remade_note = self.status.text()
         return len(lost) + len(back)
 
     def _reference_from_selected(self):
@@ -5056,7 +5066,7 @@ class MainWindow(QMainWindow):
             self.status.setText("That clip is not made yet.")
             return False
         if self.add_reference(str(self.project / rel)):
-            if "CHANGED" not in self.status.text():                            # keep the CHANGED count
+            if not self._remade_note:                                          # keep the CHANGED count
                 self.status.setText(f"The {which} frame of #{T.short_id(nid)}: {self.status.text()}")
             return True
         return False
@@ -5208,7 +5218,9 @@ class MainWindow(QMainWindow):
                         f"@{c['name']}   no picture yet") + f"   · {T.kind_of(c)}"
             item = QListWidgetItem(QIcon(pm) if pm else QIcon(), text)
             item.setData(Qt.UserRole, c["name"])
-            item.setToolTip((c.get("desc") or "") + (lambda n: f" ({n} clip{'s mention' if n != 1 else ' mentions'} it)")(len(self._mentioning(c['name']))))
+            mentions = len(self._mentioning(c["name"]))
+            item.setToolTip((c.get("desc") or "")
+                            + f" ({mentions} clip{'s mention' if mentions != 1 else ' mentions'} it)")
             self.cast_list.addItem(item)
             if cur and c["name"].lower() == cur.lower():
                 row = k
@@ -5490,7 +5502,7 @@ class MainWindow(QMainWindow):
         if self.project is None:
             self.status.setText("Open or create a project folder first.")
             return
-        f = pick_image(self, "Sound reference (a voice, a soundtrack, a beat: 2-15 s)", self.qs,
+        f = pick_image(self, f"Sound reference (a voice, a soundtrack, a beat: {AUDIO_REF_RANGE})", self.qs,
                        places=self._picker_places(), collections=self.project_media("media"), kind="media")
         if f:
             self.add_sound(f)
@@ -5518,7 +5530,7 @@ class MainWindow(QMainWindow):
         self._write_tree()
         self._changed()
         msg = (f"Sound reference <Audio {n}> added ({entry['secs']:.1f} s"
-               + (", the first part only: all sounds together may have 15 s" if entry.get("cut") else "")
+               + (f", the first part only: all sounds together may have {T.AUDIO_REF_TOTAL:g} s" if entry.get("cut") else "")
                + f"). Name it in a clip's prompt as <Audio {n}>.")
         self._say(msg)
         if self._report_remade(before, "Sound reference added"):
@@ -5775,15 +5787,15 @@ class MainWindow(QMainWindow):
         refs = T.audio_refs(self.tree) if self.tree else []
         total = sum(float(a.get("secs") or 0) for a in refs)
         if not refs:
-            text = ("A voice, music or a beat for clips: add a sound (2-15 s), then name it in a clip's prompt, e.g. "
+            text = (f"A voice, music or a beat for clips: add a sound ({AUDIO_REF_RANGE}), then name it in a clip's prompt, e.g. "
                     "\"<Audio 1> is the complete soundtrack\". Only clips that name a sound use it (with the "
                     "reference model).")
         else:
             users = self._sound_users(1)
-            text = (f"{total:.1f} of 15 s used, {len(users)} clip{'s use' if len(users) != 1 else ' uses'} them. "
-                    "\"<Audio 1> is the complete soundtrack\" copies it (measured: works with a plain prompt). A voice "
-                    "only took effect in MiniMax's long reference format (\"<Audio 1> is the voice-timbre reference "
-                    "for <Subject 1> (S1)\" …); a plain \"in the voice of <Audio 1>\" did not in the test.")
+            text = (f"{total:.1f} of {T.AUDIO_REF_TOTAL:g} s used, {len(users)} clip{'s use' if len(users) != 1 else ' uses'} "
+                    "them. \"<Audio 1> is the complete soundtrack\" copies it. A voice only works in the long "
+                    "reference format (\"<Audio 1> is the voice-timbre reference for <Subject 1> (S1)\" …), not as a "
+                    "plain \"in the voice of <Audio 1>\".")
         self.sound_info.setText(text)
 
     def _update_sound_buttons(self):
@@ -5799,7 +5811,7 @@ class MainWindow(QMainWindow):
         self.b_sound_clip.setToolTip(
             (f"Add the sound of {'video' if node.is_video else 'clip'} #{T.short_id(nid)} (its first seconds), e.g. to keep "
              "a voice from an earlier clip" if has else "Select a made clip or a converted video")
-            if room else "There are already 3 sounds or 15 s; remove one first")
+            if room else f"There are already {T.MAX_AUDIO_REFS} sounds or {T.AUDIO_REF_TOTAL:g} s; remove one first")
         sel = 0 <= self.sounds.currentRow() < len(refs)
         self.b_sound_del.setEnabled(idle and sel)
         self.b_sound_play.setEnabled(sel)
@@ -7604,7 +7616,7 @@ class MainWindow(QMainWindow):
                 record_use(png, {"kind": "ref", "file": c["images"][-1]})
                 return (f"Added as a {'face' if T.kind_of(c) == 'person' else 'picture'} of @{c['name']} (the Cast & "
                         f"references tab, {S.keys('tab_cast')}); mention it in prompts as "
-                        f"@{c['name']}." + (f" {self.status.text()}" if "CHANGED" in self.status.text() else ""))
+                        f"@{c['name']}." + (f" {self._remade_note}" if self._remade_note else ""))
             ok = self.set_image(png, confirm=True) if kind == "start" else \
                 bool(target) and self.set_end_image(target, png)
             if ok:
@@ -7612,7 +7624,7 @@ class MainWindow(QMainWindow):
                            if kind == "start" else {"kind": "end", "file": self.tree.nodes[target].end_image})
                 self.status.setText(("New start image from the AI edit" if kind == "start" else
                                      f"Clip #{T.short_id(target)} now ends at the AI-edited image") +
-                                    (f" — {self.status.text()}" if "CHANGED" in self.status.text() else "."))
+                                    (f" — {self._remade_note}" if self._remade_note else "."))
             return bool(ok)
         known = label_loras(self.qwen_loras)
         family_loras = {fam: label_loras(items) for fam, items in self.image_loras.items()}

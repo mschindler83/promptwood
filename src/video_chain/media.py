@@ -2,7 +2,7 @@
 
 Every failure is a MediaError (a RuntimeError) with a plain message: a missing binary says which one, a failed run
 carries the last lines of the tool's own message, a run that does not finish in time says so. Callers that want
-their own error type catch MediaError and re-raise (comfy.py does: ComfyError).
+their own error type catch MediaError and re-raise (comfy/ does: ComfyError).
 
 Writes: atomic_write_* put a small file down whole or not at all; part_file(out) is for a tool that writes a big
 file (ffmpeg): it writes next to out under a ".part" name and renames it when the block ends without an error.

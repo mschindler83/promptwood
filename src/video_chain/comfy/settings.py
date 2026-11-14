@@ -1,9 +1,9 @@
-"""The settings dict of one clip as ComfyGenerator.generate reads it (tree.py builds it from the project)."""
+"""The settings dict of one clip as ComfyGenerator.generate reads it (tree/ builds it from the project)."""
 from __future__ import annotations
 
 from typing import TypedDict
 
-# What a clip gets when its settings say nothing (tree.py has its own DEFAULT_FRAMES for the project's clips)
+# What a clip gets when its settings say nothing (tree/ has its own DEFAULT_FRAMES for the project's clips)
 DEFAULT_WIDTH = 512
 DEFAULT_HEIGHT = 512
 DEFAULT_FRAMES = 73
