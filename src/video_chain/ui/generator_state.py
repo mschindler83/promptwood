@@ -33,12 +33,33 @@ class ModelState(str, Enum):
     LOADED = "loaded"
 
 
+@dataclass(frozen=True)
+class Refine:
+    """The settings of an export at a refined size (what the worker's "refine" command carries)."""
+    size: str
+    out: str = ""
+    fast_attention: bool = False
+    refine_swapped: bool = False
+    strength: str = "natural"
+    method: str = ""
+    single: bool = False
+    denoise: bool = False
+    cloud: str = ""                     # "runpod" for a cloud export
+
+    def as_command(self) -> dict:
+        """The fields of the worker's command (flags that are off are left out, as before)."""
+        return {"size": self.size, "out": self.out, "fast_attention": self.fast_attention,
+                "refine_swapped": self.refine_swapped, "strength": self.strength, "method": self.method,
+                **({"single": True} if self.single else {}), **({"denoise": True} if self.denoise else {}),
+                **({"cloud": self.cloud} if self.cloud else {})}
+
+
 @dataclass
 class Job:
     """The generation in progress: the clips to make, the export's refine settings (None: a normal run) and whether
     the worker has been sent it."""
     targets: list[str]
-    refine: dict | None = None
+    refine: Refine | None = None
     sent: bool = False
 
 

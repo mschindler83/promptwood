@@ -43,3 +43,13 @@ def test_model_switch_frees_the_clip_model_once():
     other = ModelSwitch()
     other.prepare(ComfyModel.LLM)
     assert not other.free                          # (only the clip model is the generator's)
+
+
+def test_a_refine_is_a_dataclass_that_makes_the_workers_command():
+    from video_chain.ui.generator_state import Refine
+    r = Refine(size="2k", out="/o.mp4", method="seedvr2_7b", cloud="runpod", single=True)
+    assert r.size == "2k" and r.cloud == "runpod"
+    cmd = r.as_command()
+    assert cmd == {"size": "2k", "out": "/o.mp4", "fast_attention": False, "refine_swapped": False,
+                   "strength": "natural", "method": "seedvr2_7b", "single": True, "cloud": "runpod"}
+    assert "denoise" not in cmd and "single" not in Refine(size="2k", out="x").as_command()

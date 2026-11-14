@@ -13,6 +13,7 @@ from .. import chain, media, runpod as RP, tree as T
 from .theme import repolish
 from .widgets import format_time
 from .project_dialogs import ExportDialog
+from .generator_state import Refine
 from .mw_host import MainWindowHost
 from .qsvalue import qs_value
 
@@ -156,11 +157,10 @@ class ExportMixin(MainWindowHost):
                 self.join_selected("export", out)
                 return
             target = path[-1].id
-        self._start([target], refine={"size": size, "out": str(out), "fast_attention": bool(fast_attention),
-                                      "refine_swapped": bool(refine_swapped), "strength": strength,
-                                      "method": method, **({"single": True} if single is not None else {}),
-                                      **({"denoise": True} if denoise else {}),
-                                      **({"cloud": "runpod"} if cloud and method != "refine" else {})})
+        self._start([target], refine=Refine(size=size, out=str(out), fast_attention=bool(fast_attention),
+                                            refine_swapped=bool(refine_swapped), strength=strength, method=method,
+                                            single=single is not None, denoise=bool(denoise),
+                                            cloud="runpod" if cloud and method != "refine" else ""))
 
     def _export_copy(self, nid: str, src: Path, out: Path):
         """Copy a made clip to out in the background (it can be big, and out on a share); like a join it holds back

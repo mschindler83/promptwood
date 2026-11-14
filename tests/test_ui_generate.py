@@ -8,7 +8,7 @@ import time
 os.environ["QT_QPA_PLATFORM"] = "offscreen"   # never open windows on the real desktop
 from PySide6.QtWidgets import QInputDialog, QMessageBox  # noqa: E402
 
-from video_chain.ui.generator_state import Job  # noqa: E402
+from video_chain.ui.generator_state import Job, Refine  # noqa: E402
 from video_chain import chain  # noqa: E402
 from conftest import settings  # noqa: E402,F401
 from video_chain import tree as T  # noqa: E402
@@ -392,7 +392,7 @@ def test_progress_says_what_runs_and_how_long_it_still_takes(app, win, tmp_path,
     ids = new_project(win, tmp_path, image, ("a", "b"))
     clock = [1000.0]
     monkeypatch.setattr("time.monotonic", lambda: clock[0])
-    win._job, win._plan = Job(list(ids), {"size": "2k"}), list(ids)            # (an export of 2 clips)
+    win._job, win._plan = Job(list(ids), Refine(size="2k")), list(ids)            # (an export of 2 clips)
     win._run_started = clock[0]
     win._event({"e": "node", "id": ids[0], "state": "generating"})
     win._event({"e": "note", "id": ids[0], "text": "SeedVR2 piece 2 of 5"})

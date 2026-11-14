@@ -12,7 +12,7 @@ import pytest
 from PIL import Image
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox
 
-from video_chain.ui.generator_state import Job  # noqa: E402
+from video_chain.ui.generator_state import Job, Refine  # noqa: E402
 import waiting as W
 from video_chain import plugins
 
@@ -353,7 +353,7 @@ def test_events_come_after_the_app_and_clips_of_an_export_are_not_new(made_up, t
         assert plug_events.seen == [("run_event", "step one")]       # (the app had handled the event)
         host = win.plugins
         host.emit("run_event", {"e": "node", "id": "n1", "state": "done"})
-        win._job = Job(["n2"], {"width": 640}, sent=True)     # an export at another size
+        win._job = Job(["n2"], Refine(size="2k"), sent=True)     # an export at another size
         host.emit("run_event", {"e": "node", "id": "n2", "state": "done"})
         win._job = None
         assert [x for x in plug_events.seen if x[0] == "clip_made"] == [("clip_made", "n1")]

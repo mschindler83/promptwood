@@ -17,7 +17,7 @@ from .. import comfy as CMF, runpod as RP, tree as T
 from ..__main__ import COMFY_DOWN
 from .generator_state import (
     ByeEvent, ComfyBinding, ComfyModel, ErrorEvent, IdleEvent, Job, LoadingEvent, ModelState,
-    NodeEvent, Phase, PlanEvent, RunpodBinding, StartEvent, StepEvent, WorkerBinding, event_problem)
+    NodeEvent, Phase, PlanEvent, Refine, RunpodBinding, StartEvent, StepEvent, WorkerBinding, event_problem)
 from .ui_logic import CLOUD_KILL_GRACE_MS, DEFAULT_COMFY_URL, KILL_GRACE_MS, as_dict, fmt_left, plural, speed_mode, time_left
 from .mw_host import MainWindowHost
 
@@ -61,19 +61,19 @@ class GeneratorMixin(MainWindowHost):
             self._start([n.id for n in self.tree.leaves()])
 
     @property
-    def _refine(self) -> dict | None:
+    def _refine(self) -> Refine | None:
         """The refine settings of the export in progress (None: no job, or a normal run)."""
         return self._job.refine if self._job is not None else None
 
     def _worker_key(self) -> WorkerBinding:
         """What a running worker is bound to (which ComfyUI, its folder, cleanup; or the RunPod pod of a cloud
         export: GPU, volume, fallback, SeedVR2 size); a change needs a new worker."""
-        refine = self._refine or {}
-        if refine.get("cloud"):
+        refine = self._refine or Refine(size="")
+        if refine.cloud:
             return RunpodBinding(qs_value(self.qs, SK.RUNPOD_GPU, RP.DEFAULT_GPU, str),
                                  qs_value(self.qs, SK.RUNPOD_VOLUME, "", str).strip(),
                                  qs_value(self.qs, SK.RUNPOD_FALLBACK, True, bool),
-                                 CMF.SEEDVR_METHODS.get(refine.get("method") or "", "7b"),
+                                 CMF.SEEDVR_METHODS.get(refine.method, "7b"),
                                  qs_value(self.qs, SK.RUNPOD_WITHOUT_VOLUME, True, bool))
         return ComfyBinding((self.comfy_url.text().strip() or DEFAULT_COMFY_URL), self.comfy_dir.text().strip(),
                             self.comfy_cleanup.isChecked())
@@ -83,7 +83,7 @@ class GeneratorMixin(MainWindowHost):
         """The running worker is a RunPod one (it ends, and its pod with it, after its export)."""
         return bool(self.proc is not None and isinstance(self._worker_bound, RunpodBinding))
 
-    def _start(self, targets: list[str], refine: dict | None = None):
+    def _start(self, targets: list[str], refine: Refine | None = None):
         if self.running or self.tree is None:
             return
         self._style_changed()                      # a style edit not finished with Enter / leaving the field
@@ -121,7 +121,7 @@ class GeneratorMixin(MainWindowHost):
         self._update_buttons()
 
     @staticmethod
-    def _preflight(project: Path, tree: T.Tree, targets: list[str], refine: dict | None) -> tuple[list[str], list[str]]:
+    def _preflight(project: Path, tree: T.Tree, targets: list[str], refine: Refine | None) -> tuple[list[str], list[str]]:
         """What keeps these targets from being made: (the problems as short phrases, ids of clips without a prompt).
         Reads files and hashes LoRAs, so it runs in a thread; nothing is changed (the window is locked meanwhile)."""
         problems = []
@@ -191,7 +191,7 @@ class GeneratorMixin(MainWindowHost):
                 self.select(empty[0])
             return
         nodes = {n.id: n for t in targets for n in self.tree.path_to(t)}
-        cloud = bool((refine or {}).get("cloud"))
+        cloud = bool(refine and refine.cloud)
         if cloud and not RP.api_key():
             self.status.setText(self._runpod_key_hint())
             self._film_queue = None
@@ -291,7 +291,7 @@ class GeneratorMixin(MainWindowHost):
         if self.comfy.holds_clip():                        # earlier workers: was HyperFlow last?
             cmd["last_hyperflow"] = self.comfy.model == ComfyModel.H3_HYPERFLOW
         if self._job.refine:                                       # export refined: re-render the path's clips
-            cmd.update({"cmd": "refine", "target": self._job.targets[0], **self._job.refine})
+            cmd.update({"cmd": "refine", "target": self._job.targets[0], **self._job.refine.as_command()})
         if self._cloud_worker:                                     # the local ComfyUI is not touched
             cmd.pop("free_first", None)
             cmd.pop("last_hyperflow", None)
@@ -581,14 +581,14 @@ class GeneratorMixin(MainWindowHost):
         self._update_buttons()
         self._update_model_label()
 
-    def _report_job_end(self, ok: bool, refine: dict | None, code: int):
+    def _report_job_end(self, ok: bool, refine: Refine | None, code: int):
         """The status line and the progress bar after a job: done, exported, stopped or failed."""
         if ok and refine:
             self.progress.setValue(1000)
-            out = Path(self._exported or refine["out"])
+            out = Path(self._exported or refine.out)
             n = len(self._made_now)                # the export lists every clip, but reuses kept copies
-            how = {"seedvr2_7b": "SeedVR2 7B", "seedvr2_3b": "SeedVR2 3B"}.get(refine.get("method") or "", "refined")
-            self.status.setText(f"Exported {out.name} ({refine['size']}, {how}"
+            how = {"seedvr2_7b": "SeedVR2 7B", "seedvr2_3b": "SeedVR2 3B"}.get(refine.method, "refined")
+            self.status.setText(f"Exported {out.name} ({refine.size}, {how}"
                                 + (f"; {plural(n, 'clip')} upscaled now" if n else
                                    "; every clip was upscaled already") + ").")
         elif ok:

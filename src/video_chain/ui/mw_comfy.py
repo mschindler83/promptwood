@@ -15,7 +15,7 @@ from .workers import run_in_background
 from .. import comfy as CMF, net
 from . import dialogs as D, shortcuts as S
 from .theme import repolish
-from .generator_state import ComfyModel, ModelState
+from .generator_state import ComfyModel, ModelState, Refine
 from .ui_logic import CLOSE_GRACE, COMFY_START_TIMEOUT, DEFAULT_COMFY_LAUNCHER, DEFAULT_COMFY_URL
 from .mw_host import MainWindowHost
 
@@ -82,7 +82,7 @@ class ComfyMixin(MainWindowHost):
                 return r.status == 200
         run_in_background(check, on_done=self._comfy_state, on_error=lambda _e: self._comfy_state(False), owner=self)
 
-    def _autostart(self, targets: list[str], refine: dict | None = None) -> bool:
+    def _autostart(self, targets: list[str], refine: Refine | None = None) -> bool:
         """ComfyUI is down: start it (if allowed) and generate targets once it answers. False: not started."""
         if not self.comfy_autostart.isChecked():
             return False
