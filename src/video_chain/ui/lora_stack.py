@@ -19,6 +19,7 @@ from .. import tree as T
 from .dialogs import add_action, button_row, failed
 from .widgets import fit_size, guard_wheel, icon_button, label
 from .qsvalue import qs_value
+from ..lora_notes import lora_label  # noqa: F401  (re-exported: the windows import it from here)
 
 
 LORA_MIN, LORA_MAX = -10.0, 10.0       # strengths (ComfyUI allows -100..100 for LoRAs, -10..10 for the turbo LoRA)
@@ -33,10 +34,6 @@ def lora_path(p: str) -> str:
 def clean_words(text: str) -> list[str]:
     """Trigger words typed comma-separated: trimmed, empty ones dropped."""
     return [w.strip() for w in text.split(",") if w.strip()]
-
-
-def lora_label(path: str | None) -> str:
-    return Path(path).stem if path else "none"
 
 
 def fill_lora_combo(combo: QComboBox, known: list[tuple[str, str]], current: str | None) -> None:
