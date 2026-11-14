@@ -5,7 +5,7 @@ import copy
 import random
 import re
 from typing import Any, cast
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 from .. import chain
@@ -42,6 +42,7 @@ class Node:
     start_image: str | None = None  # AI, a first clip: its own start picture (starts/..., project-relative)
     #                                 instead of the project's start image (see add_start_rows)
     row: str | None = None         # the first clips made as one set for several start pictures share this id
+    extra: dict[str, Any] = field(default_factory=dict)   # keys this version does not know: kept, written back
 
     @property
     def is_video(self) -> bool:
@@ -70,6 +71,7 @@ class Tree:
     selected: str | None = None
     next_num: int = 1
     recovered_from: Path | None = field(default=None, compare=False, repr=False)   # set by load(): the backup used
+    extra: dict[str, Any] = field(default_factory=dict)   # top-level keys this version does not know: kept
 
     # ---- structure
     def children(self, nid: str | None) -> list[Node]:
@@ -210,9 +212,9 @@ class Tree:
 
     # ---- files
     def to_json(self) -> dict:
-        return {"tool": "video-chain", "version": TREE_VERSION, "image": self.image, "options": self.options,
-                "selected": self.selected, "next_num": self.next_num,
-                "nodes": [asdict(n) for n in sorted(self.nodes.values(), key=lambda n: self.number(n.id))]}
+        return {**self.extra, "tool": "video-chain", "version": TREE_VERSION, "image": self.image,
+                "options": self.options, "selected": self.selected, "next_num": self.next_num,
+                "nodes": [_node_to_json(n) for n in sorted(self.nodes.values(), key=lambda n: self.number(n.id))]}
 
     @classmethod
     def from_json(cls, d: dict) -> Tree:
@@ -231,7 +233,8 @@ class Tree:
         project_loras = {k: stored.pop(k) for k in _OLD_LORA_KEYS if k in stored}   # older: project LoRAs
         t = cls(options=_merged_options(stored),
                 image=d.get("image"),
-                selected=d.get("selected"), next_num=int(d.get("next_num") or 1))
+                selected=d.get("selected"), next_num=int(d.get("next_num") or 1),
+                extra={k: copy.deepcopy(v) for k, v in d.items() if k not in _TREE_KEYS})
         if stored.get("prompt_format") not in PROMPT_FORMATS:
             t.options["prompt_format"] = "classic"   # a project from before the setting: as it was made
         _migrate_cast(t.options, "cast" in stored)
@@ -244,6 +247,16 @@ class Tree:
         if t.selected not in t.nodes:
             t.selected = None
         return t
+
+
+_NODE_KEYS = frozenset(f.name for f in fields(Node)) - {"extra"}
+_TREE_KEYS = frozenset({"tool", "version", "image", "options", "selected", "next_num", "nodes"})
+
+
+def _node_to_json(n: Node) -> dict:
+    d = asdict(n)
+    extra = d.pop("extra")
+    return {**extra, **d}
 
 
 def _node_from_json(nd: object, project_loras: dict, taken: dict[str, Node]) -> Node:
@@ -286,7 +299,8 @@ def _node_from_json(nd: object, project_loras: dict, taken: dict[str, Node]) -> 
              kind, cast(Source, dict(src)) if kind == VIDEO else None, end, at,
              clean_keyframes(nd.get("keyframes")) if kind == AI else [],
              bool(nd.get("frozen")) and isinstance(nd.get("made"), dict), own,
-             row if kind == AI and nd.get("parent") is None else None)
+             row if kind == AI and nd.get("parent") is None else None,
+             {k: v for k, v in nd.items() if k not in _NODE_KEYS})
     return n
 
 
