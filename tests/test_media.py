@@ -199,3 +199,11 @@ def test_h3_frames_is_the_next_length_on_the_grid():
     assert tts.frames_for(1.0, 73) is None and tts.frames_for(4.0, 73) == 107
     with pytest.raises(tts.TtsError):
         tts.frames_for(15.5, 73)
+
+
+# ---- the command line checks ffmpeg at the start (LLM-38)
+def test_the_command_line_says_when_ffmpeg_is_missing(monkeypatch, capsys):
+    from video_chain import __main__ as cli
+    monkeypatch.setattr(media.shutil, "which", lambda name: None)
+    assert cli.main(["--tree", "nowhere", "--targets", "n1"]) == 2
+    assert "ffmpeg" in capsys.readouterr().err

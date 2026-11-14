@@ -16,7 +16,7 @@ import traceback
 from pathlib import Path
 from typing import Callable
 
-from . import chain
+from . import chain, media
 from . import tree as treemod
 
 
@@ -129,6 +129,10 @@ def main(argv: list[str] | None = None) -> int:
     except (AttributeError, ValueError, OSError):
         pass
     emit = _printer(a.events)
+    try:
+        media.require_ffmpeg()                # (a plain message at the start, not a FileNotFoundError deep inside)
+    except media.MediaError as e:
+        return _fail(emit, str(e))
     try:
         return _main(a, emit)
     except Exception as e:  # noqa: BLE001

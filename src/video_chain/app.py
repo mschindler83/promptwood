@@ -1,11 +1,12 @@
 """GUI entry point: video-chain-gui"""
 from __future__ import annotations
 
-import shutil
 import signal
 import sys
 import threading
 import traceback
+
+from . import media
 
 
 def _qt_error_relay():
@@ -119,7 +120,9 @@ def main(argv: list[str] | None = None) -> int:
     app.setApplicationName("Video Chain")
     app.setDesktopFileName("video-chain")
     ThemeManager.instance().apply(app)
-    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+    try:
+        media.require_ffmpeg()
+    except media.MediaError:
         QMessageBox.critical(None, "Promptwood", "ffmpeg and ffprobe are required (sudo dnf install ffmpeg).")
         return 1
     relay = _qt_error_relay()()
