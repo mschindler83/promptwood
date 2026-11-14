@@ -11,9 +11,10 @@ from .tts_dialog import VoiceTtsDialog
 from .widgets import safe_emit
 from . import speak_dialog as SPD, tts_dialog as TD
 from .ui_logic import DEFAULT_COMFY_URL, app_cache_dir, plural
+from .mw_host import MainWindowHost
 
 
-class TtsMixin:
+class TtsMixin(MainWindowHost):
     """Text to speech and speaking a clip's lines."""
 
     def _tts_changed(self, *_):
@@ -62,8 +63,8 @@ class TtsMixin:
             d.mkdir(parents=True, exist_ok=True)
             self._tts_local = TTS.LocalTTS(log=d / "tts-worker.log")
         url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL).rstrip("/")
-        self._tts_local.before_launch = lambda _w: self._make_room(TTS.LOCAL_VRAM_MB, url, "Qwen3-TTS",
-                                                                   TTS.TtsError, "speak the lines after the run")
+        self._tts_local.before_launch = lambda _w: self._make_room(  # type: ignore[assignment]  # (tts.py: None)
+            TTS.LOCAL_VRAM_MB, url, "Qwen3-TTS", TTS.TtsError, "speak the lines after the run")
         return self._tts_local
 
     def fish_tts(self) -> "TTS.FishTTS":
@@ -75,7 +76,7 @@ class TtsMixin:
             self._tts_fish = TTS.FishTTS(log=d / "fish-worker.log", helper=self.local_tts())
         url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL).rstrip("/")
         self._tts_fish.helper = self.local_tts()
-        self._tts_fish.before_launch = lambda _w: self._room_for_fish(url)
+        self._tts_fish.before_launch = lambda _w: self._room_for_fish(url)  # type: ignore[assignment]  # (as above)
         return self._tts_fish
 
     def _room_for_fish(self, url: str) -> None:
@@ -123,6 +124,7 @@ class TtsMixin:
         eng = self._speak_engine(nid)
         if eng is None:
             return False
+        assert self.tree is not None and self.project is not None      # (_speak_engine)
         snap, project = copy.deepcopy(self.tree), self.project
 
         def render(take: int, how: dict, lines: list[str]) -> dict:
@@ -151,9 +153,10 @@ class TtsMixin:
             for r in dlg.unused():                      # the other takes are never deleted: they go to old/
                 chain.keep_aside(project, project / r["file"])
             if ok and dlg.chosen is not None:
-                texts = {}                              # (every take's transcripts: each was made once only)
+                texts: dict = {}                        # (every take's transcripts: each was made once only)
                 for r in dlg.takes:
                     texts.update(r.get("texts") or {})
+                assert self.tree is not None
                 node = self.tree.nodes.get(nid)
                 if node is not None and not node.frozen and dlg.chosen["prompt"] != node.prompt \
                         and dlg.chosen.get("base_prompt") == node.prompt:
@@ -177,6 +180,7 @@ class TtsMixin:
         for r in takes:
             files = r.get("voice_files") or {}
             for name, text in (r.get("texts") or {}).items():
+                assert self.tree is not None
                 c = T.character(self.tree, name)
                 if c is not None and c.get("voice") and files.get(name) == c["voice"]["file"] \
                         and not c["voice"].get("text"):
@@ -187,10 +191,11 @@ class TtsMixin:
 
     def speak_clip(self, nid: str) -> bool:
         """Speak a clip's lines with text to speech right away (one take, in a thread); _lines_spoken makes them
-        its sound."""
+        its sound. The window (speak_clip_window) is what the menus open; this is the quick way for the tests."""
         eng = self._speak_engine(nid)
         if eng is None:
             return False
+        assert self.tree is not None and self.project is not None      # (_speak_engine)
         snap, project = copy.deepcopy(self.tree), self.project
         self._tts_busy = True
         try:
@@ -223,6 +228,7 @@ class TtsMixin:
             self._report_error(f"Could not speak the lines of clip #{T.short_id(nid)}: {err}")
             return
         node = self.tree.nodes[nid]
+        assert self.project is not None
         if node.frozen:
             chain.keep_aside(self.project, self.project / r["file"])
             self._frozen_block(node, "speak")
@@ -236,7 +242,8 @@ class TtsMixin:
         self._write_tree()
         self.refresh(rebuild_path=True)
         msg = (f"Clip #{T.short_id(nid)}: {plural(done['lines'], 'line')} spoken ({done['secs']:.1f} s)"
-               f" and made its sound (track “{T.track_of(self.tree, done['track'])['name']}”); the picture is made "
+               f" and made its sound (track “{(T.track_of(self.tree,
+                                                          done['track']) or {}).get('name')}”); the picture is made "
                "to it, lips in sync.")
         if done["frames"]:
             msg += f" The clip is now {done['frames'] / chain.FPS:.1f} s long, so the lines fit."
@@ -264,6 +271,8 @@ class TtsMixin:
             if ok and dlg.made is not None and dlg.wav.is_file():
                 before = self._done_clips()
                 try:
+                    assert self.project is not None
+                    assert self.tree is not None
                     entry = TTS.use_sample(self.project, self.tree, c["name"], dlg.wav, dlg.made["label"],
                                            dlg.made["text"], dlg.made["eleven"])
                 except (ValueError, OSError, RuntimeError) as e:

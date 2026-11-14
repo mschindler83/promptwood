@@ -35,16 +35,16 @@ class _Step(QWidget):
         h.setSpacing(6)
         self.mark = QLabel()
         self.mark.setFixedWidth(18)
-        self.mark.setAlignment(Qt.AlignCenter)
+        self.mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.text = label(text)
         self.text.setWordWrap(True)
         self.text.setToolTip(tip)
-        h.addWidget(self.mark, 0, Qt.AlignTop)
+        h.addWidget(self.mark, 0, Qt.AlignmentFlag.AlignTop)
         h.addWidget(self.text, 1)
         for b in buttons:
-            h.addWidget(b, 0, Qt.AlignTop)
+            h.addWidget(b, 0, Qt.AlignmentFlag.AlignTop)
         self.buttons = buttons
-        self.done = None
+        self.done: bool | None = None
         self.set_done(False)
 
     def set_done(self, on: bool):
@@ -58,7 +58,8 @@ class _Step(QWidget):
             self.mark.setToolTip("Done")
         else:
             self.mark.setPixmap(QPixmap())
-            self.mark.setText(str(self.number) if self.number else "")      # (not by its dot alone: a number says "step 2")
+            # (not by its dot alone: a number says "step 2")
+            self.mark.setText(str(self.number) if self.number else "")
             self.mark.setToolTip("Still to do")
         self.text.setProperty("level", "secondary" if on else "")
         repolish(self.text)
@@ -72,7 +73,7 @@ class GuidePanel(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setProperty("role", "notice")
-        self.setAttribute(Qt.WA_StyledBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         v = QVBoxLayout(self)
         v.setContentsMargins(10, 8, 8, 8)
         v.setSpacing(6)
@@ -112,7 +113,7 @@ class GuidePanel(QFrame):
         self.gen_hint.setWordWrap(True)
         self.b_show_gen = _button("Show me", "Put the keyboard focus on Generate path; Enter or Space presses it")
         grow.addWidget(self.gen_hint, 1)
-        grow.addWidget(self.b_show_gen, 0, Qt.AlignTop)
+        grow.addWidget(self.b_show_gen, 0, Qt.AlignmentFlag.AlignTop)
         self.gen_row = QWidget()
         grow.setContentsMargins(0, 0, 0, 0)
         self.gen_row.setLayout(grow)
@@ -139,7 +140,7 @@ class EngineBanner(QFrame):
         super().__init__(parent)
         self.setProperty("role", "notice")
         self.setProperty("severity", "warning")
-        self.setAttribute(Qt.WA_StyledBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         h = QHBoxLayout(self)
         h.setContentsMargins(8, 4, 6, 4)
         h.setSpacing(6)
@@ -148,7 +149,7 @@ class EngineBanner(QFrame):
         self.text.setToolTip("ComfyUI is the program that makes the clips. Without it nothing can be generated")
         self.button = _button("Start the video engine")
         h.addWidget(self.text, 1)
-        h.addWidget(self.button, 0, Qt.AlignVCenter)
+        h.addWidget(self.button, 0, Qt.AlignmentFlag.AlignVCenter)
         self.can_start = True
 
     def set_state(self, starting: bool, can_start: bool):
@@ -169,7 +170,7 @@ class NextHint(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setProperty("role", "notice")
-        self.setAttribute(Qt.WA_StyledBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         h = QHBoxLayout(self)
         h.setContentsMargins(8, 4, 4, 4)
         h.setSpacing(6)
@@ -181,5 +182,5 @@ class NextHint(QFrame):
         self.b_close = _button("Hide", "Do not show this again")
         self.b_close.clicked.connect(self.closeWanted)
         h.addWidget(self.text, 1)
-        h.addWidget(self.b_next, 0, Qt.AlignVCenter)
-        h.addWidget(self.b_close, 0, Qt.AlignVCenter)
+        h.addWidget(self.b_next, 0, Qt.AlignmentFlag.AlignVCenter)
+        h.addWidget(self.b_close, 0, Qt.AlignmentFlag.AlignVCenter)

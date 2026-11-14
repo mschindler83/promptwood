@@ -9,7 +9,7 @@ from typing import Callable
 from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtGui import (QFont, QStandardItem, QStandardItemModel, QSyntaxHighlighter, QTextCharFormat,
                            QTextCursor)
-from PySide6.QtWidgets import QCompleter, QPlainTextEdit
+from PySide6.QtWidgets import QAbstractItemView, QCompleter, QPlainTextEdit
 
 from .. import camera as CAM
 from .. import tree as T
@@ -18,7 +18,8 @@ from .theme import theme
 
 _TYPING = re.compile(r"(?<![\w@])@(\w[\w-]*)?$")      # an @mention being typed right before the cursor
 _TYPING_CAM = re.compile(r"(?<![\w#&/])#([A-Za-z][\w-]*)?$")   # a #camera token being typed
-INSERT = Qt.UserRole + 1                               # the list's role with the text that is put in (its match too)
+# the list's role with the text that is put in (its match too)
+INSERT = Qt.ItemDataRole.UserRole + 1
 
 
 class MentionHighlighter(QSyntaxHighlighter):
@@ -33,11 +34,11 @@ class MentionHighlighter(QSyntaxHighlighter):
             f = QTextCharFormat()
             if m.group(1).lower() in known:
                 f.setForeground(t.accent)
-                f.setFontWeight(QFont.DemiBold)
+                f.setFontWeight(QFont.Weight.DemiBold)
             else:
                 f.setForeground(t.colour("warning") or t.accent)
                 f.setFontUnderline(True)
-                f.setUnderlineStyle(QTextCharFormat.WaveUnderline)
+                f.setUnderlineStyle(QTextCharFormat.UnderlineStyle.WaveUnderline)
             self.setFormat(m.start(), m.end() - m.start(), f)
         for m in CAM.TOKEN.finditer(text):           # known camera tokens (other #words stay plain)
             if CAM.is_token(m.group(1)):
@@ -60,8 +61,8 @@ class MentionHelper(QObject):
         self.completer = QCompleter(self.model, self)
         self.completer.setCompletionRole(INSERT)          # matched and put in: the name / the token
         self.completer.setWidget(edit)
-        self.completer.setCaseSensitivity(Qt.CaseInsensitive)
-        self.completer.setCompletionMode(QCompleter.PopupCompletion)
+        self.completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
         self.completer.activated.connect(self._insert)
         edit.textChanged.connect(self._update)
         edit.installEventFilter(self)
@@ -77,7 +78,7 @@ class MentionHelper(QObject):
         return "#", _TYPING_CAM.search(block)
 
     def _update(self):
-        popup = self.completer.popup()
+        popup = self._popup()
         kind, m = self._typed() if self.edit.hasFocus() else (self._kind, None)
         self._kind = kind                           # (what the list now shows: _fill and _insert go by it)
         names = (self.names() if kind == "@" else CAM.tokens()) if m is not None else []
@@ -117,20 +118,25 @@ class MentionHelper(QObject):
         if m is None:
             return
         cur = self.edit.textCursor()
-        cur.movePosition(QTextCursor.Left, QTextCursor.KeepAnchor, len(m.group(1) or ""))
+        cur.movePosition(QTextCursor.MoveOperation.Left, QTextCursor.MoveMode.KeepAnchor, len(m.group(1) or ""))
         insert_spaced(self.edit, name, cur, space_before=False, focus=False)
-        self.completer.popup().hide()
+        self._popup().hide()
+
+    def _popup(self) -> QAbstractItemView:
+        popup = self.completer.popup()
+        assert popup is not None
+        return popup
 
     def eventFilter(self, obj, ev):
-        if obj is self.edit and ev.type() == QEvent.KeyPress and self.completer.popup().isVisible():
-            if ev.key() in (Qt.Key_Enter, Qt.Key_Return, Qt.Key_Tab):
-                idx = self.completer.popup().currentIndex()
+        if obj is self.edit and ev.type() == QEvent.Type.KeyPress and self._popup().isVisible():
+            if ev.key() in (Qt.Key.Key_Enter, Qt.Key.Key_Return, Qt.Key.Key_Tab):
+                idx = self._popup().currentIndex()
                 if idx.isValid():                  # (nothing chosen: the key does what it does without the list)
                     self._insert(idx.data(INSERT))
                     return True
                 return False
-            if ev.key() == Qt.Key_Escape:
-                self.completer.popup().hide()
+            if ev.key() == Qt.Key.Key_Escape:
+                self._popup().hide()
                 return True
         return False
 

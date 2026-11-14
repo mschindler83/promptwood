@@ -6,10 +6,12 @@ from __future__ import annotations
 import html
 import random
 import threading
+from collections.abc import Callable
+from typing import Any
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QIcon, QImage, QKeySequence, QPixmap, QShortcut
+from PySide6.QtGui import QIcon, QImage, QKeySequence, QPixmap
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLineEdit, QPlainTextEdit,
                                QPushButton, QSpinBox, QTextBrowser, QToolButton, QVBoxLayout, QWidget)
 
@@ -18,7 +20,8 @@ from .lora_details import themed
 from .theme import repolish, theme
 from .dialogs import add_action, button_row
 from .text_edit import replace_text  # noqa: F401  (main_window and image_edit import it from here)
-from .widgets import fit_size, guard_wheel, icon_button, label, safe_emit
+from .widgets import fit_size, guard_wheel, label, safe_emit, shortcut
+from .qsvalue import qs_value
 
 LIKE_EXAMPLE = ("Rewrite my prompt in the manner of this example prompt, which is known to work with the LoRA: take "
                 "its wording, its structure and its level of detail. Keep what my prompt is about (my subjects, my "
@@ -26,11 +29,6 @@ LIKE_EXAMPLE = ("Rewrite my prompt in the manner of this example prompt, which i
                 "\"{example}\"")
 KIND_TEXT = {"video": "video clip prompt", "video_h3": "video clip prompt", "image": "image prompt",
              "edit": "edit instruction"}
-
-
-def refine_button(tip: str = "Refine this prompt with a language model (ComfyUI)") -> "QPushButton":
-    b = icon_button("gen", tip)
-    return b
 
 
 SETUP_HINT = ("More models: set up a local language model (llama.cpp, GGUF files) in the main window under "
@@ -56,6 +54,7 @@ class RefineDialog(QDialog):
     starts from (kind "video_h3": the refiner fits the action to the length and anchors on that frame).
     loras: the paths of the LoRAs the result is made with; the model is told what is known of them (lora_notes:
     their creators' words and prompts that work with them), and writes a note on each once."""
+    connect: Callable   # (shadows QObject.connect, which this dialog never uses)
 
     def __init__(self, parent, text: str, kind: str, connect, settings=None, start_comfy=None, cast=None,
                  pictures=None, seconds: float | None = None, start_image=None, loras=None):
@@ -66,7 +65,7 @@ class RefineDialog(QDialog):
         self.setWindowTitle(f"Refine the {KIND_TEXT.get(kind, 'prompt')}")
         fit_size(self, 1100, 680)
         self.kind, self.connect, self.qs, self.start_comfy = kind, connect, settings, start_comfy
-        self.refiner = None
+        self.refiner: Any = None                  # (the connected refiner)
         self._connecting = False
         self._retries = 0                         # (more tries to connect: ComfyUI is starting)
         self.refined_any = False                  # a refine ran (its model is loaded in ComfyUI now)
@@ -116,7 +115,7 @@ class RefineDialog(QDialog):
         self.b_mode_ideas.clicked.connect(lambda: self.set_ideas_mode(True))
         v.addLayout(top)
         self.use_loras = QCheckBox("Write for the LoRAs")
-        self.use_loras.setChecked(self.qs.value("refinerLoraKnowledge", True, type=bool) if self.qs is not None
+        self.use_loras.setChecked(qs_value(self.qs, "refinerLoraKnowledge", True, bool) if self.qs is not None
                                   else True)
         self.use_loras.toggled.connect(self._remember_loras)
         self.b_loras = QToolButton()
@@ -126,7 +125,7 @@ class RefineDialog(QDialog):
                                 "LoRAs, their example prompts with the pictures they made, and everything else "
                                 "that is known of them")
         self.b_loras.setAutoRaise(True)
-        self.b_loras.setCursor(Qt.PointingHandCursor)
+        self.b_loras.setCursor(Qt.CursorShape.PointingHandCursor)
         self.b_loras.clicked.connect(lambda: self.show_loras())
         self._lora_row = QWidget()
         lrow = QHBoxLayout(self._lora_row)
@@ -180,7 +179,7 @@ class RefineDialog(QDialog):
         self.count.setValue(5)
         self.count.setSuffix(" ideas")
         self.count.setToolTip("How many different ideas (one answer: the model keeps them apart)")
-        self.count.valueChanged.connect(lambda v: self.ideas_mode() and self.b_refine.setText(f"Make {v} ideas"))
+        self.count.valueChanged.connect(self._ideas_count_changed)
         hrow.addWidget(self.count)
         self.b_all = QPushButton("Generate all")
         self.b_all.setToolTip("Put all ideas into the image window's Variations as {idea}: one Generate makes one "
@@ -210,9 +209,9 @@ class RefineDialog(QDialog):
         self.b_start.hide()
         self.b_start.clicked.connect(self._start_comfy)
         v.addWidget(self.buttons)
-        self.out.textChanged.connect(lambda: self.buttons.button(QDialogButtonBox.Ok).setEnabled(
+        self.out.textChanged.connect(lambda: self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(
             bool(self.out.toPlainText().strip()) and not self._busy))
-        QShortcut(QKeySequence("Ctrl+Return"), self, activated=lambda: self.refine())
+        shortcut(QKeySequence("Ctrl+Return"), self, lambda: self.refine())
         guard_wheel(self)
         self._show_pictures()
         self._mode_changed()
@@ -220,7 +219,8 @@ class RefineDialog(QDialog):
 
     # ---- what the chosen model can do
     def current_model(self) -> dict:
-        return next((m for m in (self.refiner.models if self.refiner else [])
+        models: list[dict] = self.refiner.models if self.refiner else []
+        return next((m for m in models
                      if m["file"] == self.model.currentData()), {})
 
     def chatting(self) -> bool:
@@ -228,6 +228,10 @@ class RefineDialog(QDialog):
 
     def seeing(self) -> bool:
         return bool(self.current_model().get("vision"))
+
+    def _ideas_count_changed(self, v: int) -> None:
+        if self.ideas_mode():
+            self.b_refine.setText(f"Make {v} ideas")
 
     def ideas_mode(self) -> bool:
         return self.b_mode_ideas.isChecked() and self.ideas_possible()
@@ -264,9 +268,9 @@ class RefineDialog(QDialog):
             w.setVisible(ideas)
         self.b_all.setVisible(ideas)
         self.b_all.setEnabled(ideas and bool(self.ideas) and not self._busy)
-        self.buttons.button(QDialogButtonBox.Ok).setEnabled(not ideas and not self._busy
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(not ideas and not self._busy
                                                             and bool(self.out.toPlainText().strip()))
-        self.buttons.button(QDialogButtonBox.Ok).setToolTip("In Ideas mode: Use this on an idea, or Generate all"
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setToolTip("In Ideas mode: Use this on an idea, or Generate all"
                                                             if ideas else "")
         self._render_ideas()
         self.caps.setText(" · ".join(x for x in ("conversation" if chat else "", "sees pictures" if see else "") if x)
@@ -290,10 +294,11 @@ class RefineDialog(QDialog):
         show_pics = chat                              # (only a conversation model can be shown pictures)
         self.pics_title.setVisible(show_pics)
         for i in range(self.pics_row.count()):
-            w = self.pics_row.itemAt(i).widget()
-            if w is not None:
-                w.setVisible(show_pics)
-                w.setEnabled(see)
+            item = self.pics_row.itemAt(i)
+            pic = item.widget() if item is not None else None
+            if pic is not None:
+                pic.setVisible(show_pics)
+                pic.setEnabled(see)
         self.pics_title.setText("Pictures the model sees (click to switch on / off)" if see else
                                 "Pictures (this model cannot see them)")
         self._update_buttons()
@@ -302,7 +307,8 @@ class RefineDialog(QDialog):
     def _show_pictures(self):
         while self.pics_row.count():
             it = self.pics_row.takeAt(0)
-            w = it.widget()                        # (after setParent(None) the item no longer knows it)
+            # (after setParent(None) the item no longer knows it)
+            w = it.widget() if it is not None else None
             if w is not None:
                 w.setParent(None)
                 w.deleteLater()
@@ -310,16 +316,17 @@ class RefineDialog(QDialog):
             b = QToolButton()
             b.setCheckable(True)
             b.setChecked(pic["on"])
-            b.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+            b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
             img = QImage(pic["path"])
             if not img.isNull():
-                b.setIcon(QIcon(QPixmap.fromImage(img.scaled(96, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation))))
+                b.setIcon(QIcon(QPixmap.fromImage(img.scaled(96, 64, Qt.AspectRatioMode.KeepAspectRatio,
+                                                             Qt.TransformationMode.SmoothTransformation))))
                 b.setIconSize(QSize(96, 64))
             b.setText(pic["title"] if len(pic["title"]) <= 22 else pic["title"][:20] + "…")
             b.setToolTip(f"{pic['title']}\n{pic['path']}\nClick: the model sees it (on) or not (off); right-click: "
                          "remove")
             b.toggled.connect(lambda on, i=i: self.pictures[i].update(on=on))
-            b.setContextMenuPolicy(Qt.CustomContextMenu)
+            b.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
             b.customContextMenuRequested.connect(lambda _p, i=i: self._remove_picture(i))
             self.pics_row.addWidget(b)
         add = QToolButton()
@@ -389,8 +396,8 @@ class RefineDialog(QDialog):
         self.model.clear()
         for m in models:
             self.model.addItem(m["label"] + f"  —  {Path(m['file'].split(':', 1)[-1]).name}", m["file"])
-            self.model.setItemData(self.model.count() - 1, m["file"], Qt.ToolTipRole)
-        saved = self.qs.value("refinerModel", "", type=str) if self.qs is not None else ""
+            self.model.setItemData(self.model.count() - 1, m["file"], Qt.ItemDataRole.ToolTipRole)
+        saved = qs_value(self.qs, "refinerModel", "", str) if self.qs is not None else ""
         i = self.model.findData(saved)
         self.model.setCurrentIndex(i if i >= 0 else 0)
         self.model.blockSignals(False)
@@ -633,7 +640,7 @@ class RefineDialog(QDialog):
             self._capture_edit()
         self._busy = True
         self._update_buttons()
-        self.buttons.button(QDialogButtonBox.Ok).setEnabled(False)
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
         self._say("Thinking …" if chat else "Refining …")
         if not str(self.model.currentData() or "").startswith("llama:"):
             self.refined_any = True                # a ComfyUI model is being loaded (unloaded before clips)
@@ -692,7 +699,7 @@ class RefineDialog(QDialog):
                        else f"{len(text.split())} words. Edit it if you like, " + nxt.lower() + "or Use this."),
                       "warning" if lost else "")
         self._mode_changed()
-        self.buttons.button(QDialogButtonBox.Ok).setEnabled(bool(self.out.toPlainText().strip())
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(bool(self.out.toPlainText().strip())
                                                             and not self.ideas_mode())
 
     # ---- ideas from bullet points (image prompts)

@@ -4,6 +4,7 @@ from __future__ import annotations
 import random
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QAction, QCursor, QKeySequence, QPixmap
@@ -21,7 +22,7 @@ from .problems import EXAMPLES, ProblemBox, add_example, camera_menu_items, inse
 from .prompt_refiner import replace_text
 from .theme import icon, repolish, theme
 from .view_mode import AdvancedNote, ViewMode, row_widget
-from .widgets import FrameTile, format_time, guard_wheel, icon_button, label
+from .widgets import FrameTile, combo_item, format_time, guard_wheel, icon_button, label
 from .mw_support import FileDrop, select_frames
 from .ui_logic import (
     CARD_WIDTH, CONTINUE_FIRST_TIP, CONTINUE_SHORT_TIP, CONTINUE_TIP, END_TIP, FRAME_CHOICES, FREEZE_TIP,
@@ -37,7 +38,7 @@ class _CardAction(QAction):
 
 
 def more_menu(card, nid: str, entries, tip: str = "More actions for this clip: variants, compare, branch, freeze, "
-                                                   "delete") -> tuple[QToolButton, dict[str, QAction]]:
+                                                   "delete") -> tuple[QToolButton, dict[str, _CardAction]]:
     """A card's "More" button: a menu of (action, icon, text, tooltip, shortcut or None) entries (None: a separator)
     that emit card.action(action, nid), the same signal the header buttons had. A shortcut is only shown (and works
     while the menu is open): the window's own shortcuts do the work, one per window, not one per card."""
@@ -45,9 +46,9 @@ def more_menu(card, nid: str, entries, tip: str = "More actions for this clip: v
     b.setText("More")
     b.setIcon(icon("more"))
     b.setIconSize(QSize(16, 16))
-    b.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+    b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
     b.setAutoRaise(True)
-    b.setPopupMode(QToolButton.InstantPopup)
+    b.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
     b.setToolTip(tip)
     m = QMenu(b)
     m.setToolTipsVisible(True)
@@ -61,7 +62,7 @@ def more_menu(card, nid: str, entries, tip: str = "More actions for this clip: v
         a.setToolTip(tip)
         if keys:
             a.setShortcut(QKeySequence(keys))
-            a.setShortcutContext(Qt.WidgetShortcut)
+            a.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
         a.triggered.connect(lambda _=False, k=key: card.action.emit(k, nid))
         m.addAction(a)
         acts[key] = a
@@ -73,8 +74,18 @@ class _ClipCardBase(QFrame):
     """What the card of a made clip and the card of a real video share: the state tag and picture, the border while it
     is worked on, freezing. The subclasses say how they differ in the class attributes and _frozen_tip."""
     _NO_PICTURE = "not made yet"                       # the thumbnail's text while there is nothing to show
-    _BUSY = ("generating",)                            # the states in which the card shows the progress bar
+    _BUSY: tuple[str, ...] = ("generating",)           # the states in which the card shows the progress bar
     _BACKGROUND = "bgRaised"                           # the theme colour of the card's background
+    # (made by the subclasses)
+    tag: QLabel
+    thumb: FrameTile
+    step: QLabel
+    bar: QProgressBar
+    b_freeze: QAction
+    _on: bool
+
+    def set_editable(self, on: bool):
+        raise NotImplementedError
 
     def set_state(self, state: str, pixmap: QPixmap | None, step: str = ""):
         self.state = state
@@ -112,6 +123,7 @@ class _ClipCardBase(QFrame):
 
 class PromptCard(_ClipCardBase):
     """One clip of the selected path: prompt, seed, LoRAs, own length / steps, status."""
+    _end_free: bool
     settings_open = False                      # the own-settings part is open (the same on every card)
     edited = Signal(str)
     seedChanged = Signal(str, int)
@@ -132,7 +144,7 @@ class PromptCard(_ClipCardBase):
         self.nid = node.id
         self.names = names
         self.setObjectName("promptCard")
-        self.setAttribute(Qt.WA_StyledBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         self.setFixedWidth(CARD_WIDTH)
         self.state = ""
         shared.v = QVBoxLayout(self)
@@ -165,7 +177,7 @@ class PromptCard(_ClipCardBase):
         self.act_variant.triggered.connect(lambda: self.action.emit("variant", self.nid))
         self.b_variant = QToolButton()
         self.b_variant.setDefaultAction(self.act_variant)
-        self.b_variant.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.b_variant.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.b_variant.setAutoRaise(True)
         self.b_variant.setIconSize(QSize(16, 16))
         head.addWidget(self.b_variant)
@@ -246,7 +258,7 @@ class PromptCard(_ClipCardBase):
                 a.setToolTip(f"#{token}")
                 a.triggered.connect(lambda _=False, t=token: self.insert_text(f"#{t}"))
         self.b_camera.setMenu(self.camera_menu)
-        self.b_camera.setPopupMode(QToolButton.InstantPopup)
+        self.b_camera.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.b_examples = self._text_button("Examples", "Example descriptions: one replaces an empty description, "
                                             "else it is added at the end (Ctrl+Z takes it back)")
         self.examples_menu = QMenu(self.b_examples)
@@ -255,7 +267,7 @@ class PromptCard(_ClipCardBase):
             a.setToolTip(ex)
             a.triggered.connect(lambda _=False, t=ex: self.add_example(t))
         self.b_examples.setMenu(self.examples_menu)
-        self.b_examples.setPopupMode(QToolButton.InstantPopup)
+        self.b_examples.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         for b in (self.b_mention, self.b_camera, self.b_examples):
             foot.addWidget(b)
         foot.addStretch(1)
@@ -263,7 +275,7 @@ class PromptCard(_ClipCardBase):
                                            "camera, sound); you see the new version before it is used")
         self.b_refine.setText("Refine")
         self.b_refine.setProperty("role", "textButton")     # (an icon button's fixed 24 px would cut its name off)
-        self.b_refine.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.b_refine.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.b_refine.clicked.connect(lambda: self.action.emit("refine", self.nid))
         foot.addWidget(self.b_refine)
         shared.v.addLayout(foot)
@@ -306,7 +318,7 @@ class PromptCard(_ClipCardBase):
         self.settings_toggle = QToolButton()
         self.settings_toggle.setCheckable(True)
         self.settings_toggle.setAutoRaise(True)
-        self.settings_toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.settings_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.settings_toggle.setToolTip("This clip's own length and steps (unset: the project's)")
         self.settings_toggle.toggled.connect(self._show_settings)
         shared.v.addWidget(self.settings_toggle)
@@ -531,7 +543,7 @@ class PromptCard(_ClipCardBase):
         self.b_revert.clicked.connect(lambda: self.action.emit("revert", self.nid))
         self.b_revert.hide()
         strow.addWidget(self.step, 1)
-        strow.addWidget(self.b_revert, 0, Qt.AlignTop)
+        strow.addWidget(self.b_revert, 0, Qt.AlignmentFlag.AlignTop)
         shared.v.addLayout(strow)
         self.bar = QProgressBar()
         self.bar.setRange(0, 100)
@@ -591,7 +603,7 @@ class PromptCard(_ClipCardBase):
         self._update_note()
 
     def _ov_changed(self, *_):
-        ov = {}
+        ov: dict[str, Any] = {}
         loras = self.loras.items()
         if loras:
             ov["loras"] = loras
@@ -638,8 +650,8 @@ class PromptCard(_ClipCardBase):
         b.setText(text)
         b.setToolTip(tip)
         b.setAutoRaise(True)
-        b.setToolButtonStyle(Qt.ToolButtonTextOnly)
-        b.setCursor(Qt.PointingHandCursor)
+        b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
         return b
 
     def _fill_mentions(self) -> list[str]:
@@ -715,8 +727,8 @@ class PromptCard(_ClipCardBase):
         for b in self.chips.chips:                 # (the lead chip is an own setting of the clip)
             if b.isCheckable():
                 b.setEnabled(edit)
-        for w in self.buttons:
-            w.setEnabled(self._on)
+        for button in self.buttons:
+            button.setEnabled(self._on)
         self.steps.setEnabled(edit and not self.steps_locked)
         self._enable_camera()
         self._enable_guide()
@@ -738,7 +750,7 @@ class PromptCard(_ClipCardBase):
         self.settings_toggle.blockSignals(True)
         self.settings_toggle.setChecked(bool(on))
         self.settings_toggle.blockSignals(False)
-        self.settings_toggle.setArrowType(Qt.DownArrow if on else Qt.RightArrow)
+        self.settings_toggle.setArrowType(Qt.ArrowType.DownArrow if on else Qt.ArrowType.RightArrow)
 
     def set_faces(self, text: str):
         self.faces.setText(text)
@@ -761,7 +773,8 @@ class PromptCard(_ClipCardBase):
         ov, names = self.ov, []
         for key, name, target in (("loras", "LoRAs", (self.link_form, self.loras)),
                                   ("guide", "Carry-over", (self.link_form, self.guide)),
-                                  ("continue", "Continue", (self.link_form, self.cont)), ("steps", "Steps", self.steps)):
+                                  ("continue", "Continue", (self.link_form, self.cont)), ("steps", "Steps",
+                                                                                          self.steps)):
             if ov.get(key) and self.view.is_advanced(target):
                 names.append(name)
         if self.keys.items and self.view.is_advanced((self.link_form, self.keys_row)):
@@ -912,12 +925,11 @@ class PromptCard(_ClipCardBase):
         switched on); model_sound: the project's sound is on (a sound laid over can be mixed with the model's)."""
         self._max_guide = max_guide
         cur = self.src_sound.currentData()
-        model = self.src_sound.model()
         for k in range(self.src_sound.count()):        # a choice in use stays choosable (to be taken back)
             d = self.src_sound.itemData(k)
             track = isinstance(d, str) and d.startswith(T.TRACK_PREFIX)
             ok = d is None or d == cur or track or (available if d is True else repeat)
-            model.item(k).setEnabled(ok)
+            combo_item(self.src_sound, k).setEnabled(ok)
         some = available or repeat or bool(cur) or self.src_sound.count() > len(SOUND_MODES)
         self.link_form.setRowVisible(self.sound_box, True)   # (always: Speak the lines)
         self.src_sound.setVisible(some)
@@ -1029,7 +1041,7 @@ class VideoCard(_ClipCardBase):
         self.nid = node.id
         self.view = view
         self.setObjectName("promptCard")
-        self.setAttribute(Qt.WA_StyledBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         self.setFixedWidth(CARD_WIDTH)
         self.state = ""
         v = QVBoxLayout(self)
@@ -1075,7 +1087,7 @@ class VideoCard(_ClipCardBase):
         v.addWidget(self.range)
         self.b_edit = QPushButton("Edit range…")
         self.b_edit.clicked.connect(lambda: self.action.emit("edit", self.nid))
-        v.addWidget(self.b_edit, 0, Qt.AlignLeft)
+        v.addWidget(self.b_edit, 0, Qt.AlignmentFlag.AlignLeft)
         v.addStretch(1)
         self.step = label("", level="tertiary")
         v.addWidget(self.step)

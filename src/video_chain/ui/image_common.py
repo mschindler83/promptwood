@@ -34,7 +34,7 @@ class PictureSlot(QWidget):
         v.setSpacing(2)
         self.tile = FrameTile(120, 90)
         self.tile.clear_frame(title)
-        self.tile.setCursor(Qt.PointingHandCursor)
+        self.tile.setCursor(Qt.CursorShape.PointingHandCursor)
         self.tile.setToolTip(f"{title}: click to choose a picture (e.g. a face or a piece of clothing)")
         self.tile.clicked.connect(lambda _t: self.choose())
         self.title = title

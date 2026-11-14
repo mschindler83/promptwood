@@ -4,7 +4,7 @@ from __future__ import annotations
 import copy
 from collections import Counter
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple, cast
 
 from .. import chain, config, llm_server as LLM, tree as T, tts as TTS
 from .graph import START
@@ -22,7 +22,7 @@ MAX_RECENT = 10
 UNLOAD_TIMEOUT = 10        # seconds ComfyUI is given to answer "unload your models"
 VRAM_POLL_SECONDS = 0.5    # how often the free VRAM is looked at while ComfyUI lets go
 AUDIO_REF_RANGE = f"{T.AUDIO_REF_MIN:g}-{T.AUDIO_REF_TOTAL:g} s"   # what one sound reference may last
-_SELECTED = object()         # "the selected character" as a default argument (None means: no character)
+_SELECTED: Any = object()         # "the selected character" as a default argument (None means: no character)
 MAX_RECENT_LORAS = 12      # LoRAs kept in the "recent" list of the pickers
 COMFY_START_TIMEOUT = 180  # seconds ComfyUI is given to come up after it was started
 KILL_GRACE_MS = 8000       # how long the generator process may take to end after Stop
@@ -35,7 +35,6 @@ DEFAULT_SIZE = (672, 384)    # a clip's size when nothing says another (width, h
 ASPECT_TOLERANCE = 0.05      # an end image this far from the canvas' aspect ratio is cut to it
 # H3's 17n+5 frame grid from 3 s to 15 s (362 frames = 15.1 s, the top of its trained range of ~124-362)
 FRAME_CHOICES = [17 * n + 5 for n in range(4, 22)]
-IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff)"
 
 
 def app_cache_dir() -> Path:
@@ -254,7 +253,7 @@ def project_setting_changes(o: dict) -> list[tuple[str, str]]:
     for k, name in (("prefix", "Style before"), ("suffix", "Style after")):
         if (style.get(k) or "").strip():
             out.append(("style_" + k, name))
-    if T.is_h3(o) != (d["prompt_format"] == "h3"):
+    if T.is_h3(cast(T.Options, o)) != (d["prompt_format"] == "h3"):
         out.append(("prompt_format", "Prompt format"))
     if bool(o.get("lora_triggers", d["lora_triggers"])) != d["lora_triggers"]:
         out.append(("lora_triggers", "LoRA trigger words"))
@@ -267,6 +266,11 @@ def project_setting_changes(o: dict) -> list[tuple[str, str]]:
     if topt["provider"] == "elevenlabs" and topt["eleven_model"] != TTS.DEFAULT_OPTIONS["eleven_model"]:
         out.append(("eleven_model", "ElevenLabs model (Cast & references)"))
     return out
+
+
+def as_dict(typed: Any) -> dict[str, Any]:
+    """A TypedDict (an Options, MadeRecord ...) as the plain dict it is, for keys that are variables."""
+    return cast(dict[str, Any], typed)
 
 
 CARD_WIDTH = 330                           # a card's width in a row; the header must fit it

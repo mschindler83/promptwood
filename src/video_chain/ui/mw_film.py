@@ -12,9 +12,10 @@ from PySide6.QtWidgets import (
 from .. import chain, film as F, tree as T
 from . import dialogs as D, shortcuts as S
 from .widgets import format_time, label, safe_emit
+from .mw_host import MainWindowHost
 
 
-class FilmMixin:
+class FilmMixin(MainWindowHost):
     """The film: scenes, storyboard, joining the scenes."""
 
     def join_film(self, purpose: str = "play", out: Path | None = None):
@@ -136,6 +137,7 @@ class FilmMixin:
         if self.film is None or self.film.path(sid) != self.project:
             self._film_queue = None                # could not open the scene (the status says why)
             return
+        assert self.tree is not None
         take = self.film.take_of(sid, self.tree)
         self._start([take])
         if not self.running and self._waiting_comfy is None:
@@ -181,11 +183,12 @@ class FilmMixin:
         """The cast, sounds and size settings are the film's: written into the other scenes when they change."""
         if self.film is None or len(self.film.scenes) < 2 or self.tree is None:
             return
-        now = json.dumps(self.film.shared(self.tree.options), sort_keys=True)
+        now = json.dumps(self.film.shared(dict(self.tree.options)), sort_keys=True)
         if now == self._shared_sent:
             return
         try:
-            self.film.sync_shared(self.project, self.tree.options)
+            assert self.project is not None
+            self.film.sync_shared(self.project, dict(self.tree.options))
             self._shared_sent = now
         except (OSError, ValueError) as e:
             self._report_error(f"Could not pass the cast / sound settings on to the other scenes: {e}")
@@ -343,17 +346,17 @@ class FilmMixin:
         table = QTableWidget(len(names), len(rows))
         table.setHorizontalHeaderLabels([f"{k}  {title}" for k, (title, _m) in enumerate(rows, start=1)])
         table.setVerticalHeaderLabels([f"@{n}" for n in names])
-        table.setEditTriggers(QTableWidget.NoEditTriggers)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         sym = {"face": "●", "voice": "♪", "face+voice": "●♪", "picture": "◆"}
         for c, (_title, marks) in enumerate(rows):
             for r, n in enumerate(names):
                 item = QTableWidgetItem(sym.get(marks.get(n, ""), ""))
-                item.setTextAlignment(Qt.AlignCenter)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 table.setItem(r, c, item)
         table.resizeColumnsToContents()
         v.addWidget(table)
         v.addWidget(label("● face   ◆ picture (a place, object or style)   ♪ speaks with its voice", level="tertiary"))
-        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(dlg.reject)
         v.addWidget(buttons)
         dlg.resize(min(900, 160 + 120 * len(rows)), min(600, 140 + 30 * len(names)))

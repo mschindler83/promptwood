@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QAbstractItemView, QHeaderView, QTableWidget, QTab
 from .. import tree as T
 
 
-def cast_cells(options: dict, nodes: list) -> dict[tuple[str, str], tuple[str, str]]:
+def cast_cells(options: T.Options, nodes: list) -> dict[tuple[str, str], tuple[str, str]]:
     """{(character name, node id): (mark, tooltip)} for the clips of a path (videos have none)."""
     out: dict[tuple[str, str], tuple[str, str]] = {}
     for n in nodes:
@@ -46,14 +46,14 @@ class CastStrip(QTableWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.setSelectionMode(QAbstractItemView.NoSelection)
-        self.setFocusPolicy(Qt.NoFocus)
+        self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setShowGrid(False)
         self.setWordWrap(False)
-        self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.horizontalHeader().setMinimumSectionSize(34)
-        self.verticalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.verticalHeader().setDefaultSectionSize(20)
         self.horizontalHeader().sectionClicked.connect(self._clicked)
         self.cellClicked.connect(lambda _r, c: self._clicked(c))
@@ -62,7 +62,7 @@ class CastStrip(QTableWidget):
                         "picture. Click a clip to show its card.")
         self._ids: list[str] = []
 
-    def show_path(self, options: dict, nodes: list) -> None:
+    def show_path(self, options: T.Options, nodes: list) -> None:
         cast = T.cast_of(options)
         show = bool(cast) and bool(nodes)
         self.setVisible(show)
@@ -79,7 +79,7 @@ class CastStrip(QTableWidget):
             for k, n in enumerate(nodes):
                 mark, tip = cells.get((c["name"], n.id), ("", ""))
                 item = QTableWidgetItem(mark)
-                item.setTextAlignment(Qt.AlignCenter)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 item.setToolTip(tip or (f"video #{T.short_id(n.id)} (real footage)" if n.is_video else
                                         f"@{c['name']} is not in #{T.short_id(n.id)}"))
                 self.setItem(r, k, item)

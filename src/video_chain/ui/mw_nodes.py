@@ -15,15 +15,17 @@ from .prompt_refiner import replace_text
 from .clip_cards import PromptCard
 from .project_dialogs import VariantsDialog
 from .ui_logic import FREEZE_TIP, plural, row_start_of, variant_strengths
+from .mw_host import MainWindowHost
 
 
-class NodeMixin:
+class NodeMixin(MainWindowHost):
     """What the node menu does: freeze, delete, branch, variants."""
 
     def node_action(self, action: str, nid: str | None):
         if self.tree is None or self._wait_note():
             return
         if action in ("take", "take_clear") and self.film is not None:
+            assert self.project is not None
             cur = self.film.scene_of(self.project)
             if cur is not None and nid:
                 try:
@@ -97,6 +99,7 @@ class NodeMixin:
         if action == "refine" and node is not None and not node.is_video:
             card = self._card_of(node.id, PromptCard)
             if card is not None:
+                assert self.project is not None
                 ck = T.Checker(self.project, self.tree)
                 start = ck.start_frame(node)
                 end = T.end_image_used(self.tree, node)
@@ -130,7 +133,7 @@ class NodeMixin:
             new = self.tree.add(node.id if node else None, "")
         elif action == "variants" and node is not None:
             dlg = VariantsDialog(self, node)
-            if dlg.exec() == QDialog.Accepted:
+            if dlg.exec() == QDialog.DialogCode.Accepted:
                 self.create_variants(node.id, dlg.count.value(), dlg.generate.isChecked(),
                                      strength_steps=dlg.strength_steps(), keep_seed=dlg.keep_seed())
             return
@@ -192,6 +195,7 @@ class NodeMixin:
         if self.tree is None or self.running or nid not in self.tree.nodes:
             return []
         what = "video" if self.tree.nodes[nid].is_video else "clip"
+        assert self.project is not None
         why = T.freeze_problem(self.project, self.tree, nid)
         if why:
             self._report_error(f"Cannot freeze {what} #{T.short_id(nid)}: {why}.")
@@ -249,10 +253,13 @@ class NodeMixin:
     def _copy_video_child(self, source: str, target: str) -> None:
         """A variant of a clip that leads into a real video leads into its own copy of that video; one with an
         end image gets its own copy of the image."""
+        assert self.tree is not None
         vc = self.tree.video_child(source)
         if vc is not None and self.tree.can_add_video(target):
+            assert self.project is not None
             T.copy_video(self.project, self.tree, vc, target)
         try:
+            assert self.project is not None
             T.copy_end_image(self.project, self.tree, source, target)
             T.copy_keyframes(self.project, self.tree, source, target)
         except (OSError, RuntimeError, ValueError) as e:
@@ -261,6 +268,8 @@ class NodeMixin:
     def _copy_row_start(self, source: str, target: str) -> None:
         """A variant of a first clip with its own start image starts from its own copy of that picture."""
         try:
+            assert self.tree is not None
+            assert self.project is not None
             T.copy_node_start(self.project, self.tree, source, target)
         except (OSError, RuntimeError, ValueError) as e:
             self._report_error(f"Could not copy the start image: {e}")
@@ -269,6 +278,7 @@ class NodeMixin:
         """Undo the edits of a made clip (prompt, seed, own settings, end image) so it counts as done again."""
         if self.tree is None or self.running or nid not in self.tree.nodes:
             return []
+        assert self.project is not None
         done = T.revert(self.project, self.tree, nid)
         if not done:
             return []
@@ -290,9 +300,11 @@ class NodeMixin:
         if memo is not None and node.parent in memo:
             made = memo[node.parent]
         else:
-            sibs = [n for n in self.tree.children(node.parent) if n.made and not n.is_video
+            tree = self.tree
+            assert tree is not None
+            sibs = [n for n in tree.children(node.parent) if n.made and not n.is_video
                     and self.status_of.get(n.id) == "done"]
-            made = [n.id for n in sorted(sibs, key=lambda n: self.tree.number(n.id))]
+            made = [n.id for n in sorted(sibs, key=lambda n: tree.number(n.id))]
             if memo is not None:
                 memo[node.parent] = made
         own = [nid] if node.made else []
@@ -308,15 +320,18 @@ class NodeMixin:
             self.status.setText("Nothing to compare: make variants of this clip first (Variant / Variants…).")
             return None
         items = []
+        assert self.project is not None
         for i in ids:
             n = self.tree.nodes[i]
             detail = " · ".join([f"seed {n.seed}"] + self._own_parts(n) +
                                 ([] if n.prompt == self.tree.nodes[nid].prompt else [f"“{n.prompt[:60]}”"]))
+            assert n.made is not None                  # (compare_candidates: made clips)
             items.append((i, f"#{T.short_id(i)}", detail, self.project / n.made["video"]))
         self.preview.stop()
+        tree = self.tree
 
         def keep(kid: str) -> bool:
-            others = [i for i in ids if i != kid and i in self.tree.nodes]
+            others = [i for i in ids if i != kid and i in tree.nodes]
             return bool(self.keep_only(kid, others))
         dlg = CompareDialog(self, items, keep, player=player,
                             title=f"Compare {len(ids)} clips from the same point as #{T.short_id(nid)}")
@@ -330,6 +345,7 @@ class NodeMixin:
         """The shared part of keep_only / keep_branch: delete the branches that start at roots (with what follows
         them), keep nid and select it. question(doomed): the text asked (before it, the made clips are counted);
         done(gone): the status line. Returns the deleted ids."""
+        assert self.tree is not None
         doomed = roots + [d.id for r in roots for d in self.tree.descendants(r)]
         made = sum(1 for d in doomed if self.tree.nodes[d].made)
         if confirm:
@@ -427,6 +443,9 @@ class NodeMixin:
             acts = {m.addAction("Another picture for this row…"): "start_own",
                     m.addAction("Start from the project's start image instead"): "start_own_clear",
                     m.addAction("More start images… (the same clip for each)"): "start_rows"}
+            for a_, what in acts.items():            # (a frozen clip refuses to change its start image)
+                if self._is_locked(self.tree.nodes[own], what):
+                    a_.setEnabled(False)
             chosen = self._exec_menu(m, pos.toPoint() if hasattr(pos, "toPoint") else pos)
             if chosen in acts:
                 act = acts[chosen]
@@ -512,6 +531,7 @@ class NodeMixin:
             ref_last.setEnabled(bool(node is not None and node.made))
             gen = m.addAction("Generate the path to here")
             if self.film is not None:
+                assert self.project is not None
                 cur = self.film.scene_of(self.project)
                 if cur is not None and cur.take == nid:
                     acts[m.addAction("Clear the scene's ending (the film plays its selected path)")] = "take_clear"

@@ -10,9 +10,10 @@ import subprocess
 import tempfile
 import threading
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject, QPointF, QRectF, QSettings, Qt, QUrl, Signal
-from PySide6.QtGui import QKeySequence, QPainter, QPen, QShortcut
+from PySide6.QtGui import QKeySequence, QPainter, QPen
 from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout,
                                QLineEdit, QPushButton, QVBoxLayout)
 
@@ -21,7 +22,11 @@ from ..tree import AUDIO_REF_MIN, VOICE_MAX_SECS, VOICE_REF_MAX_SECS
 from .theme import theme, with_alpha
 from .video_editor import RangeBar, RangePlayerMixin, fmt
 from .dialogs import button_row
-from .widgets import fit_size, guard_wheel, icon_button, label, safe_emit
+from .widgets import VideoView, fit_size, guard_wheel, icon_button, label, safe_emit, shortcut
+from .qsvalue import qs_value
+
+if TYPE_CHECKING:
+    from PySide6.QtMultimedia import QMediaPlayer
 
 PEAKS = 1200                                    # waveform columns
 
@@ -43,6 +48,7 @@ def waveform(path: str | Path, duration: float, columns: int = PEAKS, rate: int 
         while True:
             if cancelled():
                 return []
+            assert proc.stdout is not None
             data = proc.stdout.read(step * 4 * 64)
             if not data:
                 break
@@ -80,7 +86,7 @@ class WaveBar(RangeBar):
     def paintEvent(self, e):
         t = theme()
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
         h, w = self.height(), self.width() - 2 * self.PAD
         p.fillRect(QRectF(self.PAD, 4, w, h - 8), t.bgSunken)
         x0, x1 = self._x(self.start), self._x(self.end)
@@ -94,7 +100,7 @@ class WaveBar(RangeBar):
                 p.setPen(QPen(t.accent if inside else t.textTertiary, max(1.0, w / n)))
                 p.drawLine(QPointF(x, mid - v * (mid - 8)), QPointF(x, mid + v * (mid - 8)))
         for x in (x0, x1):
-            p.setPen(Qt.NoPen)
+            p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(t.accent)
             p.drawRoundedRect(QRectF(x - 3, 2, 6, h - 4), 3, 3)
         p.setPen(QPen(t.textPrimary, 2))
@@ -128,18 +134,18 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
         self.setWindowTitle(title)
         fit_size(self, 920, 640 if voice else 420)
         self.settings, self.want_player, self.voice = settings, player, voice
-        self.video = None
+        self.video: VideoView | None = None
         self._isolate = isolate if voice else None
         self.clean: dict | None = None                 # {"file", "start", "end"}: the chosen part without its music
         self.clean_busy = False
-        self.clean_player = None
+        self.clean_player: QMediaPlayer | None = None
         self._clean_n = 0
         self._tmp: tempfile.TemporaryDirectory | None = None
         self._clean_sig = _Clean()
         self._clean_sig.ready.connect(self._cleaned)
         self.file, self.duration = "", 0.0
         self.start, self.end = 0.0, 0.0
-        self.player = None
+        self.player: QMediaPlayer | None = None
         self._pos = 0.0
         self._stop_at: float | None = None
         self._gen = 0
@@ -245,8 +251,8 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
         self.clean_info.setWordWrap(True)
         if voice:
             mrow = QHBoxLayout()
-            for w in (self.b_clean, self.b_clean_play, self.use_clean):
-                mrow.addWidget(w)
+            for control in (self.b_clean, self.b_clean_play, self.use_clean):
+                mrow.addWidget(control)
             mrow.addWidget(self.clean_info, 1)
             v.addLayout(mrow)
 
@@ -254,7 +260,7 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
         v.addWidget(self.buttons)
         for key, fn in (("Space", self.toggle), ("[", lambda: self.set_range(self.position(), self.end)),
                         ("]", lambda: self.set_range(self.start, self.position(), moved="end"))):
-            QShortcut(QKeySequence(key), self, activated=fn)
+            shortcut(QKeySequence(key), self, fn)
         if file:
             self.load(file, start, end)
         self._update_enabled()
@@ -262,7 +268,7 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
     # ---- file
     def choose(self):
         folder = str(Path(self.file).parent) if self.file else (
-            self.settings.value("soundDir", "", type=str) if self.settings is not None else "")
+            qs_value(self.settings, "soundDir", "", str) if self.settings is not None else "")
         from .image_picker import pick_image, scratch_settings
         f = pick_image(self, "A recording of the voice (audio or video)" if self.voice else "Sound for an audio track",
                        self.settings if self.settings is not None else scratch_settings(), folder or None,
@@ -278,7 +284,7 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
         self._pending = (str(file), start, end)
         self.loading = True
         self.info_label.setText(f"Reading {Path(file).name} …")
-        self.buttons.button(QDialogButtonBox.Ok).setEnabled(False)
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
 
         def work():
             try:
@@ -368,8 +374,9 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
         self.b_play.setEnabled(on and self._can_play())
         self.b_play_sel.setEnabled(on and self._can_play())
         long = self.end - self.start >= AUDIO_REF_MIN - 1e-6
-        self.buttons.button(QDialogButtonBox.Ok).setEnabled(on and long and not self.clean_busy)
-        self.buttons.button(QDialogButtonBox.Cancel).setEnabled(not self.clean_busy)   # (its thread is writing)
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(on and long and not self.clean_busy)
+        # (its thread is writing)
+        self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setEnabled(not self.clean_busy)
         self.b_clean.setEnabled(on and long and not self.clean_busy and self._isolate is not None)
         self.b_clean_play.setEnabled(self.clean is not None and self.want_player and not self.clean_busy)
         self.use_clean.setEnabled(self.clean is not None and not self.clean_busy)
@@ -487,8 +494,8 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
             self.clean_player = QMediaPlayer(self)
             self.clean_player.setAudioOutput(self.clean_audio)
             self.clean_player.playbackStateChanged.connect(
-                lambda st: self.b_clean_play.setText("Stop" if st == QMediaPlayer.PlayingState else "Play cleaned"))
-        if self.clean_player.playbackState() == QMediaPlayer.PlayingState:
+                lambda st: self.b_clean_play.setText("Stop" if st == QMediaPlayer.PlaybackState.PlayingState else "Play cleaned"))
+        if self.clean_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.clean_player.stop()
             return
         if self.player is not None:
@@ -526,14 +533,14 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
             self.player.setPosition(round(self._pos * 1000))
             if self.video is not None:
                 from PySide6.QtMultimedia import QMediaPlayer
-                if self.player.playbackState() == QMediaPlayer.StoppedState:
+                if self.player.playbackState() == QMediaPlayer.PlaybackState.StoppedState:
                     self.player.pause()             # (a stopped player shows no picture: paused, it shows the frame)
 
     def _playing(self) -> bool:
         if self.player is None:
             return False
         from PySide6.QtMultimedia import QMediaPlayer
-        return self.player.playbackState() == QMediaPlayer.PlayingState
+        return self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
 
     def _total(self) -> float:
         return self.duration

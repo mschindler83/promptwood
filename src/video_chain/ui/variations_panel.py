@@ -7,6 +7,7 @@ import hashlib
 import html
 import json
 import re
+from typing import cast
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
@@ -69,7 +70,7 @@ class PlaceholderHighlighter(QSyntaxHighlighter):
             f = QTextCharFormat()
             var = self.panel.variable(name)
             if var is None or not var.active():
-                f.setUnderlineStyle(QTextCharFormat.WaveUnderline)
+                f.setUnderlineStyle(QTextCharFormat.UnderlineStyle.WaveUnderline)
                 f.setUnderlineColor(theme().negative)
                 f.setToolTip(f"{{{name}}} has no values yet: add them in Variations")
             else:
@@ -78,7 +79,8 @@ class PlaceholderHighlighter(QSyntaxHighlighter):
                 bg.setAlpha(55)
                 f.setBackground(bg)
                 f.setForeground(c.lighter(125))
-                f.setUnderlineStyle(QTextCharFormat.SingleUnderline)          # (a cue besides the colour)
+                # (a cue besides the colour)
+                f.setUnderlineStyle(QTextCharFormat.UnderlineStyle.SingleUnderline)
                 f.setUnderlineColor(c)
                 f.setToolTip(f"Variable {{{name}}} (number {names.index(name) + 1 if name in names else 0})")
             f.setFontWeight(600)
@@ -94,9 +96,10 @@ class Pill(QFrame):
         super().__init__(parent)
         self.value, self.color = value, color
         self.setObjectName("pill")
-        self.setFrameShape(QFrame.NoFrame)
-        self.setCursor(Qt.PointingHandCursor)
-        self.setFocusPolicy(Qt.StrongFocus)      # (Space switches, F2 / Enter edits, Delete removes, Menu: weight)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        # (Space switches, F2 / Enter edits, Delete removes, Menu: weight)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._look = None
         h = QHBoxLayout(self)
         h.setContentsMargins(8, 1, 2, 1)
@@ -138,42 +141,42 @@ class Pill(QFrame):
         border = QColor(c)
         border.setAlpha(255 if on else 90)
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.setPen(QPen(border, 1, Qt.SolidLine if on else Qt.DashLine))
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(QPen(border, 1, Qt.PenStyle.SolidLine if on else Qt.PenStyle.DashLine))
         p.setBrush(bg)
         r = self.rect().adjusted(0, 0, -1, -1)
         p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
         if self.hasFocus():                      # (the focus ring for keyboard users)
             p.setPen(QPen(theme().accent, 2))
-            p.setBrush(Qt.NoBrush)
+            p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRoundedRect(r.adjusted(1, 1, -1, -1), r.height() / 2, r.height() / 2)
         p.end()
 
     def keyPressEvent(self, e):                  # noqa: N802
         k = e.key()
-        if k == Qt.Key_Space:
+        if k == Qt.Key.Key_Space:
             self.value.on = not self.value.on
             self.refresh()
             self.changed.emit()
-        elif k in (Qt.Key_F2, Qt.Key_Return, Qt.Key_Enter):
+        elif k in (Qt.Key.Key_F2, Qt.Key.Key_Return, Qt.Key.Key_Enter):
             self.edit()
-        elif k in (Qt.Key_Delete, Qt.Key_Backspace):
+        elif k in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             self.removed.emit(self)
-        elif k == Qt.Key_Menu:
+        elif k == Qt.Key.Key_Menu:
             self._menu(self.mapToGlobal(self.rect().bottomLeft()))
         else:
             super().keyPressEvent(e)
 
     def mousePressEvent(self, e):                # noqa: N802
-        if e.button() == Qt.LeftButton:
+        if e.button() == Qt.MouseButton.LeftButton:
             self.value.on = not self.value.on
             self.refresh()
             self.changed.emit()
-        elif e.button() == Qt.RightButton:
+        elif e.button() == Qt.MouseButton.RightButton:
             self._menu(e.globalPosition().toPoint())
 
     def mouseDoubleClickEvent(self, e):          # noqa: N802
-        if e.button() == Qt.LeftButton:
+        if e.button() == Qt.MouseButton.LeftButton:
             self.value.on = not self.value.on    # (the first click of the double-click switched it)
             self.edit(notify=False)              # (the dialog first: a rebuild meanwhile would delete this pill)
             self.changed.emit()                  # once, edited or cancelled
@@ -298,7 +301,7 @@ class VariableCard(QFrame):
         lay.addWidget(box)
         bb, _ok = button_row(dlg, "Add")
         lay.addWidget(bb)
-        if dlg.exec() == QDialog.Accepted:
+        if dlg.exec() == QDialog.DialogCode.Accepted:
             text = "\n".join(x for x in box.toPlainText().splitlines() if not x.strip().startswith("#"))
             self.add_values(V.split_values(text))
         dlg.deleteLater()
@@ -351,7 +354,8 @@ class VariableCard(QFrame):
         return f"{n} value{'s' if n != 1 else ''}"
 
     def clear_values(self):
-        if len(self.var.values) > FEW_VALUES and not confirm(self, "Variations", f"Remove all {self._lost()} of {{{self.var.name}}}?"):
+        if len(self.var.values) > FEW_VALUES and not confirm(self, "Variations",
+                                                             f"Remove all {self._lost()} of {{{self.var.name}}}?"):
             return
         self.var.values.clear()
         self.changed.emit()
@@ -390,7 +394,7 @@ class VariationsPanel(QFrame):
         self.on.toggled.connect(lambda _on: self._rebuild())
         head.addWidget(self.on)
         self.summary = label("", level="tertiary")
-        self.summary.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.summary.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         head.addWidget(self.summary, 1)
         b_new = icon_button("plus", "New variable: a name for {name}, written into the prompt at the cursor")
         b_new.clicked.connect(lambda: self.new_variable())
@@ -420,12 +424,12 @@ class VariationsPanel(QFrame):
         for key, text, tip in (("order", "In order", "Every combination in turn; the next Generate continues there"),
                                ("shuffle", "Shuffled", "Every combination once, in a random order"),
                                ("random", "Random", "Free random picks (values with a higher weight come more often)")):
-            b = QPushButton(text)
-            b.setCheckable(True)
-            b.setToolTip(tip)
-            b.setAutoDefault(False)
-            self.modes.addButton(b)
-            self.mode_buttons[key] = b
+            mode_button = QPushButton(text)
+            mode_button.setCheckable(True)
+            mode_button.setToolTip(tip)
+            mode_button.setAutoDefault(False)
+            self.modes.addButton(mode_button)
+            self.mode_buttons[key] = mode_button
             orow.addWidget(b)
         self.mode_buttons["order"].setChecked(True)
         self.modes.buttonClicked.connect(lambda _b: self._rebuild())
@@ -452,7 +456,7 @@ class VariationsPanel(QFrame):
                               "Generate stopped")
         for w in (self.all, self.next):
             w.toggled.connect(lambda *_: self._refresh())
-        self.count.valueChanged.connect(lambda *_: (self.next.setChecked(True), self._refresh()))
+        self.count.valueChanged.connect(self._count_changed)
         arow.addWidget(self.all)
         arow.addWidget(self.next)
         arow.addWidget(self.count)
@@ -501,7 +505,7 @@ class VariationsPanel(QFrame):
         for w in (self.on, self.repeat, self.count, self.all, self.next):
             w.blockSignals(True)
         self.on.setChecked(bool(st.get("on")))
-        self.mode_buttons.get(st.get("mode"), self.mode_buttons["order"]).setChecked(True)
+        self.mode_buttons.get(st.get("mode") or "", self.mode_buttons["order"]).setChecked(True)
         self.repeat.setValue(_to_int(st.get("repeat"), 1, 1, 50))
         self.count.setValue(_to_int(st.get("count"), 4, 1, 1000))
         (self.next if st.get("amount") == "next" else self.all).setChecked(True)
@@ -509,7 +513,7 @@ class VariationsPanel(QFrame):
             w.blockSignals(False)
         saved = st.get("positions") if isinstance(st.get("positions"), dict) else {}
         if not keep_positions:
-            self.positions = dict(saved)
+            self.positions = dict(saved or {})
         elif saved:
             self.positions = {**saved, **self.positions} if self.positions else dict(saved)
         self._rebuild()
@@ -676,10 +680,15 @@ class VariationsPanel(QFrame):
         return True
 
     # ---- showing
+    def _count_changed(self, *_) -> None:
+        self.next.setChecked(True)
+        self._refresh()
+
     def _rebuild(self):
         while self.cards_box.count():
             it = self.cards_box.takeAt(0)
-            w = it.widget()                        # (after setParent(None) the item no longer knows it)
+            # (after setParent(None) the item no longer knows it)
+            w = it.widget() if it is not None else None
             if w is not None:
                 w.hide()
                 w.setParent(None)
@@ -704,9 +713,10 @@ class VariationsPanel(QFrame):
         if focus:
             self._typing_in = None
             for i in range(self.cards_box.count()):
-                card = self.cards_box.itemAt(i).widget()
-                if card is not None and card.var.name == focus:
-                    card.add.setFocus()
+                item = self.cards_box.itemAt(i)
+                found = cast("VariableCard | None", item.widget() if item is not None else None)
+                if found is not None and found.var.name == focus:
+                    found.add.setFocus()
         self._refresh()
 
     def _remember_typing(self, name: str):

@@ -10,13 +10,14 @@ import threading
 
 from PySide6.QtCore import QObject, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QFontMetrics, QImage, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLineEdit,
+from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
                                QListView, QListWidget, QListWidgetItem, QPushButton,
-                               QStyledItemDelegate, QVBoxLayout, QWidget)
+                               QStyledItemDelegate, QToolButton, QVBoxLayout, QWidget)
 
 from .. import tree as T
 from .dialogs import add_action, button_row, failed
 from .widgets import fit_size, guard_wheel, icon_button, label
+from .qsvalue import qs_value
 
 
 LORA_MIN, LORA_MAX = -10.0, 10.0       # strengths (ComfyUI allows -100..100 for LoRAs, -10..10 for the turbo LoRA)
@@ -42,7 +43,7 @@ def fill_lora_combo(combo: QComboBox, known: list[tuple[str, str]], current: str
     listed link, or is not in the list at all)."""
     for path, text in known:
         combo.addItem(text, path)
-        combo.setItemData(combo.count() - 1, path, Qt.ToolTipRole)
+        combo.setItemData(combo.count() - 1, path, Qt.ItemDataRole.ToolTipRole)
     if not current or current == T.NO_LORA:
         combo.setCurrentIndex(1 if current == T.NO_LORA and combo.findData(T.NO_LORA) >= 0 else 0)
         return
@@ -91,10 +92,10 @@ class _CardDelegate(QStyledItemDelegate):
         from .theme import ThemeManager
         t = ThemeManager.instance().theme
         r = option.rect.adjusted(3, 3, -3, -3)
-        selected = bool(option.state & QStyle.State_Selected)
-        hover = bool(option.state & QStyle.State_MouseOver)
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        hover = bool(option.state & QStyle.StateFlag.State_MouseOver)
         p.save()
-        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
         card = QPainterPath()
         card.addRoundedRect(QRectF(r), 8, 8)
         p.fillPath(card, t.accent_muted() if selected else t.bgOverlay if hover else t.bgRaised)
@@ -105,7 +106,7 @@ class _CardDelegate(QStyledItemDelegate):
         clip = QPainterPath()
         clip.addRoundedRect(pic, 6, 6)
         img = index.data(LoraPickerDialog.COVER)
-        name = index.data(Qt.DisplayRole) or ""
+        name = index.data(Qt.ItemDataRole.DisplayRole) or ""
         if isinstance(img, QImage) and not img.isNull():
             p.setClipPath(clip)
             p.drawImage(pic, img)
@@ -117,7 +118,7 @@ class _CardDelegate(QStyledItemDelegate):
             f.setBold(True)
             p.setFont(f)
             p.setPen(t.textDisabled)
-            p.drawText(pic, Qt.AlignCenter, initials(name))
+            p.drawText(pic, Qt.AlignmentFlag.AlignCenter, initials(name))
         if index.data(LoraPickerDialog.IN_USE):
             f = QFont(option.font)
             f.setPixelSize(t.font.micro)
@@ -130,7 +131,7 @@ class _CardDelegate(QStyledItemDelegate):
             path.addRoundedRect(badge, 9, 9)
             p.fillPath(path, t.accent)
             p.setPen(t.onAccent)
-            p.drawText(badge, Qt.AlignCenter, text)
+            p.drawText(badge, Qt.AlignmentFlag.AlignCenter, text)
         f = QFont(option.font)
         f.setPixelSize(t.font.body)
         f.setBold(selected)
@@ -138,7 +139,8 @@ class _CardDelegate(QStyledItemDelegate):
         p.setPen(t.textPrimary)
         fm = QFontMetrics(f)
         box = QRectF(r.x() + 7, pic.bottom() + 5, r.width() - 14, fm.height() * 2 + 1)
-        p.drawText(box, Qt.AlignHCenter | Qt.AlignTop | Qt.TextWrapAnywhere, elide_lines(name, fm, int(box.width()), 2))
+        p.drawText(box, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWrapAnywhere,
+                   elide_lines(name, fm, int(box.width()), 2))
         sub = index.data(LoraPickerDialog.SUBTITLE) or ""
         if sub:
             f2 = QFont(option.font)
@@ -147,7 +149,8 @@ class _CardDelegate(QStyledItemDelegate):
             p.setPen(t.textTertiary)
             fm2 = QFontMetrics(f2)
             line = QRectF(r.x() + 7, r.bottom() - fm2.height() - 4, r.width() - 14, fm2.height())
-            p.drawText(line, Qt.AlignHCenter | Qt.AlignVCenter, fm2.elidedText(sub, Qt.ElideRight, int(line.width())))
+            p.drawText(line, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, fm2.elidedText(sub,
+                                                                                                           Qt.TextElideMode.ElideRight, int(line.width())))
         p.restore()
 
 
@@ -160,7 +163,8 @@ def initials(name: str) -> str:
 def elide_lines(text: str, fm: QFontMetrics, width: int, lines: int) -> str:
     """The text broken into at most `lines` lines of `width` pixels (anywhere: LoRA names have few spaces), the
     last one shortened with an ellipsis."""
-    out, rest = [], text
+    out: list[str] = []
+    rest = text
     while rest and len(out) < lines - 1:
         n = len(rest)
         while n > 1 and fm.horizontalAdvance(rest[:n]) > width:
@@ -170,13 +174,14 @@ def elide_lines(text: str, fm: QFontMetrics, width: int, lines: int) -> str:
         out.append(rest[:n].rstrip())
         rest = rest[n:].lstrip()
     if rest:
-        out.append(fm.elidedText(rest, Qt.ElideRight, width))
+        out.append(fm.elidedText(rest, Qt.TextElideMode.ElideRight, width))
     return "\n".join(out)
 
 
 def _square(img: QImage, side: int) -> QImage:
     """The middle of a picture, as a square of `side` pixels (the cover fills its card)."""
-    img = img.scaled(side, side, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+    img = img.scaled(side, side, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                     Qt.TransformationMode.SmoothTransformation)
     return img.copy((img.width() - side) // 2, (img.height() - side) // 2, side, side)
 
 
@@ -186,7 +191,7 @@ class LoraPickerDialog(QDialog):
     loaded in the background (lora_pictures.cover_file) as the "Pictures" setting allows (off / safe only / all,
     the LoRA window's setting). chosen() -> the path, or None. fetch(item) -> the local still of a picture (tests
     give their own)."""
-    COVER, SUBTITLE, IN_USE, SEARCH = Qt.UserRole + 2, Qt.UserRole + 3, Qt.UserRole + 4, Qt.UserRole + 1
+    COVER, SUBTITLE, IN_USE, SEARCH = Qt.ItemDataRole.UserRole + 2, Qt.ItemDataRole.UserRole + 3, Qt.ItemDataRole.UserRole + 4, Qt.ItemDataRole.UserRole + 1
 
     def __init__(self, parent, known: list[tuple[str, str]], current: str | None = None,
                  used: set[str] | None = None, title: str = "Choose a LoRA", file_dir: str = "", settings=None,
@@ -196,7 +201,8 @@ class LoraPickerDialog(QDialog):
         from .lora_window import SHOW
         self.setWindowTitle(title)
         fit_size(self, 1000, 740)
-        self.known, self.file_dir, self._chosen = list(known), file_dir, None
+        self.known, self.file_dir = list(known), file_dir
+        self._chosen: str | None = None
         self.qs = settings if settings is not None else getattr(parent, "qs", None)
         try:
             self.db = db or triggers.db()
@@ -215,7 +221,7 @@ class LoraPickerDialog(QDialog):
         self.pictures = QComboBox()
         for key, text in SHOW:
             self.pictures.addItem(text, key)
-        saved = self.qs.value("loraPictures", "safe", type=str) if self.qs is not None else "safe"
+        saved = qs_value(self.qs, "loraPictures", "safe", str) if self.qs is not None else "safe"
         self.pictures.setCurrentIndex(max(0, self.pictures.findData(saved)))
         self.pictures.setToolTip("Each LoRA's cover is the first picture of its CivitAI page, loaded once and kept "
                                  "on disk (this tells CivitAI which pictures you look at).\nSafe only: pictures "
@@ -226,15 +232,15 @@ class LoraPickerDialog(QDialog):
         self.count = label("", level="tertiary")
         v.addWidget(self.count)
         self.list = QListWidget()
-        self.list.setViewMode(QListView.IconMode)
-        self.list.setResizeMode(QListView.Adjust)
-        self.list.setMovement(QListView.Static)
+        self.list.setViewMode(QListView.ViewMode.IconMode)
+        self.list.setResizeMode(QListView.ResizeMode.Adjust)
+        self.list.setMovement(QListView.Movement.Static)
         self.list.setWrapping(True)
         self.list.setUniformItemSizes(True)
         self.list.setGridSize(QSize(CARD_W + 6, CARD_H + 6))
-        self.list.setSelectionMode(QListView.SingleSelection)
+        self.list.setSelectionMode(QListView.SelectionMode.SingleSelection)
         self.list.setMouseTracking(True)
-        self.list.setVerticalScrollMode(QListView.ScrollPerPixel)
+        self.list.setVerticalScrollMode(QListView.ScrollMode.ScrollPerPixel)
         self.list.verticalScrollBar().setSingleStep(24)
         self.list.setItemDelegate(_CardDelegate(self))
         v.addWidget(self.list, 1)
@@ -244,7 +250,7 @@ class LoraPickerDialog(QDialog):
         iv.setContentsMargins(10, 8, 10, 8)
         iv.setSpacing(2)
         self.sel_name = label("", type_="title")
-        self.sel_name.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.sel_name.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.sel_facts = label("", level="secondary")
         self.sel_facts.setWordWrap(True)
         iv.addWidget(self.sel_name)
@@ -253,7 +259,7 @@ class LoraPickerDialog(QDialog):
         for path, text in sorted(self.known, key=lambda x: lora_label(x[0]).lower()):
             name = lora_label(path)
             it = QListWidgetItem(name)
-            it.setData(Qt.UserRole, path)
+            it.setData(Qt.ItemDataRole.UserRole, path)
             it.setData(self.SEARCH, (name, str(Path(path).parent), text))
             it.setData(self.IN_USE, os.path.realpath(path) in used)
             it.setData(self.SUBTITLE, self._subtitle(path))
@@ -269,7 +275,7 @@ class LoraPickerDialog(QDialog):
         self.b_other.clicked.connect(self._other)
         v.addWidget(self.buttons)
 
-        self._items = {self.list.item(i).data(Qt.UserRole): self.list.item(i) for i in range(self.list.count())}
+        self._items = {self.list.item(i).data(Qt.ItemDataRole.UserRole): self.list.item(i) for i in range(self.list.count())}
         self._closed = threading.Event()
         self._lock = threading.Lock()
         self._wanted: list[tuple[str, str]] = []
@@ -317,7 +323,8 @@ class LoraPickerDialog(QDialog):
         if self._closed.is_set():
             return
         area = self.list.viewport().rect()
-        seen, later = [], []
+        seen: list = []
+        later: list = []
         for path, it in self._items.items():
             if it.isHidden() or it.data(self.COVER) is not None:
                 continue
@@ -388,7 +395,7 @@ class LoraPickerDialog(QDialog):
 
     def eventFilter(self, obj, e):                 # noqa: N802  (Qt naming): Down from the search goes to the list
         from PySide6.QtCore import QEvent
-        if obj is self.search and e.type() == QEvent.KeyPress and e.key() == Qt.Key_Down:
+        if obj is self.search and e.type() == QEvent.Type.KeyPress and e.key() == Qt.Key.Key_Down:
             self.list.setFocus()
             if self.list.currentItem() is None or self.list.currentItem().isHidden():
                 self._select_first()
@@ -396,7 +403,8 @@ class LoraPickerDialog(QDialog):
         return False
 
     def visible_paths(self) -> list[str]:
-        return [self.list.item(i).data(Qt.UserRole) for i in range(self.list.count())
+        """The LoRAs the search leaves in the list (no caller in the window itself: the tests ask)."""
+        return [self.list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.list.count())
                 if not self.list.item(i).isHidden()]
 
     def _select_first(self):
@@ -424,12 +432,12 @@ class LoraPickerDialog(QDialog):
     def _update(self):
         it = self.list.currentItem()
         ok = it is not None and not it.isHidden()
-        self.buttons.button(QDialogButtonBox.Ok).setEnabled(ok)
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(ok)
         if not ok:
             self.sel_name.setText("No LoRA chosen")
             self.sel_facts.setText("")
             return
-        path = it.data(Qt.UserRole)
+        path = it.data(Qt.ItemDataRole.UserRole)
         self.sel_name.setText(it.text())
         self.sel_name.setToolTip(path)
         try:
@@ -458,7 +466,7 @@ class LoraPickerDialog(QDialog):
     def _accept(self):
         it = self.list.currentItem()
         if it is not None and not it.isHidden():
-            self._chosen = it.data(Qt.UserRole)
+            self._chosen = it.data(Qt.ItemDataRole.UserRole)
             self.accept()
 
     def _other(self):
@@ -476,9 +484,15 @@ def pick_lora(parent, known, current=None, used=None, file_dir: str = "") -> str
     """Show the LoRA picker; the chosen path or None. (Tests replace LoraStack.pick.)"""
     dlg = LoraPickerDialog(parent, known, current, used, file_dir=file_dir)
     try:
-        return dlg.chosen() if dlg.exec() == QDialog.Accepted else None
+        return dlg.chosen() if dlg.exec() == QDialog.DialogCode.Accepted else None
     finally:
         dlg.deleteLater()
+
+
+class _LoraRow(QWidget):
+    """One LoRA of the stack: its picker button, strength and remove button (the widgets are set by _add_row)."""
+    trigger_label: QLabel
+    remove_button: QToolButton
 
 
 class LoraStack(QWidget):
@@ -494,8 +508,9 @@ class LoraStack(QWidget):
         super().__init__(parent)
         self.known: list[tuple[str, str]] = []
         self.file_dir = ""
-        self.rows: list[tuple[QWidget, QPushButton, QDoubleSpinBox]] = []
-        self.use_prompt: Callable[[str], None] | None = None     # set by the owner: put a text into the prompt these LoRAs are for
+        self.rows: list[tuple[_LoraRow, QPushButton, QDoubleSpinBox]] = []
+        # set by the owner: put a text into the prompt these LoRAs are for
+        self.use_prompt: Callable[[str], None] | None = None
         self.v = QVBoxLayout(self)
         self.v.setContentsMargins(0, 0, 0, 0)
         self.v.setSpacing(4)
@@ -604,7 +619,7 @@ class LoraStack(QWidget):
 
     def refresh_triggers(self):
         for w, b, _s in self.rows:
-            if getattr(w, "trigger_label", None) is not None:
+            if hasattr(w, "trigger_label"):
                 self._show_trigger(w.trigger_label, b.property("path"))
 
     def _trigger_menu(self, button: QPushButton, pos):
@@ -648,7 +663,7 @@ class LoraStack(QWidget):
         self.changed.emit()
 
     def _add_row(self, path: str, strength: float):
-        w = QWidget(self)
+        w = _LoraRow(self)
         outer = QVBoxLayout(w)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -664,10 +679,11 @@ class LoraStack(QWidget):
         button.setStyleSheet("text-align: left; padding-left: 6px;")
         button.setMinimumWidth(60)
         from PySide6.QtWidgets import QSizePolicy
-        button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)        # long names shorten, the row stays
+        # long names shorten, the row stays
+        button.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self._set_button(button, path)
         button.clicked.connect(lambda: self._choose_again(button))
-        button.setContextMenuPolicy(Qt.CustomContextMenu)
+        button.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         button.customContextMenuRequested.connect(lambda pos: self._trigger_menu(button, pos))
         spin = QDoubleSpinBox(w)
         spin.setRange(LORA_MIN, LORA_MAX)              # some LoRAs need negative strengths (e.g. sliders)

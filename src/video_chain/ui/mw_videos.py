@@ -16,18 +16,21 @@ from .video_editor import VideoRangeDialog, choose_video
 from .widgets import safe_emit
 from .generator_state import ModelSwitch
 from .ui_logic import DEFAULT_COMFY_URL, DEFAULT_SIZE
+from .mw_host import MainWindowHost
 
 
-class VideosMixin:
+class VideosMixin(MainWindowHost):
     """Real videos in the chain: add, edit, convert, replace a person, split."""
 
     def _ask_video(self, parent: str | None):
         if self.project is None:
             self.status.setText("Open or create a project folder first.")
             return
+        assert self.tree is not None
         if not self.tree.can_add_video(parent):
             vc = self.tree.video_child(parent)
-            self.status.setText(f"Clip #{T.short_id(parent)} already leads into video #{T.short_id(vc.id)}: a "
+            assert vc is not None                      # (what can_add_video refused)
+            self.status.setText(f"Clip #{T.short_id(str(parent))} already leads into video #{T.short_id(vc.id)}: a "
                                 "generated clip can "
                                 "end at one video only. Branch from the clip before it for another one.")
             return
@@ -36,7 +39,7 @@ class VideosMixin:
             return
         dlg = VideoRangeDialog(self, f, canvas=self._canvas_for(f), settings=self.qs,
                                canvas_for=lambda file, rot: self._canvas_for(file, rot))
-        if dlg.exec() != QDialog.Accepted or not dlg.file:
+        if dlg.exec() != QDialog.DialogCode.Accepted or not dlg.file:
             return
         self.add_video(parent, dlg.file, dlg.start, dlg.end, dlg.rotate)
 
@@ -63,19 +66,19 @@ class VideosMixin:
         node = self.tree.nodes.get(nid) if self.tree else None
         if node is None or not node.is_video or self.running or self._frozen_block(node, "edit"):
             return
-        src = node.source
+        src = node.source_dict()
         f = src["file"]
         if not Path(f).is_file():
             D.tell(self, "Video missing", f"{Path(f).name} is not there any more; choose the file "
                "again in the next window.")
-        rot = T.source_rotation(src)
+        rot = T.source_rotation(node.source)
         dlg = VideoRangeDialog(self, f if Path(f).is_file() else "", src["start"], src["end"],
                                canvas=self._canvas_for(f, rot, nid), settings=self.qs, on_reference=self.add_reference,
                                rotate=rot, canvas_for=lambda file, r: self._canvas_for(file, r, nid))
         sel = self._selected_character()
         if sel is not None and T.kind_of(sel) != "person":
             dlg.set_reference_kind(sel["name"], T.kind_of(sel))
-        if dlg.exec() != QDialog.Accepted or not dlg.file:
+        if dlg.exec() != QDialog.DialogCode.Accepted or not dlg.file:
             return
         self.set_video_range(nid, dlg.file, dlg.start, dlg.end, dlg.rotate)
 
@@ -111,9 +114,10 @@ class VideosMixin:
             return
         node = self.tree.nodes[nid]
         try:
+            assert self.project is not None
             checker = T.Checker(self.project, self.tree)
             base = checker.base()
-            if base is None or checker.status(nid) == "done" or not Path(node.source["file"]).is_file():
+            if base is None or checker.status(nid) == "done" or not Path(node.source_dict()["file"]).is_file():
                 return
         except Exception as e:  # noqa: BLE001
             self._report_error(f"Could not convert the video: {e}")
@@ -229,6 +233,7 @@ class VideosMixin:
             discard()
             self.refresh()
             return
+        assert self.project is not None
         old, old_made = T.clip_files(self.project, node), node.made
         node.made = made
         if not self._write_tree():                  # (the status says why) the record stays as it was
@@ -250,23 +255,28 @@ class VideosMixin:
         if node is None or not node.is_video or self.running:
             return None
         try:
+            assert self.project is not None
+            assert self.tree is not None
             done = T.Checker(self.project, self.tree).status(nid) == "done"
         except Exception:  # noqa: BLE001
             done = False
+        assert self.project is not None
         if not done or not node.made or not (self.project / node.made["video"]).is_file():
             self.status.setText(f"Video #{T.short_id(nid)} is not converted yet: generate its path (or wait for the "
                                 "conversion), then replace the person.")
             return None
         pictures = []
+        assert self.tree is not None
         for c in T.cast_of(self.tree):
             if T.kind_of(c) != "person":            # (a head swap takes faces)
                 continue
             for k, rel in enumerate(c["images"], start=1):
+                assert self.project is not None
                 if (self.project / rel).is_file():
                     pictures.append((f"Face of @{c['name']}" + (f" ({k})" if len(c["images"]) > 1 else ""),
                                      str(self.project / rel)))
         url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL)
-        comfy_dir = os.path.expanduser(self.comfy_dir.text().strip()) or None
+        comfy_dir = self._comfy_dir_path()
         cleanup = self.comfy_cleanup.isChecked()
         switch = ModelSwitch()
 
@@ -294,9 +304,10 @@ class VideosMixin:
             switch.loaded = True
             return gen
 
+        assert self.project is not None and node.made is not None       # (checked above)
         dlg = SwapDialog(self, self.project, nid, self.project / node.made["video"], self.face_detector(), pictures,
                          connect, self.qs, on_start=before,
-                         source=node.source, h3={
+                         source=dict(node.source_dict()), h3={
                              "lora": self.find_lora("head_swap"),
                              "turbo": self.find_lora(swap.H3_SWAP_TURBO),
                              "settings": T.current_settings(self.project, self.tree.options, self.tree),
@@ -308,7 +319,7 @@ class VideosMixin:
         if not dialog:
             return dlg
         try:
-            if dlg.exec() == QDialog.Accepted and dlg.result is not None:
+            if dlg.exec() == QDialog.DialogCode.Accepted and dlg.result is not None:
                 self.use_replacement(nid, *dlg.result)
         finally:
             self.edits_closed()
@@ -344,6 +355,7 @@ class VideosMixin:
             self.status.setText(f"Video #{T.short_id(nid)} is not converted yet; wait for it, then split it.")
             return None
         if at is None:
+            assert self.project is not None
             clip = self.project / node.made["video"]
             try:
                 frames = int(node.made.get("frames") or chain.probe(clip)["frames"])
@@ -352,16 +364,17 @@ class VideosMixin:
                 return None
             key = node.made.get("key") or {}
             size = (int(key.get("width") or 0) or DEFAULT_SIZE[0], int(key.get("height") or 0) or DEFAULT_SIZE[1])
-            dlg = SplitDialog(self, clip, frames, size, node.source["start"], node.source["end"],
+            dlg = SplitDialog(self, clip, frames, size, node.source_dict()["start"], node.source_dict()["end"],
                               f"Split video #{T.short_id(nid)}")
             try:
-                if dlg.exec() != QDialog.Accepted:
+                if dlg.exec() != QDialog.DialogCode.Accepted:
                     return None
                 at = dlg.at()
             finally:
                 dlg.deleteLater()
         before = self._done_clips() - {nid}
         try:
+            assert self.tree is not None
             clip_node, rest = self.tree.split_video(nid, at)
         except ValueError as e:
             self._report_error(f"Could not split video #{T.short_id(nid)}: {e}")
@@ -393,7 +406,8 @@ class VideosMixin:
         if self.tree is None or nid not in self.tree.nodes:
             return
         n = self.tree.nodes[nid]
+        assert self.project is not None
         if n.made and (self.project / n.made["video"]).is_file():
-            what = Path(n.source["file"]).name if n.is_video else n.prompt[:60]
+            what = Path(n.source_dict()["file"]).name if n.is_video else n.prompt[:60]
             self.preview.open(self.project / n.made["video"],
                               f"{'Video' if n.is_video else 'Clip'} #{T.short_id(nid)} · {what}")

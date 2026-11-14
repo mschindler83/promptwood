@@ -11,9 +11,12 @@ from pathlib import Path
 from ..edits import LORA_FAMILY
 from ..triggers import stack_words
 from .lora_stack import lora_label
+from .image_host import ImageEditHost
+from .qsvalue import qs_value
 
 
-class LorasMixin:
+
+class LorasMixin(ImageEditHost):
     # ---- loras
     def _trigger_words(self, loras: list | None = None) -> list[str]:
         """The trigger words of the chosen LoRAs, or of `loras` [(path, strength)] (put before the prompt when the
@@ -55,13 +58,13 @@ class LorasMixin:
 
     def _recent_files(self) -> list[str]:
         try:
-            return [p for p in json.loads(self.qs.value(self._recent_key(), "[]", type=str)) if isinstance(p, str)]
+            return [p for p in json.loads(qs_value(self.qs, self._recent_key(), "[]", str)) if isinstance(p, str)]
         except (ValueError, AttributeError):
             return []
 
     def _remembered_loras(self) -> list[dict]:
         try:
-            items = json.loads(self.qs.value(self._lora_key(), "[]", type=str)) if self.qs is not None else []
+            items = json.loads(qs_value(self.qs, self._lora_key(), "[]", str)) if self.qs is not None else []
         except ValueError:
             items = []
         return [it for it in items if isinstance(it, dict) and it.get("path") and Path(it["path"]).is_file()]
@@ -77,13 +80,15 @@ class LorasMixin:
         listed = {p for p, _ in (self.family_loras.get(LORA_FAMILY.get(fam, fam), []) if self.mode() == "create"
                                  else self.known_loras)}
         if path not in listed and self.qs is not None:
-            self.qs.setValue(self._recent_key(), json.dumps([path] + [r for r in self._recent_files() if r != path][:11]))
+            self.qs.setValue(self._recent_key(),
+                             json.dumps([path] + [r for r in self._recent_files() if r != path][:11]))
         if self.check_lora is not None and self.check_lora(path) is False:
             self.state.setText(f"{Path(path).name} is not in ComfyUI's LoRA folders, so ComfyUI cannot load it: "
                                "copy or link it there (then Rescan LoRAs in the main window).")
 
     def add_lora_file(self, path: str, strength: float = 1.0):
-        """A LoRA file from any folder at the end of the list (ComfyUI must find it in its LoRA folders)."""
+        """A LoRA file from any folder at the end of the list (ComfyUI must find it in its LoRA folders). No button
+        calls it any more (the picker adds files itself); the tests use it to fill the list."""
         p = os.path.abspath(path)
         if self.qs is not None:
             self.qs.setValue(self._recent_key(), json.dumps([p] + [r for r in self._recent_files() if r != p][:11]))

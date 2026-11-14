@@ -53,20 +53,20 @@ class Storyboard(QWidget):
         h.setContentsMargins(8, 4, 8, 4)
         h.setSpacing(6)
         self.list = QListWidget()
-        self.list.setFlow(QListWidget.LeftToRight)
+        self.list.setFlow(QListWidget.Flow.LeftToRight)
         self.list.setWrapping(False)
-        self.list.setViewMode(QListWidget.ListMode)
+        self.list.setViewMode(QListWidget.ViewMode.ListMode)
         self.list.setIconSize(THUMB)
         self.list.setFixedHeight(THUMB.height() + 26)
-        self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.list.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.list.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.list.setDragDropMode(QAbstractItemView.InternalMove)
-        self.list.setDefaultDropAction(Qt.MoveAction)
+        self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.list.setDefaultDropAction(Qt.DropAction.MoveAction)
         self.list.setSpacing(4)
         self.list.setToolTip("The scenes of the film, in the order they are played. Click a scene to work on it, "
                              "drag to reorder, right-click to rename or delete")
-        self.list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.list.customContextMenuRequested.connect(self._menu)
         self.list.itemClicked.connect(self._chosen)            # a click (not a press: dragging must work)
         self.list.itemActivated.connect(self._chosen)          # Enter
@@ -98,7 +98,7 @@ class Storyboard(QWidget):
         if hit is None or hit[0] != key:
             img = QImage(path)
             pm = QPixmap() if img.isNull() else QPixmap.fromImage(
-                img.scaled(THUMB, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                img.scaled(THUMB, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
             hit = self._thumbs[path] = (key, pm)
         return hit[1]
 
@@ -114,14 +114,14 @@ class Storyboard(QWidget):
             for k, (sid, title, s) in enumerate(scenes, start=1):
                 pm = self._thumb(str(s["thumb"])) if s.get("thumb") else QPixmap()
                 item = QListWidgetItem(QIcon(pm) if not pm.isNull() else QIcon(), card_text(k, title, s))
-                item.setData(Qt.UserRole, sid)
-                item.setData(Qt.UserRole + 1, s.get("join"))
+                item.setData(Qt.ItemDataRole.UserRole, sid)
+                item.setData(Qt.ItemDataRole.UserRole + 1, s.get("join"))
                 notes = html.escape(s["notes"]).replace("\n", "<br>") if s.get("notes") else ""
                 item.setToolTip("<p>" + (f"{notes}<br><br>" if notes else "") +
                                 f"Scene {k}: {html.escape(title)}. {s.get('clips', 0)} clips; the film plays it up to "
                                 + (f"clip #{T.short_id(s['take'])}" if s.get("fixed") else "its selected clip") +
                                 ". Click to work on it, drag to move it, right-click for more</p>")
-                item.setFlags(item.flags() | Qt.ItemIsDragEnabled)
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsDragEnabled)
                 self.list.addItem(item)
                 if sid == current:
                     self.list.setCurrentItem(item)
@@ -135,16 +135,16 @@ class Storyboard(QWidget):
         """One scene's card (the open scene, while it is being worked on)."""
         for i in range(self.list.count()):
             item = self.list.item(i)
-            if item.data(Qt.UserRole) == sid:
+            if item.data(Qt.ItemDataRole.UserRole) == sid:
                 item.setText(card_text(i + 1, title, s))
 
     def order(self) -> list[str]:
-        return [self.list.item(i).data(Qt.UserRole) for i in range(self.list.count())]
+        return [self.list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.list.count())]
 
     def _chosen(self, item, _prev=None):
         """A click and Enter both come here, and a double-click sends several: the open scene is not chosen again."""
         if not self._loading and item is not None:
-            sid = item.data(Qt.UserRole)
+            sid = item.data(Qt.ItemDataRole.UserRole)
             if sid == self._current:
                 return
             self._current = sid
@@ -158,7 +158,7 @@ class Storyboard(QWidget):
         item = self.list.itemAt(pos)
         if item is None:
             return
-        sid = item.data(Qt.UserRole)
+        sid = item.data(Qt.ItemDataRole.UserRole)
         menu = QMenu(self)
         a_rename = menu.addAction("Rename…")
         a_notes = menu.addAction("Notes…")
@@ -166,7 +166,7 @@ class Storyboard(QWidget):
         joins = {}
         if self.list.row(item) > 0:
             sub = menu.addMenu("Join with the scene before")
-            cur = item.data(Qt.UserRole + 1) or "cut"
+            cur = item.data(Qt.ItemDataRole.UserRole + 1) or "cut"
             for key, text in (("cut", "Cut (hard cut)"), ("fade", "Crossfade (½ s, picture and sound)"),
                               ("continue", "Continue (starts from its last frame)")):
                 a = sub.addAction(text)

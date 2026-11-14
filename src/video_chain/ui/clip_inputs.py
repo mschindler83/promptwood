@@ -5,6 +5,7 @@ window with the exact text the model reads. Both show tree.clip_inputs; nothing 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QPlainTextEdit, QPushButton,
@@ -46,7 +47,7 @@ def chip_specs(info: dict, lead_off: str | None = None) -> list[dict]:
     """The chips of a clip from tree.clip_inputs, in the order the model gets the inputs: [{"text", "tip",
     "variant": "" | "neutral", "lead": None | True | False}] (lead: the checkable chip of the implicit lead).
     lead_off: the lead's name when the clip's lead switch is off and it would get the lead otherwise."""
-    out = []
+    out: list[dict[str, Any]] = []
     for which in ("start", "end"):
         chip = _frame_chip(which, info[which])
         if chip:
@@ -134,7 +135,7 @@ class ChipRow(QWidget):
         self._specs: list[dict] | None = None
         self.chips: list[QToolButton] = []
         self.model_chip: QToolButton | None = None      # how the clip is made (the Simple view hides it)
-        self.b_prompt = None
+        self.b_prompt: QToolButton | None = None
         self.setVisible(False)
 
     def set_specs(self, specs: list[dict] | None):
@@ -155,10 +156,10 @@ class ChipRow(QWidget):
                 b.setProperty("variant", s["variant"])
             b.setText(s["text"])
             b.setToolTip(s["tip"])
-            b.setFocusPolicy(Qt.NoFocus)             # (informational chips stay out of the Tab order)
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)             # (informational chips stay out of the Tab order)
             if s["lead"] is not None:
                 b.setCheckable(True)
-                b.setFocusPolicy(Qt.TabFocus)        # (the lead switch is reachable from the keyboard)
+                b.setFocusPolicy(Qt.FocusPolicy.TabFocus)        # (the lead switch is reachable from the keyboard)
                 b.setChecked(bool(s["lead"]))
                 b.clicked.connect(lambda on: self.leadToggled.emit(bool(on)))
             self.flow.add(b)
@@ -168,7 +169,7 @@ class ChipRow(QWidget):
         self.b_prompt = QToolButton(self)
         self.b_prompt.setText("Model prompt")
         self.b_prompt.setToolTip("The exact text the model gets for this clip, and its pictures and sounds in order")
-        self.b_prompt.setFocusPolicy(Qt.TabFocus)
+        self.b_prompt.setFocusPolicy(Qt.FocusPolicy.TabFocus)
         self.b_prompt.clicked.connect(self.promptWanted.emit)
         self.flow.add(self.b_prompt)
         self.setVisible(True)
@@ -208,19 +209,19 @@ class ModelPromptDialog(QDialog):
         self.text = QPlainTextEdit(info["prompt"])
         self.text.setProperty("type", "mono")
         self.text.setReadOnly(True)
-        self.text.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
-        self.text.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        self.text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard)
+        self.text.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
         v.addWidget(self.text, 1)
         v.addWidget(label("Pictures and sounds, in the order the model gets them", level="tertiary"))
         self.inputs = label(inputs_list(info), level="secondary")
-        self.inputs.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.inputs.setTextFormat(Qt.PlainText)
+        self.inputs.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.inputs.setTextFormat(Qt.TextFormat.PlainText)
         self.inputs.setWordWrap(True)
         v.addWidget(self.inputs)
         buttons, _none = button_row(self)
         self.b_copy = QPushButton("Copy")
         self.b_copy.setToolTip("Copy the prompt to the clipboard")
         self.b_copy.clicked.connect(lambda: QApplication.clipboard().setText(self.text.toPlainText()))
-        buttons.addButton(self.b_copy, QDialogButtonBox.ActionRole)
+        buttons.addButton(self.b_copy, QDialogButtonBox.ButtonRole.ActionRole)
         v.addWidget(buttons)
         fit_size(self, 720, 560)

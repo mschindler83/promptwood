@@ -55,7 +55,7 @@ def read_scaled(path, box: QSize | int) -> tuple[QImage, QSize]:
     r.setAutoTransform(True)
     size = r.size()
     if size.isValid() and (size.width() > box.width() or size.height() > box.height()):
-        r.setScaledSize(size.scaled(box, Qt.KeepAspectRatio))
+        r.setScaledSize(size.scaled(box, Qt.AspectRatioMode.KeepAspectRatio))
     img = r.read()
     return (img if not img.isNull() else QImage()), size
 
@@ -63,11 +63,6 @@ def read_scaled(path, box: QSize | int) -> tuple[QImage, QSize]:
 def image_size(path) -> QSize:
     """The size of an image file from its header (not turned by its orientation; the picture is not decoded)."""
     return QImageReader(str(path)).size()
-
-
-def can_read(path) -> bool:
-    """Whether Qt can read the file as an image (the header only)."""
-    return QImageReader(str(path)).canRead()
 
 
 def file_facts(path) -> tuple[float, str]:

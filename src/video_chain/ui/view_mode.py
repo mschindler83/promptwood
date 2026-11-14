@@ -88,7 +88,7 @@ class ViewMode(QObject):
         self.apply()
         self.changed.emit(on)
 
-    def advanced(self, *targets: Target) -> None:
+    def advanced(self, *targets: Target | None) -> None:
         """Register advanced-only controls (hidden in Simple); they follow the current view at once. Their own
         visibility is taken as it is now."""
         self._prune()
@@ -153,7 +153,7 @@ class AdvancedNote(QWidget):
         self.b_show = QToolButton()
         self.b_show.setText("Show")
         self.b_show.setAutoRaise(True)
-        self.b_show.setCursor(Qt.PointingHandCursor)
+        self.b_show.setCursor(Qt.CursorShape.PointingHandCursor)
         self.b_show.setToolTip("Switch to the Advanced view, which shows every setting")
         self.b_show.clicked.connect(lambda: self.view.set_simple(False))
         h.addWidget(self.text)

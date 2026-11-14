@@ -12,17 +12,19 @@ from ..comfy import REF_HINT
 from .widgets import safe_emit
 from .clip_cards import PromptCard
 from .mw_support import select_frames
-from .ui_logic import FRAME_CHOICES, speed_mode
+from .ui_logic import FRAME_CHOICES, as_dict, speed_mode
+from .mw_host import MainWindowHost
 
 
-class OptionsMixin:
+class OptionsMixin(MainWindowHost):
     """The project's options widgets and the LoRA trigger words."""
 
     @staticmethod
-    def _clean_options(o: dict):
+    def _clean_options(options: T.Options):
         """Stored option values that cannot be read (null, text where a number belongs, a wrong shape) go back to the
         defaults, so the option widgets can always be filled."""
-        d = T.DEFAULT_OPTIONS
+        d = as_dict(T.DEFAULT_OPTIONS)
+        o = as_dict(options)                        # (keys named by variables)
         for k, kind in (("frames", int), ("resolution", int), ("steps", int), ("seed", int)):
             try:
                 kind(o[k])
@@ -32,10 +34,10 @@ class OptionsMixin:
             if k in o and not isinstance(o[k], dict):
                 o[k] = copy.deepcopy(d[k])
         for k in ("turbo", "hyperflow", "pika"):
-            for key, kind in (("steps", int), ("strength", float), ("cfg", float)):
+            for key, kind2 in (("steps", int), ("strength", float), ("cfg", float)):
                 try:
                     if key in (o.get(k) or {}):
-                        kind(o[k][key])
+                        kind2(o[k][key])
                 except (TypeError, ValueError):
                     del o[k][key]
         try:
@@ -44,6 +46,7 @@ class OptionsMixin:
             del o["cfg"]
 
     def _options_to_widgets(self):
+        assert self.tree is not None
         o = self.tree.options
         self._loading = True
         try:
@@ -72,11 +75,11 @@ class OptionsMixin:
             self.eleven_model.setCurrentIndex(self.eleven_model.findData(topt["eleven_model"]))
             self.view.show((self._tts_form, self._eleven_row), topt["provider"] == "elevenlabs")
             turbo = o.get("turbo") or {}
-            self.speed.setCurrentIndex(self.speed.findData(speed_mode(o)))
+            self.speed.setCurrentIndex(self.speed.findData(speed_mode(as_dict(o))))
             self.turbo_steps.setValue(int(turbo.get("steps", 6)))
             self.turbo_strength.setValue(float(turbo.get("strength", 1.0)))
             self._cfg_mode = self.speed.currentData()
-            self.clip_cfg.setValue(float(self._mode_options(o, self._cfg_mode).get("cfg", 1.0)))
+            self.clip_cfg.setValue(float(self._mode_options(as_dict(o), self._cfg_mode).get("cfg", 1.0)))
             self._cfg_hint()
             self._fill_turbo(turbo.get("lora"))
             self.keep_rep.setChecked(bool(o.get("keep_repeated", False)))
@@ -109,7 +112,7 @@ class OptionsMixin:
         if mode != self._cfg_mode:                  # another speed mode: its own CFG into the field (not this one's)
             self._cfg_mode = mode
             self.clip_cfg.blockSignals(True)
-            self.clip_cfg.setValue(float(self._mode_options(self.tree.options, mode).get("cfg", 1.0)))
+            self.clip_cfg.setValue(float(self._mode_options(as_dict(self.tree.options), mode).get("cfg", 1.0)))
             self.clip_cfg.blockSignals(False)
         cfg = round(self.clip_cfg.value(), 2)
         self._cfg_hint()
@@ -124,9 +127,9 @@ class OptionsMixin:
             "pika": {**(self.tree.options.get("pika") or {"strength": 1.0}), "on": mode == "pika"},
             "veda": {"on": self.veda.isChecked()}})
         if mode == "normal":                        # the CFG belongs to the speed mode it was set for
-            self.tree.options["cfg"] = cfg
+            as_dict(self.tree.options)["cfg"] = cfg          # (not in the Options schema: tree/ should list it)
         else:
-            self.tree.options[mode]["cfg"] = cfg
+            as_dict(self.tree.options)[mode]["cfg"] = cfg
         self._update_size_info()
         self._show_references()
         self._turbo_widgets()
@@ -216,11 +219,13 @@ class OptionsMixin:
         self._trigger_scan_online = online
         stop = self._trigger_scan
 
+        def progress(*a) -> None:
+            safe_emit(bridge.trigger_progress, *a)
+
         def work():
             counts = {}
             try:
-                counts = triggers.db().scan(paths, online=online, stop=stop.is_set,
-                                            progress=lambda *a: safe_emit(bridge.trigger_progress, *a))
+                counts = triggers.db().scan(paths, online=online, stop=stop.is_set, progress=progress)
             except Exception as e:  # noqa: BLE001  (the scan ends; what went wrong is in the log)
                 logging.getLogger(__name__).warning("trigger word scan failed", exc_info=True)
                 safe_emit(bridge.log, f"The trigger word scan failed: {type(e).__name__}: {e}")

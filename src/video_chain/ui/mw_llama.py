@@ -13,6 +13,7 @@ from . import dialogs as D
 from .widgets import safe_emit
 from .ui_logic import (
     CLOSE_GRACE, DEFAULT_COMFY_URL, LLM_DEFAULT_SERVER, UNLOAD_TIMEOUT, VRAM_POLL_SECONDS, app_cache_dir)
+from .mw_host import MainWindowHost
 
 
 @dataclass
@@ -30,7 +31,7 @@ class KeyField:
     after: Callable[[str], None] | None = None      # after the status line
 
 
-class LlamaMixin:
+class LlamaMixin(MainWindowHost):
     """The local llama.cpp server and the API keys."""
 
     def llm_model_path(self) -> str:
@@ -51,8 +52,11 @@ class LlamaMixin:
                 cur.stop(wait=False)
             self._llama = LLM.LlamaServer(*key, log_dir=app_cache_dir())
         url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL).rstrip("/")
-        self._llama.before_launch = lambda llama=self._llama: self._room_for_llama(llama, url)
-        return self._llama
+        llama = self._llama
+        assert llama is not None
+        # (llm_server.py types the hook as None)
+        llama.before_launch = lambda llama=llama: self._room_for_llama(llama, url)  # type: ignore[assignment]
+        return llama
 
     def _end_leftover_llama(self):
         """At start-up: a llama-server an earlier run left behind (it crashed; found by its pid file) holds RAM and
@@ -91,7 +95,7 @@ class LlamaMixin:
                                        f"is free and {what} needs about {gb(need)}.")
             return                                  # (ComfyUI is not up: the VRAM is used by something else)
         end = time.time() + settle
-        now = free
+        now: float | None = free
         while time.time() < end:
             time.sleep(VRAM_POLL_SECONDS)
             now = LLM.free_vram_mb()

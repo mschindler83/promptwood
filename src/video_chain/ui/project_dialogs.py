@@ -48,8 +48,8 @@ class NewProjectDialog(QDialog):
         self.target = label("", level="tertiary")
         self.target.setWordWrap(True)
         f.addRow("", self.target)
-        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        self.buttons.button(QDialogButtonBox.Ok).setText("Create")
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Create")
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
         f.addRow(self.buttons)
@@ -80,7 +80,7 @@ class NewProjectDialog(QDialog):
             except OSError as e:
                 problem = f"{f} cannot be read ({e.strerror or e})."
         self.target.setText(problem or f"Creates {f}")
-        self.buttons.button(QDialogButtonBox.Ok).setEnabled(not problem)
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(not problem)
 
     def _choose_location(self):
         d = QFileDialog.getExistingDirectory(self, "Location", self.location.text().strip())
@@ -155,12 +155,12 @@ class VariantsDialog(QDialog):
             self.advanced.setToolTip("This clip has no LoRAs of its own (add them in its settings first)")
         self.advanced.toggled.connect(self._preview)
         self.count.valueChanged.connect(self._preview)
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Ok).setText("Create")
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Create")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         f.addRow(buttons)
-        self.ok = buttons.button(QDialogButtonBox.Ok)
+        self.ok = buttons.button(QDialogButtonBox.StandardButton.Ok)
         self._preview()
 
     def strength_steps(self) -> list[float]:
@@ -212,6 +212,8 @@ class ExportDialog(QDialog):
     ComfyUI by SeedVR2 (restores the clips as made) or re-rendered by the Open-H3 refine (draws detail anew); every
     clip once, the copies are kept for the next export. ready(size, method, strength, denoise) -> True when every
     clip has a kept copy for that choice (a dict {size: bool} works too)."""
+    # (these names shadow QWidget methods, which this class never uses)
+    size: QComboBox  # type: ignore[assignment]
 
     METHODS = (("seedvr2_7b", "SeedVR2 7B — restores the clips as made, clean (default)"),
                ("seedvr2_3b", "SeedVR2 3B — crisper, a little harder"),
@@ -319,12 +321,12 @@ class ExportDialog(QDialog):
             w_.currentIndexChanged.connect(lambda *_: self._update())
         self.denoise.toggled.connect(lambda *_: self._update())
         self._update()
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Ok).setText("Export")
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Export")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         f.addRow(buttons)
-        self.ok = buttons.button(QDialogButtonBox.Ok)
+        self.ok = buttons.button(QDialogButtonBox.StandardButton.Ok)
         self.file.textChanged.connect(self._check_file)
         self._check_file()
         guard_wheel(self)

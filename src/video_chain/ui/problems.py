@@ -34,12 +34,13 @@ def add_example(edit: QPlainTextEdit, text: str) -> None:
     cur = QTextCursor(edit.document())
     cur.beginEditBlock()
     if not old.strip():
-        cur.select(QTextCursor.Document)
+        cur.select(QTextCursor.SelectionType.Document)
         cur.insertText(text)
     else:
-        cur.movePosition(QTextCursor.End)
+        cur.movePosition(QTextCursor.MoveOperation.End)
         tail = old.rstrip()
-        cur.movePosition(QTextCursor.Left, QTextCursor.KeepAnchor, len(old) - len(tail))   # (trailing spaces go)
+        # (trailing spaces go)
+        cur.movePosition(QTextCursor.MoveOperation.Left, QTextCursor.MoveMode.KeepAnchor, len(old) - len(tail))
         cur.insertText(("" if tail[-1] in ".!?\"'" else ".") + " " + text)
     cur.endEditBlock()
     edit.setTextCursor(cur)
@@ -48,14 +49,14 @@ def add_example(edit: QPlainTextEdit, text: str) -> None:
 
 def camera_menu_items() -> list[tuple[str, list[tuple[str, str]]]]:
     """The camera moves for the Camera button: (move in plain words, [(variant in plain words, token)])."""
-    out = []
+    out: list[tuple[str, list[tuple[str, str]]]] = []
     by_move: dict[str, list[str]] = {}               # (each token parsed once: which move it belongs to)
     for t in CAM.tokens():
         parsed = CAM.parse(t)
         if parsed:
             by_move.setdefault(parsed[0], []).append(t)
     for slug, (text, _w, mods) in CAM.MOVES.items():
-        variants = [(CAM.label(t), t) for t in by_move.get(slug, [])]
+        variants = [(CAM.label(t) or t, t) for t in by_move.get(slug, [])]
         out.append((text, variants if mods else [(text, slug)]))
     return out
 
@@ -70,7 +71,7 @@ class ProblemBox(QFrame):
         super().__init__(parent)
         self.setProperty("role", "notice")
         self.setProperty("severity", "warning")
-        self.setAttribute(Qt.WA_StyledBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         self.v = QVBoxLayout(self)
         self.v.setContentsMargins(8, 6, 6, 6)
         self.v.setSpacing(4)
@@ -85,10 +86,11 @@ class ProblemBox(QFrame):
         self.items = items
         while self.v.count():
             it = self.v.takeAt(0)
-            lay = it.layout()
+            lay = it.layout() if it is not None else None
             if lay is not None:
                 while lay.count():
-                    w = lay.takeAt(0).widget()
+                    sub = lay.takeAt(0)
+                    w = sub.widget() if sub is not None else None
                     if w is not None:
                         w.setParent(None)
                         w.deleteLater()
@@ -106,7 +108,7 @@ class ProblemBox(QFrame):
             text = label(p["text"], severity="error" if p.get("error") else "warning")
             text.setWordWrap(True)
             text.setToolTip(p.get("tip", ""))
-            h.addWidget(mark, 0, Qt.AlignTop)
+            h.addWidget(mark, 0, Qt.AlignmentFlag.AlignTop)
             h.addWidget(text, 1)
             self.v.addLayout(h)
             bs = []

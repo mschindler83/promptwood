@@ -4,6 +4,7 @@ from __future__ import annotations
 import shutil
 import threading
 from pathlib import Path
+from typing import Any
 
 from PySide6.QtCore import QProcess
 from PySide6.QtWidgets import QDialog
@@ -12,9 +13,11 @@ from .. import chain, media, runpod as RP, tree as T
 from .theme import repolish
 from .widgets import format_time, safe_emit
 from .project_dialogs import ExportDialog
+from .mw_host import MainWindowHost
+from .qsvalue import qs_value
 
 
-class ExportMixin:
+class ExportMixin(MainWindowHost):
     """Joining and exporting a path, the GPU poll."""
 
     # ------------------------------------------------------------------ paths
@@ -23,6 +26,7 @@ class ExportMixin:
         if not path or self.tree is None:
             return
         nid, project = path[-1].id, self.project
+        assert project is not None
         tree = T.Tree.from_json(self.tree.to_json())
         pre = f"{prefix} " if prefix else ""
         self.status.setText(f"{pre}Joining the path …")
@@ -32,6 +36,7 @@ class ExportMixin:
 
         def work():
             with lock:
+                result: tuple[Any, str | None]
                 try:
                     joined = T.join_path(project, tree, nid, out)
                     secs = chain.joined_seconds(joined)             # not in the GUI thread (network shares)
@@ -92,14 +97,17 @@ class ExportMixin:
             path = self.selected_path()
         if not path:
             return
+        assert self.project is not None
         default = str(self.project / f"{self.project.name}-{path[-1].id}{'-clip' if single else ''}.mp4")
+        assert self.tree is not None
         base = T.Checker(self.project, self.tree).base()
-        strength = self.qs.value("refineStrength", "natural", type=str)
-        method = self.qs.value("exportUpscaler", "seedvr2_7b", type=str)
-        denoise = self.qs.value("exportDenoise", False, type=bool)
+        strength = qs_value(self.qs, "refineStrength", "natural", str)
+        method = qs_value(self.qs, "exportUpscaler", "seedvr2_7b", str)
+        denoise = qs_value(self.qs, "exportDenoise", False, bool)
 
         def ready(size, how, strength_, denoise_=False):   # every generated clip has a kept copy made this way
             def kept(n):
+                assert self.project is not None
                 f = T.refined_file(self.project, n, size)
                 if not (n.made and f.is_file()):
                     return False
@@ -112,11 +120,11 @@ class ExportMixin:
         swapped = sum(1 for n in path if T.swapped_video(n))
         dlg = ExportDialog(self, default, (base["width"], base["height"]) if base else None, ready, swapped,
                            strength, method, denoise, cloud=True if RP.api_key() else None,
-                           cloud_on=self.qs.value("exportCloud", False, type=bool), simple=self.simple)
+                           cloud_on=qs_value(self.qs, "exportCloud", False, bool), simple=self.simple)
         if single is not None:
             dlg.setWindowTitle(f"Export {'video' if path[0].is_video else 'clip'} #{T.short_id(single)}")
         try:
-            if dlg.exec() != QDialog.Accepted:
+            if dlg.exec() != QDialog.DialogCode.Accepted:
                 return
             req = dlg.request()
         finally:
@@ -140,6 +148,7 @@ class ExportMixin:
             if node is None or not node.made:
                 return
             if size == "made":
+                assert self.project is not None
                 self._export_copy(single, self.project / node.made["video"], Path(out))
                 return
             target = single
@@ -200,13 +209,13 @@ class ExportMixin:
         p = QProcess(self)
         self._gpu_proc = p
 
-        failed = []
+        failed: list[int] = []
 
         def done(*_):
             if self._gpu_proc is not p:          # window closing: the query was abandoned
                 return
             try:
-                out = bytes(p.readAllStandardOutput()).decode(errors="replace").strip().splitlines()
+                out = bytes(p.readAllStandardOutput().data()).decode(errors="replace").strip().splitlines()
             except RuntimeError:                 # Qt is destroying the window (and with it the query)
                 return
             self._gpu_proc = None
@@ -224,7 +233,7 @@ class ExportMixin:
             repolish(self.gpu)
 
         def not_started(err):                    # (no "finished" follows a process that never started)
-            if err == QProcess.FailedToStart:
+            if err == QProcess.ProcessError.FailedToStart:
                 failed.append(1)
                 self.gpu.setText("GPU: ?")
                 done()

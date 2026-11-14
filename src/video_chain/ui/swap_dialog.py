@@ -11,6 +11,7 @@ import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from PySide6.QtCore import QObject, QRectF, QSettings, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen
@@ -24,6 +25,7 @@ from .compare_player import ComparePlayer
 from .dialogs import confirm
 from .theme import theme
 from .widgets import fit_size, FrameTile, guard_wheel, label, safe_emit
+from .qsvalue import qs_value
 
 METHODS = (("animate+lock", "Head + face lock (Animate, then face swap)"), ("animate", "Head only (Animate)"),
            ("face", "Face only (face swap, the clip's own motion)"),
@@ -39,13 +41,14 @@ def letterbox(src: str, dest, size: int, crop: tuple[int, int, int] | None = Non
     if crop is not None:
         x, y, side = crop
         img = img.copy(int(x), int(y), int(side), int(side))
-    fit = img.convertToFormat(QImage.Format_RGB32).scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-    out = QImage(size, size, QImage.Format_RGB32)
+    fit = img.convertToFormat(QImage.Format.Format_RGB32).scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio,
+                                                                 Qt.TransformationMode.SmoothTransformation)
+    out = QImage(size, size, QImage.Format.Format_RGB32)
     out.fill(QColor(0, 0, 0))
     p = QPainter(out)
     p.drawImage((size - fit.width()) // 2, (size - fit.height()) // 2, fit)
     p.end()
-    return out.save(str(dest), "PNG")
+    return out.save(str(dest), "PNG")  # type: ignore[call-overload]  # (stubs: bytes, runtime: str)
 
 
 class _Sig(QObject):
@@ -60,11 +63,16 @@ class SwapDialog(QDialog):
     """clip: the converted clip of the video node; pictures: [(label, path)] offered as the new person;
     connect(progress) -> ComfyAnimator (worker thread); on_start(): before Generate (GUI thread);
     .result: (path, meta, frames) of the clip to use; it is played and compared with the clip in the window."""
+    # (these names shadow QObject / QDialog / QWidget methods, which this dialog never uses)
+    connect: Callable
+    result: tuple[Path, dict, int] | None  # type: ignore[assignment]
+    size: QComboBox  # type: ignore[assignment]
 
     def __init__(self, parent, project: Path, nid: str, clip: Path, detector: Path | None,
                  pictures: list[tuple[str, str]], connect: Callable, settings: QSettings | None = None,
                  on_start: Callable[[], None] | None = None,
-                 source: dict | None = None, pick: Callable[[str], str | None] | None = None, groups: list[list[str]] | None = None,
+                 source: dict | None = None, pick: Callable[[str],
+                                                            str | None] | None = None, groups: list[list[str]] | None = None,
                  h3: dict | None = None):
         super().__init__(parent)
         self.setWindowTitle(f"Replace a person in video #{T.short_id(nid)}")
@@ -79,8 +87,8 @@ class SwapDialog(QDialog):
         self.h3 = dict(h3 or {})
         self.heads: dict | None = None
         self.boxes: list[tuple] = []
-        self.result: tuple[Path, dict, int] | None = None
-        self.animator = None
+        self.result = None
+        self.animator: Any = None                 # (the ComfyAnimator of the running Generate)
         self._busy = False
         self._cancel = False
         self._tmp = media.scratch("swap")
@@ -113,7 +121,7 @@ class SwapDialog(QDialog):
         self.head_size = QDoubleSpinBox()
         self.head_size.setRange(0.7, 2.0)
         self.head_size.setSingleStep(0.05)
-        self.head_size.setValue(float(settings.value("swapHeadSize", 1.0, type=float)) if settings else 1.0)
+        self.head_size.setValue(float(qs_value(settings, "swapHeadSize", 1.0, float)) if settings else 1.0)
         self.head_size.setToolTip("The head area around the found face: larger takes in more hair, the ears and "
                                   "the neck; everything outside it stays as it is")
         self.head_size.valueChanged.connect(self._resize_heads)
@@ -163,7 +171,7 @@ class SwapDialog(QDialog):
         self.method = QComboBox()
         for key, text in METHODS:
             self.method.addItem(text, key)
-        self.method.setCurrentIndex(max(0, self.method.findData(settings.value("swapMethod", "animate+lock", type=str)
+        self.method.setCurrentIndex(max(0, self.method.findData(qs_value(settings, "swapMethod", "animate+lock", str)
                                                                 if settings else "animate+lock")))
         self.method.setToolTip(
             "<p><b>Head + face lock</b>: Wan 2.2 Animate draws the new head (face, hair, head shape), then a face "
@@ -175,19 +183,19 @@ class SwapDialog(QDialog):
         self.method.currentIndexChanged.connect(lambda *_: (self._forget_auto_details(), self._update()))
         form.addRow("Method", self.method)
         self.body = QCheckBox("Follow the body pose")
-        self.body.setChecked(settings.value("swapBody", True, type=bool) if settings else True)
+        self.body.setChecked(qs_value(settings, "swapBody", True, bool) if settings else True)
         self.body.setToolTip("On: the body skeleton (DWPose) drives Animate too. Off: only the face motion; the "
                              "body stays as in the clip anyway (only the head is drawn anew): better when the body "
                              "is in unusual poses DWPose gets wrong")
         form.addRow("", self.body)
         self.sharpen = QCheckBox("Sharpen the face (GPEN)")
-        self.sharpen.setChecked(settings.value("swapSharpen", True, type=bool) if settings else True)
+        self.sharpen.setChecked(qs_value(settings, "swapSharpen", True, bool) if settings else True)
         self.sharpen.setToolTip("Face restoration after the face swap (GPEN-BFR-512, 80 %): a sharper face")
         form.addRow("", self.sharpen)
         self.size = QComboBox()
         for key in SIZES:
             self.size.addItem({"480p": "480p (faster)", "720p": "720p (sharper, slower)"}.get(key, key), key)
-        self.size.setCurrentIndex(max(0, self.size.findData(settings.value("swapSize", "480p", type=str)
+        self.size.setCurrentIndex(max(0, self.size.findData(qs_value(settings, "swapSize", "480p", str)
                                                             if settings else "480p")))
         self.size.setToolTip("The size the new head is made at (only the head area: the rest of the clip keeps "
                              "its own size and sharpness)")
@@ -298,7 +306,7 @@ class SwapDialog(QDialog):
             return
         x1, y1, x2, y2 = (v * self.player.scale() for v in self.boxes[k])
         p = QPainter(img)
-        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setPen(QPen(theme().negative, max(2, img.width() // 300)))
         p.setBrush(QColor(255, 40, 40, 70))
         p.drawEllipse(QRectF(x1, y1, x2 - x1, y2 - y1))
@@ -392,10 +400,6 @@ class SwapDialog(QDialog):
         w, h = F.image_size(png)
         return F.face_square(found[0], w, h, swap.HEAD_CROP_MARGIN)
 
-    def head_picture(self) -> str | None:
-        """The picture the H3 head swap gets: the upright picture, cut to the head square when cropping is on."""
-        return str(self.ref_png) if self.ref_png else None
-
     def adjust_crop(self):
         if not self.ref_png:
             return
@@ -406,7 +410,7 @@ class SwapDialog(QDialog):
         except ValueError:
             return
         try:
-            if dlg.exec() == QDialog.Accepted:
+            if dlg.exec() == QDialog.DialogCode.Accepted:
                 self.ref_crop = dlg.crop()
                 self.head_crop.setChecked(self.ref_crop is not None)
                 self._show_reference()
@@ -418,7 +422,7 @@ class SwapDialog(QDialog):
             self.ref_tile.clear_frame("Choose a picture of the person")
             self.crop_info.setText("")
             return
-        img = QImage(str(self.ref_png)).convertToFormat(QImage.Format_ARGB32)
+        img = QImage(str(self.ref_png)).convertToFormat(QImage.Format.Format_ARGB32)
         crop = self.ref_crop if self.head_crop.isChecked() else None
         if crop is not None:
             x, y, side = crop
@@ -489,6 +493,7 @@ class SwapDialog(QDialog):
         self._busy, self._cancel = True, False
         out_dir = self.project / swap.SWAPS_DIR
         stem = f"swap_{self.nid}_{time.strftime('%Y%m%d-%H%M%S')}_{uuid.uuid4().hex[:6]}"
+        assert self.heads is not None and self.ref is not None      # (Generate is enabled only then)
         boxes, (w, h), fps = list(self.boxes), self.heads["size"], self.heads["fps"]
         n, clip, ref = self.heads["frames"], self.clip, self.ref
         size, prompt, seed = self.size.currentData(), self.prompt.text().strip(), random.randint(1, 2**31 - 1)

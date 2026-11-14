@@ -5,14 +5,18 @@ A mixin of ImageEditDialog (ui/image_edit.py): the widgets it uses are created t
 from __future__ import annotations
 
 import json
+from typing import Any
 
 from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QGridLayout, QHBoxLayout, QSpinBox
 
 from ..imagegen import FAMILIES, SAMPLERS, SCHEDULERS, default_sampling
 from .widgets import guard_wheel, icon_button, label
+from .image_host import ImageEditHost
+from .qsvalue import qs_value
 
 
-class SamplingMixin:
+
+class SamplingMixin(ImageEditHost):
     # ---- sampling
     def _build_sampling(self, cv):
         row = QHBoxLayout()
@@ -34,8 +38,8 @@ class SamplingMixin:
                                   "replaces it)")
         b_reset = icon_button("rotate", "Back to the model's own settings (all auto)")
         b_reset.clicked.connect(lambda: self.set_sampling({}))
-        for w in (self.steps, self.cfg):
-            guard_wheel(w)
+        for spin in (self.steps, self.cfg):
+            guard_wheel(spin)
         grid = QGridLayout()                       # two rows, so the panel stays narrow
         for k, (w, text) in enumerate(((self.steps, "Steps"), (self.cfg, "CFG"), (self.sampler, "Sampler"),
                                        (self.scheduler, "Scheduler"))):
@@ -43,7 +47,7 @@ class SamplingMixin:
             grid.addWidget(w, k // 2, (k % 2) * 2 + 1)
             w.setMinimumWidth(60)
             if isinstance(w, QComboBox):
-                w.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+                w.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
                 w.setMinimumContentsLength(8)
         grid.addWidget(b_reset, 0, 4)
         grid.setColumnStretch(1, 1)
@@ -76,7 +80,7 @@ class SamplingMixin:
 
     def sampling(self) -> dict:
         """The chosen sampling settings; a missing key: the model's own."""
-        out = {}
+        out: dict[str, Any] = {}
         if self.steps.value():
             out["steps"] = self.steps.value()
         if self.cfg.value():
@@ -116,7 +120,7 @@ class SamplingMixin:
             saved = {}
             if self.qs is not None and fam:
                 try:
-                    saved = json.loads(self.qs.value(self._sampling_key(), "{}", type=str) or "{}")
+                    saved = json.loads(qs_value(self.qs, self._sampling_key(), "{}", str) or "{}")
                 except ValueError:
                     saved = {}
             self.set_sampling(saved if isinstance(saved, dict) else {})

@@ -6,14 +6,14 @@ import threading
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QImage, QKeySequence, QShortcut
+from PySide6.QtGui import QImage, QKeySequence
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QGridLayout, QHBoxLayout,
                                QPushButton, QSlider, QVBoxLayout, QWidget)
 
 from .. import chain, media
 from .theme import icon
 from .dialogs import add_action, button_row
-from .widgets import fit_size, FrameStepper, FrameTile, icon_button, label, safe_emit, VideoView
+from .widgets import fit_size, FrameStepper, FrameTile, icon_button, label, safe_emit, VideoView, shortcut
 
 FPS = chain.FPS
 PREVIEW_W = 480                    # frames are decoded once at this width, so scrubbing is instant
@@ -29,7 +29,7 @@ def decode_frames(video: Path, width: int = PREVIEW_W, on_start=None) -> list[QI
     info = chain.probe(video)
     w = max(2, min(width, info["width"]) // 2 * 2)
     h = max(2, round(info["height"] * w / info["width"] / 2) * 2)
-    return [QImage(raw, w, h, 3 * w, QImage.Format_RGB888).copy()
+    return [QImage(raw, w, h, 3 * w, QImage.Format.Format_RGB888).copy()
             for raw in media.iter_frames(video, (w, h), "rgb24", flags=None, on_start=on_start, timeout=600)]
 
 
@@ -54,7 +54,7 @@ class HandoverDialog(QDialog):
         v.addWidget(info)
         self.tile = FrameTile(720, 405)
         self.tile.clear_frame("reading the frames …")
-        v.addWidget(self.tile, 1, Qt.AlignHCenter)
+        v.addWidget(self.tile, 1, Qt.AlignmentFlag.AlignHCenter)
         self.stepper = FrameStepper(self, FPS)
         self.slider, self.where = self.stepper.slider, self.stepper.label
         self.b_prev, self.b_next = self.stepper.b_back1, self.stepper.b_fwd1
@@ -89,7 +89,7 @@ class HandoverDialog(QDialog):
         n = len(frames)
         self.stepper.set_range(min(self.min_frame, n - 1), n - 1)
         self.stepper.setEnabled(True)
-        self.buttons.button(QDialogButtonBox.Ok).setEnabled(True)
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(True)
         start = n - 1 if self._current is None else min(int(self._current), n - 1)
         self.slider.setValue(start)
         self._show(self.slider.value())
@@ -187,7 +187,7 @@ class CompareDialog(QDialog):
         self.b_play.clicked.connect(self.toggle)
         self.b_restart = QPushButton("From the start")
         self.b_restart.clicked.connect(self.restart)
-        self.slider = QSlider(Qt.Horizontal)
+        self.slider = QSlider(Qt.Orientation.Horizontal)
         self._syncing = False                         # (the slider follows the players: that is not a seek)
         self.slider.valueChanged.connect(self._slider_changed)
         self.loop = QCheckBox("Loop")
@@ -205,9 +205,9 @@ class CompareDialog(QDialog):
         v.addLayout(ctl)
         close, _none = button_row(self)
         v.addWidget(close)
-        QShortcut(QKeySequence("Space"), self, activated=self.toggle)
-        for w in (self.b_play, self.b_restart, self.slider, self.loop, self.sound):
-            w.setEnabled(bool(self.players))
+        shortcut(QKeySequence("Space"), self, self.toggle)
+        for control in (self.b_play, self.b_restart, self.slider, self.loop, self.sound):
+            control.setEnabled(bool(self.players))
         if self.players:
             for p in self.players:                   # the longest clip sets the slider's range
                 p.durationChanged.connect(lambda _d: self.slider.setRange(
@@ -231,7 +231,7 @@ class CompareDialog(QDialog):
 
     def _playing(self) -> bool:
         from PySide6.QtMultimedia import QMediaPlayer
-        return any(p.playbackState() == QMediaPlayer.PlayingState for p in self.players)
+        return any(p.playbackState() == QMediaPlayer.PlaybackState.PlayingState for p in self.players)
 
     def toggle(self):
         if not self.players:
@@ -257,7 +257,8 @@ class CompareDialog(QDialog):
 
     def _ended(self, p, status):
         from PySide6.QtMultimedia import QMediaPlayer
-        over = (QMediaPlayer.EndOfMedia, QMediaPlayer.InvalidMedia, QMediaPlayer.NoMedia)
+        over = (QMediaPlayer.MediaStatus.EndOfMedia, QMediaPlayer.MediaStatus.InvalidMedia,
+                QMediaPlayer.MediaStatus.NoMedia)
         if status not in over[:2] or not self.loop.isChecked():
             return
         # the clips may differ in length: start all again once the longest one has ended (one that cannot be
@@ -326,7 +327,7 @@ class SplitDialog(QDialog):
 
     def _show(self, k: int):
         ok = 0 < k < self.n - 1
-        self.buttons.button(QDialogButtonBox.Ok).setEnabled(ok)
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(ok)
         t = self.at()
         self.summary.setText(
             f"Part 1: {self.start:.2f}–{t:.2f} s · the new clip · part 2: {t:.2f}–{self.end:.2f} s" if ok else
@@ -376,7 +377,7 @@ class VideoFrameDialog(QDialog):
         v = QVBoxLayout(self)
         self.tile = FrameTile(800, 450)
         self.tile.clear_frame("reading the frame …")
-        v.addWidget(self.tile, 1, Qt.AlignHCenter)
+        v.addWidget(self.tile, 1, Qt.AlignmentFlag.AlignHCenter)
         self.stepper = FrameStepper(self, self.fps)
         self.slider, self.where = self.stepper.slider, self.stepper.label
         self.stepper.set_range(0, self.frames - 1)

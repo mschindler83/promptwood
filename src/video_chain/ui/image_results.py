@@ -16,9 +16,11 @@ from ..edits import ResultRecord
 from .imageio import upright
 from .lora_stack import lora_label
 from .results_gallery import badged, model_key, model_name, run_groups
+from .image_host import ImageEditHost
 
 
-class ResultsMixin:
+
+class ResultsMixin(ImageEditHost):
     # ---- results
     def _load_results(self, select: str | None = None, keep: bool = False):
         """The results with the filters applied: the strip below the large view and the gallery (grouped by
@@ -27,9 +29,9 @@ class ResultsMixin:
         if select is None and (keep or cur is not None):
             select = cur[0] if cur else None
         entries = []
-        for png, meta in edits.project_edits(self.project):
+        for png_file, meta in edits.project_edits(self.project):
             try:
-                entries.append((str(png), meta, png.stat().st_mtime, png.stat().st_mtime_ns))
+                entries.append((str(png_file), meta, png_file.stat().st_mtime, png_file.stat().st_mtime_ns))
             except OSError:
                 continue
         self._entries = [(p, m, t) for p, m, t, _ns in entries]
@@ -48,7 +50,8 @@ class ResultsMixin:
         self._shown = shown
         self.results.blockSignals(True)
         self.results.clear()
-        self._strip_items = {}                       # png -> its item (a thumbnail arriving finds it at once)
+        # png -> its item (a thumbnail arriving finds it at once)
+        self._strip_items: dict[str, QListWidgetItem] = {}
         for png, meta, _t, ns in shown:
             self.results.addItem(self._strip_item(png, meta, ns))
         self.results.blockSignals(False)
@@ -60,10 +63,10 @@ class ResultsMixin:
         for png in [p for p in self._thumbs if p not in alive]:     # deleted results: their thumbnails go
             del self._thumbs[png]
         if self.results.count():
-            k = next((i for i in range(self.results.count())
-                      if self.results.item(i).data(Qt.UserRole)[0] == select), 0)
+            row = next((i for i in range(self.results.count())
+                        if self.results.item(i).data(Qt.ItemDataRole.UserRole)[0] == select), 0)
             self.results.blockSignals(True)            # (shown once below, not also through the signal)
-            self.results.setCurrentRow(k)
+            self.results.setCurrentRow(row)
             self.results.blockSignals(False)
             self._strip_selection(self.results.currentItem(), None)
         self._show_selected()
@@ -86,7 +89,7 @@ class ResultsMixin:
     def _strip_item(self, png: str, meta: ResultRecord, ns: int) -> QListWidgetItem:
         """A strip item for a result; its thumbnail is asked for unless it is there or was asked (or failed)."""
         it = QListWidgetItem(self._strip_icon(png, meta), "")
-        it.setData(Qt.UserRole, (png, meta))
+        it.setData(Qt.ItemDataRole.UserRole, (png, meta))
         it.setToolTip(meta.get("prompt", Path(png).name))
         self._strip_items[png] = it
         if self._thumbs.get(png, (None,))[0] != ns and (png, ns) not in self._requested \
@@ -121,7 +124,7 @@ class ResultsMixin:
         self._show_count(len(self._shown), len(self._entries))
         self._show_selected()
 
-    def _strip_icon(self, png: str, meta: dict, selected: bool = False) -> QIcon:
+    def _strip_icon(self, png: str, meta: edits.ResultRecord, selected: bool = False) -> QIcon:
         pix = self._thumbs.get(png, (None, QPixmap()))[1]
         return QIcon(badged(pix, QSize(150, 100), "", bool(meta.get("favorite")), png in self._in_use, selected,
                             self.devicePixelRatioF()))
@@ -129,7 +132,7 @@ class ResultsMixin:
     def _strip_selection(self, cur, prev):
         for it, on in ((prev, False), (cur, True)):
             if it is not None:
-                png, meta = it.data(Qt.UserRole)
+                png, meta = it.data(Qt.ItemDataRole.UserRole)
                 it.setIcon(self._strip_icon(png, meta, on))
 
     def _thumb_ready(self, png: str, ns: int, img: QImage):
@@ -141,7 +144,7 @@ class ResultsMixin:
         self._thumbs[png] = (ns, pix)
         it = self._strip_items.get(png)
         if it is not None:
-            it.setIcon(self._strip_icon(png, it.data(Qt.UserRole)[1], it is self.results.currentItem()))
+            it.setIcon(self._strip_icon(png, it.data(Qt.ItemDataRole.UserRole)[1], it is self.results.currentItem()))
         self.gallery.set_thumb(png, pix)
 
     def set_view(self, view: str, remember: bool = True):
@@ -171,7 +174,7 @@ class ResultsMixin:
 
     def _select_png(self, png: str):
         for i in range(self.results.count()):
-            if self.results.item(i).data(Qt.UserRole)[0] == png:
+            if self.results.item(i).data(Qt.ItemDataRole.UserRole)[0] == png:
                 self.results.setCurrentRow(i)
                 return
 
@@ -207,8 +210,8 @@ class ResultsMixin:
         else:                                          # in place: no rebuild, the view stays where it is
             for i in range(self.results.count()):
                 it = self.results.item(i)
-                if it.data(Qt.UserRole)[0] == png:
-                    it.setData(Qt.UserRole, (png, meta))
+                if it.data(Qt.ItemDataRole.UserRole)[0] == png:
+                    it.setData(Qt.ItemDataRole.UserRole, (png, meta))
                     it.setIcon(self._strip_icon(png, meta, it is self.results.currentItem()))
             self.gallery.update_thumb(png, meta)
             if sel is not None and sel[0] == png:
@@ -222,12 +225,12 @@ class ResultsMixin:
         self.fresh_seed.setChecked(False)
         self.state.setText(f"Seed {seed} is set for the next Generate (New seed after each Generate is off).")
 
-    def selected(self) -> tuple[str, dict] | None:
+    def selected(self) -> tuple[str, edits.ResultRecord] | None:
         """The selected result and its record, read again (a use is recorded while the window is open)."""
         it = self.results.currentItem()
         if it is None:
             return None
-        png, meta = it.data(Qt.UserRole)
+        png, meta = it.data(Qt.ItemDataRole.UserRole)
         return png, edits.read_meta(png) or meta
 
     def _show_selected(self):
@@ -291,4 +294,4 @@ class ResultsMixin:
     def _empty_trash(self, keep_sources: bool = False):
         """Delete for good what was deleted, and originals no result needs any more."""
         edits.empty_trash(self.project, keep_sources)
-        self._trash = []
+        self._trash: list[Path] = []

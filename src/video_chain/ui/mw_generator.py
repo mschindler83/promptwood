@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import threading
@@ -16,6 +17,8 @@ from .widgets import safe_emit
 from .generator_state import (
     CLIP_MODELS, ComfyBinding, ComfyModel, IMAGE_MODELS, Job, ModelState, Phase, RunpodBinding, WorkerBinding)
 from .ui_logic import CLOUD_KILL_GRACE_MS, DEFAULT_COMFY_URL, KILL_GRACE_MS, fmt_left, plural, time_left
+from .mw_host import MainWindowHost
+from .qsvalue import qs_value
 
 
 def step_status(nid: str, k: int, total: int, what: str, frac: float, left: float | None,
@@ -30,7 +33,7 @@ def step_status(nid: str, k: int, total: int, what: str, frac: float, left: floa
     return text
 
 
-class GeneratorMixin:
+class GeneratorMixin(MainWindowHost):
     """The generator worker: start, jobs, events, finish."""
 
     @property
@@ -63,11 +66,11 @@ class GeneratorMixin:
         export: GPU, volume, fallback, SeedVR2 size); a change needs a new worker."""
         refine = self._refine or {}
         if refine.get("cloud"):
-            return RunpodBinding(self.qs.value("runpodGpu", RP.DEFAULT_GPU, type=str),
-                                 self.qs.value("runpodVolume", "", type=str).strip(),
-                                 self.qs.value("runpodFallback", True, type=bool),
-                                 CMF.SEEDVR_METHODS.get(refine.get("method"), "7b"),
-                                 self.qs.value("runpodWithoutVolume", True, type=bool))
+            return RunpodBinding(qs_value(self.qs, "runpodGpu", RP.DEFAULT_GPU, str),
+                                 qs_value(self.qs, "runpodVolume", "", str).strip(),
+                                 qs_value(self.qs, "runpodFallback", True, bool),
+                                 CMF.SEEDVR_METHODS.get(refine.get("method") or "", "7b"),
+                                 qs_value(self.qs, "runpodWithoutVolume", True, bool))
         return ComfyBinding((self.comfy_url.text().strip() or DEFAULT_COMFY_URL), self.comfy_dir.text().strip(),
                             self.comfy_cleanup.isChecked())
 
@@ -101,6 +104,7 @@ class GeneratorMixin:
         self._update_buttons()                     # (running: nothing can be edited while it is checked)
 
         def work():
+            assert project is not None
             problems, empty = self._preflight(project, tree, targets, refine)
             try:
                 safe_emit(bridge.checked, gen, problems, empty)
@@ -138,7 +142,7 @@ class GeneratorMixin:
                     problems.append(f"generate the path first ({len(todo)} clip{'s are' if len(todo) != 1 else ' is'} "
                                     "new or changed)")
                 gone = [n for n in todo if tree.nodes[n].is_video
-                        and not Path(tree.nodes[n].source["file"]).is_file()]
+                        and not Path(tree.nodes[n].source_dict()["file"]).is_file()]
                 if gone:
                     problems.append(f"the file of video #{T.short_id(gone[0])} is missing (Edit range… to choose it)")
                 problem = T.guide_problem(tree, checker, todo)
@@ -276,7 +280,7 @@ class GeneratorMixin:
     def _send_job(self):
         if self._job is None or self.proc is None:
             return
-        if self.proc.state() != QProcess.Running:    # (it ended meanwhile: _finished starts a new one)
+        if self.proc.state() != QProcess.ProcessState.Running:    # (it ended meanwhile: _finished starts a new one)
             return
         self._job.sent = True
         self._worker_idle = False
@@ -302,6 +306,7 @@ class GeneratorMixin:
 
     def _write_job(self, cmd: dict):
         """Send a command line to the generator; if that fails the generator is ended, so the run fails cleanly."""
+        assert self.proc is not None
         if self.proc.write((json.dumps(cmd) + "\n").encode()) < 0:
             self._report_error("Could not send the job to the generator.")
             self._kill()
@@ -312,7 +317,7 @@ class GeneratorMixin:
             return
         self._quit_frees = free
         self._worker_leaving = True                       # no new job for it (a new worker starts instead)
-        if self.proc.state() == QProcess.Running:
+        if self.proc.state() == QProcess.ProcessState.Running:
             self.proc.write(b'{"cmd": "quit", "free": true}\n' if free else b'{"cmd": "quit"}\n')
         self._kill_timer.start()
 
@@ -337,7 +342,7 @@ class GeneratorMixin:
         self._kill_timer.start()
 
     def _kill(self):
-        if self.proc is not None and self.proc.state() != QProcess.NotRunning:
+        if self.proc is not None and self.proc.state() != QProcess.ProcessState.NotRunning:
             self.proc.kill()
 
     def _read_out(self):
@@ -348,7 +353,7 @@ class GeneratorMixin:
     def _drain_out(self, p: QProcess, final: bool = False):
         """Lines of the worker's output: bytes, so a character split between reads stays whole; the last, unfinished
         line waits for more unless this is the end (final)."""
-        self._buf += bytes(p.readAllStandardOutput())
+        self._buf += p.readAllStandardOutput().data()
         *lines, self._buf = self._buf.split(b"\n")
         if final:
             lines, self._buf = lines + [self._buf], b""
@@ -369,7 +374,7 @@ class GeneratorMixin:
 
     def _drain_err(self, p: QProcess, final: bool = False):
         """Lines of the worker's error output into the log (a carriage-return progress line shows its last state)."""
-        self._ebuf += bytes(p.readAllStandardError()).decode(errors="replace")
+        self._ebuf += bytes(p.readAllStandardError().data()).decode(errors="replace")
         *lines, self._ebuf = self._ebuf.split("\n")
         if final:
             lines, self._ebuf = lines + [self._ebuf], ""
@@ -402,10 +407,12 @@ class GeneratorMixin:
     def _reload_made(self):
         """Take what the generator recorded (made) from tree.json; nothing else changes during a run."""
         try:
+            assert self.project is not None
             fresh = T.load(self.project)
         except (OSError, ValueError):
             return
         for nid, n in fresh.nodes.items():
+            assert self.tree is not None
             if nid in self.tree.nodes:
                 self.tree.nodes[nid].made = n.made
                 self.tree.nodes[nid].end_at = n.end_at   # a clip made again hands over at its last frame again
@@ -458,7 +465,10 @@ class GeneratorMixin:
         self._plan = list(ev.get("make", []))
 
     def _ev_node(self, ev: dict):
-        nid, st = ev["id"], ev["state"]
+        nid, st = ev.get("id"), ev.get("state")
+        if not isinstance(nid, str) or not isinstance(st, str):
+            logging.getLogger(__name__).warning("ignoring a node event without id or state: %r", ev)
+            return
         if st == "generating":
             self._made_now.add(nid)
             self.live[nid] = "generating"
@@ -575,7 +585,7 @@ class GeneratorMixin:
             self.progress.setValue(1000)
             out = Path(self._exported or refine["out"])
             n = len(self._made_now)                # the export lists every clip, but reuses kept copies
-            how = {"seedvr2_7b": "SeedVR2 7B", "seedvr2_3b": "SeedVR2 3B"}.get(refine.get("method"), "refined")
+            how = {"seedvr2_7b": "SeedVR2 7B", "seedvr2_3b": "SeedVR2 3B"}.get(refine.get("method") or "", "refined")
             self.status.setText(f"Exported {out.name} ({refine['size']}, {how}"
                                 + (f"; {plural(n, 'clip')} upscaled now" if n else
                                    "; every clip was upscaled already") + ").")
@@ -599,7 +609,7 @@ class GeneratorMixin:
                 self._note_failure(code)
 
     def _proc_error(self, err):
-        if err == QProcess.FailedToStart:
+        if err == QProcess.ProcessError.FailedToStart:
             # Qt sends no 'finished' for a process that never started: clean up here
             self._error = f"could not start {self._program()[0]}"
             p = self.proc

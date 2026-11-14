@@ -12,9 +12,12 @@ from .image_common import FOLDER_ITEM, FOLDER_PREFIX
 from .image_picker import IMAGE_EXTS, pick_image
 from .imageio import upright
 from .mask_painter import MaskPainterDialog, mask_area, overlay
+from .image_host import ImageEditHost
+from .qsvalue import qs_value
 
 
-class SourceMixin:
+
+class SourceMixin(ImageEditHost):
     # ---- source
     def _pick(self, title: str) -> str | None:
         return pick_image(self, title, self.qs, None, self.places,
@@ -37,7 +40,7 @@ class SourceMixin:
             self.set_source(path)
 
     def _choose_folder(self):
-        start = self.qs.value("editFolder", "", type=str) if self.qs is not None else ""
+        start = qs_value(self.qs, "editFolder", "", str) if self.qs is not None else ""
         d = QFileDialog.getExistingDirectory(self, "Folder of images to edit (each one in turn)", start)
         if d:
             self.set_folder(d)
@@ -124,7 +127,7 @@ class SourceMixin:
         img = upright(self.source)
         dlg = MaskPainterDialog(self, img, self.mask)
         try:
-            if dlg.exec() == QDialog.Accepted:
+            if dlg.exec() == QDialog.DialogCode.Accepted:
                 self.set_mask(dlg.mask if mask_area(dlg.mask) > 0 else None)
         finally:
             dlg.deleteLater()

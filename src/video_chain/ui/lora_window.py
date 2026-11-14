@@ -31,6 +31,7 @@ from .lora_details import details_html, themed
 from .dialogs import add_action, button_row, confirm
 from .lora_stack import lora_label
 from .widgets import fit_size, guard_wheel, label, safe_emit
+from .qsvalue import qs_value
 
 PER_PAGE = 8
 PICTURE = 200                    # pixels: the side of a card's picture
@@ -60,22 +61,22 @@ class ExampleCard(QFrame):
         h.setSpacing(10)
         self.picture = QLabel()
         self.picture.setFixedSize(PICTURE, PICTURE)
-        self.picture.setAlignment(Qt.AlignCenter)
+        self.picture.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.picture.setWordWrap(True)
         self.picture.setProperty("level", "tertiary")
-        h.addWidget(self.picture, 0, Qt.AlignTop)
+        h.addWidget(self.picture, 0, Qt.AlignmentFlag.AlignTop)
         v = QVBoxLayout()
         v.setSpacing(4)
         if told:
             v.addWidget(label("Told to the language model in this refine", severity="positive"))
         self.prompt = QLabel(ex["prompt"])
         self.prompt.setWordWrap(True)
-        self.prompt.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        self.prompt.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard)
         v.addWidget(self.prompt)
         if ex["negative"]:
             neg = label("Negative: " + ex["negative"], level="tertiary")
             neg.setWordWrap(True)
-            neg.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            neg.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             v.addWidget(neg)
         item = ex["item"]
         facts = [x for x in ("video" if lora_pictures.is_video(item) else "picture",
@@ -132,8 +133,8 @@ class ExampleCard(QFrame):
         if img.isNull():
             return False
         self.picture.setText("")
-        self.picture.setPixmap(QPixmap.fromImage(img.scaled(PICTURE, PICTURE, Qt.KeepAspectRatio,
-                                                            Qt.SmoothTransformation)))
+        self.picture.setPixmap(QPixmap.fromImage(img.scaled(PICTURE, PICTURE, Qt.AspectRatioMode.KeepAspectRatio,
+                                                            Qt.TransformationMode.SmoothTransformation)))
         return True
 
 
@@ -145,6 +146,9 @@ class LoraWindow(QDialog):
     What the window may do where it was opened from (each None: not offered): use_prompt(text) puts an example
     into the prompt; adapt(example) has the prompt rewritten in the example's manner (the window closes);
     strengths {path: strength} of the LoRAs in the prompt's stack and set_strength(path, value) -> bool."""
+    # (these names shadow QWidget methods, which this class never uses)
+    find: QLineEdit  # type: ignore[assignment]
+    scroll: QScrollArea  # type: ignore[assignment]
 
     def __init__(self, parent=None, loras=(), current: str | None = None, settings: QSettings | None = None,
                  prompt: str = "", told: str = "", told_title: str = "What the language model was told",
@@ -174,11 +178,13 @@ class LoraWindow(QDialog):
         self._gen = 0                              # (answers of an earlier page or LoRA are dropped)
         self._closed = threading.Event()
         self._kept_of: dict = {}                   # (is a kept still on disk? per example: looked up once)
-        self._ctx = None                           # (details, info, mat, k) of the LoRA shown
+        # (details, info, mat, k) of the LoRA shown
+        self._ctx: tuple[dict | None, dict, dict | None, dict] | None = None
         self._pending: str | None = None           # the LoRA chosen in the list, shown when the arrow keys rest
         self._reverting = False
         self._find_timer, self._pick_timer = QTimer(self), QTimer(self)
-        for timer, ms, fn in ((self._find_timer, TYPING_MS, self._refill), (self._pick_timer, ARROW_MS, self._show_pending)):
+        for timer, ms, fn in ((self._find_timer, TYPING_MS, self._refill), (self._pick_timer, ARROW_MS,
+                                                                            self._show_pending)):
             timer.setSingleShot(True)
             timer.setInterval(ms)
             timer.timeout.connect(fn)
@@ -188,7 +194,7 @@ class LoraWindow(QDialog):
         self._sig.picture.connect(self._picture)
 
         v = QVBoxLayout(self)
-        split = QSplitter(Qt.Horizontal)
+        split = QSplitter(Qt.Orientation.Horizontal)
         left = QWidget()
         lv = QVBoxLayout(left)
         lv.setContentsMargins(0, 0, 0, 0)
@@ -241,7 +247,7 @@ class LoraWindow(QDialog):
         self.pictures = QComboBox()
         for key, text in SHOW:
             self.pictures.addItem(text, key)
-        saved = self.qs.value("loraPictures", "safe", type=str) if self.qs is not None else "safe"
+        saved = qs_value(self.qs, "loraPictures", "safe", str) if self.qs is not None else "safe"
         self.pictures.setCurrentIndex(max(0, self.pictures.findData(saved)))
         self.pictures.setToolTip("The pictures are small stills loaded from CivitAI when a page is shown (a video: "
                                  "one frame of it) and kept on disk, so each is loaded once. This tells CivitAI "
@@ -255,7 +261,7 @@ class LoraWindow(QDialog):
         ev.addWidget(self.count)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
-        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.box = QWidget()
         self.box_v = QVBoxLayout(self.box)
         self.box_v.setContentsMargins(0, 0, 6, 0)
@@ -339,8 +345,8 @@ class LoraWindow(QDialog):
 
         for path, text in self.loras:
             it = QListWidgetItem(text)
-            it.setData(Qt.UserRole, path)
-            it.setData(Qt.UserRole + 1, text)
+            it.setData(Qt.ItemDataRole.UserRole, path)
+            it.setData(Qt.ItemDataRole.UserRole + 1, text)
             it.setToolTip(path)
             self.list.addItem(it)
         self._known_of: dict[str, dict] = {}
@@ -357,7 +363,7 @@ class LoraWindow(QDialog):
     # ---- the list
     def _select(self, path: str):
         for i in range(self.list.count()):
-            if self.list.item(i).data(Qt.UserRole) == path:
+            if self.list.item(i).data(Qt.ItemDataRole.UserRole) == path:
                 self.list.setCurrentRow(i)
                 return
 
@@ -374,7 +380,7 @@ class LoraWindow(QDialog):
         """The list's choice changed: ask about unsaved edits first, then show the LoRA when the keys rest."""
         if self._reverting or cur is None:
             return
-        path = cur.data(Qt.UserRole)
+        path = cur.data(Qt.ItemDataRole.UserRole)
         if path != self.path and not self._leave_ok():
             self._pending = None
             self._pick_timer.stop()
@@ -410,8 +416,8 @@ class LoraWindow(QDialog):
         self._known_of[k["path"]] = k
         for i in range(self.list.count()):
             it = self.list.item(i)
-            if it.data(Qt.UserRole) == k["path"]:
-                it.setText(f"{it.data(Qt.UserRole + 1)}\n   {lora_notes.known_text(k)}")
+            if it.data(Qt.ItemDataRole.UserRole) == k["path"]:
+                it.setText(f"{it.data(Qt.ItemDataRole.UserRole + 1)}\n   {lora_notes.known_text(k)}")
                 it.setToolTip(f"{k['path']}\n{k['name']}" + (f" (for {k['base']})" if k["base"] else ""))
         ks = list(self._known_of.values())
         if len(ks) == len({p for p, _l in self.loras}):
@@ -424,7 +430,7 @@ class LoraWindow(QDialog):
         words = text.lower().split()
         for i in range(self.list.count()):
             it = self.list.item(i)
-            hay = (it.text() + " " + str(it.data(Qt.UserRole))).lower()
+            hay = (it.text() + " " + str(it.data(Qt.ItemDataRole.UserRole))).lower()
             it.setHidden(not all(w in hay for w in words))
 
     # ---- one LoRA
@@ -529,7 +535,8 @@ class LoraWindow(QDialog):
                 self.strengths[self.path] = value
                 self.state.setText(f"{self.title.text()}: strength set to {value:.2f} in this prompt's LoRAs.")
                 if self._ctx is not None:          # (only the How tab changes: what is typed in the note stays)
-                    self.how.setHtml(self._how_html(self.path, *self._ctx[:3], self._ctx[3]))
+                    details, info, mat, k = self._ctx
+                    self.how.setHtml(self._how_html(self.path, details, info, mat, k))
             else:
                 self.state.setText("The strength could not be set (the LoRA is not in the stack, or the clip "
                                    "cannot be changed now).")
@@ -554,11 +561,11 @@ class LoraWindow(QDialog):
 
     def _ask_unsaved(self) -> str:
         """"save", "discard" or "cancel": what to do with the note and remarks typed but not kept."""
-        box = QMessageBox(QMessageBox.Question, "LoRAs", "The note or remarks of this LoRA are not kept yet.",
-                          QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel, self)
-        box.setDefaultButton(QMessageBox.Save)
+        box = QMessageBox(QMessageBox.Icon.Question, "LoRAs", "The note or remarks of this LoRA are not kept yet.",
+                          QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel, self)
+        box.setDefaultButton(QMessageBox.StandardButton.Save)
         got = box.exec()
-        return "save" if got == QMessageBox.Save else "discard" if got == QMessageBox.Discard else "cancel"
+        return "save" if got == QMessageBox.StandardButton.Save else "discard" if got == QMessageBox.StandardButton.Discard else "cancel"
 
     def _leave_ok(self) -> bool:
         """True when the shown LoRA may be left: nothing unsaved, or kept / thrown away as the user chose."""

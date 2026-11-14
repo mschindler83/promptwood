@@ -8,6 +8,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QImage
@@ -72,7 +73,7 @@ class GenerateWorker(QObject):
     def __init__(self, plan: Plan, parent=None):
         super().__init__(parent)
         self.plan = plan
-        self.editor = None
+        self.editor: Any = None                 # (the connected ComfyImageEditor / ComfyImageCreator)
         self.cancelled = False
         self.skipped: list[str] = []            # (a folder's unreadable files)
         self._k = 1                             # the result being made now (the editor's progress belongs to it)
@@ -132,7 +133,7 @@ class EditWorker(GenerateWorker):
 
     def __init__(self, plan: EditPlan, parent=None):
         super().__init__(plan, parent)
-        self._copies: list[list] = []           # [kept source, mask file, results made from it]
+        self._copies: list[Any] = []           # [kept source, mask file, results made from it]
 
     def _make(self) -> None:
         p = self.plan
@@ -157,7 +158,8 @@ class EditWorker(GenerateWorker):
             self._copies.append(entry)
             if p.mask is not None:                           # the mask too (white = drawn anew)
                 entry[1] = edits.mask_path(kept)
-                if not p.mask.save(str(entry[1]), "PNG"):
+                # (the stubs want bytes as the format, PySide6 6.12 only takes str)
+                if not p.mask.save(str(entry[1]), "PNG"):  # type: ignore[call-overload]
                     raise RuntimeError("could not save the mask")
             for j in range(p.per):
                 if self.cancelled:

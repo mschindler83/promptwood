@@ -4,7 +4,9 @@ from __future__ import annotations
 import os
 import re
 import stat as stat_module
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QImage, QPixmap
@@ -18,9 +20,10 @@ from .widgets import format_time
 from . import ui_logic as UL
 from .clip_cards import PromptCard
 from .ui_logic import REMIX_DELAY_MS, SourceSoundInfo, plain_problem, plural, row_start
+from .mw_host import MainWindowHost
 
 
-class InspectorMixin:
+class InspectorMixin(MainWindowHost):
     """Refresh, node states, problems and the texts of the cards."""
 
     def _stat(self, path) -> os.stat_result | None:
@@ -55,6 +58,7 @@ class InspectorMixin:
     def _node_frame(self, n: T.Node) -> Path | None:
         """The frame shown for a node: where the clips after it start (its hand-over frame, else its last)."""
         if n.made and self.project:
+            assert self.tree is not None
             h = T.handover_file(self.project, self.tree, n)
             return h if h is not None and self._is_file(h) else self.project / n.made["frame"]
         return None
@@ -72,6 +76,7 @@ class InspectorMixin:
             return
         if self.tree.options.get("audio_refs"):
             self._show_sound_info()                # how many clips name a sound (prompts change)
+        assert self.project is not None
         checker = T.Checker(self.project, self.tree)
         try:
             self.status_of = {nid: checker.status(nid) for nid in self.tree.nodes}
@@ -90,11 +95,13 @@ class InspectorMixin:
         start_pm = self._pixmap(self.project / T.START_FILE)
         infos = [NodeInfo(START, None, "Start", "", Path(self.tree.image).name if self.tree.image else "",
                           "start", start_pm, on_path=True, selected=sel == START)]
-        for n in sorted(self.tree.nodes.values(), key=lambda n: self.tree.number(n.id)):
+        tree = self.tree
+        assert tree is not None
+        for n in sorted(self.tree.nodes.values(), key=lambda n: tree.number(n.id)):
             text = n.prompt
             if n.is_video:
-                text = (f"{Path(n.source['file']).name} · {format_time(n.source['start'], 1)}–"
-                        f"{format_time(n.source['end'], 1)}"
+                text = (f"{Path(n.source_dict()['file']).name} · {format_time(n.source_dict()['start'], 1)}–"
+                        f"{format_time(n.source_dict()['end'], 1)}"
                         + (f" · ↻{T.source_rotation(n.source)}°" if T.source_rotation(n.source) else ""))
             parent = n.parent or START
             if n.parent is None and n.start_image:          # a first clip with its own start image: its own row
@@ -125,6 +132,8 @@ class InspectorMixin:
 
     def _frozen_note(self, n: T.Node) -> str:
         try:
+            assert self.project is not None
+            assert self.tree is not None
             return T.frozen_note(self.tree, n, T.Checker(self.project, self.tree).base())
         except Exception:  # noqa: BLE001  (an unreadable start image: no note)
             return ""
@@ -132,10 +141,12 @@ class InspectorMixin:
     def badge(self, n: T.Node) -> str:
         """Short text for a clip's own settings, shown on its node ('' = all project defaults)."""
         if n.is_video:
+            assert self.tree is not None
             return ("🔒 frozen · " if n.frozen else "") + f"real video · {T.clip_length(self.tree, n) / chain.FPS:.1f} s"
         ov, parts = n.overrides or {}, self._own_parts(n)
         if ov.get("guide"):
             parts.append(f"carry-over {ov['guide']}")
+        assert self.tree is not None
         if T.end_image_used(self.tree, n):
             parts.append("end image")
         if n.keyframes:
@@ -267,10 +278,6 @@ class InspectorMixin:
             fail = self._failures.get(c.nid)
             c.set_problems(([fail] if fail else []) + ([] if self.running else self.clip_problems(c.nid)))
 
-    def _clear_failure(self, nid: str):
-        if self._failures.pop(nid, None) is not None:
-            self._update_problems()
-
     def fix_problem(self, action: str, nid: str):
         """A problem's button on a card: the place that fixes it (or the action itself)."""
         card = self._card_of(nid, PromptCard)
@@ -285,12 +292,12 @@ class InspectorMixin:
         elif action in ("cast", "cast_new"):
             self._show_left_tab(1)
             if action == "cast_new":
-                self.b_char_new.setFocus(Qt.OtherFocusReason)
+                self.b_char_new.setFocus(Qt.FocusReason.OtherFocusReason)
                 self.status.setText("Press New to add a person or a place (its name is what you write after @).")
         elif action.startswith("cast:"):
             self._show_left_tab(1)
             self._show_references(select=action[5:])
-            self.b_ref_add.setFocus(Qt.OtherFocusReason)
+            self.b_ref_add.setFocus(Qt.FocusReason.OtherFocusReason)
             self.status.setText(f"Add a picture of @{action[5:]}: Image…, Start image or Selected clip.")
         elif action == "sounds":
             self._show_left_tab(2)
@@ -302,16 +309,17 @@ class InspectorMixin:
                 self.view.reveal(t)
             self.inspector.setCurrentWidget(self.proj_scroll)
             QTimer.singleShot(0, lambda: self.proj_scroll.ensureWidgetVisible(self.turbo_lora, 0, 40))
-            self.turbo_lora.setFocus(Qt.OtherFocusReason)
+            self.turbo_lora.setFocus(Qt.FocusReason.OtherFocusReason)
         elif action in ("sound", "carry", "loras") and card is not None:
             w = {"sound": card.src_sound, "carry": card.guide, "loras": card.loras}[action]
             if action != "sound":
                 self.view.reveal((card.link_form, w))         # (an advanced setting: shown in Simple until a switch)
             self.focus_clip(nid)
-            w.setFocus(Qt.OtherFocusReason)
+            w.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _sent_guess(self, n: T.Node, use: dict) -> str:
         """The prompt the model gets, from the clip alone (when clip_inputs cannot be worked out)."""
+        assert self.tree is not None
         words = T.lora_trigger_words([p for p, _s in T.node_loras(n)]) \
             if self.tree.options.get("lora_triggers", True) and T.node_loras(n) else []
         sounds = [None] * (T.audio_mentioned(T.full_prompt(self.tree.options, n.prompt)) + len(use.get("voices") or []))
@@ -327,6 +335,7 @@ class InspectorMixin:
     def _lead_off(self, n: T.Node) -> str | None:
         """The lead's name when the clip's lead switch is off and the clip would get the lead with it on (its
         prompt mentions nobody), so its chip can switch it on again; else None."""
+        assert self.tree is not None
         lead = T.lead_of(self.tree)
         if T.lead_on(n) or lead is None:
             return None
@@ -344,6 +353,7 @@ class InspectorMixin:
             self.status.setText(f"Clip #{T.short_id(nid)} is frozen; unfreeze it first.")
             self._update_cards()
             return
+        assert self.tree is not None
         lead = T.lead_of(self.tree)
         T.set_lead_on(node, bool(on))
         card = self._card_of(nid)
@@ -376,6 +386,7 @@ class InspectorMixin:
     def _faces_text(self, use: dict) -> str:
         """Which faces (and voices) a clip is made with, for its card ('' without a cast); with spoken lines, who
         says each one (as the app reads it: the voice it gets)."""
+        assert self.tree is not None
         if not T.cast_of(self.tree):
             return ""
         text = self._cast_line(use)
@@ -386,7 +397,7 @@ class InspectorMixin:
         return text
 
     @staticmethod
-    def _seen_line(chars: list[dict]) -> str:
+    def _seen_line(chars: list[T.CastEntry]) -> str:
         """"Faces: @Anna · Pictures: @Kitchen" for the cast entries a clip sends pictures of ('' for none)."""
         faces = [f"@{c['name']}" for c in chars if c["images"] and T.kind_of(c) == "person"]
         pics = [f"@{c['name']}" for c in chars if c["images"] and T.kind_of(c) != "person"]
@@ -421,6 +432,7 @@ class InspectorMixin:
         laid: the sentence about a sound laid over / mixed in, added at the end."""
         def t(x: float) -> str:
             return f"{int(x // 60)}:{x % 60:04.1f}"
+        assert self.tree is not None
         video = T.source_video(self.tree, n)
         has_video = video is not None
         repeat = n.parent is not None
@@ -473,12 +485,13 @@ class InspectorMixin:
             have = h + 1 if h is not None else pn
         fits = [g for g in T.GUIDE_CHOICES if g <= have and g < T.clip_length(self.tree, n)]
         span = T.source_sound_span(self.tree, n)
+        assert span is not None
         return made(f"Uses {t(span['start'])}\u2013{t(span['start'] + span['secs'])} of "
                     f"{Path(span['file']).name} (video #{T.short_id(video.id)}): the sound right after its range, "
                     "exactly as recorded", guide=max(fits, default=0),
                     tail=" Write in the prompt what happens; the words come from the video.")
 
-    def _sound_suffix(self, n: T.Node, ov: dict) -> str:
+    def _sound_suffix(self, n: T.Node, ov: Mapping[str, Any]) -> str:
         """" (laid over)" / " (mixed with the clip's own sound, +3 dB)" after the name of a sound, or ""."""
         if not (ov.get("source_sound") and ov.get("sound_over")):
             return ""
@@ -489,7 +502,8 @@ class InspectorMixin:
 
     def _own_parts(self, n: T.Node) -> list[str]:
         """A clip's own LoRA / strength / length / steps in a few words."""
-        ov, parts = n.overrides or {}, []
+        ov: Mapping[str, Any] = n.overrides or {}
+        parts: list[str] = []
         over = self._sound_suffix(n, ov)
         for p, st in T.node_loras(n):
             parts.append(f"{lora_label(p)[:18]} ×{st:g}")
@@ -504,7 +518,8 @@ class InspectorMixin:
         if ov.get("source_sound") == "previous":
             parts.append("repeats the sound before" + over)
         elif T.track_id(n) is not None:
-            tr = T.track_of(self.tree, T.track_id(n)) if self.tree else None
+            tid = T.track_id(n)
+            tr = T.track_of(self.tree, tid) if self.tree and tid is not None else None
             parts.append((f"track “{tr['name'][:16]}”" if tr else "removed track") + over)
         elif ov.get("source_sound"):
             parts.append("video's sound" + over)

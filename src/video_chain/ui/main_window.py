@@ -13,12 +13,13 @@ import threading
 from pathlib import Path
 
 from PySide6.QtCore import QProcess, QSettings, QTimer, Signal
-from PySide6.QtGui import QImage, QPixmap
-from PySide6.QtWidgets import QDialog, QMainWindow, QMessageBox
+from PySide6.QtGui import QImage, QPixmap  # noqa: F401
+from PySide6.QtWidgets import QDialog, QMainWindow, QMessageBox  # noqa: F401
 
 from .. import tree as T, tts as TTS
-from .clip_dialogs import SplitDialog, VideoFrameDialog
-from .video_editor import VideoRangeDialog
+# (re-exported: the tests patch and import these names on main_window)
+from .clip_dialogs import SplitDialog, VideoFrameDialog  # noqa: F401
+from .video_editor import VideoRangeDialog  # noqa: F401
 from .view_mode import ViewMode
 from .clip_cards import PromptCard, VideoCard
 from .generator_state import ComfyModel, Job, ModelState, ModelSwitch, Phase, WorkerBinding
@@ -43,11 +44,13 @@ from .mw_support import _Bridge
 from .mw_tts import TtsMixin
 from .mw_videos import VideosMixin
 from .mw_view import ViewMixin
-from .preview import Preview
-from .project_dialogs import ExportDialog, NewProjectDialog, VariantsDialog
-from .ui_logic import (
+from .preview import Preview  # noqa: F401
+from .project_dialogs import ExportDialog, NewProjectDialog, VariantsDialog  # noqa: F401
+from .ui_logic import (  # noqa: F401
     CARD_WIDTH, CONTINUE_CLASSIC_TIP, CONTINUE_FIRST_TIP, CONTINUE_TIP, KILL_GRACE_MS, LAYOUT_VERSION, MIX_TIP,
     REMIX_DELAY_MS, STATE_TIP, find_gguf_models, fmt_left, label_loras, row_start, row_start_of, time_left)
+from .qsvalue import qs_value
+from .widgets import timer
 
 
 class MainWindow(BuildMixin, GeneratorMixin, ComfyMixin, ExportMixin, VideosMixin, EndsMixin, NodeMixin, LorasMixin,
@@ -63,7 +66,7 @@ class MainWindow(BuildMixin, GeneratorMixin, ComfyMixin, ExportMixin, VideosMixi
         self.qs = settings
         # Simple or Advanced, decided once: Simple on a first run (no settings yet), Advanced for settings from
         # before the views existed (that user knows every control); stored at once, so it never flips later
-        mode = self.qs.value("viewMode", "", type=str)
+        mode = qs_value(self.qs, "viewMode", "", str)
         if mode not in ("simple", "advanced"):
             mode = "advanced" if self.qs.allKeys() else "simple"
             self.qs.setValue("viewMode", mode)
@@ -99,7 +102,7 @@ class MainWindow(BuildMixin, GeneratorMixin, ComfyMixin, ExportMixin, VideosMixi
         self._model_state = ModelState.NONE
         self._joins = 0                         # path joins still running
         self._converts: dict[str, str] = {}     # video node -> token of its conversion in progress
-        self._kill_timer = QTimer(self, singleShot=True, interval=KILL_GRACE_MS, timeout=self._kill)
+        self._kill_timer = timer(self, self._kill, KILL_GRACE_MS, single=True)
         self.bridge = _Bridge()
         self.bridge.joined.connect(self._joined)
         self.bridge.film.connect(self._film_joined)
@@ -146,19 +149,19 @@ class MainWindow(BuildMixin, GeneratorMixin, ComfyMixin, ExportMixin, VideosMixi
         # both fight over the memory; the same model again is used as it is (no reload)
         self._comfy_model: ComfyModel | None = None
         self._quit_frees = True                 # the worker's next quit unloads the model
-        self._qwen_timer = QTimer(self, singleShot=True, timeout=self._qwen_idle)
+        self._qwen_timer = timer(self, self._qwen_idle, single=True)
         self._join_lock = threading.Lock()      # joins run one after another (play after generating + export)
-        self._save_timer = QTimer(self, singleShot=True, interval=400, timeout=self._save_tree)
-        self._refresh_timer = QTimer(self, singleShot=True, interval=250, timeout=self.refresh)
+        self._save_timer = timer(self, self._save_tree, 400, single=True)
+        self._refresh_timer = timer(self, self.refresh, 250, single=True)
         # a made clip's sound mode / level changed: its sound is mixed again (no new generation), once the level
         # settles; remix_due: the clips waiting for that (refresh)
-        self._remix_timer = QTimer(self, singleShot=True, interval=REMIX_DELAY_MS, timeout=self._start_remix)
+        self._remix_timer = timer(self, self._start_remix, REMIX_DELAY_MS, single=True)
         self._remixing = False
         self.remix_due: set[str] = set()
         self._remix_stuck: set[str] = set()     # the due clips whose remix failed (tried again after an edit)
         self._gpu_proc: QProcess | None = None
-        self._gpu_timer = QTimer(self, interval=4000, timeout=self._poll_gpu)
-        self._comfy_timer = QTimer(self, interval=4000, timeout=self._poll_comfy)
+        self._gpu_timer = timer(self, self._poll_gpu, 4000)
+        self._comfy_timer = timer(self, self._poll_comfy, 4000)
         self._build()
         from .plugin_host import PluginHost      # separately installed features (plugins.py); none: nothing added
         self.plugins = PluginHost(self)          # (before the settings: they open the last project, and the
@@ -181,7 +184,8 @@ class MainWindow(BuildMixin, GeneratorMixin, ComfyMixin, ExportMixin, VideosMixi
     _cmp_memo: dict | None = None
     # what a frozen clip / video cannot do: it would change the clip as made (or what it ends at)
     FROZEN_LOCKED = {"end_image", "end_video", "end_ai", "end_clear", "revert", "refine", "speak", "handover",
-                     "handover_clear", "edit", "split", "swap", "swap_undo", "video", "keyframe"}
+                     "handover_clear", "edit", "split", "swap", "swap_undo", "video", "keyframe", "start_own",
+                     "start_own_clear"}
     _trigger_scan_online = True                 # the running trigger word scan may ask CivitAI
     _left_w = 0                                 # the width of the left panel (kept while it is hidden)
     _shared_sent = None                         # the shared settings last written into the film's other scenes

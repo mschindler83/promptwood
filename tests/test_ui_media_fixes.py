@@ -357,7 +357,7 @@ def test_tinted_icon_file_follows_the_svg(app, tmp_path, monkeypatch):
     from types import SimpleNamespace
     from video_chain.ui import theme
     monkeypatch.setattr(theme, "QStandardPaths", SimpleNamespace(
-        writableLocation=lambda *_: str(tmp_path), CacheLocation=0))
+        writableLocation=lambda *_: str(tmp_path), StandardLocation=SimpleNamespace(CacheLocation=0)))
     tm = theme.ThemeManager.instance()
     monkeypatch.setattr(theme, "tinted_svg", lambda *a, **k: b"<svg>old</svg>")
     old = tm._icon_file("play", QColor("red"))

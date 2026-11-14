@@ -266,4 +266,4 @@ class SpeakLinesDialog(QDialog):
 
 
 def run_dialog(dlg: SpeakLinesDialog) -> bool:
-    return dlg.exec() == QDialog.Accepted
+    return dlg.exec() == QDialog.DialogCode.Accepted

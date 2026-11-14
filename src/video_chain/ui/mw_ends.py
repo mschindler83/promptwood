@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import copy
 import logging
-import os
 from pathlib import Path
 
 from PySide6.QtGui import QImage
@@ -16,9 +15,11 @@ from .image_edit import ImageEditDialog, record_use
 from .video_editor import choose_video
 from .generator_state import ComfyModel, ModelSwitch
 from .ui_logic import ASPECT_TOLERANCE, DEFAULT_COMFY_URL, label_loras, plural
+from .mw_host import MainWindowHost
+from .qsvalue import qs_value
 
 
-class EndsMixin:
+class EndsMixin(MainWindowHost):
     """Start, end and key pictures of a clip, editing a picture, the clip's handover."""
 
     # ---- prompt refiner
@@ -31,7 +32,7 @@ class EndsMixin:
             self.status.setText("Write a prompt first; the refiner improves it.")
             return None
         url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL)
-        comfy_dir = os.path.expanduser(self.comfy_dir.text().strip()) or None
+        comfy_dir = self._comfy_dir_path()
 
         llama = self.llama_server()
 
@@ -47,7 +48,7 @@ class EndsMixin:
         dlg = PR.RefineDialog(self, text, kind, connect, self.qs, start_comfy=self.start_comfy, cast=cast,
                            pictures=pictures or [], seconds=seconds, start_image=start_image, loras=loras)
         try:
-            if dlg.exec() != QDialog.Accepted:
+            if dlg.exec() != QDialog.DialogCode.Accepted:
                 return None
             ideas = dlg.chosen_ideas() if hasattr(dlg, "chosen_ideas") else None
             return ideas if ideas else dlg.chosen()       # (a list: all ideas, for the image window's variations)
@@ -107,7 +108,7 @@ class EndsMixin:
             first = str(self.project / T.START_FILE) if (self.project / T.START_FILE).is_file() else None
         target = nid if node is not None and not node.is_video and self.tree.video_child(nid) is None else None
         url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL)
-        comfy_dir = os.path.expanduser(self.comfy_dir.text().strip()) or None
+        comfy_dir = self._comfy_dir_path()
         cleanup = self.comfy_cleanup.isChecked()
 
         switch = ModelSwitch()
@@ -146,12 +147,16 @@ class EndsMixin:
                         f"references tab, {S.keys('tab_cast')}); mention it in prompts as "
                         f"@{c['name']}." + (f" {self._remade_note}" if self._remade_note else ""))
             ok = self.set_image(png, confirm=True) if kind == "start" else \
-                bool(target) and self.set_end_image(target, png)
+                bool(target and self.set_end_image(target, png))
             if ok:
-                record_use(png, {"kind": "start", "sha1": chain.file_signature(self.project / T.START_FILE)}
-                           if kind == "start" else {"kind": "end", "file": self.tree.nodes[target].end_image})
+                if kind == "start":
+                    assert self.project is not None
+                    record_use(png, {"kind": "start", "sha1": chain.file_signature(self.project / T.START_FILE)})
+                else:
+                    assert self.tree is not None and target is not None
+                    record_use(png, {"kind": "end", "file": self.tree.nodes[target].end_image})
                 self.status.setText(("New start image from the AI edit" if kind == "start" else
-                                     f"Clip #{T.short_id(target)} now ends at the AI-edited image") +
+                                     f"Clip #{T.short_id(target or '')} now ends at the AI-edited image") +
                                     (f" — {self._remade_note}" if self._remade_note else "."))
             return bool(ok)
         known = label_loras(self.qwen_loras)
@@ -198,9 +203,11 @@ class EndsMixin:
         node = self.tree.nodes.get(nid) if self.tree else None
         if node is None or node.is_video or self.running:
             return
+        assert self.tree is not None
         if self.tree.video_child(nid) is not None:
             self.status.setText(f"Clip #{T.short_id(nid)} ends at the video after it; it hands over there.")
             return
+        assert self.project is not None
         if not node.made or not (self.project / node.made["video"]).is_file():
             self.status.setText(f"Make clip #{T.short_id(nid)} first; then choose the frame it hands over at.")
             return
@@ -210,7 +217,7 @@ class EndsMixin:
         dlg = HandoverDialog(self, self.project / node.made["video"], f"Hand-over frame of clip #{T.short_id(nid)}",
                              T.handover_index(self.tree, node), min_frame=max(1, need - 1))
         try:
-            if dlg.exec() != QDialog.Accepted:
+            if dlg.exec() != QDialog.DialogCode.Accepted:
                 return
             frame = dlg.frame()
         finally:
@@ -226,6 +233,7 @@ class EndsMixin:
         node = self.tree.nodes[nid]
         if node.is_video:
             return False
+        assert self.project is not None
         if node.made and not node.made.get("frames") and (self.project / node.made["video"]).is_file():
             try:                                    # an older record: the real count, once
                 node.made["frames"] = chain.probe(self.project / node.made["video"])["frames"]
@@ -258,9 +266,11 @@ class EndsMixin:
         node = self.tree.nodes.get(nid) if self.tree else None
         if node is None or node.is_video or self.running:
             return
+        assert self.tree is not None
         if self.tree.video_child(nid) is not None:
             self.status.setText(f"Clip #{T.short_id(nid)} ends at the first frame of the video after it.")
             return
+        assert self.project is not None
         start = str(Path(self.project / node.end_image).parent) if node.end_image else None
         f = IP.pick_image(self, f"End image of clip #{T.short_id(nid)} (the frame it steers its end to)", self.qs,
                           start,
@@ -283,8 +293,11 @@ class EndsMixin:
 
     def _choose_video_file(self, exclude: str | None = None) -> str | None:
         """Choose a video: the project's real videos and its made clips (not clip exclude) first, or any file."""
+        tree = self.tree
+        assert tree is not None
+        assert self.project is not None
         clips = [(str(self.project / n.made["video"]), f"Clip #{T.short_id(n.id)} · {n.prompt[:40]}")
-                 for n in sorted(self.tree.nodes.values(), key=lambda n: self.tree.number(n.id))
+                 for n in sorted(tree.nodes.values(), key=lambda n: tree.number(n.id))
                  if not n.is_video and n.made and (self.project / n.made["video"]).is_file() and n.id != exclude]
         cols = self.project_media("video") + ([("Clips of this project", clips)] if clips else [])
         return choose_video(self, self.qs, places=self._picker_places(), collections=cols) or None
@@ -303,6 +316,7 @@ class EndsMixin:
         node = self.tree.nodes.get(nid) if self.tree else None
         if node is None or node.is_video or self.running:
             return None
+        assert self.tree is not None
         if self.tree.video_child(nid) is not None:
             self.status.setText(f"Clip #{T.short_id(nid)} ends at the first frame of the video after it.")
             return None
@@ -316,7 +330,7 @@ class EndsMixin:
         if not dialog:
             return dlg
         try:
-            if dlg.exec() != QDialog.Accepted:
+            if dlg.exec() != QDialog.DialogCode.Accepted:
                 return None
             with media.scratch("end") as tmp:
                 png = Path(tmp) / f"{Path(video).stem}_f{dlg.slider.value()}.png"
@@ -339,11 +353,13 @@ class EndsMixin:
             if image is None:
                 if not self.tree.nodes[nid].end_image:
                     return False
+                assert self.project is not None
                 T.clear_end_image(self.project, self.tree, nid)
             else:
                 if QImage(image).isNull():
                     self.status.setText(f"Not an image: {Path(image).name}")
                     return False
+                assert self.project is not None
                 T.set_end_image(self.project, self.tree, nid, Path(image))
         except (ValueError, OSError, RuntimeError) as e:
             self._report_error(f"Could not set the end image: {e}")
@@ -387,13 +403,17 @@ class EndsMixin:
         elif act in ("add_video", "video", "add_moment", "moment"):
             self._keyframe_from_video(nid, at, i, own=act in ("add_moment", "moment"))
         elif act == "note":
+            assert i is not None
             text, ok = QInputDialog.getText(
                 self, f"Keyframe at {at:.2f} s", "What happens at this moment (added to the prompt with its time, "
                 "e.g. “she turns to the camera”; empty: nothing):", text=node.keyframes[i]["note"])
             if ok:
                 self._set_keyframe(nid, None, at, note=text.strip(), index=i)
         elif act == "remove":
+            assert i is not None
             try:
+                assert self.project is not None
+                assert self.tree is not None
                 T.remove_keyframe(self.project, self.tree, nid, i)
             except (ValueError, OSError, RuntimeError) as e:
                 self._report_error(f"Could not remove the keyframe: {e}")
@@ -406,8 +426,10 @@ class EndsMixin:
                              video: str | None = None, dialog: bool = True):
         """A keyframe from a frame of a video. own: this clip's frame at that moment ("keep this moment": its time
         follows the frame chosen); else any video (the project's first), the keyframe stays at its time."""
+        assert self.tree is not None
         node = self.tree.nodes[nid]
         if own:
+            assert self.project is not None
             if not node.made or not (self.project / node.made["video"]).is_file():
                 self.status.setText(f"Clip #{T.short_id(nid)} is not made yet: there is no moment of it to keep.")
                 return None
@@ -426,7 +448,7 @@ class EndsMixin:
         if not dialog:
             return dlg
         try:
-            if dlg.exec() != QDialog.Accepted:
+            if dlg.exec() != QDialog.DialogCode.Accepted:
                 return None
             return self._keyframe_from_dialog(nid, dlg, at, index, own)
         finally:
@@ -456,6 +478,7 @@ class EndsMixin:
         frames = T.clip_length(self.tree, self.tree.nodes[nid])
         at = min((frames - 2) / chain.FPS, max(1 / chain.FPS, round(float(at) * chain.FPS) / chain.FPS))
         try:
+            assert self.project is not None
             T.set_keyframe(self.project, self.tree, nid, Path(image) if image else None, at, note, index)
         except (ValueError, OSError, RuntimeError) as e:
             self._report_error(f"Could not set the keyframe: {e}")
@@ -480,19 +503,21 @@ class EndsMixin:
         size may follow it)."""
         try:
             tree = self.tree
+            assert tree is not None
             if nid is not None and nid in tree.nodes and tree.nodes[nid].is_video:
                 tree = copy.copy(tree)                       # (only this node differs: not a copy of the whole tree)
                 tree.nodes = dict(tree.nodes)
                 node = tree.nodes[nid] = copy.copy(tree.nodes[nid])
-                src = node.source
+                src = node.source_dict()
                 node.source = T.video_source(file or src["file"], src["start"], src["end"], rotate)
+            assert self.project is not None
             base = T.Checker(self.project, tree).base()
             if base is not None:
                 return base["width"], base["height"]
             if file:
                 info = chain.probe_source(Path(file))
                 w, h = chain.rotated_size(info["width"], info["height"], rotate)
-                return chain.canvas_size(w, h, int(self.tree.options.get("resolution", 512)))
+                return chain.canvas_size(w, h, int(tree.options.get("resolution", 512)))
         except Exception:  # noqa: BLE001  (an unreadable file: no size)
             logging.getLogger(__name__).debug("canvas of %s", file, exc_info=True)
         return None
@@ -501,7 +526,7 @@ class EndsMixin:
     def _pick_images(self, title: str) -> list[str]:
         """Several pictures from the file dialog (it opens where the start image came from)."""
         start = str(Path(self.tree.image).parent) if self.tree and self.tree.image and \
-            Path(self.tree.image).parent.is_dir() else self.qs.value("startRowsDir", "", type=str)
+            Path(self.tree.image).parent.is_dir() else qs_value(self.qs, "startRowsDir", "", str)
         files, _f = QFileDialog.getOpenFileNames(self, title, start or "",
                                                  "Pictures (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff)")
         if files:
@@ -523,6 +548,7 @@ class EndsMixin:
         if not images:
             return []
         try:
+            assert self.project is not None
             new = T.add_start_rows(self.project, self.tree, nid, [Path(f) for f in images])
         except (OSError, RuntimeError, ValueError) as e:
             self._report_error(f"Could not add the start images: {e}")
@@ -592,6 +618,7 @@ class EndsMixin:
             return False
         try:
             if clear:
+                assert self.project is not None
                 T.clear_node_start(self.project, self.tree, nid)
             else:
                 if image is None:
@@ -599,6 +626,7 @@ class EndsMixin:
                                        self._picker_places(), self.project_images())
                 if not image:
                     return False
+                assert self.project is not None
                 T.set_node_start(self.project, self.tree, nid, Path(image))
         except (OSError, RuntimeError, ValueError) as e:
             self._report_error(f"Could not set the start image: {e}")

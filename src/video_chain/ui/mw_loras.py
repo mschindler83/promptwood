@@ -6,6 +6,7 @@ import os
 import threading
 import time
 from pathlib import Path
+from typing import Any, cast
 
 from PySide6.QtWidgets import QFileDialog
 
@@ -15,9 +16,11 @@ from .widgets import safe_emit
 from . import ui_logic as UL
 from .clip_cards import PromptCard
 from .ui_logic import MAX_RECENT_LORAS, REMIX_DELAY_MS, STEPS_TIP, label_loras, plural
+from .mw_host import MainWindowHost
+from .qsvalue import qs_value
 
 
-class LorasMixin:
+class LorasMixin(MainWindowHost):
     """LoRAs: the list, the scan, the pickers."""
 
     def show_loras(self, current: str | None = None):
@@ -37,7 +40,7 @@ class LorasMixin:
         out = label_loras(self.h3_loras)
         listed = {p for p, _ in out} | {os.path.realpath(p) for p, _ in out}
         try:
-            recent = json.loads(self.qs.value("recentLoras", "[]", type=str))
+            recent = json.loads(qs_value(self.qs, "recentLoras", "[]", str))
         except ValueError:
             recent = []
         cands = ([p for n in self.tree.nodes.values() for p, _st in T.node_loras(n)] if self.tree else []) + recent
@@ -161,7 +164,7 @@ class LorasMixin:
 
     def _remember_lora(self, path: str):
         try:
-            recent = json.loads(self.qs.value("recentLoras", "[]", type=str))
+            recent = json.loads(qs_value(self.qs, "recentLoras", "[]", str))
         except ValueError:
             recent = []
         recent = [path] + [r for r in recent if r != path]
@@ -170,7 +173,7 @@ class LorasMixin:
     def _overrides_changed(self, nid: str, ov: dict):
         if self.tree and nid in self.tree.nodes and not self.tree.nodes[nid].frozen:
             before = self.tree.nodes[nid].overrides or {}
-            self.tree.nodes[nid].overrides = dict(ov)
+            self.tree.nodes[nid].overrides = cast(T.Overrides, dict(ov))
             self._failures.pop(nid, None)
             if self.tree.nodes[nid].made and any(before.get(k) != ov.get(k) for k in ("sound_over",
                                                                                        "sound_mix_level")):
@@ -203,11 +206,11 @@ class LorasMixin:
         """Put a LoRA file at the end of a clip's stack."""
         if self.tree is None or self.running or nid not in self.tree.nodes or self.tree.nodes[nid].frozen:
             return
-        ov = dict(self.tree.nodes[nid].overrides)
+        ov: dict[str, Any] = dict(self.tree.nodes[nid].overrides)
         p = lora_path(path)
         ov["loras"] = list(ov.get("loras") or []) + [{"path": p, "strength": float(strength)}]
         self._remember_lora(p)
-        self.tree.nodes[nid].overrides = ov
+        self.tree.nodes[nid].overrides = cast(T.Overrides, ov)
         self._changed()
         self.refresh(rebuild_path=True)
         if self.in_comfy_loras(p) is False:
@@ -240,6 +243,7 @@ class LorasMixin:
             self._changed()
 
     def _new_seed(self) -> int:
+        assert self.tree is not None
         return self.tree.new_seed()
 
     def _wait_note(self) -> bool:
@@ -264,7 +268,7 @@ class LorasMixin:
         if now - miss.get((key, comfy_dir), -1e9) < 30:
             return None                              # (looked for a moment ago: not there)
         try:
-            for root in CMF.comfy_lora_roots(comfy_dir):
+            for root in (CMF.comfy_lora_roots(Path(comfy_dir)) if comfy_dir else []):
                 for f in sorted(Path(root).rglob("*.safetensors")):
                     if key in f.name.lower():
                         self._lora_hits = {**self._lora_hits, (key, comfy_dir): (str(f), now)}

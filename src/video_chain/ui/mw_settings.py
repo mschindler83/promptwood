@@ -8,56 +8,58 @@ from .. import runpod as RP, tree as T, triggers
 from . import ui_logic as UL
 from .ui_logic import (
     DEFAULT_COMFY_LAUNCHER, DEFAULT_COMFY_URL, LAYOUT_VERSION, LLM_DEFAULT_PORT, LLM_DEFAULT_SERVER, MAX_RECENT)
+from .mw_host import MainWindowHost
+from .qsvalue import qs_value
 
 
-class SettingsMixin:
+class SettingsMixin(MainWindowHost):
     """Window settings (QSettings), recent projects, the title."""
 
     # ------------------------------------------------------------------ settings
     def _load_settings(self):
         q = self.qs
-        self.keep_loaded.setChecked(q.value("keepLoaded", True, type=bool))
-        self.comfy_url.setText(q.value("comfyUrl", DEFAULT_COMFY_URL, type=str))
-        self.comfy_launcher.setText(q.value("comfyLauncher", DEFAULT_COMFY_LAUNCHER, type=str))
-        self.comfy_dir.setText(q.value("comfyDir", UL.DEFAULT_COMFY_DIR, type=str))
-        self.comfy_cleanup.setChecked(q.value("comfyCleanup", True, type=bool))
-        self.comfy_autostart.setChecked(q.value("comfyAutoStart", True, type=bool))
-        self.triggers_online.setChecked(q.value("loraTriggersOnline", True, type=bool))
+        self.keep_loaded.setChecked(qs_value(q, "keepLoaded", True, bool))
+        self.comfy_url.setText(qs_value(q, "comfyUrl", DEFAULT_COMFY_URL, str))
+        self.comfy_launcher.setText(qs_value(q, "comfyLauncher", DEFAULT_COMFY_LAUNCHER, str))
+        self.comfy_dir.setText(qs_value(q, "comfyDir", UL.DEFAULT_COMFY_DIR, str))
+        self.comfy_cleanup.setChecked(qs_value(q, "comfyCleanup", True, bool))
+        self.comfy_autostart.setChecked(qs_value(q, "comfyAutoStart", True, bool))
+        self.triggers_online.setChecked(qs_value(q, "loraTriggersOnline", True, bool))
         self.civitai_site.blockSignals(True)
         self.civitai_site.setCurrentIndex(max(0, self.civitai_site.findData(
-            triggers.set_site(q.value("civitaiSite", "", type=str)))))
+            triggers.set_site(qs_value(q, "civitaiSite", "", str)))))
         self.civitai_site.blockSignals(False)
-        self.llm_on.setChecked(q.value("llmServerOn", self.llm_model.count() > 0, type=bool))  # on when one is found
-        self.llm_server.setText(q.value("llmServer", LLM_DEFAULT_SERVER, type=str))
-        saved = q.value("llmModel", "", type=str)
+        self.llm_on.setChecked(qs_value(q, "llmServerOn", self.llm_model.count() > 0, bool))  # on when one is found
+        self.llm_server.setText(qs_value(q, "llmServer", LLM_DEFAULT_SERVER, str))
+        saved = qs_value(q, "llmModel", "", str)
         if saved:
             i = self.llm_model.findData(saved)
             if i < 0:
                 self.llm_model.addItem(Path(saved).name, saved)
                 i = self.llm_model.count() - 1
             self.llm_model.setCurrentIndex(i)
-        self.llm_port.setValue(q.value("llmPort", LLM_DEFAULT_PORT, type=int))
-        self.llm_cpu_moe.setChecked(q.value("llmCpuMoe", True, type=bool))
+        self.llm_port.setValue(qs_value(q, "llmPort", LLM_DEFAULT_PORT, int))
+        self.llm_cpu_moe.setChecked(qs_value(q, "llmCpuMoe", True, bool))
         self.video_gpu.blockSignals(True)
-        self.video_gpu.setChecked(q.value("videoGpu", True, type=bool))
+        self.video_gpu.setChecked(qs_value(q, "videoGpu", True, bool))
         self.video_gpu.blockSignals(False)
-        self.idle_minutes.setValue(q.value("idleMinutes", 15, type=int))
+        self.idle_minutes.setValue(qs_value(q, "idleMinutes", 15, int))
         self._runpod_loading = True
-        gpu = q.value("runpodGpu", RP.DEFAULT_GPU, type=str)
+        gpu = qs_value(q, "runpodGpu", RP.DEFAULT_GPU, str)
         i = self.runpod_gpu.findData(gpu)
         if i >= 0:
             self.runpod_gpu.setCurrentIndex(i)
         else:
             self.runpod_gpu.setEditText(gpu)
-        self.runpod_fallback.setChecked(q.value("runpodFallback", True, type=bool))
-        self.runpod_volume.setText(q.value("runpodVolume", "", type=str))
-        self.runpod_without_volume.setChecked(q.value("runpodWithoutVolume", True, type=bool))
+        self.runpod_fallback.setChecked(qs_value(q, "runpodFallback", True, bool))
+        self.runpod_volume.setText(qs_value(q, "runpodVolume", "", str))
+        self.runpod_without_volume.setChecked(qs_value(q, "runpodWithoutVolume", True, bool))
         self._runpod_loading = False
         if g := q.value("geometry"):
             self.restoreGeometry(g)
         self._restore_layout()
         self._fill_recent()
-        proj = q.value("project", "", type=str)
+        proj = qs_value(q, "project", "", str)
         if proj and Path(proj).is_dir():
             self.open_project(Path(proj), quiet=True)
 
@@ -91,7 +93,7 @@ class SettingsMixin:
     # ---- recent projects
     def recent_projects(self) -> list[str]:
         try:
-            items = json.loads(self.qs.value("recentProjects", "[]", type=str))
+            items = json.loads(qs_value(self.qs, "recentProjects", "[]", str))
         except ValueError:
             items = []
         return [p for p in items if isinstance(p, str)]

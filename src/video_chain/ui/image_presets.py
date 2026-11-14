@@ -13,16 +13,18 @@ from ..imagegen import FAMILIES
 from .dialogs import confirm as ask, failed
 from .lora_stack import lora_label
 from .widgets import icon_button, label
+from .image_host import ImageEditHost
 
 
-class PresetsMixin:
+
+class PresetsMixin(ImageEditHost):
     # ---- presets
     def _build_presets(self, cv):
         row = QHBoxLayout()
         self.preset = QComboBox()
         self.preset.setToolTip("Presets of the LoRAs above: choosing one puts its prompt, negative prompt, quality, "
                                "sampling settings and LoRA strength into the fields")
-        self.preset.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.preset.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.preset.setMinimumContentsLength(12)
         self.preset.activated.connect(lambda _i: self.apply_preset())
         self.preset.currentIndexChanged.connect(lambda *_: self._preset_buttons())
@@ -57,7 +59,7 @@ class PresetsMixin:
         for lo, p in found:
             text = p["name"] if len(loras) == 1 else f"{lora_label(lo)}: {p['name']}"
             self.preset.addItem(text, f"{lo}\n{p['name']}")         # (a string: findData cannot match tuples)
-            self.preset.setItemData(self.preset.count() - 1, (p.get("prompt") or "")[:300], Qt.ToolTipRole)
+            self.preset.setItemData(self.preset.count() - 1, (p.get("prompt") or "")[:300], Qt.ItemDataRole.ToolTipRole)
         i = self.preset.findData(cur) if cur else -1
         self.preset.setCurrentIndex(max(0, i))
         self.preset.blockSignals(False)

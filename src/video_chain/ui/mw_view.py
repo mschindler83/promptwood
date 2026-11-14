@@ -13,10 +13,13 @@ from PySide6.QtWidgets import QApplication, QLineEdit, QPlainTextEdit
 from .. import tree as T
 from . import shortcuts as S
 from .clip_cards import PromptCard
-from .ui_logic import COMFY_START_TIMEOUT, DEFAULT_COMFY_LAUNCHER, LAYOUTS, LAYOUT_VERSION, project_setting_changes
+from .ui_logic import (COMFY_START_TIMEOUT, DEFAULT_COMFY_LAUNCHER, LAYOUTS, LAYOUT_VERSION, as_dict,
+                       project_setting_changes)
+from .mw_host import MainWindowHost
+from .qsvalue import qs_value
 
 
-class ViewMixin:
+class ViewMixin(MainWindowHost):
     """Simple / Advanced view, the guide, the engine banner, the menu and the panel layouts."""
 
     # ------------------------------------------------------------------ Simple / Advanced view
@@ -76,7 +79,7 @@ class ViewMixin:
     # ------------------------------------------------------------------ guided start
     def _guide_store(self) -> dict:
         try:
-            d = json.loads(self.qs.value("guideChoices", "{}", type=str) or "{}")
+            d = json.loads(qs_value(self.qs, "guideChoices", "{}", str) or "{}")
         except ValueError:
             d = {}
         return d if isinstance(d, dict) else {}
@@ -90,6 +93,7 @@ class ViewMixin:
         return set(d.get(self._guide_key(), [])) | set(d.get(str(self.project), []))    # (+ the key used before)
 
     def _guide_key(self) -> str:
+        assert self.project is not None
         return str(self.project.resolve())      # (the same folder spelled another way is the same project)
 
     def _guide_mark(self, what: str):
@@ -114,13 +118,15 @@ class ViewMixin:
     def _guide_cast(self):
         """Step 2: Cast & references, with New in focus (it adds a person or a place)."""
         self._show_left_tab(1)
-        self.b_char_new.setFocus(Qt.OtherFocusReason)
+        self.b_char_new.setFocus(Qt.FocusReason.OtherFocusReason)
         self.status.setText("Press New to add a person or a place, then give it pictures.")
 
     def _first_clip(self) -> T.Node | None:
         if self.tree is None:
             return None
-        roots = sorted(self.tree.children(None), key=lambda n: self.tree.number(n.id))
+        tree = self.tree
+        assert tree is not None
+        roots = sorted(self.tree.children(None), key=lambda n: tree.number(n.id))
         return roots[0] if roots else None
 
     def _guide_write(self):
@@ -132,7 +138,7 @@ class ViewMixin:
         self.focus_clip(first.id)
         card = self._card_of(first.id, PromptCard)
         if card is not None:
-            card.edit.setFocus(Qt.OtherFocusReason)
+            card.edit.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def show_guide(self, on: bool):
         """Hide guide / View → Getting started (stored in the app's settings)."""
@@ -146,7 +152,7 @@ class ViewMixin:
     def _update_guide(self):
         """The guide while the project has no made clip (step 0 without a project), its steps ticked from the real
         state; the "how to go on" line once after the first made clip."""
-        hidden = self.qs.value("guideHidden", False, type=bool)
+        hidden = qs_value(self.qs, "guideHidden", False, bool)
         if self.tree is None or self.project is None:
             self.guide_panel.set_state(project=False)
             self.guide_panel.setVisible(not hidden)
@@ -166,11 +172,11 @@ class ViewMixin:
         if show and ready and not self._guide_ready:      # Generate is next: the keyboard focus goes there (not
             fw = QApplication.focusWidget()                 # away from a description being typed)
             if not isinstance(fw, (QPlainTextEdit, QLineEdit)):
-                self.b_gen.setFocus(Qt.OtherFocusReason)
+                self.b_gen.setFocus(Qt.FocusReason.OtherFocusReason)
         self._guide_ready = ready
-        if len(self.tree.nodes) >= 2 and not self.qs.value("nextHintDone", False, type=bool):
+        if len(self.tree.nodes) >= 2 and not qs_value(self.qs, "nextHintDone", False, bool):
             self.qs.setValue("nextHintDone", True)          # a second clip exists: the user knows how to go on
-        self.next_hint.setVisible(made and not self.qs.value("nextHintDone", False, type=bool))
+        self.next_hint.setVisible(made and not qs_value(self.qs, "nextHintDone", False, bool))
 
     def _next_hint_done(self):
         self.qs.setValue("nextHintDone", True)
@@ -207,7 +213,7 @@ class ViewMixin:
         if self.tree is None:
             return []
         ctl = self._project_controls()
-        return [name for key, name in project_setting_changes(self.tree.options)
+        return [name for key, name in project_setting_changes(as_dict(self.tree.options))
                 if self.view.is_advanced(ctl[key])]
 
     def _update_adv_note(self):
@@ -236,7 +242,8 @@ class ViewMixin:
         m.addAction("Quit", self.close).setShortcut(S.sequence("quit"))
         v = self.menuBar().addMenu("&View")
         for k, name in enumerate(("Clips", "Cast & references", "Sounds")):
-            a = v.addAction(f"{name} (left)", lambda _=False, k=k: self._show_left_tab(k))
+            a = v.addAction(f"{name} (left)")
+            a.triggered.connect(lambda _=False, k=k: self._show_left_tab(k))
             a.setShortcut(S.sequence(("tab_clips", "tab_cast", "tab_sounds")[k]))
         v.addAction("Log", self.show_log).setShortcut(S.sequence("log"))
         v.addAction("Getting started", lambda: self.show_guide(True))
@@ -249,7 +256,9 @@ class ViewMixin:
         self.act_left.toggled.connect(self._show_left)   # (the panel is built later, in _build)
         for name in ("edit", "write", "watch"):
             row = S.SHORTCUTS[[s.id for s in S.SHORTCUTS].index(f"layout_{name}")]
-            v.addAction(row.text, lambda _=False, n=name: self.apply_layout(n)).setShortcut(S.sequence(row.id))
+            layout_action = v.addAction(row.text)
+            layout_action.triggered.connect(lambda _=False, n=name: self.apply_layout(n))
+            layout_action.setShortcut(S.sequence(row.id))
         v.addAction("Reset layout", lambda: self.apply_layout("edit"))
         v.addSeparator()
         group = QActionGroup(self)                  # (the view itself is made in __init__, after the menu)
@@ -269,7 +278,7 @@ class ViewMixin:
     def show_shortcuts(self):
         """Help → Keyboard shortcuts: the table every window binds from (not modal: it stays beside the work)."""
         dlg = S.shortcuts_dialog(self)
-        dlg.setAttribute(Qt.WA_DeleteOnClose)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dlg.open()
 
     def apply_layout(self, name: str):
@@ -305,7 +314,7 @@ class ViewMixin:
         """The layout of the last session; the default one if there is none, it was saved by an older version or
         it is damaged."""
         try:
-            d = json.loads(self.qs.value("layout", "", type=str) or "{}")
+            d = json.loads(qs_value(self.qs, "layout", "", str) or "{}")
             split, center = d["split"], d["center"]
             ok = (d.get("v") == LAYOUT_VERSION and len(split) == 3 and len(center) == 2
                   and all(isinstance(x, int) and x >= 0 for x in split + center)

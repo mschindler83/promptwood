@@ -19,7 +19,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, QSize, QTimer, Qt, Signal, QObject
-from PySide6.QtGui import QImage, QKeySequence, QPixmap, QShortcut
+from PySide6.QtGui import QImage, QKeySequence, QPixmap
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFrame, QGridLayout,
                                QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QProgressBar,
                                QPushButton, QScrollArea, QSlider, QSpinBox, QStackedWidget, QVBoxLayout, QWidget)
@@ -44,7 +44,8 @@ from .imageio import decode_upright as _decode_upright, upright  # noqa: F401  (
 from .lora_stack import LoraStack
 from .results_gallery import InfoCard, ResultGallery, ResultView, ThumbLoader
 from .variations_panel import PlaceholderHighlighter, VariationsPanel
-from .widgets import FrameTile, fit_size, guard_wheel, icon_button, label
+from .widgets import FrameTile, fit_size, guard_wheel, icon_button, label, shortcut, combo_item
+from .qsvalue import qs_value
 
 
 class _FamiliesSignal(QObject):
@@ -58,12 +59,15 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
     on_use(kind 'start' | 'end', png) -> bool; start_comfy() -> bool."""
 
     def __init__(self, parent, project: Path, sources: list[tuple[str, str]], source: str | None,
-                 end_target: str | None, connect: Callable[[Callable | None], object], on_use: Callable[[str, str], bool],
+                 end_target: str | None, connect: Callable[[Callable | None], object], on_use: Callable[[str, str],
+                                                                                                        bool],
                  settings: QSettings | None = None, places: list[tuple[str, str]] | None = None,
                  start_comfy: Callable[[], bool] | None = None, on_start: Callable[[], None] | None = None,
                  known_loras: list[tuple[str, str]] | None = None, lora_dir: str = "",
-                 uses: Callable[[ResultRecord], list[str]] | None = None, refine: Callable[..., str | list[str] | None] | None = None,
-                 connect_create: Callable[[Callable | None], object] | None = None, family_loras: dict[str, list] | None = None,
+                 uses: Callable[[ResultRecord], list[str]] | None = None, refine: Callable[...,
+                                                                                           str | list[str] | None] | None = None,
+                 connect_create: Callable[[Callable | None], object] | None = None, family_loras: dict[str,
+                                                                                                       list] | None = None,
                  start_aspect: float | None = None, mode: str = "edit",
                  check_lora: Callable[[str | None], bool | None] | None = None,
                  use_triggers: bool = True, collections: Callable[[], list] | None = None):
@@ -85,7 +89,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         self._build_actions(left)
         top.addWidget(self._scrolled(left))
         line = QFrame()
-        line.setFrameShape(QFrame.VLine)
+        line.setFrameShape(QFrame.Shape.VLine)
         top.addWidget(line)
         top.addLayout(self._build_results_panel(), 1)
         self._built = True                               # (every widget the parts above talk to exists now)
@@ -94,9 +98,16 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         self._restore(source, sources, mode)
 
     # ---- building the window
-    def _init_state(self, project: Path, connect, on_use, end_target, settings, places, start_comfy, on_start,
-                    known_loras, lora_dir, uses, refine, connect_create, family_loras, start_aspect, check_lora,
-                    use_triggers, collections):
+    def _init_state(self, project: Path, connect: Callable[[Callable | None], object],
+                    on_use: Callable[[str, str], bool], end_target: str | None, settings: QSettings | None,
+                    places: list[tuple[str, str]] | None, start_comfy: Callable[[], bool] | None,
+                    on_start: Callable[[], None] | None, known_loras: list[tuple[str, str]] | None, lora_dir: str,
+                    uses: Callable[[ResultRecord], list[str]] | None,
+                    refine: Callable[..., str | list[str] | None] | None,
+                    connect_create: Callable[[Callable | None], object] | None,
+                    family_loras: dict[str, list] | None, start_aspect: float | None,
+                    check_lora: Callable[[str | None], bool | None] | None, use_triggers: bool,
+                    collections: Callable[[], list] | None):
         self.project, self.connect_editor, self.on_use = Path(project), connect, on_use
         self.end_target, self.qs, self.places, self.start_comfy = end_target, settings, places or [], start_comfy
         self.on_start = on_start                         # called (GUI thread) before each Generate
@@ -126,7 +137,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         self._sampling_family: str | None = None
         self._sampling_loading = False
         self._sampling_auto: dict = {}                   # the model's own settings, shown as "auto (…)"
-        self.mask: QImage | None = None                  # white = drawn anew, at the source's (upright) size
+        self.mask = None                                 # white = drawn anew, at the source's (upright) size
         self.known_loras, self.lora_dir = list(known_loras or []), lora_dir
         self.family_loras = family_loras or {}
         self.closed = False
@@ -165,7 +176,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         ev.addWidget(label("1  Image to edit", type_="heading"))
         self.src_tile = FrameTile(380, 214)
         self.src_tile.clear_frame("Choose the image to edit")
-        self.src_tile.setCursor(Qt.PointingHandCursor)
+        self.src_tile.setCursor(Qt.CursorShape.PointingHandCursor)
         self.src_tile.clicked.connect(lambda _t: self._choose_source())
         ev.addWidget(self.src_tile)
         self.src_combo = QComboBox()
@@ -187,11 +198,10 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         self.edit_model.setToolTip("Qwen-Image-Edit 2511: the proven edit model. Qwen-Image 2.1 (2026): newer and "
                                    "smaller, one model for creating and editing; research licence (non-commercial). "
                                    "MOSS-Image Edit (2026, 5B, Apache 2.0): MOSS-Image with its edit LoRA")
-        saved = self.qs.value("editModel", "", type=str) if self.qs is not None else ""
+        saved = qs_value(self.qs, "editModel", "", str) if self.qs is not None else ""
         self.edit_model.setCurrentIndex(max(0, self.edit_model.findData(saved)))
         self.edit_model.currentIndexChanged.connect(self._edit_model_changed)
-        self.edit_model.activated.connect(lambda _i: self.qs is not None and
-                                          self.qs.setValue("editModel", self.edit_model.currentData()))
+        self.edit_model.activated.connect(lambda _i: self._remember("editModel", self.edit_model.currentData()))
         erow.addWidget(label("Model", level="tertiary"))
         erow.addWidget(self.edit_model, 1)
         ev.addLayout(erow)
@@ -209,7 +219,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         mrow2.addWidget(self.b_mask_clear)
         mrow2.addWidget(self.mask_info, 1)
         ev.addLayout(mrow2)
-        self.mask: QImage | None = None              # white = drawn anew, at the source's (upright) size
+        self.mask = None                              # white = drawn anew, at the source's (upright) size
         left.addWidget(self.edit_box)
 
     def _build_create_box(self, left: QVBoxLayout):
@@ -223,8 +233,8 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         self.family.setToolTip("The model family; unavailable ones say what is missing")
         self.family.addItem("looking for models in ComfyUI …", None)
         self.family.currentIndexChanged.connect(self._family_changed)
-        self.family.activated.connect(lambda _i: self.qs is not None and self.family.currentData() and
-                                      self.qs.setValue("createFamily", self.family.currentData()))
+        self.family.activated.connect(lambda _i: self._remember("createFamily", self.family.currentData(),
+                                                                needs_value=True))
         self.model_file = QComboBox()
         self.model_file.setToolTip("The model file (the recommended one first; fine-tunes of the family too)")
         crow.addWidget(self.family, 1)
@@ -339,8 +349,8 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
             "its trigger words. The seed, prompt and every other setting stay the same, so the LoRAs can be "
             "compared side by side.<br>With more results (or variations), each one is made with every LoRA in "
             "turn.</p>")
-        self.lora_each.setChecked(self.qs is not None and self.qs.value("loraEach", False, type=bool))
-        self.lora_each.toggled.connect(lambda on: self.qs is not None and self.qs.setValue("loraEach", on))
+        self.lora_each.setChecked(self.qs is not None and qs_value(self.qs, "loraEach", False, bool))
+        self.lora_each.toggled.connect(lambda on: self._remember("loraEach", on))
         self.lora_each.toggled.connect(lambda _on: self._variations_changed())
         self.loras.changed.connect(lambda: self._variations_changed())
         self.loras.filled.connect(lambda: self._variations_changed())
@@ -423,8 +433,8 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         lw.setLayout(left)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(lw)
         scroll.setFixedWidth(430)
         self.left_scroll = scroll
@@ -447,7 +457,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
             head.addWidget(b)
         self.b_single.setChecked(True)
         self.views.idClicked.connect(lambda i: self.set_view("gallery" if i else "single"))
-        self.thumb_size = QSlider(Qt.Horizontal)
+        self.thumb_size = QSlider(Qt.Orientation.Horizontal)
         self.thumb_size.setRange(120, 360)
         self.thumb_size.setValue(200)
         self.thumb_size.setFixedWidth(120)
@@ -499,13 +509,13 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         self.view.clear_frame("Results appear here")
         sv.addWidget(self.view, 1)
         self.results = QListWidget()
-        self.results.setViewMode(QListWidget.IconMode)
-        self.results.setFlow(QListWidget.LeftToRight)
+        self.results.setViewMode(QListWidget.ViewMode.IconMode)
+        self.results.setFlow(QListWidget.Flow.LeftToRight)
         self.results.setWrapping(False)
         self.results.setIconSize(QSize(150, 100))
         self.results.setGridSize(QSize(158, 108))
         self.results.setFixedHeight(130)
-        self.results.setMovement(QListWidget.Static)
+        self.results.setMovement(QListWidget.Movement.Static)
         self.results.setToolTip("The results shown (newest first); Gallery shows them all, grouped by run")
         self.results.setProperty("role", "resultStrip")      # (the theme styles it: transparent, no frame)
         self.results.currentItemChanged.connect(self._strip_selection)
@@ -562,12 +572,12 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         return right
 
     def _add_shortcuts(self):
-        QShortcut(QKeySequence("Ctrl+Return"), self, activated=self.generate)
+        shortcut(QKeySequence("Ctrl+Return"), self, self.generate)
         for key, fn in (("Delete", self.delete_selected), ("B", self.b_before.toggle),
                         ("F", lambda: self.toggle_favorite())):
             for w in (self.results, self.gallery):
-                sc = QShortcut(QKeySequence(key), w, activated=fn)
-                sc.setContext(Qt.WidgetWithChildrenShortcut)  # only while the results have the focus
+                sc = shortcut(QKeySequence(key), w, fn)
+                sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)  # only while the results have the focus
         for b in self.findChildren(QPushButton):              # Enter in a field must not press a button
             b.setAutoDefault(False)
             b.setDefault(False)
@@ -576,13 +586,13 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
     def _restore(self, source: str | None, sources: list[tuple[str, str]], mode: str):
         """What the user had last time: sizes, variations, view, the image to edit, the mode; then the first look."""
         if self.qs is not None:
-            self.thumb_size.setValue(self.qs.value("resultsThumb", 200, type=int))
+            self.thumb_size.setValue(qs_value(self.qs, "resultsThumb", 200, int))
             try:
-                self.variations.set_state(json.loads(self.qs.value("promptVariations", "{}", type=str) or "{}"))
+                self.variations.set_state(json.loads(qs_value(self.qs, "promptVariations", "{}", str) or "{}"))
             except ValueError:
                 pass
         self._load_results()
-        self.set_view(self.qs.value("resultsView", "single", type=str) if self.qs is not None else "single",
+        self.set_view(qs_value(self.qs, "resultsView", "single", str) if self.qs is not None else "single",
                       remember=False)
         if source:
             i = self.src_combo.findData(source)
@@ -593,7 +603,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
             self.set_source(sources[0][1])
         self.modes.idClicked.connect(self._mode_clicked)
         self.m_create.setEnabled(self.connect_create is not None)
-        saved = self.qs.value("imageMode", "", type=str) if self.qs is not None else ""
+        saved = qs_value(self.qs, "imageMode", "", str) if self.qs is not None else ""
         if mode != "auto" and self.qs is not None:
             self.qs.setValue("imageMode", mode)       # opened from its Edit / Create button: the user's choice
         self.set_mode(mode if mode != "auto" else (saved or "edit"))
@@ -608,7 +618,8 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         text = bool(self.prompt.toPlainText().strip())
         if self.mode() == "create":
             fam = self.family.currentData()
-            refs_ok = not self.use_refs.isChecked() or any(s.path for s in self.cpics[:FAMILIES.get(fam, {}).get("refs", 0)])
+            refs_ok = not self.use_refs.isChecked() or any(s.path for s in self.cpics[:FAMILIES.get(fam,
+                                                                                                    {}).get("refs", 0)])
             ok = idle and text and fam in FAMILIES and "models" in (self.families.get(fam) or {}) and refs_ok
             why = ("Choose an available model" if fam not in FAMILIES or "models" not in (self.families.get(fam) or {})
                    else "Add a reference picture" if not refs_ok else "Describe the image")
@@ -698,6 +709,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         refs = [s.path for s in self.cpics[:FAMILIES[fam]["refs"]] if s.path] if self.use_refs.isChecked() else []
         self._remember_loras()                    # what it was made with is offered next time
         w, h = size_for(fam, self.aspect.currentData() or 1.0)
+        assert self.connect_create is not None
         plan = CreatePlan(self.project / EDITS_DIR, self.connect_create, prompt, quality, n, [], runs, run_words,
                           refs, jobs, family=fam, model_file=model, negative=negative, width=w, height=h,
                           strength=self.ref_strength.value(), tags=self.tags.isChecked(), sampling=self.sampling())
@@ -750,7 +762,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
                f"({names[(k - 1) // self._per_image]})" if names and (k - 1) // self._per_image < len(names) else "")
         self.state.setText(f"Result {k} of {n}{pic}: step {i} / {steps}")
 
-    def _result(self, png: str, meta: dict):
+    def _result(self, png: str, meta: ResultRecord):
         if isinstance(meta.get("variation"), dict) and meta["variation"].get("step") is not None:
             self.variations.done(int(meta["variation"]["step"]), meta["variation"].get("key"))   # continues after
         self._result_added(png, meta)
@@ -774,6 +786,11 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
                                + (f" and {len(sk) - 5} more" if len(sk) > 5 else "") + ".")
         self._batch_names = []
         self._update_buttons()
+
+    def _remember(self, key: str, value: object, needs_value: bool = False) -> None:
+        """Keep a choice in the settings (when there are settings; needs_value: and the choice is not empty)."""
+        if self.qs is not None and not (needs_value and not value):
+            self.qs.setValue(key, value)
 
     def _start_comfy(self):
         if self.start_comfy and self.start_comfy():
@@ -828,7 +845,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
             if self.mode() != "create":
                 self.set_mode("create")
             i = self.family.findData(meta.get("family"))
-            if i >= 0 and self.family.model().item(i).isEnabled():
+            if i >= 0 and combo_item(self.family, i).isEnabled():
                 self.family.setCurrentIndex(i)
             j = self.model_file.findData(meta.get("chosen_model") or meta.get("model"))
             if j >= 0:
@@ -844,7 +861,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
             if self.mode() != "edit":
                 self.set_mode("edit")
             i = self.edit_model.findData(meta.get("edit_model") or "2511")
-            if i >= 0 and self.edit_model.model().item(i).isEnabled():
+            if i >= 0 and combo_item(self.edit_model, i).isEnabled():
                 self.edit_model.setCurrentIndex(i)
             q = self.quality.findData(meta.get("quality"))
             if q >= 0:
@@ -852,7 +869,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
             self.set_mask(None)                   # (a result made without a mask: none)
             m = meta.get("mask")                  # an inpaint of the image shown: its mask again
             if m and Path(m).is_file() and meta.get("source") == self.source:
-                img = QImage(m).convertToFormat(QImage.Format_Grayscale8)
+                img = QImage(m).convertToFormat(QImage.Format.Format_Grayscale8)
                 if not img.isNull() and img.size() == upright(self.source).size():
                     self.set_mask(img)
         if meta.get("template"):                  # made from variations: the prompt with its placeholders

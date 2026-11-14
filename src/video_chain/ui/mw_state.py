@@ -8,17 +8,20 @@ from PySide6.QtGui import QImage, QImageReader
 from .. import chain, swap, tree as T
 from . import dialogs as D, image_picker as IP, image_edit as IE
 from .graph import START
+from .ui_logic import as_dict
 from .image_edit import EDITS_DIR, project_edits, uses_of
+from .mw_host import MainWindowHost
 
 
-class StateMixin:
+class StateMixin(MainWindowHost):
     """The tree's state: saving, change marks, the start image."""
 
-    def _uses(self, meta: dict) -> list[str]:
+    def _uses(self, meta: IE.ResultRecord) -> list[str]:
         """Where an image-edit result is used (the AI image window asks for every result of a reload): the index of
         the project's end images and face pictures is built once until something changes (UIM-26)."""
         if self._uses_cache is None or self._uses_cache[0] is not self.tree:
             self._uses_cache = (self.tree, IE.uses_index(self.tree))
+        assert self.project is not None
         return uses_of(self.project, self.tree, meta, self._uses_cache[1])
 
     def _changed(self):
@@ -44,10 +47,12 @@ class StateMixin:
             "changes since the last save?")
 
     def _stamp(self) -> tuple | None:
+        if self.project is None:
+            return None
         try:
             st = (self.project / T.TREE_FILE).stat()
             return st.st_mtime_ns, st.st_size
-        except (OSError, TypeError):
+        except OSError:
             return None
 
     def _say(self, msg: str):
@@ -116,7 +121,9 @@ class StateMixin:
         if self.project is None or self.tree is None:
             return []
         videos, seen = [], set()
-        for n in sorted(self.tree.nodes.values(), key=lambda n: self.tree.number(n.id)):
+        tree = self.tree
+        assert tree is not None
+        for n in sorted(self.tree.nodes.values(), key=lambda n: tree.number(n.id)):
             if not n.is_video:
                 continue
             src = (swap.replaced(n) or {}).get("original") or n.source or {}
@@ -138,12 +145,15 @@ class StateMixin:
         p = self.project
         start = [(str(p / T.START_FILE), "Start image")] if (p / T.START_FILE).is_file() else []
         clips, videos, ends = [], [], []
-        for n in sorted(self.tree.nodes.values(), key=lambda n: self.tree.number(n.id)):
+        tree = self.tree
+        assert tree is not None
+        for n in sorted(self.tree.nodes.values(), key=lambda n: tree.number(n.id)):
             m = n.made or {}
             if n.is_video:
                 for key, what in (("first", "first frame"), ("frame", "last frame")):
-                    if m.get(key) and (p / m[key]).is_file():
-                        videos.append((str(p / m[key]), f"Video #{T.short_id(n.id)} · {what}"))
+                    rel = as_dict(m).get(key)
+                    if rel and (p / rel).is_file():
+                        videos.append((str(p / rel), f"Video #{T.short_id(n.id)} · {what}"))
                 continue
             if m.get("frame") and (p / m["frame"]).is_file():
                 clips.append((str(p / m["frame"]), f"Clip #{T.short_id(n.id)} · last frame"))
@@ -201,6 +211,7 @@ class StateMixin:
                 "their paths. The first clip then starts from its prompt."):
             return False
         before = self._done_clips()
+        assert self.tree is not None
         T.clear_start_image(self.project, self.tree)
         self._pix.clear()
         self._write_tree()
@@ -224,6 +235,7 @@ class StateMixin:
             return False
         made = self.made_from_start()
         try:                                        # another aspect ratio: another video size for every clip
+            assert self.tree is not None
             base = T.Checker(self.project, self.tree).base()
             size = chain.canvas_size(*chain.image_size(Path(path)), int(self.tree.options.get("resolution", 512)))
             if base is not None and size != (base["width"], base["height"]):
@@ -239,6 +251,7 @@ class StateMixin:
             return False
         before = self._done_clips()
         try:
+            assert self.tree is not None
             T.set_start_image(self.project, Path(path), self.tree)
         except (OSError, RuntimeError) as e:
             self._report_error(f"Could not use {Path(path).name}: {e}")
@@ -264,7 +277,7 @@ class StateMixin:
         node = self.tree.nodes.get(nid) if self.tree and nid else None
         made = node is not None and bool(node.made)
         self.b_ref_clip.setEnabled(made and not self.running)
-        if made:
+        if made and node is not None and nid is not None:
             what = (f"the first frame of video #{T.short_id(nid)}" if node.is_video else f"the last frame of clip "
                                                                                          f"#{T.short_id(nid)}")
             tip = f"Add {what} as a {ref}"
@@ -277,7 +290,7 @@ class StateMixin:
                                      and self._selected_character() is not None and not self.running)
         self.b_voice_clip.setToolTip(
             f"Set the voice from the sound of {'video' if node.is_video else 'clip'} #{T.short_id(nid)}: choose the "
-            "part of it, with or without its background music" if has_sound
+            "part of it, with or without its background music" if has_sound and node is not None and nid is not None
             else "Select a made clip or a converted video with the voice")
 
     def _show_start_image(self):
@@ -285,6 +298,7 @@ class StateMixin:
         start = self.project / T.START_FILE if self.project else None
         if start and start.is_file():
             self.start_tile.set_image(QImage(str(start)))
+            assert self.tree is not None
             self.start_tile.setToolTip(self.tree.image or str(start))
         else:
             self.start_tile.clear_frame("Click or drop an image")

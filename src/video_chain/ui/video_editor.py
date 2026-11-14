@@ -10,16 +10,20 @@ from __future__ import annotations
 import subprocess
 import threading
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
-from PySide6.QtCore import QObject, QPointF, QRectF, QSettings, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QObject, QPointF, QRectF, QSettings, Qt, QUrl, Signal
 from PySide6.QtGui import QImage, QPainter, QPen
-from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QDoubleSpinBox, QHBoxLayout, QLineEdit,
-                               QPushButton, QStackedWidget, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QDoubleSpinBox, QHBoxLayout, QLabel, QLineEdit,
+                               QPushButton, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
 from .. import chain, media
 from .theme import icon, theme, with_alpha
 from .dialogs import button_row
-from .widgets import fit_size, format_time, FrameTile, guard_wheel, icon_button, label, safe_emit, VideoView
+from .widgets import fit_size, format_time, FrameTile, guard_wheel, icon_button, label, safe_emit, VideoView, shortcut, timer
+
+if TYPE_CHECKING:
+    from PySide6.QtMultimedia import QMediaPlayer
 
 FPS = chain.FPS
 
@@ -48,7 +52,7 @@ class RangeBar(QWidget):
         super().__init__(parent)
         self.setMinimumHeight(42)
         self.setMouseTracking(True)
-        self.setFocusPolicy(Qt.StrongFocus)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAccessibleName("Range of the video: start, end and playhead")
         self.setToolTip("Drag the two handles to set the range. With the keyboard: Ctrl+Left / Ctrl+Right move the "
                         "start, Ctrl+Shift+Left / Right the end, one frame at a time.")
@@ -73,10 +77,10 @@ class RangeBar(QWidget):
     def paintEvent(self, _e):
         t = theme()
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
         h = self.height()
         track = QRectF(self.PAD, h / 2 - 5, self.width() - 2 * self.PAD, 10)
-        p.setPen(Qt.NoPen)
+        p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(t.bgSunken)
         p.drawRoundedRect(track, 4, 4)
         sel = QRectF(QPointF(self._x(self.start), track.top()), QPointF(self._x(self.end), track.bottom()))
@@ -97,9 +101,9 @@ class RangeBar(QWidget):
 
     def keyPressEvent(self, e):
         step = 1 / FPS
-        sign = {Qt.Key_Left: -1, Qt.Key_Right: 1}.get(e.key())
-        if sign and e.modifiers() & Qt.ControlModifier:
-            if e.modifiers() & Qt.ShiftModifier:
+        sign = {Qt.Key.Key_Left: -1, Qt.Key.Key_Right: 1}.get(e.key())
+        if sign and e.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            if e.modifiers() & Qt.KeyboardModifier.ShiftModifier:
                 self.end = min(self.duration, max(self.start + step, self.end + sign * step))
                 self.seek.emit(self.end)
             else:
@@ -112,7 +116,7 @@ class RangeBar(QWidget):
             super().keyPressEvent(e)
 
     def mousePressEvent(self, e):
-        if e.button() != Qt.LeftButton:
+        if e.button() != Qt.MouseButton.LeftButton:
             return
         x = e.position().x()
         self._drag = self._hit(x) or "pos"
@@ -123,7 +127,7 @@ class RangeBar(QWidget):
         if self._drag:
             self._move(x)
         else:
-            self.setCursor(Qt.SizeHorCursor if self._hit(x) else Qt.PointingHandCursor)
+            self.setCursor(Qt.CursorShape.SizeHorCursor if self._hit(x) else Qt.CursorShape.PointingHandCursor)
 
     def mouseReleaseEvent(self, _e):
         self._drag = None
@@ -151,6 +155,23 @@ class RangePlayerMixin:
 
     SPIN_STEP = 0.1                                     # the step of the start / end boxes (seconds)
     player_error = ""                                   # why the player cannot play this file ("" = it can)
+    # (made by the dialog)
+    player: QMediaPlayer | None
+    info_label: QLabel
+    file: str
+    start: float
+    end: float
+    bar: Any
+    time: QLabel
+    b_play: QToolButton
+    _stop_at: float | None
+    _pos: float
+
+    def _update_enabled(self) -> None:
+        raise NotImplementedError
+
+    def seek(self, t: float) -> None:
+        raise NotImplementedError
 
     def _spin(self, tip: str) -> QDoubleSpinBox:
         s = QDoubleSpinBox()
@@ -186,7 +207,8 @@ class RangePlayerMixin:
             return
         from PySide6.QtMultimedia import QMediaPlayer
         self._before_play()
-        if self.player.playbackState() == QMediaPlayer.PlayingState:
+        assert self.player is not None                 # (_can_play)
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.player.pause()
         else:
             self._stop_at = None
@@ -196,6 +218,7 @@ class RangePlayerMixin:
         if not self._can_play():
             return
         self._before_play()
+        assert self.player is not None                 # (_can_play)
         self.seek(self.start)
         self._stop_at = self.end
         self.player.play()
@@ -207,11 +230,12 @@ class RangePlayerMixin:
             self.time.setText(f"{fmt(self._pos)} / {fmt(self._total())}")
         if self._stop_at is not None and self._pos >= self._stop_at:
             self._stop_at = None
+            assert self.player is not None
             self.player.pause()
 
     def _player_state(self, st):
         from PySide6.QtMultimedia import QMediaPlayer
-        self.b_play.setIcon(icon("pause" if st == QMediaPlayer.PlayingState else "play"))
+        self.b_play.setIcon(icon("pause" if st == QMediaPlayer.PlaybackState.PlayingState else "play"))
 
 
 class _Probed(QObject):
@@ -244,10 +268,11 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
         self.canvas_for = canvas_for
         self.rotate = chain.rotation(rotate)
         self.on_reference = on_reference              # callable(png path) -> bool: crop and add a face picture
-        self.file, self.info = "", None
+        self.file: str = ""
+        self.info: dict | None = None
         self.start, self.end = 0.0, 0.0
-        self.player = None
-        self.video = None
+        self.player: QMediaPlayer | None = None
+        self.video: VideoView | None = None
         self._closed = False
         self._gen = 0
         self._probed = _Probed()
@@ -259,7 +284,7 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
         self._pending: tuple = ()
         self._frames = _Frames()
         self._frames.ready.connect(self._frame_ready)
-        self._frame_timer = QTimer(self, singleShot=True, interval=300, timeout=self._update_frames)
+        self._frame_timer = timer(self, self._update_frames, 300, single=True)
         self._stop_at: float | None = None
 
         v = QVBoxLayout(self)
@@ -276,7 +301,7 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
 
         self.stack = QStackedWidget()
         self.placeholder = label("Choose a video.", level="tertiary")
-        self.placeholder.setAlignment(Qt.AlignCenter)
+        self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.placeholder.setMinimumHeight(260)
         self.stack.addWidget(self.placeholder)
         v.addWidget(self.stack, 1)
@@ -369,12 +394,13 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
         self.buttons, _ok = button_row(self, "Use this range")
         v.addWidget(self.buttons)
         for key, fn in (("Space", self.toggle), ("Left", lambda: self.step_frames(-1)),
-                        ("Right", lambda: self.step_frames(1)), ("[", lambda: self.set_range(self.position(), self.end)),
+                        ("Right", lambda: self.step_frames(1)), ("[", lambda: self.set_range(self.position(),
+                                                                                             self.end)),
                         ("]", lambda: self.set_range(self.start, self.position(), moved="end")),
                         ("R", lambda: self.set_rotation(self.rotate + 90)),
                         ("Shift+R", lambda: self.set_rotation(self.rotate - 90))):
-            from PySide6.QtGui import QKeySequence, QShortcut
-            QShortcut(QKeySequence(key), self, activated=fn)
+            from PySide6.QtGui import QKeySequence
+            shortcut(QKeySequence(key), self, fn)
         self._pos = 0.0
         self._keep = None if file else (start, end)   # a missing file: its range (and turn) is kept for the one
                                                       # chosen again
@@ -395,7 +421,7 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
         self.loading = on
         if on:
             self.info_label.setText(text)
-            self.buttons.button(QDialogButtonBox.Ok).setEnabled(False)
+            self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
             self.b_ref.setEnabled(False)
         else:
             self._update_enabled()
@@ -479,6 +505,7 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
             self.player.setVideoOutput(self.video.sink)
             self._attach_player(self.player)
         self.player_error = ""
+        assert self.player is not None and self.video is not None
         self.player.setSource(QUrl.fromLocalFile(self.file))
         self.stack.setCurrentWidget(self.video)
 
@@ -498,7 +525,7 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
                 self.canvas = self.canvas_for(self.file, self.rotate) or self.canvas
             except Exception:  # noqa: BLE001  (the size stays as it was)
                 pass
-        if self.player is not None:
+        if self.player is not None and self.video is not None:
             self.video.set_rotation(self.rotate)
         self._show_info()
 
@@ -518,7 +545,7 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
             w.setEnabled(on)
         self.b_play.setEnabled(on and self._can_play())
         self.b_play_sel.setEnabled(on and self._can_play())
-        self.buttons.button(QDialogButtonBox.Ok).setEnabled(on and self.frames() >= 1)
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(on and self.frames() >= 1)
 
     # ---- face picture
     def set_reference_kind(self, name: str, kind: str) -> None:
@@ -680,7 +707,8 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
                     proc.kill()
                     proc.communicate()
                     return None if gen != self._gen else QImage()
-        return QImage.fromData(out, "PNG") if proc.returncode == 0 else QImage()
+        # (the stubs want bytes as the format, PySide6 6.12 only takes str)
+        return QImage.fromData(out, "PNG") if proc.returncode == 0 else QImage()  # type: ignore[arg-type]
 
     def _frame_ready(self, gen: int, which: str, img: QImage):
         if gen != self._gen:

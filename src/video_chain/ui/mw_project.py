@@ -7,6 +7,7 @@ import shutil
 import threading
 import time
 from pathlib import Path
+from typing import cast
 
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
@@ -18,9 +19,11 @@ from .graph import START
 from .widgets import safe_emit
 from .project_dialogs import NewProjectDialog
 from .ui_logic import plural
+from .mw_host import MainWindowHost
+from .qsvalue import qs_value
 
 
-class ProjectMixin:
+class ProjectMixin(MainWindowHost):
     """Project files: new, open, save, copy, close."""
 
     # ---- new / open / save / close
@@ -30,9 +33,11 @@ class ProjectMixin:
         last = self.recent_projects()
         location = str(Path(last[0]).parent) if last else str(Path.home())
         dlg = NewProjectDialog(self, location, self.qs)
-        if dlg.exec() != QDialog.Accepted:
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        self.create_project(dlg.folder(), dlg.image.text().strip())
+        folder = dlg.folder()
+        if folder is not None:
+            self.create_project(folder, dlg.image.text().strip())
 
     def create_project(self, folder: Path, image: str = "") -> bool:
         """Create a new project folder (it must not be a project yet) and open it; optionally with a start image."""
@@ -226,7 +231,7 @@ class ProjectMixin:
                 film.current = scene
                 folder = film.path(scene)
             elif folder == root:
-                folder = film.path(film.current)
+                folder = film.path(film.current or film.scenes[0].id)
             else:
                 film.current = (film.scene_of(folder) or film.scenes[0]).id
             tree = T.load(folder)
@@ -238,10 +243,10 @@ class ProjectMixin:
             return False
         if not (folder / T.TREE_FILE).exists() and not tree.nodes:
             try:                                 # a new project starts with the last used settings
-                last = json.loads(self.qs.value("lastOptions", "{}", type=str))
-                tree.options.update({k: v for k, v in last.items()
-                                     if k in T.DEFAULT_OPTIONS and k not in ("identity", "cast", "style",
-                                                                             "audio_refs")})
+                last = json.loads(qs_value(self.qs, "lastOptions", "{}", str))
+                tree.options.update(cast(T.Options, {
+                    k: v for k, v in last.items()
+                    if k in T.DEFAULT_OPTIONS and k not in ("identity", "cast", "style", "audio_refs")}))
             except ValueError:
                 pass
         self._clean_options(tree.options)           # (a value that cannot be read must not leave a half-open project)
@@ -253,10 +258,10 @@ class ProjectMixin:
         self.focus = self._path_end = None         # (ids like n3 exist in every scene: no focus carried over)
         self._failures.clear()
         synced = ""
-        if len(film.scenes) > 1 and film.shared_state and film.shared(tree.options) != film.shared_state:
+        if len(film.scenes) > 1 and film.shared_state and film.shared(dict(tree.options)) != film.shared_state:
             tree.options.update(json.loads(json.dumps(film.shared_state)))   # it missed a change of the film's cast
             synced = " Its cast and sound settings were brought up to the film's."
-        self._shared_sent = json.dumps(film.shared(tree.options), sort_keys=True)
+        self._shared_sent = json.dumps(film.shared(dict(tree.options)), sort_keys=True)
         self.project_edit.setText(str(root))
         self.project_edit.setToolTip(str(folder))
         self.preview.stop()
@@ -298,13 +303,13 @@ class ProjectMixin:
         fw = QApplication.focusWidget() or self.focusWidget()
         typing = isinstance(fw, QPlainTextEdit) or (isinstance(fw, QLineEdit) and not fw.isReadOnly())
         if not typing and self.tree is not None and self.graph.isVisible():
-            self.graph.setFocus(Qt.OtherFocusReason)
+            self.graph.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def showEvent(self, e):
         super().showEvent(e)
         if not self._first_shown:
             self._first_shown = True
-            QTimer.singleShot(0, lambda: self.graph.setFocus(Qt.OtherFocusReason))
+            QTimer.singleShot(0, lambda: self.graph.setFocus(Qt.FocusReason.OtherFocusReason))
 
     def _tell_recovered(self, folder: Path, backup: Path):
         """tree.json was damaged and its backup was opened: said in the status line and the log, and in a notice
@@ -317,8 +322,8 @@ class ProjectMixin:
 
     def notify(self, title: str, text: str):
         """A notice that does not block the window (a message box opened, not run); kept until it is closed."""
-        box = QMessageBox(QMessageBox.Information, title, text, QMessageBox.Ok, self)
-        box.setAttribute(Qt.WA_DeleteOnClose)
+        box = QMessageBox(QMessageBox.Icon.Information, title, text, QMessageBox.StandardButton.Ok, self)
+        box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self._notices.append(box)
         box.destroyed.connect(lambda _=None, b=box: self._notices.remove(b) if b in self._notices else None)
         box.open()

@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from PySide6.QtCore import QObject, QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QImage, QPainter, QPen
@@ -16,7 +18,7 @@ from PySide6.QtWidgets import QHBoxLayout, QSlider, QToolButton, QVBoxLayout, QW
 
 from .. import chain, media
 from .theme import icon, theme
-from .widgets import icon_button, label, safe_emit
+from .widgets import icon_button, label, safe_emit, shortcut
 
 MEMORY_BUDGET = 900 * 2**20               # bytes for the stored frames of both clips (RGB, 3 bytes a pixel)
 MAX_SIZE = (1280, 720)                    # never stored larger than this (the view is smaller)
@@ -57,7 +59,7 @@ class CompareView(QWidget):
 
     def show_frames(self, before: QImage, after: QImage | None = None) -> None:
         self.before, self.after, self.text = before, after, ""
-        self.setCursor(Qt.SplitHCursor if after is not None else Qt.ArrowCursor)
+        self.setCursor(Qt.CursorShape.SplitHCursor if after is not None else Qt.CursorShape.ArrowCursor)
         self.update()
 
     def show_text(self, text: str) -> None:
@@ -77,9 +79,9 @@ class CompareView(QWidget):
         p.fillRect(self.rect(), theme().bgSunken)
         if self.before.isNull():
             p.setPen(theme().textTertiary)
-            p.drawText(self.rect(), Qt.AlignCenter | Qt.TextWordWrap, self.text)
+            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap, self.text)
             return
-        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         r = self.picture_rect()
         if self.after is None or self.after.isNull():
             p.drawImage(r, self.before)
@@ -92,7 +94,7 @@ class CompareView(QWidget):
         p.drawImage(QRectF(x, r.top(), r.right() - x, r.height()), self.after,
                     QRectF(cut * self.after.width() / iw, 0, self.after.width() * (1 - self.split),
                            self.after.height()))
-        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setPen(QPen(theme().overlayInk, 2))
         p.drawLine(QPointF(x, r.top()), QPointF(x, r.bottom()))
         p.setBrush(theme().overlayInk)
@@ -105,11 +107,11 @@ class CompareView(QWidget):
             box = QRectF(r.left() + 8 if left else r.right() - 8 - w, r.top() + 8, w, 20)
             if (left and box.right() > x - 4) or (not left and box.left() < x + 4):
                 continue                                 # (no label over the divider)
-            p.setPen(Qt.NoPen)
+            p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(theme().hudBg)
             p.drawRoundedRect(box, 4, 4)
             p.setPen(theme().overlayInk)
-            p.drawText(box, Qt.AlignCenter, text)
+            p.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
 
     def _move_split(self, x: float):
         r = self.picture_rect()
@@ -119,11 +121,11 @@ class CompareView(QWidget):
         self.update()
 
     def mousePressEvent(self, e):
-        if e.button() == Qt.LeftButton:
+        if e.button() == Qt.MouseButton.LeftButton:
             self._move_split(e.position().x())
 
     def mouseMoveEvent(self, e):
-        if e.buttons() & Qt.LeftButton:
+        if e.buttons() & Qt.MouseButton.LeftButton:
             self._move_split(e.position().x())
 
 
@@ -142,7 +144,7 @@ class ComparePlayer(QWidget):
     def __init__(self, parent=None, fps: float = chain.FPS):
         super().__init__(parent)
         self.fps = fps
-        self.overlay = None
+        self.overlay: Callable[[int, QImage], Any] | None = None
         self.size_ = (0, 0)                              # the stored frame size
         self.clip_size = (0, 0)
         self.frames: list[bytes] = []
@@ -152,7 +154,10 @@ class ComparePlayer(QWidget):
         self._result_cancel = threading.Event()          # stops the running decode of the result
         self._events = [self._cancel, self._result_cancel]
         events = self._events                            # (a list, so the destroyed hook sees the current ones)
-        self.destroyed.connect(lambda *_: [e.set() for e in events])
+        def stop_loading(*_) -> None:
+            for e in events:
+                e.set()
+        self.destroyed.connect(stop_loading)
         self._t0 = 0.0                                   # when playing started (monotonic) and at which frame
         self._k0 = 0
         self._shown_k = -1
@@ -160,14 +165,14 @@ class ComparePlayer(QWidget):
         self._sig.loaded.connect(self._loaded)
         self._sig.progress.connect(self._progress)
         self.timer = QTimer(self)
-        self.timer.setTimerType(Qt.PreciseTimer)
+        self.timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.timer.timeout.connect(self._tick)
 
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
         self.view = CompareView()
         v.addWidget(self.view, 1)
-        self.slider = QSlider(Qt.Horizontal)
+        self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setEnabled(False)
         self.slider.valueChanged.connect(self._show)
         v.addWidget(self.slider)
@@ -190,12 +195,12 @@ class ComparePlayer(QWidget):
         row.addWidget(self.hint)
         v.addLayout(row)
         self._controls(False)
-        from PySide6.QtGui import QKeySequence, QShortcut
+        from PySide6.QtGui import QKeySequence
         for key, fn in (("Space", self.toggle), ("Left", lambda: self.step(-1)), ("Right", lambda: self.step(1)),
                         ("Shift+Left", lambda: self.step(-round(self.fps))),
                         ("Shift+Right", lambda: self.step(round(self.fps))), ("Home", lambda: self.seek(0)),
                         ("End", lambda: self.seek(self.count() - 1))):
-            QShortcut(QKeySequence(key), self, activated=fn, context=Qt.WidgetWithChildrenShortcut)
+            shortcut(QKeySequence(key), self, fn, context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
 
     @staticmethod
     def _button(text: str, tip: str, fn) -> QToolButton:
@@ -305,7 +310,7 @@ class ComparePlayer(QWidget):
         if src is None or not 0 <= k < len(src):
             return QImage()
         w, h = self.size_
-        return QImage(src[k], w, h, w * 3, QImage.Format_RGB888).copy()
+        return QImage(src[k], w, h, w * 3, QImage.Format.Format_RGB888).copy()
 
     def position(self) -> int:
         return self.slider.value()
@@ -315,7 +320,7 @@ class ComparePlayer(QWidget):
             return
         before = self.image(k)
         if self.overlay is not None:
-            before = before.convertToFormat(QImage.Format_ARGB32)
+            before = before.convertToFormat(QImage.Format.Format_ARGB32)
             self.overlay(k, before)
         after = self.image(k, True) if self.result is not None else None
         self.view.show_frames(before, after if after is not None and not after.isNull() else None)
