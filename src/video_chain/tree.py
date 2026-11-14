@@ -124,6 +124,33 @@ PICTURE_TAG = re.compile(r"<Picture\s*\d+>", re.IGNORECASE)
 # a spoken line: "...", “...”, „...“, «...» or MiniMax's own <d>[Language] ...</d>
 DIALOGUE = re.compile(r'<d>\s*(?:\[[^\]\n]*\]\s*)?(.*?)</d>|"([^"\n]+)"|“([^”\n]+)”|„([^“”\n]+)[“”]|«([^»\n]+)»',
                       re.DOTALL)
+# how a line is spoken, in square brackets inside it: "[angry] Lass mich!", "Ja [laughs] genau". Text to speech that
+# hears them gets them (tts.spoken_text); the clip model never does (clip_cast takes them out of the lines).
+SPEECH_TAG = re.compile(r"\[[^\[\]\n]{1,80}\]")
+
+
+def without_tags(line: str) -> str:
+    """A spoken line without its [tags] (and the spaces they leave)."""
+    out = SPEECH_TAG.sub(" ", line or "")
+    out = re.sub(r"[ \t]+", " ", out)
+    return re.sub(r" ([,.;:!?…])", r"\1", out).strip()
+
+
+def without_speech_tags(text: str) -> str:
+    """A prompt with the [tags] taken out of its spoken lines only (the brackets elsewhere stay, and so does the
+    [Language] of a <d>[Language] ...</d> line)."""
+    text = text or ""
+    out, pos = [], 0
+    for m in DIALOGUE.finditer(text):
+        g = next((k for k in range(1, (m.lastindex or 0) + 1) if m.group(k) is not None), None)
+        if g is None or not SPEECH_TAG.search(m.group(g)):
+            continue
+        a, b = m.span(g)
+        out += [text[pos:a], without_tags(m.group(g))]
+        pos = b
+    return "".join(out) + text[pos:]
+
+
 SAID_BY = re.compile(r"[ \t]*,?[ \t]*(says|said|asks|asked|answers|answered|replies|replied|whispers|whispered|"
                      r"shouts|shouted|calls|called|adds|added|cries|cried|murmurs|murmured|mutters|muttered|laughs|"
                      r"laughed|sagt|fragt|antwortet|ruft|flüstert)[ \t]+@(\w[\w-]*)", re.IGNORECASE)   # "...", says @Anna
@@ -1211,6 +1238,7 @@ def clip_cast(options: dict, prompt: str, voices: bool = True, lead: bool = True
     None:    no face pictures (no cast, or no lead).
     In the h3 format (is_h3) the same modes pick the same kind of pictures, but the text is written by
     h3_prompt.compose (see _h3_cast; model_prompt adds the clip's frames, camera, notes and soundtrack)."""
+    prompt = without_speech_tags(prompt)          # (how a line is spoken is for text to speech only)
     if is_h3(options):
         return _h3_cast(options, prompt, voices, lead)
     text = full_prompt(options, prompt)

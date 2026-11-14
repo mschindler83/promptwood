@@ -553,3 +553,188 @@ def test_a_transcript_does_not_go_to_a_voice_replaced_meanwhile(project, tmp_pat
     T.set_voice(project, t, "Anna", other)                    # replaced while the lines were made
     tts.apply_lines(project, t, n.id, r)
     assert "text" not in T.character(t, "Anna")["voice"]
+
+
+# ---- Fish S2 Pro and [tags] in lines
+
+
+class FakeFish(FakeLocal):
+    """Fish S2 Pro without the model (the same calls as Qwen3-TTS: clone, transcribe)."""
+    name = "fish"
+
+
+def test_tags_go_only_to_the_engines_that_hear_them(project, tmp_path):
+    """Fish S2 Pro and ElevenLabs v3 get a line with its [tags]; Qwen3-TTS and the older ElevenLabs models get it
+    without them; the track keeps the line as written."""
+    t = T.load(project)
+    give_voice(project, t, "Anna", tmp_path)
+    n = t.add(None, '@Anna says "[angry] Lass mich [sighs] endlich in Ruhe!"')
+    fish = FakeFish()
+    r = tts.speak_lines(project, t, n.id, fish)
+    assert [c[1] for c in fish.calls if c[0] == "clone"] == ["[angry] Lass mich [sighs] endlich in Ruhe!"]
+    assert T.track_of(t, r["track"])["tts"] == {"clip": n.id, "provider": "fish", "language": "German",
+                                                "lines": [{"name": "Anna",
+                                                           "line": "[angry] Lass mich [sighs] endlich in Ruhe!"}]}
+    loc = FakeLocal()
+    tts.speak_lines(project, t, n.id, loc)
+    assert [c[1] for c in loc.calls if c[0] == "clone"] == ["Lass mich endlich in Ruhe!"]
+    T.character(t, "Anna")["tts"] = {"eleven": {"id": "v1", "name": "Rachel"}}
+    for model, said in (("eleven_multilingual_v2", "Lass mich endlich in Ruhe!"),
+                        ("eleven_v3", "[angry] Lass mich [sighs] endlich in Ruhe!")):
+        t.options["tts"] = {"provider": "elevenlabs", "eleven_model": model}
+        el = FakeEleven()
+        tts.speak_lines(project, t, n.id, el)
+        assert el.calls[-1][1] == said
+    assert tts.takes_tags("fish") and tts.takes_tags("elevenlabs", "eleven_v3")
+    assert not tts.takes_tags("local") and not tts.takes_tags("elevenlabs", "eleven_multilingual_v2")
+    n.prompt = '@Anna says "[sighs]"'                       # a sound alone: Fish makes it, Qwen has nothing to say
+    t.options["tts"] = {"provider": "local"}
+    tts.render_lines(project, t, n.id, FakeFish())
+    with pytest.raises(tts.TtsError, match="nothing to say besides its"):
+        tts.render_lines(project, t, n.id, FakeLocal())
+
+
+def test_fish_transcribes_first_and_has_its_own_delivery(project, tmp_path):
+    """Every voice sample is transcribed before the first line is spoken (Whisper and Fish never share the GPU);
+    steady / lively are Fish's own temperatures (natural: the model's own)."""
+    t = T.load(project)
+    give_voice(project, t, "Anna", tmp_path)
+    give_voice(project, t, "Ben", tmp_path)
+    n = t.add(None, '@Anna says "[happy] Hallo." @Ben answers "[tired] Na?" @Anna says "[laughs] Ja!"')
+    fish = FakeFish()
+    tts.render_lines(project, t, n.id, fish, speak={"delivery": "steady"})
+    kinds = [c[0] for c in fish.calls]
+    assert kinds == ["transcribe", "transcribe", "clone", "clone", "clone"]
+    assert all(c[-1] == {"temperature": 0.5} for c in fish.calls if c[0] == "clone")
+    fish = FakeFish()
+    tts.render_lines(project, t, n.id, fish, speak={"delivery": "natural"})
+    assert all(len(c) == 6 for c in fish.calls if c[0] == "clone")      # (no temperature given)
+    fish = FakeFish()
+    tts.render_lines(project, t, n.id, fish, speak={"delivery": "lively"})
+    assert all(c[-1] == {"temperature": 0.9} for c in fish.calls if c[0] == "clone")
+
+
+def test_the_clip_model_never_sees_the_tags(project, tmp_path):
+    assert T.without_tags("[angry] Lass mich [sighs] endlich in Ruhe [quietly]!") == "Lass mich endlich in Ruhe!"
+    assert T.without_tags("Nur Text.") == "Nur Text."
+    text = '[Shot 2] @Anna says "[angry] Lass mich!" and <d>[German] [laughs] Ja.</d> [a note]'
+    assert T.without_speech_tags(text) == '[Shot 2] @Anna says "Lass mich!" and <d>[German] Ja.</d> [a note]'
+    t = T.load(project)
+    prompt = '@Anna looks at @Ben and says "[whispering, scared] Hörst du das [gasps] auch?"'
+    for fmt in ("classic", "h3"):
+        t.options["prompt_format"] = fmt
+        for voiced in (False, True):
+            if voiced:
+                give_voice(project, t, "Anna", tmp_path)
+            out = T.clip_cast(t.options, prompt)["prompt"]
+            assert "Hörst du das auch?" in out, (fmt, voiced, out)
+            assert not any(w in out for w in ("whispering", "scared", "gasps")), (fmt, voiced, out)
+    assert T.dialogue(t.options, prompt)[0]["line"] == "[whispering, scared] Hörst du das [gasps] auch?"
+
+
+def test_fish_worker_protocol_and_its_checks(tmp_path, monkeypatch):
+    """The Fish worker speaks the same protocol (clone with its model's snapshot); before it starts the Qwen3-TTS
+    helper is stopped and free RAM and VRAM are checked; transcribing goes to the helper (Fish stops first, the
+    helper right after); it runs in a capped systemd scope when systemd is there."""
+    w = tmp_path / "worker.py"
+    w.write_text(FAKE_WORKER)
+    cache = fake_cache(tmp_path)
+    (cache / ("models--" + tts.FISH_MODEL.replace("/", "--")) / "snapshots" / "f1").mkdir(parents=True)
+    helper = tts.LocalTTS(python=Path(sys.executable), cache=cache, worker=w, start_timeout=20)
+    fish = tts.FishTTS(python=Path(sys.executable), cache=cache, worker=w, start_timeout=20, helper=helper,
+                       mem_cap_gb=None)
+    from video_chain import llm_server
+    monkeypatch.setattr(tts, "mem_available_mb", lambda: 40000)
+    monkeypatch.setattr(llm_server, "free_vram_mb", lambda: 23000)
+    assert fish.problems(transcribe=True) == []
+    try:
+        assert fish.transcribe(tmp_path / "v.wav", "de") == "said" and not helper.running() and not fish.running()
+        helper.request({"cmd": "x"})                        # (the helper runs) ...
+        assert fish.clone("[angry] Hallo", "German", tmp_path / "r.wav", "t", tmp_path / "o.wav", 5) == 1.5
+        assert not helper.running() and fish.running()      # ... and goes before Fish starts
+        echo = fish.request({"cmd": "x"})["echo"]
+        assert fish.transcribe(tmp_path / "v.wav") == "said" and not fish.running()
+    finally:
+        fish.stop()
+        helper.stop()
+    assert echo == {"cmd": "x"}
+    monkeypatch.setattr(tts, "mem_available_mb", lambda: 3000)
+    with pytest.raises(tts.TtsError, match="GB of RAM is free"):
+        fish.clone("Hallo", "German", tmp_path / "r.wav", "t", tmp_path / "o.wav")
+    monkeypatch.setattr(tts, "mem_available_mb", lambda: 40000)
+    monkeypatch.setattr(llm_server, "free_vram_mb", lambda: 12000)
+    with pytest.raises(tts.TtsError, match="GB of VRAM is free"):
+        fish.clone("Hallo", "German", tmp_path / "r.wav", "t", tmp_path / "o.wav")
+    assert not fish.running()
+    capped = tts.FishTTS(python=Path(sys.executable), worker=w, mem_cap_gb=12)
+    monkeypatch.setattr(tts, "_user_systemd", lambda: True)
+    cmd = capped._command()
+    assert cmd[:3] == ["systemd-run", "--user", "--scope"] and "MemoryMax=12G" in cmd and "MemorySwapMax=0" in cmd
+    assert cmd[-3:] == [sys.executable, "-I", str(w)]
+    monkeypatch.setattr(tts, "_user_systemd", lambda: False)
+    assert capped._command() == [sys.executable, "-I", str(w)]
+
+
+def test_fish_problems_and_engine_choice(tmp_path):
+    helper = tts.LocalTTS(python=tmp_path / "nope" / "python", cache=tmp_path)
+    fish = tts.FishTTS(python=tmp_path / "nofish" / "python", cache=tmp_path, helper=helper)
+    bad = fish.problems(transcribe=True)
+    assert "Fish S2 Pro's environment is missing" in bad[0] and "uv sync" in bad[0]
+    assert any(tts.FISH_MODEL in b for b in bad) and any("TTS environment" in b for b in bad)
+    t = T.Tree()
+    t.options["tts"] = {"provider": "fish"}
+    loc = tts.LocalTTS()
+    eng = tts.engine(t, loc)
+    assert eng.name == "fish" and eng.helper is loc
+    assert tts.engine(t, loc, fish) is fish
+    t.options["tts"] = {"provider": "local"}
+    assert tts.engine(t, loc, fish) is loc
+    assert "fish" in tts.PROVIDERS and "non-commercial" in tts.PROVIDERS["fish"]
+
+
+@pytest.mark.models
+def test_fish_s2_pro_speaks_tones_in_a_cloned_voice(tmp_path):
+    """The real model (about 19 GB of VRAM, run alone): a designed voice (Qwen3-TTS) cloned by Fish S2 Pro, its lines
+    heard back by Whisper: the words are right, no [tag] is read out, and [shouting] is louder than [whispering].
+    The environments: tts.FISH_PYTHON and tts.TTS_PYTHON, or $FISH_PYTHON and $TTS_PYTHON (another checkout's)."""
+    import os
+
+    from video_chain.llm_server import free_vram_mb
+    py = Path(os.environ.get("FISH_PYTHON") or tts.FISH_PYTHON)
+    helper = tts.LocalTTS(python=Path(os.environ.get("TTS_PYTHON") or tts.TTS_PYTHON), log=tmp_path / "worker.log")
+    fish = tts.FishTTS(python=py, log=tmp_path / "fish.log", helper=helper)
+    bad = fish.problems(design=True, transcribe=True)
+    if bad:
+        pytest.skip("; ".join(bad))
+    free = free_vram_mb()
+    if free is not None and free < tts.FISH_VRAM_MB:
+        pytest.skip(f"only {free} MB of VRAM free; Fish S2 Pro needs {tts.FISH_VRAM_MB}")
+
+    def mean_db(path):
+        out = subprocess.run(["ffmpeg", "-v", "info", "-i", str(path), "-af", "volumedetect", "-f", "null", "-"],
+                             capture_output=True, text=True).stderr
+        return float(out.split("mean_volume:")[1].split("dB")[0])
+    try:
+        ref = tmp_path / "ref.wav"
+        fish.design(tts.SAMPLE_TEXT["German"], "German", "Eine Frau um die dreißig, lebhafte, ausdrucksstarke Stimme.",
+                    ref, seed=3)
+        said = fish.transcribe(ref, "de")
+        assert "dich zu sehen" in said.lower(), said          # (the reference only: its umlaut is not the point)
+        got, loud = {}, {}
+        for key, line in (("plain", "Wir sehen uns morgen im Park."),
+                          ("shouting", "[shouting] Wir sehen uns morgen im Park!"),
+                          ("whispering", "[whispering] Wir sehen uns morgen im Park."),
+                          ("inline", "Wir sehen uns [laughs] morgen im Park.")):
+            out = tmp_path / f"{key}.wav"
+            assert 1.0 < fish.clone(line, "German", ref, said, out, seed=1) < 10.0
+            loud[key] = mean_db(out)
+            got[key] = out
+        assert fish.running()
+        for key, out in got.items():                        # (Fish stops for Whisper)
+            heard = fish.transcribe(out, "de").lower()
+            assert "wir sehen uns morgen im park" in heard.replace(",", ""), (key, heard)
+            assert not any(w in heard for w in ("shouting", "whispering", "laughs")), (key, heard)
+        assert loud["shouting"] > loud["whispering"] + 3, loud
+    finally:
+        fish.stop()
+        helper.stop()

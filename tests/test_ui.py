@@ -4829,3 +4829,61 @@ def test_more_start_pictures_make_rows(app, win, tmp_path, image, monkeypatch):
 def chain_sig(path):
     from video_chain import chain
     return chain.file_signature(path)
+
+
+def test_speak_window_puts_a_tone_into_a_line(app):
+    """With an engine that hears [tags] the Speak the lines window offers tones: one goes into the line clicked
+    last, where its cursor is (before any click: the first line, at its start); without such an engine: no tones."""
+    from video_chain.ui.speak_dialog import SpeakLinesDialog
+    lines = [{"name": "Anna", "line": "Lass mich in Ruhe!"}, {"name": "Ben", "line": "Ja genau."}]
+    make = lambda tags: SpeakLinesDialog(None, "#1", lines, "fish" if tags else "local",   # noqa: E731
+                                         {"takes": 1, "delivery": "natural", "speed": 1.0}, play=lambda *a: None,
+                                         render=lambda *a: None, file=lambda r: r, tags=tags)
+    dlg = make(True)
+    try:
+        dlg.tone.setCurrentText("angry")
+        dlg.put_tone()
+        assert dlg.line_texts() == ["[angry] Lass mich in Ruhe!", "Ja genau."]
+        e = dlg.line_edits[1]
+        dlg._target = e                                      # (Ben's line clicked, the cursor after "Ja")
+        e.setCursorPosition(2)
+        dlg.tone.setCurrentText("[laughs]")                  # (typed with its brackets: still one pair)
+        dlg.put_tone()
+        assert dlg.line_texts()[1] == "Ja [laughs] genau."
+        dlg.tone.setCurrentText("tired, half asleep")        # own words
+        dlg.put_tone()
+        assert dlg.line_texts()[1] == "Ja [laughs] [tired, half asleep] genau."
+        assert any("square brackets" in w.text() for w in dlg.findChildren(type(dlg.info)))
+    finally:
+        dlg.deleteLater()
+    dlg = make(False)
+    try:
+        assert dlg.tone is None and dlg.b_tone is None
+        assert any("Fish S2 Pro hears them" in w.text() for w in dlg.findChildren(type(dlg.info)))
+    finally:
+        dlg.deleteLater()
+
+
+def test_fish_engine_in_the_window(win, monkeypatch):
+    """Fish S2 Pro is a provider; its worker transcribes with the Qwen3-TTS worker; before it starts the llama.cpp
+    server goes and ComfyUI is asked for its VRAM; stop_tts stops both workers."""
+    from video_chain import tts as TTS
+    assert win.tts_provider.findData("fish") >= 0
+    win.tree = win.tree or T.Tree()
+    win.tree.options["tts"] = {"provider": "fish"}
+    eng = win._tts_engine()
+    assert eng.name == "fish" and eng.helper is win.local_tts() and win._tts_engine() is eng
+    calls = []
+
+    class Llama:
+        def stop(self, wait=True):
+            calls.append(("llama", wait))
+            return True
+    monkeypatch.setattr(win, "_llama", Llama(), raising=False)
+    monkeypatch.setattr(win, "_make_room", lambda need, url, what, error, later: calls.append((need, what, error)))
+    eng.before_launch(eng)
+    assert calls == [("llama", True), (TTS.FISH_VRAM_MB, "Fish S2 Pro", TTS.TtsError)]
+    stops = []
+    monkeypatch.setattr(win._tts_local, "stop", lambda: stops.append("qwen") or True)
+    monkeypatch.setattr(win._tts_fish, "stop", lambda: stops.append("fish") or True)
+    assert win.stop_tts("test") and stops == ["qwen", "fish"]

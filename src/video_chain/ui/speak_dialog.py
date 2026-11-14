@@ -1,6 +1,7 @@
 """Speak a clip's lines with text to speech: several takes to choose from, and how they are spoken (steady or lively,
-slower or faster). The words of the lines can be changed to try other sentences. The takes are listened to; "Use this
-take" makes one the clip's sound (and its words the clip's lines)."""
+slower or faster). The words of the lines can be changed to try other sentences; with an engine that hears [tags]
+(Fish S2 Pro, ElevenLabs v3) a tone can be put into a line ([angry], [laughs] ...). The takes are listened to; "Use
+this take" makes one the clip's sound (and its words the clip's lines)."""
 from __future__ import annotations
 
 import threading
@@ -22,9 +23,10 @@ class SpeakLinesDialog(QDialog):
     """lines: [{"name", "line"}]; speak: the settings to start with (tts.speak_options); play(path, title): how a
     take is listened to; render(take number, speak, line texts) -> a take (tts.render_lines; called in a thread),
     file(take) -> its path. chosen: the take to use (after "Use this take"; its "prompt" has the words it speaks);
-    unused(): the takes to delete."""
+    unused(): the takes to delete. tags: the engine hears [tags] in a line (a tone can be put in)."""
 
-    def __init__(self, parent, clip: str, lines: list[dict], provider: str, speak: dict, play, render, file):
+    def __init__(self, parent, clip: str, lines: list[dict], provider: str, speak: dict, play, render, file,
+                 tags: bool = False):
         super().__init__(parent)
         self.setWindowTitle(f"Speak the lines of clip {clip}")
         self.clip, self.provider = clip, provider
@@ -41,15 +43,34 @@ class SpeakLinesDialog(QDialog):
         v = QVBoxLayout(self)
         self.original = [d["line"] for d in lines]
         self.line_edits: list[QLineEdit] = []
+        self._target: QLineEdit | None = None       # the line a tone goes into (the one last clicked or typed in)
         lform = QFormLayout()
         for d in lines:
             e = QLineEdit(d["line"])
             e.setToolTip(f"What {d['name']} says. Change it to try another sentence: the take you use writes its "
-                         "words into the clip's prompt.")
+                         "words into the clip's prompt." + (" A tone in square brackets says how it is spoken "
+                                                            "([angry] at the start, [laughs] in the middle)."
+                                                            if tags else ""))
             e.textChanged.connect(lambda _t: self._enable())
+            e.cursorPositionChanged.connect(lambda _a, _b, e=e: self._aim(e))
             self.line_edits.append(e)
             lform.addRow(d["name"], e)
         v.addLayout(lform)
+        self.tone = self.b_tone = None
+        if tags:
+            trow = QHBoxLayout()
+            self.tone = QComboBox()
+            self.tone.setEditable(True)
+            self.tone.addItems(tts.TONE_TAGS)
+            self.tone.setToolTip("How the line is spoken. Pick one or type your own words: any short description "
+                                 "works ([tired, half asleep], [proud]); several go together ([whispering, scared]).")
+            self.b_tone = QPushButton("Put into the line")
+            self.b_tone.setToolTip("Writes the tone as [tag] into the line you clicked last, where its cursor is "
+                                   "(the first line, at its start, before you click one)")
+            self.b_tone.clicked.connect(self.put_tone)
+            trow.addWidget(self.tone, 1)
+            trow.addWidget(self.b_tone)
+            v.addLayout(trow)
         form = QFormLayout()
         self.n = QSpinBox()
         self.n.setRange(1, 8)
@@ -73,10 +94,14 @@ class SpeakLinesDialog(QDialog):
         form.addRow("Speed", self.speed)
         guard_wheel(self.n, self.delivery, self.speed)
         v.addLayout(form)
-        hint = label("The tone (calm, angry, whispering …) comes from the voice sample: a voice set from a part "
+        hint = label("Say how a line is spoken in square brackets: [angry] at its start, [laughs] or "
+                     "[whispering] in the middle. Any words work; the clip's picture never sees them. A lively "
+                     "voice sample gives the tones more room than a very calm one." if tags else
+                     "The tone (calm, angry, whispering …) comes from the voice sample: a voice set from a part "
                      "where the speaker sounds like that speaks its lines like that. Punctuation is heard too "
-                     "(! ? …)." if provider == "local" else
-                     "The tone comes from the ElevenLabs voice and from the punctuation of the line (! ? …).",
+                     "(! ? …). [Tags] in a line are left out (Fish S2 Pro hears them)." if provider == "local" else
+                     "The tone comes from the ElevenLabs voice and from the punctuation of the line (! ? …); its "
+                     "v3 models also hear [tags] in a line.",
                      level="tertiary")
         hint.setWordWrap(True)
         v.addWidget(hint)
@@ -116,6 +141,24 @@ class SpeakLinesDialog(QDialog):
         """The lines as they are typed now."""
         return [tts.clean_line(e.text()) for e in self.line_edits]
 
+    def _aim(self, e: QLineEdit):
+        if e.hasFocus():
+            self._target = e
+
+    def put_tone(self):
+        """The chosen tone as [tag] into the line clicked last, at its cursor (else the first line, at its start)."""
+        word = (self.tone.currentText() if self.tone is not None else "").strip().strip("[]").strip()
+        if not word or not self.line_edits or self.busy:
+            return
+        e = self._target or self.line_edits[0]
+        text, at = e.text(), (e.cursorPosition() if e is self._target else 0)
+        before, after = text[:at].rstrip(), text[at:].lstrip()
+        tag = f"[{word}]"
+        new = " ".join(x for x in (before, tag, after) if x)
+        e.setText(new)
+        e.setCursorPosition(len(" ".join(x for x in (before, tag) if x)))
+        self._target = e
+
     def selected(self) -> dict | None:
         row = self.list.currentRow()
         return self.takes[row] if 0 <= row < len(self.takes) else None
@@ -123,7 +166,7 @@ class SpeakLinesDialog(QDialog):
     def _enable(self):
         self.b_make.setEnabled(not self.busy and all(self.line_texts()))
         self.b_make.setText("Make more takes" if self.takes else "Make the takes")
-        for w in (self.n, self.delivery, self.speed, *self.line_edits):
+        for w in (self.n, self.delivery, self.speed, *self.line_edits, *[x for x in (self.tone, self.b_tone) if x]):
             w.setEnabled(not self.busy)
         self.b_play.setEnabled(self.selected() is not None)
         self.b_use.setEnabled(not self.busy and self.selected() is not None)
@@ -137,7 +180,7 @@ class SpeakLinesDialog(QDialog):
         self._next += n
         self.busy, self._stop = True, False
         self._enable()
-        self.info.setText(f"Speaking take 1 of {n}…" + (" (the model loads first)" if self.provider == "local"
+        self.info.setText(f"Speaking take 1 of {n}…" + (" (the model loads first)" if self.provider in ("local", "fish")
                                                          and not self.takes else ""))
         self._left = n
 
