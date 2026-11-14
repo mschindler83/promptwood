@@ -20,6 +20,7 @@ from PySide6.QtGui import QColor, QIcon, QImage, QImageReader, QPainter, QPixmap
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QMenu, QSlider, QSplitter, QStyle, QVBoxLayout, QWidget)
 
+from .. import media
 from .theme import icon, theme
 from .widgets import icon_button, label
 
@@ -92,15 +93,14 @@ def prune_cache(cache_dir: Path, keep: int = MAX_CACHED) -> None:
 
 def _video_frame(path: str, box: int = THUMB_MAX) -> QImage:
     """A frame of a video (at 1 s, else the first), at most box pixels on its long side (ffmpeg; any thread)."""
-    import subprocess
     for at in ("1", "0"):
         try:
-            r = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-ss", at, "-i", path, "-frames:v", "1", "-vf",
+            out = media.ffmpeg(["-ss", at, "-i", path, "-frames:v", "1", "-vf",
                                 f"scale='min({box},iw)':'min({box},ih)':force_original_aspect_ratio=decrease",
-                                "-f", "image2pipe", "-c:v", "png", "-"], capture_output=True, timeout=30)
-        except (OSError, subprocess.TimeoutExpired):
-            return QImage()
-        img = QImage.fromData(r.stdout, "PNG") if r.stdout else QImage()
+                                "-f", "image2pipe", "-c:v", "png", "-"], timeout=30, text=False)
+        except media.MediaError:
+            continue                                    # (no frame at that second: the first one is tried)
+        img = QImage.fromData(out, "PNG") if out else QImage()
         if not img.isNull():
             return img
     return QImage()
@@ -108,12 +108,10 @@ def _video_frame(path: str, box: int = THUMB_MAX) -> QImage:
 
 def _media_info(path: str) -> str:
     """'0:12.5 · 1920×1080 · 24 fps' (videos) or '0:08.0 · sound' (ffprobe; '' if unreadable)."""
-    import subprocess
     try:
-        r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration:stream=codec_type,width,height,"
-                            "r_frame_rate", "-of", "json", path], capture_output=True, text=True, timeout=20)
-        d = json.loads(r.stdout or "{}")
-    except (OSError, ValueError, subprocess.TimeoutExpired):
+        d = media.ffprobe_json(path, "-show_entries", "format=duration:stream=codec_type,width,height,r_frame_rate",
+                               timeout=20)
+    except (OSError, ValueError, media.MediaError):
         return ""
     secs = float((d.get("format") or {}).get("duration") or 0)
     m, sec = divmod(secs, 60)

@@ -8,7 +8,6 @@ video ends, the last one where a clip after it starts.
 from __future__ import annotations
 
 import subprocess
-import tempfile
 import threading
 from pathlib import Path
 
@@ -17,7 +16,7 @@ from PySide6.QtGui import QImage, QPainter, QPen
 from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QDoubleSpinBox, QHBoxLayout, QLineEdit,
                                QPushButton, QStackedWidget, QVBoxLayout, QWidget)
 
-from .. import chain
+from .. import chain, media
 from .theme import icon, theme, with_alpha
 from .widgets import FrameTile, VideoView, format_time, guard_wheel, icon_button, label
 
@@ -483,14 +482,13 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
         if self.info is None or self.on_reference is None:
             return False
         t = self.position()
-        with tempfile.TemporaryDirectory(prefix="video-chain-ref-") as d:
+        with media.scratch("ref") as d:
             png = Path(d) / "frame.png"
             try:
                 turn = chain.rotate_filter(self.rotate)
-                subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{t:.4f}", "-i", self.file]
-                               + (["-vf", turn] if turn else []) + ["-frames:v", "1", "-update", "1", str(png)],
-                               capture_output=True, timeout=60)
-            except (OSError, subprocess.SubprocessError):
+                media.ffmpeg(["-y", "-ss", f"{t:.4f}", "-i", self.file] + (["-vf", turn] if turn else [])
+                             + ["-frames:v", "1", "-update", "1", png], timeout=60)
+            except (OSError, media.MediaError):
                 pass
             if not png.is_file():
                 self.summary.setText(f"Could not read the frame at {fmt(t)}.")
@@ -573,8 +571,8 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
         """Run a frame decode; killed as soon as the range moves on or the dialog closes (None then)."""
         import time
         try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        except OSError:
+            proc = media.popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+        except (OSError, media.MediaError):
             return QImage()
         end = time.monotonic() + 120
         while True:

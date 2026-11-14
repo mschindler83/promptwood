@@ -6,8 +6,6 @@ memory at the size they are shown at; stepping and playing then only paint store
 inspected exactly. The stored size keeps the memory below MEMORY_BUDGET."""
 from __future__ import annotations
 
-import subprocess
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -16,7 +14,7 @@ from PySide6.QtCore import QObject, QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QImage, QPainter, QPen
 from PySide6.QtWidgets import QHBoxLayout, QSlider, QToolButton, QVBoxLayout, QWidget
 
-from .. import chain
+from .. import chain, media
 from .theme import icon, theme
 from .widgets import icon_button, label
 
@@ -34,32 +32,11 @@ def store_size(width: int, height: int, frames: int, clips: int = 2) -> tuple[in
 
 def decode(clip: Path, size: tuple[int, int], progress=None, cancelled=None) -> list[bytes]:
     """Every frame of the clip as RGB bytes at size (in the clip's own frame order and count)."""
-    w, h = size
-    n = w * h * 3
-    err_file = tempfile.TemporaryFile()                  # (a file, not a pipe: a chatty ffmpeg cannot fill it up)
-    proc = subprocess.Popen(["ffmpeg", "-nostdin", "-v", "error", "-i", str(clip), "-map", "0:v:0",
-                             "-fps_mode", "passthrough", "-vf", f"scale={w}:{h}:flags=area", "-f", "rawvideo",
-                             "-pix_fmt", "rgb24", "-"], stdout=subprocess.PIPE, stderr=err_file)
     frames: list[bytes] = []
-    try:
-        while True:
-            if cancelled is not None and cancelled():
-                proc.kill()
-                break
-            buf = proc.stdout.read(n)
-            if len(buf) < n:
-                break
-            frames.append(buf)
-            if progress is not None:
-                progress(len(frames))
-    finally:
-        proc.stdout.close()
-        code = proc.wait()
-        err_file.seek(0)
-        err = err_file.read(65536).decode(errors="replace").strip()
-        err_file.close()
-    if code and not (cancelled is not None and cancelled()):
-        raise RuntimeError(f"cannot read {Path(clip).name}: {err.splitlines()[-1] if err else code}")
+    for buf in media.iter_frames(clip, size, "rgb24", flags="area", passthrough=True, cancelled=cancelled):
+        frames.append(buf)
+        if progress is not None:
+            progress(len(frames))
     return frames
 
 

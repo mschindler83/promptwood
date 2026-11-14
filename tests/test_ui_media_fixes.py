@@ -420,7 +420,7 @@ def test_compare_decode_does_not_use_a_stderr_pipe(tmp_path, monkeypatch):
     def spy(*a, **k):
         seen.update(k)
         return real(*a, **k)
-    monkeypatch.setattr(compare_player.subprocess, "Popen", spy)
+    monkeypatch.setattr(subprocess, "Popen", spy)
     clip = make_video(tmp_path / "c.mp4", 0.5)
     frames = compare_player.decode(clip, (80, 44))
     assert len(frames) >= 10 and seen["stderr"] is not subprocess.PIPE

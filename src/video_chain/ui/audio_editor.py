@@ -16,7 +16,7 @@ from PySide6.QtGui import QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout,
                                QLineEdit, QPushButton, QVBoxLayout)
 
-from .. import chain
+from .. import chain, media
 from ..tree import AUDIO_REF_MIN, VOICE_MAX_SECS, VOICE_REF_MAX_SECS
 from .theme import theme, with_alpha
 from .video_editor import RangeBar, RangePlayerMixin, fmt
@@ -32,10 +32,10 @@ def waveform(path: str | Path, duration: float, columns: int = PEAKS, rate: int 
     import math
     step = max(1, math.ceil(max(duration, 0.001) * rate / columns))     # samples per column
     try:
-        proc = subprocess.Popen(["ffmpeg", "-nostdin", "-v", "error", "-i", str(path), "-map", "0:a:0", "-vn",
-                                 "-ac", "1", "-ar", str(rate), "-f", "f32le", "-"],
-                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    except OSError:
+        proc = media.popen(["ffmpeg", "-nostdin", "-v", "error", "-i", str(path), "-map", "0:a:0", "-vn",
+                            "-ac", "1", "-ar", str(rate), "-f", "f32le", "-"],
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+    except (OSError, media.MediaError):
         return []
     out, rest = [], b""
     try:
@@ -404,7 +404,7 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
             self.player.pause()
         self._stop_cleaned()
         if self._tmp is None:
-            self._tmp = tempfile.TemporaryDirectory(prefix="video-chain-voice-")
+            self._tmp = media.scratch("voice")
         self._clean_n += 1
         raw = Path(self._tmp.name) / f"part{self._clean_n}.wav"
         out = Path(self._tmp.name) / f"cleaned{self._clean_n}.wav"

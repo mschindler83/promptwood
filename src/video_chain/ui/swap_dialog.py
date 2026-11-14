@@ -6,7 +6,6 @@ the new head, at its own size, frames and sound; "Use this" makes the video node
 from __future__ import annotations
 
 import random
-import tempfile
 import threading
 import time
 import uuid
@@ -17,7 +16,7 @@ from PySide6.QtGui import QColor, QImage, QPainter, QPen
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLineEdit,
                                QMessageBox, QProgressBar, QPushButton, QVBoxLayout)
 
-from .. import chain, swap
+from .. import chain, media, swap
 from ..animate import DEFAULT_PROMPT, SIZES, gen_size, window_count
 from .compare_player import ComparePlayer
 from .widgets import FrameTile, guard_wheel, label
@@ -79,7 +78,7 @@ class SwapDialog(QDialog):
         self.animator = None
         self._busy = False
         self._cancel = False
-        self._tmp = tempfile.TemporaryDirectory(prefix="video-chain-swap-")
+        self._tmp = media.scratch("swap")
         self._sig = _Sig()
         self._sig.found.connect(self._found)
         self._sig.progress.connect(self._progress)
