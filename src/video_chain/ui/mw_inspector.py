@@ -227,6 +227,13 @@ class InspectorMixin(MainWindowHost):
         for raw in T.source_sound_problems(self.tree, todo, self.project):
             out.append(Problem(PK.SOURCE_SOUND, plain_problem(raw, nid), raw + " (the clip's “Sound” setting)", "sound",
                                "Show"))
+        out += self._cast_problems(nid, todo)
+        out += self._lora_problems(nid, checker)
+        return out
+
+    def _cast_problems(self, nid: str, todo: list[str]) -> list[Problem]:
+        assert self.project is not None and self.tree is not None
+        out: list[Problem] = []
         for c in T.cast_issues(self.project, self.tree, todo):
             raw = c.text
             if c.kind is T.CastKind.UNKNOWN:
@@ -240,12 +247,18 @@ class InspectorMixin(MainWindowHost):
             else:
                 out.append(Problem(PK.CAST, plain_problem(raw, nid), raw + " (Cast & references)", "cast",
                                    "Open Cast & references"))
-        for lo in T.loras_needed(self.tree, checker, [nid]):
-            if not Path(lo).is_file():
-                out.append(Problem(PK.LORA, f"An add-on (LoRA) of this clip is missing: {Path(lo).name}. Choose it "
-                                   "again or remove it.", f"The LoRA file does not exist: {lo}", "loras", "Show"))
-                break
         return out
+
+    def _lora_problems(self, nid: str, checker: T.Checker) -> list[Problem]:
+        """One problem naming every LoRA file of the clip that is gone (not only the first)."""
+        assert self.tree is not None
+        gone = [lo for lo in T.loras_needed(self.tree, checker, [nid]) if not Path(lo).is_file()]
+        if not gone:
+            return []
+        names = ", ".join(Path(lo).name for lo in gone)
+        text = (f"An add-on (LoRA) of this clip is missing: {names}. Choose it again or remove it." if len(gone) == 1
+                else f"Add-ons (LoRAs) of this clip are missing: {names}. Choose them again or remove them.")
+        return [Problem(PK.LORA, text, "The LoRA file does not exist: " + "; ".join(gone), "loras", "Show")]
 
     def _note_failure(self, code: int):
         """A run failed: what went wrong stays on the card of the clip it failed at (the first clip still to make

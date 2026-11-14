@@ -185,3 +185,30 @@ def test_voice_fields_are_set_through_the_public_call(app, win, tmp_path, image)
     assert T.character(win.tree, "Anna")["voice"]["text"] == "from a take"
     win._keep_transcripts([{"voice_files": {"Anna": "refs/other.wav"}, "texts": {"Anna": "stale"}}])
     assert T.character(win.tree, "Anna")["voice"]["text"] == "from a take"
+
+
+# ------------------------------------------------------------------ MWB-15: every missing LoRA is said, not the first only
+def test_all_missing_loras_of_a_clip_are_named(app, tmp_path, monkeypatch):
+    from PIL import Image
+
+    from video_chain import tree as T
+    from video_chain.ui.main_window import MainWindow
+    img = tmp_path / "s.jpg"
+    Image.new("RGB", (64, 36)).save(img)
+    here = tmp_path / "here.safetensors"
+    here.write_bytes(b"x")
+    w = MainWindow(settings(tmp_path), command=FAKE)
+    try:
+        assert w.create_project(tmp_path / "p", str(img))
+        nid = w.tree.selected
+        monkeypatch.setattr(T, "loras_needed", lambda *a, **k: [str(tmp_path / "gone1.safetensors"), str(here),
+                                                                str(tmp_path / "gone2.safetensors")])
+        lora = [p for p in w.clip_problems(nid) if p.kind.name == "LORA"]
+        assert len(lora) == 1
+        assert "gone1.safetensors" in lora[0].text and "gone2.safetensors" in lora[0].text
+        assert "here.safetensors" not in lora[0].text
+        monkeypatch.setattr(T, "loras_needed", lambda *a, **k: [str(tmp_path / "gone1.safetensors")])
+        one = [p for p in w.clip_problems(nid) if p.kind.name == "LORA"]
+        assert "gone1.safetensors" in one[0].text and "gone2" not in one[0].text
+    finally:
+        w.close()
