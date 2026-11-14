@@ -240,7 +240,7 @@ class Tree:
         """A real video (file, start..end seconds, turned clockwise by rotate degrees) after parent. A generated clip
         can lead into one video only."""
         if not self.can_add_video(parent):
-            raise ValueError(f"clip #{parent[1:]} already leads into a video")
+            raise ValueError(f"clip #{short_id(parent)} already leads into a video")
         if float(end) <= float(start):
             raise ValueError("the end of the range must be after its start")
         node = self.add(parent, "")
@@ -255,7 +255,7 @@ class Tree:
         parts (its original range split at the same moment). Returns (the new clip, the rest)."""
         v = self.nodes[nid]
         if not v.is_video:
-            raise ValueError(f"#{nid[1:]} is not a real video")
+            raise ValueError(f"#{short_id(nid)} is not a real video")
         start, end = float(v.source["start"]), float(v.source["end"])
         at = round(float(at), 4)
         if not start + 1 / chain.FPS <= at <= end - 1 / chain.FPS:
@@ -307,7 +307,8 @@ class Tree:
         return [s.id for n in self.path_to(nid) for s in self.siblings(n.id)]
 
     def number(self, nid: str) -> int:
-        return int(nid[1:]) if nid[1:].isdigit() else 0
+        s = short_id(nid)
+        return int(s) if s.isdigit() else 0
 
     # ---- files
     def to_json(self) -> dict:
@@ -1464,35 +1465,35 @@ def cast_problems(project: Path, tree: Tree, todo: list[str]) -> list[str]:
         found, unknown = mentions(tree.options, text)
         for word in unknown:
             close = _closest(word, names)
-            out.append(f"clip #{nid[1:]} mentions @{word}, but there is no such character"
+            out.append(f"clip #{short_id(nid)} mentions @{word}, but there is no such character"
                        + (f" — did you mean @{close}?" if close else " (add it in the Cast)"))
         for c in found:
             if kind_of(c) != "person" and not c["images"]:
-                out.append(f"@{c['name']} (clip #{nid[1:]}) has no picture yet")
+                out.append(f"@{c['name']} (clip #{short_id(nid)}) has no picture yet")
             elif not c["images"] and not c.get("voice"):
-                out.append(f"@{c['name']} (clip #{nid[1:]}) has no face picture or voice yet")
+                out.append(f"@{c['name']} (clip #{short_id(nid)}) has no face picture or voice yet")
         for m in WRONG_TAG.finditer(text):
-            out.append(f"clip #{nid[1:]} writes <{m.group(1)} {m.group(2)}>; the model only knows <Picture "
+            out.append(f"clip #{short_id(nid)} writes <{m.group(1)} {m.group(2)}>; the model only knows <Picture "
                        f"{m.group(2)}> (or mention the character as @Name)")
         use = node_cast(tree.options, node)
         if use["mode"] in ("mention", "voices") and PICTURE_TAG.search(text):
-            out.append(f"clip #{nid[1:]} writes <Picture N> and mentions @Names; with @Names the app numbers the "
+            out.append(f"clip #{short_id(nid)} writes <Picture N> and mentions @Names; with @Names the app numbers the "
                        "pictures itself, so write the people only as @Name")
         if use["mode"] == "tags":
             top = max(int(re.sub(r"\D", "", t)) for t in PICTURE_TAG.findall(text))
             if top > len(use["images"]):
                 n = len(use["images"])
-                out.append(f"clip #{nid[1:]} names <Picture {top}>, but the cast has only {n} face "
+                out.append(f"clip #{short_id(nid)} names <Picture {top}>, but the cast has only {n} face "
                            f"picture{'' if n == 1 else 's'}")
         faces = "face " if all(kind_of(c) == "person" for c in use["characters"]) else ""
         if len(use["images"]) > MAX_CAST_PICTURES:
-            out.append(f"clip #{nid[1:]} needs {len(use['images'])} {faces}pictures; the model takes at most "
+            out.append(f"clip #{short_id(nid)} needs {len(use['images'])} {faces}pictures; the model takes at most "
                        f"{MAX_CAST_PICTURES}")
         if any(not (Path(project) / r).is_file() for r in use["images"]):
-            out.append(f"a {faces}picture of clip #{nid[1:]} is missing in refs/")
+            out.append(f"a {faces}picture of clip #{short_id(nid)} is missing in refs/")
         if use["voices"]:
             if any(not (Path(project) / r).is_file() for r in use["voices"]):
-                out.append(f"a voice of clip #{nid[1:]} is missing in refs/")
+                out.append(f"a voice of clip #{short_id(nid)} is missing in refs/")
             n_sounds = audio_mentioned(text)
             secs = {a["file"]: float(a.get("secs") or 0) for a in audio_refs(tree)[:n_sounds]}
             secs.update({c["voice"]["file"]: float(c["voice"].get("secs") or 0) for c in cast_of(tree)
@@ -1502,9 +1503,9 @@ def cast_problems(project: Path, tree: Tree, todo: list[str]) -> list[str]:
             what = (f"{len(use['voices'])} voice{'s' if len(use['voices']) != 1 else ''}"
                     + (f" and {n_sounds} sound{'s' if n_sounds != 1 else ''}" if n_sounds else ""))
             if n > MAX_AUDIO_REFS:
-                out.append(f"clip #{nid[1:]} needs {what}; the model takes at most {MAX_AUDIO_REFS} sounds")
+                out.append(f"clip #{short_id(nid)} needs {what}; the model takes at most {MAX_AUDIO_REFS} sounds")
             elif total > AUDIO_REF_TOTAL + 0.05:
-                out.append(f"clip #{nid[1:]} needs {what} of {total:.1f} s together; the model takes at most "
+                out.append(f"clip #{short_id(nid)} needs {what} of {total:.1f} s together; the model takes at most "
                            f"{AUDIO_REF_TOTAL:.0f} s (shorten a voice: set it again from a shorter part)")
     return list(dict.fromkeys(out))
 
@@ -1577,10 +1578,10 @@ def audio_problems(project: Path, tree: Tree, todo: list[str]) -> list[str]:
             continue
         n = audio_mentioned(full_prompt(tree.options, node.prompt))
         if n > len(refs):
-            out.append(f"clip #{nid[1:]} names <Audio {n}>, but there {'is' if len(refs) == 1 else 'are'} only "
+            out.append(f"clip #{short_id(nid)} names <Audio {n}>, but there {'is' if len(refs) == 1 else 'are'} only "
                        f"{len(refs)} sound reference{'' if len(refs) == 1 else 's'}")
         elif any(not (Path(project) / a["file"]).is_file() for a in refs[:n]):
-            out.append(f"a sound reference of clip #{nid[1:]} is missing in refs/")
+            out.append(f"a sound reference of clip #{short_id(nid)} is missing in refs/")
     return out
 
 
@@ -1596,7 +1597,7 @@ def set_end_image(project: Path, tree: Tree, nid: str, image: Path) -> str:
     if node.is_video:
         raise ValueError("a real video has no end image of its own")
     if tree.video_child(nid) is not None:
-        raise ValueError(f"clip #{nid[1:]} ends at the video after it")
+        raise ValueError(f"clip #{short_id(nid)} ends at the video after it")
     d = Path(project) / ENDS_DIR
     d.mkdir(parents=True, exist_ok=True)
     rel = f"{ENDS_DIR}/{nid}_{uuid.uuid4().hex[:8]}.png"
@@ -1692,7 +1693,7 @@ def freeze_problem(project: Path, tree: Tree, nid: str) -> str | None:
     ck = Checker(project, trial)
     for n in nodes:
         if not ck._files_there(n):
-            return f"{'video' if n.is_video else 'clip'} #{n.id[1:]} is not made yet (or its files are missing)"
+            return f"{'video' if n.is_video else 'clip'} #{short_id(n.id)} is not made yet (or its files are missing)"
     for n in nodes:
         if not n.is_video:
             _revert_fields(trial, n.id)
@@ -1701,7 +1702,7 @@ def freeze_problem(project: Path, tree: Tree, nid: str) -> str | None:
     for n in nodes:
         why = ck.seam_problem(n)
         if why:
-            return f"clip #{n.id[1:]}: {why}; make it again first"
+            return f"clip #{short_id(n.id)}: {why}; make it again first"
     return None
 
 
@@ -1876,7 +1877,7 @@ def keyframe_problem(tree: Tree, checker: "Checker", todo: list[str]) -> str | N
         seen = set()
         for k in node.keyframes:
             f = keyframe_frame(k["at"])
-            where = f"clip #{nid[1:]}'s keyframe at {k['at']:.2f} s"
+            where = f"clip #{short_id(nid)}'s keyframe at {k['at']:.2f} s"
             if f > hi:
                 return (f"{where} is at or past its end ({frames / chain.FPS:.2f} s{', minus its carry-over' if hi < frames - 2 else ''}): "
                         "move it earlier or make the clip longer")
@@ -2349,7 +2350,7 @@ class Checker:
             return "its settings changed (the project's or its own)"
         if node.parent is not None and self.status(node.parent) != "done":
             p = self.tree.nodes[node.parent]
-            return f"{'video' if p.is_video else 'clip'} #{p.id[1:]} before it changes"
+            return f"{'video' if p.is_video else 'clip'} #{short_id(p.id)} before it changes"
         if m.get("start_sha1") != self.sha(self.start_frame(node)):
             return "the frame it starts from changed"
         if m.get("end_key") != self.end_key(node):
@@ -2650,7 +2651,7 @@ def source_sound_problems(tree: Tree, todo: list[str], project: Path | None = No
         tid = track_id(node)
         if tid is not None:
             if span is None:
-                out.append(f"clip #{nid[1:]} plays an audio track that was removed; choose another sound")
+                out.append(f"clip #{short_id(nid)} plays an audio track that was removed; choose another sound")
                 continue
             track = track_of(tree, tid)
             if not sound_file(project, span).is_file():
@@ -2658,52 +2659,52 @@ def source_sound_problems(tree: Tree, todo: list[str], project: Path | None = No
                 continue
             if span["start"] >= float(track["secs"]) - 0.05:
                 out.append(f"the audio track “{track['name']}” ({float(track['secs']):.1f} s) has ended before clip "
-                           f"#{nid[1:]} (it would start at {span['start']:.1f} s); choose another sound")
+                           f"#{short_id(nid)} (it would start at {span['start']:.1f} s); choose another sound")
                 continue
             if not over and span["secs"] < AUDIO_REF_MIN:
-                out.append(f"clip #{nid[1:]} is shorter than {AUDIO_REF_MIN:.0f} s, the least sound the model "
+                out.append(f"clip #{short_id(nid)} is shorter than {AUDIO_REF_MIN:.0f} s, the least sound the model "
                            "takes; make it longer to play the audio track")
             if not over:
                 out += _sound_room(tree, node, span)
             continue
         if (node.overrides or {}).get("source_sound") == "previous":
             if span is None:
-                out.append(f"clip #{nid[1:]} repeats the sound of the clip before, but it is the first clip")
+                out.append(f"clip #{short_id(nid)} repeats the sound of the clip before, but it is the first clip")
                 continue
             before = tree.nodes[span["video"]]
             if not over and span["secs"] < AUDIO_REF_MIN:
-                out.append(f"clip #{nid[1:]} is shorter than {AUDIO_REF_MIN:.0f} s, the least sound the model "
+                out.append(f"clip #{short_id(nid)} is shorter than {AUDIO_REF_MIN:.0f} s, the least sound the model "
                            "takes; make it longer to repeat the sound of the clip before")
             if span["loop"] < REPEAT_MIN:
-                out.append(f"the clip before clip #{nid[1:]} plays only {span['loop']:.2f} s in the film, too short "
+                out.append(f"the clip before clip #{short_id(nid)} plays only {span['loop']:.2f} s in the film, too short "
                            f"to repeat (at least {REPEAT_MIN} s)")
             if not over:
                 out += _sound_room(tree, node, span)
             if not before.is_video and before.id in todo:   # made (again) first in this run: checked then
                 continue
             if not span["file"]:
-                out.append(f"clip #{nid[1:]} repeats the sound of clip #{before.id[1:]}, which is not made yet")
+                out.append(f"clip #{short_id(nid)} repeats the sound of clip #{short_id(before.id)}, which is not made yet")
                 continue
             if not sound_file(project, span).is_file():
-                out.append(f"the video file of clip #{nid[1:]}'s sound is missing ({Path(span['file']).name})")
+                out.append(f"the video file of clip #{short_id(nid)}'s sound is missing ({Path(span['file']).name})")
                 continue
             out += _repeat_sound_problems(project, node, span)
             continue
         if span is None:
-            out.append(f"clip #{nid[1:]} continues a real video's sound, but there is no real video before it")
+            out.append(f"clip #{short_id(nid)} continues a real video's sound, but there is no real video before it")
             continue
         if not Path(span["file"]).is_file():
-            out.append(f"the video file of clip #{nid[1:]}'s sound is missing ({Path(span['file']).name})")
+            out.append(f"the video file of clip #{short_id(nid)}'s sound is missing ({Path(span['file']).name})")
             continue
         have = chain.audio_seconds(Path(span["file"]))
         need = span["start"] + span["secs"]
         if not over and span["secs"] < AUDIO_REF_MIN:
-            out.append(f"clip #{nid[1:]} is shorter than {AUDIO_REF_MIN:.0f} s, the least sound the model takes; "
+            out.append(f"clip #{short_id(nid)} is shorter than {AUDIO_REF_MIN:.0f} s, the least sound the model takes; "
                        "make it longer to continue the video's sound")
         if have is None:
-            out.append(f"{Path(span['file']).name} has no sound, so clip #{nid[1:]} cannot continue it")
+            out.append(f"{Path(span['file']).name} has no sound, so clip #{short_id(nid)} cannot continue it")
         elif have < need - 0.05:
-            out.append(f"clip #{nid[1:]} needs the sound of {Path(span['file']).name} up to "
+            out.append(f"clip #{short_id(nid)} needs the sound of {Path(span['file']).name} up to "
                        f"{int(need // 60)}:{need % 60:04.1f}, but it ends at {int(have // 60)}:{have % 60:04.1f}; "
                        "make the clip shorter")
         if not over:
@@ -2714,11 +2715,11 @@ def source_sound_problems(tree: Tree, todo: list[str], project: Path | None = No
 def _repeat_sound_problems(project: Path | None, node: Node, span: dict) -> list[str]:
     """The clip before's file must have sound, about as long as the part that is repeated."""
     have = chain.audio_seconds(sound_file(project, span))
-    who = f"clip #{(span.get('video') or node.parent or '?')[1:]}"
+    who = f"clip #{short_id(span.get('video') or node.parent or '?')}"
     if have is None:
-        return [f"{who} has no sound, so clip #{node.id[1:]} cannot repeat it"]
+        return [f"{who} has no sound, so clip #{short_id(node.id)} cannot repeat it"]
     if have < span["start"] + span["loop"] - 0.25:
-        return [f"{who}'s sound ends at {have:.1f} s, before the part clip #{node.id[1:]} repeats "
+        return [f"{who}'s sound ends at {have:.1f} s, before the part clip #{short_id(node.id)} repeats "
                 f"(up to {span['start'] + span['loop']:.1f} s)"]
     return []
 
@@ -2732,10 +2733,10 @@ def _sound_room(tree: Tree, node: Node, span: dict) -> list[str]:
         sum(float(c["voice"].get("secs") or 0) for c in cast_of(tree) if c.get("voice")
             and c["voice"]["file"] in voices)
     if n_sounds + len(voices) + 1 > MAX_AUDIO_REFS:
-        return [f"clip #{nid[1:]} has too many sounds with its soundtrack (the model takes "
+        return [f"clip #{short_id(nid)} has too many sounds with its soundtrack (the model takes "
                 f"{MAX_AUDIO_REFS}); remove a sound or voice from its prompt"]
     if secs > AUDIO_REF_TOTAL + 0.05:
-        return [f"clip #{nid[1:]} needs {secs:.1f} s of sound with its soundtrack (the model takes "
+        return [f"clip #{short_id(nid)} needs {secs:.1f} s of sound with its soundtrack (the model takes "
                 f"{AUDIO_REF_TOTAL:.0f} s); make it shorter or leave out its other sounds"]
     return []
 
@@ -2858,7 +2859,7 @@ def clip_inputs(project: Path, tree: Tree, nid: str, checker: "Checker | None" =
     checker = checker or Checker(project, tree)
     node = tree.nodes[nid]
     if node.is_video:
-        raise ValueError(f"#{nid[1:]} is a real video")
+        raise ValueError(f"#{short_id(nid)} is a real video")
     s = checker.settings(nid) or {}
     use = node_cast(tree.options, node)
     plain = plain_frames(project, tree, node)
@@ -3158,8 +3159,8 @@ def _guides(project: Path, tree: Tree, node: Node, settings: dict, tmp: Path) ->
         if k is not None:                           # it hands over earlier: the frames up to that one
             n = k + 1
         if n < guide:
-            raise ValueError(f"clip #{parent.id[1:]} ({n} frames) is shorter than the {guide}-frame carry-over "
-                             f"of clip #{node.id[1:]}")
+            raise ValueError(f"clip #{short_id(parent.id)} ({n} frames) is shorter than the {guide}-frame carry-over "
+                             f"of clip #{short_id(node.id)}")
         g = tmp / "guide_start.mp4"
         audio = chain.cut_frames(clip, g, n - guide, guide)
         guides.append({"video": str(g), "frame_idx": 0, "frames": guide, "audio": audio, "at": "start"})
@@ -3167,8 +3168,8 @@ def _guides(project: Path, tree: Tree, node: Node, settings: dict, tmp: Path) ->
         if guide:
             clip, n = project / vc.made["video"], _clip_frames(project, vc)
             if n < guide:
-                raise ValueError(f"video #{vc.id[1:]} ({n} frames) is shorter than the {guide}-frame carry-over "
-                                 f"of clip #{node.id[1:]}")
+                raise ValueError(f"video #{short_id(vc.id)} ({n} frames) is shorter than the {guide}-frame carry-over "
+                                 f"of clip #{short_id(node.id)}")
             g = tmp / "guide_end.mp4"
             audio = chain.cut_frames(clip, g, 0, guide)
             guides.append({"video": str(g), "frame_idx": frames - guide, "frames": guide, "audio": audio,
@@ -3179,7 +3180,7 @@ def _guides(project: Path, tree: Tree, node: Node, settings: dict, tmp: Path) ->
         end_image = project / node.end_image
     used = sum(g["frames"] for g in guides)
     if used and used >= frames:
-        raise ValueError(f"clip #{node.id[1:]} ({frames} frames) is too short for its carry-over ({used} frames); "
+        raise ValueError(f"clip #{short_id(node.id)} ({frames} frames) is too short for its carry-over ({used} frames); "
                          "make it longer or the carry-over shorter")
     return guides, end_image
 
@@ -3209,12 +3210,12 @@ def guide_problem(tree: Tree, checker: "Checker", todo: list[str]) -> str | None
             if k is not None:                       # it hands over earlier
                 n = k + 1
             if n < guide:
-                return (f"{what} #{other.id[1:]} ({n} frames) is shorter than the {guide}-frame carry-over "
-                        f"of clip #{nid[1:]}")
+                return (f"{what} #{short_id(other.id)} ({n} frames) is shorter than the {guide}-frame carry-over "
+                        f"of clip #{short_id(nid)}")
             used += guide
         frames = int(s["frames"])
         if used and used >= frames:
-            return (f"clip #{nid[1:]} ({frames} frames) is too short for its carry-over ({used} frames); "
+            return (f"clip #{short_id(nid)} ({frames} frames) is too short for its carry-over ({used} frames); "
                     "make it longer or the carry-over shorter")
     return None
 
@@ -3249,7 +3250,7 @@ def remix_sound(project: Path, tree: Tree, nid: str, checker: Checker | None = N
     settings = ck.settings(nid)
     ss = settings["source_sound"]
     if not sound_file(project, ss).is_file():
-        raise FileNotFoundError(f"the sound of clip #{nid[1:]} is missing ({Path(ss['file']).name})")
+        raise FileNotFoundError(f"the sound of clip #{short_id(nid)} is missing ({Path(ss['file']).name})")
     with media.scratch("job", dir=str(project / "nodes")) as tmp:
         wav = Path(tmp) / "source_sound.wav"
         given_sound(project, node, ss, wav)
@@ -3338,10 +3339,10 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
         raise ValueError(problem)
     no_end = missing_end_images(project, tree, todo)
     if no_end:
-        raise FileNotFoundError(f"the end image of clip #{no_end[0][1:]} is missing")
+        raise FileNotFoundError(f"the end image of clip #{short_id(no_end[0])} is missing")
     no_key = missing_keyframes(project, tree, todo)
     if no_key:
-        raise FileNotFoundError(f"a keyframe picture of clip #{no_key[0][1:]} is missing")
+        raise FileNotFoundError(f"a keyframe picture of clip #{short_id(no_key[0])} is missing")
     problem = keyframe_problem(tree, checker, todo)
     if problem:
         raise ValueError(problem)
@@ -3410,7 +3411,7 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
                              end_image is not None)        # what the workflow really gets as plain frames
                     numbered = settings.get("frame_pictures") or []
                     if ("start" in numbered and not plain[0]) or ("end" in numbered and not plain[1]):
-                        raise RuntimeError(f"clip #{nid[1:]}: its frames are not the ones its settings number "
+                        raise RuntimeError(f"clip #{short_id(nid)}: its frames are not the ones its settings number "
                                            f"({', '.join(numbered)})")
                     generator.generate(model_prompt(tree.options, node, settings, start=plain[0], end=plain[1]),
                                        send, new_video, new_frame, node.seed, settings=call)
@@ -3668,7 +3669,7 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
             s = node.made.get("settings") or {}
             if node.is_video and not all(k_ in (node.made.get("key") or {}) for k_ in ("width", "height")) or \
                     not node.is_video and not all(k_ in s for k_ in ("width", "height")):
-                raise ValueError(f"{'video' if node.is_video else 'clip'} #{node.id[1:]} has no recorded size; "
+                raise ValueError(f"{'video' if node.is_video else 'clip'} #{short_id(node.id)} has no recorded size; "
                                  "make it again, then export")
             if regen and method != "refine":             # SeedVR2: the clip as made, restored at the size
                 dims = node.made.get("key") if node.is_video else s
