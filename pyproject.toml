@@ -32,5 +32,6 @@ video_chain = ["theme/*.json", "theme/*.in", "theme/icons/*.svg", "theme/fonts/*
 testpaths = ["tests"]
 pythonpath = ["src", "tests"]
 markers = ["models: needs real model files (run with -m models)",
+           "slow: takes more than about 5 s (real ffmpeg media); skip with -m 'not slow'",
            "h3_default: new trees get the app's real default prompt format (h3), not the tests' classic one"]
 addopts = "-m 'not models'"

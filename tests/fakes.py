@@ -1,4 +1,5 @@
 """Fake clip generator: synthetic ffmpeg clips, no model."""
+import socket
 import subprocess
 import time
 from pathlib import Path
@@ -6,6 +7,13 @@ from pathlib import Path
 from PIL import Image
 
 from video_chain import chain
+
+def free_port() -> int:
+    """A port nobody listens on now (for a fake server that cannot bind port 0 itself; prefer binding port 0)."""
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
 
 COLOURS = ["red", "green", "blue", "yellow", "magenta", "cyan"]
 
@@ -17,11 +25,11 @@ class FakeGenerator:
         self.frames, self.audio, self.size = frames, audio, size
         self.progress, self.step_delay, self.steps = progress, step_delay, steps
         self.calls = []
+        self.refines, self.seedvrs = [], []
 
     def refine(self, draft, prompt, out, seed, size, frames, loras, first_frame=None, last_frame=None, sparse=None,
                strength="natural"):
         """Fake 2K refine: the draft scaled to size (frames and sound kept)."""
-        self.refines = getattr(self, "refines", [])
         self.refines.append({"draft": Path(draft).name, "prompt": prompt, "size": tuple(size), "frames": frames,
                              "loras": loras, "first": first_frame and Path(first_frame).name,
                              "last": last_frame and Path(last_frame).name, "sparse": sparse,
@@ -31,7 +39,6 @@ class FakeGenerator:
 
     def seedvr(self, draft, out, size, method="seedvr2_7b", seed=42, denoise=False):
         """Fake SeedVR2 upscale: the draft scaled to size (frames and sound kept)."""
-        self.seedvrs = getattr(self, "seedvrs", [])
         self.seedvrs.append({"draft": Path(draft).name, "size": tuple(size), "method": method, "denoise": denoise})
         time.sleep(getattr(self, "step_delay", 0) * 10)          # (FAKE_DELAY: time to stop an export mid-clip)
         subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(draft), "-vf", f"scale={size[0]}:{size[1]},setsar=1",

@@ -658,7 +658,9 @@ def test_the_models_own_sound_is_kept_and_mixed_again(project, tmp_path):
     # the kept refined copy is not made again, it only gets the clip's new sound
     refiner = FakeGenerator()
     T.refine_path(refiner, project, a.id, "2k", tmp_path / "2k.mp4", log=lambda _m: None)
-    assert not getattr(refiner, "refines", []) and _band(tmp_path / "2k.mp4", 300) > 0.06
+    assert refiner.refines == [], (refiner.refines,           # (a copy made again shows its draft and size; its record
+                                   T.refine_record(T.refined_file(project, t.nodes[a.id], "2k")))   # tells why)
+    assert _band(tmp_path / "2k.mp4", 300) > 0.06
     assert T.refine_record(T.refined_file(project, t.nodes[a.id], "2k"))["sound"] == 4
 
 
