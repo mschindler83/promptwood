@@ -247,3 +247,24 @@ def test_the_speak_and_voice_buttons_are_off_with_their_reason_while_speech_is_b
     win._set_tts_busy(False)
     assert card.b_speak.isEnabled() and win.b_voice_tts.isEnabled() and win.b_voice_clone.isEnabled()
     assert "busy" not in card.b_speak.toolTip().lower()
+
+
+# ------------------------------------------------------------------ UX-10: the window's fields have names, labels are buddies
+def test_the_fields_of_the_window_have_accessible_names_and_their_labels_are_buddies(app, tmp_path):
+    from PySide6.QtWidgets import QLabel
+
+    from video_chain.ui.main_window import MainWindow
+    w = MainWindow(settings(tmp_path), command=FAKE)
+    try:
+        for name in ("project_edit", "char_desc", "char_kind", "comfy_launcher", "comfy_dir", "civitai_key",
+                     "eleven_key", "runpod_key", "eleven_model", "llm_model", "llm_port", "clip_cfg", "turbo_steps",
+                     "turbo_strength", "idle_minutes", "log"):
+            assert getattr(w, name).accessibleName(), name
+        buddies = {lab.text(): lab.buddy() for lab in w.findChildren(QLabel) if lab.buddy() is not None}
+        for text, field in (("Folder", w.comfy_dir), ("Start with", w.comfy_launcher), ("port", w.llm_port),
+                            ("strength", w.turbo_strength), ("CivitAI API key", w.civitai_key),
+                            ("ElevenLabs API key", w.eleven_key), ("RunPod API key", w.runpod_key)):
+            assert buddies.get(text) is field, text
+        assert any(lab.text() == "Folder" and lab.buddy() is w.project_edit for lab in w.findChildren(QLabel))
+    finally:
+        w.close()
