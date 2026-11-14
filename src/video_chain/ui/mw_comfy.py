@@ -42,8 +42,11 @@ class ComfyMixin(MainWindowHost):
         self._qwen_timer.stop()
 
         run_in_background(lambda: CMF.free_models(url, timeout=10), on_done=self._comfy_freed,
-                          on_error=lambda e: (logging.getLogger(__name__).warning("unloading ComfyUI's models", exc_info=e),
-                                              self._comfy_freed(False)), owner=self)
+                          on_error=self._free_failed, owner=self)
+
+    def _free_failed(self, e: BaseException):
+        logging.getLogger(__name__).warning("unloading ComfyUI's models", exc_info=e)
+        self._comfy_freed(False)
 
     def _comfy_freed(self, ok: bool):
         """ComfyUI answered the unload request (MWC-30): the model counts as unloaded only when it did."""

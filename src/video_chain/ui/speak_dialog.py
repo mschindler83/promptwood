@@ -4,20 +4,14 @@ slower or faster). The words of the lines can be changed to try other sentences;
 this take" makes one the clip's sound (and its words the clip's lines)."""
 from __future__ import annotations
 
-import threading
 
-from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import (QComboBox, QDialog, QDoubleSpinBox, QFormLayout, QHBoxLayout,
                                QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSpinBox, QVBoxLayout)
 
+from .workers import post, run_in_background
 from .. import tts
 from .dialogs import button_row
-from .widgets import fit_size, guard_wheel, label, safe_emit
-
-
-class _Signals(QObject):
-    take = Signal(object, str)                 # a rendered take (tts.render_lines) or None, error
-    done = Signal()
+from .widgets import fit_size, guard_wheel, label
 
 
 class SpeakLinesDialog(QDialog):
@@ -40,9 +34,6 @@ class SpeakLinesDialog(QDialog):
         self._failed = False                       # a take could not be made (this round)
         self._left = 0                             # takes still to come in this round
         self._next = 0
-        self._sig = _Signals(self)
-        self._sig.take.connect(self._take_done)
-        self._sig.done.connect(self._all_done)
         v = QVBoxLayout(self)
         self.original = [d["line"] for d in lines]
         self.line_edits: list[QLineEdit] = []
@@ -193,19 +184,17 @@ class SpeakLinesDialog(QDialog):
         self._failed = False
 
         def work():
-            try:
-                for k in range(n):
-                    if self._stop:
-                        break
-                    try:
-                        take = self._render(first + k, how, said)
-                    except Exception as e:  # noqa: BLE001
-                        safe_emit(self._sig.take, None, str(e))
-                        break
-                    safe_emit(self._sig.take, take, "")
-            finally:
-                safe_emit(self._sig.done)
-        threading.Thread(target=work, daemon=True).start()
+            for k in range(n):                      # (every take is handed over as it is made: post keeps the order)
+                if self._stop:
+                    break
+                try:
+                    take = self._render(first + k, how, said)
+                except Exception as e:  # noqa: BLE001
+                    post(self, self._take_done, None, str(e))
+                    break
+                post(self, self._take_done, take, "")
+        run_in_background(work, on_done=lambda _r: self._all_done(), on_error=lambda _e: self._all_done(),
+                          owner=self)
 
     def _take_done(self, r, err: str):
         if r is None:

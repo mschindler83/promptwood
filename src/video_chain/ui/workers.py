@@ -68,10 +68,10 @@ def _alive(owner: weakref.ref[QObject] | None) -> bool:
     return obj is not None and isValid(obj)
 
 
-def post(owner: QObject | None, fn: Callable[[], None]) -> bool:
-    """From any thread: call fn on the GUI thread (at once when already there; not when the owner is gone). True when
+def post(owner: QObject | None, fn: Callable[..., None], *args: Any) -> bool:
+    """From any thread: call fn(*args) on the GUI thread (at once when already there; not when the owner is gone). True when
     it was handed over."""
-    return _post(weakref.ref(owner) if owner is not None else None, fn)
+    return _post(weakref.ref(owner) if owner is not None else None, lambda: fn(*args))
 
 
 def _post(ref: weakref.ref[QObject] | None, fn: Callable[[], None]) -> bool:
@@ -110,6 +110,8 @@ def run_in_background(fn: Callable[[], Any], *, on_done: Callable[[Any], None],
         try:
             result = fn()
         except BaseException as e:  # noqa: BLE001 - whatever ends a worker goes to the caller or the log
+            if not _alive(ref):
+                log.debug("background work failed after its owner was gone: %s", e, exc_info=e)
             def failed(e: BaseException = e) -> None:
                 if stale():
                     return

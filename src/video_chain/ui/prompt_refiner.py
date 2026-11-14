@@ -4,24 +4,27 @@ seed, a hint like "more cinematic"), and taken over. Which model refines is chos
 from __future__ import annotations
 
 import html
+import logging
 import random
-import threading
 from collections.abc import Callable
 from typing import Any
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QIcon, QImage, QKeySequence, QPixmap
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLineEdit, QPlainTextEdit,
                                QPushButton, QSpinBox, QTextBrowser, QToolButton, QVBoxLayout, QWidget)
 
+from .workers import post, run_in_background
 from ..tree import refine_problems
 from .lora_details import themed
 from .theme import repolish, theme
 from .dialogs import add_action, button_row
 from .text_edit import replace_text  # noqa: F401  (main_window and image_edit import it from here)
-from .widgets import fit_size, guard_wheel, label, safe_emit, shortcut
+from .widgets import fit_size, guard_wheel, label, shortcut
 from .qsvalue import qs_value
+
+log = logging.getLogger(__name__)
 
 LIKE_EXAMPLE = ("Rewrite my prompt in the manner of this example prompt, which is known to work with the LoRA: take "
                 "its wording, its structure and its level of detail. Keep what my prompt is about (my subjects, my "
@@ -33,16 +36,6 @@ KIND_TEXT = {"video": "video clip prompt", "video_h3": "video clip prompt", "ima
 
 SETUP_HINT = ("More models: set up a local language model (llama.cpp, GGUF files) in the main window under "
               "Preferences, Prompt refiner.")
-
-
-class _Sig(QObject):
-    connected = Signal(object)            # the refiner connect() made (set in the GUI thread)
-    models = Signal(object, str)          # [model dicts], error
-    result = Signal(str, str)             # text, error
-    ideas = Signal(object, str)           # [idea dicts], error
-    loras = Signal(object)                # lora_notes.summary of the LoRA stack
-    told = Signal(str)                    # the LoRA part of the instruction a refine was given
-    progress = Signal(str)                # what is being done before the answer (a LoRA is read up on)
 
 
 class RefineDialog(QDialog):
@@ -78,14 +71,6 @@ class RefineDialog(QDialog):
         self._edited: dict[int, bool] = {}       # versions the user edited by hand
         self.pictures = [{"title": t, "path": str(p), "on": bool(on)} for t, p, on in (pictures or [])
                          if p and Path(p).is_file()]
-        self._sig = _Sig()
-        self._sig.models.connect(self._models)
-        self._sig.result.connect(self._result)
-        self._sig.ideas.connect(self._ideas_ready)
-        self._sig.connected.connect(self._connected)
-        self._sig.loras.connect(self._loras_known)
-        self._sig.progress.connect(self._progress)
-        self._sig.told.connect(self._was_told)
         self.ideas: list[dict] = []
         self._chosen_ideas: list[str] | None = None
         v = QVBoxLayout(self)
@@ -362,22 +347,26 @@ class RefineDialog(QDialog):
             return
         self._connecting = True
         self.state.setText("Connecting …")
-        sig, connect, loras = self._sig, self.connect, list(self.loras)
+        connect, loras = self.connect, list(self.loras)
 
         def work():
             if loras:
-                try:
-                    from .. import lora_notes
-                    safe_emit(sig.loras, lora_notes.summary(loras))
-                except Exception:  # noqa: BLE001  (nothing known of the LoRAs: a plain refine)
-                    pass
-            try:
-                refiner = connect()
-                safe_emit(sig.connected, refiner)              # (queued before the list: set in the GUI thread)
-                safe_emit(sig.models, refiner.models, "")
-            except Exception as e:  # noqa: BLE001
-                safe_emit(sig.models, [], str(e))
-        threading.Thread(target=work, daemon=True).start()
+                self._tell_loras(loras)
+            refiner = connect()
+            post(self, lambda: self._connected(refiner))        # (queued before the list: set in the GUI thread)
+            return refiner.models
+        run_in_background(work, on_done=lambda models: self._models(models, ""),
+                          on_error=lambda e: self._models([], str(e)), owner=self)
+
+    def _tell_loras(self, loras: list) -> None:
+        """(a worker thread) What is known of the LoRAs, to the dialog; nothing known: a plain refine."""
+        try:
+            from .. import lora_notes
+            summary = lora_notes.summary(loras)
+        except Exception:  # noqa: BLE001  (a LoRA's data cannot be read)
+            log.warning("what is known of the LoRAs could not be read", exc_info=True)
+            return
+        post(self, lambda: self._loras_known(summary))
 
     def _models(self, models: list, error: str):
         self._connecting = False
@@ -489,17 +478,10 @@ class RefineDialog(QDialog):
 
     def _refresh_loras(self):
         """Read again what is known of the LoRAs (a note was written or forgotten)."""
-        sig, loras = self._sig, list(self.loras)
+        loras = list(self.loras)
         if not loras:
             return
-
-        def work():
-            try:
-                from .. import lora_notes
-                safe_emit(sig.loras, lora_notes.summary(loras))
-            except Exception:  # noqa: BLE001
-                pass
-        threading.Thread(target=work, daemon=True).start()
+        run_in_background(lambda: self._tell_loras(loras), on_done=lambda _r: None, owner=self)
 
     def _remember_loras(self, on: bool):
         if self.qs is not None:
@@ -511,29 +493,27 @@ class RefineDialog(QDialog):
         (lora_notes.make_notes). What it is told is kept for "What the model is told…"."""
         paths = list(self.loras) if (not self._lora_row.isHidden() and self.use_loras.isEnabled()
                                      and self.use_loras.isChecked()) else []
-        refiner, model, sig = self.refiner, self.model.currentData(), self._sig
+        refiner, model = self.refiner, self.model.currentData()
 
         def guide() -> str:
             if not paths:
-                safe_emit(sig.told, "")
+                post(self, lambda: self._was_told(""))
                 return ""
             from .. import lora_notes
             try:
                 if hasattr(refiner, "complete"):
                     def said(name, i, n):
-                        safe_emit(sig.progress, f"Reading up on the LoRA {name} ({i} of {n}; once per LoRA) …")
+                        post(self, lambda: self._progress(f"Reading up on the LoRA {name} ({i} of {n}; once per LoRA) …"))
                     lora_notes.make_notes(paths, lambda system, user, n: refiner.complete(
                         system, user, n, model_file=model), progress=said)
-                    safe_emit(sig.progress, "")
+                    post(self, lambda: self._progress(""))
                 told = lora_notes.guidance(paths, prompt=text)
             except Exception:  # noqa: BLE001  (the LoRAs' data cannot be read: a plain refine)
+                log.warning("the LoRAs' notes could not be read", exc_info=True)
                 told = ""
-            try:
-                safe_emit(sig.told, told)
-                if told:
-                    safe_emit(sig.loras, lora_notes.summary(paths))    # (a note may be new: the counts say so)
-            except Exception:  # noqa: BLE001
-                pass
+            post(self, lambda: self._was_told(told))
+            if told:
+                self._tell_loras(paths)                                # (a note may be new: the counts say so)
             return told
         return guide
 
@@ -613,7 +593,7 @@ class RefineDialog(QDialog):
         """Ask the refiner to give up the answer being made (the dialog then shows the error that follows)."""
         if self._busy and hasattr(self.refiner, "interrupt"):
             self.b_stop.setEnabled(False)
-            threading.Thread(target=self.refiner.interrupt, daemon=True).start()
+            run_in_background(self.refiner.interrupt, on_done=lambda _r: None)
 
     def again(self):
         """The message that led to the current version, asked again (another answer replaces it; the version
@@ -647,23 +627,18 @@ class RefineDialog(QDialog):
         text, kind, model = self.original.toPlainText(), self.kind, self.model.currentData()
         ask = self.hint.text().strip() if ask is None else ask
         self._pending = ask
-        sig, refiner, seed, cast = self._sig, self.refiner, random.randint(0, 2**31 - 1), self.cast
+        refiner, seed, cast = self.refiner, random.randint(0, 2**31 - 1), self.cast
         turns, pics = list(self.turns[:self.base + 1]), self.chosen_pictures()
         clip, guide = self._clip(), self._lora_guide(text)
 
         def work():
-            try:
-                loras = guide()
-                more = {**clip, **({"loras": loras} if loras else {})}
-                if chat:
-                    out = refiner.chat(text, kind, turns, ask, pictures=pics, cast=cast or None, seed=seed, **more)
-                else:
-                    out = refiner.refine_prompt(text, kind, model, seed, ask, **({"cast": cast} if cast else {}),
-                                                **more)
-                safe_emit(sig.result, out, "")
-            except Exception as e:  # noqa: BLE001
-                safe_emit(sig.result, "", str(e))
-        threading.Thread(target=work, daemon=True).start()
+            loras = guide()
+            more = {**clip, **({"loras": loras} if loras else {})}
+            if chat:
+                return refiner.chat(text, kind, turns, ask, pictures=pics, cast=cast or None, seed=seed, **more)
+            return refiner.refine_prompt(text, kind, model, seed, ask, **({"cast": cast} if cast else {}), **more)
+        run_in_background(work, on_done=lambda out: self._result(out, ""),
+                          on_error=lambda e: self._result("", str(e)), owner=self)
 
     def _clip(self) -> dict:
         """What a "video_h3" refine is told about the clip (nothing for the other kinds). A conversation shows the
@@ -712,18 +687,15 @@ class RefineDialog(QDialog):
         n, wish, bullets = self.count.value(), self.hint.text().strip(), self.original.toPlainText()
         self._asked_bullets = bullets
         self._say(f"Making {n} ideas … (about {4 * n} s)")
-        sig, refiner, seed, cast, pics = self._sig, self.refiner, random.randint(0, 2**31 - 1), self.cast, \
-            self.chosen_pictures()
+        refiner, seed, cast, pics = self.refiner, random.randint(0, 2**31 - 1), self.cast, self.chosen_pictures()
         guide = self._lora_guide(bullets)
 
         def work():
-            try:
-                loras = guide()
-                safe_emit(sig.ideas, refiner.ideas(bullets, n, wish, pictures=pics, cast=cast or None, seed=seed,
-                                               **({"loras": loras} if loras else {})), "")
-            except Exception as e:  # noqa: BLE001
-                safe_emit(sig.ideas, [], str(e))
-        threading.Thread(target=work, daemon=True).start()
+            loras = guide()
+            return refiner.ideas(bullets, n, wish, pictures=pics, cast=cast or None, seed=seed,
+                                 **({"loras": loras} if loras else {}))
+        run_in_background(work, on_done=lambda ideas: self._ideas_ready(ideas, ""),
+                          on_error=lambda e: self._ideas_ready([], str(e)), owner=self)
 
     def _ideas_ready(self, ideas: list, error: str):
         self._busy = False
@@ -802,5 +774,5 @@ class RefineDialog(QDialog):
 
     def done(self, r):
         if self._busy and self.refiner is not None and hasattr(self.refiner, "interrupt"):
-            threading.Thread(target=self.refiner.interrupt, daemon=True).start()
+            run_in_background(self.refiner.interrupt, on_done=lambda _r: None)
         super().done(r)

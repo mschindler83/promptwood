@@ -5,27 +5,30 @@ the frame slider, make it larger or smaller; choose the new person's picture; Ge
 the new head, at its own size, frames and sound; "Use this" makes the video node play it (it can go back)."""
 from __future__ import annotations
 
+import logging
 import random
-import threading
 import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QObject, QRectF, QSettings, Qt, Signal
+from PySide6.QtCore import QRectF, QSettings, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPen
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLineEdit,
                                QProgressBar, QPushButton, QVBoxLayout)
 
+from .workers import post, run_in_background
 from .. import chain, media, swap
 from .. import tree as T
 from ..animate import DEFAULT_PROMPT, SIZES, gen_size, window_count
 from .compare_player import ComparePlayer
 from .dialogs import confirm
 from .theme import theme
-from .widgets import fit_size, FrameTile, guard_wheel, label, safe_emit
+from .widgets import fit_size, FrameTile, guard_wheel, label
 from .qsvalue import qs_value
+
+log = logging.getLogger(__name__)
 
 METHODS = (("animate+lock", "Head + face lock (Animate, then face swap)"), ("animate", "Head only (Animate)"),
            ("face", "Face only (face swap, the clip's own motion)"),
@@ -49,14 +52,6 @@ def letterbox(src: str, dest, size: int, crop: tuple[int, int, int] | None = Non
     p.drawImage((size - fit.width()) // 2, (size - fit.height()) // 2, fit)
     p.end()
     return out.save(str(dest), "PNG")  # type: ignore[call-overload]  # (stubs: bytes, runtime: str)
-
-
-class _Sig(QObject):
-    found = Signal(object, str)             # find_heads result (or None), error
-    progress = Signal(str, int, int)        # what, done, of
-    finished = Signal(object, str)          # (out path, meta) or None, error
-    details = Signal(str)                   # the face details written by the vision model
-    reference = Signal(int, str, object, object)   # picture generation, path, upright PNG (None: unreadable), crop
 
 
 class SwapDialog(QDialog):
@@ -92,12 +87,6 @@ class SwapDialog(QDialog):
         self._busy = False
         self._cancel = False
         self._tmp = media.scratch("swap")
-        self._sig = _Sig()
-        self._sig.found.connect(self._found)
-        self._sig.progress.connect(self._progress)
-        self._sig.finished.connect(self._finished)
-        self._sig.details.connect(self._auto_details_made)
-        self._sig.reference.connect(self._reference_ready)
         self._ref_gen = 0                              # which picture the worker is preparing (older answers drop)
         self.ref_busy = False
         self._closed = False
@@ -259,18 +248,19 @@ class SwapDialog(QDialog):
             self._no_heads("No face detector found (insightface's det_10g.onnx in ComfyUI's "
                            "models/insightface/models/buffalo_l): the head is not marked.")
             return
-        sig, clip, det, scale = self._sig, self.clip, self.detector, self.head_size.value()
+        clip, det, scale = self.clip, self.detector, self.head_size.value()
 
         def work():
-            try:
-                h = swap.find_heads(clip, det, scale, progress=lambda k, n: sig.progress.emit("find", k, n),
-                                    cancelled=lambda: self._cancel)
-                sig.found.emit(h, "")
-            except Exception as e:  # noqa: BLE001
-                safe_emit(sig.found, None, str(e))
+            return swap.find_heads(clip, det, scale, progress=lambda k, n: self._tell("find", k, n),
+                                   cancelled=lambda: self._cancel)
         self._busy = True
         self.bar.show()
-        threading.Thread(target=work, daemon=True).start()
+        run_in_background(work, on_done=lambda h: self._found(h, ""), on_error=lambda e: self._found(None, str(e)),
+                          owner=self)
+
+    def _tell(self, what: str, k: int, n: int) -> None:
+        """(a worker thread) The progress line of the dialog."""
+        post(self, lambda: self._progress(what, k, n))
 
     def _found(self, heads, error: str):
         self._busy = False
@@ -356,7 +346,7 @@ class SwapDialog(QDialog):
         self.ref_tile.clear_frame("Looking at the picture …")
         self.crop_info.setText("Looking for the face …")
         png = Path(self._tmp.name) / f"ref_{uuid.uuid4().hex[:6]}.png"
-        gen, sig = self._ref_gen, self._sig
+        gen = self._ref_gen
 
         def work():
             crop = None
@@ -373,8 +363,8 @@ class SwapDialog(QDialog):
                 out = use if ok else None
             except Exception:  # noqa: BLE001  (the temporary folder removed by a close, ...)
                 out = None
-            safe_emit(sig.reference, gen, str(path), out, crop)
-        threading.Thread(target=work, daemon=True).start()
+            return out, crop
+        run_in_background(work, on_done=lambda r: self._reference_ready(gen, str(path), r[0], r[1]), owner=self)
         self._update()
 
     def _reference_ready(self, gen: int, path: str, png, crop):
@@ -497,7 +487,7 @@ class SwapDialog(QDialog):
         boxes, (w, h), fps = list(self.boxes), self.heads["size"], self.heads["fps"]
         n, clip, ref = self.heads["frames"], self.clip, self.ref
         size, prompt, seed = self.size.currentData(), self.prompt.text().strip(), random.randint(1, 2**31 - 1)
-        scale, sig, connect = self.head_size.value(), self._sig, self.connect
+        scale, connect = self.head_size.value(), self.connect
         project, source = self.project, self.source
         ref_png = self.ref_png
         crop = self.ref_crop if self.head_crop.isChecked() else None
@@ -522,7 +512,7 @@ class SwapDialog(QDialog):
             try:
                 out_dir.mkdir(parents=True, exist_ok=True)
                 if method == "h3":
-                    gen = self.h3["connect"](lambda i, s: sig.progress.emit("make", i, s))
+                    gen = self.h3["connect"](lambda i, s: self._tell("make", i, s))
                     self.animator = gen
                     check()
                     length = swap.h3_length(n)
@@ -531,9 +521,9 @@ class SwapDialog(QDialog):
                         raise RuntimeError(f"cannot read the picture {Path(ref).name}")
                     details = prompt
                     if not details and self.h3.get("describe"):  # the face details, as the creator's workflow
-                        sig.progress.emit("describe", 0, 0)
+                        self._tell("describe", 0, 0)
                         details = self.h3["describe"](head_ref)  # (the head the model gets)
-                        sig.details.emit(details)
+                        post(self, lambda: self._auto_details_made(details))
                         check()
                     st = dict(self.h3["settings"] or {})
                     for speed in ("turbo", "hyperflow", "pika"):   # the recipe's own turbo LoRA instead
@@ -552,12 +542,12 @@ class SwapDialog(QDialog):
                     meta = {"method": "h3", "lora": self.h3["lora"], "frames_made": length, "details": details,
                             "steps": st.get("steps"), "seed": seed}
                 elif method == "face":
-                    self.animator = connect(lambda i, s: sig.progress.emit("make", i, s))
+                    self.animator = connect(lambda i, s: self._tell("make", i, s))
                     check()
                     meta = self.animator.face_only(clip, out, persons, fps, enhance)
                 else:
                     swap.write_mask(boxes, w, h, mask, fps)
-                    self.animator = connect(lambda i, s: sig.progress.emit("make", i, s))
+                    self.animator = connect(lambda i, s: self._tell("make", i, s))
                     check()
                     if self.animator.missing:
                         raise RuntimeError(self.animator.missing)
@@ -566,7 +556,7 @@ class SwapDialog(QDialog):
                     cached = swap.cached_pose(project, key)
                     need = ["face"] + (["pose"] if body else [])
                     if all(k in cached for k in need):
-                        sig.progress.emit("cached", 0, 0)
+                        self._tell("cached", 0, 0)
                     keep = {k: out_dir / f"{stem}_{k}.mkv" for k in need if k not in cached}
                     try:
                         meta = self.animator.replace(clip, mask, Path(ref), out, seed, n, (w, h), size, prompt,
@@ -585,16 +575,16 @@ class SwapDialog(QDialog):
                 if got != n:
                     raise RuntimeError(f"the made clip has {got} frames instead of {n}")
                 ok = True
-                sig.finished.emit((out, meta, n), "")
-            except Exception as e:  # noqa: BLE001
-                safe_emit(sig.finished, None, "cancelled" if self._cancel else str(e))
+                return out, meta, n
             finally:                                   # nothing of a failed or stopped try stays in swaps/
                 for f in temp + ([] if ok else [out, mask]):
                     try:
                         f.unlink(missing_ok=True)
                     except OSError:
                         pass
-        threading.Thread(target=work, daemon=True).start()
+        run_in_background(work, on_done=lambda r: self._finished(r, ""),
+                          on_error=lambda e: self._finished(None, "cancelled" if self._cancel else str(e)),
+                          owner=self)
 
     def stop(self):
         self._cancel = True
@@ -602,8 +592,8 @@ class SwapDialog(QDialog):
         if a is not None:
             try:
                 a.interrupt()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception:  # noqa: BLE001  (the stop goes on: the worker checks the flag)
+                log.warning("the generator could not be interrupted", exc_info=True)
 
     def _progress(self, what: str, k: int, n: int):
         if what == "describe":

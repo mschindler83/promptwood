@@ -18,7 +18,7 @@ import random
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, QSize, QTimer, Qt, Signal, QObject
+from PySide6.QtCore import QSettings, QSize, QTimer, Qt
 from PySide6.QtGui import QImage, QKeySequence, QPixmap
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFrame, QGridLayout,
                                QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QProgressBar,
@@ -46,10 +46,6 @@ from .results_gallery import InfoCard, ResultGallery, ResultView, ThumbLoader
 from .variations_panel import PlaceholderHighlighter, VariationsPanel
 from .widgets import FrameTile, fit_size, guard_wheel, icon_button, label, shortcut, combo_item
 from .qsvalue import qs_value
-
-
-class _FamiliesSignal(QObject):
-    families = Signal(object, str)              # what ComfyUI has of each image family, error
 
 
 class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, LorasMixin, SamplingMixin, PresetsMixin,
@@ -150,8 +146,6 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         self._worker: GenerateWorker | None = None       # the running Generate
         self._busy = False
         self.used: tuple[str, str] | None = None        # (kind, png) once a result was used
-        self._sig = _FamiliesSignal()
-        self._sig.families.connect(self._families_found)
     def _build_mode_row(self, left: QVBoxLayout):
         # mode: edit an image (Qwen Image Edit) or create a new one (four model families)
         mrow = QHBoxLayout()

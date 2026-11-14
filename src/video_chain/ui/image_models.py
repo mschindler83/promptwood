@@ -3,17 +3,17 @@
 A mixin of ImageEditDialog (ui/image_edit.py): the widgets it uses are created there."""
 from __future__ import annotations
 
-import threading
 from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import Qt, QTimer
 
+from .workers import run_in_background
 from ..comfy import EDIT_MODELS
 from ..edits import MOSS_EDIT_QUALITIES, QUALITY_TEXT, lora_note
 from ..imagegen import FAMILIES, size_for
 from .image_common import CREATE_HINT, PROMPT_HINT
-from .widgets import safe_emit, combo_item
+from .widgets import combo_item
 from .image_host import ImageEditHost
 from .qsvalue import qs_value
 
@@ -109,17 +109,15 @@ class ModelsMixin(ImageEditHost):
             self.qs.setValue(self._quality_key(), self.quality.currentData())
 
     def _load_families(self):
-        sig, connect = self._sig, self.connect_create
+        connect = self.connect_create
 
         def work():
-            try:
-                if connect is None:
-                    raise RuntimeError("no image creator")
-                creator: Any = connect(None)
-                sig.families.emit(creator.files, "")
-            except Exception as e:  # noqa: BLE001
-                safe_emit(sig.families, {}, str(e))
-        threading.Thread(target=work, daemon=True).start()
+            if connect is None:
+                raise RuntimeError("no image creator")
+            creator: Any = connect(None)
+            return creator.files
+        run_in_background(work, on_done=lambda files: self._families_found(files, ""),
+                          on_error=lambda e: self._families_found({}, str(e)), owner=self)
 
     def _families_found(self, files: dict, error: str):
         before = self.family.currentData()

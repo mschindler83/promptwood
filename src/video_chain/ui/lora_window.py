@@ -20,17 +20,18 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSettings, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QSettings, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QGuiApplication, QImage, QPixmap
 from PySide6.QtWidgets import (QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSplitter,
                                QTabWidget, QTextBrowser, QToolButton, QVBoxLayout, QWidget)
 
+from .workers import post, run_in_background
 from .. import lora_notes, lora_pictures, triggers
 from .lora_details import details_html, themed
 from .dialogs import add_action, button_row, confirm
 from .lora_stack import lora_label
-from .widgets import fit_size, guard_wheel, label, safe_emit
+from .widgets import fit_size, guard_wheel, label
 from .qsvalue import qs_value
 
 PER_PAGE = 8
@@ -39,11 +40,6 @@ SHOW = (("off", "Off"), ("safe", "Safe only"), ("all", "All"))
 LOADERS = 4
 TYPING_MS = 200                  # the wait after the last key in "Find in the prompts" before the cards are rebuilt
 ARROW_MS = 120                   # the wait on a LoRA in the list before its files are read (arrow keys pass by)
-
-
-class _Sig(QObject):
-    known = Signal(int, object)              # generation, what_is_known of one LoRA
-    picture = Signal(int, int, str, str)     # generation, card index, file, error
 
 
 class ExampleCard(QFrame):
@@ -189,9 +185,6 @@ class LoraWindow(QDialog):
             timer.setInterval(ms)
             timer.timeout.connect(fn)
         self._jobs: queue.Queue = queue.Queue()
-        self._sig = _Sig()
-        self._sig.known.connect(self._known)
-        self._sig.picture.connect(self._picture)
 
         v = QVBoxLayout(self)
         split = QSplitter(Qt.Orientation.Horizontal)
@@ -401,16 +394,16 @@ class LoraWindow(QDialog):
 
     def _read_all(self):
         """What is known of every listed LoRA, read in the background (each has a file of its own)."""
-        paths, sig, gen, db, closed = [p for p, _l in self.loras], self._sig, self._gen, self.db, self._closed
+        paths, gen, db, closed = [p for p, _l in self.loras], self._gen, self.db, self._closed
 
         def work():
             for p in paths:
                 if closed.is_set():
                     return
                 k = lora_notes.what_is_known(p, db)
-                if not safe_emit(sig.known, gen, k):
+                if not post(self, self._known, gen, k):
                     return
-        threading.Thread(target=work, daemon=True).start()
+        run_in_background(work, on_done=lambda _r: None, owner=self)
 
     def _known(self, _gen: int, k: dict):
         self._known_of[k["path"]] = k
@@ -672,9 +665,7 @@ class LoraWindow(QDialog):
     def _start_loaders(self):
         if not self._loaders:
             for _ in range(LOADERS):
-                t = threading.Thread(target=self._load_pictures, daemon=True)
-                t.start()
-                self._loaders.append(t)
+                self._loaders.append(run_in_background(self._load_pictures, on_done=lambda _r: None, owner=self))
 
     def _kept(self, item: dict) -> bool:
         key = item.get("id", id(item))
@@ -697,7 +688,7 @@ class LoraWindow(QDialog):
                 out = (str(f), "") if f else ("", "CivitAI gave no picture for it")
             except Exception as e:  # noqa: BLE001
                 out = ("", f"Could not be loaded ({e})")
-            if not safe_emit(self._sig.picture, gen, i, *out):
+            if not post(self, self._picture, gen, i, *out):
                 return
 
     def _picture(self, gen: int, i: int, path: str, error: str):

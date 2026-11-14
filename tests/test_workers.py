@@ -96,3 +96,19 @@ def test_post_from_the_gui_thread_runs_at_once():
     seen, owner = [], QWidget()
     assert post(owner, lambda: seen.append(1)) is True
     assert seen == [1]
+
+
+def test_an_error_after_the_owner_is_gone_is_logged_not_raised(caplog):
+    import shiboken6
+    from video_chain.ui.workers import run_in_background
+    gate, errs, owner = threading.Event(), [], QObject()
+
+    def boom():
+        gate.wait(5)
+        raise ValueError("late one")
+    with caplog.at_level(logging.DEBUG, logger="video_chain.ui.workers"):
+        run_in_background(boom, on_done=lambda r: None, on_error=errs.append, owner=owner)
+        shiboken6.delete(owner)
+        gate.set()
+        assert wait(app, lambda: any("late one" in r.getMessage() for r in caplog.records))
+    assert errs == []

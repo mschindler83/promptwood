@@ -2,25 +2,21 @@
 side to pick one (CompareDialog)."""
 from __future__ import annotations
 
-import threading
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QImage, QKeySequence
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QGridLayout, QHBoxLayout,
                                QPushButton, QSlider, QVBoxLayout, QWidget)
 
+from .workers import run_in_background
 from .. import chain, media
 from .theme import icon
 from .dialogs import add_action, button_row
-from .widgets import fit_size, FrameStepper, FrameTile, icon_button, label, safe_emit, VideoView, shortcut
+from .widgets import fit_size, FrameStepper, FrameTile, icon_button, label, VideoView, shortcut
 
 FPS = chain.FPS
 PREVIEW_W = 480                    # frames are decoded once at this width, so scrubbing is instant
-
-
-class _Decoded(QObject):
-    done = Signal(object, str)        # list of QImage, error
 
 
 def decode_frames(video: Path, width: int = PREVIEW_W, on_start=None) -> list[QImage]:
@@ -69,17 +65,9 @@ class HandoverDialog(QDialog):
         self.b_last.clicked.connect(lambda: self.slider.setValue(self.slider.maximum()))
         v.addWidget(self.buttons)
         self.slider.valueChanged.connect(self._show)
-        self._sig = _Decoded()
-        self._sig.done.connect(self._decoded)
-        sig = self._sig
-
-        def work():
-            try:
-                frames, err = decode_frames(Path(video), on_start=lambda pr: setattr(self, "_proc", pr)), ""
-            except Exception as e:  # noqa: BLE001
-                frames, err = [], str(e)
-            safe_emit(sig.done, frames, err)
-        threading.Thread(target=work, daemon=True).start()
+        run_in_background(lambda: decode_frames(Path(video), on_start=lambda pr: setattr(self, "_proc", pr)),
+                          on_done=lambda frames: self._decoded(frames, ""),
+                          on_error=lambda e: self._decoded([], str(e)), owner=self)
 
     def _decoded(self, frames: list, error: str):
         if error or not frames:
@@ -349,10 +337,6 @@ def grab_frame(video: Path, at: float, out: Path, width: int | None = None) -> b
     return Path(out).is_file() and Path(out).stat().st_size > 0
 
 
-class _Grabbed(QObject):
-    ready = Signal(int, QImage)                 # request number, frame
-
-
 class VideoFrameDialog(QDialog):
     """Choose one frame of any video (any length: only the frame shown is decoded): a slider over the whole
     video, one frame / one second back and on. frame_file() writes the chosen frame at the video's full size."""
@@ -371,8 +355,6 @@ class VideoFrameDialog(QDialog):
         self._req = 0
         self._closed = False
         self._grabbing = self._again = False        # one ffmpeg at a time; the newest position after it
-        self._sig = _Grabbed()
-        self._sig.ready.connect(self._ready)
         self._tmp = media.scratch("frame")
         v = QVBoxLayout(self)
         self.tile = FrameTile(800, 450)
@@ -413,17 +395,14 @@ class VideoFrameDialog(QDialog):
             return
         self._grabbing = True
         self._req += 1
-        req, at, sig = self._req, self._seek(), self._sig
+        req, at = self._req, self._seek()
         out = Path(self._tmp.name) / f"p{req}.png"
 
         def work():
-            img = QImage()
-            try:
-                if grab_frame(self.video, at, out, width=960):
-                    img = QImage(str(out))
-            finally:                                # (always answered: a stuck "grabbing" would freeze the dialog)
-                safe_emit(sig.ready, req, img)
-        threading.Thread(target=work, daemon=True).start()
+            return QImage(str(out)) if grab_frame(self.video, at, out, width=960) else QImage()
+        # (always answered: a stuck "grabbing" would freeze the dialog)
+        run_in_background(work, on_done=lambda img: self._ready(req, img),
+                          on_error=lambda _e: self._ready(req, QImage()), owner=self)
 
     def _ready(self, req: int, img: QImage):
         self._grabbing = False

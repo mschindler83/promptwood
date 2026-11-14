@@ -8,19 +8,19 @@ video ends, the last one where a clip after it starts.
 from __future__ import annotations
 
 import subprocess
-import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from PySide6.QtCore import QObject, QPointF, QRectF, QSettings, Qt, QUrl, Signal
+from PySide6.QtCore import QPointF, QRectF, QSettings, Qt, QUrl, Signal
 from PySide6.QtGui import QImage, QPainter, QPen
 from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QDoubleSpinBox, QHBoxLayout, QLabel, QLineEdit,
                                QPushButton, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
+from .workers import post, run_in_background
 from .. import chain, media
 from .theme import icon, theme, with_alpha
 from .dialogs import button_row
-from .widgets import fit_size, format_time, FrameTile, guard_wheel, icon_button, label, safe_emit, VideoView, shortcut, timer
+from .widgets import fit_size, format_time, FrameTile, guard_wheel, icon_button, label, VideoView, shortcut, timer
 
 if TYPE_CHECKING:
     from PySide6.QtMultimedia import QMediaPlayer
@@ -238,18 +238,6 @@ class RangePlayerMixin:
         self.b_play.setIcon(icon("pause" if st == QMediaPlayer.PlaybackState.PlayingState else "play"))
 
 
-class _Probed(QObject):
-    ready = Signal(int, object, str)        # generation, the source's info (None), error
-
-
-class _Grabbed(QObject):
-    ready = Signal(int, str)                # generation, error ("" = the frame file is there)
-
-
-class _Frames(QObject):
-    ready = Signal(int, str, QImage)        # generation, "first" | "last", frame
-
-
 class VideoRangeDialog(RangePlayerMixin, QDialog):
     """Pick a video file, a range of it and its rotation. file / start / end / rotate hold the result.
 
@@ -275,15 +263,9 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
         self.video: VideoView | None = None
         self._closed = False
         self._gen = 0
-        self._probed = _Probed()
-        self._probed.ready.connect(self._probe_done)
-        self._grabbed = _Grabbed()
-        self._grabbed.ready.connect(self._grab_done)
         self._load_gen = 0
         self.loading = False                          # a file is being read (probe or frame grab) off the UI thread
         self._pending: tuple = ()
-        self._frames = _Frames()
-        self._frames.ready.connect(self._frame_ready)
         self._frame_timer = timer(self, self._update_frames, 300, single=True)
         self._stop_at: float | None = None
 
@@ -430,7 +412,7 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
         """load(), with ffprobe run off the UI thread: the dialog shows "Reading …" and cannot be accepted meanwhile.
         An answer that arrives after another load began or the dialog closed is dropped."""
         self._load_gen += 1
-        gen, sig = self._load_gen, self._probed
+        gen = self._load_gen
         self._pending = (str(file), start, end)
         self._set_loading(True, f"Reading {Path(file).name} …")
 
@@ -439,8 +421,8 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
                 info, err = chain.probe_source(Path(file)), ""
             except (RuntimeError, OSError, ValueError) as e:
                 info, err = None, str(e)
-            safe_emit(sig.ready, gen, info, err)
-        threading.Thread(target=work, daemon=True).start()
+            return info, err
+        run_in_background(work, on_done=lambda r: self._probe_done(gen, *r), owner=self)
 
     def _probe_done(self, gen: int, info, err: str) -> None:
         if gen != self._load_gen or self._closed:
@@ -568,7 +550,7 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
         cmd = ["-y", "-ss", f"{t:.4f}", "-i", self.file] + (["-vf", turn] if turn else []) + \
               ["-frames:v", "1", "-update", "1", png]
         self._load_gen += 1
-        gen, sig = self._load_gen, self._grabbed
+        gen = self._load_gen
         self._pending = (ctx, png, t)
         self._set_loading(True, "Reading the frame …")
 
@@ -577,8 +559,9 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
                 media.ffmpeg(cmd, timeout=60)
             except (OSError, media.MediaError):
                 pass
-            safe_emit(sig.ready, gen, "" if png.is_file() else "missing")
-        threading.Thread(target=work, daemon=True).start()
+            return "" if png.is_file() else "missing"
+        run_in_background(work, on_done=lambda err: self._grab_done(gen, err),
+                          on_error=lambda _e: self._grab_done(gen, "missing"), owner=self)
 
     def _grab_done(self, gen: int, err: str) -> None:
         ctx, png, t = self._pending
@@ -666,7 +649,7 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
         if self.info is None or self._closed:
             return
         self._gen += 1
-        gen, file, sig = self._gen, self.file, self._frames
+        gen, file = self._gen, self.file
         n = self.frames()
         start = self.start
         w, h = self.canvas or (self.info["width"], self.info["height"])
@@ -686,9 +669,9 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
                                     "-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "-"], gen)
                 if img is None:                           # the range moved on (or the dialog closed): stopped
                     return
-                if not safe_emit(sig.ready, gen, which, img):
+                if not post(self, self._frame_ready, gen, which, img):
                     return
-        threading.Thread(target=work, daemon=True).start()
+        run_in_background(work, on_done=lambda _r: None, owner=self)
 
     def _decode(self, cmd: list[str], gen: int) -> QImage | None:
         """Run a frame decode; killed as soon as the range moves on or the dialog closes (None then)."""

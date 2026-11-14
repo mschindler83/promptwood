@@ -13,6 +13,7 @@ from PySide6.QtGui import QColor, QFont, QGuiApplication, QImage, QPainter, QPai
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy,
                                QToolButton, QVBoxLayout, QWidget)
 
+from .workers import run_in_background
 from ..edits import ResultRecord
 from .imageio import read_scaled
 from .theme import theme
@@ -462,7 +463,7 @@ class ThumbLoader(QObject):
         super().__init__(parent)
         self._q: queue.LifoQueue = queue.LifoQueue()
         self._stop = threading.Event()
-        threading.Thread(target=self._work, daemon=True).start()
+        run_in_background(self._work, on_done=lambda _r: None, owner=self)
 
     def request(self, png: str, mtime_ns: int):
         self._q.put((png, mtime_ns))

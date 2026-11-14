@@ -24,7 +24,6 @@ if TYPE_CHECKING:
     from .results_gallery import InfoCard, ResultGallery, ResultView, ThumbLoader
     from .variations_panel import PlaceholderHighlighter, VariationsPanel
     from .widgets import FrameTile
-    from .image_edit import _FamiliesSignal
 
     class ImageEditHost(QDialog):
         _rehighlighting: bool
@@ -37,7 +36,6 @@ if TYPE_CHECKING:
         _loader: ThumbLoader
         _requested: set[tuple[str, int]]
         _retry_families: int
-        _sig: _FamiliesSignal
         _thumbs: dict[str, tuple[int, QPixmap]]
         _var_timer: QTimer
         aspect: QComboBox

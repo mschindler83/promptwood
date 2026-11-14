@@ -3,7 +3,6 @@ another, writes each one's record and tells the window (progress, result, finish
 what they ask the editor for; the loop, the file names, the record and the error handling are shared."""
 from __future__ import annotations
 
-import threading
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -13,6 +12,7 @@ from typing import Any
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QImage
 
+from .workers import run_in_background
 from .. import edits
 from ..comfy import EDIT_MODELS
 from ..triggers import with_triggers
@@ -79,13 +79,13 @@ class GenerateWorker(QObject):
         self._k = 1                             # the result being made now (the editor's progress belongs to it)
 
     def start(self) -> None:
-        threading.Thread(target=self._run, daemon=True).start()
+        run_in_background(self._run, on_done=lambda _r: None, owner=self)
 
     def cancel(self) -> None:
         self.cancelled = True
         ed = self.editor
         if ed is not None:
-            threading.Thread(target=ed.interrupt, daemon=True).start()
+            run_in_background(ed.interrupt, on_done=lambda _r: None)
 
     # ---- the thread
     def _run(self) -> None:
