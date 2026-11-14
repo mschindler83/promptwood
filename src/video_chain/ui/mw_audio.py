@@ -45,13 +45,9 @@ class AudioMixin(MainWindowHost):
             return
         assert self.tree is not None and self.project is not None
         snap, project = copy.deepcopy(self.tree), self.project
-        self._tts_busy = True
-        try:
+        with self._tts_session():
             self._update_buttons()
             self.status.setText(f"Cloning the voice of @{name} at ElevenLabs…")
-        except BaseException:
-            self._tts_busy = False                  # (it never started: not busy for ever)
-            raise
 
         run_in_background(lambda: TTS.clone_sample(project, snap, name, TTS.ElevenLabs()),
                           on_done=lambda v: self._eleven_cloned(name, v, "", str(project)),      # (the answer ends "busy")

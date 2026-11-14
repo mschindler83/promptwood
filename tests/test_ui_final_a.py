@@ -404,3 +404,20 @@ def test_llama_config_names_what_decides_a_new_server(app, tmp_path):
         assert srv2 is not srv and srv2 is not None and srv2.port == 8124
     finally:
         w.close()
+
+
+# ------------------------------------------------------------------ MWB-31: text to speech busy flag with a session
+def test_tts_session_marks_busy_and_never_leaves_it_stuck(app, tmp_path):
+    from video_chain.ui.main_window import MainWindow
+    w = MainWindow(settings(tmp_path), command=FAKE)
+    try:
+        with w._tts_session():                                   # handed to a worker: its answer frees it
+            assert w._tts_busy
+        assert w._tts_busy
+        w._tts_busy = False
+        with pytest.raises(ValueError):
+            with w._tts_session():
+                raise ValueError("never started")
+        assert not w._tts_busy                                   # (it never started: not busy for ever)
+    finally:
+        w.close()
