@@ -560,15 +560,197 @@ def test_mix_the_sound_with_the_clips_own(project, tmp_path):
                            check=True)
     T.refine_path(Mute(), project, a.id, "2k", tmp_path / "2k.mp4", log=lambda _m: None, single=True)
     assert _band(tmp_path / "2k.mp4", 300) > 0.06 and _band(tmp_path / "2k.mp4", 1200) > 0.2   # the made mix
-    t.nodes[a.id].overrides["sound_mix_level"] = -6.0                 # the track quieter in the mix: made again
+    t.nodes[a.id].overrides["sound_mix_level"] = -6.0                 # the track quieter: only mixed again
     assert T.Checker(project, t).settings(a.id)["source_sound"]["mix_level"] == -6.0
-    assert T.Checker(project, t).status(a.id) == "changed"
+    assert T.Checker(project, t).status(a.id) == "done" and T.Checker(project, t).remix_due(a.id)
     t.nodes[a.id].overrides.pop("sound_mix_level")
-    t.nodes[a.id].overrides["sound_over"] = True                      # only the track again: made again
+    t.nodes[a.id].overrides["sound_over"] = True                      # only the track again: only mixed again
+    assert T.Checker(project, t).status(a.id) == "done" and T.Checker(project, t).remix_due(a.id)
+    t.nodes[a.id].overrides.pop("sound_over")                         # lip sync: the model hears it, made again
     assert T.Checker(project, t).status(a.id) == "changed"
     t.nodes[a.id].overrides["sound_over"] = "mix"
     t.options["audio"] = False                                        # no sound from the model: a plain overlay
     assert "mix" not in T.Checker(project, t).settings(a.id)["source_sound"]
+
+
+def _md5(path: Path, *args: str) -> str:
+    """ffmpeg's md5 of what the args pick from a file (e.g. "-map", "0:v", "-c", "copy": the stream's packets)."""
+    out = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), *args, "-f", "md5", "-"], capture_output=True,
+                         text=True, check=True).stdout
+    return out.strip()
+
+
+class _Recording(FakeGenerator):
+    """Notes each generated clip's audio (its packets and its decoded samples) before the app changes it."""
+
+    def generate(self, prompt, start_image, out_video, out_last_frame, seed, settings=None):
+        super().generate(prompt, start_image, out_video, out_last_frame, seed, settings)
+        self.sounds = getattr(self, "sounds", [])
+        self.sounds.append((_md5(out_video, "-map", "0:a", "-c", "copy"), _md5(out_video, "-map", "0:a")))
+
+
+def _sound_project(project, tmp_path, frames=24):
+    with_start(project, tmp_path)
+    src = _two_tones(tmp_path / "song.mp3")
+    t = T.load(project)
+    t.options["frames"] = frames
+    tid = T.add_track(project, t, src, 3.0, 8.0, "Song")["id"]
+    return t, tid
+
+
+def test_the_models_own_sound_is_kept_and_mixed_again(project, tmp_path):
+    """A clip made with its sound laid over keeps the model's sound next to it (packets copied, so it is the
+    generated sound exactly). Switching lay over / mix and changing the level then only builds the sound again
+    from the two: no generator call, the picture copied packet for packet, its last frame untouched; the record
+    follows, so the clip is done; a joined path is joined again and a kept refined copy gets the new sound."""
+    import numpy as np
+    t, tid = _sound_project(project, tmp_path)
+    a = t.add(None, "she dances")
+    a.overrides = {"source_sound": f"track:{tid}", "sound_over": True}
+    T.save(project, t)
+    gen = _Recording(frames=17, size=None)                          # its sound: a 300 Hz sine
+    T.run_tree(gen, project, [a.id], log=lambda _m: None)
+    t = T.load(project)
+    m = t.nodes[a.id].made
+    own = project / m["own_sound"]
+    assert m["own_sound"] == m["video"][:-4] + ".own.m4a" and own.is_file()
+    assert (_md5(own, "-map", "0:a", "-c", "copy"), _md5(own, "-map", "0:a")) == gen.sounds[0]
+    video, frame = project / m["video"], project / m["frame"]
+    pic, frame_sha, frame_time = _md5(video, "-map", "0:v", "-c", "copy"), chain.file_signature(frame), \
+        frame.stat().st_mtime_ns
+    assert _band(video, 300) < 0.01 and _band(video, 1200) > 0.2   # laid over: only the track
+    joined = T.join_path(project, t, a.id)
+    stamp = joined.with_suffix(".json").read_text()
+    T.refine_path(FakeGenerator(), project, a.id, "2k", tmp_path / "2k.mp4", log=lambda _m: None)   # (kept)
+
+    def remix(**ov):
+        t.nodes[a.id].overrides = {"source_sound": f"track:{tid}", **ov}
+        ck = T.Checker(project, t)
+        assert ck.status(a.id) == "done" and ck.remix_due(a.id)
+        assert T.remix_sound(project, t, a.id)
+        ck = T.Checker(project, t)
+        assert ck.status(a.id) == "done" and not ck.remix_due(a.id) and not T.remix_sound(project, t, a.id)
+        assert _md5(video, "-map", "0:v", "-c", "copy") == pic and chain.probe(video)["frames"] == m["frames"]
+        assert (chain.file_signature(frame), frame.stat().st_mtime_ns) == (frame_sha, frame_time)
+        assert (_md5(own, "-map", "0:a", "-c", "copy"), _md5(own, "-map", "0:a")) == gen.sounds[0]
+        assert abs(chain.audio_seconds(video) - m["frames"] / 24) < 0.05
+        return _band(video, 300), _band(video, 1200)
+    own_hz, track = remix(sound_over="mix")
+    assert own_hz > 0.06 and track > 0.2 and t.nodes[a.id].made["settings"]["source_sound"]["mix"] is True
+    assert T.load(project).nodes[a.id].made["sound_rev"] == 1                # saved
+    own_q, track_q = remix(sound_over="mix", sound_mix_level=-12)
+    assert abs(own_q - own_hz) < 0.02 and abs(20 * np.log10(track_q / track) + 12) < 1.5
+    own_r, track_r = remix(sound_over=True)
+    assert own_r < 0.01 and abs(track_r - track) < 0.03                      # only the track again
+    assert t.nodes[a.id].made["sound_rev"] == 3 and t.nodes[a.id].made["overrides"] == t.nodes[a.id].overrides
+    again = T.join_path(project, t, a.id)
+    assert again.with_suffix(".json").read_text() != stamp                  # (its date changed: joined again)
+    assert len(list((project / chain.OLD_DIR / "paths").glob("*.mp4"))) == 1
+    # run_tree: a sound-only change is mixed again, the generator is not called
+    t.nodes[a.id].overrides = {"source_sound": f"track:{tid}", "sound_over": "mix"}
+    T.save(project, t)
+    gen2 = FakeGenerator(frames=17, size=None)
+    T.run_tree(gen2, project, [a.id], log=lambda _m: None)
+    t = T.load(project)
+    assert gen2.calls == [] and T.Checker(project, t).status(a.id) == "done"
+    assert not T.Checker(project, t).remix_due(a.id) and _band(video, 300) > 0.06
+    assert _md5(video, "-map", "0:v", "-c", "copy") == pic
+    # the kept refined copy is not made again, it only gets the clip's new sound
+    refiner = FakeGenerator()
+    T.refine_path(refiner, project, a.id, "2k", tmp_path / "2k.mp4", log=lambda _m: None)
+    assert not getattr(refiner, "refines", []) and _band(tmp_path / "2k.mp4", 300) > 0.06
+    assert T.refine_record(T.refined_file(project, t.nodes[a.id], "2k"))["sound"] == 4
+
+
+def test_without_its_own_sound_kept_a_clip_is_made_again(project, tmp_path):
+    """A clip made before the model's sound was kept (or without any: the project's sound off) is made again when
+    only its mix changes, as before."""
+    t, tid = _sound_project(project, tmp_path)
+    a = t.add(None, "she dances")
+    a.overrides = {"source_sound": f"track:{tid}", "sound_over": True}
+    T.save(project, t)
+    T.run_tree(FakeGenerator(frames=17, size=None), project, [a.id], log=lambda _m: None)
+    t = T.load(project)
+    del t.nodes[a.id].made["own_sound"]                                      # (as an older record)
+    t.nodes[a.id].overrides["sound_over"] = "mix"
+    ck = T.Checker(project, t)
+    assert ck.status(a.id) == "changed" and not ck.remix_due(a.id) and not T.remix_sound(project, t, a.id)
+    T.save(project, t)
+    gen = FakeGenerator(frames=17, size=None)
+    T.run_tree(gen, project, [a.id], log=lambda _m: None)
+    assert len(gen.calls) == 1 and T.load(project).nodes[a.id].made.get("own_sound")
+    t = T.load(project)
+    t.options["audio"] = False                                               # the model makes no sound: none kept
+    T.save(project, t)
+    T.run_tree(FakeGenerator(frames=17, size=None, audio=False), project, [a.id], log=lambda _m: None)
+    assert "own_sound" not in T.load(project).nodes[a.id].made
+
+
+def test_the_own_sound_travels_with_its_clip(project, tmp_path):
+    """The kept sound is one of the clip's files: made again, the version before goes to old/ with it; a removed
+    clip takes it to old/; one no record names is moved to old/ by the clean-up, never deleted."""
+    t, tid = _sound_project(project, tmp_path)
+    a = t.add(None, "she dances")
+    a.overrides = {"source_sound": f"track:{tid}", "sound_over": "mix"}
+    T.save(project, t)
+    T.run_tree(FakeGenerator(frames=17, size=None), project, [a.id], log=lambda _m: None)
+    t = T.load(project)
+    first = t.nodes[a.id].made["own_sound"]
+    assert project / first in T.clip_files(project, t.nodes[a.id])
+    t.nodes[a.id].prompt = "she dances faster"
+    T.save(project, t)
+    T.run_tree(FakeGenerator(frames=17, size=None), project, [a.id], log=lambda _m: None)
+    t = T.load(project)
+    second = t.nodes[a.id].made["own_sound"]
+    assert second != first and (project / second).is_file() and not (project / first).exists()
+    assert (project / chain.OLD_DIR / first).is_file()
+    stray = project / "nodes" / "n9_0badcafe.own.m4a"
+    shutil.copyfile(project / second, stray)
+    T.remove_stale_files(project, t)
+    assert not stray.exists() and (project / chain.OLD_DIR / "nodes" / stray.name).is_file()
+    assert (project / second).is_file()                                     # (named by its record: stays)
+    t.remove(a.id, project)
+    assert not (project / second).exists() and (project / chain.OLD_DIR / second).is_file()
+
+
+def test_what_uses_a_remixed_clips_sound(project, tmp_path):
+    """After a clip's sound is mixed again: a clip that lays the repeated sound of it over is mixed again too (in
+    the same run, no generator call); one that is made to that sound (lip sync) and one that carries over its frames
+    with their sound are made again."""
+    t, tid = _sound_project(project, tmp_path, frames=48)
+    a = t.add(None, "she dances")
+    a.overrides = {"source_sound": f"track:{tid}", "sound_over": True}
+    over = t.add(a.id, "it goes on, laid over")
+    over.overrides = {"source_sound": "previous", "sound_over": True}
+    lips = t.add(a.id, "she sings along")
+    lips.overrides = {"source_sound": "previous"}
+    guided = t.add(a.id, "she turns")
+    guided.overrides = {"guide": 5}
+    T.save(project, t)
+    T.run_tree(FakeGenerator(frames=17, size=None), project, [over.id, lips.id, guided.id], log=lambda _m: None)
+    t = T.load(project)
+    before = _md5(project / t.nodes[over.id].made["video"], "-map", "0:a")
+    t.nodes[a.id].overrides["sound_over"] = "mix"
+    ck = T.Checker(project, t)
+    assert ck.remix_due(a.id) and all(ck.status(n) == "done" for n in (over.id, lips.id, guided.id))
+    assert T.remix_sound(project, t, a.id)                                  # (saved)
+    ck = T.Checker(project, t)
+    assert ck.remix_due(over.id) and ck.status(lips.id) == ck.status(guided.id) == "changed"
+    assert ck.why(lips.id) == "the sound of the clip before it, which it repeats, was mixed again"
+    assert ck.why(guided.id) == "the clip its carry-over comes from changed"
+    gen = FakeGenerator(frames=17, size=None)
+    T.run_tree(gen, project, [over.id, lips.id, guided.id], log=lambda _m: None)
+    assert sorted(c["prompt"][:9] for c in gen.calls) == ["she sings", "she turns"]
+    t = T.load(project)
+    ck = T.Checker(project, t)
+    assert all(ck.status(n) == "done" and not ck.remix_due(n) for n in t.nodes)
+    rec = t.nodes[over.id].made
+    assert rec["settings"]["source_sound"]["rev"] == 1 and rec["sound_rev"] == 1
+    assert _md5(project / rec["video"], "-map", "0:a") != before            # a's new mix, repeated
+    t.nodes[a.id].overrides["sound_over"] = True                            # the worker's check: mixed again first,
+    T.save(project, t)                                                      # so it knows the lip-sync clip needs the
+    job = cli.prepare_job(project, [lips.id])                               # model (and loads it)
+    assert job["ai_todo"] == [lips.id] and T.load(project).nodes[a.id].made["sound_rev"] == 2
 
 
 def make_split_source(path: Path, size="160x90") -> Path:

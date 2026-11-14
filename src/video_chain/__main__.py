@@ -174,6 +174,12 @@ def prepare_job(project: Path, targets: list[str]) -> dict:
     empty = treemod.empty_prompts(tree, targets)
     if empty:
         raise JobError(f"empty prompt in node {empty[0]}")
+    # a sound-only change is mixed again now (seconds, no model), so the plan knows what repeats or carries over
+    # that sound and has to be made again
+    try:
+        treemod.remix_sounds(project, tree, sorted({n.id for t in targets for n in tree.path_to(t)}, key=tree.depth))
+    except (OSError, RuntimeError) as e:
+        raise JobError(f"could not mix a clip's sound again: {e}") from e
     checker = treemod.Checker(project, tree)
     todo = treemod.plan(tree, checker, targets)
     loras = treemod.loras_needed(tree, checker, todo)

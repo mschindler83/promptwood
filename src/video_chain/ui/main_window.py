@@ -126,8 +126,10 @@ SPEAK_TIP = ("<p>Speak this clip's lines (\"...\" after @Name, e.g. @Anna says \
 MIX_TIP = ("<p>What you hear: the given sound exactly as it is, plus the sound the model makes for this clip "
            "(steps, voices, the sound of the room). Good when music or a background goes on and the clip should "
            "still sound alive, e.g. the real video's music under the new clip's footsteps.<br>The model does not hear "
-           "the given sound, so its own sound may not follow its rhythm.<br>A clip already made with the sound laid "
-           "over is made again (only the given sound was kept).</p>")
+           "the given sound, so its own sound may not follow its rhythm.<br>A made clip keeps the model's sound next "
+           "to it, so switching this or changing the level only mixes its sound again (seconds, no new generation); "
+           "a clip made before the app kept that sound is made again.</p>")
+REMIX_DELAY_MS = 400    # a made clip's sound is mixed again this long after its mix level last changed
 MIX_OFF_TIP = ("'Generate sound' is off in the project's clip settings, so the model makes no sound to mix with; the "
                "given sound is laid over alone.")
 FREEZE_TIP = ("Freeze: keep this clip as it is made, and every clip before it. They count as done whatever "
@@ -538,6 +540,7 @@ class _Bridge(QObject):
     trigger_progress = Signal(int, int, str)   # the scan asks CivitAI about the k-th of n LoRAs (its file name)
     copied = Signal(str, str)                  # Save as: target folder, error ('' = done)
     converted = Signal(str, object, str, str, str)  # video node id, record or None, error, token, project
+    remixed = Signal(object, str, str)         # [(clip id, its new record)], error ('' = done), project
     llm_room = Signal(str)                     # ComfyUI's models were unloaded for the llama.cpp server (why)
     spoken = Signal(str, object, str, str)     # clip id, rendered lines (tts.render_lines) or None, error, project
     tts_log = Signal(str)                      # a step of text to speech
@@ -1793,6 +1796,7 @@ class MainWindow(QMainWindow):
         self._trigger_scan = None
         self.bridge.copied.connect(self._copied)
         self.bridge.converted.connect(self._converted)
+        self.bridge.remixed.connect(self._remixed)
         self.bridge.llm_room.connect(self._llm_room_made)
         self.bridge.spoken.connect(self._lines_spoken)
         self.bridge.eleven_models.connect(self._fill_eleven_models)
@@ -1821,6 +1825,12 @@ class MainWindow(QMainWindow):
         self._join_lock = threading.Lock()      # joins run one after another (play after generating + export)
         self._save_timer = QTimer(self, singleShot=True, interval=400, timeout=self._save_tree)
         self._refresh_timer = QTimer(self, singleShot=True, interval=250, timeout=self.refresh)
+        # a made clip's sound mode / level changed: its sound is mixed again (no new generation), once the level
+        # settles; remix_due: the clips waiting for that (refresh)
+        self._remix_timer = QTimer(self, singleShot=True, interval=REMIX_DELAY_MS, timeout=self._start_remix)
+        self._remixing = False
+        self.remix_due: set[str] = set()
+        self._remix_stuck: set[str] = set()     # the due clips whose remix failed (tried again after an edit)
         self._build()
         self._load_settings()
         self._gpu_proc: QProcess | None = None
@@ -5805,10 +5815,15 @@ class MainWindow(QMainWindow):
         try:
             self.status_of = {nid: checker.status(nid) for nid in self.tree.nodes}
             self.why_of = {nid: checker.why(nid) for nid, st in self.status_of.items() if st == "changed"}
+            self.remix_due = {nid for nid in self.tree.nodes if checker.remix_due(nid)}
         except Exception as e:  # noqa: BLE001  (e.g. an unreadable start image)
             self.status_of = {nid: "new" for nid in self.tree.nodes}
             self.why_of = {}
+            self.remix_due = set()
             self.status.setText(f"Could not check the clips: {e}")
+        if self.remix_due and self.remix_due != self._remix_stuck and not self._remix_timer.isActive() \
+                and not self._remixing and not self.running:
+            self._remix_timer.start(REMIX_DELAY_MS)  # (e.g. one left over by a stopped run: mixed again soon)
         sel = self.selected_id()
         on_path = {n.id for n in self.selected_path()}
         start_pm = self._pixmap(self.project / T.START_FILE)
@@ -6385,6 +6400,8 @@ class MainWindow(QMainWindow):
             else:
                 why = self.why_of.get(n.id) if st == "changed" else ""
                 step = f"Will be made again: {why}." if why else ("will be made again" if st == "changed" else "")
+                if st == "done" and n.id in self.remix_due:
+                    step = "Its sound is mixed again from the kept sounds (no new generation)."
                 card.set_revert(T.changed_inputs(self.tree, n.id) if st == "changed" else [])
                 card.set_guide_useful(n.parent is not None or vc is not None)
                 k = T.handover_index(self.tree, n)
@@ -6705,8 +6722,14 @@ class MainWindow(QMainWindow):
 
     def _overrides_changed(self, nid: str, ov: dict):
         if self.tree and nid in self.tree.nodes and not self.tree.nodes[nid].frozen:
+            before = self.tree.nodes[nid].overrides or {}
             self.tree.nodes[nid].overrides = dict(ov)
             self._failures.pop(nid, None)
+            if self.tree.nodes[nid].made and any(before.get(k) != ov.get(k) for k in ("sound_over",
+                                                                                       "sound_mix_level")):
+                # (a made clip's sound may only need mixing again: the mode at once, the level once it settles)
+                self._remix_stuck = set()
+                self._remix_timer.start(0 if before.get("sound_over") != ov.get("sound_over") else REMIX_DELAY_MS)
             self._changed()
 
     def _lora_picked(self, nid: str, path: str):
@@ -6983,7 +7006,8 @@ class MainWindow(QMainWindow):
         """A path is being joined or a video converted (they read / write clip files): no deleting (or changing
         hand-over frames) meanwhile."""
         if self._joins:
-            self.status.setText(f"Wait until the path is joined, then {what}.")
+            self.status.setText(f"Wait until the {'sound is mixed again' if self._remixing else 'path is joined'}, "
+                                f"then {what}.")
         elif self._converts:
             self.status.setText(f"Wait until the video is converted, then {what}.")
         return bool(self._joins or self._converts)
@@ -7656,6 +7680,75 @@ class MainWindow(QMainWindow):
                 bridge.converted.emit(nid, None, str(e), token, str(project))
         threading.Thread(target=work, daemon=True).start()
         self.refresh()
+
+    # ---- a sound-only change: the sound is mixed again from the model's kept sound (no new generation)
+    def _start_remix(self):
+        """Mix the sound of every clip that only needs that again (Checker.remix_due), off the GUI thread; one job
+        at a time, and like a join (it rewrites clip files): no generation, deleting or other join meanwhile."""
+        if self.tree is None or self.project is None or self.running or self._remixing:
+            return
+        try:
+            ck = T.Checker(self.project, self.tree)
+            due = sorted((n for n in self.tree.nodes if ck.remix_due(n)), key=self.tree.depth)
+        except Exception:  # noqa: BLE001  (refresh reports what cannot be checked)
+            return
+        if not due:
+            return
+        tree, project = T.Tree.from_json(self.tree.to_json()), self.project
+        order = sorted(tree.nodes, key=tree.depth)           # (a clip before the ones after it: what repeats it)
+        bridge, lock = self.bridge, self._join_lock
+        self._remixing = True
+        self._joins += 1                                     # (generate, delete, join: they wait for it)
+        self._update_buttons()
+        self.status.setText(f"Mixing the sound of clip #{due[0][1:]} again …")
+
+        revs = {n: (tree.nodes[n].made or {}).get("sound_rev") for n in order}
+
+        def work():
+            with lock:
+                error = ""
+                try:
+                    T.remix_sounds(project, tree, order, T.Checker(project, tree), persist=False)
+                except Exception as e:  # noqa: BLE001  (the ones remixed before it are still taken)
+                    error = str(e)
+                done = [n for n in order if (tree.nodes[n].made or {}).get("sound_rev") != revs[n]]
+                bridge.remixed.emit([(n, copy.deepcopy(tree.nodes[n].made)) for n in done], error, str(project))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _remixed(self, results, error: str, project: str):
+        """Take the remixed clips' records (only for the clip version that was remixed: one made again meanwhile
+        keeps its own) and say what follows from it: a clip that is made to that sound, or carries over from that
+        clip, is made again with the path."""
+        self._remixing = False
+        self._joins = max(0, self._joins - 1)
+        self._update_buttons()
+        if project != str(self.project) or self.tree is None:
+            return
+        before = dict(self.status_of)
+        taken = []
+        for nid, made in results:
+            node = self.tree.nodes.get(nid)
+            if node is not None and node.made and node.made.get("video") == made.get("video"):
+                node.made = made
+                taken.append(nid)
+        if taken:
+            self._changed()
+            self.refresh()
+        if error:
+            self._remix_timer.stop()
+            self._remix_stuck = set(self.remix_due)          # (not tried again by itself until something changes)
+            self.status.setText(f"Could not mix the sound again: {error}")
+            return
+        if not taken:
+            return
+        names = ", ".join(f"#{n[1:]}" for n in taken)
+        text = f"Clip{'s' if len(taken) > 1 else ''} {names}: sound mixed again (no new generation)."
+        after = [n for n in self.tree.nodes if before.get(n) == "done" and self.status_of.get(n) == "changed"]
+        if after:
+            text += (f" Clip{'s' if len(after) > 1 else ''} {', '.join('#' + n[1:] for n in after)} "
+                     f"{'use' if len(after) > 1 else 'uses'} that sound (made to it, or carried over from it) and "
+                     f"{'are' if len(after) > 1 else 'is'} made again with the path.")
+        self.status.setText(text)
 
     def _converted(self, nid: str, made, error: str, token: str, project: str):
         def discard():

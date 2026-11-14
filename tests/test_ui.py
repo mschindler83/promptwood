@@ -2751,6 +2751,45 @@ def test_mix_the_laid_over_sound_with_the_clips_own(app, win, tmp_path, image):
     assert c.mix_row.isVisibleTo(c) and not c.sound_mix.isEnabled() and "Generate sound" in c.sound_mix.toolTip()
 
 
+def test_mixing_a_made_clip_again_needs_no_generation(app, win, tmp_path, image):
+    """On a made clip with its sound laid over, switching to the mix (at once) or changing the level (once it
+    settles) mixes the sound again in the background from the model's kept sound: no generation, the clip stays
+    done, the status line says so; the clip file keeps its name."""
+    import subprocess
+    src = tmp_path / "song.wav"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=f=500:d=12", str(src)], check=True)
+    ids = new_project(win, tmp_path, image, ("one",))
+    tid = win.add_track(str(src), 2.0, 9.0, "Song")
+    flush(app, win)
+    card = lambda: next(c for c in win.cards if c.nid == ids[0])            # noqa: E731
+    card().src_sound.setCurrentIndex(card().src_sound.findData(f"track:{tid}"))
+    card().sound_over.setChecked(True)
+    flush(app, win)
+    run_and_wait(app, win, win.generate_path)
+    node = win.tree.nodes[ids[0]]
+    video = node.made["video"]
+    assert node.made.get("own_sound") and win.state(ids[0]) == "done"
+    from video_chain.ui.main_window import MIX_TIP
+    assert "no new generation" in MIX_TIP and "made before" in MIX_TIP
+    card().sound_mix.setChecked(True)
+    assert win._remix_timer.isActive() and win._remix_timer.interval() == 0     # the mode: at once
+    wait(app, lambda: "sound mixed again (no new generation)" in win.status.text(), timeout=30)
+    assert not win.running and not win._remixing and win.state(ids[0]) == "done"
+    node = win.tree.nodes[ids[0]]
+    assert node.made["video"] == video and node.made["settings"]["source_sound"]["mix"] is True
+    assert node.made["sound_rev"] == 1 and not win.remix_due
+    win.status.setText("")
+    card().mix_level.setValue(-6)
+    assert win._remix_timer.isActive() and win._remix_timer.interval() == 400   # the level: once it settles
+    wait(app, lambda: "sound mixed again" in win.status.text(), timeout=30)
+    node = win.tree.nodes[ids[0]]
+    assert node.made["settings"]["source_sound"]["mix_level"] == -6 and node.made["sound_rev"] == 2
+    flush(app, win)
+    saved = T.load(win.project).nodes[ids[0]].made
+    assert saved["sound_rev"] == 2 and saved["video"] == video
+    assert T.Checker(win.project, T.load(win.project)).status(ids[0]) == "done"
+
+
 def test_start_node_opens_the_project_tab(app, win, tmp_path, image):
     """A click on the Start node shows the start image settings (the inspector's Project tab)."""
     from video_chain.ui.graph import START

@@ -26,6 +26,7 @@ Project folder:
   nodes/<id>_<tag>.png its last frame, the start image of its children
   nodes/<id>_<tag>_first.png   a video node's first frame (the end frame of the generated clip before it)
   nodes/<id>_<tag>_f<k>.png    a clip's hand-over frame k (Node.end_at), the start image of its children
+  nodes/<id>_<tag>.own.m4a     the sound the model made for a clip whose given sound is laid over (remix_sound)
   paths/<id>.mp4       a joined path (start -> node), made on demand
   ends/<id>_<tag>.png  a generated clip's own end image
   ends/<id>_k<tag>.png a middle keyframe of a generated clip (Node.keyframes)
@@ -363,7 +364,8 @@ class Tree:
 
 SEED_MAX = 2_000_000_000            # (the seed field's range)
 REFINED = ("1080p", "2k")          # refined copies of a clip version for export: nodes/<id>_<tag>_<size>.mp4
-_CLIP_NAME = re.compile(r"^n\d+(_[0-9a-f]{8})?((_first|_f\d+)?\.(mp4|png)|_(1080p|2k)\.(mp4|json))$")   # also the fixed names of older versions
+# a clip file of this app (also the fixed names of older versions)
+_CLIP_NAME = re.compile(r"^n\d+(_[0-9a-f]{8})?((_first|_f\d+)?\.(mp4|png)|_(1080p|2k)\.(mp4|json)|\.own\.(m4a|mka))$")
 
 
 def handover_frames(video: Path) -> list[Path]:
@@ -384,13 +386,18 @@ def _unlink(f: Path) -> bool:
         return False
 
 
+# the files of a clip version its record names (own_sound: the model's sound of a clip with a sound laid over, kept
+# for remix_sound); they travel together: kept aside, made again, removed as one
+CLIP_KEYS = ("video", "frame", "first", "own_sound")
+
+
 def clip_files(project: Path, node: "Node") -> list[Path]:
     """The files a node's current record points to."""
     if not node.made:
         return []
     area = (Path(project) / "nodes").resolve()
     out = []
-    for k in ("video", "frame", "first"):
+    for k in CLIP_KEYS:
         if node.made.get(k):
             f = Path(project) / node.made[k]
             if area in f.resolve().parents:           # a damaged/hand-edited record never reaches elsewhere
@@ -420,8 +427,7 @@ def remove_stale_files(project: Path, tree: "Tree") -> list[Path]:
     d = Path(project) / "nodes"
     if not d.is_dir():
         return []
-    used = {Path(project) / n.made[k] for n in tree.nodes.values() if n.made for k in ("video", "frame", "first")
-            if n.made.get(k)}
+    used = {Path(project) / n.made[k] for n in tree.nodes.values() if n.made for k in CLIP_KEYS if n.made.get(k)}
     used |= {h for n in tree.nodes.values() if (h := handover_file(project, tree, n)) is not None}
     used |= {f for n in tree.nodes.values() if n.made and n.made.get("video") for size in REFINED
              for f in (refined_file(project, n, size), refined_file(project, n, size).with_suffix(".json"))}
@@ -2051,6 +2057,7 @@ class Checker:
     def __init__(self, project: Path, tree: Tree):
         self.project, self.tree = Path(project), tree
         self._status: dict[str, str] = {}
+        self._remix: set[str] = set()              # done, but its sound is to be built again (remix_due)
         self._settings: dict | None = None
         self._audio: list[dict] | None = None
         self._pictures: dict[str, str | None] = {}
@@ -2127,7 +2134,8 @@ class Checker:
             return None
         k = handover_index(self.tree, parent)            # an earlier hand-over: other guide frames
         v = parent.made.get("video")
-        return None if v is None else v + (f"@{k}" if k is not None else "")
+        rev = parent.made.get("sound_rev")              # its sound built again in place: the guide hears the new one
+        return None if v is None else v + (f"@{k}" if k is not None else "") + (f"~s{rev}" if rev else "")
 
     def _files_there(self, node: Node) -> bool:
         m = node.made
@@ -2136,7 +2144,9 @@ class Checker:
         return all((self.project / m[k]).is_file() for k in ("video", "frame", "first") if m.get(k))
 
     def status(self, nid: str) -> str:
-        """done | changed (made, but something it depends on changed) | new (never made)."""
+        """done | changed (made, but something it depends on changed) | new (never made). A clip whose settings
+        differ only in how its laid-over sound is mixed counts as done (nothing the model made changes; what follows
+        it is not touched): its sound is built again from its kept own sound (remix_due, remix_sound)."""
         if nid in self._status:
             return self._status[nid]
         node = self.tree.nodes[nid]
@@ -2149,7 +2159,7 @@ class Checker:
             base = self.base()
             st = "done" if base is not None and _same_key(m.get("key"), video_key(node, base)) else "changed"
         elif (m.get("prompt") != node.prompt or m.get("seed") != node.seed
-              or _old_record(m.get("settings")) != self.settings(nid)
+              or (not (same := _old_record(m.get("settings")) == self.settings(nid)) and not self._sound_only(node))
               or (node.parent is not None and self.status(node.parent) != "done")
               or m.get("start_sha1") != self.sha(self.start_frame(node))
               or m.get("end_key") != self.end_key(node)
@@ -2158,8 +2168,35 @@ class Checker:
             st = "changed"
         else:
             st = "done"
+            if not same:                           # only its sound's mix changed
+                self._remix.add(nid)
         self._status[nid] = st
         return st
+
+    def _sound_only(self, node: Node) -> bool:
+        """The made clip's settings differ from its current ones only in its laid-over sound's mix (mix on / off,
+        the level) or in a new version of the sound it repeats from the clip before (sound_rev): the model heard
+        none of that, so the clip need not be made again, as long as the model's own sound was kept (own_sound).
+        Clips made before it was kept are made again."""
+        m = node.made
+        own = m.get("own_sound")
+        if not own or not (self.project / own).is_file():
+            return False
+        made, now = _old_record(m.get("settings")), self.settings(node.id)
+        if not isinstance(made, dict) or not isinstance(now, dict):
+            return False
+        a, b = made.get("source_sound"), now.get("source_sound")
+        if not (isinstance(a, dict) and isinstance(b, dict) and a.get("overlay") and b.get("overlay")):
+            return False
+        loose = ("mix", "mix_level", "rev")
+
+        def strip(d: dict) -> dict:
+            return {k: v for k, v in d.items() if k not in loose}
+        return strip(a) == strip(b) and {**made, "source_sound": None} == {**now, "source_sound": None}
+
+    def remix_due(self, nid: str) -> bool:
+        """The clip is done, but its sound has to be built again for its current sound settings (remix_sound)."""
+        return self.status(nid) == "done" and nid in self._remix
 
 
     def seam_problem(self, node: Node) -> str | None:
@@ -2191,6 +2228,9 @@ class Checker:
         if isinstance(s, dict) and "backend" not in s:
             return "it was made with the old generator"
         if _old_record(s) != self.settings(nid):
+            was, now = (s or {}).get("source_sound") or {}, (self.settings(nid) or {}).get("source_sound") or {}
+            if now.get("mode") == "previous" and was.get("rev") != now.get("rev"):
+                return "the sound of the clip before it, which it repeats, was mixed again"
             return "its settings changed (the project's or its own)"
         if node.parent is not None and self.status(node.parent) != "done":
             p = self.tree.nodes[node.parent]
@@ -2467,8 +2507,11 @@ def previous_sound_span(tree: Tree, node: Node, project: Path | None = None) -> 
     n = (made_frames(p) if not p.is_video else 0) or clip_length(tree, p)
     a, b = path_cuts(tree, path, bool(tree.options.get("keep_repeated")), planned=not (p.made or p.is_video))[k]   # (as planned until it is made)
     loop = max(1, n - a - b) / chain.FPS
-    return {"file": file, "start": round(base + a / chain.FPS, 3), "secs": secs, "loop": round(loop, 3),
-            "offset": round((loop - lead) % loop, 3), "video": p.id, "mode": "previous"}
+    out = {"file": file, "start": round(base + a / chain.FPS, 3), "secs": secs, "loop": round(loop, 3),
+           "offset": round((loop - lead) % loop, 3), "video": p.id, "mode": "previous"}
+    if not p.is_video and p.made and p.made.get("sound_rev"):
+        out["rev"] = int(p.made["sound_rev"])       # its sound was built again in the same file (remix_sound)
+    return out
 
 
 def sound_file(project: Path | None, sound: dict) -> Path:
@@ -3063,6 +3106,65 @@ def guide_problem(tree: Tree, checker: "Checker", todo: list[str]) -> str | None
     return None
 
 
+def given_sound(project: Path, node: Node, ss: dict, wav: Path) -> None:
+    """A clip's given sound (its recorded source_sound span) cut into a WAV, as the clip gets it: by run_tree before
+    the model and remix_sound after it, so a remix lays exactly the same sound."""
+    if ss.get("mode") == "previous":
+        bad = _repeat_sound_problems(project, node, ss)
+        if bad:
+            raise RuntimeError(bad[0])
+    chain.to_wav(sound_file(project, ss), wav, ss["start"], ss["secs"], ss.get("loop"), ss.get("offset") or 0.0,
+                 ss.get("pad") or 0.0, fill=ss.get("mode") == "track")
+
+
+def remix_sound(project: Path, tree: Tree, nid: str, checker: Checker | None = None, persist: bool = True) -> bool:
+    """A made clip whose settings changed only in how its laid-over sound is mixed (Checker.remix_due): its sound
+    is built again from the model's sound kept next to it and the given sound (cut again as run_tree does), in
+    place, the picture copied packet for packet; its record then holds the current settings (sound_rev counts the
+    rebuilds: a clip that repeats this one's sound, or carries over from it, depends on it). Seconds instead of a new
+    generation; the last frame and everything the clips after it start from stay as they are. False: nothing to do
+    (not due: e.g. no own sound kept, then the clip has to be made again). persist: write tree.json (a window saves
+    its own tree instead)."""
+    project = Path(project)
+    ck = checker or Checker(project, tree)
+    if nid not in tree.nodes or not ck.remix_due(nid):
+        return False
+    node = tree.nodes[nid]
+    settings = ck.settings(nid)
+    ss = settings["source_sound"]
+    if not sound_file(project, ss).is_file():
+        raise FileNotFoundError(f"the sound of clip #{nid[1:]} is missing ({Path(ss['file']).name})")
+    with tempfile.TemporaryDirectory(prefix="video-chain-", dir=str(project / "nodes")) as tmp:
+        wav = Path(tmp) / "source_sound.wav"
+        given_sound(project, node, ss, wav)
+        chain.remix_audio(project / node.made["video"], project / node.made["own_sound"], wav,
+                          float(ss.get("mix_level") or 0.0) if ss.get("mix") else None)
+    node.made["settings"] = settings
+    node.made["overrides"] = copy.deepcopy(node.overrides or {})
+    node.made["sound_rev"] = int(node.made.get("sound_rev") or 0) + 1
+    if persist:
+        save(project, tree)
+    return True
+
+
+def remix_sounds(project: Path, tree: Tree, nids: list[str], checker: Checker | None = None,
+                 persist: bool = True) -> list[str]:
+    """remix_sound for every due clip of nids (in this order: put a clip before the ones after it), again and again
+    while one becomes due (a clip that lays over the sound of the one before, remixed now). Returns the remixed."""
+    out: list[str] = []
+    ck = checker or Checker(project, tree)
+    again = True
+    while again and len(out) <= len(nids) ** 2:   # (each remix can make only the clips after it due)
+        again = False
+        for nid in nids:
+            if remix_sound(project, tree, nid, ck, persist):
+                out.append(nid)
+                ck = Checker(project, tree)         # (what depends on its sound changes)
+                again = True
+                break
+    return out
+
+
 def run_tree(generator: chain.Generator, project: Path, targets: list[str],
              events: Callable[[dict], None] | None = None, log: Callable[[str], None] = print) -> list[str]:
     """Make what the target paths need. Saves tree.json after every clip, so a stop keeps finished clips."""
@@ -3079,8 +3181,13 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
     checker = Checker(project, tree)
     if checker.base() is None:
         raise FileNotFoundError("the project has no start image (and no video to take the size from)")
-    todo = plan(tree, checker, targets)
     on_paths = {n.id for t in targets for n in tree.path_to(t)}
+    # a sound-only change: the sound is mixed again (seconds), not the clip made again; before the plan, since what
+    # repeats or carries over that sound depends on it
+    for nid in remix_sounds(project, tree, sorted(on_paths, key=lambda i: tree.depth(i)), checker):
+        log(f"{nid}: sound mixed again from its kept own sound (no new generation)")
+        checker = Checker(project, tree)
+    todo = plan(tree, checker, targets)
     missing = [lo for lo in loras_needed(tree, checker, todo) if not Path(lo).is_file()]
     if missing:
         raise FileNotFoundError(f"LoRA not found: {missing[0]}")
@@ -3138,6 +3245,7 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
             key_key = checker.keyframe_key(node)
             guide_from = checker.guide_from(node)
             call = dict(settings)
+            own = None
             if node.keyframes:
                 call["keyframes"] = [{"image": str(project / k["image"]), "frame_idx": keyframe_frame(k["at"])}
                                      for k in node.keyframes]
@@ -3156,13 +3264,7 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
                     if settings.get("source_sound"):   # the real video's sound after its range: the soundtrack
                         sound = Path(tmp) / "source_sound.wav"
                         ss = settings["source_sound"]
-                        if ss.get("mode") == "previous":
-                            bad = _repeat_sound_problems(project, node, ss)
-                            if bad:
-                                raise RuntimeError(bad[0])
-                        chain.to_wav(sound_file(project, ss), sound, ss["start"], ss["secs"], ss.get("loop"),
-                                     ss.get("offset") or 0.0, ss.get("pad") or 0.0,
-                                     fill=ss.get("mode") == "track")
+                        given_sound(project, node, ss, sound)
                         if not ss.get("overlay"):  # the model makes the picture to it (lip sync)
                             call["audio_paths"] = list(call.get("audio_paths") or []) + [str(sound)]
                     plain = (send is not None and not any(g.get("at") == "start" for g in guides),
@@ -3173,6 +3275,8 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
                                            f"({', '.join(numbered)})")
                     generator.generate(model_prompt(tree.options, node, settings, start=plain[0], end=plain[1]),
                                        send, new_video, new_frame, node.seed, settings=call)
+                    if sound is not None and new_video.exists() and settings["source_sound"].get("overlay"):
+                        own = chain.keep_own_sound(new_video)    # the model's sound, before it is replaced / mixed
                     if sound is not None and new_video.exists() and settings["source_sound"].get("mix"):
                         chain.mix_audio(new_video, sound, settings["source_sound"].get("mix_level") or 0.0)
                     elif sound is not None and new_video.exists():
@@ -3192,6 +3296,8 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
                          "keyframes": copy.deepcopy(node.keyframes),
                          "start_sha1": start_sha, "video": f"nodes/{new_video.name}",
                          "frame": f"nodes/{new_frame.name}", "frames": made_n}
+            if own is not None:
+                node.made["own_sound"] = f"nodes/{own.name}"   # (a sound-only change mixes again: remix_sound)
             if old_end and old_end != node.end_image and _in_ends(project, old_end):
                 old.append(project / old_end)          # the end image of the previous version
             for rel in old_keys - {k["image"] for k in node.keyframes} - {None}:
@@ -3207,7 +3313,7 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
                 node.made["keyframe_key"] = key_key
             if guide_from is not None:
                 node.made["guide_from"] = guide_from
-            new_files = [new_video, new_frame]
+            new_files = [new_video, new_frame] + ([own] if own is not None else [])
             if node.end_at is not None:
                 # a new take: the frame chosen in the old one means nothing here; it hands over at its last
                 # frame until a frame of this take is chosen
@@ -3295,6 +3401,26 @@ def refine_record(target: Path) -> dict:
         return {}
 
 
+def _refined_sound(project: Path, node: Node, target: Path, tmp: Path, log: Callable[[str], None], who: str) -> None:
+    """The sound of a generated clip's refined copy: its mix of both sounds exactly as the clip has it, or its given
+    sound cut again from its file (as recorded); without a given sound the refine's own sound stays."""
+    s = node.made.get("settings") or {}
+    draft = project / node.made["video"]
+    if (s.get("source_sound") or {}).get("mix") and chain.audio_seconds(draft):
+        wav = tmp / f"{node.id}_sound.wav"     # the made clip's mix of both sounds, exactly
+        chain.to_wav(draft, wav)
+        chain.replace_audio(target, wav)
+    elif s.get("source_sound") and not sound_file(project, s["source_sound"]).is_file():
+        log(f"{who}: the video file of its sound is missing ({Path(s['source_sound']['file']).name}); the refined "
+            "copy keeps the model's sound")
+    elif s.get("source_sound"):
+        ss = s["source_sound"]
+        wav = tmp / f"{node.id}_sound.wav"     # the recorded sound, as in the clip
+        chain.to_wav(sound_file(project, ss), wav, ss["start"], ss["secs"], ss.get("loop"), ss.get("offset") or 0.0,
+                     ss.get("pad") or 0.0, fill=ss.get("mode") == "track")
+        chain.replace_audio(target, wav)
+
+
 def refine_path(generator, project: Path, nid: str, size: str, out: Path,
                 events: Callable[[dict], None] | None = None, log: Callable[[str], None] = print,
                 pin: bool = True, fast_attention: bool = False, refine_swapped: bool = False,
@@ -3331,6 +3457,8 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
     if single and nid not in tree.nodes:
         raise ValueError(f"no clip {nid}")
     path = [tree.nodes[nid]] if single else tree.path_to(nid)
+    if remix_sounds(project, tree, [n.id for n in path], checker):   # (the refined copies take the clip's sound)
+        checker = Checker(project, tree)
     missing = [n.id for n in path if checker.status(n.id) != "done"]
     if missing:
         raise ValueError(f"not made yet: {', '.join(missing)}")
@@ -3376,6 +3504,8 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
                 if fast_attention:
                     pins["attention"] = "sol-attn"
             record = refine_record(target)
+            sound_rev = None if node.is_video else node.made.get("sound_rev")   # (its sound mixed again since)
+            copy_rev = record.pop("sound", None)
             if node.is_video and not regen and record.get("video", "converted") == "converted":
                 reuse = target.is_file()                 # (copies converted before the record named it)
             else:
@@ -3387,6 +3517,10 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
                 else:
                     target = tmp / f"{node.id}_{size}_single.mp4"   # unpinned: not kept, the path's copy stays
             files[node.id] = target
+            if reuse and (copy_rev or None) != (sound_rev or None) and target.parent != tmp:
+                log(f"[{k}/{len(order)}] {node.id}: its sound was mixed again; the refined copy gets the new sound")
+                _refined_sound(project, node, target, tmp, log, f"[{k}/{len(order)}] {node.id}")
+                target.with_suffix(".json").write_text(json.dumps({**pins, "sound": sound_rev}), encoding="utf-8")
             if reuse:
                 emit({"e": "node", "id": node.id, "state": "reused"})
                 continue
@@ -3457,21 +3591,9 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
                 generator.refine(project / node.made["video"], prompt, target, node.seed, (w, h),
                                  made_frames(node) or _clip_frames(project, node), loras, first, last,
                                  sparse=SOL_TAU if fast_attention else None, strength=strength)
-                draft = project / node.made["video"]
-                if (s.get("source_sound") or {}).get("mix") and chain.audio_seconds(draft):
-                    wav = tmp / f"{node.id}_sound.wav"     # the made clip's mix of both sounds, exactly
-                    chain.to_wav(draft, wav)
-                    chain.replace_audio(target, wav)
-                elif s.get("source_sound") and not sound_file(project, s["source_sound"]).is_file():
-                    log(f"[{k}/{len(order)}] {node.id}: the video file of its sound is missing "
-                        f"({Path(s['source_sound']['file']).name}); the refined copy keeps the model's sound")
-                elif s.get("source_sound"):
-                    wav = tmp / f"{node.id}_sound.wav"     # the recorded sound, as in the clip
-                    chain.to_wav(sound_file(project, s["source_sound"]), wav, s["source_sound"]["start"],
-                                 s["source_sound"]["secs"], s["source_sound"].get("loop"),
-                                 s["source_sound"].get("offset") or 0.0, s["source_sound"].get("pad") or 0.0,
-                                 fill=s["source_sound"].get("mode") == "track")
-                    chain.replace_audio(target, wav)
+                _refined_sound(project, node, target, tmp, log, f"[{k}/{len(order)}] {node.id}")
+            if sound_rev:
+                pins["sound"] = sound_rev
             target.with_suffix(".json").write_text(json.dumps(pins), encoding="utf-8")
             made_now.append(node.id)
             emit({"e": "node", "id": node.id, "state": "done"})
@@ -3486,12 +3608,15 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
     return out
 
 
-def join_path(project: Path, tree: Tree, nid: str, out: Path | None = None) -> Path:
+def join_path(project: Path, tree: Tree, nid: str, out: Path | None = None, persist: bool = False) -> Path:
     """Join the clips from the start to nid into one video (paths/<id>.mp4 unless out is given).
-    Every clip on the path must be done."""
+    Every clip on the path must be done. A clip whose sound is due to be mixed again is remixed first (in tree;
+    persist: also saved; a window saves its own tree, so by default a remix not saved is simply done again later).
+    A kept join is reused while every clip file is unchanged (by date: a remixed clip is joined again)."""
     project = Path(project)
-    checker = Checker(project, tree)
     path = tree.path_to(nid)
+    remix_sounds(project, tree, [n.id for n in path], persist=persist)
+    checker = Checker(project, tree)
     missing = [n.id for n in path if checker.status(n.id) != "done"]
     if missing:
         raise ValueError(f"not made yet: {', '.join(missing)}")

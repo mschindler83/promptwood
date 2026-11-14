@@ -404,18 +404,66 @@ def mix_audio(video: Path, wav: Path, level_db: float = 0.0) -> None:
     if not probe(video)["audio"]:
         replace_audio(video, wav)
         return
+    _mix_into(video, video, wav, level_db)
+
+
+def _mix_into(video: Path, own: Path, wav: Path, level_db: float) -> None:
+    """mix_audio's mix with the clip's own sound read from `own` (the clip itself, or the model's sound kept next
+    to it before it was replaced: see keep_own_sound), so a mix can be built again from the same two sounds."""
     level = min(max(float(level_db), MIX_LEVELS[0]), MIX_LEVELS[1])
     fmt = "aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo"
-    graph = (f"[0:a:0]{fmt},apad[own];[1:a:0]{fmt},volume={level:.2f}dB,apad[given];"
+    graph = (f"[1:a:0]{fmt},apad[own];[2:a:0]{fmt},volume={level:.2f}dB,apad[given];"
              f"[own][given]amix=inputs=2:duration=first:normalize=0,"
              f"alimiter=limit={MIX_LIMIT}:level=false:latency=true[mix]")
+    video = Path(video)
     tmp = video.with_name(video.stem + ".part" + video.suffix)
     try:
-        _run(["ffmpeg", "-v", "error", "-y", "-i", str(video), "-i", str(wav), "-filter_complex", graph,
-              "-map", "0:v:0", "-map", "[mix]", "-c:v", "copy", "-c:a", "aac", "-b:a", "256k", "-shortest", str(tmp)])
+        _run(["ffmpeg", "-v", "error", "-y", "-i", str(video), "-i", str(own), "-i", str(wav), "-filter_complex",
+              graph, "-map", "0:v:0", "-map", "[mix]", "-c:v", "copy", "-c:a", "aac", "-b:a", "256k", "-shortest",
+              str(tmp)])
         tmp.replace(video)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+OWN_SOUND = ".own"     # nodes/<clip stem>.own.m4a: the sound the model made for a clip whose sound was laid over
+
+
+def audio_codec(path: Path) -> str | None:
+    """The codec of a file's first audio stream (None: it has no sound)."""
+    out = _run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name",
+                "-of", "csv=p=0", str(path)]).strip()
+    return out.splitlines()[0].strip() if out else None
+
+
+def keep_own_sound(video: Path) -> Path | None:
+    """Keep the sound the model made for a clip before a given sound replaces it or is mixed into it: its audio
+    stream copied as it is (no re-encoding, so nothing is lost) into <clip stem>.own.m4a next to the clip, or .mka
+    for a codec MP4 audio cannot hold. Then switching between laying over and mixing, or another mix level, only
+    builds the sound again (remix_audio) instead of making the clip again. None: the clip has no sound."""
+    video = Path(video)
+    codec = audio_codec(video)
+    if codec is None:
+        return None
+    out = video.with_name(video.stem + OWN_SOUND + (".m4a" if codec in ("aac", "alac") else ".mka"))
+    tmp = out.with_name(out.stem + ".part" + out.suffix)
+    try:
+        _run(["ffmpeg", "-v", "error", "-y", "-i", str(video), "-map", "0:a:0", "-vn", "-c:a", "copy", str(tmp)])
+        tmp.replace(out)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return out
+
+
+def remix_audio(video: Path, own: Path, wav: Path, level_db: float | None) -> None:
+    """Build a clip's sound again from the model's own sound kept next to it (keep_own_sound) and the given sound:
+    level_db None: only the given sound (as replace_audio), else both mixed at that level (as mix_audio, the own
+    sound taken from `own`, not from the clip, which already holds a mix or the given sound). The picture is
+    copied packet for packet, so the clip's frames stay exactly as made. Written under a temporary name first."""
+    if level_db is None:
+        replace_audio(video, wav)
+    else:
+        _mix_into(Path(video), Path(own), wav, level_db)
 
 
 def cut_frames(video: Path, out: Path, first: int, count: int, fps: int = FPS) -> bool:
@@ -671,6 +719,8 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
         if source_sound.get("mode") == "previous":     # the clip before's sound, repeated (loop / offset)
             s["source_sound"].update({"mode": "previous", "loop": float(source_sound["loop"]),
                                       "offset": float(source_sound.get("offset") or 0.0)})
+            if source_sound.get("rev"):                # that clip's sound was built again in place (tree.remix_sound)
+                s["source_sound"]["rev"] = int(source_sound["rev"])
         elif source_sound.get("mode") == "track":      # an audio track of the project, carried on along the path
             s["source_sound"].update({"mode": "track", "track": str(source_sound["track"]),
                                       "pad": float(source_sound.get("pad") or 0.0)})
