@@ -31,6 +31,7 @@ import logging
 import math
 import os
 import queue
+import shutil
 import subprocess
 import tempfile
 import threading
