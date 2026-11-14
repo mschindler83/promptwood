@@ -66,7 +66,7 @@ def test_update_cards_looks_at_each_file_once(app, win, tmp_path, image, monkeyp
         return real(p, *a, **k)
     monkeypatch.setattr(os, "stat", counting)
     win._update_cards()
-    monkeypatch.undo()
+    monkeypatch.setattr(os, "stat", real)
     assert seen, "the files were not looked at at all"
     # (the card widget itself looks at the end image once more in PromptCard.set_end, outside this window code)
     assert max(v for k, v in seen.items() if not k.endswith("e.png")) == 1 and seen[str(win.project / "ends" / "e.png")] <= 2
@@ -202,7 +202,7 @@ def test_start_checks_in_the_background(app, win, tmp_path, image, monkeypatch):
     assert "Checking" in win.status.text()
     wait(app, lambda: win.worker_alive)
     assert any(th is not __import__("threading").main_thread() for th in seen)
-    monkeypatch.undo()
+    monkeypatch.setattr(T, "Checker", real)
     wait(app, lambda: not win.running)
     assert win.state(ids[0]) == "done"
 
