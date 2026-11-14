@@ -17,7 +17,8 @@ from ..tree import refine_problems
 from .theme import repolish
 from .widgets import guard_wheel, icon_button, label
 
-KIND_TEXT = {"video": "video clip prompt", "image": "image prompt", "edit": "edit instruction"}
+KIND_TEXT = {"video": "video clip prompt", "video_h3": "video clip prompt", "image": "image prompt",
+             "edit": "edit instruction"}
 
 
 def refine_button(tip: str = "Refine this prompt with a language model (ComfyUI)") -> "QPushButton":
@@ -46,12 +47,14 @@ class RefineDialog(QDialog):
     ComfyUI's models refine once per press (with an optional hint). llama.cpp models hold a conversation: each
     message changes the current version, every version stays and can be continued from, and pictures (the clip's
     start frame, the image to edit, …) can be shown to a model that sees. chosen() -> the text to use, or None.
-    pictures: [(title, path, on)] offered at the start."""
+    pictures: [(title, path, on)] offered at the start. seconds, start_image: the clip's length and the frame it
+    starts from (kind "video_h3": the refiner fits the action to the length and anchors on that frame)."""
 
     def __init__(self, parent, text: str, kind: str, connect, settings=None, start_comfy=None, cast=None,
-                 pictures=None):
+                 pictures=None, seconds: float | None = None, start_image=None):
         super().__init__(parent)
         self.cast = cast or []                    # the project's characters: the refiner keeps @Name, writes lines
+        self.seconds, self.start_image = seconds, (str(start_image) if start_image else None)
         self.setWindowTitle(f"Refine the {KIND_TEXT.get(kind, 'prompt')}")
         self.resize(1100, 680)
         self.kind, self.connect, self.qs, self.start_comfy = kind, connect, settings, start_comfy
@@ -443,13 +446,15 @@ class RefineDialog(QDialog):
         self._pending = ask
         sig, refiner, seed, cast = self._sig, self.refiner, random.randint(0, 2**31 - 1), self.cast
         turns, pics = list(self.turns[:self.base + 1]), self.chosen_pictures()
+        clip = self._clip()
 
         def work():
             try:
                 if chat:
-                    out = refiner.chat(text, kind, turns, ask, pictures=pics, cast=cast or None, seed=seed)
+                    out = refiner.chat(text, kind, turns, ask, pictures=pics, cast=cast or None, seed=seed, **clip)
                 else:
-                    out = refiner.refine_prompt(text, kind, model, seed, ask, **({"cast": cast} if cast else {}))
+                    out = refiner.refine_prompt(text, kind, model, seed, ask, **({"cast": cast} if cast else {}),
+                                                **clip)
                 sig.result.emit(out, "")
             except Exception as e:  # noqa: BLE001
                 try:
@@ -457,6 +462,12 @@ class RefineDialog(QDialog):
                 except RuntimeError:
                     pass
         threading.Thread(target=work, daemon=True).start()
+
+    def _clip(self) -> dict:
+        """What a "video_h3" refine is told about the clip (nothing for the other kinds). A conversation shows the
+        start frame only when it is among the chosen pictures (else the model is told it cannot see it); ComfyUI's
+        refiner shows it to its vision models."""
+        return {"seconds": self.seconds, "start_image": self.start_image} if self.kind == "video_h3" else {}
 
     def _result(self, text: str, error: str):
         self._busy = False

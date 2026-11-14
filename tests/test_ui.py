@@ -2003,12 +2003,14 @@ def test_lora_picker_search_and_full_names(app, tmp_path):
 def test_prompt_refiner_on_the_card(app, win, tmp_path, image, monkeypatch):
     from video_chain.ui import main_window as M
     ids = new_project(win, tmp_path, image, ("a man walks",))
-    seen, seen_pics = {}, []
+    seen, seen_pics, seen_clip = {}, [], {}
 
     class FakeDialog:
-        def __init__(self, parent, text, kind, connect, settings=None, start_comfy=None, cast=None, pictures=None):
+        def __init__(self, parent, text, kind, connect, settings=None, start_comfy=None, cast=None, pictures=None,
+                     **clip):
             seen.update(text=text, kind=kind, cast=cast)
             seen_pics.extend(pictures or [])
+            seen_clip.update(clip)
             self.refined_any = True
 
         def exec(self):
@@ -2028,6 +2030,13 @@ def test_prompt_refiner_on_the_card(app, win, tmp_path, image, monkeypatch):
     card.edit.undo()                                              # one Ctrl+Z takes the refined text back
     assert card.edit.toPlainText() == "a man walks"
     assert win._comfy_model == "llm" and "language model" in win.model_label.text()   # unloaded before clips
+    assert seen_clip["seconds"] == win.tree.options.get("frames", 73) / 24 and Path(seen_clip["start_image"]) == \
+        Path(seen_pics[0][1])
+    win.tree.options["prompt_format"] = "h3"                       # the official format: its own refine
+    win.tree.nodes[ids[0]].overrides["frames"] = 121
+    next(c for c in win.cards if c.nid == ids[0]).b_refine.click()
+    assert seen["kind"] == "video_h3" and seen["cast"] == [] and seen_clip["seconds"] == 121 / 24
+    del win.tree.options["prompt_format"]
 
 
 def test_create_a_new_image_in_the_window(app, tmp_path, image, monkeypatch):

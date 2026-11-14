@@ -642,6 +642,92 @@ def test_prompt_refiner(server):
     assert C.clean_refined("**“A calm sea.”**") == "A calm sea."
 
 
+def test_classic_video_refine_is_unchanged():
+    """The classic format keeps its instruction, its length limit and its one-line answer; clip facts given for
+    it are not used."""
+    assert C.REFINE_INSTRUCTIONS["video"].startswith("You improve prompts for an image-to-video model (MiniMax H3)")
+    assert C.REFINE_INSTRUCTIONS["video"].endswith("At most 120 words. Answer with the prompt only, no preface, no "
+                                                   "quotes around it, no markdown.")
+    model = {"file": "qwen3vl_4b_fp8_scaled.safetensors", "type": "krea2"}
+    plain = C.build_refine_prompt_workflow(prompt="a man walks", kind="video", model=model, seed=1)
+    given = C.build_refine_prompt_workflow(prompt="a man walks", kind="video", model=model, seed=1, seconds=3.0,
+                                           start="seen")
+    assert plain == given and plain["gen"]["inputs"]["max_length"] == 512 and "pic" not in plain
+    assert "seconds" not in plain["gen"]["inputs"]["system_prompt"]
+    assert C.clean_refined("a\n\nb\noverall_soundscape: x") == "a b overall_soundscape: x"     # one line
+
+
+def test_h3_refine_instruction_and_clip():
+    """The official format: its own instruction (style and composition first, onset -> development -> result,
+    camera as type + amplitude + speed, two sound lines, no tags), the clip's seconds and its start frame."""
+    text = C.REFINE_INSTRUCTIONS["video_h3"]
+    for part in ("present tense", "overall style", "initial composition", "how the action begins, how it develops",
+                 "amplitude and speed", "Keep every subject, action, detail and spoken line", "350-500 words",
+                 "[Shot 2] At 00:03.500", "\"overall_soundscape: \"", "\"non_diegetic_music: \"", "N/A",
+                 "Do not write a header line", "speaker ids like (S1)"):
+        assert part in text, part
+    system, user = C.refine_messages(prompt="@Anna waves", kind="video_h3", seconds=73 / 24, start="seen",
+                                     cast=[{"name": "Anna", "desc": "", "voice": True}])
+    assert user == "@Anna waves" and system.startswith(text) and "minors" in system
+    assert "The cast, written as @Name: @Anna, has a voice." in system                 # cast rules apply too
+    assert "The clip is 3.04 seconds long" in system and "every cut time is before 00:03.042" in system
+    assert "is the video's first frame" in system and "Anchor the first sentences" in system
+    unseen, _u = C.refine_messages(prompt="x", kind="video_h3", seconds=10, start="unseen")
+    assert "The clip is 10.00 seconds long" in unseen and "Do not invent how it looks" in unseen
+    assert "first frame (at 0.00" not in unseen
+    nothing, _u = C.refine_messages(prompt="x", kind="video_h3")
+    assert nothing == text + " " + C._SAFETY                                           # no clip facts: none told
+    wf = C.build_refine_prompt_workflow(prompt="x", kind="video_h3", model={"file": "q", "type": "krea2"}, seed=2,
+                                        seconds=5, start="seen", image="video-chain/start.png")
+    assert wf["gen"]["inputs"]["max_length"] == 1024 and wf["gen"]["inputs"]["image"] == ["pic", 0]
+    assert wf["pic"] == {"class_type": "LoadImage", "inputs": {"image": "video-chain/start.png"}}
+
+
+def test_clean_refined_keeps_the_h3_lines():
+    raw = ("<think>plan</think>Here is the refined prompt:\n\n```\n**integrated_multimodal_description:** [Shot 1] "
+           "Live-action, cinematic, a wide shot frames @Anna on a pier.\nThe camera pushes in as @Anna (S1) says: "
+           "<d>[English] Come on.</d>\n\n[Shot 2] At 00:03.000, the camera cuts to the sea.\n\n"
+           "**overall_soundscape:** Waves break on the pilings.\nnon_diegetic_music: N/A\n```")
+    assert C.clean_refined(raw, lines=True) == (
+        "[Shot 1] Live-action, cinematic, a wide shot frames @Anna on a pier. The camera pushes in as @Anna says: "
+        "\"Come on.\"\n[Shot 2] At 00:03.000, the camera cuts to the sea.\n"
+        "overall_soundscape: Waves break on the pilings.\nnon_diegetic_music: N/A")
+    header = ("For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully "
+              "referenced.\n\nintegrated_multimodal_description: She smiles.\n\noverall_soundscape: Wind.")
+    assert C.clean_refined(header, lines=True) == "She smiles.\noverall_soundscape: Wind."   # music left out
+    assert C.clean_refined("“She smiles. Birds sing.”", lines=True) == "She smiles. Birds sing."   # no sound lines
+    inline = "She smiles. overall_soundscape: Wind.  non_diegetic_music:   "                # on one line, music empty
+    assert C.clean_refined(inline, lines=True) == "She smiles.\noverall_soundscape: Wind."
+    assert C.clean_refined("<think>cut off", lines=True) == ""
+
+
+def test_h3_refine_sees_the_start_frame_only_with_a_vision_model(server, start):
+    r = C.ComfyPromptRefiner(server.url)
+    gemma = r.models[0]["file"]
+    qwen = next(m["file"] for m in r.vision_models())
+    assert "gemma" in gemma and "qwen3vl" in qwen
+    server.refine_answer = "She waves.\n\noverall_soundscape: Wind.\n\nnon_diegetic_music: N/A"
+    out = r.refine_prompt("she waves", "video_h3", qwen, 1, seconds=73 / 24, start_image=start)
+    assert out == "She waves.\noverall_soundscape: Wind.\nnon_diegetic_music: N/A"           # lines kept
+    wf = server.prompts[-1]
+    assert wf["gen"]["inputs"]["image"] == ["pic", 0] and wf["pic"]["class_type"] == "LoadImage"
+    assert "Anchor the first sentences" in wf["gen"]["inputs"]["system_prompt"]
+    assert "3.04 seconds" in wf["gen"]["inputs"]["system_prompt"] and wf["gen"]["inputs"]["max_length"] == 1024
+    r.refine_prompt("she waves", "video_h3", gemma, 1, seconds=2, start_image=start)           # cannot see
+    wf = server.prompts[-1]
+    assert "pic" not in wf and "image" not in wf["gen"]["inputs"]
+    assert "Do not invent how it looks" in wf["gen"]["inputs"]["system_prompt"]
+    r.refine_prompt("she waves", "video_h3", qwen, 1, seconds=2, start_image=start.with_name("later.png"))
+    assert "pic" not in server.prompts[-1] and "cannot see" in server.prompts[-1]["gen"]["inputs"]["system_prompt"]
+    r.refine_prompt("she waves", "video_h3", qwen, 1, seconds=2)                               # no start frame
+    sp = server.prompts[-1]["gen"]["inputs"]["system_prompt"]
+    assert "pic" not in server.prompts[-1] and "first frame" not in sp and "2.00 seconds" in sp
+    server.refine_answer = "A man walks.\n\noverall_soundscape: Steps."
+    assert r.refine_prompt("a man walks", "video", qwen, 1, seconds=2, start_image=start) == \
+        "A man walks. overall_soundscape: Steps."                                              # classic: one line
+    assert "pic" not in server.prompts[-1] and server.prompts[-1]["gen"]["inputs"]["max_length"] == 512
+
+
 def test_long_clips_are_refined_in_context_windows():
     """Measured on an RTX 4090: a 10 s clip at 2K (1M tokens) runs out of memory in one pass; refined in H3
     context windows of 124 frames it works (no visible seams). Short clips stay in one pass."""

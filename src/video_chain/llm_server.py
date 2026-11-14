@@ -25,6 +25,7 @@ DEFAULT_SERVER = "/path/to/ai/llama.cpp/build/bin/llama-server"
 START_TIMEOUT = 600.0                            # a 25 GB model from a cold disk takes minutes
 CONTEXT = 16384                                  # a conversation with pictures (one ~1 MP picture: ~1-2k tokens)
 MAX_TOKENS = 1024                                # a prompt is a few hundred tokens; more means it rambles
+LONG_TOKENS = {"video_h3": 1536}                 # the official H3 format: up to ~500 words + the sound lines
 IMAGE_SIDE = 1024                                # pictures are sent at most this large (fewer tokens, same gist)
 
 
@@ -75,11 +76,18 @@ CHAT_RULES = ("This is a conversation about one prompt. The user's first message
 
 
 def chat_messages(*, prompt: str, kind: str, turns: list[tuple[str, str]], instruction: str,
-                  pictures: list[tuple[str, str]] = (), cast: list[dict] | None = None) -> list[dict]:
+                  pictures: list[tuple[str, str]] = (), cast: list[dict] | None = None,
+                  seconds: float | None = None, start_image: str | None = None) -> list[dict]:
     """The conversation for the model. turns: the earlier [(instruction, version)]; the last version is the current
     prompt (also when the user edited it). The first user message holds the user's prompt, the pictures (labelled)
-    and the first instruction; then the turns alternate; the new instruction comes last."""
-    system, first = refine_messages(prompt=prompt, kind=kind, cast=cast)
+    and the first instruction; then the turns alternate; the new instruction comes last.
+    seconds, start_image ("video_h3"): the clip's length and first frame; the model is told it sees that frame
+    when it is among the pictures (else not to invent its look)."""
+    start = None
+    if kind == "video_h3" and start_image:
+        start = "seen" if str(start_image) in [str(p) for _t, p in pictures] else "unseen"
+    system, first = refine_messages(prompt=prompt, kind=kind, cast=cast,
+                                    seconds=seconds if kind == "video_h3" else None, start=start)
     asks = [a for a, _v in turns] + [instruction]
 
     def ask_text(a: str) -> str:
@@ -378,19 +386,28 @@ class LlamaServer:
 
     def refine_prompt(self, prompt: str, kind: str, model_file: str | None = None, seed: int = 0,
                       hint: str = "", cast: list[dict] | None = None, temperature: float = 0.5,
-                      timeout: float = 300.0) -> str:
-        system, user = refine_messages(prompt=prompt, kind=kind, hint=hint, cast=cast)
+                      timeout: float = 300.0, seconds: float | None = None,
+                      start_image: str | None = None) -> str:
+        """One refine (text only; the refine window holds a conversation with llama.cpp models, see chat, where
+        pictures are shown). start_image ("video_h3"): the model is told the clip starts from a frame it cannot see."""
+        system, user = refine_messages(prompt=prompt, kind=kind, hint=hint, cast=cast,
+                                       seconds=seconds if kind == "video_h3" else None,
+                                       start="unseen" if kind == "video_h3" and start_image else None)
         return self._complete([{"role": "system", "content": system}, {"role": "user", "content": user}], seed,
-                              temperature, timeout)
+                              temperature, timeout, max_tokens=LONG_TOKENS.get(kind, MAX_TOKENS),
+                              lines=kind == "video_h3")
 
     def chat(self, prompt: str, kind: str, turns: list[tuple[str, str]], instruction: str,
              pictures: list[tuple[str, str]] = (), cast: list[dict] | None = None, seed: int = 0,
-             temperature: float = 0.5, timeout: float = 300.0) -> str:
+             temperature: float = 0.5, timeout: float = 300.0, seconds: float | None = None,
+             start_image: str | None = None) -> str:
         """The next version in a refine conversation (see chat_messages); pictures need the vision projector."""
         if pictures and not self.mmproj:
             raise LlmServerError("this model has no vision part (mmproj file) next to it: it cannot see pictures")
         return self._complete(chat_messages(prompt=prompt, kind=kind, turns=turns, instruction=instruction,
-                                            pictures=pictures, cast=cast), seed, temperature, timeout)
+                                            pictures=pictures, cast=cast, seconds=seconds, start_image=start_image),
+                              seed, temperature, timeout, max_tokens=LONG_TOKENS.get(kind, MAX_TOKENS),
+                              lines=kind == "video_h3")
 
     def ideas(self, bullets: str, n: int = 5, wish: str = "", pictures: list[tuple[str, str]] = (),
               cast: list[dict] | None = None, seed: int = 0, temperature: float = 0.9,
@@ -410,7 +427,8 @@ class LlamaServer:
         self._gen += 1
 
     def _complete(self, messages: list[dict], seed: int, temperature: float, timeout: float,
-                  max_tokens: int = MAX_TOKENS, clean: bool = True, schema: dict | None = None) -> str:
+                  max_tokens: int = MAX_TOKENS, clean: bool = True, schema: dict | None = None,
+                  lines: bool = False) -> str:
         self.start()
         body = {"messages": messages,
                 "max_tokens": int(max_tokens), "temperature": float(temperature), "top_k": 64, "top_p": 0.95,
@@ -444,7 +462,7 @@ class LlamaServer:
                                  "try again, or ask for a shorter prompt or fewer ideas")
         if not clean:
             return text
-        text = clean_refined(text)
+        text = clean_refined(text, lines=lines)
         if not text:
             raise LlmServerError("the language model gave no answer")
         return text
@@ -460,12 +478,13 @@ class CombinedRefiner:
         if not self.models:
             raise LlmServerError(comfy_error or "no language model")
 
-    def refine_prompt(self, prompt, kind, model_file=None, seed=0, hint="", cast=None):
+    def refine_prompt(self, prompt, kind, model_file=None, seed=0, hint="", cast=None, **clip):
+        """clip: seconds / start_image of a "video_h3" refine, to either backend."""
         if (model_file or "").startswith(PREFIX) or self.comfy is None:
             if self.llama is None:
                 raise LlmServerError("the llama.cpp server is not set up")
-            return self.llama.refine_prompt(prompt, kind, model_file, seed, hint, cast)
-        return self.comfy.refine_prompt(prompt, kind, model_file, seed, hint, cast)
+            return self.llama.refine_prompt(prompt, kind, model_file, seed, hint, cast, **clip)
+        return self.comfy.refine_prompt(prompt, kind, model_file, seed, hint, cast, **clip)
 
     def ideas(self, *a, **k):
         if self.llama is None:

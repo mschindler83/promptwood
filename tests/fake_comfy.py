@@ -130,6 +130,7 @@ class FakeComfy:
         self.seedvr_jobs: list[str] = []           # the model of every SeedVR2 job
         self.audio_refs = True                     # MiniMaxH3ReferenceToVideo takes reference sounds
         self.fail_next: str | None = None          # the next job fails with this message (once)
+        self.refine_answer: str | None = None      # the prompt refiner's raw answer (None: "REFINED <prompt>")
         self.prompts, self.calls, self.history = [], [], {}
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
@@ -253,6 +254,10 @@ class FakeComfy:
         if "gen" in wf and wf["gen"]["class_type"] == "TextGenerate":     # the prompt refiner: a fake answer
             g = wf["gen"]["inputs"]
             self.refined = g
+            if "pic" in wf:                          # a vision model sees a picture: uploaded first
+                assert (self.root / "input" / wf["pic"]["inputs"]["image"]).is_file(), "picture not uploaded"
+            if self.refine_answer is not None:
+                return {"show": {"text": [self.refine_answer]}}
             return {"show": {"text": [f"<think>planning</think>Here is the refined prompt: \"REFINED {g['prompt'][:40]}\""]}}
         if "lock" in wf and "anim0" not in wf and wf.get("save", {}).get("class_type") == "SaveVideo":
             self.faced = wf                          # face only: the clip again (its face "swapped")

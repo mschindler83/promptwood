@@ -73,6 +73,13 @@ def test_start_refine_and_stop(fake_server, tmp_path):
     assert "more cinematic" in req["messages"][1]["content"]
     args = json.loads((tmp_path / "llama-server.args").read_text())
     assert "--cpu-moe" in args and args[args.index("-m") + 1] == str(model)
+    assert req["max_tokens"] == L.MAX_TOKENS and "seconds long" not in req["messages"][0]["content"]   # classic
+    text = srv.refine_prompt("@Anna runs.", "video_h3", seed=1, seconds=10.0, start_image=str(tmp_path / "s.png"))
+    req = json.loads((tmp_path / "llama-server.req").read_text())
+    assert text == "@Anna runs along the shore." and req["max_tokens"] == L.LONG_TOKENS["video_h3"] > L.MAX_TOKENS
+    system = req["messages"][0]["content"]
+    assert system.startswith(L.refine_messages(prompt="", kind="video_h3")[0].split(" Every person")[0])
+    assert "10.00 seconds long" in system and "cannot see" in system            # one refine: text only
     pid = srv.proc.pid
     assert srv.stop() and not srv.ready() and not srv.stop()
     with pytest.raises(OSError):
@@ -94,6 +101,10 @@ def test_missing_files_and_combined_list(tmp_path, fake_server):
     both = L.CombinedRefiner(Comfy(), llama)
     assert [m["file"] for m in both.models] == [L.PREFIX + str(model), "gemma.safetensors"]
     assert both.refine_prompt("x", "image", "gemma.safetensors") == "from comfy"
+    got = {}
+    Comfy.refine_prompt = lambda self, *a, **k: got.update(a=a, k=k) or "h3"
+    assert both.refine_prompt("x", "video_h3", "gemma.safetensors", 1, "", None, seconds=3.0, start_image="s.png") \
+        == "h3" and got["k"] == {"seconds": 3.0, "start_image": "s.png"}       # the clip goes to the backend
     only = L.CombinedRefiner(None, llama, "ComfyUI is not reachable")        # ComfyUI down: llama still works
     assert only.models[0]["file"].startswith(L.PREFIX)
     with pytest.raises(L.LlmServerError, match="not reachable"):
@@ -178,6 +189,24 @@ def test_chat_messages_and_pictures(tmp_path):
     assert L.LlamaServer("s", str(model), 1, mmproj="m").models[0]["vision"]
 
 
+def test_h3_conversation_sees_the_start_frame_when_shown(tmp_path):
+    """The official format in a conversation: the clip's seconds, and the start frame as the video's first frame
+    when it is among the pictures (else: not to invent its look); the answer keeps its lines."""
+    from PIL import Image
+    pic = tmp_path / "start.png"
+    Image.new("RGB", (64, 48)).save(pic)
+    seen = L.chat_messages(prompt="she waves", kind="video_h3", turns=[], instruction="", seconds=73 / 24,
+                           pictures=[("The frame the clip starts from", str(pic))], start_image=str(pic))
+    assert "3.04 seconds long" in seen[0]["content"] and "Anchor the first sentences" in seen[0]["content"]
+    assert seen[1]["content"][2]["type"] == "image_url"
+    unseen = L.chat_messages(prompt="she waves", kind="video_h3", turns=[], instruction="", seconds=2,
+                             pictures=[], start_image=str(pic))
+    assert "cannot see" in unseen[0]["content"] and "Anchor" not in unseen[0]["content"]
+    classic = L.chat_messages(prompt="she waves", kind="video", turns=[], instruction="", seconds=2,
+                              start_image=str(pic))
+    assert classic == L.chat_messages(prompt="she waves", kind="video", turns=[], instruction="")
+
+
 def test_refine_window_conversation(tmp_path, monkeypatch):
     """The refine window with a conversation model: versions build on each other, an earlier version can be
     continued from (the later ones go), the user's edit counts, Another try replaces the answer, pictures are
@@ -257,6 +286,51 @@ def test_refine_window_conversation(tmp_path, monkeypatch):
     dlg.refine()
     wait_idle()
     assert dlg.out.toPlainText() == "one-shot shorter"
+    dlg.reject()
+
+
+def test_refine_window_gives_an_h3_refine_the_clip(tmp_path):
+    """Kind "video_h3": the window passes the clip's seconds and start frame to both kinds of refine (the other
+    kinds get nothing new); the answer's lines are shown as they came."""
+    os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    from PIL import Image
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from video_chain.ui.prompt_refiner import RefineDialog
+    pic = tmp_path / "s.png"
+    Image.new("RGB", (64, 48)).save(pic)
+    calls = []
+
+    class Fake:
+        models = [{"file": "llama:/m/q.gguf", "label": "Q", "chat": True, "vision": True},
+                  {"file": "qwen3vl_4b.safetensors", "label": "G"}]
+
+        def chat(self, prompt, kind, turns, ask, pictures=(), cast=None, seed=0, **clip):
+            calls.append(("chat", kind, clip, list(pictures)))
+            return "She waves.\noverall_soundscape: Wind."
+
+        def refine_prompt(self, prompt, kind, model, seed, hint, **k):
+            calls.append(("one", kind, k, []))
+            return "She waves.\nnon_diegetic_music: N/A"
+    dlg = RefineDialog(None, "she waves", "video_h3", lambda: Fake(), seconds=2.5, start_image=pic,
+                       pictures=[("The frame the clip starts from", str(pic), True)])
+
+    def wait_idle():
+        end = __import__("time").time() + 5
+        while (dlg._busy or not dlg.model.isEnabled()) and __import__("time").time() < end:
+            app.processEvents()
+        app.processEvents()
+    wait_idle()
+    assert "video clip prompt" in dlg.windowTitle()
+    dlg.refine()
+    wait_idle()
+    assert calls[-1] == ("chat", "video_h3", {"seconds": 2.5, "start_image": str(pic)},
+                         [("The frame the clip starts from", str(pic))])
+    assert dlg.out.toPlainText() == "She waves.\noverall_soundscape: Wind."
+    dlg.model.setCurrentIndex(1)                                         # ComfyUI: one refine per press
+    dlg.refine()
+    wait_idle()
+    assert calls[-1] == ("one", "video_h3", {"seconds": 2.5, "start_image": str(pic)}, [])
     dlg.reject()
 
 
