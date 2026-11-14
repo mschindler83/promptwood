@@ -19,7 +19,7 @@ from .lora_stack import lora_label
 from .widgets import format_time
 from . import ui_logic as UL
 from .clip_cards import PromptCard
-from .ui_logic import (REMIX_DELAY_MS, Problem, ProblemKind as PK, SourceSoundInfo, classify_cast_problem, plain_problem,
+from .ui_logic import (REMIX_DELAY_MS, Problem, ProblemKind as PK, SourceSoundInfo, plain_problem,
                        plural, row_start)
 from ..__main__ import COMFY_DOWN
 from .mw_host import MainWindowHost
@@ -227,15 +227,15 @@ class InspectorMixin(MainWindowHost):
         for raw in T.source_sound_problems(self.tree, todo, self.project):
             out.append(Problem(PK.SOURCE_SOUND, plain_problem(raw, nid), raw + " (the clip's “Sound” setting)", "sound",
                                "Show"))
-        for raw in T.cast_problems(self.project, self.tree, todo):
-            c = classify_cast_problem(raw)
-            if c.kind is PK.CAST_UNKNOWN:
+        for c in T.cast_issues(self.project, self.tree, todo):
+            raw = c.text
+            if c.kind is T.CastKind.UNKNOWN:
                 out.append(Problem(
-                    c.kind, f"The description names @{c.name}, but Cast & references has no {c.name}."
+                    PK.CAST_UNKNOWN, f"The description names @{c.name}, but Cast & references has no {c.name}."
                     + (f" Did you mean @{c.suggestion}?" if c.suggestion else " Add it there, or change the name."),
                     raw, "cast_new", "Open Cast & references"))
-            elif c.kind is PK.CAST_NO_PICTURE:
-                out.append(Problem(c.kind, f"@{c.name} has no picture yet. Add one, so the clip can show "
+            elif c.kind is T.CastKind.NO_PICTURE:
+                out.append(Problem(PK.CAST_NO_PICTURE, f"@{c.name} has no picture yet. Add one, so the clip can show "
                                    + ("this person." if c.person else "it."), raw, f"cast:{c.name}", "Add a picture"))
             else:
                 out.append(Problem(PK.CAST, plain_problem(raw, nid), raw + " (Cast & references)", "cast",

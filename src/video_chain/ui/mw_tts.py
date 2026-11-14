@@ -138,7 +138,7 @@ class TtsMixin(MainWindowHost):
         def render(take: int, how: dict, lines: list[str]) -> dict:
             r = TTS.render_lines(project, snap, nid, eng, take=take, speak=how, lines=lines)
             for name, text in (r.get("texts") or {}).items():     # (transcribed once, not for every take)
-                TTS._set_voice_fields(snap, name, text=text)
+                TTS.set_voice_fields(snap, name, text=text)
             return r
         dlg = SpeakLinesDialog(
             self, f"#{T.short_id(nid)}", [{"name": d["speaker"]["name"], "line": d["line"]}
@@ -192,7 +192,7 @@ class TtsMixin(MainWindowHost):
                 c = T.character(self.tree, name)
                 if c is not None and c.get("voice") and files.get(name) == c["voice"]["file"] \
                         and not c["voice"].get("text"):
-                    TTS._set_voice_fields(self.tree, name, text=text)
+                    TTS.set_voice_fields(self.tree, name, text=text)
                     changed = True
         if changed:
             self._write_tree()

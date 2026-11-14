@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import re
+from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from .. import chain
 from .. import h3_prompt as _h3
@@ -246,9 +247,31 @@ def _resolver(options: Options):
     return lambda w: (character(options, w) or {}).get("name")
 
 
+class CastKind(Enum):
+    UNKNOWN = "unknown"         # an @name that is not in the cast
+    NO_PICTURE = "no_picture"   # a cast member without a picture (or, for a person, without face picture and voice)
+    OTHER = "other"
+
+
+class CastIssue(NamedTuple):
+    kind: CastKind
+    text: str                   # the message shown to the user
+    name: str = ""              # the @name it is about (UNKNOWN, NO_PICTURE)
+    suggestion: str = ""        # UNKNOWN: the name it may have meant
+    person: bool = False        # NO_PICTURE: about a person (a face picture or voice)
+
+
 def cast_problems(project: Path, tree: Tree, todo: list[str]) -> list[str]:
     """Why clips to be made cannot get the faces their prompts name (one message per problem)."""
-    out = []
+    return [i.text for i in cast_issues(project, tree, todo)]
+
+
+def cast_issues(project: Path, tree: Tree, todo: list[str]) -> list[CastIssue]:
+    """cast_problems with a kind per problem, so a caller never has to read the wording."""
+    out: list[CastIssue] = []
+
+    def add(text: str, kind: CastKind = CastKind.OTHER, **more) -> None:
+        out.append(CastIssue(kind, text, **more))
     names = [c["name"] for c in cast_of(tree)]
     for nid in todo:
         node = tree.nodes[nid]
@@ -258,35 +281,37 @@ def cast_problems(project: Path, tree: Tree, todo: list[str]) -> list[str]:
         found, unknown = mentions(tree.options, text)
         for word in unknown:
             close = _closest(word, names)
-            out.append(f"clip #{short_id(nid)} mentions @{word}, but there is no such character"
-                       + (f" — did you mean @{close}?" if close else " (add it in the Cast)"))
+            add(f"clip #{short_id(nid)} mentions @{word}, but there is no such character"
+                + (f" — did you mean @{close}?" if close else " (add it in the Cast)"),
+                CastKind.UNKNOWN, name=word, suggestion=close or "")
         for c in found:
             if kind_of(c) != "person" and not c["images"]:
-                out.append(f"@{c['name']} (clip #{short_id(nid)}) has no picture yet")
+                add(f"@{c['name']} (clip #{short_id(nid)}) has no picture yet", CastKind.NO_PICTURE, name=c["name"])
             elif not c["images"] and not c.get("voice"):
-                out.append(f"@{c['name']} (clip #{short_id(nid)}) has no face picture or voice yet")
+                add(f"@{c['name']} (clip #{short_id(nid)}) has no face picture or voice yet", CastKind.NO_PICTURE,
+                    name=c["name"], person=True)
         for m in WRONG_TAG.finditer(text):
-            out.append(f"clip #{short_id(nid)} writes <{m.group(1)} {m.group(2)}>; the model only knows <Picture "
+            add(f"clip #{short_id(nid)} writes <{m.group(1)} {m.group(2)}>; the model only knows <Picture "
                        f"{m.group(2)}> (or mention the character as @Name)")
         use = node_cast(tree.options, node)
         if use["mode"] in ("mention", "voices") and PICTURE_TAG.search(text):
-            out.append(f"clip #{short_id(nid)} writes <Picture N> and mentions @Names; with @Names the app numbers the "
+            add(f"clip #{short_id(nid)} writes <Picture N> and mentions @Names; with @Names the app numbers the "
                        "pictures itself, so write the people only as @Name")
         if use["mode"] == "tags":
             top = max(int(re.sub(r"\D", "", t)) for t in PICTURE_TAG.findall(text))
             if top > len(use["images"]):
                 n = len(use["images"])
-                out.append(f"clip #{short_id(nid)} names <Picture {top}>, but the cast has only {n} face "
+                add(f"clip #{short_id(nid)} names <Picture {top}>, but the cast has only {n} face "
                            f"picture{'' if n == 1 else 's'}")
         faces = "face " if all(kind_of(c) == "person" for c in use["characters"]) else ""
         if len(use["images"]) > MAX_CAST_PICTURES:
-            out.append(f"clip #{short_id(nid)} needs {len(use['images'])} {faces}pictures; the model takes at most "
+            add(f"clip #{short_id(nid)} needs {len(use['images'])} {faces}pictures; the model takes at most "
                        f"{MAX_CAST_PICTURES}")
         if any(not (Path(project) / r).is_file() for r in use["images"]):
-            out.append(f"a {faces}picture of clip #{short_id(nid)} is missing in refs/")
+            add(f"a {faces}picture of clip #{short_id(nid)} is missing in refs/")
         if use["voices"]:
             if any(not (Path(project) / r).is_file() for r in use["voices"]):
-                out.append(f"a voice of clip #{short_id(nid)} is missing in refs/")
+                add(f"a voice of clip #{short_id(nid)} is missing in refs/")
             n_sounds = audio_mentioned(text)
             secs = {a["file"]: float(a.get("secs") or 0) for a in audio_refs(tree)[:n_sounds]}
             secs.update({c["voice"]["file"]: float(c["voice"].get("secs") or 0) for c in cast_of(tree)
@@ -296,11 +321,11 @@ def cast_problems(project: Path, tree: Tree, todo: list[str]) -> list[str]:
             what = (f"{len(use['voices'])} voice{'s' if len(use['voices']) != 1 else ''}"
                     + (f" and {n_sounds} sound{'s' if n_sounds != 1 else ''}" if n_sounds else ""))
             if n > MAX_AUDIO_REFS:
-                out.append(f"clip #{short_id(nid)} needs {what}; the model takes at most {MAX_AUDIO_REFS} sounds")
+                add(f"clip #{short_id(nid)} needs {what}; the model takes at most {MAX_AUDIO_REFS} sounds")
             elif total > AUDIO_REF_TOTAL + 0.05:
-                out.append(f"clip #{short_id(nid)} needs {what} of {total:.1f} s together; the model takes at most "
+                add(f"clip #{short_id(nid)} needs {what} of {total:.1f} s together; the model takes at most "
                            f"{AUDIO_REF_TOTAL:.0f} s (shorten a voice: set it again from a shorter part)")
-    return list(dict.fromkeys(out))
+    return list(dict.fromkeys(out))   # (no duplicates, in order)
 
 
 def _closest(word: str, names: list[str]) -> str | None:

@@ -123,17 +123,6 @@ def test_leaving_the_project_settles_a_pending_option_change(app, tmp_path):
 
 
 # ------------------------------------------------------------------ MWB-14 / MWB-15: problems with a kind
-def test_cast_problems_are_classified_in_one_place():
-    from video_chain.ui.ui_logic import CastProblem, ProblemKind, classify_cast_problem
-    assert classify_cast_problem("clip #2 mentions @Anan, but there is no such character — did you mean @Anna?") == \
-        CastProblem(ProblemKind.CAST_UNKNOWN, "Anan", "Anna")
-    assert classify_cast_problem("clip #2 mentions @Bob, but there is no such character") == \
-        CastProblem(ProblemKind.CAST_UNKNOWN, "Bob", "")
-    assert classify_cast_problem("@Anna (clip #2) has no picture yet") == CastProblem(ProblemKind.CAST_NO_PICTURE, "Anna", "")
-    assert classify_cast_problem("@Anna (clip #2) has no face picture or voice yet").kind is ProblemKind.CAST_NO_PICTURE
-    assert classify_cast_problem("something else").kind is ProblemKind.CAST
-
-
 def test_clip_problems_carry_a_kind_and_make_the_card_items(app, tmp_path):
     from PIL import Image
     from video_chain.ui.main_window import MainWindow

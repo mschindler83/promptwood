@@ -16,10 +16,10 @@ if TYPE_CHECKING:
     from PySide6.QtGui import QAction, QPixmap
     from PySide6.QtWidgets import (
         QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFormLayout, QLabel, QLineEdit, QListWidget,
-        QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSpinBox,
+        QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QProgressDialog, QPushButton, QScrollArea, QSpinBox,
         QSplitter, QTabWidget, QToolButton, QWidget)
     from pathlib import Path
-    from threading import Lock
+    from threading import Event, Lock
     from ..film import Film
     from ..llm_server import LlamaServer
     from ..tree.model import Tree
@@ -124,6 +124,9 @@ if TYPE_CHECKING:
         act_open: QAction
         act_save: QAction
         act_save_as: QAction
+        act_cancel_copy: QAction
+        _copy_cancel: Event | None
+        _copy_dialog: QProgressDialog | None
         adv_note: AdvancedNote
         aspect: QComboBox
         audio: QCheckBox

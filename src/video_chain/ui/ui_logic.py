@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import copy
 import json
-import re
 from collections import Counter
 from dataclasses import dataclass
 from enum import StrEnum
@@ -293,33 +292,10 @@ class Problem:
         return d
 
 
-class CastProblem(NamedTuple):
-    kind: ProblemKind
-    name: str = ""                  # the @name the message is about
-    suggestion: str = ""            # CAST_UNKNOWN: the name it may have meant
-    person: bool = False            # CAST_NO_PICTURE: the message is about a person (a face picture or voice)
-
-
-def classify_cast_problem(raw: str) -> CastProblem:
-    """What a cast check's message (tree.cast_problems: text only) is about. The one place that reads its wording."""
-    m = re.search(r"mentions @([\w-]+), but there is no such character(?: — did you mean @([\w-]+)\?)?", raw)
-    if m:
-        return CastProblem(ProblemKind.CAST_UNKNOWN, m.group(1), m.group(2) or "")
-    pic = re.match(r"@([\w-]+) \(clip #\d+\) has no (picture|face picture or voice) yet", raw)
-    if pic:
-        return CastProblem(ProblemKind.CAST_NO_PICTURE, pic.group(1), person=pic.group(2) != "picture")
-    return CastProblem(ProblemKind.CAST)
-
-
 SPEED_NAMES = {"normal": "Normal", "turbo": "Turbo", "hyperflow": "HyperFlow", "pika": "Pika"}   # (the modes, as named)
 
 
-def speed_mode(o: dict) -> str:
-    """Which speed mode the project's options switch on: "turbo", "hyperflow", "pika" or "normal"."""
-    for mode in ("turbo", "hyperflow", "pika"):
-        if (o.get(mode) or {}).get("on"):
-            return mode
-    return "normal"
+speed_mode = T.speed_mode   # (the tree reads the mode; kept here for the window's imports)
 
 
 def project_setting_changes(o: dict) -> list[tuple[str, str]]:

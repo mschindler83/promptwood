@@ -236,6 +236,8 @@ class ViewMixin(MainWindowHost):
         self.act_save.setShortcut(S.sequence("save"))
         self.act_save_as = m.addAction("Save as…", self.save_project_as)
         self.act_save_as.setShortcut(S.sequence("save_as"))
+        self.act_cancel_copy = m.addAction("Cancel copying", self.cancel_copy)
+        self.act_cancel_copy.setEnabled(False)
         m.addSeparator()
         self.act_close = m.addAction("Close project", self.close_project)
         m.addAction("Show project folder", self._open_dir)
