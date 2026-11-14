@@ -21,7 +21,6 @@ unless chosen otherwise) is asked first and linked to; the other is asked when t
 cannot be reached."""
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -32,6 +31,8 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Callable
+
+from . import media
 
 RECHECK_DAYS = 30
 SITES = ("https://civitai.com", "https://civitai.red")    # CivitAI's two sites (the first is the default)
@@ -194,13 +195,7 @@ def _never() -> bool:
 
 
 def sha256_of(path: str | Path, stop: Callable[[], bool] = _never) -> str | None:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(8 << 20), b""):
-            if stop():
-                return None
-            h.update(chunk)
-    return h.hexdigest()
+    return media.file_digest(path, "sha256", stop, chunk=8 << 20)
 
 
 MAX_ANSWER = 32 * 2**20      # bytes read from one CivitAI answer at most
@@ -442,7 +437,6 @@ class TriggerDB:
 
     def save(self):
         """Write the database; what another process added in between is kept (merged, ours first)."""
-        import tempfile
         with self._lock:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             try:
@@ -453,14 +447,7 @@ class TriggerDB:
                 for part in ("by_sha", "files"):
                     for k, v in (disk.get(part) or {}).items():
                         self.data[part].setdefault(k, v)
-            fd, tmp = tempfile.mkstemp(prefix=self.path.name + ".", suffix=".part", dir=str(self.path.parent))
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    json.dump(self.data, f, indent=1, ensure_ascii=False)
-                os.replace(tmp, self.path)
-            finally:
-                if os.path.exists(tmp):
-                    os.unlink(tmp)
+            media.atomic_write_json(self.path, self.data, indent=1)
             self._mtime = self.path.stat().st_mtime_ns
 
     def details_path(self, sha: str) -> Path:
@@ -527,17 +514,9 @@ class TriggerDB:
             return self.set_note(path, new)
 
     def _save_details(self, sha: str, details: dict, target: Path | None = None):
-        import tempfile
         target = target or self.details_path(sha)
         target.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(prefix=target.name + ".", suffix=".part", dir=str(target.parent))
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(details, f, ensure_ascii=False)
-            os.replace(tmp, target)
-        finally:
-            if os.path.exists(tmp):
-                os.unlink(tmp)
+        media.atomic_write_json(target, details, indent=None)
 
     def _file(self, path: str) -> dict | None:
         """The cached entry of a path while its size and date are unchanged."""

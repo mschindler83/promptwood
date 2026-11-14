@@ -7,10 +7,11 @@ import contextlib
 import fcntl
 import json
 import os
-import tempfile
 import threading
 import time
 from pathlib import Path
+
+from . import media
 
 FIELDS = ("prompt", "negative", "quality", "sampling", "strength", "family", "variations")
 
@@ -68,16 +69,7 @@ class PresetStore:
 
     def _write(self, data: dict) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(prefix=self.path.name + ".", suffix=".part", dir=str(self.path.parent))
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=1, ensure_ascii=False)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, self.path)
-        finally:
-            if os.path.exists(tmp):
-                os.unlink(tmp)
+        media.atomic_write_json(self.path, data, indent=1)
 
     def list(self, lora: str) -> list[dict]:
         """The presets of a LoRA, by name."""

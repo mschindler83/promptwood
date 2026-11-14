@@ -16,7 +16,7 @@ import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from . import chain
+from . import chain, media
 from . import tree as T
 
 FILM_FILE = "film.json"
@@ -137,12 +137,7 @@ class Film:
             return
         data = {"version": 1, "scenes": [asdict(s) for s in self.scenes], "current": self.current,
                 "shared": self.shared_state}
-        tmp = f.with_suffix(".part")
-        with open(tmp, "w", encoding="utf-8") as fh:
-            fh.write(json.dumps(data, indent=2, ensure_ascii=False))
-            fh.flush()
-            os.fsync(fh.fileno())
-        tmp.replace(f)
+        media.atomic_write_json(f, data)
 
     # ---- scenes
     def scene(self, sid: str) -> Scene:
@@ -510,9 +505,7 @@ def join_film(film: Film, out: Path, keep: bool = False) -> Path:
     except (OSError, ValueError):
         pass                                                   # (an unreadable stamp: joined again)
     chain.replace_kept(film.root, out, write)
-    tmp = stamp.with_name(stamp.name + ".part")
-    tmp.write_text(key, encoding="utf-8")
-    tmp.replace(stamp)
+    media.atomic_write_text(stamp, key)
     return out
 
 

@@ -5,15 +5,13 @@ the gallery's text (prompts, settings); a picture is loaded only when the LoRA w
 Only CivitAI's picture server is asked, without the API key, and only for a picture address CivitAI gave."""
 from __future__ import annotations
 
-import os
 import re
-import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from . import triggers
+from . import media, triggers
 
 WIDTH = 320                      # pixels wide (CivitAI's server scales)
 MAX_BYTES = 4 * 2**20            # a small still is ~50 kB; more is not a still
@@ -125,14 +123,7 @@ def fetch(item: dict, db=None, timeout: float = 20.0) -> Path | None:
     if not data or len(data) > MAX_BYTES:
         raise OSError("the picture is empty or too large")
     target.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=target.name + ".", suffix=".part", dir=str(target.parent))
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
-        os.replace(tmp, target)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+    media.atomic_write_bytes(target, data)
     return target
 
 
