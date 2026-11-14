@@ -1,14 +1,18 @@
-"""A list of LoRAs with a strength each (rows of LoRA, strength, remove; '+ LoRA'), the LoRA picker (search, full
-names, other files), and the helpers to fill a LoRA combo box. Used by the clip cards (H3 LoRAs) and the image edit window (Qwen LoRAs)."""
+"""A list of LoRAs with a strength each (rows of LoRA, strength, remove; '+ LoRA'), the LoRA picker (search, a grid
+of covers from CivitAI, other files), and the helpers to fill a LoRA combo box. Used by the clip cards (H3 LoRAs) and the image edit window (Qwen LoRAs)."""
 from __future__ import annotations
 
 import os
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QHBoxLayout, QLineEdit,
-                               QListWidget, QListWidgetItem, QPushButton, QVBoxLayout, QWidget)
+import threading
+
+from PySide6.QtCore import QObject, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QFont, QFontMetrics, QImage, QPainter, QPainterPath, QPen
+from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLineEdit,
+                               QListView, QListWidget, QListWidgetItem, QPushButton,
+                               QStyledItemDelegate, QVBoxLayout, QWidget)
 
 from .. import tree as T
 from .dialogs import add_action, button_row, failed
@@ -53,11 +57,6 @@ def fill_lora_combo(combo: QComboBox, known: list[tuple[str, str]], current: str
     combo.setCurrentIndex(i)
 
 
-def _home(path: str) -> str:
-    home = str(Path.home())
-    return "~" + path[len(home):] if path.startswith(home + os.sep) else path
-
-
 def matches(query: str, *texts: str) -> bool:
     """Every word of the query is in one of the texts (case does not matter; '-', '_' and spaces count the same)."""
     norm = lambda t: t.lower().replace("_", " ").replace("-", " ")   # noqa: E731
@@ -65,36 +64,201 @@ def matches(query: str, *texts: str) -> bool:
     return all(w in hay for w in norm(query).split())
 
 
+COVER = 156                      # pixels: the side of a card's cover in the LoRA picker
+CARD_W, CARD_H = COVER + 16, COVER + 62
+COVER_LOADERS = 2
+
+
+class _CoverSig(QObject):
+    cover = Signal(str, str, object)             # LoRA path, Pictures setting, QImage or None
+
+
+_COVERS: dict[tuple[str, str], QImage] = {}      # (path, setting) -> the cover, kept while the app runs
+
+
+class _CardDelegate(QStyledItemDelegate):
+    """A LoRA as a card: its cover (or its initials), its name in up to two lines, base model and trigger words."""
+
+    def __init__(self, dialog):
+        super().__init__(dialog)
+        self.dlg = dialog
+
+    def sizeHint(self, option, index):            # noqa: N802  (Qt naming)
+        return QSize(CARD_W, CARD_H)
+
+    def paint(self, p: QPainter, option, index):
+        from PySide6.QtWidgets import QStyle
+        from .theme import ThemeManager
+        t = ThemeManager.instance().theme
+        r = option.rect.adjusted(3, 3, -3, -3)
+        selected = bool(option.state & QStyle.State_Selected)
+        hover = bool(option.state & QStyle.State_MouseOver)
+        p.save()
+        p.setRenderHint(QPainter.Antialiasing)
+        card = QPainterPath()
+        card.addRoundedRect(QRectF(r), 8, 8)
+        p.fillPath(card, t.accent_muted() if selected else t.bgOverlay if hover else t.bgRaised)
+        if selected:
+            p.setPen(QPen(t.accent, 2))
+            p.drawPath(card)
+        pic = QRectF(r.x() + 5, r.y() + 5, r.width() - 10, r.width() - 10)
+        clip = QPainterPath()
+        clip.addRoundedRect(pic, 6, 6)
+        img = index.data(LoraPickerDialog.COVER)
+        name = index.data(Qt.DisplayRole) or ""
+        if isinstance(img, QImage) and not img.isNull():
+            p.setClipPath(clip)
+            p.drawImage(pic, img)
+            p.setClipping(False)
+        else:
+            p.fillPath(clip, t.bgSunken)
+            f = QFont(p.font())
+            f.setPixelSize(int(pic.height() * 0.28))
+            f.setBold(True)
+            p.setFont(f)
+            p.setPen(t.textDisabled)
+            p.drawText(pic, Qt.AlignCenter, initials(name))
+        if index.data(LoraPickerDialog.IN_USE):
+            f = QFont(option.font)
+            f.setPixelSize(t.font.micro)
+            f.setBold(True)
+            p.setFont(f)
+            text = "IN USE"
+            w = QFontMetrics(f).horizontalAdvance(text) + 12
+            badge = QRectF(pic.right() - w - 5, pic.top() + 5, w, 18)
+            path = QPainterPath()
+            path.addRoundedRect(badge, 9, 9)
+            p.fillPath(path, t.accent)
+            p.setPen(t.onAccent)
+            p.drawText(badge, Qt.AlignCenter, text)
+        f = QFont(option.font)
+        f.setPixelSize(t.font.body)
+        f.setBold(selected)
+        p.setFont(f)
+        p.setPen(t.textPrimary)
+        fm = QFontMetrics(f)
+        box = QRectF(r.x() + 7, pic.bottom() + 5, r.width() - 14, fm.height() * 2 + 1)
+        p.drawText(box, Qt.AlignHCenter | Qt.AlignTop | Qt.TextWrapAnywhere, elide_lines(name, fm, int(box.width()), 2))
+        sub = index.data(LoraPickerDialog.SUBTITLE) or ""
+        if sub:
+            f2 = QFont(option.font)
+            f2.setPixelSize(t.font.small)
+            p.setFont(f2)
+            p.setPen(t.textTertiary)
+            fm2 = QFontMetrics(f2)
+            line = QRectF(r.x() + 7, r.bottom() - fm2.height() - 4, r.width() - 14, fm2.height())
+            p.drawText(line, Qt.AlignHCenter | Qt.AlignVCenter, fm2.elidedText(sub, Qt.ElideRight, int(line.width())))
+        p.restore()
+
+
+def initials(name: str) -> str:
+    """Up to two letters standing for a LoRA without a cover ("smoke_exhale_v2" -> "SE")."""
+    words = [w for w in name.replace("-", " ").replace("_", " ").replace(".", " ").split() if w[:1].isalnum()]
+    return "".join(w[0] for w in words[:2]).upper() or "?"
+
+
+def elide_lines(text: str, fm: QFontMetrics, width: int, lines: int) -> str:
+    """The text broken into at most `lines` lines of `width` pixels (anywhere: LoRA names have few spaces), the
+    last one shortened with an ellipsis."""
+    out, rest = [], text
+    while rest and len(out) < lines - 1:
+        n = len(rest)
+        while n > 1 and fm.horizontalAdvance(rest[:n]) > width:
+            n -= 1
+        cut = rest.rfind(" ", 0, n) if n < len(rest) else -1
+        n = cut + 1 if cut > n // 2 else n
+        out.append(rest[:n].rstrip())
+        rest = rest[n:].lstrip()
+    if rest:
+        out.append(fm.elidedText(rest, Qt.ElideRight, width))
+    return "\n".join(out)
+
+
+def _square(img: QImage, side: int) -> QImage:
+    """The middle of a picture, as a square of `side` pixels (the cover fills its card)."""
+    img = img.scaled(side, side, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+    return img.copy((img.width() - side) // 2, (img.height() - side) // 2, side, side)
+
+
 class LoraPickerDialog(QDialog):
-    """Choose a LoRA: a search field over the full names and folders, a list with the whole name of each LoRA
-    (its folder below it), 'Other file…' for a file from anywhere. chosen() -> the path, or None."""
+    """Choose a LoRA: a search field over the full names and folders, a grid of cards (each LoRA's cover from its
+    CivitAI page, its name, base model and trigger words), 'Other file…' for a file from anywhere. The covers are
+    loaded in the background (lora_pictures.cover_file) as the "Pictures" setting allows (off / safe only / all,
+    the LoRA window's setting). chosen() -> the path, or None. fetch(item) -> the local still of a picture (tests
+    give their own)."""
+    COVER, SUBTITLE, IN_USE, SEARCH = Qt.UserRole + 2, Qt.UserRole + 3, Qt.UserRole + 4, Qt.UserRole + 1
 
     def __init__(self, parent, known: list[tuple[str, str]], current: str | None = None,
-                 used: set[str] | None = None, title: str = "Choose a LoRA", file_dir: str = ""):
+                 used: set[str] | None = None, title: str = "Choose a LoRA", file_dir: str = "", settings=None,
+                 db=None, fetch=None):
         super().__init__(parent)
+        from .. import triggers
+        from .lora_window import SHOW
         self.setWindowTitle(title)
-        fit_size(self, 720, 620)
+        fit_size(self, 1000, 740)
         self.known, self.file_dir, self._chosen = list(known), file_dir, None
+        self.qs = settings if settings is not None else getattr(parent, "qs", None)
+        try:
+            self.db = db or triggers.db()
+        except Exception:  # noqa: BLE001
+            self.db = None
+        self.fetch = fetch
         used = {os.path.realpath(u) for u in (used or set())}
         v = QVBoxLayout(self)
+        v.setSpacing(8)
+        bar = QHBoxLayout()
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search LoRAs by name or folder … (several words: all must match)")
         self.search.setClearButtonEnabled(True)
-        v.addWidget(self.search)
+        bar.addWidget(self.search, 1)
+        bar.addWidget(label("Pictures", level="tertiary"))
+        self.pictures = QComboBox()
+        for key, text in SHOW:
+            self.pictures.addItem(text, key)
+        saved = self.qs.value("loraPictures", "safe", type=str) if self.qs is not None else "safe"
+        self.pictures.setCurrentIndex(max(0, self.pictures.findData(saved)))
+        self.pictures.setToolTip("Each LoRA's cover is the first picture of its CivitAI page, loaded once and kept "
+                                 "on disk (this tells CivitAI which pictures you look at).\nSafe only: pictures "
+                                 "CivitAI rates as safe.\nOff: nothing is loaded. The LoRA window uses the same "
+                                 "setting.")
+        bar.addWidget(self.pictures)
+        v.addLayout(bar)
         self.count = label("", level="tertiary")
         v.addWidget(self.count)
         self.list = QListWidget()
-        self.list.setWordWrap(True)
-        self.list.setUniformItemSizes(False)
-        self.list.setAlternatingRowColors(True)
+        self.list.setViewMode(QListView.IconMode)
+        self.list.setResizeMode(QListView.Adjust)
+        self.list.setMovement(QListView.Static)
+        self.list.setWrapping(True)
+        self.list.setUniformItemSizes(True)
+        self.list.setGridSize(QSize(CARD_W + 6, CARD_H + 6))
+        self.list.setSelectionMode(QListView.SingleSelection)
+        self.list.setMouseTracking(True)
+        self.list.setVerticalScrollMode(QListView.ScrollPerPixel)
+        self.list.verticalScrollBar().setSingleStep(24)
+        self.list.setItemDelegate(_CardDelegate(self))
         v.addWidget(self.list, 1)
+        info = QFrame()
+        info.setProperty("role", "notice")
+        iv = QVBoxLayout(info)
+        iv.setContentsMargins(10, 8, 10, 8)
+        iv.setSpacing(2)
+        self.sel_name = label("", type_="title")
+        self.sel_name.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.sel_facts = label("", level="secondary")
+        self.sel_facts.setWordWrap(True)
+        iv.addWidget(self.sel_name)
+        iv.addWidget(self.sel_facts)
+        v.addWidget(info)
         for path, text in sorted(self.known, key=lambda x: lora_label(x[0]).lower()):
             name = lora_label(path)
-            mark = "   · in use" if os.path.realpath(path) in used else ""
-            it = QListWidgetItem(f"{name}{mark}\n{_home(str(Path(path).parent))}")
+            it = QListWidgetItem(name)
             it.setData(Qt.UserRole, path)
-            it.setData(Qt.UserRole + 1, (name, str(Path(path).parent), text))
-            it.setToolTip(path)
+            it.setData(self.SEARCH, (name, str(Path(path).parent), text))
+            it.setData(self.IN_USE, os.path.realpath(path) in used)
+            it.setData(self.SUBTITLE, self._subtitle(path))
+            it.setData(self.COVER, None)
+            it.setToolTip(name)
             self.list.addItem(it)
             if current and os.path.realpath(path) == os.path.realpath(current):
                 self.list.setCurrentItem(it)
@@ -104,13 +268,123 @@ class LoraPickerDialog(QDialog):
                                 "use it)")
         self.b_other.clicked.connect(self._other)
         v.addWidget(self.buttons)
+
+        self._items = {self.list.item(i).data(Qt.UserRole): self.list.item(i) for i in range(self.list.count())}
+        self._closed = threading.Event()
+        self._lock = threading.Lock()
+        self._wanted: list[tuple[str, str]] = []
+        self._busy: set[tuple[str, str]] = set()
+        self._wake = threading.Event()
+        self._sig = _CoverSig()
+        self._sig.cover.connect(self._cover)
+        self._side = int(COVER * max(1.0, self.devicePixelRatioF()))
+        self._prioritise = QTimer(self, singleShot=True, interval=60)
+        self._prioritise.timeout.connect(self._want_covers)
+        self.list.verticalScrollBar().valueChanged.connect(lambda *_: self._prioritise.start())
+        for _ in range(COVER_LOADERS):
+            threading.Thread(target=self._load_covers, daemon=True).start()
+
         self.search.textChanged.connect(self._filter)
         self.search.returnPressed.connect(self._accept)
         self.search.installEventFilter(self)
         self.list.itemDoubleClicked.connect(lambda _it: self._accept())
+        self.list.activated.connect(lambda _i: self._accept())
         self.list.currentItemChanged.connect(lambda *_: self._update())
+        self.pictures.currentIndexChanged.connect(self._pictures_changed)
         self._filter("")
         self.search.setFocus()
+
+    def _subtitle(self, path: str) -> str:
+        """Base model and trigger words of a LoRA, as far as they are known."""
+        try:
+            info = self.db.info(path) if self.db is not None and Path(path).is_file() else None
+        except Exception:  # noqa: BLE001
+            info = None
+        if not info:
+            return ""
+        parts = [info.get("base_model") or ""]
+        if info.get("words"):
+            parts.append(", ".join(info["words"]))
+        return " · ".join(x for x in parts if x)
+
+    # ---- the covers
+    def show_mode(self) -> str:
+        return self.pictures.currentData() or "off"
+
+    def _want_covers(self):
+        """The covers still missing, those in sight first; the loaders take them in this order."""
+        mode = self.show_mode()
+        if self._closed.is_set():
+            return
+        area = self.list.viewport().rect()
+        seen, later = [], []
+        for path, it in self._items.items():
+            if it.isHidden() or it.data(self.COVER) is not None:
+                continue
+            (seen if self.list.visualItemRect(it).intersects(area) else later).append((path, mode))
+        with self._lock:
+            self._wanted = [] if mode == "off" else seen + later
+        if self._wanted:
+            self._wake.set()
+
+    def _load_covers(self):
+        """A loader thread: the covers wanted, one after the other (kept in memory while the app runs)."""
+        from .. import lora_pictures
+        while not self._closed.is_set():
+            with self._lock:
+                job = next((j for j in self._wanted if j not in self._busy), None)
+                if job is not None:
+                    self._wanted.remove(job)
+                    self._busy.add(job)
+                else:
+                    self._wake.clear()
+            if job is None:
+                self._wake.wait(0.3)
+                continue
+            path, mode = job
+            img = _COVERS.get(job)
+            if img is None and self.db is not None:
+                try:
+                    f = lora_pictures.cover_file(path, self.db, mode, self.fetch)
+                    if f is not None:
+                        q = QImage(str(f))
+                        if not q.isNull():
+                            img = _square(q, self._side)
+                            img.setDevicePixelRatio(self._side / COVER)
+                            _COVERS[job] = img
+                except Exception:  # noqa: BLE001  (a LoRA without a cover is shown with its initials)
+                    img = None
+            with self._lock:
+                self._busy.discard(job)
+            try:
+                self._sig.cover.emit(path, mode, img)
+            except RuntimeError:
+                return
+
+    def _cover(self, path: str, mode: str, img):
+        it = self._items.get(path)
+        if it is not None and img is not None and mode == self.show_mode():
+            it.setData(self.COVER, img)
+
+    def _pictures_changed(self, *_):
+        if self.qs is not None:
+            self.qs.setValue("loraPictures", self.show_mode())
+        for it in self._items.values():
+            it.setData(self.COVER, None)
+        self._want_covers()
+
+    def done(self, result: int):                   # noqa: N802  (Qt naming)
+        self._closed.set()
+        self._wake.set()
+        super().done(result)
+
+    def showEvent(self, e):                        # noqa: N802  (Qt naming): the cards in sight come first
+        super().showEvent(e)
+        self._prioritise.start()
+
+    def resizeEvent(self, e):                      # noqa: N802  (Qt naming)
+        super().resizeEvent(e)
+        self._prioritise.start()
 
     def eventFilter(self, obj, e):                 # noqa: N802  (Qt naming): Down from the search goes to the list
         from PySide6.QtCore import QEvent
@@ -135,7 +409,7 @@ class LoraPickerDialog(QDialog):
         shown = 0
         for i in range(self.list.count()):
             it = self.list.item(i)
-            ok = matches(text, *it.data(Qt.UserRole + 1))
+            ok = matches(text, *it.data(self.SEARCH))
             it.setHidden(not ok)
             shown += ok
         if self.list.currentItem() is None or self.list.currentItem().isHidden():
@@ -145,10 +419,41 @@ class LoraPickerDialog(QDialog):
                            f"{total} LoRA{'s' if total != 1 else ''}" if total else
                            "No LoRAs found in ComfyUI's LoRA folders (Other file… for one from elsewhere)")
         self._update()
+        self._want_covers()
 
     def _update(self):
         it = self.list.currentItem()
-        self.buttons.button(QDialogButtonBox.Ok).setEnabled(it is not None and not it.isHidden())
+        ok = it is not None and not it.isHidden()
+        self.buttons.button(QDialogButtonBox.Ok).setEnabled(ok)
+        if not ok:
+            self.sel_name.setText("No LoRA chosen")
+            self.sel_facts.setText("")
+            return
+        path = it.data(Qt.UserRole)
+        self.sel_name.setText(it.text())
+        self.sel_name.setToolTip(path)
+        try:
+            info = self.db.info(path) if self.db is not None and Path(path).is_file() else None
+        except Exception:  # noqa: BLE001
+            info = None
+        facts = []
+        if it.data(self.IN_USE):
+            facts.append("in use")
+        if info and info.get("base_model"):
+            facts.append(f"base model {info['base_model']}")
+        if info is None:
+            facts.append("trigger words: not looked up yet")
+        elif info.get("words"):
+            facts.append("trigger words: " + ", ".join(info["words"]))
+        elif info.get("suggested"):
+            facts.append("no trigger words; its training tags suggest " + ", ".join(info["suggested"]))
+        else:
+            facts.append("no trigger words")
+        if info and info.get("model") and info["model"] != it.text():
+            facts.insert(0, f"“{info['model']}” on CivitAI")
+        if not Path(path).is_file():
+            facts.append("the file is missing")
+        self.sel_facts.setText("  ·  ".join(facts))
 
     def _accept(self):
         it = self.list.currentItem()

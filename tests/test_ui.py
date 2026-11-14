@@ -1976,8 +1976,8 @@ def test_lora_picker_search_and_full_names(app, tmp_path):
     assert matches("smoke exh", "smoke_exhale_v2") and not matches("smoke smile", "glow_smoke")
     dlg = LoraPickerDialog(None, known, used={known[1][0]})
     texts = [dlg.list.item(i).text() for i in range(dlg.list.count())]
-    assert texts[0].startswith("glow_smoke   · in use\n")                                 # marked, sorted by name
-    assert any(t.startswith(Path(names[0]).name + "\n") for t in texts)                    # the whole name
+    assert texts[0] == "glow_smoke" and dlg.list.item(0).data(dlg.IN_USE)                  # marked, sorted by name
+    assert Path(names[0]).name in texts and not any("MiniMax" in t for t in texts)        # whole name, no folder
     dlg.search.setText("smoke")
     assert len(dlg.visible_paths()) == 2 and dlg.count.text() == "2 of 3 LoRAs"
     dlg.search.setText("smoke exhale")
