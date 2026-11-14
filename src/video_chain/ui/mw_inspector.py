@@ -4,7 +4,9 @@ from __future__ import annotations
 import os
 import re
 import stat as stat_module
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QImage, QPixmap
@@ -93,7 +95,9 @@ class InspectorMixin(MainWindowHost):
         start_pm = self._pixmap(self.project / T.START_FILE)
         infos = [NodeInfo(START, None, "Start", "", Path(self.tree.image).name if self.tree.image else "",
                           "start", start_pm, on_path=True, selected=sel == START)]
-        for n in sorted(self.tree.nodes.values(), key=lambda n: self.tree.number(n.id)):
+        tree = self.tree
+        assert tree is not None
+        for n in sorted(self.tree.nodes.values(), key=lambda n: tree.number(n.id)):
             text = n.prompt
             if n.is_video:
                 text = (f"{Path(n.source_dict()['file']).name} · {format_time(n.source_dict()['start'], 1)}–"
@@ -319,6 +323,7 @@ class InspectorMixin(MainWindowHost):
 
     def _sent_guess(self, n: T.Node, use: dict) -> str:
         """The prompt the model gets, from the clip alone (when clip_inputs cannot be worked out)."""
+        assert self.tree is not None
         words = T.lora_trigger_words([p for p, _s in T.node_loras(n)]) \
             if self.tree.options.get("lora_triggers", True) and T.node_loras(n) else []
         sounds = [None] * (T.audio_mentioned(T.full_prompt(self.tree.options, n.prompt)) + len(use.get("voices") or []))
@@ -396,7 +401,7 @@ class InspectorMixin(MainWindowHost):
         return text
 
     @staticmethod
-    def _seen_line(chars: list[dict]) -> str:
+    def _seen_line(chars: list[T.CastEntry]) -> str:
         """"Faces: @Anna · Pictures: @Kitchen" for the cast entries a clip sends pictures of ('' for none)."""
         faces = [f"@{c['name']}" for c in chars if c["images"] and T.kind_of(c) == "person"]
         pics = [f"@{c['name']}" for c in chars if c["images"] and T.kind_of(c) != "person"]
@@ -484,12 +489,13 @@ class InspectorMixin(MainWindowHost):
             have = h + 1 if h is not None else pn
         fits = [g for g in T.GUIDE_CHOICES if g <= have and g < T.clip_length(self.tree, n)]
         span = T.source_sound_span(self.tree, n)
+        assert span is not None
         return made(f"Uses {t(span['start'])}\u2013{t(span['start'] + span['secs'])} of "
                     f"{Path(span['file']).name} (video #{T.short_id(video.id)}): the sound right after its range, "
                     "exactly as recorded", guide=max(fits, default=0),
                     tail=" Write in the prompt what happens; the words come from the video.")
 
-    def _sound_suffix(self, n: T.Node, ov: dict) -> str:
+    def _sound_suffix(self, n: T.Node, ov: Mapping[str, Any]) -> str:
         """" (laid over)" / " (mixed with the clip's own sound, +3 dB)" after the name of a sound, or ""."""
         if not (ov.get("source_sound") and ov.get("sound_over")):
             return ""
@@ -500,7 +506,8 @@ class InspectorMixin(MainWindowHost):
 
     def _own_parts(self, n: T.Node) -> list[str]:
         """A clip's own LoRA / strength / length / steps in a few words."""
-        ov, parts = n.overrides or {}, []
+        ov: Mapping[str, Any] = n.overrides or {}
+        parts: list[str] = []
         over = self._sound_suffix(n, ov)
         for p, st in T.node_loras(n):
             parts.append(f"{lora_label(p)[:18]} ×{st:g}")
@@ -515,7 +522,8 @@ class InspectorMixin(MainWindowHost):
         if ov.get("source_sound") == "previous":
             parts.append("repeats the sound before" + over)
         elif T.track_id(n) is not None:
-            tr = T.track_of(self.tree, T.track_id(n)) if self.tree else None
+            tid = T.track_id(n)
+            tr = T.track_of(self.tree, tid) if self.tree and tid is not None else None
             parts.append((f"track “{tr['name'][:16]}”" if tr else "removed track") + over)
         elif ov.get("source_sound"):
             parts.append("video's sound" + over)

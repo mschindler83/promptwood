@@ -34,7 +34,9 @@ class ProjectMixin(MainWindowHost):
         dlg = NewProjectDialog(self, location, self.qs)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        self.create_project(dlg.folder(), dlg.image.text().strip())
+        folder = dlg.folder()
+        if folder is not None:
+            self.create_project(folder, dlg.image.text().strip())
 
     def create_project(self, folder: Path, image: str = "") -> bool:
         """Create a new project folder (it must not be a project yet) and open it; optionally with a start image."""
@@ -228,7 +230,7 @@ class ProjectMixin(MainWindowHost):
                 film.current = scene
                 folder = film.path(scene)
             elif folder == root:
-                folder = film.path(film.current)
+                folder = film.path(film.current or film.scenes[0].id)
             else:
                 film.current = (film.scene_of(folder) or film.scenes[0]).id
             tree = T.load(folder)
@@ -255,10 +257,10 @@ class ProjectMixin(MainWindowHost):
         self.focus = self._path_end = None         # (ids like n3 exist in every scene: no focus carried over)
         self._failures.clear()
         synced = ""
-        if len(film.scenes) > 1 and film.shared_state and film.shared(tree.options) != film.shared_state:
+        if len(film.scenes) > 1 and film.shared_state and film.shared(dict(tree.options)) != film.shared_state:
             tree.options.update(json.loads(json.dumps(film.shared_state)))   # it missed a change of the film's cast
             synced = " Its cast and sound settings were brought up to the film's."
-        self._shared_sent = json.dumps(film.shared(tree.options), sort_keys=True)
+        self._shared_sent = json.dumps(film.shared(dict(tree.options)), sort_keys=True)
         self.project_edit.setText(str(root))
         self.project_edit.setToolTip(str(folder))
         self.preview.stop()

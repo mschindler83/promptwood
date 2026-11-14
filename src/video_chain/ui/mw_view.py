@@ -123,7 +123,9 @@ class ViewMixin(MainWindowHost):
     def _first_clip(self) -> T.Node | None:
         if self.tree is None:
             return None
-        roots = sorted(self.tree.children(None), key=lambda n: self.tree.number(n.id))
+        tree = self.tree
+        assert tree is not None
+        roots = sorted(self.tree.children(None), key=lambda n: tree.number(n.id))
         return roots[0] if roots else None
 
     def _guide_write(self):

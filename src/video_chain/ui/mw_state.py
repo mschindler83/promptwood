@@ -120,7 +120,9 @@ class StateMixin(MainWindowHost):
         if self.project is None or self.tree is None:
             return []
         videos, seen = [], set()
-        for n in sorted(self.tree.nodes.values(), key=lambda n: self.tree.number(n.id)):
+        tree = self.tree
+        assert tree is not None
+        for n in sorted(self.tree.nodes.values(), key=lambda n: tree.number(n.id)):
             if not n.is_video:
                 continue
             src = (swap.replaced(n) or {}).get("original") or n.source or {}
@@ -142,7 +144,9 @@ class StateMixin(MainWindowHost):
         p = self.project
         start = [(str(p / T.START_FILE), "Start image")] if (p / T.START_FILE).is_file() else []
         clips, videos, ends = [], [], []
-        for n in sorted(self.tree.nodes.values(), key=lambda n: self.tree.number(n.id)):
+        tree = self.tree
+        assert tree is not None
+        for n in sorted(self.tree.nodes.values(), key=lambda n: tree.number(n.id)):
             m = n.made or {}
             if n.is_video:
                 for key, what in (("first", "first frame"), ("frame", "last frame")):

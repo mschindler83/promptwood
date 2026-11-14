@@ -63,8 +63,8 @@ class TtsMixin(MainWindowHost):
             d.mkdir(parents=True, exist_ok=True)
             self._tts_local = TTS.LocalTTS(log=d / "tts-worker.log")
         url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL).rstrip("/")
-        self._tts_local.before_launch = lambda _w:  # type: ignore[assignment]  # (tts.py types the hook as None) self._make_room(TTS.LOCAL_VRAM_MB, url, "Qwen3-TTS",
-                                                                   TTS.TtsError, "speak the lines after the run")
+        self._tts_local.before_launch = lambda _w: self._make_room(  # type: ignore[assignment]  # (tts.py: None)
+            TTS.LOCAL_VRAM_MB, url, "Qwen3-TTS", TTS.TtsError, "speak the lines after the run")
         return self._tts_local
 
     def fish_tts(self) -> "TTS.FishTTS":

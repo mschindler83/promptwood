@@ -351,7 +351,7 @@ class GeneratorMixin(MainWindowHost):
     def _drain_out(self, p: QProcess, final: bool = False):
         """Lines of the worker's output: bytes, so a character split between reads stays whole; the last, unfinished
         line waits for more unless this is the end (final)."""
-        self._buf += bytes(p.readAllStandardOutput())
+        self._buf += p.readAllStandardOutput().data()
         *lines, self._buf = self._buf.split(b"\n")
         if final:
             lines, self._buf = lines + [self._buf], b""
@@ -372,7 +372,7 @@ class GeneratorMixin(MainWindowHost):
 
     def _drain_err(self, p: QProcess, final: bool = False):
         """Lines of the worker's error output into the log (a carriage-return progress line shows its last state)."""
-        self._ebuf += bytes(p.readAllStandardError()).decode(errors="replace")
+        self._ebuf += p.readAllStandardError().data().decode(errors="replace")
         *lines, self._ebuf = self._ebuf.split("\n")
         if final:
             lines, self._ebuf = lines + [self._ebuf], ""

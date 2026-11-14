@@ -183,12 +183,12 @@ class FilmMixin(MainWindowHost):
         """The cast, sounds and size settings are the film's: written into the other scenes when they change."""
         if self.film is None or len(self.film.scenes) < 2 or self.tree is None:
             return
-        now = json.dumps(self.film.shared(self.tree.options), sort_keys=True)
+        now = json.dumps(self.film.shared(dict(self.tree.options)), sort_keys=True)
         if now == self._shared_sent:
             return
         try:
             assert self.project is not None
-            self.film.sync_shared(self.project, self.tree.options)
+            self.film.sync_shared(self.project, dict(self.tree.options))
             self._shared_sent = now
         except (OSError, ValueError) as e:
             self._report_error(f"Could not pass the cast / sound settings on to the other scenes: {e}")

@@ -4,6 +4,7 @@ from __future__ import annotations
 import shutil
 import threading
 from pathlib import Path
+from typing import Any
 
 from PySide6.QtCore import QProcess
 from PySide6.QtWidgets import QDialog
@@ -25,6 +26,7 @@ class ExportMixin(MainWindowHost):
         if not path or self.tree is None:
             return
         nid, project = path[-1].id, self.project
+        assert project is not None
         tree = T.Tree.from_json(self.tree.to_json())
         pre = f"{prefix} " if prefix else ""
         self.status.setText(f"{pre}Joining the path …")
@@ -34,6 +36,7 @@ class ExportMixin(MainWindowHost):
 
         def work():
             with lock:
+                result: tuple[Any, str | None]
                 try:
                     joined = T.join_path(project, tree, nid, out)
                     secs = chain.joined_seconds(joined)             # not in the GUI thread (network shares)
@@ -104,6 +107,7 @@ class ExportMixin(MainWindowHost):
 
         def ready(size, how, strength_, denoise_=False):   # every generated clip has a kept copy made this way
             def kept(n):
+                assert self.project is not None
                 f = T.refined_file(self.project, n, size)
                 if not (n.made and f.is_file()):
                     return False
@@ -205,13 +209,13 @@ class ExportMixin(MainWindowHost):
         p = QProcess(self)
         self._gpu_proc = p
 
-        failed = []
+        failed: list[int] = []
 
         def done(*_):
             if self._gpu_proc is not p:          # window closing: the query was abandoned
                 return
             try:
-                out = bytes(p.readAllStandardOutput()).decode(errors="replace").strip().splitlines()
+                out = p.readAllStandardOutput().data().decode(errors="replace").strip().splitlines()
             except RuntimeError:                 # Qt is destroying the window (and with it the query)
                 return
             self._gpu_proc = None

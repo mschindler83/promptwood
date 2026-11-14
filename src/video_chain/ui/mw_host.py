@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from ..tts import FishTTS, LocalTTS
     from .cast_strip import CastStrip
     from .clip_cards import PromptCard, VideoCard
-    from .generator_state import ComfyModel, ModelState, Phase
+    from .generator_state import ComfyModel, Job, ModelState, Phase
     from .graph import GraphView
     from .guide import EngineBanner, GuidePanel, NextHint
     from .mw_support import _Bridge, _CurrentStack
@@ -43,6 +43,10 @@ if TYPE_CHECKING:
         _lora_misses: dict
         _lora_scan_gen: int
         _path_end: str | None
+        _film_queue: list[str] | None
+        _job: Job | None
+        _plan: list[str]
+        _played_path: tuple | None
         _shared_sent: str | None
         _tracks_shown: tuple | None
         _tree_stamp: tuple | None

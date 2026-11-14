@@ -300,9 +300,11 @@ class NodeMixin(MainWindowHost):
         if memo is not None and node.parent in memo:
             made = memo[node.parent]
         else:
-            sibs = [n for n in self.tree.children(node.parent) if n.made and not n.is_video
+            tree = self.tree
+            assert tree is not None
+            sibs = [n for n in tree.children(node.parent) if n.made and not n.is_video
                     and self.status_of.get(n.id) == "done"]
-            made = [n.id for n in sorted(sibs, key=lambda n: self.tree.number(n.id))]
+            made = [n.id for n in sorted(sibs, key=lambda n: tree.number(n.id))]
             if memo is not None:
                 memo[node.parent] = made
         own = [nid] if node.made else []
@@ -318,15 +320,18 @@ class NodeMixin(MainWindowHost):
             self.status.setText("Nothing to compare: make variants of this clip first (Variant / Variants…).")
             return None
         items = []
+        assert self.project is not None
         for i in ids:
             n = self.tree.nodes[i]
             detail = " · ".join([f"seed {n.seed}"] + self._own_parts(n) +
                                 ([] if n.prompt == self.tree.nodes[nid].prompt else [f"“{n.prompt[:60]}”"]))
+            assert n.made is not None                  # (compare_candidates: made clips)
             items.append((i, f"#{T.short_id(i)}", detail, self.project / n.made["video"]))
         self.preview.stop()
+        tree = self.tree
 
         def keep(kid: str) -> bool:
-            others = [i for i in ids if i != kid and i in self.tree.nodes]
+            others = [i for i in ids if i != kid and i in tree.nodes]
             return bool(self.keep_only(kid, others))
         dlg = CompareDialog(self, items, keep, player=player,
                             title=f"Compare {len(ids)} clips from the same point as #{T.short_id(nid)}")
