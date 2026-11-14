@@ -346,6 +346,7 @@ class RunpodSession:
         self.volume_kind = "network"
         self.note, self.log = note or (lambda _t: None), log or (lambda _t: None)
         self.config, self.idle_min, self.ssh_bin = Path(config), int(idle_min), ssh
+        self.close_timeout = 180.0              # close() gives up (and says so) after this many seconds
         self.boot_timeout, self.setup_timeout = boot_timeout, setup_timeout
         self.key: Path = self.config / "id_ed25519"
         self.user, self.remote_port = "root", REMOTE_PORT      # (tests: a local sshd as oneself)
@@ -594,6 +595,17 @@ class RunpodSession:
             raise RunpodError(f"preparing the pod failed (exit {code}): " + " | ".join(tail[-5:]))
 
     def _open_tunnel(self) -> None:
+        """The port is free when chosen, but another program may take it before ssh binds it: when ssh ends because
+        of that, one more try on a new port."""
+        try:
+            self._open_tunnel_once()
+        except RunpodError as e:
+            if not re.search(r"in use|cannot listen|forward", str(e), re.I):
+                raise
+            logger.warning("the SSH tunnel's port was taken (%s): trying another", e)
+            self._open_tunnel_once()
+
+    def _open_tunnel_once(self) -> None:
         port = free_port()
         self._tunnel_err = tempfile.TemporaryFile()      # (a file, not a pipe: nobody reads it while the tunnel lives)
         self.tunnel = subprocess.Popen(
@@ -674,6 +686,7 @@ class RunpodSession:
             if self.pod_id:
                 spent = self.cost_so_far
                 err = None
+                end = time.monotonic() + self.close_timeout        # (an overall limit: each call may itself retry)
                 for attempt in range(5):
                     try:
                         self.api.delete_pod(self.pod_id)
@@ -685,6 +698,11 @@ class RunpodSession:
                         err = f"status {st}"
                     except RunpodError as e:
                         err = str(e)
+                    if time.monotonic() >= end:
+                        err = f"{err}; gave up after {self.close_timeout:.0f} s"
+                        raise RunpodError(f"could not terminate pod {self.pod_id} ({err}): end it in RunPod's "
+                                          f"console (it removes itself after {self.idle_min} min without a "
+                                          "connection)")
                     time.sleep(2 * (attempt + 1))
                 else:
                     raise RunpodError(f"could not terminate pod {self.pod_id} ({err}): end it in RunPod's console "
@@ -796,33 +814,34 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("what", choices=("status", "down", "gpus"))
     a = p.parse_args(argv)
     try:
-        return _cli(a.what)
+        return _cli(a.what, out=print)
     except RunpodError as e:
         print(f"error: {e}")
         return 1
 
 
-def _cli(what: str) -> int:
+def _cli(what: str, out=print) -> int:
+    """The command line's work; every line it has for the user goes to out (the library itself prints nothing)."""
     api = RunpodApi(api_key())
     if what == "gpus":
         for g in api.gpus():
             price = (g.get("price") or {}).get("secure")
-            print(f"{str(g.get('id') or '?'):40} {g.get('memory', '?'):>3} GB  "
+            out(f"{str(g.get('id') or '?'):40} {g.get('memory', '?'):>3} GB  "
                   + (f"${price:.2f}/h" if isinstance(price, (int, float)) else "   -   ")
                   + f"  {g.get('availability') or ''}")
         return 0
     pods, failed = leftover_pods(api), 0
     for pod in pods:
-        print(f"{pod.get('id')}  {pod.get('name')}  {pod.get('status')}  {(pod.get('gpu') or {}).get('id', '')}")
+        out(f"{pod.get('id')}  {pod.get('name')}  {pod.get('status')}  {(pod.get('gpu') or {}).get('id', '')}")
         if what == "down":
             try:
                 api.delete_pod(pod["id"])
-                print("  terminated")
+                out("  terminated")
             except RunpodError as e:         # (the others still get their turn)
                 failed += 1
-                print(f"  NOT terminated: {e}")
+                out(f"  NOT terminated: {e}")
     if not pods:
-        print("no video-chain pods on RunPod")
+        out("no video-chain pods on RunPod")
     return 1 if failed else 0
 
 
