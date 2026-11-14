@@ -54,6 +54,8 @@ def made_up(tmp_path, monkeypatch):
     for name in ("plug_good", "plug_broken", "plug_bad_setup"):
         monkeypatch.delitem(sys.modules, name, raising=False)
     monkeypatch.delenv(plugins.OFF, raising=False)
+    # only the made-up plugins: none that happens to be installed next to the app
+    monkeypatch.setattr(plugins.metadata, "entry_points", lambda group: [])
     plugins.reset()
     return d
 
