@@ -59,6 +59,9 @@ from .. import h3_prompt as _h3
 
 from .consts import (  # noqa: F401
     TREE_FILE,
+    SPEED_MODES,
+    speed_mode,
+    set_speed_mode,
     TREE_VERSION,
     NewerTreeError,
     START_FILE,
@@ -202,6 +205,9 @@ from .clipcast import (  # noqa: F401
     _h3_cast,
     _resolver,
     cast_problems,
+    cast_issues,
+    CastIssue,
+    CastKind,
     _closest)
 from .sound import (  # noqa: F401
     audio_problems)

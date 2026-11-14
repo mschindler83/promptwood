@@ -127,11 +127,10 @@ class OptionsMixin(MainWindowHost):
             "aspect": self.aspect.currentData(),
             "steps": self.steps.value(), "audio": self.audio.isChecked(), "keep_repeated": self.keep_rep.isChecked(),
             "turbo": {**(self.tree.options.get("turbo") or {}),
-                      "on": mode == "turbo", "lora": self.turbo_lora.currentData(),
+                      "lora": self.turbo_lora.currentData(),
                       "steps": self.turbo_steps.value(), "strength": round(self.turbo_strength.value(), 2)},
-            "hyperflow": {**(self.tree.options.get("hyperflow") or {"strength": 1.0}), "on": mode == "hyperflow"},
-            "pika": {**(self.tree.options.get("pika") or {"strength": 1.0}), "on": mode == "pika"},
             "veda": {"on": self.veda.isChecked()}})
+        T.set_speed_mode(self.tree.options, mode)
         if mode == "normal":                        # the CFG belongs to the speed mode it was set for
             as_dict(self.tree.options)["cfg"] = cfg          # (not in the Options schema: tree/ should list it)
         else:

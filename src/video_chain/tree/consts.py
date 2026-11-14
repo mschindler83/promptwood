@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from .schema import Options
 
@@ -154,3 +155,22 @@ _CLIP_NAME = re.compile(r"^n\d+(_[0-9a-f]{8})?((_first|_f\d+)?\.(mp4|png)|_(1080
 # the files of a clip version its record names (own_sound: the model's sound of a clip with a sound laid over, kept
 # for remix_sound); they travel together: kept aside, made again, removed as one
 CLIP_KEYS = ("video", "frame", "first", "own_sound")
+
+
+SPEED_MODES = ("normal", "turbo", "hyperflow", "pika")      # the speed modes; each but "normal" has its own option dict
+
+
+def speed_mode(o: Any) -> str:
+    """Which speed mode the options switch on: "turbo", "hyperflow", "pika" or "normal"."""
+    for mode in SPEED_MODES[1:]:
+        if (o.get(mode) or {}).get("on"):
+            return mode
+    return "normal"
+
+
+def set_speed_mode(o: Any, mode: str) -> None:
+    """Switch exactly one speed mode on (or none, for "normal"); the other settings of each mode stay."""
+    if mode not in SPEED_MODES:
+        raise ValueError(f"unknown speed mode {mode!r}")
+    for m in SPEED_MODES[1:]:
+        o[m] = {**(o.get(m) or dict(DEFAULT_OPTIONS[m])), "on": m == mode}   # type: ignore[literal-required]
