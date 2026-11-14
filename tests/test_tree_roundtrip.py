@@ -88,3 +88,13 @@ def test_remove_later_moves_the_files_only_after_the_tree_is_saved(tmp_path):
     T.save(tmp_path, t)
     assert not clip.exists() and (tmp_path / chain.OLD_DIR / "nodes" / clip.name).read_bytes() == b"clip"
     T.save(tmp_path, t)                                    # (nothing is moved twice)
+
+
+def test_split_video_leaves_the_tree_as_it_was_when_it_fails(monkeypatch):
+    t = T.Tree()
+    v = t.add_video(None, "/x/v.mp4", 0.0, 10.0)
+    before = copy.deepcopy(t)
+    monkeypatch.setattr(T.Tree, "add_video", lambda *_a, **_k: (_ for _ in ()).throw(ValueError("no")))
+    with pytest.raises(ValueError):
+        t.split_video(v.id, 4.0)
+    assert t == before

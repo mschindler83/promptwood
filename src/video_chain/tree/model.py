@@ -159,15 +159,23 @@ class Tree:
             raise ValueError("split inside the video's range (not at its first or last frame)")
         kids = self.children(nid)
         rest_source: Source = {**v.source, "start": at, "end": round(end, 4)}
-        v.source = {**v.source, "end": at}
-        rep = v.source.get("replaced")
+        first_source: Source = {**v.source, "end": at}
+        rep = first_source.get("replaced")
         if isinstance(rep, dict) and isinstance(rep.get("original"), dict):   # the original's range, split too
             o = rep["original"]
             cut = round(float(o["start"]) + (at - start), 4)
-            v.source["replaced"] = {**rep, "original": {**o, "end": cut}}
+            first_source["replaced"] = {**rep, "original": {**o, "end": cut}}
             rest_source["replaced"] = {**rep, "original": {**o, "start": cut}}
+        next_num, old_source = self.next_num, v.source
         clip = self.add(nid, "")
-        rest = self.add_video(clip.id, rest_source["file"], at, end)
+        try:
+            rest = self.add_video(clip.id, rest_source["file"], at, end)
+        except BaseException:                         # (nothing is left half done)
+            self.nodes.pop(clip.id, None)
+            self.next_num = next_num
+            v.source = old_source
+            raise
+        v.source = first_source
         rest.source = rest_source
         for k in kids:
             k.parent = rest.id
