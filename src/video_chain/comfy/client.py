@@ -460,7 +460,7 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
                 _UPLOADS[(self.url, got)] = _UPLOADS.get((self.url, got), 0) + 1
         return got
 
-    def generate(self, prompt: str, start_image: Path, out_video: Path, out_last_frame: Path, seed: int,
+    def generate(self, prompt: str, start_image: Path | None, out_video: Path, out_last_frame: Path, seed: int,
                  settings: ClipSettings | None = None) -> None:
         self._begin_job()
         s: ClipSettings = settings or {}

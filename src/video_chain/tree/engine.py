@@ -4,13 +4,14 @@ from __future__ import annotations
 import copy
 import shutil
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable, cast
 
 from .. import chain
 from .. import media
 from .consts import VIDEO
 from .guard import inside
 from .model import Node, Tree, short_id
+from .schema import MadeRecord
 from .timeline import clip_length, full_prompt, handover_file, handover_index
 from .files import _unlink, clip_files, handover_frames, load, new_clip_files, remove_stale_files, save
 from .cast import audio_mentioned, audio_refs, cast_of, is_h3, kind_of, mentions
@@ -82,8 +83,9 @@ def clip_inputs(project: Path, tree: Tree, nid: str, checker: Checker | None = N
     guide = int((node.overrides or {}).get("guide") or 0)
     vc = tree.video_child(nid)
     start_file = checker.start_frame(node)
+    own_end = end_image_used(tree, node)
     end_file = (Path(project) / vc.made["first"] if vc is not None and vc.made and vc.made.get("first") else None) \
-        if vc is not None else (Path(project) / node.end_image if end_image_used(tree, node) else None)
+        if vc is not None else (Path(project) / own_end if own_end else None)
     start = {"given": "frame" if plain[0] else "guide" if guide and node.parent is not None else None,
              "file": start_file if plain[0] else None, "picture": nums.get("start")}
     end = {"given": "frame" if plain[1] else "guide" if guide and vc is not None else None,
@@ -110,7 +112,8 @@ def path_videos(tree: Tree, targets: list[str]) -> list[str]:
     out = []
     for t in targets:
         for n in tree.path_to(t):
-            for v in ([n] if n.is_video else []) + ([tree.video_child(n.id)] if tree.video_child(n.id) else []):
+            child = tree.video_child(n.id)
+            for v in ([n] if n.is_video else []) + ([child] if child else []):
                 if v.id not in out:
                     out.append(v.id)
     return out
@@ -141,20 +144,22 @@ def make_video(project: Path, node: Node, base: dict) -> dict:
 def copy_video(project: Path, tree: Tree, src: Node, parent: str | None) -> Node:
     """A copy of a video node (same file and range) after parent; its converted files are copied too (new names),
     so the copy is ready at once and deleting one never touches the other's files."""
+    assert src.source is not None                    # (a video node has its source)
     node = tree.add_video(parent, src.source["file"], src.source["start"], src.source["end"],
                           source_rotation(src.source))
-    if src.made and all((Path(project) / src.made[k]).is_file() for k in ("video", "frame", "first")):
+    made = cast(dict[str, Any], src.made)             # (the keys below are names, the checker wants literals)
+    if made and all((Path(project) / made[k]).is_file() for k in ("video", "frame", "first")):
         video, frame = new_clip_files(project, node.id)
         first = frame.with_name(frame.stem + "_first.png")
         try:
             for k, target in (("video", video), ("frame", frame), ("first", first)):
-                shutil.copyfile(Path(project) / src.made[k], target)
+                shutil.copyfile(Path(project) / made[k], target)
         except OSError:
             for f in (video, frame, first):
                 _unlink(f)
             return node                              # made later by converting again
-        node.made = {**copy.deepcopy(src.made), "video": f"nodes/{video.name}", "frame": f"nodes/{frame.name}",
-                     "first": f"nodes/{first.name}"}
+        node.made = cast(MadeRecord, {**copy.deepcopy(made), "video": f"nodes/{video.name}",
+                                      "frame": f"nodes/{frame.name}", "first": f"nodes/{first.name}"})
     return node
 
 
@@ -165,8 +170,11 @@ def ensure_handover(project: Path, tree: Tree, node: Node) -> Path | None:
         node.made["frames"] = chain.probe(Path(project) / node.made["video"])["frames"]   # older record: count once
     f = handover_file(project, tree, node)
     if f is not None and not f.is_file():
+        assert node.made is not None                 # (a hand-over file belongs to a made clip)
+        at = handover_index(tree, node)
+        assert at is not None
         with media.part_file(f) as tmp:
-            chain.frame_at(Path(project) / node.made["video"], handover_index(tree, node), tmp)
+            chain.frame_at(Path(project) / node.made["video"], at, tmp)
     if node.made and node.made.get("video") and not node.is_video:   # frames of an earlier choice in this take
         v = Path(project) / node.made["video"]
         if inside(project, "nodes", v):
@@ -188,9 +196,10 @@ def ensure_handovers(project: Path, tree: Tree) -> list[str]:
 
 
 def _clip_frames(project: Path, node: Node) -> int:
-    if node.is_video and node.made.get("frames"):
-        return int(node.made["frames"])
-    return chain.probe(Path(project) / node.made["video"])["frames"]
+    made = node.made or {}
+    if node.is_video and made.get("frames"):
+        return int(made["frames"])
+    return chain.probe(Path(project) / made["video"])["frames"]
 
 
 def _guides(project: Path, tree: Tree, node: Node, settings: dict, tmp: Path) -> tuple[list[dict], Path | None]:
@@ -198,10 +207,11 @@ def _guides(project: Path, tree: Tree, node: Node, settings: dict, tmp: Path) ->
     guide = int(settings.get("guide") or 0)
     frames = int(settings["frames"])
     vc = tree.video_child(node.id)
-    guides, end_image = [], None
+    guides: list[dict] = []
+    end_image: Path | None = None
     if guide and node.parent is not None:
         parent = tree.nodes[node.parent]
-        clip, n = project / parent.made["video"], _clip_frames(project, parent)
+        clip, n = project / (parent.made or {})["video"], _clip_frames(project, parent)
         k = handover_index(tree, parent, n)
         if k is not None:                           # it hands over earlier: the frames up to that one
             n = k + 1
@@ -213,7 +223,7 @@ def _guides(project: Path, tree: Tree, node: Node, settings: dict, tmp: Path) ->
         guides.append({"video": str(g), "frame_idx": 0, "frames": guide, "audio": audio, "at": "start"})
     if vc is not None:
         if guide:
-            clip, n = project / vc.made["video"], _clip_frames(project, vc)
+            clip, n = project / (vc.made or {})["video"], _clip_frames(project, vc)
             if n < guide:
                 raise ValueError(f"video #{short_id(vc.id)} ({n} frames) is shorter than the {guide}-frame carry-over "
                                  f"of clip #{short_id(node.id)}")
@@ -222,9 +232,9 @@ def _guides(project: Path, tree: Tree, node: Node, settings: dict, tmp: Path) ->
             guides.append({"video": str(g), "frame_idx": frames - guide, "frames": guide, "audio": audio,
                            "at": "end"})
         else:
-            end_image = project / vc.made["first"]
-    elif end_image_used(tree, node):
-        end_image = project / node.end_image
+            end_image = project / (vc.made or {})["first"]
+    elif (own_end := end_image_used(tree, node)):
+        end_image = project / own_end
     used = sum(g["frames"] for g in guides)
     if used and used >= frames:
         raise ValueError(f"clip #{short_id(node.id)} ({frames} frames) is too short for its carry-over "
@@ -240,7 +250,7 @@ def _continuation(project: Path, tree: Tree, node: Node, settings: dict, tmp: Pa
     if not n or node.parent is None:
         return None
     parent = tree.nodes[node.parent]
-    clip, have = project / parent.made["video"], _clip_frames(project, parent)
+    clip, have = project / (parent.made or {})["video"], _clip_frames(project, parent)
     k = handover_index(tree, parent, have)
     if k is not None:                               # it hands over earlier: the frames up to that one
         have = k + 1
@@ -262,12 +272,14 @@ def guide_problem(tree: Tree, checker: Checker, todo: list[str]) -> str | None:
     made, with the lengths the clips will have."""
     def length(n: Node) -> int:
         if n.is_video and n.id in todo:             # converted again: the current range
-            return chain.range_frames(n.source["start"], n.source["end"])
+            src = n.source or {}
+            return chain.range_frames(src["start"], src["end"])
         return clip_length(tree, n)                 # converted (a source that ends early gives fewer frames)
 
     for nid in todo:
         node = tree.nodes[nid]
         s = checker.settings(nid) if not node.is_video else None
+        s = s if s is not None else {}
         cont = int(((s or {}).get("continue") or {}).get("frames") or 0)
         if cont and node.parent is not None:
             other = tree.nodes[node.parent]
@@ -280,11 +292,11 @@ def guide_problem(tree: Tree, checker: Checker, todo: list[str]) -> str | None:
             if cont > int(s["frames"]):
                 return (f"clip #{short_id(nid)} ({s['frames']} frames) is shorter than its {cont}-frame "
                         "continuation; make it longer or the continuation shorter")
-        guide = int((s or {}).get("guide") or 0)
+        guide = int(s.get("guide") or 0)
         if not guide:
             continue
         used = 0
-        near = ([("clip", tree.nodes[node.parent])] if node.parent is not None else [])
+        near: list[tuple[str, Node]] = [("clip", tree.nodes[node.parent])] if node.parent is not None else []
         vc = tree.video_child(nid)
         if vc is not None:
             near.append(("video", vc))
@@ -332,25 +344,27 @@ def remix_sound(project: Path, tree: Tree, nid: str, checker: Checker | None = N
         return False
     node = tree.nodes[nid]
     settings = ck.settings(nid)
+    assert settings is not None and node.made is not None     # (remix_due: a made clip with settings)
+    made = cast(dict[str, Any], node.made)
     ss = settings["source_sound"]
     if not sound_file(project, ss).is_file():
         raise FileNotFoundError(f"the sound of clip #{short_id(nid)} is missing ({Path(ss['file']).name})")
     with media.scratch("job", dir=str(project / "nodes")) as tmp:
         wav = Path(tmp) / "source_sound.wav"
         given_sound(project, node, ss, wav)
-        if not chain.keep_copy(project, project / node.made["video"]):      # (never overwritten: the old mix stays)
+        if not chain.keep_copy(project, project / made["video"]):      # (never overwritten: the old mix stays)
             raise OSError(f"the clip of {nid} could not be kept in {chain.OLD_DIR}/ before its sound is mixed again")
-        chain.remix_audio(project / node.made["video"], project / node.made["own_sound"], wav,
+        chain.remix_audio(project / made["video"], project / made["own_sound"], wav,
                           float(ss.get("mix_level") or 0.0) if ss.get("mix") else None)
-    node.made["settings"] = settings
-    base = node.made.get("overrides")           # (what Undo goes back to: only the sound keys follow the remix)
+    made["settings"] = settings
+    base = made.get("overrides")           # (what Undo goes back to: only the sound keys follow the remix)
     if isinstance(base, dict):
         for k in _SOUND_OVERRIDES:
-            if (node.overrides or {}).get(k) is None:
+            if cast(dict[str, Any], node.overrides or {}).get(k) is None:
                 base.pop(k, None)
             else:
-                base[k] = copy.deepcopy(node.overrides[k])
-    node.made["sound_rev"] = int(node.made.get("sound_rev") or 0) + 1
+                base[k] = copy.deepcopy(cast(dict[str, Any], node.overrides)[k])
+    made["sound_rev"] = int(made.get("sound_rev") or 0) + 1
     if persist:
         save(project, tree)
     return True
@@ -394,9 +408,9 @@ def _check_run(project: Path, tree: Tree, checker: Checker, todo: list[str]) -> 
     missing = [lo for lo in loras_needed(tree, checker, todo) if not Path(lo).is_file()]
     if missing:
         raise FileNotFoundError(f"LoRA not found: {missing[0]}")
-    gone = [nid for nid in todo if tree.nodes[nid].is_video and not Path(tree.nodes[nid].source["file"]).is_file()]
+    gone = [nid for nid in todo if tree.nodes[nid].is_video and not Path((tree.nodes[nid].source or {})["file"]).is_file()]
     if gone:
-        raise FileNotFoundError(f"video file not found: {tree.nodes[gone[0]].source['file']}")
+        raise FileNotFoundError(f"video file not found: {(tree.nodes[gone[0]].source or {})['file']}")
     problem = guide_problem(tree, checker, todo)
     if problem:
         raise ValueError(problem)
@@ -416,7 +430,7 @@ def _check_run(project: Path, tree: Tree, checker: Checker, todo: list[str]) -> 
 
 def _generator_call(project: Path, node: Node, settings: dict) -> dict:
     """The settings handed to generator.generate: the clip's settings with the files its pictures and sounds are."""
-    call = dict(settings)
+    call: dict[str, Any] = dict(settings)
     if node.keyframes:
         call["keyframes"] = [{"image": str(project / k["image"]), "frame_idx": keyframe_frame(k["at"])}
                              for k in node.keyframes]
@@ -489,13 +503,14 @@ def _make_ai_clip(generator: chain.Generator, project: Path, tree: Tree, node: N
     # previous clip and its record, and a still-open old file (SMB) does not stop anything
     new_video, new_frame = new_clip_files(project, nid)
     settings = checker.settings(nid)
+    assert settings is not None                    # (checked before the run: the project has its size)
     start_sha = checker.sha(start)
     end_key = checker.end_key(node)
     key_key = checker.keyframe_key(node)
     guide_from = checker.guide_from(node)
     continue_from = checker.continue_from(node)
     call = _generator_call(project, node, settings)
-    own = None
+    own: Path | None = None
     try:
         with media.scratch("job", dir=str(nodes_dir)) as tmp:
             guides, end_image = _guides(project, tree, node, settings, Path(tmp))
@@ -577,11 +592,12 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
         node = tree.nodes[nid]
         old = clip_files(project, node)
         if node.is_video:
-            src = node.source
+            src = node.source or {}
             log(f"[{k}/{len(todo)}] {nid}: converting {Path(src['file']).name} {src['start']:.2f}-{src['end']:.2f} s")
             emit({"e": "node", "id": nid, "state": "generating", "k": k, "n": len(todo)})
-            node.made = make_video(project, node, checker.base())
-            new_files = [project / node.made[x] for x in ("video", "frame", "first")]
+            record = make_video(project, node, checker.base() or {})
+            node.made = cast(MadeRecord, record)
+            new_files = [project / record[x] for x in ("video", "frame", "first")]
         else:
             new_files, older = _make_ai_clip(generator, project, tree, node, checker, k, len(todo), emit, log)
             old += older
