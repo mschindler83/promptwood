@@ -7,7 +7,7 @@ import sys
 sys.path.insert(0, os.path.dirname(__file__))
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-from ui_helpers import FAKE, app, settings  # noqa: E402,F401
+from ui_helpers import FAKE, app, image, new_project, run_and_wait, settings, wait, win  # noqa: E402,F401
 
 
 def test_no_shortcut_needs_ctrl_and_alt_together():
@@ -84,3 +84,41 @@ def test_the_image_window_takes_a_refine_result(app, tmp_path):
         assert [v.text for v in dlg.variations.variable("idea").values] == ["a cat", "a dog"]
     finally:
         dlg.reject()
+
+
+# ------------------------------------------------------------------ the frame window is read only when it is ready
+def test_keep_a_moment_waits_for_the_probe_of_a_clip_without_a_frame_count(app, win, tmp_path, image):
+    """A clip whose record has no frame count is probed in a worker: the position of the 'keep this moment' frame is
+    set when the window is ready, not on the placeholder slider that the stepper replaces."""
+    ids = new_project(win, tmp_path, image, ("a", "b"))
+    run_and_wait(app, win, win.generate_path)
+    wait(app, lambda: not win._joins, timeout=30)
+    del win.tree.nodes[ids[0]].made["frames"]                  # (so the window cannot be told at once)
+    win.modal_dialogs = False
+    dlg = win._keyframe_from_video(ids[0], 0.5, None, own=True)
+    assert dlg is not None
+    try:
+        assert wait(app, lambda: dlg.ready)
+        assert wait(app, lambda: dlg.slider.value() != 0)
+        from video_chain import tree as T
+        assert dlg.slider.value() == min(dlg.frames - 2, max(1, T.keyframe_frame(0.5)))
+    finally:
+        dlg.deleteLater()
+
+
+def test_a_frame_window_runs_its_callbacks_when_ready(app, tmp_path):
+    import subprocess
+
+    from video_chain.ui.clip_dialogs import VideoFrameDialog
+    vid = tmp_path / "v.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=gray:s=64x48:r=24:d=1",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", str(vid)], check=True)
+    dlg = VideoFrameDialog(None, vid, "frame")
+    seen = []
+    dlg.after_ready(lambda: seen.append(dlg.frames))
+    assert seen == []                                              # (still reading the file)
+    assert wait(app, lambda: dlg.ready)
+    assert seen == [24]
+    dlg.after_ready(lambda: seen.append("now"))                    # ready: at once
+    assert seen == [24, "now"]
+    dlg.deleteLater()

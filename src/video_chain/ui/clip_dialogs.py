@@ -3,6 +3,7 @@ side to pick one (CompareDialog)."""
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, QUrl
@@ -367,6 +368,7 @@ class VideoFrameDialog(QDialog):
         self._req = 0
         self._closed = False
         self.ready = False                          # (the video is probed: for a file the user picked that is a worker's job)
+        self._when_ready: list[Callable[[], None]] = []
         self._grabbing = self._again = False        # one ffmpeg at a time; the newest position after it
         self._tmp = media.scratch("frame")
         self.fps, self.duration, self.frames = float(FPS), 0.0, 1
@@ -418,6 +420,16 @@ class VideoFrameDialog(QDialog):
         self.ready = True
         self.slider.valueChanged.connect(self._moved)
         self._moved(0)                               # (the first frame: read when the timer fires)
+        waiting, self._when_ready = self._when_ready, []
+        for call in waiting:
+            call()
+
+    def after_ready(self, call: Callable[[], None]) -> None:
+        """Run call once the video is known (at once if it is): `frames` and `slider` are the placeholders before."""
+        if self.ready:
+            call()
+        else:
+            self._when_ready.append(call)
 
     def at(self) -> float:
         """The chosen frame's time in the video (its own frame rate)."""

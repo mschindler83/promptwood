@@ -449,7 +449,7 @@ class EndsMixin(MainWindowHost):
         if dlg is None:
             return None
         if own:
-            dlg.slider.setValue(min(dlg.frames - 2, max(1, T.keyframe_frame(at))))
+            dlg.after_ready(lambda: dlg.slider.setValue(min(dlg.frames - 2, max(1, T.keyframe_frame(at)))))
         if not self.modal_dialogs:
             return dlg
         try:
