@@ -280,7 +280,8 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
                    pika: tuple[str, float] | None = None, audio_refs: list[str] = (),
                    audio_key=lambda i: f"ref_audios.ref_audio_{i}", start_pin: int = 1,
                    recipe: dict | None = None, veda: str | None = None,
-                   keyframes: list[tuple[str, int]] = (), frame_refs: list[str] = ()) -> dict:
+                   keyframes: list[tuple[str, int]] = (), frame_refs: list[str] = (), ref_videos: list[str] = (),
+                   video_key=lambda i: f"ref_videos.ref_video_{i}") -> dict:
     """The API-format workflow for one clip (image = the uploaded start image, as LoadImage names it; None: a
     clip without a start frame).
 
@@ -304,6 +305,12 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
     reference images); MiniMaxH3ReferenceToVideo gets them with the audio VAE, the prompt says what each one is for
     (a voice, a soundtrack to copy, a beat).
 
+    With ref_videos (uploaded short clips, <Video 1> ... in the prompt; the end of the clip before that this clip
+    continues): the ref2va model too; each goes in through LoadVideo + GetVideoComponents, its pictures only. Its
+    soundtrack (ref_video_audios) is NOT wired: the node would give it an <Audio j> of its own right before the
+    <Video k>, which would renumber the sounds and voices the prompt names. The node keeps a reference video's
+    first 17n+5 frames, at most the clip's length, so the caller sends exactly such a length.
+
     With turbo (ComfyUI name of the turbo LoRA, strength): ComfyUI-MiniMax-H3-Turbo's loader (it handles the
     pruned model's adaln layers) right after the model, the other LoRAs after it, and its own sampler.
 
@@ -318,7 +325,8 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
     "shift": (12.0, 3.0)}): MiniMaxH3SigmaShift after the LoRAs, that sampler and scheduler (not with turbo,
     hyperflow or pika)."""
     wf: dict = {
-        "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": UNET_REF if refs or audio_refs else UNET,
+        "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": UNET_REF if refs or audio_refs or ref_videos
+                                                         else UNET,
                                                          "weight_dtype": "default"}},
         "clip": {"class_type": "CLIPLoader", "inputs": {"clip_name": TEXT_ENCODER, "type": "minimax",
                                                          "device": "default"}},
@@ -341,7 +349,7 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
         wf["end"] = {"class_type": "LoadImage", "inputs": {"image": end_image}}
     if audio or audio_refs:
         wf["audio_vae"] = {"class_type": "VAELoader", "inputs": {"vae_name": AUDIO_VAE}}
-    if refs or audio_refs:
+    if refs or audio_refs or ref_videos:
         inputs = {"clip": ["clip", 0], "vae": ["vae", 0], "prompt": prompt, "width": int(width),
                   "height": int(height), "length": int(frames), "ref_image_size": ref_size}
         for i, ref in enumerate(refs):
@@ -351,6 +359,10 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
             if not (use_start if f == "start" else use_end):
                 raise ValueError(f"the {f} frame is to be a reference picture, but the clip has no plain {f} frame")
             inputs[ref_key(i)] = [f, 0]                # the same LoadImage the guide pins
+        for i, clip in enumerate(ref_videos):          # pictures only (see above: no ref_video_audios)
+            wf[f"rvideo{i}"] = {"class_type": "LoadVideo", "inputs": {"file": clip}}
+            wf[f"rvparts{i}"] = {"class_type": "GetVideoComponents", "inputs": {"video": [f"rvideo{i}", 0]}}
+            inputs[video_key(i)] = [f"rvparts{i}", 0]
         for i, sound in enumerate(audio_refs):
             wf[f"aref{i}"] = {"class_type": "LoadAudio", "inputs": {"audio": sound}}
             inputs[audio_key(i)] = [f"aref{i}", 0]
@@ -549,6 +561,18 @@ class ComfyGenerator:
             prefix = (spec[1].get("template") or {}).get("prefix", prefix)
         return lambda i: f"ref_audios.{prefix}{i}"
 
+    def video_key(self):
+        """How this ComfyUI names the reference video inputs (raises ComfyError if its H3 nodes take none)."""
+        opt = self._object_info("MiniMaxH3ReferenceToVideo").get("input", {}).get("optional", {})
+        spec = opt.get("ref_videos")
+        if spec is None:
+            raise ComfyError("this ComfyUI's MiniMax H3 Reference to Video node takes no reference videos "
+                             "(update ComfyUI)")
+        prefix = "ref_video_"
+        if isinstance(spec, list) and len(spec) > 1 and isinstance(spec[1], dict):
+            prefix = (spec[1].get("template") or {}).get("prefix", prefix)
+        return lambda i: f"ref_videos.{prefix}{i}"
+
     def check_ref_model(self):
         req = self._object_info("UNETLoader").get("input", {}).get("required", {})
         if UNET_REF not in _combo_options(req.get("unet_name")):
@@ -717,7 +741,8 @@ class ComfyGenerator:
                 raise ComfyError(f"{Path(s['turbo']['lora']).name} is not in ComfyUI's LoRA folders")
             turbo = (name, float(s["turbo"].get("strength", 1.0)))
         hyper = (self.hyperflow_file(), float(s["hyperflow"].get("strength", 1.0))) if s.get("hyperflow") else None
-        pika = (self.pika_lora(bool(s.get("ref_paths") or s.get("audio_paths"))), float(s["pika"].get("strength", 1.0))) \
+        pika = (self.pika_lora(bool(s.get("ref_paths") or s.get("audio_paths") or s.get("ref_videos"))),
+                float(s["pika"].get("strength", 1.0))) \
             if s.get("pika") else None
         if turbo and self.last_hyperflow:
             self.free()                              # HyperFlow's patch would break the turbo LoRA
@@ -781,6 +806,14 @@ class ComfyGenerator:
             for a in s["audio_paths"]:
                 sounds.append(self.upload(Path(a)))
                 uploads.append((sounds[-1], a))
+        videos = []
+        if s.get("ref_videos"):                    # the end of the clip before (a continuation): ref2va as well
+            if not refs and not frame_refs and not sounds:
+                self.check_ref_model()
+            self.check_guides()                    # (LoadVideo + GetVideoComponents)
+            for v in s["ref_videos"]:
+                videos.append(self.upload(Path(v)))
+                uploads.append((videos[-1], v))
         prefix = f"{SUBFOLDER}/{uuid.uuid4().hex[:12]}"
         wf = build_workflow(prompt=prompt, image=image, seed=seed, width=s.get("width", 512),
                             height=s.get("height", 512), frames=s.get("frames", 73), steps=s.get("steps", 20),
@@ -791,7 +824,8 @@ class ComfyGenerator:
                             cfg=float(s.get("cfg", 1.0)),
                             audio_refs=sounds, **({"audio_key": self.audio_key()} if sounds else {}),
                             start_pin=int(s.get("start_pin") or 1), recipe=s.get("recipe"), keyframes=keyframes,
-                            veda=self.veda_predictor(bool(refs or sounds)) if s.get("veda") else None)
+                            ref_videos=videos, **({"video_key": self.video_key()} if videos else {}),
+                            veda=self.veda_predictor(bool(refs or sounds or videos)) if s.get("veda") else None)
         ws = self._connect_ws()
         try:
             self._queue(wf)

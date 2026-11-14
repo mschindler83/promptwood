@@ -4253,6 +4253,52 @@ def test_clip_chips_and_the_model_prompt(app, win, tmp_path, image, monkeypatch)
     assert T.Checker(p, win.tree).settings(ids[0])["frame_pictures"] == ["start"]
 
 
+def test_continue_the_clip_before_on_the_card(app, win, tmp_path, image):
+    """The card's Continue combo: only in the official format and not on a first clip (disabled, the tooltip says
+    why); the lengths that fit both clips; it sets the override, shows a chip and the <Video 1> entry of the Model
+    prompt window, is advanced-only and counts for the card's note; a value that no longer applies can be taken back."""
+    from video_chain.ui import main_window as MW
+    ids = new_project(win, tmp_path, image)
+    flush(app, win)
+    card = next(c for c in win.cards if c.nid == ids[1])
+    assert not card.cont.isEnabled() and card.cont.toolTip() == MW.CONTINUE_CLASSIC_TIP   # classic (tests' default)
+    win.prompt_format.setCurrentIndex(win.prompt_format.findData("h3"))
+    flush(app, win)
+    first, card = (next(c for c in win.cards if c.nid == i) for i in ids)
+    assert not first.cont.isEnabled() and first.cont.toolTip() == MW.CONTINUE_FIRST_TIP
+    assert card.cont.isEnabled() and card.cont.toolTip() == MW.CONTINUE_TIP
+    assert [card.cont.itemData(k) for k in range(card.cont.count())] == [None, 22, 39, 56, 73]   # 73-frame clips
+    assert card.cont.itemText(0) == "off" and card.cont.itemText(2) == "last 1.6 s (39 frames)"
+    assert "Carry-over is different: it fixes the first frames" in MW.CONTINUE_TIP and "takes longer" in MW.CONTINUE_TIP
+    card.cont.setCurrentIndex(card.cont.findData(39))
+    assert win.tree.nodes[ids[1]].overrides == {"continue": 39} and card.advanced_active() == ["Continue"]
+    flush(app, win)
+    card, chips = _chips(win, ids[1])
+    assert chips == ["Start frame · Picture 1", "Continues clip before · Video 1", "With reference pictures"]
+    assert card.chips.chips[1].toolTip().startswith(f"The end of clip #{ids[0][1:]} (its last 1.6 s, 39 frames")
+    assert T.Checker(win.project, win.tree).settings(ids[1])["continue"] == {"frames": 39}
+    win._dialogs_modeless = True
+    card.chips.b_prompt.click()
+    dlg = win._model_prompt_dialog
+    assert dlg.inputs.text().splitlines() == ["<Picture 1> — start frame (" + Path(str(T.clip_inputs(
+        win.project, win.tree, ids[1])["start"]["file"])).name + ")", f"<Video 1> — end of clip #{ids[0][1:]} (39 frames)"]
+    assert "The shot continues directly from the end of <Video 1>." in dlg.text.toPlainText()
+    dlg.deleteLater()
+    win.set_simple(True)                                                 # Simple: hidden, the note counts it
+    card = next(c for c in win.cards if c.nid == ids[1])
+    assert _row_hidden(card._link, card.cont) and card.adv_note.text.text() == "1 advanced setting is active:"
+    win.set_simple(False)
+    win.prompt_format.setCurrentIndex(win.prompt_format.findData("classic"))   # set, but classic: no effect
+    flush(app, win)
+    card = next(c for c in win.cards if c.nid == ids[1])
+    assert card.cont.isEnabled() and card.cont.currentData() == 39 and "choose 'off'" in card.cont.toolTip()
+    assert "continue" not in T.Checker(win.project, win.tree).settings(ids[1])
+    card.cont.setCurrentIndex(0)
+    assert win.tree.nodes[ids[1]].overrides == {}
+    flush(app, win)
+    card = next(c for c in win.cards if c.nid == ids[1])
+    assert not card.cont.isEnabled() and card.cont.count() == 1
+
 def test_prompt_format_choice(app, win, tmp_path, image):
     """Project → Prompt format switches options["prompt_format"]; the official format disables the face hint; a
     project file from before the setting opens as classic."""

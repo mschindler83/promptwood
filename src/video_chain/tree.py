@@ -7,6 +7,9 @@ last-frame input), one right after it starts from the video's last frame. So rea
 chained in any order. A generated clip can lead into at most one video (its end can only match one).
 With a motion guide (override "guide": 5, 22 or 39 frames) a generated clip gets the last frames of the clip
 before and the first frames of a following video (with their sound) instead of a single frame at each end.
+In the h3 prompt format a generated clip after another clip (or a real video) can also continue it (override
+"continue": n frames): the last n frames of the clip before go to the reference model as <Video 1> and the prompt
+says the clip continues it ("video continuation"); the pinned frames stay as they are.
 A generated clip with no video after it can have an end image of its own (Node.end_image, a copy in ends/): the
 frame H3 steers the clip's end to. It is not a frame of the chain, so nothing is cut when the path is joined.
 Middle keyframes (Node.keyframes: [{"image": ends/..., "at": seconds, "note": text}]) pin pictures at moments inside
@@ -67,10 +70,13 @@ TREE_FILE = "tree.json"
 START_FILE = "start.png"
 NO_LORA = "none"                   # old override value: this node without any LoRA
 OVERRIDE_KEYS = ("loras", "frames", "steps", "guide", "source_sound", "sound_over", "sound_mix_level", "camera",
-                 "lead")
+                 "lead", "continue")
 _OLD_LORA_KEYS = ("lora", "strength", "extra_loras")
 AI, VIDEO = "ai", "video"
 GUIDE_CHOICES = (5, 22, 39)        # motion guide lengths on H3's 17n+5 grid
+# lengths of the clip before's end shown as a reference video ("continue"): MiniMaxH3ReferenceToVideo keeps the
+# first 17n+5 frames of a reference video (at most the target's frame count), so only these lengths arrive whole
+CONTINUE_CHOICES = (22, 39, 56, 73, 90, 107, 124)
 DEFAULT_OPTIONS = {"model": "Comfy-Org/MiniMax-H3", "frames": 73, "steps": 28,
                    "resolution": 512, "audio": True, "keep_repeated": False, "seed": 42,
                    # the aspect ratio of a project without a start image or video (its first clip starts from text)
@@ -2137,6 +2143,19 @@ class Checker:
         rev = parent.made.get("sound_rev")              # its sound built again in place: the guide hears the new one
         return None if v is None else v + (f"@{k}" if k is not None else "") + (f"~s{rev}" if rev else "")
 
+    def continue_from(self, node: Node) -> str | None:
+        """The clip a continuation's reference video is cut from (its file name: every new clip gets a new one,
+        and its hand-over frame, where the cut ends), or None for a clip that does not continue the one before."""
+        s = self.settings(node.id)
+        if node.parent is None or not s or not s.get("continue"):
+            return None
+        parent = self.tree.nodes[node.parent]
+        v = (parent.made or {}).get("video")
+        if v is None:
+            return None
+        k = handover_index(self.tree, parent)
+        return v + (f"@{k}" if k is not None else "")
+
     def _files_there(self, node: Node) -> bool:
         m = node.made
         if not m or not m.get("video") or not m.get("frame") or (node.is_video and not m.get("first")):
@@ -2164,7 +2183,8 @@ class Checker:
               or m.get("start_sha1") != self.sha(self.start_frame(node))
               or m.get("end_key") != self.end_key(node)
               or m.get("keyframe_key") != self.keyframe_key(node)
-              or m.get("guide_from") != self.guide_from(node)):
+              or m.get("guide_from") != self.guide_from(node)
+              or m.get("continue_from") != self.continue_from(node)):
             st = "changed"
         else:
             st = "done"
@@ -2243,6 +2263,8 @@ class Checker:
             return "its keyframes changed"
         if m.get("guide_from") != self.guide_from(node):
             return "the clip its carry-over comes from changed"
+        if m.get("continue_from") != self.continue_from(node):
+            return "the clip it continues changed"
         return "something it depends on changed"
 
 
@@ -2324,10 +2346,10 @@ SOURCE_SOUND_TEXT = ("<Audio {k}> is the complete original audio track of the ta
 
 
 def uses_ref_model(settings: dict) -> bool:
-    """Whether a clip is made with H3's reference model: face pictures, sounds or voices, or the real video's sound
-    (all go to MiniMaxH3ReferenceToVideo)."""
+    """Whether a clip is made with H3's reference model: face pictures, sounds or voices, the real video's sound or
+    the end of the clip before as a reference video ("continue"; all go to MiniMaxH3ReferenceToVideo)."""
     ss = settings.get("source_sound")
-    return bool(settings.get("refs") or settings.get("audio_refs")
+    return bool(settings.get("refs") or settings.get("audio_refs") or settings.get("continue")
                 or (ss and not (isinstance(ss, dict) and ss.get("overlay"))))
 
 
@@ -2703,13 +2725,14 @@ def _h3_model_prompt(options: dict, node: Node, s: dict, start: bool, end: bool)
         soundtrack = len(s.get("audio_refs") or []) + 1
         extra.append(_soundtrack_sentence(ss, soundtrack))
     frames = int(s.get("frames") or (node.overrides or {}).get("frames") or options.get("frames", 73))
+    continues = 1 if s.get("continue") else None     # the only reference video: <Video 1>
     return _h3.compose(h["body"], start=start, end=end, seconds=frames / chain.FPS, subjects=h["subjects"],
                        frame_pictures=frame_numbers(len(use["images"]), s.get("frame_pictures")),
                        sounds=h["sounds"], soundtrack=soundtrack, lines=h["lines"], language=_language(options),
                        lead_implicit=h["lead_implicit"], triggers=list(s.get("lora_triggers") or []),
                        extra=[x for x in extra if x], soundscape=h["soundscape"], music=h["music"],
-                       resolve=_resolver(options),
-                       reference=bool(use["images"] or use["voices"] or h["sounds"] or soundtrack))
+                       resolve=_resolver(options), continues=continues,
+                       reference=bool(use["images"] or use["voices"] or h["sounds"] or soundtrack or continues))
 
 
 def plain_frames(project: Path, tree: Tree, node: Node) -> tuple[bool, bool]:
@@ -2734,6 +2757,8 @@ def clip_inputs(project: Path, tree: Tree, nid: str, checker: "Checker | None" =
      "subjects": [{"name", "kind", "pictures": [N ...], "files": [rel ...], "lead": True for the implicit lead,
                    "voice": its <Audio N> or None}]  (in subject order: <Subject 1> ... in the h3 format),
      "pictures": [{"n": N, "file": rel or Path, "what": "@Anna" | "start frame" | "end frame"}]  (ref_images order),
+     "videos":   [{"n": 1, "what": "end of clip #3" | "end of video #2", "frames": n, "node": its id}]  (<Video N>:
+                 the clip before's end it continues, "continue"; picture only, so it adds no <Audio N>),
      "sounds":   [{"n": N, "file": rel or None, "what": "sound" | "voice of @Anna" | "soundtrack"}]  (<Audio N>),
      "prompt": what the model gets, "settings": the settings it is made with (Checker.settings)}
     picture: the <Picture N> a frame has as a reference picture (h3 + reference model); a frame without one is
@@ -2781,9 +2806,14 @@ def clip_inputs(project: Path, tree: Tree, nid: str, checker: "Checker | None" =
     for f, d, what in (("start", start, "start frame"), ("end", end, "end frame")):
         if d["picture"] is not None:
             pictures.append({"n": d["picture"], "file": d["file"], "what": what})
+    videos = []
+    if (s.get("continue") or {}).get("frames") and node.parent is not None:
+        p = tree.nodes[node.parent]
+        videos.append({"n": 1, "what": f"end of {'video' if p.is_video else 'clip'} #{p.id[1:]}",
+                       "frames": int(s["continue"]["frames"]), "node": p.id})
     return {"format": "h3" if is_h3(tree) else "classic", "model": "ref2va" if uses_ref_model(s) else "fl2va",
             "seconds": int(s.get("frames") or clip_length(tree, node)) / chain.FPS, "start": start, "end": end,
-            "subjects": subjects, "pictures": pictures, "sounds": sounds,
+            "subjects": subjects, "pictures": pictures, "videos": videos, "sounds": sounds,
             "prompt": model_prompt(tree.options, node, s, start=plain[0], end=plain[1]), "settings": s}
 
 
@@ -2799,7 +2829,9 @@ def node_settings(base: dict, options: dict, node: Node, audio_pool: list[dict] 
     In the h3 format (is_h3) it also records "prompt_format": "h3", the cast entries the prompt describes (also
     without pictures: their descriptions are in it), and "frame_pictures": frames_given = plain_frames (start,
     end) that are also sent as numbered reference pictures: with the reference model only, after the subject
-    pictures, within MAX_CAST_PICTURES (the end frame's number goes first, then the start frame's)."""
+    pictures, within MAX_CAST_PICTURES (the end frame's number goes first, then the start frame's), and
+    "continue": {"frames": n} for a clip that continues the clip before (continue_frames; it takes the reference
+    model, so its frames are numbered too)."""
     ov = node.overrides or {}
     n_audio = 0 if node.is_video else audio_mentioned(full_prompt(options, node.prompt))
     given = source_sound is not None and not source_sound.get("overlay")       # (then without the voices)
@@ -2839,7 +2871,10 @@ def node_settings(base: dict, options: dict, node: Node, audio_pool: list[dict] 
     s["prompt_format"] = "h3"
     if use["record"]:
         s["cast"] = [dict(c) for c in use["record"]]
-    if (refs or sounds or given) and not use["h3"]["structured"]:     # the reference model: frames get numbers
+    cont = continue_frames(options, node)
+    if cont:
+        s["continue"] = {"frames": cont}
+    if (refs or sounds or given or cont) and not use["h3"]["structured"]:     # the reference model: numbered frames
         room = max(0, MAX_CAST_PICTURES - len(refs))
         frames = [f for f, on in zip(("start", "end"), frames_given) if on][:room]
         if frames:
@@ -3071,9 +3106,60 @@ def _guides(project: Path, tree: Tree, node: Node, settings: dict, tmp: Path) ->
     return guides, end_image
 
 
+def continue_frames(options: dict, node: Node) -> int:
+    """How many frames of the end of the clip before a clip is shown as <Video 1> (override "continue"); 0: none,
+    also in the classic format (its prompt cannot say what the video is) and for a first clip (nothing before it)."""
+    if node.is_video or node.parent is None or not is_h3(options):
+        return 0
+    return int((node.overrides or {}).get("continue") or 0)
+
+
+def frames_before(tree: Tree, node: Node) -> int:
+    """Frames of the clip before a node that lead into it: up to its hand-over frame (its made length, else its
+    length setting / the video's range)."""
+    parent = tree.nodes[node.parent]
+    n = made_frames(parent) or clip_length(tree, parent)
+    k = handover_index(tree, parent, n)
+    return k + 1 if k is not None else n
+
+
+def continue_choices(tree: Tree, node: Node) -> list[int]:
+    """The continuation lengths that fit a clip: no longer than what the clip before hands over with, and no longer
+    than the clip itself (the node cuts a longer reference video to the target's frame count, keeping its START,
+    so the end that matters would be lost)."""
+    if node.is_video or node.parent is None:
+        return []
+    have, own = frames_before(tree, node), clip_length(tree, node)
+    return [c for c in CONTINUE_CHOICES if c <= have and c <= own]
+
+
+def _continuation(project: Path, tree: Tree, node: Node, settings: dict, tmp: Path) -> Path | None:
+    """The reference video of a clip that continues the clip before (settings "continue"): that clip's last n
+    frames up to its hand-over frame, cut to a short clip of their own as a carry-over is (chain.cut_frames; its
+    sound stays in the file, but only the pictures are wired). None without a continuation."""
+    n = int((settings.get("continue") or {}).get("frames") or 0)
+    if not n or node.parent is None:
+        return None
+    parent = tree.nodes[node.parent]
+    clip, have = project / parent.made["video"], _clip_frames(project, parent)
+    k = handover_index(tree, parent, have)
+    if k is not None:                               # it hands over earlier: the frames up to that one
+        have = k + 1
+    what = f"{'video' if parent.is_video else 'clip'} #{parent.id[1:]}"
+    if have < n:
+        raise ValueError(f"{what} ({have} frames) is shorter than the {n}-frame continuation of clip #{node.id[1:]}")
+    if n > int(settings["frames"]):
+        raise ValueError(f"clip #{node.id[1:]} ({settings['frames']} frames) is shorter than its {n}-frame "
+                         "continuation; make it longer or the continuation shorter")
+    out = tmp / "continue_from.mp4"
+    chain.cut_frames(clip, out, have - n, n)
+    return out
+
+
 def guide_problem(tree: Tree, checker: "Checker", todo: list[str]) -> str | None:
-    """Why a motion guide of a clip to be made cannot work (a neighbour shorter than the guide, a clip too short
-    for its guides), or None. Checked before anything is made, with the lengths the clips will have."""
+    """Why a motion guide or a continuation of a clip to be made cannot work (a neighbour shorter than the guide or
+    the continuation, a clip too short for its guides or its continuation), or None. Checked before anything is
+    made, with the lengths the clips will have."""
     def length(n: Node) -> int:
         if n.is_video and n.id in todo:             # converted again: the current range
             return chain.range_frames(n.source["start"], n.source["end"])
@@ -3082,6 +3168,18 @@ def guide_problem(tree: Tree, checker: "Checker", todo: list[str]) -> str | None
     for nid in todo:
         node = tree.nodes[nid]
         s = checker.settings(nid) if not node.is_video else None
+        cont = int(((s or {}).get("continue") or {}).get("frames") or 0)
+        if cont and node.parent is not None:
+            other = tree.nodes[node.parent]
+            n = length(other)
+            k = handover_index(tree, other, n)
+            n = k + 1 if k is not None else n
+            what = f"{'video' if other.is_video else 'clip'} #{other.id[1:]}"
+            if n < cont:
+                return f"{what} ({n} frames) is shorter than the {cont}-frame continuation of clip #{nid[1:]}"
+            if cont > int(s["frames"]):
+                return (f"clip #{nid[1:]} ({s['frames']} frames) is shorter than its {cont}-frame continuation; "
+                        "make it longer or the continuation shorter")
         guide = int((s or {}).get("guide") or 0)
         if not guide:
             continue
@@ -3244,6 +3342,7 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
             end_key = checker.end_key(node)
             key_key = checker.keyframe_key(node)
             guide_from = checker.guide_from(node)
+            continue_from = checker.continue_from(node)
             call = dict(settings)
             own = None
             if node.keyframes:
@@ -3258,6 +3357,9 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
                     guides, end_image = _guides(project, tree, node, settings, Path(tmp))
                     if guides:
                         call["guides"] = guides
+                    ref_video = _continuation(project, tree, node, settings, Path(tmp))
+                    if ref_video is not None:          # <Video 1>: the end of the clip before
+                        call["ref_videos"] = [str(ref_video)]
                     if end_image is not None:
                         call["end_image"] = str(end_image)
                     sound = None
@@ -3313,6 +3415,8 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
                 node.made["keyframe_key"] = key_key
             if guide_from is not None:
                 node.made["guide_from"] = guide_from
+            if continue_from is not None:
+                node.made["continue_from"] = continue_from
             new_files = [new_video, new_frame] + ([own] if own is not None else [])
             if node.end_at is not None:
                 # a new take: the frame chosen in the old one means nothing here; it hands over at its last
