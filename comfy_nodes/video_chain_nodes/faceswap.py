@@ -8,6 +8,9 @@ it can be used and tested on its own. Frames are RGB uint8 (h, w, 3).
 """
 from __future__ import annotations
 
+import logging
+from pathlib import Path
+
 import numpy as np
 
 TEMPLATES = {      # FaceFusion's warp templates (5 landmarks, as a share of the crop)
@@ -18,6 +21,7 @@ TEMPLATES = {      # FaceFusion's warp templates (5 landmarks, as a share of the
     "ffhq_512": [[0.37691676, 0.46864664], [0.62285697, 0.46912813], [0.50123859, 0.61331904],
                  [0.39308822, 0.72541100], [0.61150205, 0.72490465]],
 }
+log = logging.getLogger(__name__)
 DET_SIZE, DET_SCORE, MASK_BLUR = 640, 0.5, 0.3
 LOST = 12                                          # frames without the face before the largest face is taken again
 
@@ -26,6 +30,9 @@ def _session(path: str, gpu: bool = True):
     import onnxruntime as ort
     providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if gpu else ["CPUExecutionProvider"]
     providers = [p for p in providers if p in ort.get_available_providers()]
+    if gpu and "CUDAExecutionProvider" not in providers:
+        log.warning("video-chain face swap: onnxruntime has no CUDA provider, %s runs on the CPU (much slower)",
+                    Path(path).name)
     opts = ort.SessionOptions()
     opts.log_severity_level = 3
     return ort.InferenceSession(str(path), opts, providers=providers)
@@ -183,10 +190,11 @@ class FaceSwapper:
         pasted = paste_back(frame, out, box_mask(512), m)
         return (frame.astype(np.float32) * (1 - blend) + pasted.astype(np.float32) * blend).round().astype(np.uint8)
 
-    def run(self, frames, identity, enhance: float = 0.0, progress=None, out=None):
+    def run(self, frames, identity, enhance: float = 0.0, progress=None, out=None, total: int | None = None):
         """Swap the face of one person through the frames (followed from frame to frame: the nearest face, the
         search widening while the face is lost, the largest face again after LOST frames); frames without that
         face stay as they are. out(k, frame) takes each frame as it is done (else they are returned as a list).
+        total is the number of frames when frames is a generator (for progress).
         Returns (frames or None, how many were swapped)."""
         last, kept, done, gap = None, [], 0, 0
         for k, f in enumerate(frames):
@@ -213,5 +221,5 @@ class FaceSwapper:
             else:
                 kept.append(f)
             if progress is not None:
-                progress(k + 1, len(frames))
+                progress(k + 1, total if total is not None else len(frames))
         return (None if out is not None else kept), done

@@ -129,9 +129,13 @@ class FakeComfy:
         self.veda = True                           # the Veda node and its two predictors
         self.seedvr_jobs: list[str] = []           # the model of every SeedVR2 job
         self.audio_refs = True                     # MiniMaxH3ReferenceToVideo takes reference sounds
+        self.view_truncate = 0                     # the next n downloads end before their Content-Length
+        self.junk: set[str] = set()                # these POST paths answer with a non-JSON page (HTTP 200)
+        self.hold = False                          # jobs stay queued: no history until it is cleared (a busy ComfyUI)
         self.fail_next: str | None = None          # the next job fails with this message (once)
         self.refine_answer: str | None = None      # the prompt refiner's raw answer (None: "REFINED <prompt>")
         self.prompts, self.calls, self.history = [], [], {}
+        self.prompts_deleted: list[str] = []       # ids removed with /queue delete while held
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -407,6 +411,15 @@ class FakeComfy:
                 if u.path == "/view":
                     q = urllib.parse.parse_qs(u.query)
                     f = fake.root / q["type"][0] / q.get("subfolder", [""])[0] / q["filename"][0]
+                    if fake.view_truncate > 0:
+                        fake.view_truncate -= 1
+                        data = f.read_bytes()
+                        self.send_response(200)
+                        self.send_header("Content-Length", str(len(data) + 50))
+                        self.end_headers()
+                        self.wfile.write(data[:len(data) // 2])
+                        self.close_connection = True
+                        return None
                     return self._send(200, f.read_bytes(), "application/octet-stream")
                 return self._send(404, {"error": "not found"})
 
@@ -414,6 +427,8 @@ class FakeComfy:
                 u = urllib.parse.urlparse(self.path)
                 body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
                 fake.calls.append(("POST", u.path))
+                if u.path in fake.junk:
+                    return self._send(200, b"<html>proxy error</html>", "text/html")
                 if u.path == "/upload/image":
                     ctype = self.headers["Content-Type"]
                     boundary = ctype.split("boundary=")[1].encode()
@@ -438,7 +453,9 @@ class FakeComfy:
                 if u.path == "/prompt":
                     fake.prompts.append(payload["prompt"])
                     pid = f"p{len(fake.prompts)}"
-                    if fake.fail_with or fake.fail_next:
+                    if fake.hold:
+                        pass                                   # queued behind another job: no history yet
+                    elif fake.fail_with or fake.fail_next:
                         msg, fake.fail_next = fake.fail_with or fake.fail_next, None
                         fake.history[pid] = {"outputs": {}, "status": {"status_str": "error", "completed": False,
                                              "messages": [["execution_error", {"exception_type": "RuntimeError",
@@ -448,6 +465,8 @@ class FakeComfy:
                                              "status": {"status_str": "success", "completed": True}}
                     return self._send(200, {"prompt_id": pid, "number": 1, "node_errors": {}})
                 if u.path in ("/free", "/interrupt", "/queue"):
+                    if u.path == "/queue" and fake.hold:
+                        fake.prompts_deleted.extend(payload.get("delete", []))
                     fake.calls.append(("BODY", u.path, payload))
                     return self._send(200, {})
                 return self._send(404, {"error": "not found"})
