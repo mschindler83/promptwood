@@ -673,7 +673,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         self._per_image = per
         plan = EditPlan(self.project / EDITS_DIR, self.connect_editor, prompt, quality, n, [], runs, run_words, refs,
                         jobs, model=model, sources=sources, per=per, mask=mask, keep_size=keep_size)
-        self._start_worker(EditWorker(plan, self), base_n,
+        self._start_worker(EditWorker(plan), base_n,
                            "Connecting to ComfyUI … (the first edit loads the model, which takes a while; if a "
                            "clip is being generated, the edit waits for it)")
 
@@ -701,7 +701,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         plan = CreatePlan(self.project / EDITS_DIR, self.connect_create, prompt, quality, n, [], runs, run_words,
                           refs, jobs, family=fam, model_file=model, negative=negative, width=w, height=h,
                           strength=self.ref_strength.value(), tags=self.tags.isChecked(), sampling=self.sampling())
-        self._start_worker(CreateWorker(plan, self), base_n,
+        self._start_worker(CreateWorker(plan), base_n,
                            f"Connecting to ComfyUI … (the first image loads {FAMILIES[fam]['label']}, which takes a "
                            "while)")
 

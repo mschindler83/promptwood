@@ -63,7 +63,8 @@ class CreatePlan(Plan):
 
 class GenerateWorker(QObject):
     """Runs a plan in a thread. progress(k, n, step, steps), result(png, record), finished(error): '' = all done,
-    'cancelled' = stopped."""
+    'cancelled' = stopped. It has no parent: the window may close while the thread still emits (the thread's own
+    reference keeps the worker alive, and a gone window is simply not told)."""
     progress = Signal(int, int, int, int)       # try k, of n, step i, of steps
     result = Signal(str, object)                # png, meta
     finished = Signal(str)                      # error ('' = all done or cancelled)
