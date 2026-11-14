@@ -192,10 +192,11 @@ def test_start_image_size_is_read_from_header(win, tmp_path, image, monkeypatch)
 
 
 def test_pixmap_cache_is_bounded(win, tmp_path, image, monkeypatch):
+    from video_chain.ui import ui_logic as UL
     from PIL import Image
     from video_chain.ui import main_window as M
     opened(win, tmp_path, image)
-    monkeypatch.setattr(M, "PIXMAP_CACHE_MAX", 5)
+    monkeypatch.setattr(UL, "PIXMAP_CACHE_MAX", 5)
     win._pix.clear()
     for i in range(12):
         p = tmp_path / f"f{i}.png"

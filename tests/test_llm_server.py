@@ -109,6 +109,7 @@ def test_missing_files_and_combined_list(tmp_path, fake_server):
 
 
 def test_main_window_settings_and_stop(fake_server, tmp_path, monkeypatch):
+    from video_chain.ui import prompt_refiner as PR
     os.environ["QT_QPA_PLATFORM"] = "offscreen"
     from PySide6.QtWidgets import QApplication
     QApplication.instance() or QApplication([])
@@ -147,7 +148,7 @@ def test_main_window_settings_and_stop(fake_server, tmp_path, monkeypatch):
 
             def deleteLater(self):
                 pass
-        monkeypatch.setattr(MW, "RefineDialog", Closed)
+        monkeypatch.setattr(PR, "RefineDialog", Closed)
         srv.start()
         assert win.refine_text("a cat", "image") is None
         assert srv.proc is None and "prompt refiner was closed" in win.log.toPlainText()   # unloaded on close

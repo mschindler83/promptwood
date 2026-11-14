@@ -571,6 +571,7 @@ def test_lora_lists_offer_the_h3_loras(app, tmp_path, image, monkeypatch):
 
 
 def test_identity_references_in_the_window(app, win, tmp_path, image, monkeypatch):
+    from video_chain.ui import image_picker as IP
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
     ids = new_project(win, tmp_path, image, ("a", "b"))
     run_and_wait(app, win, win.generate_path)
@@ -663,7 +664,7 @@ def test_identity_references_in_the_window(app, win, tmp_path, image, monkeypatc
     film = tmp_path / "talk.mp4"
     subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=200:duration=40", "-f", "lavfi",
                     "-i", "color=gray:s=64x48:d=40", "-shortest", str(film)], check=True)
-    monkeypatch.setattr(M, "pick_image", lambda *a, **k: str(film))
+    monkeypatch.setattr(IP, "pick_image", lambda *a, **k: str(film))
     seen = {}
 
     def choose(dlg):
@@ -770,7 +771,7 @@ def test_identity_references_in_the_window(app, win, tmp_path, image, monkeypatc
     win._tts_local = None
     mute = tmp_path / "mute.mp4"
     subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=gray:s=64x48:d=3", str(mute)], check=True)
-    monkeypatch.setattr(M, "pick_image", lambda *a, **k: str(mute))
+    monkeypatch.setattr(IP, "pick_image", lambda *a, **k: str(mute))
     win._voice_from_file()
     assert "has no sound" in win.status.text()
     assert win.set_character_voice(str(speech))
@@ -1998,6 +1999,7 @@ def test_lora_picker_search_and_full_names(app, tmp_path):
 
 
 def test_prompt_refiner_on_the_card(app, win, tmp_path, image, monkeypatch):
+    from video_chain.ui import prompt_refiner as PR
     from video_chain.ui import main_window as M
     ids = new_project(win, tmp_path, image, ("a man walks",))
     seen, seen_pics, seen_clip = {}, [], {}
@@ -2018,7 +2020,7 @@ def test_prompt_refiner_on_the_card(app, win, tmp_path, image, monkeypatch):
 
         def deleteLater(self):
             pass
-    monkeypatch.setattr(M, "RefineDialog", FakeDialog)
+    monkeypatch.setattr(PR, "RefineDialog", FakeDialog)
     card = win.cards[0]
     card.b_refine.click()
     assert seen == {"text": "a man walks", "kind": "video", "cast": []}
@@ -3862,6 +3864,7 @@ def test_all_ideas_become_variations(app, tmp_path):
 
 
 def test_middle_keyframes_on_the_card(app, win, tmp_path, image, monkeypatch):
+    from video_chain.ui import image_picker as IP
     """The keyframe strip: add (picture; the strip's menu), move, note, keep a moment of the made clip, remove;
     the clip counts as changed and the made clip's hard cuts show as a warning."""
     from PIL import Image as PImage
@@ -3875,7 +3878,7 @@ def test_middle_keyframes_on_the_card(app, win, tmp_path, image, monkeypatch):
     assert card.keys.isEnabled() and card.keys.items == [] and not card.keys.made
     pic = tmp_path / "key.png"
     PImage.new("RGB", (192, 108), (0, 200, 0)).save(pic)
-    monkeypatch.setattr(M, "pick_image", lambda *a, **k: str(pic))
+    monkeypatch.setattr(IP, "pick_image", lambda *a, **k: str(pic))
     monkeypatch.setattr(M.PromptCard, "_exec_menu", lambda self, m: m.actions()[0])     # "A picture at …"
     card.keys.addAt.emit(1.0)                                     # a click on the strip at 1 s
     node = win.tree.nodes[nid]
@@ -3953,6 +3956,8 @@ def tr_lines(win, nid):
 
 
 def test_text_to_speech_in_the_app(app, win, tmp_path, image, monkeypatch):
+    from video_chain.ui import speak_dialog as SPD
+    from video_chain.ui import tts_dialog as TD
     """Speak the lines on a card (a fake engine) makes them the clip's sound; a voice made in the TTS window becomes
     the character's voice; the provider and the ElevenLabs key are kept (the key in the keyring only)."""
     import subprocess
@@ -4011,7 +4016,7 @@ def test_text_to_speech_in_the_app(app, win, tmp_path, image, monkeypatch):
         dlg._make()
         wait(app, lambda: dlg.made is not None or "Could not" in dlg.info.text(), timeout=30)
         return dlg.made is not None
-    monkeypatch.setattr(M, "run_voice_dialog", accept)
+    monkeypatch.setattr(TD, "run_dialog", accept)
     win._voice_with_tts()
     c = T.character(win.tree, "Anna")
     assert c["voice"]["name"].startswith("designed: warm young voice") and c["voice"]["text"]
@@ -4048,7 +4053,7 @@ def test_text_to_speech_in_the_app(app, win, tmp_path, image, monkeypatch):
         dlg.list.setCurrentRow(dlg.list.count() - 1)
         dlg.accept()
         return dlg.chosen is not None
-    monkeypatch.setattr(M, "run_speak_dialog", choose)
+    monkeypatch.setattr(SPD, "run_dialog", choose)
     old_track = T.track_id(win.tree.nodes[nid])
     win.node_action("speak", nid)
     assert seen["lines"] == ["Hallo, schön dich zu sehen."] and not seen["use"] and not seen["empty"]
@@ -4064,7 +4069,7 @@ def test_text_to_speech_in_the_app(app, win, tmp_path, image, monkeypatch):
     assert tr["id"] != old_track and win.project / tr["file"] == seen["files"][-1] and "spoken" in win.status.text()
     assert T.load(win.project).options["tts"]["speak"] == {"takes": 1, "delivery": "lively", "speed": 0.8}
     assert win.played[-1] == seen["files"][0] and not win._tts_busy
-    monkeypatch.setattr(M, "run_speak_dialog", lambda dlg: (seen.update(again=dlg.speak_values()), False)[1])
+    monkeypatch.setattr(SPD, "run_dialog", lambda dlg: (seen.update(again=dlg.speak_values()), False)[1])
     win.node_action("speak", nid)                            # cancelled: nothing changes; the settings were kept
     assert seen["again"]["delivery"] == "lively" and T.track_id(win.tree.nodes[nid]) == tr["id"]
     # a frozen clip's lines are not spoken
@@ -4419,13 +4424,14 @@ def test_simple_view_says_when_hidden_settings_are_active(app, win, tmp_path, im
 
 
 def test_view_default_first_run_simple_existing_settings_advanced(app, tmp_path, monkeypatch):
+    from video_chain.ui import ui_logic as UL
     """No settings at all (a first run): Simple; settings from before the views: Advanced. Stored at once, so the
     choice does not flip once the app has written other settings."""
     from PySide6.QtCore import QSettings
     from video_chain.ui import main_window as MW
     for name in ("_poll_comfy", "scan_loras", "_poll_gpu"):              # no ComfyUI, no GPU, no LoRA folders
         monkeypatch.setattr(MW.MainWindow, name, lambda self, *a, **k: None)
-    monkeypatch.setattr(MW, "DEFAULT_COMFY_DIR", str(tmp_path / "no-comfyui"))
+    monkeypatch.setattr(UL, "DEFAULT_COMFY_DIR", str(tmp_path / "no-comfyui"))
     q = QSettings(str(tmp_path / "first.ini"), QSettings.IniFormat)
     assert q.allKeys() == []
     w = MW.MainWindow(q, command=FAKE)
