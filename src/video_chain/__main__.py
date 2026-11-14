@@ -6,6 +6,7 @@ The LoRA must be in one of ComfyUI's LoRA folders.
 from __future__ import annotations
 
 import argparse
+import io
 import logging
 import json
 import os
@@ -15,7 +16,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable, cast
 
 from . import chain, logs, media
 from . import tree as treemod
@@ -113,23 +114,31 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return a
 
 
-def _printer(enabled: bool):
-    def emit(event: dict) -> None:
-        if not enabled or emit.gone:
+class _Printer:
+    """emit(event): one "@@ {json}" line on stdout for the GUI; gone: the GUI is gone, nothing more is written."""
+
+    def __init__(self, enabled: bool):
+        self.enabled = enabled
+        self.gone = False
+
+    def __call__(self, event: dict) -> None:
+        if not self.enabled or self.gone:
             return
         try:
             print("@@ " + json.dumps(event, ensure_ascii=False), flush=True)
         except (OSError, ValueError):                  # the GUI is gone (broken pipe) or stdout is closed
-            emit.gone = True
-    emit.gone = False
-    return emit
+            self.gone = True
+
+
+def _printer(enabled: bool) -> _Printer:
+    return _Printer(enabled)
 
 
 def main(argv: list[str] | None = None) -> int:
     a = parse_args(argv)
     logs.setup(to_file=False)                  # (stderr only: the GUI that starts this keeps it)
     try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")      # (the events do not depend on the locale)
+        cast(io.TextIOWrapper, sys.stdout).reconfigure(encoding="utf-8", errors="replace")      # (the events do not depend on the locale)
     except (AttributeError, ValueError, OSError):
         pass
     emit = _printer(a.events)
@@ -179,7 +188,7 @@ def _cloud_generator(a, emit, current, holder: dict):
         emit({"e": "error", "msg": f"RunPod: {e}"})
         _close_cloud(holder, emit)
         raise SystemExit(CLOUD_FAILED)
-    gen.note = note
+    gen.note = note  # type: ignore[method-assign]  # (the worker's own hook replaces the no-op on this instance)
     emit({"e": "loaded", "what": "runpod"})
     return gen
 
@@ -218,7 +227,7 @@ def _generator(a, emit, current):
     except ComfyUnavailable as e:
         emit({"e": "error", "msg": str(e), "comfy_down": True})
         raise SystemExit(COMFY_DOWN)
-    gen.note = lambda text: emit({"e": "note", "id": current.get("id"), "text": str(text)})
+    gen.note = lambda text: emit({"e": "note", "id": current.get("id"), "text": str(text)})  # type: ignore[method-assign]  # (the worker's hook replaces the no-op on this instance)
     emit({"e": "loaded", "what": "comfyui"})
     from . import plugins                          # (a plugin may wrap the generator or give another backend)
     return plugins.wrap_generator(gen, a, log=lambda m: print(m, file=sys.stderr, flush=True))
@@ -298,7 +307,7 @@ def _main_tree(a, emit) -> int:
         job = prepare_job(a.tree, [t for t in a.targets.split(",") if t])
     except (JobError, ValueError) as e:
         return _fail(emit, str(e))
-    current = {"id": None, "k": 0}
+    current: dict[str, Any] = {"id": None, "k": 0}
     gen = None
     if job["ai_todo"]:                             # nothing to generate: no need for ComfyUI
         gen = _generator(a, emit, current)
@@ -384,13 +393,13 @@ def _guarded(emit, job: Callable[[], None]) -> None:
         emit({"e": "error", "msg": f"{type(e).__name__}: {e}"})
 
 
-def serve(a, emit, make_generator: Callable[[dict], object], stdin=None) -> int:
+def serve(a, emit, make_generator: Callable[[dict], Any], stdin=None) -> int:
     """Worker: connect once, then run jobs from stdin until 'quit', end of input, or the idle timeout.
     make_generator(current) connects to ComfyUI; ComfyUI keeps the model loaded between jobs, and the worker asks
     it to unload after the idle time (or on quit with free)."""
     stdin = stdin or sys.stdin
     lines = _LineReader(stdin)
-    current = {"id": None, "k": 0}
+    current: dict[str, Any] = {"id": None, "k": 0}
     gen = make_generator(current)
     idle = a.idle_minutes * 60 if a.idle_minutes and a.idle_minutes > 0 else None
     emit({"e": "idle", "timeout": idle})
@@ -421,6 +430,11 @@ def serve(a, emit, make_generator: Callable[[dict], object], stdin=None) -> int:
         if cmd.get("cmd") == "refine":               # export a path at a higher size (2K refine)
             started = time.monotonic()
 
+            def on_refine_event(ev: dict) -> None:
+                if ev.get("e") == "node" and ev.get("state") == "generating":
+                    current.update(id=ev["id"], k=ev.get("k", 0))
+                emit(ev)
+
             def refine():
                 _prologue(gen, cmd)
                 treemod.refine_path(gen, Path(cmd["tree"]), cmd["target"], cmd["size"], Path(cmd["out"]),
@@ -430,9 +444,7 @@ def serve(a, emit, make_generator: Callable[[dict], object], stdin=None) -> int:
                                     method=str(cmd.get("method") or "refine"),
                                     single=bool(cmd.get("single")),
                                     denoise=bool(cmd.get("denoise")),
-                                    events=lambda ev: (ev.get("e") == "node" and ev.get("state") == "generating"
-                                                       and current.update(id=ev["id"], k=ev.get("k", 0)),
-                                                       emit(ev)))
+                                    events=on_refine_event)
             _guarded(emit, refine)
             emit({"e": "idle", "timeout": idle, "took": round(time.monotonic() - started, 1)})
             continue
@@ -521,7 +533,7 @@ def _main(a, emit) -> int:
 
     emit({"e": "start", "clips": len(prompts), "width": width, "height": height, "frames": a.frames,
           "steps": a.steps, "out": str(out)})
-    current = {"k": 0}
+    current: dict[str, Any] = {"k": 0}
 
     def on_event(ev: dict) -> None:
         if ev.get("e") == "clip":
