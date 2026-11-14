@@ -336,7 +336,7 @@ def _shown_strings(path: Path):
 def test_the_ui_files_use_one_word_per_thing():
     bad = []
     for path in sorted(UI.glob("*.py")):
-        if path.name in ("main_window.py", "widgets.py"):       # (main_window: see DEFERRED_main_window_ui.md)
+        if path.name == "widgets.py":
             continue
         for line, s in _shown_strings(path):
             for pat, use in REJECTED:

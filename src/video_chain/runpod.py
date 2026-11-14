@@ -37,7 +37,7 @@ from pathlib import Path, PurePosixPath
 from .comfy import (SEEDVR_FULL_VRAM, SEEDVR_METHODS, SEEDVR_NODES, SEEDVR_PRECISION_FULL, SUBFOLDER, ComfyError,
                     ComfyGenerator)
 
-from . import keys, net
+from . import keys, media, net
 
 logger = logging.getLogger(__name__)
 
@@ -340,7 +340,7 @@ class RunpodSession:
         self.tunnel: subprocess.Popen | None = None
         self._tunnel_err = None
         self.started = None
-        self._tmp = tempfile.TemporaryDirectory(prefix="video-chain-runpod-")
+        self._tmp = media.scratch("runpod")
         self.known_hosts = Path(self._tmp.name) / "known_hosts"
         self._closed = False
         self._closing = False

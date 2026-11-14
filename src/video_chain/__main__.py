@@ -1,5 +1,5 @@
 """video-chain: one start image + N prompts -> N chained MiniMax-H3 clips + one joined video, rendered by a running
-ComfyUI (see comfy.py). E.g.
+ComfyUI (see comfy/). E.g.
   ./video-chain start.jpg prompts.txt --out ~/chains/test1 --lora glow_h3_lora.safetensors
 The LoRA must be in one of ComfyUI's LoRA folders.
 """

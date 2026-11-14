@@ -146,7 +146,7 @@ def test_generate_path_then_branch_reuses(app, win, tmp_path, image):
     ids = new_project(win, tmp_path, image, ("one", "two", "three"))
     run_and_wait(app, win, win.generate_path)
     wait(app, lambda: win.played)                                      # the joined path is played
-    assert win.status.text().startswith("Done: 3 clips made. Path joined: 0:02.0")
+    assert win.status.text().startswith("Done: 3 clips made. Path joined: 0:02")
     assert [win.state(i) for i in ids] == ["done"] * 3
     assert win.played[-1] == tmp_path / "proj" / "paths" / f"{ids[-1]}.mp4"
     assert chain.probe(win.played[-1])["frames"] == 17 + 16 + 16
@@ -327,7 +327,7 @@ def test_clip_settings_per_node(app, win, tmp_path, image):
     assert win.graph.items_by_id[ids[1]].info.badge.startswith("glow")
     assert win.graph.items_by_id[ids[0]].info.badge == ""
     # time spans follow the clip's own length: clip 2 is 124 frames (minus the repeated one)
-    assert win.cards[2].span.text().startswith(f"0:{(73 + 123) / 24:04.1f}")
+    assert win.cards[2].span.text().startswith(f"0:{(73 + 123) / 24:06.3f}")
     run_and_wait(app, win, win.generate_path)
     made = T.load(tmp_path / "proj").nodes[ids[1]].made["settings"]
     assert made["lora"] == str(lora.resolve()) and made["strength"] == 0.8 and made["frames"] == 124
@@ -903,7 +903,7 @@ def test_clip_lengths_3_to_15_seconds(app, win, tmp_path, image):
     assert [card.length.itemData(i) for i in range(card.length.count())][1:] == values
     win.frames.setCurrentIndex(win.frames.findData(362))
     flush(app, win)
-    assert win.tree.options["frames"] == 362 and win.cards[0].span.text().startswith("0:00.0 – 0:15.1")
+    assert win.tree.options["frames"] == 362 and win.cards[0].span.text().startswith("0:00.000 – 0:15.083")
     # a project saved with 39 frames keeps showing them (not silently another length)
     t = T.load(win.project)
     t.options["frames"] = 39
@@ -1324,7 +1324,7 @@ def test_motion_guide_choice_on_the_card(app, win, tmp_path, image):
     assert win.tree.nodes[ids[1]].overrides["guide"] == 22
     assert "carry-over 22" in win.badge(win.tree.nodes[ids[1]])
     flush(app, win)
-    assert win.cards[1].span.text().startswith("0:03.0 – 0:05.2")          # 22 guide frames left out
+    assert win.cards[1].span.text().startswith("0:03.042 – 0:05.167")          # 22 guide frames left out
 
 
 def test_video_range_dialog(app, tmp_path):
@@ -4460,7 +4460,7 @@ def test_card_more_menu_triggers_the_same_actions_and_the_card_fits(app):
     assert [a.text() for a in entries] == ["Variants…", "Compare…", "Branch", "Freeze", "Delete…"]
     card.set_rows(True, 1)                                      # a clip that starts the video, with other pictures
     assert [a.text() for a in menu.actions() if not a.isSeparator() and a.isVisible()][3:5] == [
-        "More start pictures…", "Apply to its other start pictures"]
+        "More start images…", "Apply to its other start images"]
     card.set_rows(False, 0)
     assert all(not a.icon().isNull() and a.toolTip() for a in entries)
     assert card.more_actions["branch"].shortcut().toString() == "Ctrl+B"
@@ -4521,7 +4521,7 @@ def test_plain_words(app, win, tmp_path, image):
 
 # ---------------------------------------------------------------- guided start, writing the prompt, problems
 def test_guide_steps_tick_with_the_state_and_hide(app, win, tmp_path, image):
-    """No project: step 0. A project: the three steps tick from the real state (text only / a start picture, a
+    """No project: step 0. A project: the three steps tick from the real state (text only / a start image, a
     cast entry or Skip, the first clip's prompt), then Generate is pointed out; Hide guide is stored, View → Getting
     started brings it back; once a clip is made the guide goes and the "how to go on" line shows once."""
     g = win.guide_panel
@@ -4763,7 +4763,7 @@ def test_cloud_upscaling_not_offered_in_simple_without_a_key(app, win, tmp_path,
 
 
 def test_more_start_pictures_make_rows(app, win, tmp_path, image, monkeypatch):
-    """A first clip, made once per start picture: each new clip on its own row of the node view, behind a start
+    """A first clip, made once per start image: each new clip on its own row of the node view, behind a start
     node that shows its picture; the prompt can be given to the others later; a row's picture can be changed."""
     from video_chain.ui.graph import START
     from video_chain.ui.main_window import PromptCard, row_start, row_start_of
@@ -4782,7 +4782,7 @@ def test_more_start_pictures_make_rows(app, win, tmp_path, image, monkeypatch):
     win.node_action("start_rows", first)                                      # (asked "make them now?": yes)
     new = [n.id for n in T.row_members(win.tree, first) if n.id != first]
     assert len(new) == 2 and win.running
-    assert "2 start pictures added" in asked[0] and "cut from its centre" in asked[0] and "Make the 3 clips" in asked[0]
+    assert "2 start images added" in asked[0] and "cut from its centre" in asked[0] and "Make the 3 clips" in asked[0]
     nodes = [win.tree.nodes[n] for n in new]
     src = win.tree.nodes[first]
     assert all(n.parent is None and n.prompt == "she waves" and n.seed == src.seed and n.start_image for n in nodes)
