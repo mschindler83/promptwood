@@ -10,6 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtWidgets import QApplication, QDialogButtonBox
 
+import waiting as W
 from video_chain import chain
 from video_chain.ui import audio_editor as AE
 from video_chain.ui import video_editor as VE
@@ -19,13 +20,7 @@ app = QApplication.instance() or QApplication([])
 
 
 def wait(cond, timeout=10.0):
-    end = time.monotonic() + timeout
-    while time.monotonic() < end:
-        app.processEvents()
-        if cond():
-            return True
-        time.sleep(0.01)
-    return False
+    return W.wait(app, cond, timeout)
 
 
 def make_video(path, secs=2.0):

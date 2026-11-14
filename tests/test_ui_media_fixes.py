@@ -13,6 +13,7 @@ from PySide6.QtCore import QPointF, Qt  # noqa: E402
 from PySide6.QtGui import QColor, QImage, QPixmap  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
+import waiting as W  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -24,13 +25,7 @@ def app():
 
 
 def wait(app, cond, timeout=10.0):
-    end = time.monotonic() + timeout
-    while time.monotonic() < end:
-        app.processEvents()
-        if cond():
-            return True
-        time.sleep(0.01)
-    return False
+    return W.wait(app, cond, timeout)
 
 
 def pixmap(w=64, h=36):

@@ -31,3 +31,22 @@ def test_localhost_is_allowed():
     from fakes import free_port
     with pytest.raises(urllib.error.URLError):               # (nobody listens: refused, not blocked)
         urllib.request.urlopen(f"http://127.0.0.1:{free_port()}/", timeout=1)
+
+
+def test_a_window_left_open_has_its_timers_stopped_after_the_test():
+    """conftest's stop_leftover_timers: run its teardown by hand on a window with a ticking timer."""
+    import conftest
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QApplication, QWidget
+    app = QApplication.instance() or QApplication([])
+    assert app is not None
+    w = QWidget()
+    t = QTimer(w)
+    t.start(1000)
+    gen = (getattr(conftest.stop_leftover_timers, "__wrapped__", None) or conftest.stop_leftover_timers)()
+    next(gen)
+    assert t.isActive()
+    with pytest.raises(StopIteration):
+        next(gen)                                            # (the part after the test)
+    assert not t.isActive()
+    w.deleteLater()
