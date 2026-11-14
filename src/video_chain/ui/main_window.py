@@ -9471,7 +9471,8 @@ class MainWindow(QMainWindow):
             self._trigger_scan.set()                  # the trigger word lookup stops at the next file
         self.stop_llama()                             # never leave the language model server behind
         self.stop_tts()
-        for t in (self._qwen_timer, self._model_timer, self._gpu_timer, self._comfy_timer):
+        timers = [t for t in (self._qwen_timer, self._model_timer, self._gpu_timer, self._comfy_timer) if t.isActive()]
+        for t in timers:
             t.stop()
         if self._gpu_proc is not None:
             gp, self._gpu_proc = self._gpu_proc, None
@@ -9497,6 +9498,8 @@ class MainWindow(QMainWindow):
             self._reload_made()
             if not self._may_leave_project():
                 e.ignore()
+                for t in timers:                     # (the window stays: its GPU / ComfyUI status goes on)
+                    t.start()
                 self._update_buttons()
                 return
         self.preview.stop()

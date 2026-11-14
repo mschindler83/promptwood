@@ -13,7 +13,7 @@ from PySide6.QtCore import QTimer  # noqa: E402
 from PySide6.QtGui import QCloseEvent  # noqa: E402
 from PySide6.QtWidgets import QMessageBox  # noqa: E402
 
-from test_ui import (FAKE, app, crop_accepted, image, new_project, no_runpod_key, run_and_wait,  # noqa: E402,F401
+from test_ui import (FAKE, app, crop_accepted, image, new_project, run_and_wait,  # noqa: E402,F401
                      settings, silent_player, wait, win)
 from video_chain import tree as T  # noqa: E402
 
@@ -447,3 +447,17 @@ def test_job_that_cannot_be_written_ends_the_generator(app, win, tmp_path, image
     finally:
         win.proc, win._job = None, None
     assert killed and "Could not send the job" in win.status.text()
+
+
+def test_staying_after_a_stopped_run_keeps_the_window_working(app, win, tmp_path, image, monkeypatch):
+    ids = new_project(win, tmp_path, image, ("a", "b"))
+    monkeypatch.setenv("FAKE_DELAY", "0.3")
+    win.generate_path()
+    wait(app, lambda: win.state(ids[1]) == "generating")
+    assert win._gpu_timer.isActive() and win._comfy_timer.isActive()
+    _recording_question(monkeypatch, QMessageBox.Yes)          # stop and quit ...
+    monkeypatch.setattr(win, "_may_leave_project", lambda: False)   # ... but keep the window (to save elsewhere)
+    ev = QCloseEvent()
+    win.closeEvent(ev)
+    assert not ev.isAccepted()
+    assert win._gpu_timer.isActive() and win._comfy_timer.isActive(), "the GPU / ComfyUI status stopped updating"
