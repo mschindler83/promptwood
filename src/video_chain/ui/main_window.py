@@ -21,13 +21,14 @@ import urllib.request
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QSettings, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QCursor, QDesktopServices, QIcon, QImage, QKeySequence, QPixmap, QShortcut
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
-                               QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QInputDialog, QLabel,
+from PySide6.QtGui import (QAction, QActionGroup, QCursor, QDesktopServices, QIcon, QImage, QKeySequence, QPixmap,
+                           QShortcut)
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
+                               QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QInputDialog, QLabel,
                                QFrame, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu,
                                QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
-                               QScrollArea, QSlider, QSpinBox, QSplitter, QStackedWidget, QTabWidget, QToolButton,
-                               QVBoxLayout, QWidget)
+                               QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QStackedWidget, QTabWidget,
+                               QToolButton, QVBoxLayout, QWidget)
 
 from .. import chain
 from .. import film as F
@@ -56,6 +57,7 @@ from .image_edit import EDITS_DIR, ImageEditDialog, project_edits, record_use, u
 from .video_editor import VideoRangeDialog, choose_video
 from .theme import icon, repolish, theme
 from .widgets import FrameTile, VideoView, guard_wheel, icon_button, label, section_bar
+from .view_mode import AdvancedNote, ViewMode, row_widget
 
 DEFAULT_COMFY_URL = "http://127.0.0.1:8188"
 from ..llm_server import DEFAULT_PORT as LLM_DEFAULT_PORT, DEFAULT_SERVER as LLM_DEFAULT_SERVER  # noqa: E402
@@ -116,8 +118,8 @@ SPEAK_TIP = ("<p>Speak this clip's lines (\"...\" after @Name, e.g. @Anna says \
              "each in its speaker's voice, and make them the clip's sound: the picture is made to it, lips in sync."
              "<br>A window opens: make a few takes, set how steady or lively and how fast the lines are spoken, "
              "listen, and use the best take. The words can be changed there too, to try other sentences."
-             "<br>Who speaks (Qwen3-TTS on this computer, or ElevenLabs with your API key) is set in the Cast tab, "
-             "under Text to speech; the API key in Settings.</p>")
+             "<br>Who speaks (Qwen3-TTS on this computer, or ElevenLabs with your API key) is set in the Cast & "
+             "references tab, under Text to speech; the API key in Settings.</p>")
 FREEZE_TIP = ("Freeze: keep this clip as it is made, and every clip before it. They count as done whatever "
               "the project's settings say (size, speed LoRA, steps …), are not made again and cannot be "
               "edited; the clips after it follow the settings as before. Click again to unfreeze")
@@ -521,7 +523,8 @@ class _Bridge(QObject):
 
 END_TIP = ("End image: a picture this clip steers its end to (any image, or a frame of a clip in the project). "
            "The clip's last frame is what the model actually made; the next clip starts from that")
-STEPS_TIP = "Sampling steps per clip: more is slower and rarely better; 20-30 is typical"
+STEPS_TIP = ("Steps: how many times the model refines each clip (sampling steps). More is slower and rarely "
+             "better; 20-30 is typical")
 STEPS_DEFAULT = 3
 
 
@@ -547,6 +550,91 @@ class _CurrentStack(QStackedWidget):
         return w.minimumSizeHint() if w is not None else super().minimumSizeHint()
 
 
+def project_setting_changes(o: dict) -> list[tuple[str, str]]:
+    """The project's settings (tree.options) that differ from a new project's (tree.DEFAULT_OPTIONS) and change how
+    its clips are made: [(key, name shown)]. A setting that has no effect now (the steps in a speed mode with its
+    own, the ElevenLabs model with local text to speech) is left out. ui keys, not option keys: see
+    MainWindow._project_controls."""
+    d, out = T.DEFAULT_OPTIONS, []
+    mode = ("turbo" if (o.get("turbo") or {}).get("on") else "hyperflow" if (o.get("hyperflow") or {}).get("on")
+            else "pika" if (o.get("pika") or {}).get("on") else "normal")
+    if mode == "normal" and int(o.get("steps", d["steps"])) != d["steps"]:
+        out.append(("steps", "Steps"))
+    if mode != "normal":
+        out.append(("speed", "Speed"))
+    if mode == "turbo":
+        t, dt = o.get("turbo") or {}, d["turbo"]
+        if int(t.get("steps", dt["steps"])) != dt["steps"] or float(t.get("strength", 1.0)) != dt["strength"]:
+            out.append(("turbo", "Turbo steps / strength"))
+    cfg = (o if mode == "normal" else (o.get(mode) or {})).get("cfg", 1.0)
+    if abs(float(cfg) - 1.0) > 1e-6:
+        out.append(("cfg", "CFG"))
+    if bool((o.get("veda") or {"on": True}).get("on", True)) != d["veda"]["on"]:
+        out.append(("veda", "Fast attention (Veda)"))
+    if bool(o.get("keep_repeated", d["keep_repeated"])) != d["keep_repeated"]:
+        out.append(("keep_repeated", "Keep repeated frames"))
+    style = o.get("style") or {}
+    for k, name in (("prefix", "Style before"), ("suffix", "Style after")):
+        if (style.get(k) or "").strip():
+            out.append(("style_" + k, name))
+    if T.is_h3(o) != (d["prompt_format"] == "h3"):
+        out.append(("prompt_format", "Prompt format"))
+    if bool(o.get("lora_triggers", d["lora_triggers"])) != d["lora_triggers"]:
+        out.append(("lora_triggers", "LoRA trigger words"))
+    ident, di = o.get("identity") or {}, d["identity"]
+    if ident.get("size", di["size"]) != di["size"]:
+        out.append(("ref_size", "Reference size (Cast & references)"))
+    if bool(ident.get("hint", di["hint"])) != di["hint"]:
+        out.append(("ref_hint", "Tie each person to their face (Cast & references)"))
+    topt = TTS.options(o)
+    if topt["provider"] == "elevenlabs" and topt["eleven_model"] != TTS.DEFAULT_OPTIONS["eleven_model"]:
+        out.append(("eleven_model", "ElevenLabs model (Cast & references)"))
+    return out
+
+
+CARD_WIDTH = 330                           # a card's width in a row; the header must fit it
+
+
+class _CardAction(QAction):
+    """An action of a card's header (its More menu). click() as the header button it replaced had."""
+
+    def click(self):
+        self.trigger()
+
+
+def more_menu(card, nid: str, entries, tip: str = "More actions for this clip: variants, compare, branch, freeze, "
+                                                   "delete") -> tuple[QToolButton, dict[str, QAction]]:
+    """A card's "More" button: a menu of (action, icon, text, tooltip, shortcut or None) entries (None: a separator)
+    that emit card.action(action, nid), the same signal the header buttons had. A shortcut is only shown (and works
+    while the menu is open): the window's own shortcuts do the work, one per window, not one per card."""
+    b = QToolButton()
+    b.setText("More")
+    b.setIcon(icon("more"))
+    b.setIconSize(QSize(16, 16))
+    b.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+    b.setAutoRaise(True)
+    b.setPopupMode(QToolButton.InstantPopup)
+    b.setToolTip(tip)
+    m = QMenu(b)
+    m.setToolTipsVisible(True)
+    acts = {}
+    for e in entries:
+        if e is None:
+            m.addSeparator()
+            continue
+        key, ic, text, tip, keys = e
+        a = _CardAction(icon(ic), text, m)
+        a.setToolTip(tip)
+        if keys:
+            a.setShortcut(QKeySequence(keys))
+            a.setShortcutContext(Qt.WidgetShortcut)
+        a.triggered.connect(lambda _=False, k=key: card.action.emit(k, nid))
+        m.addAction(a)
+        acts[key] = a
+    b.setMenu(m)
+    return b, acts
+
+
 class PromptCard(QFrame):
     """One clip of the selected path: prompt, seed, LoRAs, own length / steps, status."""
     settings_open = False                      # the own-settings part is open (the same on every card)
@@ -561,12 +649,12 @@ class PromptCard(QFrame):
     leadChanged = Signal(str, bool)            # node id, the lead switch (the lead chip)
     modelPrompt = Signal(str)                  # node id: show the exact prompt the model gets
 
-    def __init__(self, node: T.Node, parent=None, names=lambda: []):
+    def __init__(self, node: T.Node, parent=None, names=lambda: [], view: ViewMode | None = None):
         super().__init__(parent)
         self.nid = node.id
         self.setObjectName("promptCard")
         self.setAttribute(Qt.WA_StyledBackground)
-        self.setFixedWidth(330)
+        self.setFixedWidth(CARD_WIDTH)
         self.state = ""
         v = QVBoxLayout(self)
         v.setContentsMargins(10, 8, 8, 10)
@@ -580,25 +668,36 @@ class PromptCard(QFrame):
         head.addWidget(self.sub)
         head.addWidget(self.tag)
         head.addStretch(1)
-        self.buttons = []
-        for act, ic, tip in (("variant", "clone", "Variant: same prompt, other seed, as a new branch (Ctrl+D)"),
-                             ("variants", "layers", "Variants…: several new branches with the same prompt and "
-                                                    "settings but other seeds, generated at once"),
-                             ("compare", "cmp", "Compare: play this clip and its made variants side by side, keep one"),
-                             ("branch", "split", "Branch: another continuation from the same point (Ctrl+B)"),
-                             ("delete", "trash", "Delete this clip and everything after it")):
-            b = icon_button(ic, tip)
-            b.clicked.connect(lambda _=False, a=act: self.action.emit(a, self.nid))
-            head.addWidget(b)
-            self.buttons.append(b)
-            if act == "compare":
-                self.b_compare = b
+        # the header: the most used action with its name, the others in one More menu (delete last, it asks)
+        self.act_variant = _CardAction(icon("clone"), "Variant", self)
+        self.act_variant.setToolTip("Variant: same prompt, other seed, as a new branch (Ctrl+D)")
+        self.act_variant.triggered.connect(lambda: self.action.emit("variant", self.nid))
+        self.b_variant = QToolButton()
+        self.b_variant.setDefaultAction(self.act_variant)
+        self.b_variant.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.b_variant.setAutoRaise(True)
+        self.b_variant.setIconSize(QSize(16, 16))
+        head.addWidget(self.b_variant)
+        self.b_more, acts = more_menu(self, self.nid, (
+            ("variants", "layers", "Variants…", "Variants…: several new branches with the same prompt and settings "
+                                                "but other seeds, generated at once", None),
+            ("compare", "cmp", "Compare…", "Compare: play this clip and its made variants side by side, keep one",
+             None),
+            ("branch", "split", "Branch", "Branch: another continuation from the same point (Ctrl+B)", "Ctrl+B"),
+            None,
+            ("freeze_toggle", "lock", "Freeze", FREEZE_TIP, None),
+            None,
+            ("delete", "trash", "Delete…", "Delete this clip and everything after it (asks first)", "Del")))
+        head.addWidget(self.b_more)
+        self.more_actions = acts                 # action name -> QAction (the More menu's entries)
+        # (the old header buttons by their names: enabled / clicked as before)
+        self.buttons = [self.act_variant, acts["variants"], acts["compare"], acts["branch"], acts["delete"]]
+        self.b_compare = acts["compare"]
         self._can_compare = False
         self.frozen, self._on = False, True
         self.has_lines = False                   # its prompt has a spoken line (text to speech can speak it)
-        self.b_freeze = icon_button("lock", FREEZE_TIP, checkable=True)
-        self.b_freeze.clicked.connect(lambda _=False: self.action.emit("freeze_toggle", self.nid))
-        head.insertWidget(head.count() - 1, self.b_freeze)
+        self.b_freeze = acts["freeze_toggle"]
+        self.b_freeze.setCheckable(True)
         v.addLayout(head)
         self.span = label("", level="tertiary")
         v.addWidget(self.span)
@@ -624,7 +723,10 @@ class PromptCard(QFrame):
         foot = QHBoxLayout()
         self.words = label("", level="tertiary")
         foot.addWidget(self.words)
-        self.b_refine = icon_button("gen", "Refine this prompt with a language model (motion, camera, sound)")
+        self.b_refine = icon_button("gen", "Refine: a language model rewrites this prompt with more detail (motion, "
+                                           "camera, sound); you see the new version before it is used")
+        self.b_refine.setText("Refine")
+        self.b_refine.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.b_refine.clicked.connect(lambda: self.action.emit("refine", self.nid))
         foot.addWidget(self.b_refine)
         foot.addStretch(1)
@@ -634,11 +736,13 @@ class PromptCard(QFrame):
                                   "Switch it off in the project settings: “Fast attention (Veda)”")
         self.veda_mark.hide()
         foot.addWidget(self.veda_mark)
-        foot.addWidget(label("Seed", level="tertiary"))
+        self.seed_label = label("Seed", level="tertiary")
+        foot.addWidget(self.seed_label)
         self.seed = QSpinBox()
         self.seed.setRange(0, T.SEED_MAX)
         self.seed.setValue(node.seed)
-        self.seed.setToolTip("Seed of this clip; another seed gives another version")
+        self.seed.setToolTip("Seed: the number the clip's randomness starts from. The same seed and settings make "
+                             "the same clip again; another seed gives another version")
         foot.addWidget(self.seed)
         self.new_seed = None
         self.b_seed = icon_button("rotate", "New random seed for this clip (another version when it is made again)")
@@ -662,17 +766,19 @@ class PromptCard(QFrame):
         grid.setHorizontalSpacing(8)
         grid.setVerticalSpacing(4)
         self.loras = LoraStack(self)
-        self.loras.setToolTip("The LoRAs of this clip and their strengths (none: the base model)")
+        self.loras.setToolTip("LoRAs: add-ons that teach the model a look, a person or a motion. The LoRAs of this "
+                              "clip and their strengths (none: the base model)")
         self.loras.picked.connect(lambda p: self.lora_picked.emit(self.nid, p))
         self.length = QComboBox()
         self.length.setToolTip("Length of this clip")
         self.steps = QSpinBox()
         self.steps.setRange(STEPS_DEFAULT, 80)
         self.steps.setSpecialValueText("default")
-        self.steps.setToolTip("Sampling steps of this clip (lowest value = the project's)")
+        self.steps.setToolTip("Steps: how many times the model refines this clip. Lowest value = the project's")
         srow = QHBoxLayout()
         srow.addWidget(self.length, 1)
-        srow.addWidget(label("Steps", level="tertiary"))
+        self.steps_label = label("Steps", level="tertiary")
+        srow.addWidget(self.steps_label)
         srow.addWidget(self.steps)
         grid.addRow("Length", srow)
         v.addWidget(self.own)
@@ -781,7 +887,8 @@ class PromptCard(QFrame):
         self.key_warn.setWordWrap(True)
         self.key_warn.hide()
         kbox.addWidget(self.key_warn)
-        link.addRow("Keyframes", kbox)
+        self.keys_row = row_widget(kbox)
+        link.addRow("Keyframes", self.keys_row)
         hrow = QHBoxLayout()
         hrow.setSpacing(6)
         self.hand_text = label("last frame", level="secondary")
@@ -793,12 +900,19 @@ class PromptCard(QFrame):
         hrow.addWidget(self.hand_text, 1)
         hrow.addWidget(self.b_hand)
         hrow.addWidget(self.b_hand_clear)
-        link.addRow("Hand-over", hrow)
+        self.hand_row = row_widget(hrow)
+        link.addRow("Hand-over", self.hand_row)
         self._can_hand, self._has_hand = False, False
         self._end_free = True                    # no video after this clip: its own end image can be set
         self._has_end = False
         self._guide_useful = True                # there is a clip before it or a video after it
         v.addLayout(link)
+        # Simple view: the expert parts of the card are hidden (their values still apply: the note says so)
+        self.view = view if view is not None else ViewMode(False, self)
+        self.adv_note = AdvancedNote(self.view)
+        v.addWidget(self.adv_note)
+        self.view.advanced(self.seed_label, self.seed, self.b_seed, self.veda_mark, self.steps_label, self.steps,
+                           (link, self.loras), (link, self.guide), (link, self.keys_row), (link, self.hand_row))
         self._show_settings(PromptCard.settings_open)
         self.guide.currentIndexChanged.connect(self._ov_changed)
         for w_ in (self.cam_move, self.cam_amp, self.cam_speed):
@@ -865,6 +979,7 @@ class PromptCard(QFrame):
             for w in widgets:
                 w.blockSignals(False)
         self.loras.setEnabled(not self.edit.isReadOnly())
+        self._update_note()
 
     def _ov_changed(self, *_):
         ov = {}
@@ -889,6 +1004,7 @@ class PromptCard(QFrame):
             ov["lead"] = False
         self._enable_camera()
         self.ov = ov
+        self._update_note()
         self.overridesChanged.emit(self.nid, ov)
 
     def _enable_camera(self):
@@ -991,9 +1107,27 @@ class PromptCard(QFrame):
         for b in self.chips.chips:
             if b.isCheckable():
                 b.setEnabled(not self.edit.isReadOnly())
+        self.view.advanced(self.chips.model_chip, self.chips.b_prompt)    # (new chips follow the view too)
 
     def set_veda(self, on: bool):
-        self.veda_mark.setVisible(bool(on))
+        self.view.show(self.veda_mark, bool(on))
+
+    def advanced_active(self) -> list[str]:
+        """The clip's own settings that are set (not a clip's defaults: no overrides, no keyframes, hand-over at
+        the last frame) and whose control the Simple view hides. The seed is not one: every clip has one."""
+        ov, names = self.ov, []
+        for key, name, target in (("loras", "LoRAs", (self._link, self.loras)),
+                                  ("guide", "Carry-over", (self._link, self.guide)), ("steps", "Steps", self.steps)):
+            if ov.get(key) and self.view.is_advanced(target):
+                names.append(name)
+        if self.keys.items and self.view.is_advanced((self._link, self.keys_row)):
+            names.append("Keyframes")
+        if self._has_hand and self.view.is_advanced((self._link, self.hand_row)):
+            names.append("Hand-over")
+        return names
+
+    def _update_note(self):
+        self.adv_note.set_active(self.advanced_active())
 
     def set_summary(self, text: str):
         """The own settings in a few words, shown on the (closed) settings toggle."""
@@ -1014,6 +1148,7 @@ class PromptCard(QFrame):
         self.hand_text.setToolTip(tip)
         self._can_hand, self._has_hand = bool(can), bool(has)
         self._enable_hand()
+        self._update_note()
 
     def _enable_hand(self):
         on = not self.edit.isReadOnly()
@@ -1134,6 +1269,7 @@ class PromptCard(QFrame):
                                   ": a keyframe (or the end image) is probably too far from what comes before it "
                                   "— move it later, or use a picture closer to the scene.")
         self.key_warn.setVisible(bool(cuts))
+        self._update_note()
 
     def _enable_end(self):
         on = not self.edit.isReadOnly()
@@ -1178,12 +1314,13 @@ class VideoCard(QFrame):
     action = Signal(str, str)                  # action, node id
     play = Signal(str)
 
-    def __init__(self, node: T.Node, parent=None, names=lambda: []):
+    def __init__(self, node: T.Node, parent=None, names=lambda: [], view: ViewMode | None = None):
         super().__init__(parent)
         self.nid = node.id
+        self.view = view
         self.setObjectName("promptCard")
         self.setAttribute(Qt.WA_StyledBackground)
-        self.setFixedWidth(330)
+        self.setFixedWidth(CARD_WIDTH)
         self.state = ""
         v = QVBoxLayout(self)
         v.setContentsMargins(10, 8, 8, 10)
@@ -1197,18 +1334,20 @@ class VideoCard(QFrame):
         head.addWidget(self.sub)
         head.addWidget(self.tag)
         head.addStretch(1)
-        self.buttons = []
-        for act, ic, tip in (("edit", "pen", "Edit range… (or choose another file)"),
-                             ("branch", "split", "Branch: another continuation from the same point (Ctrl+B)"),
-                             ("delete", "trash", "Delete this video and everything after it")):
-            b = icon_button(ic, tip)
-            b.clicked.connect(lambda _=False, a=act: self.action.emit(a, self.nid))
-            head.addWidget(b)
-            self.buttons.append(b)
+        self.b_more, acts = more_menu(self, self.nid, (
+            ("edit", "pen", "Edit range…", "Edit range… (or choose another file)", None),
+            ("branch", "split", "Branch", "Branch: another continuation from the same point (Ctrl+B)", "Ctrl+B"),
+            None,
+            ("freeze_toggle", "lock", "Freeze", FREEZE_TIP.replace("this clip", "this video"), None),
+            None,
+            ("delete", "trash", "Delete…", "Delete this video and everything after it (asks first)", "Del")),
+            tip="More actions for this video: edit its range, branch, freeze, delete")
+        head.addWidget(self.b_more)
+        self.more_actions = acts
+        self.buttons = [acts["edit"], acts["branch"], acts["delete"]]    # (by their old names, as the buttons were)
         self.frozen, self._on = False, True
-        self.b_freeze = icon_button("lock", FREEZE_TIP.replace("this clip", "this video"), checkable=True)
-        self.b_freeze.clicked.connect(lambda _=False: self.action.emit("freeze_toggle", self.nid))
-        head.insertWidget(head.count() - 3, self.b_freeze)
+        self.b_freeze = acts["freeze_toggle"]
+        self.b_freeze.setCheckable(True)
         v.addLayout(head)
         self.span = label("", level="tertiary")
         v.addWidget(self.span)
@@ -1407,11 +1546,21 @@ class Preview(QWidget):
 # ----------------------------------------------------------------------------- main window
 
 class MainWindow(QMainWindow):
+    viewChanged = Signal(bool)                  # the view was switched: True = Simple (after the controls follow)
+
     def __init__(self, settings: QSettings | None = None, command: list[str] | None = None):
         super().__init__()
         self.setWindowTitle("Promptwood")
         self._build_menu()
         self.qs = settings or QSettings()
+        # Simple or Advanced, decided once: Simple on a first run (no settings yet), Advanced for settings from
+        # before the views existed (that user knows every control); stored at once, so it never flips later
+        mode = self.qs.value("viewMode", "", type=str)
+        if mode not in ("simple", "advanced"):
+            mode = "advanced" if self.qs.allKeys() else "simple"
+            self.qs.setValue("viewMode", mode)
+        self.view = ViewMode(mode == "simple", self)
+        self.view.changed.connect(self._view_switched)
         self.command = command                  # tests replace the worker with a fake one
         self.project: Path | None = None
         self.tree: T.Tree | None = None
@@ -1714,9 +1863,11 @@ class MainWindow(QMainWindow):
         irow = QFormLayout()
         irow.setContentsMargins(0, 0, 0, 0)
         self.ref_size = QComboBox()
+        self.ref_size.setToolTip("Reference size: how big the cast's pictures are sent to the model. Match: the "
+                                 "clip's size (fast); max 2048 px: a better likeness, slower")
         self.ref_size.addItem("match (fast)", "match")
         self.ref_size.addItem("max 2048 px (best likeness, slower)", "max")
-        irow.addRow("Size", self.ref_size)
+        irow.addRow("Picture size", self.ref_size)
         self.dialogue_lang = QComboBox()
         self.dialogue_lang.setEditable(True)
         self.dialogue_lang.addItems(["English", "German", "French", "Spanish", "Italian", "Portuguese", "Japanese",
@@ -1771,7 +1922,8 @@ class MainWindow(QMainWindow):
         self.track_list = QListWidget()
         self.track_list.setFixedHeight(96)
         self.track_list.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.track_list.setToolTip("Sound the clips play as their soundtrack (a clip's Sound: “Audio track: …”). "
+        self.track_list.setToolTip("Audio tracks: music, speech or a background the clips play as their own sound "
+                                   "(a clip's Sound: “Audio track: …”), on from clip to clip. "
                                    "Double-click to cut it again")
         self.track_list.itemDoubleClicked.connect(lambda _i: self._recut_track())
         self.track_list.currentRowChanged.connect(lambda _r: self._update_track_buttons())
@@ -1812,7 +1964,8 @@ class MainWindow(QMainWindow):
         self.sounds = QListWidget()
         self.sounds.setFixedHeight(70)
         self.sounds.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.sounds.setToolTip("Sound references: in a clip's prompt the first one is <Audio 1>, the second "
+        self.sounds.setToolTip("Sound references: sounds the model listens to (a voice, a sound to copy, a beat). "
+                               "In a clip's prompt the first one is <Audio 1>, the second "
                                "<Audio 2> ... Double-click to listen")
         self.sounds.itemDoubleClicked.connect(lambda _i: self._play_sound())
         self.sounds.currentRowChanged.connect(lambda _r: self._update_sound_buttons())
@@ -1845,6 +1998,8 @@ class MainWindow(QMainWindow):
         cw = QWidget()
         c = QFormLayout(cw)
         c.setContentsMargins(10, 6, 10, 8)
+        self.adv_note = AdvancedNote(self.view)          # Simple: the hidden project settings that still apply
+        c.addRow(self.adv_note)
         self.frames = QComboBox()
         for n in FRAME_CHOICES:
             self.frames.addItem(frames_text(n), n)
@@ -1853,11 +2008,13 @@ class MainWindow(QMainWindow):
                                "between clips, so the face drifts less; they take longer and need more memory")
         c.addRow("Length", self.frames)
         self.resolution = QComboBox()
-        for r, txt in ((384, "384 (fast draft)"), (512, "512 (like the training)"), (640, "640"), (768, "768"),
-                       (chain.H3_NATIVE, "768p — H3's native size (16:9 = 1344×768; slower, Veda helps)")):
+        for r, txt in ((384, "384 (fast draft)"), (512, "512 (standard)"), (640, "640"), (768, "768"),
+                       (chain.H3_NATIVE, "768p — the model's native size (16:9 = 1344×768; slower)")):
             self.resolution.addItem(txt, r)
         self.resolution.setCurrentIndex(1)
-        self.resolution.setToolTip("About this many pixels squared, in the start image's aspect ratio")
+        self.resolution.setToolTip("Size: how big the clips are made, about this many pixels squared in the start "
+                                   "image's aspect ratio (bigger is sharper and slower). 512: like the training (the "
+                                   "default); 768p: MiniMax H3's native size (fast attention, Veda, helps there)")
         c.addRow("Size", self.resolution)
         self.aspect = QComboBox()
         for key in T.ASPECTS:
@@ -1876,7 +2033,9 @@ class MainWindow(QMainWindow):
         self.speed.addItem("Turbo (turbo LoRA, 4-8 steps)", "turbo")
         self.speed.addItem("HyperFlow (8 steps)", "hyperflow")
         self.speed.addItem("Pika H3 Flex (6 steps)", "pika")
-        self.speed.setToolTip("HyperFlow: Video Rebirth's 8-step LoRA, about 2× faster than Normal (measured on an "
+        self.speed.setToolTip("Speed: make the clips faster with an add-on (LoRA) made for few steps; Normal "
+                              "uses the full model. "
+                              "HyperFlow: Video Rebirth's 8-step LoRA, about 2× faster than Normal (measured on an "
                               "RTX 4090: 19 s instead of 42 s for a 3 s clip at 672×384; needs the "
                               "ComfyUI-HyperFlow-H3 nodes and its pruned weights). "
                               "Pika H3 Flex: Pika's post-trained H3 as a LoRA, 6 steps (lcm), reported close to "
@@ -1892,19 +2051,21 @@ class MainWindow(QMainWindow):
         self.clip_cfg.setDecimals(2)
         self.clip_cfg.setValue(1.0)
         self.clip_cfg.setToolTip(
-            "CFG of the chosen speed mode (each mode keeps its own value). 1: off, one pass per step, as H3 and its "
-            "speed LoRAs (turbo, HyperFlow, Pika) are made for. Above 1: real classifier-free guidance against an "
-            "empty prompt (start / end frames stay): the prompt is followed more strongly, but every step runs twice "
+            "CFG: how strictly the model follows the prompt. It belongs to the chosen speed mode (each mode keeps "
+            "its own value). 1: off, one pass per step, as H3 and its speed LoRAs (turbo, HyperFlow, Pika) are made "
+            "for. Above 1: real classifier-free guidance against an empty prompt (start / end frames stay): the prompt is followed more strongly, but every step runs twice "
             "(about twice as slow) and the step-distilled LoRAs can burn colours or over-sharpen from about 1.5-2; "
             "try 1.2-1.5 first. Below 1 (e.g. 0.9): the prompt is followed a little less, also two passes per step")
         self.cfg_note = label("", level="tertiary")
         crow.addWidget(self.clip_cfg)
         crow.addWidget(self.cfg_note, 1)
-        c.addRow("CFG", crow)
+        self._cfg_row = row_widget(crow)
+        c.addRow("CFG", self._cfg_row)
         self._cfg_mode = "normal"
         self.veda = QCheckBox("Fast attention (Veda) for large and long clips")
         self.veda.setChecked(True)
         self.veda.setToolTip(
+            "Fast attention: makes large and long clips much faster. "
             "Veda sparse attention (the veda-sparse-attention node in ComfyUI) computes only the attention that "
             "matters. It is used automatically for clips large enough to gain, marked “⚡ Veda” on the clip. "
             "Measured on an RTX 4090: a 10 s clip at 1344×768 took 146 s instead of 338 s (2.3× faster) and stayed "
@@ -1968,18 +2129,20 @@ class MainWindow(QMainWindow):
             w.editingFinished.connect(self._style_changed)
         self.lora_triggers = QCheckBox("Put the LoRAs' trigger words before the prompt")
         self.lora_triggers.setChecked(True)
-        self.lora_triggers.setToolTip("A clip with LoRAs gets their trigger words in front of its prompt (from the "
+        self.lora_triggers.setToolTip("Trigger words: the words a LoRA was trained with, which switch on its effect. "
+                                      "A clip with LoRAs gets their trigger words in front of its prompt (from the "
                                       "LoRA files and CivitAI; shown under each LoRA, right-click to change them). "
                                       "Clips record them, so new words make those clips again")
         self.lora_triggers.toggled.connect(self._lora_triggers_changed)
         c.addRow("", self.lora_triggers)
         proj_v.addWidget(cw)
 
-        bar, _ = section_bar("ComfyUI", left)
+        bar, _ = section_bar("Video engine (ComfyUI)", left)
         prefs_v.addWidget(bar)
         aw = QWidget()
         a = QFormLayout(aw)
         a.setContentsMargins(10, 6, 10, 8)
+        self._comfy_form = a
         self.comfy_url = QLineEdit(DEFAULT_COMFY_URL)
         self.comfy_url.setToolTip("Address of the ComfyUI that renders the clips")
         a.addRow("Address", self.comfy_url)
@@ -2002,7 +2165,8 @@ class MainWindow(QMainWindow):
                                  "this window)")
         self.b_rescan.clicked.connect(lambda: self.scan_loras(report=True))
         drow.addWidget(self.b_rescan)
-        a.addRow("Folder", drow)
+        self._comfy_dir_row = row_widget(drow)
+        a.addRow("Folder", self._comfy_dir_row)
         self.comfy_cleanup = QCheckBox("Clean up ComfyUI's copies after each clip")
         self.comfy_cleanup.setChecked(True)
         self.comfy_cleanup.setToolTip("ComfyUI keeps every clip and start image in output/video-chain and "
@@ -2044,7 +2208,8 @@ class MainWindow(QMainWindow):
         lrow.addWidget(self.llm_model, 1)
         lrow.addWidget(label("port", level="tertiary"))
         lrow.addWidget(self.llm_port)
-        a.addRow("GGUF model", lrow)
+        self._gguf_row = row_widget(lrow)
+        a.addRow("GGUF model", self._gguf_row)
         self.llm_cpu_moe = QCheckBox("Keep the model's experts in RAM (GPU stays free for ComfyUI; slower)")
         self.llm_cpu_moe.setChecked(True)
         self.llm_cpu_moe.setToolTip("Mixture-of-experts models (…-A3B): their expert weights stay in RAM and only "
@@ -2074,7 +2239,8 @@ class MainWindow(QMainWindow):
         b_key.clicked.connect(lambda: self._save_civitai_key())
         crow.addWidget(self.civitai_key, 1)
         crow.addWidget(b_key)
-        a.addRow("CivitAI API key", crow)
+        self._civitai_row = row_widget(crow)
+        a.addRow("CivitAI API key", self._civitai_row)
         self._show_civitai_key()
         erow = QHBoxLayout()
         self.eleven_key = QLineEdit()
@@ -2103,13 +2269,15 @@ class MainWindow(QMainWindow):
         krow.addWidget(self.keep_loaded)
         krow.addWidget(self.idle_minutes)
         krow.addStretch(1)
-        a.addRow("", krow)
+        self._keep_row = row_widget(krow)
+        a.addRow("", self._keep_row)
         self.keep_loaded.toggled.connect(self.idle_minutes.setEnabled)
         prefs_v.addWidget(aw)
 
         bar, _ = section_bar("Cloud upscaling (RunPod)", left)
         prefs_v.addWidget(bar)
         rw = QWidget()
+        self._runpod_section = (bar, rw)
         r = QFormLayout(rw)
         r.setContentsMargins(10, 6, 10, 8)
         rrow = QHBoxLayout()
@@ -2246,7 +2414,7 @@ class MainWindow(QMainWindow):
         self.graph.contextMenu.connect(self._context)
         gv.addWidget(self.graph, 1)
         self.left_tabs.addTab(gw, "Clips")
-        self.left_tabs.addTab(cast_scroll, "Cast")
+        self.left_tabs.addTab(cast_scroll, "Cast & references")
         self.left_tabs.addTab(sound_scroll, "Sounds")
         self.left_tabs.setMinimumWidth(340)
 
@@ -2387,6 +2555,21 @@ class MainWindow(QMainWindow):
             tb.addWidget(w)
         tb.addSeparator()
         tb.addWidget(self.progress)
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        tb.addWidget(spacer)
+        self.view_buttons = QButtonGroup(self)      # Simple | Advanced, always in sight (also in the View menu)
+        self.b_simple = QPushButton("Simple")
+        self.b_simple.setToolTip("Simple view: only what you need to make and continue clips. Hidden settings keep "
+                                 "their values (a line says when some of them are active)")
+        self.b_advanced = QPushButton("Advanced")
+        self.b_advanced.setToolTip("Advanced view: every setting (speed, steps, LoRAs, seeds, keyframes, ComfyUI …)")
+        for b, simple in ((self.b_simple, True), (self.b_advanced, False)):
+            b.setCheckable(True)
+            b.setAutoDefault(False)
+            self.view_buttons.addButton(b)
+            b.clicked.connect(lambda _=False, on=simple: self.set_simple(on))
+            tb.addWidget(b)
         self.run_toolbar = tb
         sb.addWidget(self.status, 1)
         self.model_label = label("Model: not loaded", role="statusText")
@@ -2395,7 +2578,7 @@ class MainWindow(QMainWindow):
         self.b_unload.clicked.connect(self.unload)
         self.b_unload.hide()
         self.comfy_label = label("", role="statusText")
-        self.b_prefs = icon_button("gear", "ComfyUI and preferences (Ctrl+,)")
+        self.b_prefs = icon_button("gear", "Preferences: the video engine (ComfyUI), API keys (Ctrl+,)")
         self.b_prefs.clicked.connect(self.show_prefs)
         sb.addPermanentWidget(self.comfy_label)
         sb.addPermanentWidget(self.b_prefs)
@@ -2426,7 +2609,80 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Delete"), self.graph,
                   activated=lambda: self.node_action("delete", self.target_id()))
         QShortcut(QKeySequence("F"), self.graph, activated=self.graph.fit)
+        self._register_advanced()
+        self._show_view()
         self._update_buttons()
+
+    # ------------------------------------------------------------------ Simple / Advanced view
+    def _register_advanced(self):
+        """The controls the Simple view hides (the clip cards register their own). The question for each: does a
+        beginner need it to make and continue a clip with a start image, people / places and sound?"""
+        c, a = self._clips_form, self._comfy_form
+        self.advanced_only(
+            # project: speed and quality knobs, prompt wording, path joining
+            (c, self.steps), (c, self.speed), (c, self._cfg_row), (c, self.veda), (c, self.turbo_lora),
+            (c, self._turbo_row), (c, self.keep_rep), (c, self.prompt_format), (c, self.style_prefix),
+            (c, self.style_suffix), (c, self.lora_triggers),
+            # cast: how the pictures are sent
+            (self._tts_form, self.ref_size), self.ref_hint, (self._tts_form, self._eleven_row),
+            # preferences: ComfyUI's technical part (the address, start command and auto start stay), RunPod
+            (a, self._comfy_dir_row), (a, self.comfy_cleanup), (a, self.triggers_online), (a, self.llm_on),
+            (a, self.llm_server), (a, self._gguf_row), (a, self.llm_cpu_moe), (a, self._civitai_row),
+            (a, self._keep_row), *self._runpod_section,
+            # the log, the GPU's memory
+            (self.tabs, self.log), self.gpu)
+
+    def advanced_only(self, *targets):
+        """Register controls the Simple view hides: a widget, (QFormLayout, field widget) for a form row, (QTabWidget,
+        page) for a tab. Use self.view.show(target, on) for their own visibility afterwards (not setVisible)."""
+        self.view.advanced(*targets)
+
+    @property
+    def simple(self) -> bool:
+        return self.view.simple
+
+    def set_simple(self, on: bool):
+        """Switch the view (stored in the app's settings). It only shows / hides controls, never changes a value."""
+        self.qs.setValue("viewMode", "simple" if on else "advanced")
+        self.view.set_simple(on)
+        self._show_view()
+
+    def _view_switched(self, simple: bool):
+        self._show_view()
+        self.viewChanged.emit(simple)
+
+    def _show_view(self):
+        """The switch and the View menu show the current view."""
+        simple = self.view.simple
+        for w, on in ((self.b_simple, simple), (self.b_advanced, not simple),
+                      (self.act_simple, simple), (self.act_advanced, not simple)):
+            w.setChecked(on)
+
+    def show_log(self):
+        """View → Log: shown in the Simple view too when asked for (until the view is switched)."""
+        self.view.reveal((self.tabs, self.log))
+        self.tabs.setCurrentWidget(self.log)
+
+    def _project_controls(self) -> dict:
+        """project_setting_changes' keys -> the control that sets each."""
+        c = self._clips_form
+        return {"steps": (c, self.steps), "speed": (c, self.speed), "turbo": (c, self._turbo_row),
+                "cfg": (c, self._cfg_row), "veda": (c, self.veda), "keep_repeated": (c, self.keep_rep),
+                "style_prefix": (c, self.style_prefix), "style_suffix": (c, self.style_suffix),
+                "prompt_format": (c, self.prompt_format), "lora_triggers": (c, self.lora_triggers),
+                "ref_size": (self._tts_form, self.ref_size), "ref_hint": self.ref_hint,
+                "eleven_model": (self._tts_form, self._eleven_row)}
+
+    def advanced_active(self) -> list[str]:
+        """The project's settings that differ from a new project's and whose control the Simple view hides."""
+        if self.tree is None:
+            return []
+        ctl = self._project_controls()
+        return [name for key, name in project_setting_changes(self.tree.options)
+                if self.view.is_advanced(ctl[key])]
+
+    def _update_adv_note(self):
+        self.adv_note.set_active(self.advanced_active())
 
     # ------------------------------------------------------------------ settings
     def _load_settings(self):
@@ -2520,12 +2776,12 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         m.addAction("Quit", self.close).setShortcut(QKeySequence("Ctrl+Q"))
         v = self.menuBar().addMenu("&View")
-        for k, name in enumerate(("Clips", "Cast", "Sounds")):
+        for k, name in enumerate(("Clips", "Cast & references", "Sounds")):
             a = v.addAction(f"{name} (left)", lambda _=False, k=k: self._show_left_tab(k))
             a.setShortcut(QKeySequence(f"Alt+{k + 1}"))
-        v.addAction("Log", lambda: self.tabs.setCurrentWidget(self.log)).setShortcut(QKeySequence("Alt+L"))
+        v.addAction("Log", self.show_log).setShortcut(QKeySequence("Alt+L"))
         v.addSeparator()
-        self.act_left = v.addAction("Left panel (clips, cast, sounds)")
+        self.act_left = v.addAction("Left panel (clips, cast & references, sounds)")
         self.act_left.setCheckable(True)
         self.act_left.setChecked(True)
         self.act_left.setShortcut(QKeySequence("Ctrl+Alt+B"))
@@ -2535,8 +2791,16 @@ class MainWindow(QMainWindow):
                                ("watch", "Ctrl+Alt+3", "Layout: Watch (viewer and timeline only)")):
             v.addAction(tip, lambda _=False, n=name: self.apply_layout(n)).setShortcut(QKeySequence(key))
         v.addAction("Reset layout", lambda: self.apply_layout("edit"))
+        v.addSeparator()
+        group = QActionGroup(self)                  # (the view itself is made in __init__, after the menu)
+        self.act_simple = v.addAction("Simple view (the controls you need to make clips)")
+        self.act_advanced = v.addAction("Advanced view (every setting)")
+        for a, simple in ((self.act_simple, True), (self.act_advanced, False)):
+            a.setCheckable(True)
+            group.addAction(a)
+            a.triggered.connect(lambda _=False, on=simple: self.set_simple(on))
         st = self.menuBar().addMenu("&Settings")
-        st.addAction("ComfyUI and preferences…", self.show_prefs).setShortcut(QKeySequence("Ctrl+,"))
+        st.addAction("Preferences (video engine, API keys)…", self.show_prefs).setShortcut(QKeySequence("Ctrl+,"))
 
     def apply_layout(self, name: str):
         """A layout preset, as shares of the window: 'edit' (the default: a big viewer), 'write' (a wide inspector
@@ -2953,7 +3217,7 @@ class MainWindow(QMainWindow):
         dlg.setWindowTitle("Cast in the film")
         v = QVBoxLayout(dlg)
         if not names:
-            v.addWidget(label("The film has no characters yet (the Cast tab, Alt+2).", level="secondary"))
+            v.addWidget(label("The film has no characters yet (the Cast & references tab, Alt+2).", level="secondary"))
         table = QTableWidget(len(names), len(rows))
         table.setHorizontalHeaderLabels([f"{k}  {title}" for k, (title, _m) in enumerate(rows, start=1)])
         table.setVerticalHeaderLabels([f"@{n}" for n in names])
@@ -3284,7 +3548,7 @@ class MainWindow(QMainWindow):
             if self.eleven_model.findData(topt["eleven_model"]) < 0:
                 self.eleven_model.addItem(topt["eleven_model"], topt["eleven_model"])
             self.eleven_model.setCurrentIndex(self.eleven_model.findData(topt["eleven_model"]))
-            self._tts_form.setRowVisible(self._eleven_row, topt["provider"] == "elevenlabs")
+            self.view.show((self._tts_form, self._eleven_row), topt["provider"] == "elevenlabs")
             turbo = o.get("turbo") or {}
             self.speed.setCurrentIndex(self.speed.findData(
                 "turbo" if turbo.get("on") else "hyperflow" if (o.get("hyperflow") or {}).get("on")
@@ -3303,6 +3567,7 @@ class MainWindow(QMainWindow):
             self.lora_triggers.setChecked(bool(o.get("lora_triggers", True)))
         finally:
             self._loading = False
+        self._update_adv_note()
 
     @staticmethod
     def _mode_options(options: dict, mode: str) -> dict:
@@ -3601,7 +3866,7 @@ class MainWindow(QMainWindow):
         if self._loading or self.tree is None:
             return
         provider = self.tts_provider.currentData()
-        self._tts_form.setRowVisible(self._eleven_row, provider == "elevenlabs")
+        self.view.show((self._tts_form, self._eleven_row), provider == "elevenlabs")
         new = {"provider": provider, "eleven_model": self.eleven_model.currentData() or
                TTS.DEFAULT_OPTIONS["eleven_model"]}
         old = TTS.options(self.tree)
@@ -5155,6 +5420,7 @@ class MainWindow(QMainWindow):
         return self.live.get(nid) or self.status_of.get(nid, "new")
 
     def refresh(self, rebuild_path: bool = False):
+        self._update_adv_note()                    # (cheap: the project's options against the defaults)
         if self.tree is None:
             self.graph.show_nodes([])
             self._update_buttons()
@@ -5419,7 +5685,7 @@ class MainWindow(QMainWindow):
                                "(Ctrl+N) to add a clip after the start image.")
         for k, n in enumerate(path):
             if n.is_video:
-                card = VideoCard(n)
+                card = VideoCard(n, view=self.view)
                 card.action.connect(self.node_action)
                 card.play.connect(self._play_node)
                 self._fit_card(card)
@@ -5427,7 +5693,7 @@ class MainWindow(QMainWindow):
                 self.cards.append(card)
                 card.set_editable(not self.running)
                 continue
-            card = PromptCard(n, names=self._cast_names)
+            card = PromptCard(n, names=self._cast_names, view=self.view)
             card.edited.connect(self._card_edited)
             card.seedChanged.connect(self._seed_changed)
             card.new_seed = self._new_seed
@@ -5789,8 +6055,8 @@ class MainWindow(QMainWindow):
         idle = not self.running
         for w in (self.turbo_lora, self.turbo_steps, self.turbo_strength):
             w.setEnabled(on and idle)
-        self._clips_form.setRowVisible(self.turbo_lora, on)      # the turbo settings only matter in turbo mode
-        self._clips_form.setRowVisible(self._turbo_row, on)
+        self.view.show((self._clips_form, self.turbo_lora), on)  # the turbo settings only matter in turbo mode
+        self.view.show((self._clips_form, self._turbo_row), on)
         locked = on or hyper                                      # their own steps for every clip
         self.steps.setEnabled(idle and not locked)
         self.steps.setToolTip("Turbo mode: every clip uses the turbo steps" if on else
@@ -6310,8 +6576,8 @@ class MainWindow(QMainWindow):
                     return False
                 c = self._selected_character()
                 record_use(png, {"kind": "ref", "file": c["images"][-1]})
-                return (f"Added as a {'face' if T.kind_of(c) == 'person' else 'picture'} of @{c['name']} (the Cast "
-                        "tab, Alt+2); mention it in prompts as "
+                return (f"Added as a {'face' if T.kind_of(c) == 'person' else 'picture'} of @{c['name']} (the Cast & "
+                        "references tab, Alt+2); mention it in prompts as "
                         f"@{c['name']}." + (f" {self.status.text()}" if "CHANGED" in self.status.text() else ""))
             ok = self.set_image(png, confirm=True) if kind == "start" else \
                 bool(target) and self.set_end_image(target, png)
@@ -7863,7 +8129,8 @@ class MainWindow(QMainWindow):
         else:
             self.progress.setValue(0)
             self.status.setText(f"Failed: {self._error or f'the generator exited with code {code}'}")
-            self.tabs.setCurrentWidget(self.log)
+            if self.view.visible((self.tabs, self.log)):     # (Simple: the status line says what failed)
+                self.tabs.setCurrentWidget(self.log)
         self._stopping = False
         if self.worker_alive and (self._cloud_worker or not self.keep_loaded.isChecked()):
             self._quit_worker()                    # (a RunPod worker always: its pod is billed while it waits)
@@ -7975,14 +8242,16 @@ class MainWindow(QMainWindow):
 
     def _update_comfy_label(self):
         if self.comfy_up:
-            text, sev = "ComfyUI: running", ""
+            text, sev = "Video engine: running", ""
         elif self._comfy_starting and time.monotonic() - self._comfy_starting < 180:
-            text, sev = "ComfyUI: starting …", "warning"
+            text, sev = "Video engine: starting …", "warning"
         elif self.comfy_up is False:
-            text, sev = "ComfyUI: not running", "warning"
+            text, sev = "Video engine: not running", "warning"
         else:
-            text, sev = "ComfyUI: …", ""
+            text, sev = "Video engine: …", ""
         self.comfy_label.setText(text)
+        self.comfy_label.setToolTip(f"The video engine is ComfyUI, the program that makes the clips "
+                                    f"({self.comfy_url.text().strip() or DEFAULT_COMFY_URL}); its settings: Ctrl+,")
         self.comfy_label.setProperty("severity", sev)
         repolish(self.comfy_label)
         self.b_start_comfy.setEnabled(not self.comfy_up)

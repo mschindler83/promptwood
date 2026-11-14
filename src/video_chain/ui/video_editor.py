@@ -227,7 +227,7 @@ class VideoRangeDialog(QDialog):
         rrow.addStretch(1)
         self.b_ref = QPushButton("Add as face picture…")
         self.b_ref.setToolTip("Crop a face from the frame at the playhead (the face is found for you, or set the "
-                              "square by hand) and add it to the character selected in the Cast; clips that "
+                              "square by hand) and add it to the character selected in Cast & references; clips that "
                               "mention that character get this face")
         self.b_ref.clicked.connect(self.reference_here)
         self.face = True                              # set_reference_kind: a person's face, else a whole picture
@@ -406,8 +406,9 @@ class VideoRangeDialog(QDialog):
                 return False
             ok = bool(self.on_reference(str(png)))
         what = "face picture" if self.face else "picture"
-        self.summary.setText((f"The face from the frame at {fmt(t)} was added (see the Cast tab, Alt+2)." if self.face
-                              else f"The frame at {fmt(t)} was added as a picture (see the Cast tab, Alt+2).") if ok
+        where = "(see the Cast & references tab, Alt+2)"
+        self.summary.setText((f"The face from the frame at {fmt(t)} was added {where}." if self.face
+                              else f"The frame at {fmt(t)} was added as a picture {where}.") if ok
                              else f"The frame at {fmt(t)} was not added as a {what}.")
         return ok
 

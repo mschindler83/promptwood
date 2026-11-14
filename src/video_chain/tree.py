@@ -1732,10 +1732,10 @@ def keyframe_problem(tree: Tree, checker: "Checker", todo: list[str]) -> str | N
             f = keyframe_frame(k["at"])
             where = f"clip #{nid[1:]}'s keyframe at {k['at']:.2f} s"
             if f > hi:
-                return (f"{where} is at or past its end ({frames / chain.FPS:.2f} s{', minus its motion guide' if hi < frames - 2 else ''}): "
+                return (f"{where} is at or past its end ({frames / chain.FPS:.2f} s{', minus its carry-over' if hi < frames - 2 else ''}): "
                         "move it earlier or make the clip longer")
             if f < lo:
-                return f"{where} is {'inside its motion guide' if lo > 1 else 'on its first frame'}: move it later"
+                return f"{where} is {'inside its carry-over' if lo > 1 else 'on its first frame'}: move it later"
             if f in seen:
                 return f"{where} falls on the same frame as another one: move one of them"
             seen.add(f)
@@ -2027,7 +2027,7 @@ class Checker:
         if m.get("start_sha1") != self.sha(self.start_frame(node)):
             return "it no longer starts at the frame it was made from"
         if m.get("guide_from") != self.guide_from(node):
-            return "the clip its motion guide comes from was made again"
+            return "the clip its carry-over comes from was made again"
         if m.get("end_key") != self.end_key(node):
             return "the video it ends at changed"
         return None
@@ -2058,7 +2058,7 @@ class Checker:
         if m.get("keyframe_key") != self.keyframe_key(node):
             return "its keyframes changed"
         if m.get("guide_from") != self.guide_from(node):
-            return "the clip its motion guide comes from changed"
+            return "the clip its carry-over comes from changed"
         return "something it depends on changed"
 
 
@@ -2858,7 +2858,7 @@ def _guides(project: Path, tree: Tree, node: Node, settings: dict, tmp: Path) ->
         if k is not None:                           # it hands over earlier: the frames up to that one
             n = k + 1
         if n < guide:
-            raise ValueError(f"clip #{parent.id[1:]} ({n} frames) is shorter than the {guide}-frame motion guide "
+            raise ValueError(f"clip #{parent.id[1:]} ({n} frames) is shorter than the {guide}-frame carry-over "
                              f"of clip #{node.id[1:]}")
         g = tmp / "guide_start.mp4"
         audio = chain.cut_frames(clip, g, n - guide, guide)
@@ -2867,7 +2867,7 @@ def _guides(project: Path, tree: Tree, node: Node, settings: dict, tmp: Path) ->
         if guide:
             clip, n = project / vc.made["video"], _clip_frames(project, vc)
             if n < guide:
-                raise ValueError(f"video #{vc.id[1:]} ({n} frames) is shorter than the {guide}-frame motion guide "
+                raise ValueError(f"video #{vc.id[1:]} ({n} frames) is shorter than the {guide}-frame carry-over "
                                  f"of clip #{node.id[1:]}")
             g = tmp / "guide_end.mp4"
             audio = chain.cut_frames(clip, g, 0, guide)
@@ -2879,8 +2879,8 @@ def _guides(project: Path, tree: Tree, node: Node, settings: dict, tmp: Path) ->
         end_image = project / node.end_image
     used = sum(g["frames"] for g in guides)
     if used and used >= frames:
-        raise ValueError(f"clip #{node.id[1:]} ({frames} frames) is too short for its motion guide ({used} frames); "
-                         "make it longer or the guide shorter")
+        raise ValueError(f"clip #{node.id[1:]} ({frames} frames) is too short for its carry-over ({used} frames); "
+                         "make it longer or the carry-over shorter")
     return guides, end_image
 
 
@@ -2909,13 +2909,13 @@ def guide_problem(tree: Tree, checker: "Checker", todo: list[str]) -> str | None
             if k is not None:                       # it hands over earlier
                 n = k + 1
             if n < guide:
-                return (f"{what} #{other.id[1:]} ({n} frames) is shorter than the {guide}-frame motion guide "
+                return (f"{what} #{other.id[1:]} ({n} frames) is shorter than the {guide}-frame carry-over "
                         f"of clip #{nid[1:]}")
             used += guide
         frames = int(s["frames"])
         if used and used >= frames:
-            return (f"clip #{nid[1:]} ({frames} frames) is too short for its motion guide ({used} frames); "
-                    "make it longer or the guide shorter")
+            return (f"clip #{nid[1:]} ({frames} frames) is too short for its carry-over ({used} frames); "
+                    "make it longer or the carry-over shorter")
     return None
 
 

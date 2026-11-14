@@ -26,9 +26,13 @@ def app():
     return a
 
 
-def settings(tmp_path, name="s.ini"):
+def settings(tmp_path, name="s.ini", view="advanced"):
+    """The test's own settings file. view: the window's view ("advanced": every control, as the tests were written
+    for; "simple"; None: none stored, the window decides as on a first run / an update)."""
     from PySide6.QtCore import QSettings
     q = QSettings(str(tmp_path / name), QSettings.IniFormat)
+    if view and q.value("viewMode") is None:
+        q.setValue("viewMode", view)
     if q.value("comfyDir") is None:                  # never the real ComfyUI folder in tests
         q.setValue("comfyDir", str(tmp_path / "no-comfyui"))
     if q.value("thumbCacheDir") is None:             # nor the real thumbnail cache
@@ -536,7 +540,7 @@ def test_comfyui_not_running(app, win, tmp_path, image, monkeypatch):
     monkeypatch.setenv("FAKE_COMFY_DOWN", "1")
     new_project(win, tmp_path, image, ("a",))
     run_and_wait(app, win, win.generate_path)
-    assert "ComfyUI is not running" in win.status.text() and win.comfy_label.text() == "ComfyUI: not running"
+    assert "ComfyUI is not running" in win.status.text() and win.comfy_label.text() == "Video engine: not running"
     assert win.b_start_comfy.isEnabled()
 
 
@@ -3243,7 +3247,7 @@ def test_export_shows_the_enlargement_and_size_1024(app, win, tmp_path, image):
     win.open_project(tmp_path / "proj")
     from video_chain import chain
     k = win.resolution.findData(chain.H3_NATIVE)
-    assert k >= 0 and "H3's native size" in win.resolution.itemText(k)
+    assert k >= 0 and "native size" in win.resolution.itemText(k)
 
 
 def test_buttons_open_their_windows(app, win, tmp_path, image, monkeypatch):
@@ -4103,7 +4107,7 @@ def test_clip_chips_and_the_model_prompt(app, win, tmp_path, image, monkeypatch)
     ids = new_project(win, tmp_path, image, ("A cat jumps.",))
     flush(app, win)
     card, chips = _chips(win, ids[0])
-    assert chips == ["Start frame", "fl2va · classic"] and not card.chips.isHidden()
+    assert chips == ["Start frame", "From the start frame"] and not card.chips.isHidden()
     assert card.chips.chips[0].toolTip() == "The clip starts exactly from this frame (start.png)."
     # the official format: a person, a place and the start frame numbered after their pictures
     win.prompt_format.setCurrentIndex(win.prompt_format.findData("h3"))
@@ -4117,7 +4121,7 @@ def test_clip_chips_and_the_model_prompt(app, win, tmp_path, image, monkeypatch)
     type_prompt(win, ids[0], "@Anna walks into @Kitchen.")
     flush(app, win)
     card, chips = _chips(win, ids[0])
-    assert chips == ["Start frame · Picture 4", "@Anna · face ×2", "@Kitchen · place", "ref2va · official"]
+    assert chips == ["Start frame · Picture 4", "@Anna · face ×2", "@Kitchen · place", "With reference pictures"]
     tips = [b.toolTip() for b in card.chips.chips]
     assert "<Picture 4>" in tips[0] and "<Picture 1> and <Picture 2>" in tips[1] and "<Picture 3>" in tips[2]
     info = T.clip_inputs(p, win.tree, ids[0])
@@ -4136,14 +4140,14 @@ def test_clip_chips_and_the_model_prompt(app, win, tmp_path, image, monkeypatch)
     type_prompt(win, ids[0], "She waves.")
     flush(app, win)
     card, chips = _chips(win, ids[0])
-    assert chips == ["Start frame · Picture 3", "@Anna · lead", "ref2va · official"]
+    assert chips == ["Start frame · Picture 3", "@Anna · lead", "With reference pictures"]
     lead = card.chips.chips[1]
     assert lead.isCheckable() and lead.isChecked() and lead.isEnabled()
     lead.click()
     assert win.tree.nodes[ids[0]].overrides == {"lead": False} and "without @Anna" in win.status.text()
     flush(app, win)
     card, chips = _chips(win, ids[0])
-    assert chips == ["Start frame", "@Anna · lead off", "fl2va · official"]
+    assert chips == ["Start frame", "@Anna · lead off", "From the start frame"]
     assert not card.chips.chips[1].isChecked()
     s = T.Checker(p, win.tree).settings(ids[0])
     assert "refs" not in s and "frame_pictures" not in s and "no lead" in card.settings_toggle.text()
@@ -4156,7 +4160,7 @@ def test_clip_chips_and_the_model_prompt(app, win, tmp_path, image, monkeypatch)
     card.chips.chips[1].click()                                                     # on again: as before
     assert win.tree.nodes[ids[0]].overrides == {}
     flush(app, win)
-    assert _chips(win, ids[0])[1] == ["Start frame · Picture 3", "@Anna · lead", "ref2va · official"]
+    assert _chips(win, ids[0])[1] == ["Start frame · Picture 3", "@Anna · lead", "With reference pictures"]
     assert T.Checker(p, win.tree).settings(ids[0])["frame_pictures"] == ["start"]
 
 
@@ -4188,3 +4192,186 @@ def test_prompt_format_choice(app, win, tmp_path, image):
     T.save(new, t)
     win.open_project(new)
     assert win.prompt_format.currentData() == "h3" and not win.ref_hint.isEnabled()
+
+
+# ----------------------------------------------------------------------------- Simple / Advanced view, card menu
+
+def _row_hidden(form, field):
+    lab = form.labelForField(field)
+    return field.isHidden() and (lab is None or lab.isHidden())
+
+
+def test_simple_view_hides_the_expert_controls_also_on_rebuilt_cards(app, win, tmp_path, image):
+    """Simple hides the registered controls (form rows with their labels, the Log tab, the card's expert parts),
+    keeps what a beginner needs, changes no value; new cards follow the view; Advanced shows everything again, and
+    a control the app hides itself (the turbo rows outside turbo mode) stays hidden there."""
+    ids = new_project(win, tmp_path, image)
+    flush(app, win)
+    assert not win.simple and win.act_advanced.isChecked() and win.b_advanced.isChecked()
+    steps_before = win.steps.value()
+    win.b_simple.click()
+    assert win.simple and win.qs.value("viewMode") == "simple" and win.act_simple.isChecked()
+    c = win._clips_form
+    for f in (win.steps, win.speed, win._cfg_row, win.veda, win.prompt_format, win.style_prefix, win.lora_triggers):
+        assert _row_hidden(c, f), f
+    assert not win.tabs.isTabVisible(win.tabs.indexOf(win.log)) and win.ref_hint.isHidden()
+    for f in (win.frames, win.resolution, win.aspect, win.audio):        # kept
+        assert not f.isHidden() and not (c.labelForField(f) and c.labelForField(f).isHidden())
+    for w in (win.b_gen, win.b_stop, win.b_play_path, win.b_export, win.start_tile, win.cast_list, win.comfy_label):
+        assert not w.isHidden()
+    card = win.cards[-1]
+    for w in (card.seed, card.b_seed, card.seed_label, card.steps, card.chips.model_chip, card.chips.b_prompt):
+        assert w.isHidden(), w
+    for f in (card.loras, card.guide, card.keys_row, card.hand_row):
+        assert _row_hidden(card._link, f)
+    for w in (card.edit, card.cam_move, card.b_end, card.length, card.b_variant, card.b_more, card.b_refine,
+              card.settings_toggle):
+        assert not w.isHidden(), w
+    win._rebuild_path()                                                   # new cards: in the current view at once
+    new = win.cards[-1]
+    assert new is not card and new.seed.isHidden() and _row_hidden(new._link, new.loras)
+    win.speed.setCurrentIndex(win.speed.findData("turbo"))                # the app shows the turbo rows: Simple wins
+    assert _row_hidden(c, win.turbo_lora) and _row_hidden(c, win._turbo_row)
+    win.speed.setCurrentIndex(win.speed.findData("normal"))
+    win.show_log()                                                        # View → Log: shown when asked for
+    assert win.tabs.isTabVisible(win.tabs.indexOf(win.log)) and win.tabs.currentWidget() is win.log
+    seen = []
+    win.viewChanged.connect(seen.append)
+    win.act_advanced.trigger()
+    assert seen == [False] and not win.simple and win.qs.value("viewMode") == "advanced"
+    new = win.cards[-1]
+    assert not new.seed.isHidden() and not _row_hidden(new._link, new.loras) and not _row_hidden(c, win.steps)
+    assert new.chips.model_chip is not None and not new.chips.model_chip.isHidden()
+    assert _row_hidden(c, win.turbo_lora)                                 # not turbo: hidden by the app itself
+    assert win.steps.value() == steps_before and win.tabs.isTabVisible(win.tabs.indexOf(win.log))
+
+
+def test_simple_view_says_when_hidden_settings_are_active(app, win, tmp_path, image):
+    """A non-default hidden project setting / clip setting shows "N advanced settings are active: Show" in Simple
+    only; Show switches to Advanced."""
+    ids = new_project(win, tmp_path, image)
+    flush(app, win)
+    assert win.advanced_active() == []
+    win.steps.setValue(30)
+    win.veda.setChecked(False)
+    flush(app, win)
+    assert win.advanced_active() == ["Steps", "Fast attention (Veda)"]
+    assert win.adv_note.isHidden()                                        # Advanced: the controls are in sight
+    card = next(c for c in win.cards if c.nid == ids[1])
+    assert card.advanced_active() == [] and card.adv_note.isHidden()
+    card.guide.setCurrentIndex(card.guide.findData(5))
+    assert card.advanced_active() == ["Carry-over"]
+    win.set_simple(True)
+    assert not win.adv_note.isHidden() and win.adv_note.text.text() == "2 advanced settings are active:"
+    assert "Steps" in win.adv_note.toolTip()
+    card = next(c for c in win.cards if c.nid == ids[1])
+    assert not card.adv_note.isHidden() and card.adv_note.text.text() == "1 advanced setting is active:"
+    first = next(c for c in win.cards if c.nid == ids[0])
+    assert first.adv_note.isHidden()                                      # nothing set on it
+    win._rebuild_path()                                                   # a rebuilt card: its note too
+    card = next(c for c in win.cards if c.nid == ids[1])
+    assert not card.adv_note.isHidden()
+    card.adv_note.b_show.click()
+    assert not win.simple and card.adv_note.isHidden() and win.adv_note.isHidden()
+    win.set_simple(True)
+    win.steps.setValue(T.DEFAULT_OPTIONS["steps"])
+    win.veda.setChecked(True)
+    flush(app, win)
+    assert win.simple and win.adv_note.isHidden() and win.advanced_active() == []     # back to the defaults
+
+
+def test_view_default_first_run_simple_existing_settings_advanced(app, tmp_path, monkeypatch):
+    """No settings at all (a first run): Simple; settings from before the views: Advanced. Stored at once, so the
+    choice does not flip once the app has written other settings."""
+    from PySide6.QtCore import QSettings
+    from video_chain.ui import main_window as MW
+    for name in ("_poll_comfy", "scan_loras", "_poll_gpu"):              # no ComfyUI, no GPU, no LoRA folders
+        monkeypatch.setattr(MW.MainWindow, name, lambda self, *a, **k: None)
+    monkeypatch.setattr(MW, "DEFAULT_COMFY_DIR", str(tmp_path / "no-comfyui"))
+    q = QSettings(str(tmp_path / "first.ini"), QSettings.IniFormat)
+    assert q.allKeys() == []
+    w = MW.MainWindow(q, command=FAKE)
+    try:
+        assert w.simple and q.value("viewMode") == "simple" and w.steps.isHidden()
+        w.save_settings()
+    finally:
+        w.close()
+    w = MW.MainWindow(q, command=FAKE)                                    # now with other keys: still Simple
+    try:
+        assert w.simple
+    finally:
+        w.close()
+    old = settings(tmp_path, "old.ini", view=None)                       # an existing user's settings
+    assert old.value("viewMode") is None
+    w = MW.MainWindow(old, command=FAKE)
+    try:
+        assert not w.simple and old.value("viewMode") == "advanced" and not w.steps.isHidden()
+    finally:
+        w.close()
+
+
+def test_card_more_menu_triggers_the_same_actions_and_the_card_fits(app):
+    """The header: Variant with its name, the rest in More (icon, text, the shortcut shown); each entry emits the
+    same action the old buttons did; the header and the footer fit the card's width (size hints, offscreen)."""
+    from video_chain.ui.main_window import CARD_WIDTH, PromptCard, VideoCard
+    card = PromptCard(T.Node("n3", "n2", "a cat"))
+    got = []
+    card.action.connect(lambda a, nid: got.append((a, nid)))
+    menu = card.b_more.menu()
+    entries = [a for a in menu.actions() if not a.isSeparator()]
+    assert [a.text() for a in entries] == ["Variants…", "Compare…", "Branch", "Freeze", "Delete…"]
+    assert all(not a.icon().isNull() and a.toolTip() for a in entries)
+    assert card.more_actions["branch"].shortcut().toString() == "Ctrl+B"
+    assert card.more_actions["delete"].shortcut().toString() == "Del"
+    card.b_variant.click()
+    for a in entries:
+        a.trigger()
+    assert got == [(a, "n3") for a in ("variant", "variants", "compare", "branch", "freeze_toggle", "delete")]
+    got.clear()
+    card.b_freeze.click()                                       # the old attributes still work
+    card.buttons[0].click()
+    assert got == [("freeze_toggle", "n3"), ("variant", "n3")]
+    card.set_compare(0)
+    assert not card.b_compare.isEnabled()
+    card.set_state("generating", None)                          # the longest state tag
+    m = card.layout().contentsMargins()
+    room = CARD_WIDTH - m.left() - m.right()
+    head = card.layout().itemAt(0).layout()
+    assert head.sizeHint().width() <= room and head.minimumSize().width() <= room
+    assert card.b_refine.text() == "Refine" and card.b_variant.text() == "Variant" and card.b_more.text() == "More"
+    foot = next(card.layout().itemAt(k).layout() for k in range(card.layout().count())
+                if card.layout().itemAt(k).layout() is not None
+                and card.layout().itemAt(k).layout().indexOf(card.b_refine) >= 0)
+    assert foot.minimumSize().width() <= room
+    video = VideoCard(T.Node("n4", "n3", kind=T.VIDEO, source={"file": "/nonexistent.mp4", "start": 0, "end": 1}))
+    got = []
+    video.action.connect(lambda a, nid: got.append(a))
+    for a in video.b_more.menu().actions():
+        if not a.isSeparator():
+            a.trigger()
+    assert got == ["edit", "branch", "freeze_toggle", "delete"]
+    head = video.layout().itemAt(0).layout()
+    assert head.sizeHint().width() <= room
+    card.deleteLater()
+    video.deleteLater()
+
+
+def test_plain_words(app, win, tmp_path, image):
+    """The words a beginner reads: the tab named like its section, the model chip and the engine's state in plain
+    words, the first sentence of the expert tooltips."""
+    assert win.left_tabs.tabText(1) == "Cast & references"
+    view_menu = next(a.menu() for a in win.menuBar().actions() if a.text() == "&View")
+    assert "Cast & references (left)" in [a.text() for a in view_menu.actions()]
+    assert win.comfy_label.text().startswith("Video engine")
+    assert win.steps.toolTip().startswith("Steps: how many times the model refines")
+    assert win.clip_cfg.toolTip().startswith("CFG: how strictly the model follows the prompt")
+    ids = new_project(win, tmp_path, image, ("A cat jumps.",))
+    flush(app, win)
+    card = win.cards[0]
+    assert card.loras.toolTip().startswith("LoRAs: add-ons that teach the model a look, a person or a motion")
+    assert card.seed.toolTip().startswith("Seed: the number the clip's randomness starts from")
+    assert card.chips.model_chip.text() == "From the start frame" and "fl2va" in card.chips.model_chip.toolTip()
+    from video_chain.ui.clip_inputs import model_chip_text
+    none = {"given": None}
+    assert model_chip_text({"model": "fl2va", "start": none, "end": none, "pictures": []}) == "From the prompt only"
+    assert model_chip_text({"model": "ref2va", "start": none, "end": none, "pictures": []}) == "With reference sounds"

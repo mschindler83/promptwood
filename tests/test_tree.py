@@ -795,7 +795,7 @@ def test_hand_over_with_a_motion_guide(project):
     assert ch.guide_from(t.nodes[b1.id]).endswith("@8")
     assert T.guide_problem(t, ch, [b1.id]) is None
     t.nodes[a.id].end_at = 3                                        # 4 frames < the 5-frame guide
-    assert "shorter than the 5-frame motion guide" in T.guide_problem(t, T.Checker(project, t), [b1.id])
+    assert "shorter than the 5-frame carry-over" in T.guide_problem(t, T.Checker(project, t), [b1.id])
 
 
 def test_style_text_around_every_prompt(project):
@@ -1372,7 +1372,7 @@ def test_middle_keyframes(project, tmp_path):
     assert "past its end" in T.keyframe_problem(t, ch, [b1.id])
     t.nodes[b1.id].keyframes[0]["at"] = 0.1                                       # frame 2
     t.nodes[b1.id].overrides["guide"] = 5                                         # frames 0-4 are the guide
-    assert "inside its motion guide" in T.keyframe_problem(t, T.Checker(project, t), [b1.id])
+    assert "inside its carry-over" in T.keyframe_problem(t, T.Checker(project, t), [b1.id])
     t.nodes[b1.id].keyframes[0]["at"] = 5 / 24                                    # the first frame after it
     assert T.keyframe_problem(t, T.Checker(project, t), [b1.id]) is None
     t.nodes[b1.id].overrides.pop("guide")

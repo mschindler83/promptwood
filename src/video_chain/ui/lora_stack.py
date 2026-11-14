@@ -193,8 +193,8 @@ class LoraStack(QWidget):
         brow.setSpacing(4)
         self.none = label("none", level="tertiary")
         self.b_add = QPushButton(add_text)
-        self.b_add.setToolTip("Add a LoRA: search by name, or take a file from another folder; several are applied "
-                              "in this order")
+        self.b_add.setToolTip("Add a LoRA (an add-on that teaches the model a look, a person or a motion): search "
+                              "by name, or take a file from another folder; several are applied in this order")
         self.b_add.clicked.connect(self.add_from_picker)
         self.b_add.setAutoDefault(False)               # Enter in a text field of the window must not open it
         brow.addWidget(self.none)

@@ -148,14 +148,22 @@ def chip_specs(info: dict, lead_off: str | None = None) -> list[dict]:
                                                  + (f" ({name})." if name else " (it is missing)."))
         out.append({"text": text, "tip": tip, "variant": "", "lead": None})
     model = info["model"]
-    out.append({"text": f"{model} · {FORMAT_NAMES.get(info['format'], info['format'])}", "variant": "neutral",
-                "lead": None,
-                "tip": ("Made with the reference model (ref2va): it gets the pictures and sounds above. "
+    out.append({"text": model_chip_text(info), "variant": "neutral", "lead": None, "model": True,
+                "tip": ("Made with MiniMax H3's reference model (ref2va): it gets the pictures and sounds above. "
                         if model == "ref2va" else
-                        "Made with the first / last frame model (fl2va): no reference pictures or sounds. ")
-                + ("The prompt is written in MiniMax H3's official format." if info["format"] == "h3" else
-                   "The prompt is written in the app's classic format.") + " (Project → Prompt format)"})
+                        "Made with MiniMax H3's first / last frame model (fl2va): no reference pictures or sounds. ")
+                + (f"The prompt is written in MiniMax H3's {FORMAT_NAMES['h3']} format." if info["format"] == "h3"
+                   else "The prompt is written in the app's classic format.") + " (Project → Prompt format)"})
     return out
+
+
+def model_chip_text(info: dict) -> str:
+    """How the clip is made, in plain words (the model and the prompt format are in the chip's tooltip)."""
+    if info["model"] == "ref2va":
+        return "With reference pictures" if info["pictures"] else "With reference sounds"
+    given = [w for w in ("start", "end") if info[w]["given"] in ("frame", "guide")]
+    return {("start",): "From the start frame", ("end",): "To the end frame",
+            ("start", "end"): "From the start to the end frame"}.get(tuple(given), "From the prompt only")
 
 
 class ChipRow(QWidget):
@@ -168,6 +176,7 @@ class ChipRow(QWidget):
         self.flow = FlowLayout(self, spacing=4)
         self._specs: list[dict] | None = None
         self.chips: list[QToolButton] = []
+        self.model_chip: QToolButton | None = None      # how the clip is made (the Simple view hides it)
         self.b_prompt = None
         self.setVisible(False)
 
@@ -178,7 +187,7 @@ class ChipRow(QWidget):
         self._specs = specs
         self.flow.clear()
         self.chips = []
-        self.b_prompt = None
+        self.model_chip = self.b_prompt = None
         if not specs:
             self.setVisible(False)
             return
@@ -196,6 +205,8 @@ class ChipRow(QWidget):
                 b.clicked.connect(lambda on: self.leadToggled.emit(bool(on)))
             self.flow.addWidget(b)
             self.chips.append(b)
+            if s.get("model"):
+                self.model_chip = b
         self.b_prompt = QToolButton(self)
         self.b_prompt.setText("Model prompt")
         self.b_prompt.setToolTip("The exact text the model gets for this clip, and its pictures and sounds in order")
@@ -219,7 +230,7 @@ def inputs_list(info: dict) -> str:
             lines.append(f"{which.capitalize()} frame ({name}): pinned as the {'first' if which == 'start' else 'last'}"
                          " frame, not numbered")
         elif d["given"] == "guide":
-            lines.append(f"{which.capitalize()}: carry-over frames (motion guide), not numbered")
+            lines.append(f"{which.capitalize()}: carry-over frames, not numbered")
     lines += [f"<Audio {s['n']}> — {s['what']} ("
               + (Path(s["file"]).name if s.get("file") else "cut when the clip is made") + ")" for s in info["sounds"]]
     return "\n".join(lines) if lines else "No pictures or sounds besides the prompt."
