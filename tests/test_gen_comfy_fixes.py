@@ -128,3 +128,11 @@ def test_uploads_are_dropped_when_anything_after_the_build_fails(server, tmp_pat
     with pytest.raises(AttributeError):                             # (keep_pose of the wrong kind: after the build)
         an.replace(v, v, tmp_path / "r.png", tmp_path / "o.mp4", 1, 30, (320, 180), keep_pose=["x"])
     assert dropped == [3]
+
+
+@pytest.mark.parametrize("family", ["krea2"])
+def test_a_family_without_a_model_file_is_a_clear_error_not_a_null_in_the_workflow(family):
+    with pytest.raises(ComfyError, match="no model file"):
+        G.build_create_workflow(family=family, files={"clip": "c.safetensors", "vae": "v.safetensors"}, model=None,
+                                prompt="x", negative="", width=512, height=512, seed=1, quality="standard",
+                                loras=[], refs=[], ref_strength=0.5, prefix="p")
