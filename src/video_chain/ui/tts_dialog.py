@@ -36,6 +36,7 @@ class VoiceTtsDialog(QDialog):
         self.wav = Path(self._tmp.name) / "sample.wav"
         self.made: dict | None = None            # what the sample was made with (use_sample's label / text / eleven)
         self._pending: dict | None = None
+        self.voices: list = []                   # the account's ElevenLabs voices (once loaded)
         self.busy = False
         v = QVBoxLayout(self)
         form = QFormLayout()
@@ -121,6 +122,14 @@ class VoiceTtsDialog(QDialog):
         self.b_make.setEnabled(ok and bool(self.text.text().strip()))
         self.b_voices.setEnabled(not self.busy)
         self.kind.setEnabled(not self.busy)
+        self.buttons.button(QDialogButtonBox.Cancel).setEnabled(not self.busy)   # (a thread is working for it)
+
+    def _emit_safe(self, signal, *args) -> None:
+        """Emit from a worker thread; the dialog (and its signals) may be gone by then."""
+        try:
+            signal.emit(*args)
+        except RuntimeError:
+            pass
 
     # ---- ElevenLabs voices
     def _load_voices(self):
@@ -130,9 +139,11 @@ class VoiceTtsDialog(QDialog):
 
         def work():
             try:
-                self._sig.voices.emit(self._eleven().voices(), "")
+                voices = self._eleven().voices()
             except Exception as e:  # noqa: BLE001
-                self._sig.voices.emit(None, str(e))
+                self._emit_safe(self._sig.voices, None, str(e))
+                return
+            self._emit_safe(self._sig.voices, voices, "")
         threading.Thread(target=work, daemon=True).start()
 
     def _voices_done(self, voices, err: str):
@@ -165,6 +176,7 @@ class VoiceTtsDialog(QDialog):
         self.b_use.setEnabled(False)
         self._enable()
         self.info.setText("Making the sample…" + (" (the model loads first: about 15 s)" if kind == "local" else ""))
+        voice_id = voice["id"] if kind == "elevenlabs" and voice else None      # (the local engine has no voice ids)
         made = ({"label": f"designed: {desc[:40]}", "text": text, "eleven": None} if kind == "local" else
                 {"label": f"ElevenLabs: {voice['name']}", "text": text,
                  "eleven": {"id": voice["id"], "name": voice["name"]}})
@@ -172,12 +184,13 @@ class VoiceTtsDialog(QDialog):
         def work():
             try:
                 eng = self._local() if kind == "local" else self._eleven()
-                secs = tts.make_sample(eng, text, self.lang, self.wav, description=desc, voice_id=voice and
-                                       voice["id"], model=self.model, seed=seed)
+                secs = tts.make_sample(eng, text, self.lang, self.wav, description=desc, voice_id=voice_id,
+                                       model=self.model, seed=seed)
                 self._pending = made
-                self._sig.sample.emit(secs, "")
             except Exception as e:  # noqa: BLE001
-                self._sig.sample.emit(None, str(e))
+                self._emit_safe(self._sig.sample, None, str(e))
+                return
+            self._emit_safe(self._sig.sample, secs, "")
         threading.Thread(target=work, daemon=True).start()
 
     def _sample_done(self, secs, err: str):
@@ -193,8 +206,10 @@ class VoiceTtsDialog(QDialog):
         self._play(self.wav, f"Voice sample for @{self.name}")
 
     def reject(self):
-        if not self.busy:
-            super().reject()
+        if self.busy:                            # (Cancel is off while busy; Esc still comes here)
+            self.info.setText("Wait until the voice is made, then close.")
+            return
+        super().reject()
 
     def accept(self):
         if not self.busy and self.made is not None:

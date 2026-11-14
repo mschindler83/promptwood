@@ -9,7 +9,7 @@ from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtWidgets import QAbstractItemView, QHBoxLayout, QListWidget, QListWidgetItem, QMenu, QPushButton, QWidget
 
-from .widgets import label
+from .widgets import format_time, label
 
 THUMB = QSize(96, 54)
 
@@ -18,7 +18,7 @@ def state_text(s: dict) -> str:
     """'0:24 · done' / '0:18 · 1 changed, 2 new' / 'empty' for a scene card."""
     n = s.get("done", 0) + s.get("changed", 0) + s.get("new", 0)
     secs = float(s.get("secs") or 0)
-    length = f"{int(secs // 60)}:{int(round(secs % 60)):02d}"
+    length = format_time(secs)
     if not n:
         return "no clip chosen" if s.get("clips") else "empty"
     end = f" · ends at #{s['take'][1:]}" if s.get("fixed") and s.get("take") else ""
@@ -83,25 +83,41 @@ class Storyboard(QWidget):
         sv.addWidget(self.b_add)
         h.addWidget(side)
         self._loading = False
+        self._current: str | None = None          # the open scene (a click on it changes nothing)
+        self._thumbs: dict[str, tuple[tuple, QPixmap]] = {}      # path -> ((mtime, size), the scaled picture)
+
+    def _thumb(self, path: str) -> QPixmap:
+        """The scene's start picture scaled to a card, read from disk once per file version."""
+        try:
+            st = Path(path).stat()
+        except OSError:
+            return QPixmap()
+        key = (st.st_mtime_ns, st.st_size)
+        hit = self._thumbs.get(path)
+        if hit is None or hit[0] != key:
+            img = QImage(path)
+            pm = QPixmap() if img.isNull() else QPixmap.fromImage(
+                img.scaled(THUMB, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            hit = self._thumbs[path] = (key, pm)
+        return hit[1]
 
     def show_scenes(self, scenes: list[tuple[str, str, dict]], current: str | None) -> None:
         """scenes: (id, title, summary) in film order."""
         self._loading = True
+        self._current = current
+        self._thumbs = {p: v for p, v in self._thumbs.items()
+                        if p in {str(s.get("thumb")) for _i, _t, s in scenes}}
         try:
             self.list.clear()
             total = 0.0
             for k, (sid, title, s) in enumerate(scenes, start=1):
-                pm = QPixmap()
-                if s.get("thumb") and Path(s["thumb"]).is_file():
-                    img = QImage(str(s["thumb"]))
-                    if not img.isNull():
-                        pm = QPixmap.fromImage(img.scaled(THUMB, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                pm = self._thumb(str(s["thumb"])) if s.get("thumb") else QPixmap()
                 item = QListWidgetItem(QIcon(pm) if not pm.isNull() else QIcon(), card_text(k, title, s))
                 item.setData(Qt.UserRole, sid)
                 item.setData(Qt.UserRole + 1, s.get("join"))
                 notes = html.escape(s["notes"]).replace("\n", "<br>") if s.get("notes") else ""
                 item.setToolTip("<p>" + (f"{notes}<br><br>" if notes else "") +
-                                f"Scene {k}: {title}. {s.get('clips', 0)} clips; the film plays it up to "
+                                f"Scene {k}: {html.escape(title)}. {s.get('clips', 0)} clips; the film plays it up to "
                                 + (f"clip #{s['take'][1:]}" if s.get("fixed") else "its selected clip") +
                                 ". Click to work on it, drag to move it, right-click for more</p>")
                 item.setFlags(item.flags() | Qt.ItemIsDragEnabled)
@@ -110,7 +126,7 @@ class Storyboard(QWidget):
                     self.list.setCurrentItem(item)
                 total += float(s.get("secs") or 0)
             n = len(scenes)
-            self.total.setText(f"{n} scene{'s' if n != 1 else ''} · {int(total // 60)}:{int(round(total % 60)):02d}")
+            self.total.setText(f"{n} scene{'s' if n != 1 else ''} · {format_time(total)}")
         finally:
             self._loading = False
 
@@ -125,8 +141,12 @@ class Storyboard(QWidget):
         return [self.list.item(i).data(Qt.UserRole) for i in range(self.list.count())]
 
     def _chosen(self, item, _prev=None):
+        """A click and Enter both come here, and a double-click sends several: the open scene is not chosen again."""
         if not self._loading and item is not None:
             sid = item.data(Qt.UserRole)
+            if sid == self._current:
+                return
+            self._current = sid
             QTimer.singleShot(0, lambda: self.sceneChosen.emit(sid))   # after the click is handled
 
     def _emit_moved(self):
@@ -167,5 +187,4 @@ class Storyboard(QWidget):
             self.joinWanted.emit(sid, joins[chosen])
 
     def setEnabled(self, on: bool):          # noqa: N802  (Qt naming): no switching while clips are made
-        self.list.setEnabled(on)
-        self.b_add.setEnabled(on)
+        super().setEnabled(on)

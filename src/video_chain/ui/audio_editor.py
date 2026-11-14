@@ -13,13 +13,13 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QPointF, QRectF, QSettings, Qt, QUrl, Signal
 from PySide6.QtGui import QKeySequence, QPainter, QPen, QShortcut
-from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QHBoxLayout,
+from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout,
                                QLineEdit, QPushButton, QVBoxLayout)
 
 from .. import chain
 from ..tree import AUDIO_REF_MIN, VOICE_MAX_SECS, VOICE_REF_MAX_SECS
-from .theme import icon, theme, with_alpha
-from .video_editor import RangeBar, fmt
+from .theme import theme, with_alpha
+from .video_editor import RangeBar, RangePlayerMixin, fmt
 from .widgets import guard_wheel, icon_button, label
 
 PEAKS = 1200                                    # waveform columns
@@ -109,7 +109,7 @@ class _Clean(QObject):
     ready = Signal(object, str, float, float)       # the cleaned file or None, error, the part it is of (start, end)
 
 
-class AudioRangeDialog(QDialog):
+class AudioRangeDialog(RangePlayerMixin, QDialog):
     """Choose a sound file and the part of it that becomes an audio track. file / start / end / name: the result.
     voice: the part becomes a character's voice instead (no name; a video's picture is shown while it plays, to
     see who speaks; a new file starts with its first VOICE_REF_MAX_SECS chosen). isolate(source wav, target wav),
@@ -212,6 +212,8 @@ class AudioRangeDialog(QDialog):
         rrow.addWidget(b_e)
         rrow.addStretch(1)
         v.addLayout(rrow)
+        self.keys_hint = label("Keys: Space play / pause · [ start here · ] end here", level="tertiary")
+        v.addWidget(self.keys_hint)
         self.start_spin.valueChanged.connect(lambda x: self.set_range(x, self.end, moved="start"))
         self.end_spin.valueChanged.connect(lambda x: self.set_range(self.start, x, moved="end"))
         guard_wheel(self.start_spin, self.end_spin)
@@ -249,15 +251,6 @@ class AudioRangeDialog(QDialog):
         if file:
             self.load(file, start, end)
         self._update_enabled()
-
-    def _spin(self, tip: str) -> QDoubleSpinBox:
-        s = QDoubleSpinBox()
-        s.setDecimals(3)
-        s.setSingleStep(0.1)
-        s.setSuffix(" s")
-        s.setToolTip(tip)
-        s.setMinimumWidth(110)
-        return s
 
     # ---- file
     def _choose(self):
@@ -327,18 +320,19 @@ class AudioRangeDialog(QDialog):
             if self.video is not None:
                 self.player.setVideoOutput(self.video.sink)
                 self.player.hasVideoChanged.connect(self.video.setVisible)
-            self.player.positionChanged.connect(self._player_pos)
-            self.player.playbackStateChanged.connect(self._player_state)
+            self._attach_player(self.player)
+        self.player_error = ""
         self.player.setSource(QUrl.fromLocalFile(self.file))
 
     def _update_enabled(self):
         on = self.duration > 0
         for w in (self.bar, self.b_back, self.b_fwd, self.start_spin, self.end_spin):
             w.setEnabled(on)
-        self.b_play.setEnabled(on and self.player is not None)
-        self.b_play_sel.setEnabled(on and self.player is not None)
+        self.b_play.setEnabled(on and self._can_play())
+        self.b_play_sel.setEnabled(on and self._can_play())
         long = self.end - self.start >= AUDIO_REF_MIN - 1e-6
         self.buttons.button(QDialogButtonBox.Ok).setEnabled(on and long and not self.clean_busy)
+        self.buttons.button(QDialogButtonBox.Cancel).setEnabled(not self.clean_busy)   # (its thread is writing)
         self.b_clean.setEnabled(on and long and not self.clean_busy and self._isolate is not None)
         self.b_clean_play.setEnabled(self.clean is not None and self.want_player and not self.clean_busy)
         self.use_clean.setEnabled(self.clean is not None and not self.clean_busy)
@@ -490,6 +484,7 @@ class AudioRangeDialog(QDialog):
     def seek(self, t: float):
         if self.duration <= 0:
             return
+        self._stop_at = None                        # a seek ends "play range"
         self._pos = min(max(0.0, t), self.duration)
         self.bar.set_pos(self._pos)
         self.time.setText(f"{fmt(self._pos)} / {fmt(self.duration)}")
@@ -506,35 +501,11 @@ class AudioRangeDialog(QDialog):
         from PySide6.QtMultimedia import QMediaPlayer
         return self.player.playbackState() == QMediaPlayer.PlayingState
 
-    def toggle(self):
-        if self.player is None:
-            return
+    def _total(self) -> float:
+        return self.duration
+
+    def _before_play(self):
         self._stop_cleaned_playback()
-        from PySide6.QtMultimedia import QMediaPlayer
-        if self.player.playbackState() == QMediaPlayer.PlayingState:
-            self.player.pause()
-        else:
-            self._stop_at = None
-            self.player.play()
-
-    def play_range(self):
-        if self.player is None:
-            return
-        self.seek(self.start)
-        self._stop_at = self.end
-        self.player.play()
-
-    def _player_pos(self, ms: int):
-        self._pos = ms / 1000
-        self.bar.set_pos(self._pos)
-        self.time.setText(f"{fmt(self._pos)} / {fmt(self.duration)}")
-        if self._stop_at is not None and self._pos >= self._stop_at:
-            self._stop_at = None
-            self.player.pause()
-
-    def _player_state(self, st):
-        from PySide6.QtMultimedia import QMediaPlayer
-        self.b_play.setIcon(icon("pause" if st == QMediaPlayer.PlayingState else "play"))
 
     def _stop_cleaned_playback(self):
         if self.clean_player is not None:

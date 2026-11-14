@@ -1,6 +1,6 @@
 /* the design app-wide stylesheet (Graphite / Cobalt v1). ThemeManager fills the ${...} placeholders from Theme:
    ${token} colour, ${token@a} colour with alpha a, ${rowHeight}, ${rowHeight-N}, ${radius.rN}, ${space.sN},
-   ${font.X} px, ${uiFamily}, ${monoFamily}, ${icon:name:token} = file of the icon tinted with token.
+   ${font.X} px, ${uiFamily}, ${monoFamily}, the icon placeholder (the word icon, the icon name and a colour token, joined by colons) = file of the icon tinted with that token.
    One sheet for the whole app: never setStyleSheet per widget; after a dynamic-property change call imt::repolish(w). */
 
 * { font-family: "${uiFamily}"; font-size: ${font.body}px; }

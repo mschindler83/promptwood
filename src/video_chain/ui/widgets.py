@@ -9,6 +9,15 @@ from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QHBoxL
 from .theme import icon, theme
 
 
+def format_time(seconds: float, precision: int = 0) -> str:
+    """m:ss (precision 0) or m:ss.mmm (precision 3). Rounded first, then split: 59.6 s is 1:00, never 0:60."""
+    q = 10 ** precision
+    total = round(max(0.0, float(seconds)) * q)
+    whole, frac = divmod(total, q)
+    m, s = divmod(whole, 60)
+    return f"{m}:{s:02d}" + (f".{frac:0{precision}d}" if precision else "")
+
+
 def frame_image(frame) -> QImage:
     """A decoded video frame as an RGB image, converted on the CPU (YUV420P / NV12, limited or full range, BT.709
     when the frame says so, else BT.601 as Qt does): QVideoFrame.toImage() may use a GPU (OpenGL through the EGL driver that crashed).
@@ -211,8 +220,14 @@ class _WheelGuard(QObject):
     """The mouse wheel over a list or number field that does not have the keyboard focus scrolls the panel
     around it instead of changing the value (scrolling through the settings must not change them)."""
 
+    @staticmethod
+    def has_focus(w: QWidget) -> bool:
+        """The field or a child of it (an editable combo's line edit) has the keyboard focus."""
+        f = QApplication.focusWidget()
+        return w.hasFocus() or (f is not None and w.isAncestorOf(f))
+
     def eventFilter(self, obj, e):                # noqa: N802  (Qt naming)
-        if e.type() == QEvent.Wheel and isinstance(obj, QWidget) and not obj.hasFocus():
+        if e.type() == QEvent.Wheel and isinstance(obj, QWidget) and not self.has_focus(obj):
             parent = obj.parentWidget()
             if parent is not None:
                 QApplication.sendEvent(parent, e)       # Qt passes it on up to the scroll area

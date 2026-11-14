@@ -3,6 +3,7 @@ Clicking a node selects it (the path from the start to it is highlighted); doubl
 video: opens its range editor)."""
 from __future__ import annotations
 
+import html
 from dataclasses import dataclass
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
@@ -15,6 +16,9 @@ W, H = 216, 178
 THUMB_H = 114
 GAP_X, GAP_Y = 64, 24
 START = "__start__"
+ZOOM_MIN, ZOOM_MAX, ZOOM_STEP = 0.2, 2.5, 1.15
+TIP_CHARS = 300
+TIP_HINT = "Double-click: play. Right-click: more."
 
 
 @dataclass
@@ -44,6 +48,14 @@ def status_colour(status: str) -> QColor:
             "converting": t.accent, "failed": t.negative, "stopped": t.warning}.get(status, t.textTertiary)
 
 
+def node_tooltip(info: NodeInfo) -> str:
+    """The prompt (cut short, as plain text) and what a click, a double-click and a right-click do."""
+    text = (info.prompt or info.title).strip()
+    if len(text) > TIP_CHARS:
+        text = text[:TIP_CHARS].rstrip() + "…"
+    return f"<p>{html.escape(text).replace(chr(10), '<br>')}</p><p><i>{TIP_HINT}</i></p>"
+
+
 class NodeItem(QGraphicsObject):
     clicked = Signal(str)
     doubleClicked = Signal(str)
@@ -57,15 +69,31 @@ class NodeItem(QGraphicsObject):
         self._hover = False
         self.focused = False                  # shown in the inspector
         self.playing = False                  # the clip the played path is at
-        self.setToolTip(info.prompt or info.title)
+        self.setToolTip(node_tooltip(info))
+        self._thumb: tuple | None = None      # (picture key, scale, size) -> the scaled picture
 
     def boundingRect(self) -> QRectF:
         return QRectF(-2, -2, W + 4, H + 4)
 
     def set_info(self, info: NodeInfo):
         self.info = info
-        self.setToolTip(info.prompt or info.title)
+        self.setToolTip(node_tooltip(info))
         self.update()
+
+    def thumb_pixmap(self, dpr: float) -> QPixmap | None:
+        """The node's picture scaled to its thumbnail box at the screen's scale, once per picture and scale (not on
+        every paint)."""
+        pm = self.info.pixmap
+        if pm is None or pm.isNull():
+            return None
+        key = (pm.cacheKey(), dpr)
+        if self._thumb is None or self._thumb[0] != key:
+            box = QRectF(8, 8, W - 16, THUMB_H)
+            scaled = pm.scaled(int(box.width() * dpr), int(box.height() * dpr), Qt.KeepAspectRatio,
+                               Qt.SmoothTransformation)
+            scaled.setDevicePixelRatio(dpr)
+            self._thumb = (key, scaled)
+        return self._thumb[1]
 
     def paint(self, p: QPainter, _opt, _w=None):
         t, i = theme(), self.info
@@ -95,11 +123,10 @@ class NodeItem(QGraphicsObject):
         p.setPen(Qt.NoPen)
         p.setBrush(t.bgSunken)
         p.drawRoundedRect(thumb, 5, 5)
-        if i.pixmap is not None and not i.pixmap.isNull():
-            pm = i.pixmap.scaled(int(thumb.width() * 2), int(thumb.height() * 2), Qt.KeepAspectRatio,
-                                 Qt.SmoothTransformation)
-            pm.setDevicePixelRatio(2)
-            pw, ph = pm.width() / 2, pm.height() / 2
+        dpr = p.device().devicePixelRatioF() if p.device() is not None else 1.0
+        pm = self.thumb_pixmap(dpr)
+        if pm is not None:
+            pw, ph = pm.width() / dpr, pm.height() / dpr
             target = QRectF(thumb.center().x() - pw / 2, thumb.center().y() - ph / 2, pw, ph)
             if i.status in ("changed", "stopped", "failed"):
                 p.setOpacity(0.45)
@@ -193,7 +220,7 @@ class NodeItem(QGraphicsObject):
 
 
 class GraphView(QGraphicsView):
-    selected = Signal(object)          # node id, or START, or None
+    selected = Signal(object)          # node id, or START
     activated = Signal(str)
     contextMenu = Signal(str, object)
 
@@ -210,6 +237,9 @@ class GraphView(QGraphicsView):
         self._structure: tuple = ()
         self._focus: str | None = None
         self._playing: str | None = None
+        self._parent_of: dict[str, str | None] = {}
+        self._kids_of: dict[str, list[str]] = {}
+        self.setFocusPolicy(Qt.StrongFocus)         # the keyboard reaches the branches too (see keyPressEvent)
 
     def set_playing(self, nid: str | None) -> None:
         """Mark the clip the played path is at (None: nothing is played), and bring it into view."""
@@ -251,21 +281,29 @@ class GraphView(QGraphicsView):
         for i in infos:
             by_parent.setdefault(i.parent, []).append(i)
         pos: dict[str, QPointF] = {}
-        row = [0]
-
-        def place(info: NodeInfo, depth: int) -> float:
-            kids = by_parent.get(info.id, [])
-            if kids:
-                ys = [place(k, depth + 1) for k in kids]
-                y = (ys[0] + ys[-1]) / 2
-            else:
-                y = row[0] * (H + GAP_Y)
-                row[0] += 1
-            pos[info.id] = QPointF(depth * (W + GAP_X), y)
-            return y
-
-        for root in by_parent.get(None, []):
-            place(root, 0)
+        ids = {i.id for i in infos}
+        self._parent_of = {i.id: i.parent for i in infos}
+        self._kids_of = {i.id: [k.id for k in by_parent.get(i.id, [])] for i in infos}
+        # a node whose parent is not in the list is a root of its own (never stacked on the start node)
+        roots = [i for i in infos if i.parent is None or i.parent not in ids]
+        row = 0
+        for root in roots:                      # iterative post-order: a long chain must not hit the recursion limit
+            ys: dict[str, float] = {}
+            stack: list[tuple[str, int, bool]] = [(root.id, 0, False)]
+            while stack:
+                nid, depth, done = stack.pop()
+                kids = [k.id for k in by_parent.get(nid, [])]
+                if not done and kids:
+                    stack.append((nid, depth, True))
+                    stack.extend((k, depth + 1, False) for k in reversed(kids))
+                    continue
+                if kids:
+                    y = (ys[kids[0]] + ys[kids[-1]]) / 2
+                else:
+                    y = row * (H + GAP_Y)
+                    row += 1
+                ys[nid] = y
+                pos[nid] = QPointF(depth * (W + GAP_X), y)
         for i in infos:
             item = NodeItem(i)
             item.setPos(pos.get(i.id, QPointF(0, 0)))
@@ -300,16 +338,59 @@ class GraphView(QGraphicsView):
     def _clicked(self, nid: str):
         self.selected.emit(nid)
 
-    def mousePressEvent(self, e):
-        super().mousePressEvent(e)
+    # ---- keyboard: Up / Down the siblings, Left the parent, Right the first continuation, Enter plays, Menu
+    def _order(self) -> list[str]:
+        return list(self.items_by_id)
+
+    def keyPressEvent(self, e):
+        key = e.key()
+        cur = self._focus if self._focus in self.items_by_id else None
+        if key in (Qt.Key_Up, Qt.Key_Down, Qt.Key_Left, Qt.Key_Right, Qt.Key_Home) and self.items_by_id:
+            if cur is None:
+                self._go(self._order()[0])
+            elif key in (Qt.Key_Up, Qt.Key_Down):
+                par = self._parent_of.get(cur)
+                sibs = self._kids_of.get(par, []) if par in self._kids_of else \
+                    [k for k in self._order() if self._parent_of.get(k) == par]
+                k = sibs.index(cur) + (1 if key == Qt.Key_Down else -1) if cur in sibs else -1
+                if 0 <= k < len(sibs):
+                    self._go(sibs[k])
+            elif key == Qt.Key_Left:
+                par = self._parent_of.get(cur)
+                if par in self.items_by_id:
+                    self._go(par)
+            elif key == Qt.Key_Right:
+                kids = self._kids_of.get(cur, [])
+                if kids:
+                    self._go(kids[0])
+            else:
+                self._go(self._order()[0])
+            e.accept()
+        elif key in (Qt.Key_Return, Qt.Key_Enter) and cur is not None:
+            self.activated.emit(cur)
+            e.accept()
+        elif key == Qt.Key_Menu and cur is not None:
+            item = self.items_by_id[cur]
+            self.contextMenu.emit(cur, self.viewport().mapToGlobal(self.mapFromScene(item.sceneBoundingRect().center())))
+            e.accept()
+        else:
+            super().keyPressEvent(e)
+
+    def _go(self, nid: str):
+        self.selected.emit(nid)
+        self.set_focus(nid)
+        self.reveal(nid)
 
     # ---- view
+    def zoom_by(self, f: float) -> None:
+        """Zoom by the factor, kept between ZOOM_MIN and ZOOM_MAX."""
+        now = self.transform().m11()
+        f = min(ZOOM_MAX, max(ZOOM_MIN, now * f)) / now
+        self.scale(f, f)
+
     def wheelEvent(self, e):
         if e.modifiers() & Qt.ControlModifier:
-            f = 1.15 ** (e.angleDelta().y() / 120)
-            s = self.transform().m11() * f
-            if 0.2 <= s <= 2.5:
-                self.scale(f, f)
+            self.zoom_by(ZOOM_STEP ** (e.angleDelta().y() / 120))
             e.accept()
         else:
             super().wheelEvent(e)
