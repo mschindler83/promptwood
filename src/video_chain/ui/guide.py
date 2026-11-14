@@ -89,7 +89,7 @@ class GuidePanel(QFrame):
         # the three steps of a project
         self.b_picture = _button("Choose…", "Choose the picture the first clip starts from")
         self.b_text_only = _button("Text only", "Begin without a picture: the first clip is made from its "
-                                                "description alone (choose its picture format in the Project tab)")
+                                                "description alone (choose its Aspect in the Project tab on the right)")
         self.step1 = _Step(1, "Choose a start picture, or start from text only.", "The first clip starts from this "
                            "picture; every clip after it continues from the one before",
                            [self.b_picture, self.b_text_only])
@@ -169,7 +169,9 @@ class NextHint(QFrame):
         h = QHBoxLayout(self)
         h.setContentsMargins(8, 4, 4, 4)
         h.setSpacing(6)
-        self.text = label("Add the next clip: it continues from this one's last frame.")
+        self.text = label("Add the next clip: it continues from this one's last frame. To make it better, refine the "
+                          "prompt, add LoRAs or a sound in the clip's settings; when the path is done, use Export "
+                          "path. Simple / Advanced (top right) shows fewer or more settings.")
         self.text.setWordWrap(True)
         self.b_next = _button("Add the next clip", "A new clip after the selected one (Ctrl+N)", primary=True)
         self.b_close = _button("Got it", "Do not show this again")

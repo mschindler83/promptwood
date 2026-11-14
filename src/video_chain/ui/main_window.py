@@ -38,7 +38,7 @@ from .. import swap
 from .. import tree as T
 from .. import tts as TTS
 from .. import runpod as RP
-from ..comfy import REF_HINT
+from ..comfy import REF_HINT, refine_size
 from .graph import START, GraphView, NodeInfo
 from .image_picker import pick_image
 from .clip_dialogs import CompareDialog, HandoverDialog, SplitDialog, VideoFrameDialog
@@ -62,6 +62,11 @@ from .view_mode import AdvancedNote, ViewMode, row_widget
 from .problems import EXAMPLES, ProblemBox, add_example, camera_menu_items, insert_at_cursor
 from .guide import EngineBanner, GuidePanel, NextHint
 
+try:                                            # (the player is optional: Preview says so when it is missing)
+    from PySide6.QtMultimedia import QMediaPlayer
+except ImportError:                             # pragma: no cover
+    QMediaPlayer = None
+
 DEFAULT_COMFY_URL = "http://127.0.0.1:8188"
 from ..llm_server import DEFAULT_PORT as LLM_DEFAULT_PORT, DEFAULT_SERVER as LLM_DEFAULT_SERVER  # noqa: E402
 LLM_MODEL_DIRS = (Path("/path/to/ai/hf-models"), Path.home() / ".cache" / "huggingface" / "hub")
@@ -77,12 +82,17 @@ def find_gguf_models(roots=LLM_MODEL_DIRS) -> list[Path]:
     out: list[Path] = []
     for root in roots:
         try:
+            by_folder: dict[Path, list[Path]] = {}              # (one look at each snapshot folder, not 3 per file)
             for f in sorted(Path(root).glob("models--*/snapshots/*/*.gguf")):
-                low = f.name.lower()
-                if "mmproj" in low or "imatrix" in low or not f.exists():
-                    continue
-                if any(f.parent.glob("*mmproj*.gguf")) or any(h in low for h in CHAT_HINTS):
-                    out.append(f)
+                by_folder.setdefault(f.parent, []).append(f)
+            for files in by_folder.values():
+                has_mmproj = any("mmproj" in f.name.lower() for f in files)
+                for f in files:
+                    low = f.name.lower()
+                    if "mmproj" in low or "imatrix" in low or not f.exists():
+                        continue
+                    if has_mmproj or any(h in low for h in CHAT_HINTS):
+                        out.append(f)
         except OSError:
             continue
     return out
@@ -93,7 +103,7 @@ FRAME_CHOICES = [17 * n + 5 for n in range(4, 22)]
 
 
 def frames_text(n: int) -> str:
-    return f"{n / 24:.1f} s ({n} frames)"
+    return f"{n / chain.FPS:.1f} s ({n} frames)"
 
 
 def select_frames(combo: QComboBox, frames: int | None) -> None:
@@ -208,17 +218,25 @@ class NewProjectDialog(QDialog):
     def folder(self) -> Path | None:
         name = "".join(ch for ch in self.name.text().strip() if ch not in '/\\:*?"<>|').strip()
         loc = self.location.text().strip()
-        return Path(os.path.expanduser(loc)) / name if name and loc else None
+        if not name or name.startswith(".") or name.endswith(".") or not loc:    # ("." / ".." are no names)
+            return None
+        return Path(os.path.expanduser(loc)) / name
 
     def _check(self):
         f = self.folder()
         problem = ""
         if f is None:
-            problem = "Enter a name and a location."
+            problem = "Enter a name (not starting or ending with a dot) and a location."
         elif (f / T.TREE_FILE).exists():
             problem = f"{f} is already a project (use Open)."
-        elif f.exists() and any(f.iterdir()):
-            problem = f"{f} exists and is not empty."
+        elif f.is_file():
+            problem = f"{f} is a file."
+        else:
+            try:
+                if f.is_dir() and any(f.iterdir()):
+                    problem = f"{f} exists and is not empty."
+            except OSError as e:
+                problem = f"{f} cannot be read ({e.strerror or e})."
         self.target.setText(problem or f"Creates {f}")
         self.buttons.button(QDialogButtonBox.Ok).setEnabled(not problem)
 
@@ -328,7 +346,6 @@ class VariantsDialog(QDialog):
             self.advanced.setToolTip("This clip has no LoRAs of its own (add them in its settings first)")
         self.advanced.toggled.connect(self._preview)
         self.count.valueChanged.connect(self._preview)
-        self._preview()
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("Create")
         buttons.accepted.connect(self.accept)
@@ -348,9 +365,10 @@ class VariantsDialog(QDialog):
     def _preview(self, *_):
         steps = self.strength_steps()
         if not self.advanced.isChecked() or not any(steps):
-            self.preview.setText("")
-            if hasattr(self, "ok"):
-                self.ok.setEnabled(True)
+            # (the seed option does nothing until a step is set: say so instead of looking active)
+            self.preview.setText("Set a step above for at least one LoRA: until then the seed is not kept."
+                                 if self.advanced.isChecked() and self.same_seed.isChecked() else "")
+            self.ok.setEnabled(True)
             return
         rows = []
         for k in range(1, self.count.value() + 1):
@@ -364,8 +382,7 @@ class VariantsDialog(QDialog):
                      f"{LORA_MIN:g}…{LORA_MAX:g})" + (": with the same seed that is the same clip again." if
                                                        self.same_seed.isChecked() else "."))
         self.preview.setText(text)
-        if hasattr(self, "ok"):
-            self.ok.setEnabled(not (same and self.same_seed.isChecked()))
+        self.ok.setEnabled(not (same and self.same_seed.isChecked()))
 
 
 class ExportDialog(QDialog):
@@ -437,6 +454,9 @@ class ExportDialog(QDialog):
             "when the export ends (it also removes itself 20 min after a lost connection). RunPod bills the pod by "
             "the second. Settings → Cloud upscaling (RunPod)" if cloud is not None else
             "Needs a RunPod API key: Settings → Cloud upscaling (RunPod)")
+        if simple:
+            self.cloud.setToolTip(self.cloud.toolTip() + " (Simple view: switch to the Advanced view first, "
+                                  "View → Advanced view, then Settings → Preferences)")
         f.addRow("", self.cloud)
         if simple and cloud is None:               # not set up: not offered; where to set it up is in the tooltip
             f.setRowVisible(self.cloud, False)
@@ -481,7 +501,14 @@ class ExportDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         f.addRow(buttons)
+        self.ok = buttons.button(QDialogButtonBox.Ok)
+        self.file.textChanged.connect(self._check_file)
+        self._check_file()
         guard_wheel(self)
+
+    def _check_file(self, *_):
+        """Export needs a file name (an empty one would make a hidden ".mp4")."""
+        self.ok.setEnabled(bool(self.file.text().strip()))
 
     def _ready(self, size: str) -> bool:
         how, st = self.method.currentData(), self.strength.currentData()
@@ -497,7 +524,6 @@ class ExportDialog(QDialog):
         self.cloud.setEnabled(bool(up and not refine and self.cloud_ok))
         self.swapped.setEnabled(up)
         w, h = self.made_size or (0, 0)
-        from ..comfy import refine_size
         for i in range(1, self.size.count()):
             key = self.size.itemData(i)
             text = {"1080p": "1080p", "2k": "2K"}[key]
@@ -527,7 +553,7 @@ class ExportDialog(QDialog):
 
     def target(self) -> Path:
         f = self.file.text().strip()
-        return Path(os.path.expanduser(f if f.endswith(".mp4") else f + ".mp4"))
+        return Path(os.path.expanduser(f if f.lower().endswith(".mp4") else f + ".mp4"))
 
 
 class _Bridge(QObject):
@@ -554,7 +580,7 @@ END_TIP = ("End image: a picture this clip steers its end to (any image, or a fr
            "The clip's last frame is what the model actually made; the next clip starts from that")
 STEPS_TIP = ("Steps: how many times the model refines each clip (sampling steps). More is slower and rarely "
              "better; 20-30 is typical")
-STEPS_DEFAULT = 3
+STEPS_UNSET = 3        # the per-clip steps box at its lowest value means "the project's steps" (nothing set)
 
 
 LAYOUT_VERSION = 1
@@ -859,7 +885,7 @@ class PromptCard(QFrame):
         self.length = QComboBox()
         self.length.setToolTip("Length of this clip")
         self.steps = QSpinBox()
-        self.steps.setRange(STEPS_DEFAULT, 80)
+        self.steps.setRange(STEPS_UNSET, 80)
         self.steps.setSpecialValueText("default")
         self.steps.setToolTip("Steps: how many times the model refines this clip. Lowest value = the project's")
         srow = QHBoxLayout()
@@ -1065,11 +1091,13 @@ class PromptCard(QFrame):
         try:
             self.loras.set_items(known, self.ov.get("loras") or [])
             self.length.clear()
-            self.length.addItem(f"default ({project_frames / 24:.1f} s)", None)
+            self.length.addItem(f"default ({project_frames / chain.FPS:.1f} s)", None)
             for n in FRAME_CHOICES:
                 self.length.addItem(frames_text(n), n)
             select_frames(self.length, self.ov.get("frames"))
-            self.steps.setValue(int(self.ov.get("steps", STEPS_DEFAULT)))
+            self.steps.setValue(int(self.ov.get("steps", STEPS_UNSET)))
+            while self.guide.count() > len(GUIDE_TEXT):         # (an odd value shown earlier is not kept)
+                self.guide.removeItem(self.guide.count() - 1)
             g = self.guide.findData(self.ov.get("guide"))
             if g < 0:
                 self.guide.addItem(f"{self.ov['guide']} frames", self.ov["guide"])
@@ -1104,7 +1132,7 @@ class PromptCard(QFrame):
             ov["loras"] = loras
         if self.length.currentData() is not None:
             ov["frames"] = self.length.currentData()
-        if self.steps.value() > STEPS_DEFAULT:
+        if self.steps.value() > STEPS_UNSET:
             ov["steps"] = self.steps.value()
         if self.guide.currentData():
             ov["guide"] = self.guide.currentData()
@@ -1443,14 +1471,16 @@ class PromptCard(QFrame):
         if at is None:
             times = [0.0] + [it["at"] for it in self.keys.items] + [self.keys.duration]
             gap = max(range(len(times) - 1), key=lambda i: times[i + 1] - times[i])
-            at = self.keys.at_of(self.keys.x_of((times[gap] + times[gap + 1]) / 2))
+            at = round((times[gap] + times[gap + 1]) / 2, 2)
         m = QMenu(self)
         acts = {m.addAction(f"A picture at {at:.2f} s…"): "add", m.addAction("A frame of a video…"): "add_video"}
         if self.keys.made:
             acts[m.addAction("This clip's frame at that moment (keep it, re-roll the rest)…")] = "add_moment"
         a = self._exec_menu(m)
-        if a in acts:
-            self.keyframe.emit(acts[a], self.nid, {"at": at})
+        what = acts.get(a)
+        m.deleteLater()                             # (a child of the card: it would stay until the card goes)
+        if what:
+            self.keyframe.emit(what, self.nid, {"at": at})
 
     def _exec_menu(self, m):
         return m.exec(QCursor.pos())
@@ -1498,8 +1528,10 @@ class PromptCard(QFrame):
     def _restyle(self):
         t = theme()
         border = t.accent.name() if self.state == "generating" else t.lineSubtle.name()
-        self.setStyleSheet(f"QFrame#promptCard {{ background: {t.bgRaised.name()}; border: 1px solid {border};"
-                           f" border-radius: 6px; }} QFrame#promptCard QLabel {{ background: transparent; }}")
+        css = (f"QFrame#promptCard {{ background: {t.bgRaised.name()}; border: 1px solid {border};"
+               f" border-radius: 6px; }} QFrame#promptCard QLabel {{ background: transparent; }}")
+        if css != self.styleSheet():                # (a new sheet re-polishes the card and everything in it)
+            self.setStyleSheet(css)
 
 
 class VideoCard(QFrame):
@@ -1575,7 +1607,7 @@ class VideoCard(QFrame):
         n = chain.range_frames(src.get("start", 0), src.get("end", 0))
         rot = T.source_rotation(src)
         self.range.setText(f"{fmt_time(src.get('start', 0))} – {fmt_time(src.get('end', 0))} of the file · "
-                           f"{n} frames at 24 fps" + (f" · turned {rot}° right" if rot else ""))
+                           f"{n} frames at {chain.FPS} fps" + (f" · turned {rot}° right" if rot else ""))
 
     def set_state(self, state: str, pixmap: QPixmap | None, step: str = ""):
         self.state = state
@@ -1611,8 +1643,10 @@ class VideoCard(QFrame):
     def _restyle(self):
         t = theme()
         border = t.accent.name() if self.state in ("generating", "converting") else t.lineSubtle.name()
-        self.setStyleSheet(f"QFrame#promptCard {{ background: {t.bgSunken.name()}; border: 1px solid {border};"
-                           f" border-radius: 6px; }} QFrame#promptCard QLabel {{ background: transparent; }}")
+        css = (f"QFrame#promptCard {{ background: {t.bgSunken.name()}; border: 1px solid {border};"
+               f" border-radius: 6px; }} QFrame#promptCard QLabel {{ background: transparent; }}")
+        if css != self.styleSheet():
+            self.setStyleSheet(css)
 
 
 # ----------------------------------------------------------------------------- start image tile, preview
@@ -1642,10 +1676,13 @@ class Preview(QWidget):
     opened: a file is played now (its path); moved: where it is (seconds), -1 when it stopped or was closed."""
     opened = Signal(str)
     moved = Signal(float)
+    failed = Signal(str)              # a file is missing or cannot be played (what to tell the user)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.player = None
+        self.video: VideoView | None = None
+        self.audio = None
         v = QVBoxLayout(self)
         v.setContentsMargins(8, 8, 8, 8)
         v.setSpacing(6)
@@ -1675,7 +1712,9 @@ class Preview(QWidget):
         if self.player is not None:
             return True
         try:
-            from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+            from PySide6.QtMultimedia import QAudioOutput
+            if QMediaPlayer is None:
+                raise ImportError
         except ImportError:
             self.placeholder.setText("Video playback is not available (QtMultimedia missing).")
             return False
@@ -1689,10 +1728,31 @@ class Preview(QWidget):
         self.player.positionChanged.connect(self._pos)
         self.player.durationChanged.connect(lambda d: self.slider.setRange(0, int(d)))
         self.player.playbackStateChanged.connect(self._state)
+        self.player.errorOccurred.connect(self._error)
         return True
 
+    def _error(self, _code, text: str):
+        if self.player is None or self.player.source().isEmpty():
+            return
+        self._fail(f"Cannot play {self.player.source().fileName()}: {text}")
+
+    def _fail(self, text: str):
+        """Show why nothing plays (the placeholder says it) and tell the window (status line, log)."""
+        if self.player is not None:
+            self.player.stop()
+        self.name.setText(text)
+        self.stack.setCurrentWidget(self.placeholder)
+        self.b_play.setEnabled(False)
+        self.slider.setEnabled(False)
+        self.failed.emit(text)
+
     def open(self, path: Path, title: str, autoplay: bool = True):
-        if not path or not Path(path).exists() or not self._ensure_player():
+        if not path:
+            return
+        if not Path(path).exists():
+            self._fail(f"File not found: {path}")
+            return
+        if not self._ensure_player():
             return
         self.player.stop()
         self.player.setSource(QUrl())
@@ -1708,7 +1768,6 @@ class Preview(QWidget):
     def toggle(self):
         if self.player is None:
             return
-        from PySide6.QtMultimedia import QMediaPlayer
         if self.player.playbackState() == QMediaPlayer.PlayingState:
             self.player.pause()
         else:
@@ -1719,6 +1778,12 @@ class Preview(QWidget):
             self.player.stop()
             self.player.setSource(QUrl())
             self.video.clear()
+            self.stack.setCurrentWidget(self.placeholder)
+            self.name.setText("")
+            self.slider.setValue(0)
+            self.time.setText("0:00.0 / 0:00.0")
+            self.b_play.setEnabled(False)
+            self.slider.setEnabled(False)
             self.moved.emit(-1.0)
 
     def _pos(self, ms):
@@ -1730,7 +1795,6 @@ class Preview(QWidget):
         self.time.setText(f"{fmt_time(ms / 1000)} / {fmt_time(self.player.duration() / 1000)}")
 
     def _state(self, st):
-        from PySide6.QtMultimedia import QMediaPlayer
         self.b_play.setIcon(icon("pause" if st == QMediaPlayer.PlayingState else "play"))
         if st == QMediaPlayer.StoppedState:
             self.moved.emit(-1.0)                   # (played to its end, or stopped)
@@ -1744,7 +1808,6 @@ class MainWindow(QMainWindow):
     def __init__(self, settings: QSettings | None = None, command: list[str] | None = None):
         super().__init__()
         self.setWindowTitle("Promptwood")
-        self._build_menu()
         self.qs = settings or QSettings()
         # Simple or Advanced, decided once: Simple on a first run (no settings yet), Advanced for settings from
         # before the views existed (that user knows every control); stored at once, so it never flips later
@@ -1754,6 +1817,7 @@ class MainWindow(QMainWindow):
             self.qs.setValue("viewMode", mode)
         self.view = ViewMode(mode == "simple", self)
         self.view.changed.connect(self._view_switched)
+        self._build_menu()
         self.command = command                  # tests replace the worker with a fake one
         self.project: Path | None = None
         self.tree: T.Tree | None = None
@@ -1831,12 +1895,12 @@ class MainWindow(QMainWindow):
         self._remixing = False
         self.remix_due: set[str] = set()
         self._remix_stuck: set[str] = set()     # the due clips whose remix failed (tried again after an edit)
-        self._build()
-        self._load_settings()
         self._gpu_proc: QProcess | None = None
         self._gpu_timer = QTimer(self, interval=4000, timeout=self._poll_gpu)
-        self._gpu_timer.start()
         self._comfy_timer = QTimer(self, interval=4000, timeout=self._poll_comfy)
+        self._build()
+        self._load_settings()
+        self._gpu_timer.start()
         self._comfy_timer.start()
         QTimer.singleShot(0, self._poll_comfy)
         QTimer.singleShot(0, self.scan_loras)
@@ -1874,7 +1938,7 @@ class MainWindow(QMainWindow):
         self.prefs.setWindowTitle("Preferences")
         prefs_v = QVBoxLayout(self.prefs)
 
-        bar, _ = section_bar("Project", left)
+        bar, _ = section_bar("Project folder", left)
         proj_v.addWidget(bar)
         pw = QWidget()
         pf = QFormLayout(pw)
@@ -2453,6 +2517,7 @@ class MainWindow(QMainWindow):
         b_key = QPushButton("Save key")
         b_key.setAutoDefault(False)
         b_key.clicked.connect(lambda: self._save_civitai_key())
+        self.civitai_key.returnPressed.connect(lambda: self._save_civitai_key())    # (Enter saves too)
         crow.addWidget(self.civitai_key, 1)
         crow.addWidget(b_key)
         self._civitai_row = row_widget(crow)
@@ -2467,6 +2532,7 @@ class MainWindow(QMainWindow):
         b_ekey = QPushButton("Save key")
         b_ekey.setAutoDefault(False)
         b_ekey.clicked.connect(lambda: self._save_eleven_key())
+        self.eleven_key.returnPressed.connect(lambda: self._save_eleven_key())
         erow.addWidget(self.eleven_key, 1)
         erow.addWidget(b_ekey)
         a.addRow("ElevenLabs API key", erow)
@@ -2505,6 +2571,7 @@ class MainWindow(QMainWindow):
         b_rkey = QPushButton("Save key")
         b_rkey.setAutoDefault(False)
         b_rkey.clicked.connect(lambda: self._save_runpod_key())
+        self.runpod_key.returnPressed.connect(lambda: self._save_runpod_key())
         rrow.addWidget(self.runpod_key, 1)
         rrow.addWidget(b_rkey)
         r.addRow("RunPod API key", rrow)
@@ -2720,6 +2787,7 @@ class MainWindow(QMainWindow):
         self._played_path: tuple[str, list] | None = None   # the joined path in the preview, its clips' spans
         self.preview.opened.connect(self._preview_opened)
         self.preview.moved.connect(self._preview_moved)
+        self.preview.failed.connect(self._preview_failed)
         rv.addWidget(self.preview, 1)
         prow = QHBoxLayout()
         prow.setContentsMargins(8, 0, 8, 8)
@@ -2849,9 +2917,11 @@ class MainWindow(QMainWindow):
             QShortcut(QKeySequence(keys), self, activated=fn)
         for w in (*self._panels, self.prefs):
             guard_wheel(w)
-        QShortcut(QKeySequence("Delete"), self.graph,
-                  activated=lambda: self.node_action("delete", self.target_id()))
-        QShortcut(QKeySequence("F"), self.graph, activated=self.graph.fit)
+        # plain keys act only while the graph (or a child) has the focus: in a list or a combo, Delete / F are theirs
+        self.graph.setFocusPolicy(Qt.StrongFocus)
+        for key, fn in (("Delete", lambda: self.node_action("delete", self.target_id())), ("F", self.graph.fit)):
+            sc = QShortcut(QKeySequence(key), self.graph, activated=fn)
+            sc.setContext(Qt.WidgetWithChildrenShortcut)
         self._register_advanced()
         self._show_view()
         self._update_buttons()
@@ -2874,8 +2944,8 @@ class MainWindow(QMainWindow):
             (a, self.llm_on),
             (a, self.llm_server), (a, self._gguf_row), (a, self.llm_cpu_moe), (a, self._civitai_row),
             (a, self._keep_row), *self._runpod_section,
-            # the log, the GPU's memory
-            (self.tabs, self.log), self.gpu)
+            # the GPU's memory (the log stays: Details on a failed clip and bug reports lead there)
+            self.gpu)
 
     def advanced_only(self, *targets):
         """Register controls the Simple view hides: a widget, (QFormLayout, field widget) for a form row, (QTabWidget,
@@ -2903,6 +2973,10 @@ class MainWindow(QMainWindow):
                       (self.act_simple, simple), (self.act_advanced, not simple)):
             w.setChecked(on)
 
+    def _preview_failed(self, text: str):
+        self.status.setText(text)
+        self.log.appendPlainText(text)
+
     def show_log(self):
         """View → Log: shown in the Simple view too when asked for (until the view is switched)."""
         self.view.reveal((self.tabs, self.log))
@@ -2919,25 +2993,28 @@ class MainWindow(QMainWindow):
     def _guide_choices(self) -> set[str]:
         """What the guide was told for this project ("text_only", "no_cast"); kept in the app's settings, not in
         the project (it changes nothing the clips are made with)."""
-        return set(self._guide_store().get(str(self.project), [])) if self.project is not None else set()
+        return set(self._guide_store().get(self._guide_key(), [])) if self.project is not None else set()
+
+    def _guide_key(self) -> str:
+        return str(self.project.resolve())      # (the same folder spelled another way is the same project)
 
     def _guide_mark(self, what: str):
         if self.project is None:
             return
-        d, key = self._guide_store(), str(self.project)
+        d, key = self._guide_store(), self._guide_key()
         d[key] = sorted(set(d.pop(key, [])) | {what})
         self.qs.setValue("guideChoices", json.dumps(dict(list(d.items())[-50:])))     # (the last 50 projects)
         self._update_guide()
 
     def _guide_text_only(self):
-        """Step 1 without a picture: the first clip is made from its description; its picture format is Aspect."""
+        """Step 1 without a picture: the first clip is made from its description; its picture format is the Aspect setting."""
         if self.project is None:
             return
         self._guide_mark("text_only")
         self.inspector.setCurrentWidget(self.proj_scroll)
         QTimer.singleShot(0, lambda: self.proj_scroll.ensureWidgetVisible(self.aspect, 0, 40))
-        self.status.setText("Text only: the first clip is made from its description. Choose its picture format "
-                            "under Aspect (Project tab).")
+        self.status.setText("Text only: the first clip is made from its description. Choose its Aspect "
+                            "(Project tab on the right).")
 
     def _guide_cast(self):
         """Step 2: Cast & references, with New in focus (it adds a person or a place)."""
@@ -2968,6 +3045,8 @@ class MainWindow(QMainWindow):
         if on:
             self._show_left_tab(0)
         self._update_guide()
+        if not on:
+            self.status.setText("Guide hidden: View → Getting started shows it again.")
 
     def _update_guide(self):
         """The guide while the project has no made clip (step 0 without a project), its steps ticked from the real
