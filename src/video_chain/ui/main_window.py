@@ -798,7 +798,7 @@ class PromptCard(QFrame):
         head.addStretch(1)
         # the header: the most used action with its name, the others in one More menu (delete last, it asks)
         self.act_variant = _CardAction(icon("clone"), "Variant", self)
-        self.act_variant.setToolTip("Variant: same prompt, other seed, as a new branch (Ctrl+D)")
+        self.act_variant.setToolTip(S.tip("Variant: same prompt, other seed, as a new branch", "variant"))
         self.act_variant.triggered.connect(lambda: self.action.emit("variant", self.nid))
         self.b_variant = QToolButton()
         self.b_variant.setDefaultAction(self.act_variant)
@@ -811,7 +811,7 @@ class PromptCard(QFrame):
                                                 "but other seeds, generated at once", None),
             ("compare", "cmp", "Compare…", "Compare: play this clip and its made variants side by side, keep one",
              None),
-            ("branch", "split", "Branch", "Branch: another continuation from the same point (Ctrl+B)", "Ctrl+B"),
+            ("branch", "split", "Branch", S.tip("Branch: another continuation from the same point", "branch"), S.keys("branch")),
             ("start_rows", "layers", "More start images…",
              "More start images…: choose several pictures; this clip is made once for each, with the same prompt, "
              "seed and settings, each on its own row (for a clip that starts the video)", None),
@@ -821,7 +821,7 @@ class PromptCard(QFrame):
             None,
             ("freeze_toggle", "lock", "Freeze", FREEZE_TIP, None),
             None,
-            ("delete", "trash", "Delete…", "Delete this clip and everything after it (asks first)", "Del")))
+            ("delete", "trash", "Delete…", "Delete this clip and everything after it (asks first)", S.keys("graph_delete"))))
         head.addWidget(self.b_more)
         self.more_actions = acts                 # action name -> QAction (the More menu's entries)
         for k in ("start_rows", "row_apply"):    # (shown for a clip that starts the video: set_rows)
@@ -1629,11 +1629,11 @@ class VideoCard(QFrame):
         head.addStretch(1)
         self.b_more, acts = more_menu(self, self.nid, (
             ("edit", "pen", "Edit range…", "Edit range… (or choose another file)", None),
-            ("branch", "split", "Branch", "Branch: another continuation from the same point (Ctrl+B)", "Ctrl+B"),
+            ("branch", "split", "Branch", S.tip("Branch: another continuation from the same point", "branch"), S.keys("branch")),
             None,
             ("freeze_toggle", "lock", "Freeze", FREEZE_TIP.replace("this clip", "this video"), None),
             None,
-            ("delete", "trash", "Delete…", "Delete this video and everything after it (asks first)", "Del")),
+            ("delete", "trash", "Delete…", "Delete this video and everything after it (asks first)", S.keys("graph_delete"))),
             tip="More actions for this video: edit its range, branch, freeze, delete")
         head.addWidget(self.b_more)
         self.more_actions = acts
@@ -2035,10 +2035,10 @@ class MainWindow(QMainWindow):
         pf.addRow("Folder", prow)
         brow = QHBoxLayout()
         self.b_new = QPushButton("New…")
-        self.b_new.setToolTip("Create a new project (Ctrl+Shift+N)")
+        self.b_new.setToolTip(S.tip("Create a new project", "new_project"))
         self.b_new.clicked.connect(self.new_project)
         self.b_open = QPushButton("Open…")
-        self.b_open.setToolTip("Open a project folder (Ctrl+O)")
+        self.b_open.setToolTip(S.tip("Open a project folder", "open"))
         self.b_open.clicked.connect(self._choose_project)
         self.b_recent = QPushButton("Recent")
         self.b_recent.setToolTip("Open one of the last projects")
@@ -2755,14 +2755,14 @@ class MainWindow(QMainWindow):
         self.tree_info = label("", level="tertiary")
         bh.addWidget(self.tree_info)
         bh.addSpacing(8)
-        self.b_continue = icon_button("plus", "Continue: a new clip after the selected one (Ctrl+N)")
-        self.b_add_video = icon_button("camera", "Add a real video after the selected clip (Ctrl+Shift+V): a "
+        self.b_continue = icon_button("plus", S.tip("Continue: a new clip after the selected one", "continue"))
+        self.b_add_video = icon_button("camera", S.tip("Add a real video after the selected clip", "add_video") + ": a "
                                                  "generated clip before it ends at its first frame, one after it "
                                                  "starts from its last frame")
-        self.b_branch = icon_button("split", "Branch: another continuation from the same point (Ctrl+B)")
-        self.b_variant = icon_button("clone", "Variant: same prompt, other seed (Ctrl+D)")
-        self.b_delete = icon_button("trash", "Delete the selected clip and everything after it (Del)")
-        self.b_fit = icon_button("frame", "Fit the view (F)")
+        self.b_branch = icon_button("split", S.tip("Branch: another continuation from the same point", "branch"))
+        self.b_variant = icon_button("clone", S.tip("Variant: same prompt, other seed", "variant"))
+        self.b_delete = icon_button("trash", S.tip("Delete the selected clip and everything after it", "graph_delete"))
+        self.b_fit = icon_button("frame", S.tip("Fit the view", "graph_fit"))
         for btn, act in ((self.b_continue, "continue"), (self.b_add_video, "video"), (self.b_branch, "branch"),
                          (self.b_variant, "variant"), (self.b_delete, "delete")):
             btn.clicked.connect(lambda _=False, a=act: self.node_action(a, self.target_id()))
@@ -2833,10 +2833,10 @@ class MainWindow(QMainWindow):
         ctv.setContentsMargins(8, 6, 8, 6)
         nav = QHBoxLayout()
         self.b_prev_clip = QPushButton("‹")
-        self.b_prev_clip.setToolTip("The clip before it on the path (Alt+Left)")
+        self.b_prev_clip.setToolTip(S.tip("The clip before it on the path", "prev_clip"))
         self.b_prev_clip.clicked.connect(lambda: self._step_focus(-1))
         self.b_next_clip = QPushButton("›")
-        self.b_next_clip.setToolTip("The clip after it on the path (Alt+Right)")
+        self.b_next_clip.setToolTip(S.tip("The clip after it on the path", "next_clip"))
         self.b_next_clip.clicked.connect(lambda: self._step_focus(1))
         self.focus_info = label("", level="secondary")
         for b in (self.b_prev_clip, self.b_next_clip):
@@ -2925,10 +2925,10 @@ class MainWindow(QMainWindow):
         sb = self.statusBar()
         self.b_gen = QPushButton("Generate path")
         self.b_gen.setProperty("variant", "primary")
-        self.b_gen.setToolTip("Make every clip on the selected path that is not made yet (Ctrl+Enter)")
+        self.b_gen.setToolTip(S.tip("Make every clip on the selected path that is not made yet", "generate"))
         self.b_gen.clicked.connect(self.generate_path)
         self.b_gen_all = QPushButton("Generate all")
-        self.b_gen_all.setToolTip("Make every clip of every branch that is not made yet (Ctrl+Shift+Enter)")
+        self.b_gen_all.setToolTip(S.tip("Make every clip of every branch that is not made yet", "generate_all"))
         self.b_gen_all.clicked.connect(self.generate_all)
         self.b_stop = QPushButton("Stop")
         self.b_stop.setProperty("variant", "danger")
@@ -2969,7 +2969,7 @@ class MainWindow(QMainWindow):
         self.b_unload.clicked.connect(self.unload)
         self.b_unload.hide()
         self.comfy_label = label("", role="statusText")
-        self.b_prefs = icon_button("gear", "Preferences: the video engine (ComfyUI), API keys (Ctrl+,)")
+        self.b_prefs = icon_button("gear", S.tip("Preferences: the video engine (ComfyUI), API keys", "preferences"))
         self.b_prefs.clicked.connect(self.show_prefs)
         sb.addPermanentWidget(self.comfy_label)
         sb.addPermanentWidget(self.b_prefs)
@@ -3776,7 +3776,7 @@ class MainWindow(QMainWindow):
         dlg.setWindowTitle("Cast in the film")
         v = QVBoxLayout(dlg)
         if not names:
-            v.addWidget(label("The film has no characters yet (the Cast & references tab, Alt+2).", level="secondary"))
+            v.addWidget(label("The film has no characters yet (the Cast & references tab, " + S.keys("tab_cast") + ").", level="secondary"))
         table = QTableWidget(len(names), len(rows))
         table.setHorizontalHeaderLabels([f"{k}  {title}" for k, (title, _m) in enumerate(rows, start=1)])
         table.setVerticalHeaderLabels([f"@{n}" for n in names])
@@ -6626,7 +6626,7 @@ class MainWindow(QMainWindow):
         self.cards = []
         path = self.selected_path()
         self.path_hint.setText("The start image is selected. Select a clip to see its path, or press Continue "
-                               "(Ctrl+N) to add a clip after the start image.")
+                               f"({S.keys('continue')}) to add a clip after the start image.")
         known, lora_dir = self.known_loras(), self._lora_dir()      # (once for all cards: each reads files / settings)
         for k, n in enumerate(path):
             if n.is_video:
@@ -6901,9 +6901,9 @@ class MainWindow(QMainWindow):
         self.b_gen_all.setEnabled(free and has and bool(self.tree.nodes))
         self.b_delete.setEnabled(is_clip and free)
         num = f" #{sel[1:]}" if is_clip else ""
-        self.b_branch.setToolTip(f"Branch: another continuation from the same point as clip{num} (Ctrl+B)")
-        self.b_variant.setToolTip(f"Variant of clip{num}: same prompt, other seed (Ctrl+D)")
-        self.b_delete.setToolTip(f"Delete clip{num} (the one in the inspector) and everything after it (Del)")
+        self.b_branch.setToolTip(S.tip(f"Branch: another continuation from the same point as clip{num}", "branch"))
+        self.b_variant.setToolTip(S.tip(f"Variant of clip{num}: same prompt, other seed", "variant"))
+        self.b_delete.setToolTip(S.tip(f"Delete clip{num} (the one in the inspector) and everything after it", "graph_delete"))
         self.b_play_path.setEnabled(all_done and idle)
         self.b_export.setEnabled(all_done and idle)
         fn = self.tree.nodes.get(self.focus) if has and self.focus else None
@@ -7592,7 +7592,7 @@ class MainWindow(QMainWindow):
                 c = self._selected_character()
                 record_use(png, {"kind": "ref", "file": c["images"][-1]})
                 return (f"Added as a {'face' if T.kind_of(c) == 'person' else 'picture'} of @{c['name']} (the Cast & "
-                        "references tab, Alt+2); mention it in prompts as "
+                        f"references tab, {S.keys('tab_cast')}); mention it in prompts as "
                         f"@{c['name']}." + (f" {self.status.text()}" if "CHANGED" in self.status.text() else ""))
             ok = self.set_image(png, confirm=True) if kind == "start" else \
                 bool(target) and self.set_end_image(target, png)
@@ -9639,7 +9639,7 @@ class MainWindow(QMainWindow):
             text, sev = "Video engine: …", ""
         self.comfy_label.setText(text)
         self.comfy_label.setToolTip(f"The video engine is ComfyUI, the program that makes the clips "
-                                    f"({self.comfy_url.text().strip() or DEFAULT_COMFY_URL}); its settings: Ctrl+,")
+                                    f"({self.comfy_url.text().strip() or DEFAULT_COMFY_URL}); its settings: {S.keys('preferences')}")
         self.comfy_label.setProperty("severity", sev)
         repolish(self.comfy_label)
         self.b_start_comfy.setEnabled(not self.comfy_up)
