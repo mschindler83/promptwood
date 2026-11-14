@@ -14,7 +14,7 @@ from .lora_stack import fill_lora_combo, lora_label, lora_path
 from .widgets import safe_emit
 from . import ui_logic as UL
 from .clip_cards import PromptCard
-from .ui_logic import MAX_RECENT_LORAS, REMIX_DELAY_MS, STEPS_TIP, label_loras
+from .ui_logic import MAX_RECENT_LORAS, REMIX_DELAY_MS, STEPS_TIP, label_loras, plural
 
 
 class LorasMixin:
@@ -132,8 +132,8 @@ class LorasMixin:
                             for fam in ("flux1", "sdxl", "krea2", "qwen21", "moss")}
         self._scan_triggers()
         if report:
-            self.status.setText(f"{len(self.h3_loras)} LoRA{'s' if len(self.h3_loras) != 1 else ''} and "
-                                f"{len(self.turbo_loras)} turbo LoRA{'s' if len(self.turbo_loras) != 1 else ''} in "
+            self.status.setText(f"{plural(len(self.h3_loras), 'LoRA')} and "
+                                f"{plural(len(self.turbo_loras), 'turbo LoRA')} in "
                                 "ComfyUI's LoRA folders.")
         if self.tree is not None:
             self._fill_turbo((self.tree.options.get("turbo") or {}).get("lora"))

@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QDialog, QListWidgetItem
 from .. import chain, tree as T, tts as TTS
 from . import dialogs as D, image_picker as IP
 from .widgets import safe_emit
-from .ui_logic import AUDIO_REF_RANGE
+from .ui_logic import AUDIO_REF_RANGE, plural
 
 
 class AudioMixin:
@@ -440,7 +440,7 @@ class AudioMixin:
         for tr in trs:
             users = len(T.track_users(self.tree, tr["id"]))
             item = QListWidgetItem(f"{tr['name']}   {float(tr['secs']):.1f} s"
-                                   + (f"   · {users} clip{'s' if users != 1 else ''}" if users else ""))
+                                   + (f"   · {plural(users, 'clip')}" if users else ""))
             item.setData(Qt.UserRole, tr["id"])
             item.setToolTip(f"{tr.get('source') or tr['file']}\n{float(tr.get('start') or 0):.2f}–"
                             f"{float(tr.get('end') or 0):.2f} s of the file")

@@ -14,7 +14,7 @@ from .widgets import format_time
 from .clip_cards import PromptCard, VideoCard
 from .ui_logic import (
     CARD_MIN_WIDTH, CONTINUE_CLASSIC_TIP, CONTINUE_FIRST_TIP, QWIDGETSIZE_MAX, STATE_TIP, THUMB_CACHE_MAX,
-    TIMELINE_THUMB_HEIGHT, row_start_of)
+    TIMELINE_THUMB_HEIGHT, plural, row_start_of)
 
 
 class PathMixin:
@@ -325,7 +325,7 @@ class PathMixin:
                                                                           or self._converts))
         todo = sum(1 for n in path if self.state(n.id) != "done")
         why = ("Select a clip first: its path is played" if not path else
-               f"Not ready: {todo} clip{'s' if todo != 1 else ''} on this path {'are' if todo != 1 else 'is'} new or "
+               f"Not ready: {plural(todo, 'clip')} on this path {'are' if todo != 1 else 'is'} new or "
                "changed. Generate path first" if todo else
                "Wait until generating has finished" if not idle else "")
         self.b_play_path.setToolTip(why or "Join the clips of the selected path and play them")

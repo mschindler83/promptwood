@@ -13,7 +13,7 @@ from . import dialogs as D, image_picker as IP
 from .clip_inputs import KIND_NAMES
 from .face_crop import FaceCropDialog
 from .clip_cards import PromptCard
-from .ui_logic import _SELECTED
+from .ui_logic import _SELECTED, plural
 
 
 class CastMixin:
@@ -418,10 +418,10 @@ class CastMixin:
             pm = self._pixmap(self.project / c["images"][0]) if self.project and c["images"] else None
             n = len(c["images"])
             if T.kind_of(c) == "person":
-                text = (f"@{c['name']}   {n} face{'s' if n != 1 else ''}" if n else f"@{c['name']}   no face yet") + \
+                text = (f"@{c['name']}   {plural(n, 'face')}" if n else f"@{c['name']}   no face yet") + \
                     ("   · voice" if c.get("voice") else "") + ("   · lead" if c.get("lead") else "")
             else:
-                text = (f"@{c['name']}   {n} picture{'s' if n != 1 else ''}" if n else
+                text = (f"@{c['name']}   {plural(n, 'picture')}" if n else
                         f"@{c['name']}   no picture yet") + f"   · {T.kind_of(c)}"
             item = QListWidgetItem(QIcon(pm) if pm else QIcon(), text)
             item.setData(Qt.UserRole, c["name"])
@@ -447,8 +447,8 @@ class CastMixin:
         else:
             people = sum(1 for c in cast if T.kind_of(c) == "person")
             others = len(cast) - people
-            text = (f"{people} character{'s' if people != 1 else ''}"
-                    + (f" and {others} reference{'s' if others != 1 else ''} (places, objects, style)" if others
+            text = (f"{plural(people, 'character')}"
+                    + (f" and {plural(others, 'reference')} (places, objects, style)" if others
                        else "") + ". Write @Name in a prompt (typing @ offers the names): the clip is made with "
                     "exactly those faces" + (" and pictures" if others else "") + ". "
                     + (f"Clips that mention nobody get @{lead['name']}'s face. " if lead and lead["images"] else

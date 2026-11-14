@@ -25,7 +25,7 @@ from .mw_support import FileDrop, select_frames
 from .ui_logic import (
     CARD_WIDTH, CONTINUE_FIRST_TIP, CONTINUE_SHORT_TIP, CONTINUE_TIP, END_TIP, FRAME_CHOICES, FREEZE_TIP,
     GUIDE_TEXT, GUIDE_TIP, MIX_OFF_TIP, MIX_TIP, SOUND_MODES, SPEAK_TIP, STATE_STYLE, STATE_TEXT, STEPS_UNSET,
-    continue_text, frames_text)
+    continue_text, frames_text, plural)
 
 
 class _CardAction(QAction):
@@ -744,7 +744,7 @@ class PromptCard(QFrame):
         """n: made clips next to this one (its variants / branches) that can be compared with it."""
         self._can_compare = n > 0
         self.b_compare.setEnabled(self._can_compare and self._on)
-        self.b_compare.setToolTip(f"Compare: play this clip and its {n} made variant{'s' if n != 1 else ''} side by "
+        self.b_compare.setToolTip(f"Compare: play this clip and its {plural(n, 'made variant')} side by "
                                   "side, keep one" if n else
                                   "Compare: needs this clip and at least one other made clip from the same point "
                                   "(Variant / Variants…)")

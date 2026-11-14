@@ -15,7 +15,18 @@ from ..__main__ import COMFY_DOWN
 from .widgets import safe_emit
 from .generator_state import (
     CLIP_MODELS, ComfyBinding, ComfyModel, IMAGE_MODELS, Job, ModelState, Phase, RunpodBinding, WorkerBinding)
-from .ui_logic import CLOUD_KILL_GRACE_MS, DEFAULT_COMFY_URL, KILL_GRACE_MS, fmt_left, time_left
+from .ui_logic import CLOUD_KILL_GRACE_MS, DEFAULT_COMFY_URL, KILL_GRACE_MS, fmt_left, plural, time_left
+
+
+def step_status(nid: str, k: int, total: int, what: str, frac: float, left: float | None,
+                left_all: float | None) -> str:
+    """The status line of a clip being made: 'Clip #3 (2 of 5): step 4 / 20 · 20 % · about 40 s left (all clips: ...)'."""
+    text = f"Clip #{T.short_id(nid)} ({k} of {total}): {what} · {round(100 * frac)} %"
+    if left is not None:
+        text += f" · {fmt_left(left)} left"
+    if left_all is not None and total > 1 and k < total:
+        text += f" (all clips: {fmt_left(left_all)})"
+    return text
 
 
 class GeneratorMixin:
@@ -330,10 +341,16 @@ class GeneratorMixin:
 
     def _read_out(self):
         p = self.proc
-        if p is None:
-            return
-        self._buf += bytes(p.readAllStandardOutput())     # bytes: a character split between reads stays whole
+        if p is not None:
+            self._drain_out(p)
+
+    def _drain_out(self, p: QProcess, final: bool = False):
+        """Lines of the worker's output: bytes, so a character split between reads stays whole; the last, unfinished
+        line waits for more unless this is the end (final)."""
+        self._buf += bytes(p.readAllStandardOutput())
         *lines, self._buf = self._buf.split(b"\n")
+        if final:
+            lines, self._buf = lines + [self._buf], b""
         for line in lines:
             self._safe_line(line.decode(errors="replace"))
 
@@ -346,10 +363,15 @@ class GeneratorMixin:
 
     def _read_err(self):
         p = self.proc
-        if p is None:
-            return
+        if p is not None:
+            self._drain_err(p)
+
+    def _drain_err(self, p: QProcess, final: bool = False):
+        """Lines of the worker's error output into the log (a carriage-return progress line shows its last state)."""
         self._ebuf += bytes(p.readAllStandardError()).decode(errors="replace")
         *lines, self._ebuf = self._ebuf.split("\n")
+        if final:
+            lines, self._ebuf = lines + [self._ebuf], ""
         for line in lines:
             line = line.split("\r")[-1].rstrip()
             if line:
@@ -389,106 +411,120 @@ class GeneratorMixin:
         self._tree_stamp = self._stamp()            # the generator wrote it; this window is up to date
 
     def _event(self, ev: dict):
-        e = ev.get("e")
-        if e == "loading":
-            self._worker_idle = False
-            self.status.setText("Starting a RunPod pod …" if ev.get("what") == "runpod" else "Connecting to ComfyUI …")
-            self.progress.setRange(0, 0)
-            self._model_state = ModelState.LOADING
-            self._update_model_label()
-        elif e == "loaded":
-            self.status.setText("Connected to the RunPod pod." if ev.get("what") == "runpod" else
-                                "Connected to ComfyUI.")
-            self._model_state = ModelState.LOADED
-        elif e == "idle":
-            self._worker_idle = True
-            self._idle_since = time.monotonic()
-            self._idle_timeout = ev.get("timeout")
-            if self._job is not None and not self._job.sent:
-                self._send_job()
-            elif self._job is not None:
-                self._job_finished()
-            self._update_model_label()
-        elif e == "bye":
-            self._worker_idle = False
-            self._worker_leaving = True
-            if self._job is not None and self._job.sent and self._phase != Phase.DONE:
-                self._replace_worker = True               # our job crossed its goodbye: a new worker takes it
-            if self._comfy_model in CLIP_MODELS and (ev.get("reason") == "idle" or self._quit_frees):
-                self._comfy_model = None                       # it unloaded the clip model
-            if ev.get("reason") == "idle" and not self.running:
-                self.status.setText("The model was unloaded after the idle time.")
-        elif e == "start":
-            self.status.setText(f"{ev.get('nodes', 0)} clips to make at {ev['width']}×{ev['height']}, "
-                                f"{ev['frames']} frames each.")
-        elif e == "plan":
-            self._plan = list(ev.get("make", []))
-        elif e == "node":
-            nid, st = ev["id"], ev["state"]
-            if st == "generating":
-                self._made_now.add(nid)
-                self.live[nid] = "generating"
-                self.progress_of[nid] = 0.0
-                self._clip_started, self._clip_note = time.monotonic(), ""
-                k = self._plan.index(nid) + 1 if nid in self._plan else 1
-                self._overall(k, 0)
-                node = self.tree.nodes.get(nid) if self.tree else None
-                fast = node is not None and self.veda_used(node) and not self._refine
-                self.status.setText(f"Clip #{T.short_id(nid)} ({k} of {len(self._plan)}) …"
-                                    + (" with ⚡ Veda fast attention (a large clip)" if fast else ""))
-            else:
-                self.live.pop(nid, None)
-                self.progress_of.pop(nid, None)
-                if nid in self._plan:
-                    self._overall(self._plan.index(nid) + 1, 1)
-                self._reload_made()
-            self.refresh()
-            if st == "generating":
-                self.graph.reveal(nid)
-        elif e == "step":
-            nid = ev.get("id")
-            if nid and ev.get("n"):
-                frac = ev["i"] / ev["n"]
-                self.progress_of[nid] = frac
-                k = self._plan.index(nid) + 1 if nid in self._plan else 1
-                self._overall(k, frac)
-                upscaling = bool(self._refine)
-                now = time.monotonic()
-                left = time_left(now - self._clip_started, frac)
-                n_plan = max(1, len(self._plan))
-                left_all = time_left(now - self._run_started, ((k - 1) + frac) / n_plan)
-                what = (self._clip_note or "upscaling") if upscaling else \
-                    f"step {ev['i']} / {ev['n']}"
-                self.status.setText(f"Clip #{T.short_id(nid)} ({k} of {len(self._plan)}): {what} · {round(100 * frac)} %"
-                                    + (f" · {fmt_left(left)} left" if left is not None else "")
-                                    + (f" (all clips: {fmt_left(left_all)})" if left_all is not None and n_plan > 1
-                                       and k < n_plan else ""))
-                item = self.graph.items_by_id.get(nid)
-                if item is not None:
-                    item.info.progress = frac
-                    item.update()
-                card = next((c for c in self.cards if c.nid == nid), None)
-                if card is not None:
-                    text = None
-                    if upscaling:
-                        text = f"{round(100 * frac)} %" + (f" · {fmt_left(left)} left" if left is not None else "")
-                    card.set_progress(ev["i"], ev["n"], text)
-        elif e == "note":                              # what the generator is doing now (e.g. a SeedVR2 piece)
-            self._clip_note = str(ev.get("text") or "")
-            if self._model_state == ModelState.LOADING:         # (preparing the RunPod pod: each step in the status bar)
-                self.status.setText(self._clip_note + " …")
-        elif e == "done":
-            self._phase = Phase.DONE
-        elif e == "exported":
-            self._exported = ev.get("file")
-        elif e == "joining":
-            self.status.setText("Joining the refined clips …")
-        elif e == "error":
-            self._error = ev.get("msg", "error")
-            if self._job is None:                      # after the job (e.g. a RunPod pod that could not be ended)
-                self.status.setText(f"Warning: {self._error}")
-                self.log.appendPlainText(f"Warning: {self._error}")
+        """One event of the worker ('@@ {json}' line): the handler of its kind, then the plugins hear it."""
+        handler = getattr(self, "_ev_" + str(ev.get("e")), None)
+        if handler is not None:
+            handler(ev)
         self.plugins.emit("run_event", ev)             # (the plugins hear it once the app has handled it)
+
+    def _ev_loading(self, ev: dict):
+        self._worker_idle = False
+        self.status.setText("Starting a RunPod pod …" if ev.get("what") == "runpod" else "Connecting to ComfyUI …")
+        self.progress.setRange(0, 0)
+        self._model_state = ModelState.LOADING
+        self._update_model_label()
+
+    def _ev_loaded(self, ev: dict):
+        self.status.setText("Connected to the RunPod pod." if ev.get("what") == "runpod" else
+                            "Connected to ComfyUI.")
+        self._model_state = ModelState.LOADED
+
+    def _ev_idle(self, ev: dict):
+        self._worker_idle = True
+        self._idle_since = time.monotonic()
+        self._idle_timeout = ev.get("timeout")
+        if self._job is not None and not self._job.sent:
+            self._send_job()
+        elif self._job is not None:
+            self._job_finished()
+        self._update_model_label()
+
+    def _ev_bye(self, ev: dict):
+        self._worker_idle = False
+        self._worker_leaving = True
+        if self._job is not None and self._job.sent and self._phase != Phase.DONE:
+            self._replace_worker = True               # our job crossed its goodbye: a new worker takes it
+        if self._comfy_model in CLIP_MODELS and (ev.get("reason") == "idle" or self._quit_frees):
+            self._comfy_model = None                       # it unloaded the clip model
+        if ev.get("reason") == "idle" and not self.running:
+            self.status.setText("The model was unloaded after the idle time.")
+
+    def _ev_start(self, ev: dict):
+        self.status.setText(f"{ev.get('nodes', 0)} clips to make at {ev['width']}×{ev['height']}, "
+                            f"{ev['frames']} frames each.")
+
+    def _ev_plan(self, ev: dict):
+        self._plan = list(ev.get("make", []))
+
+    def _ev_node(self, ev: dict):
+        nid, st = ev["id"], ev["state"]
+        if st == "generating":
+            self._made_now.add(nid)
+            self.live[nid] = "generating"
+            self.progress_of[nid] = 0.0
+            self._clip_started, self._clip_note = time.monotonic(), ""
+            k = self._plan.index(nid) + 1 if nid in self._plan else 1
+            self._overall(k, 0)
+            node = self.tree.nodes.get(nid) if self.tree else None
+            fast = node is not None and self.veda_used(node) and not self._refine
+            self.status.setText(f"Clip #{T.short_id(nid)} ({k} of {len(self._plan)}) …"
+                                + (" with ⚡ Veda fast attention (a large clip)" if fast else ""))
+        else:
+            self.live.pop(nid, None)
+            self.progress_of.pop(nid, None)
+            if nid in self._plan:
+                self._overall(self._plan.index(nid) + 1, 1)
+            self._reload_made()
+        self.refresh()
+        if st == "generating":
+            self.graph.reveal(nid)
+
+    def _ev_step(self, ev: dict):
+        nid = ev.get("id")
+        if not (nid and ev.get("n")):
+            return
+        frac = ev["i"] / ev["n"]
+        self.progress_of[nid] = frac
+        k = self._plan.index(nid) + 1 if nid in self._plan else 1
+        self._overall(k, frac)
+        upscaling = bool(self._refine)
+        now = time.monotonic()
+        left = time_left(now - self._clip_started, frac)
+        n_plan = max(1, len(self._plan))
+        left_all = time_left(now - self._run_started, ((k - 1) + frac) / n_plan)
+        what = (self._clip_note or "upscaling") if upscaling else f"step {ev['i']} / {ev['n']}"
+        self.status.setText(step_status(nid, k, len(self._plan), what, frac, left, left_all))
+        item = self.graph.items_by_id.get(nid)
+        if item is not None:
+            item.info.progress = frac
+            item.update()
+        card = next((c for c in self.cards if c.nid == nid), None)
+        if card is not None:
+            text = None
+            if upscaling:
+                text = f"{round(100 * frac)} %" + (f" · {fmt_left(left)} left" if left is not None else "")
+            card.set_progress(ev["i"], ev["n"], text)
+
+    def _ev_note(self, ev: dict):
+        """What the generator is doing now (e.g. a SeedVR2 piece)."""
+        self._clip_note = str(ev.get("text") or "")
+        if self._model_state == ModelState.LOADING:         # (preparing the RunPod pod: each step in the status bar)
+            self.status.setText(self._clip_note + " …")
+
+    def _ev_done(self, ev: dict):
+        self._phase = Phase.DONE
+
+    def _ev_exported(self, ev: dict):
+        self._exported = ev.get("file")
+
+    def _ev_joining(self, ev: dict):
+        self.status.setText("Joining the refined clips …")
+
+    def _ev_error(self, ev: dict):
+        self._error = ev.get("msg", "error")
+        if self._job is None:                      # after the job (e.g. a RunPod pod that could not be ended)
+            self.status.setText(f"Warning: {self._error}")
+            self.log.appendPlainText(f"Warning: {self._error}")
 
     def _tell_plugins_finished(self, result: int):
         try:
@@ -516,32 +552,7 @@ class GeneratorMixin:
             c.set_editable(True)
         self.progress.setRange(0, 1000)
         self.refresh()
-        if ok and refine:
-            self.progress.setValue(1000)
-            out = Path(self._exported or refine["out"])
-            n = len(self._made_now)                # the export lists every clip, but reuses kept copies
-            how = {"seedvr2_7b": "SeedVR2 7B", "seedvr2_3b": "SeedVR2 3B"}.get(refine.get("method"), "refined")
-            self.status.setText(f"Exported {out.name} ({refine['size']}, {how}"
-                                + (f"; {n} clip{'s' if n != 1 else ''} upscaled now" if n else
-                                   "; every clip was upscaled already") + ").")
-        elif ok:
-            self.progress.setValue(1000)
-            made = len(self._plan)
-            msg = f"Done: {made} clip{'s' if made != 1 else ''} made." if made else "Everything was already made."
-            self.status.setText(msg)
-            path = self.selected_path()
-            if len(self._targets) == 1 and path and path[-1].id == self._targets[0] and self._film_queue is None:
-                self.join_selected("play", prefix=msg)
-        elif self._stopping:
-            self.progress.setValue(0)
-            self.status.setText("Stopped. Finished clips are kept.")
-        else:
-            self.progress.setValue(0)
-            self.status.setText(f"Failed: {self._error or f'the generator exited with code {code}'}")
-            if self.view.visible((self.tabs, self.log)):     # (Simple: the status line and the card say it)
-                self.tabs.setCurrentWidget(self.log)
-            if not refine:                                   # (an export's failure is not a clip's)
-                self._note_failure(code)
+        self._report_job_end(ok, refine, code)
         self._stopping = False
         if self.worker_alive and (self._cloud_worker or not self.keep_loaded.isChecked()):
             self._quit_worker()                    # (a RunPod worker always: its pod is billed while it waits)
@@ -557,6 +568,35 @@ class GeneratorMixin:
         self._update_buttons()
         self._update_model_label()
 
+    def _report_job_end(self, ok: bool, refine: dict | None, code: int):
+        """The status line and the progress bar after a job: done, exported, stopped or failed."""
+        if ok and refine:
+            self.progress.setValue(1000)
+            out = Path(self._exported or refine["out"])
+            n = len(self._made_now)                # the export lists every clip, but reuses kept copies
+            how = {"seedvr2_7b": "SeedVR2 7B", "seedvr2_3b": "SeedVR2 3B"}.get(refine.get("method"), "refined")
+            self.status.setText(f"Exported {out.name} ({refine['size']}, {how}"
+                                + (f"; {plural(n, 'clip')} upscaled now" if n else
+                                   "; every clip was upscaled already") + ").")
+        elif ok:
+            self.progress.setValue(1000)
+            made = len(self._plan)
+            msg = f"Done: {plural(made, 'clip')} made." if made else "Everything was already made."
+            self.status.setText(msg)
+            path = self.selected_path()
+            if len(self._targets) == 1 and path and path[-1].id == self._targets[0] and self._film_queue is None:
+                self.join_selected("play", prefix=msg)
+        elif self._stopping:
+            self.progress.setValue(0)
+            self.status.setText("Stopped. Finished clips are kept.")
+        else:
+            self.progress.setValue(0)
+            self.status.setText(f"Failed: {self._error or f'the generator exited with code {code}'}")
+            if self.view.visible((self.tabs, self.log)):     # (Simple: the status line and the card say it)
+                self.tabs.setCurrentWidget(self.log)
+            if not refine:                                   # (an export's failure is not a clip's)
+                self._note_failure(code)
+
     def _proc_error(self, err):
         if err == QProcess.FailedToStart:
             # Qt sends no 'finished' for a process that never started: clean up here
@@ -568,14 +608,8 @@ class GeneratorMixin:
         self._kill_timer.stop()
         p, self.proc = self.proc, None
         if p is not None:
-            rest = self._buf + bytes(p.readAllStandardOutput())
-            for line in rest.split(b"\n"):
-                self._safe_line(line.decode(errors="replace"))
-            err = bytes(p.readAllStandardError()).decode(errors="replace")
-            for line in (self._ebuf + err).split("\n"):
-                line = line.split("\r")[-1].rstrip()
-                if line:
-                    self.log.appendPlainText(line)
+            self._drain_out(p, final=True)
+            self._drain_err(p, final=True)
             p.deleteLater()
         self._buf, self._ebuf = b"", ""
         self._worker_idle = False

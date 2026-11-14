@@ -17,6 +17,7 @@ from . import dialogs as D
 from .graph import START
 from .widgets import safe_emit
 from .project_dialogs import NewProjectDialog
+from .ui_logic import plural
 
 
 class ProjectMixin:
@@ -282,7 +283,7 @@ class ProjectMixin:
         self.refresh(rebuild_path=True)
         QTimer.singleShot(0, self.graph.fit)
         QTimer.singleShot(0, self._focus_graph)
-        self.status.setText(f"Project {folder.name}: {len(tree.nodes)} clip{'s' if len(tree.nodes) != 1 else ''}."
+        self.status.setText(f"Project {folder.name}: {plural(len(tree.nodes), 'clip')}."
                             + synced + (f" Note: {film.problem}; the film's scene list is not changed until it is "
                                         "fixed." if film.problem else ""))
         if tree.recovered_from is not None:

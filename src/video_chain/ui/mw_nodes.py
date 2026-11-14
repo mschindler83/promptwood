@@ -145,7 +145,7 @@ class NodeMixin:
                 return
             below = len(self.tree.descendants(node.id))
             made = node.made is not None or any(d.made for d in self.tree.descendants(node.id))
-            msg = f"Delete {'video' if node.is_video else 'clip'} #{T.short_id(node.id)}" + (f" and the {below} clip{'s' if below != 1 else ''} after it"
+            msg = f"Delete {'video' if node.is_video else 'clip'} #{T.short_id(node.id)}" + (f" and the {plural(below, 'clip')} after it"
                                                    if below else "") + "?"
             if made:
                 msg += "\nTheir video files are not deleted: they are moved to old/ in the project folder."
@@ -407,7 +407,7 @@ class NodeMixin:
         self.refresh()
         self.graph.reveal(ids[-1])
         sweep = " with stepped LoRA strengths" if any(steps) and loras else ""
-        self.status.setText(f"{len(ids)} variant{'s' if len(ids) != 1 else ''} of clip #{T.short_id(nid)} added{sweep}; once "
+        self.status.setText(f"{plural(len(ids), 'variant')} of clip #{T.short_id(nid)} added{sweep}; once "
                             "made, compare them side by side with the Compare button on the card.")
         if generate:
             self._start(ids)

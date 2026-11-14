@@ -10,7 +10,7 @@ from .speak_dialog import SpeakLinesDialog
 from .tts_dialog import VoiceTtsDialog
 from .widgets import safe_emit
 from . import speak_dialog as SPD, tts_dialog as TD
-from .ui_logic import DEFAULT_COMFY_URL
+from .ui_logic import DEFAULT_COMFY_URL, plural
 
 
 class TtsMixin:
@@ -235,7 +235,7 @@ class TtsMixin:
             return
         self._write_tree()
         self.refresh(rebuild_path=True)
-        msg = (f"Clip #{T.short_id(nid)}: {done['lines']} line{'s' if done['lines'] != 1 else ''} spoken ({done['secs']:.1f} s)"
+        msg = (f"Clip #{T.short_id(nid)}: {plural(done['lines'], 'line')} spoken ({done['secs']:.1f} s)"
                f" and made its sound (track “{T.track_of(self.tree, done['track'])['name']}”); the picture is made "
                "to it, lips in sync.")
         if done["frames"]:

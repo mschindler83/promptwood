@@ -17,7 +17,7 @@ from .lora_stack import lora_label
 from .widgets import format_time
 from . import ui_logic as UL
 from .clip_cards import PromptCard
-from .ui_logic import REMIX_DELAY_MS, SourceSoundInfo, plain_problem, row_start
+from .ui_logic import REMIX_DELAY_MS, SourceSoundInfo, plain_problem, plural, row_start
 
 
 class InspectorMixin:
@@ -138,7 +138,7 @@ class InspectorMixin:
         if T.end_image_used(self.tree, n):
             parts.append("end image")
         if n.keyframes:
-            parts.append(f"{len(n.keyframes)} keyframe{'s' if len(n.keyframes) != 1 else ''}")
+            parts.append(f"{plural(len(n.keyframes), 'keyframe')}")
         if (n.made or {}).get("cuts"):
             parts.append("⚠ cuts")
         if n.frozen:

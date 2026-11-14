@@ -15,7 +15,7 @@ from .clip_dialogs import HandoverDialog, VideoFrameDialog
 from .image_edit import ImageEditDialog, record_use
 from .video_editor import choose_video
 from .generator_state import CLIP_MODELS, ComfyModel
-from .ui_logic import ASPECT_TOLERANCE, DEFAULT_COMFY_URL, label_loras
+from .ui_logic import ASPECT_TOLERANCE, DEFAULT_COMFY_URL, label_loras, plural
 
 
 class EndsMixin:
@@ -542,7 +542,7 @@ class EndsMixin:
                         "shape (nothing is stretched).")
         except Exception:  # noqa: BLE001
             pass
-        self.status.setText(f"{len(ids)} start image{'s' if len(ids) != 1 else ''} added: clip #{T.short_id(nid)} "
+        self.status.setText(f"{plural(len(ids), 'start image')} added: clip #{T.short_id(nid)} "
                             f"once for each, with the same prompt, seed and settings, on its own row."
                             + (f" {skipped} could not be read." if skipped else "") + size)
         todo = ([nid] if self.status_of.get(nid) != "done" else []) + ids
