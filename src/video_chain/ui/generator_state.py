@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, TypedDict
 
 
 class ComfyModel(str, Enum):
@@ -108,79 +107,6 @@ class ModelSwitch:
             self.free = False
 
 
-# ---------------------------------------------------------------- the worker's events ('@@ {json}' lines, MWC-8)
-# One TypedDict per kind of event the worker (video_chain.__main__) sends. `total=False` fields are optional on the wire.
-# The window checks an event once, at the boundary (event_problem), so a handler can index the required fields.
-class _Event(TypedDict):
-    e: str
-
-
-class LoadingEvent(_Event, total=False):
-    what: str                           # "runpod" | "comfyui"
-
-
-class IdleEvent(_Event, total=False):
-    timeout: float | None
-    took: float
-
-
-class ByeEvent(_Event, total=False):
-    reason: str
-
-
-class StartEvent(_Event, total=False):
-    nodes: int
-    width: int
-    height: int
-    frames: int
-
-
-class PlanEvent(_Event):
-    make: list[str]
-
-
-class NodeEvent(_Event, total=False):
-    id: str
-    state: str
-    k: int
-
-
-class StepEvent(_Event, total=False):
-    id: str | None
-    i: float
-    n: float
-
-
-class NoteEvent(_Event, total=False):
-    id: str | None
-    text: str
-
-
-class ErrorEvent(_Event, total=False):
-    msg: str
-    comfy_down: bool
-
-
-def _number(v: Any) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool)
-
-
-# kind -> {field: (check, what it must be)} for the fields that must be there
-_REQUIRED: dict[str, dict[str, tuple[Any, str]]] = {
-    "start": {"width": (_number, "a number"), "height": (_number, "a number"), "frames": (_number, "a number")},
-    "plan": {"make": (lambda v: isinstance(v, list), "a list")},
-    "node": {"id": (lambda v: isinstance(v, str), "text"), "state": (lambda v: isinstance(v, str), "text")},
-    "step": {"i": (_number, "a number"), "n": (_number, "a number")},
-}
-
-
-def event_problem(ev: Any) -> str | None:
-    """Why a worker event cannot be handled (None: it can). Unknown kinds are fine: the plugins hear them."""
-    if not isinstance(ev, dict):
-        return f"it is not an object: {ev!r}"
-    for field, (ok, what) in _REQUIRED.get(str(ev.get("e")), {}).items():
-        if field not in ev:
-            return f"a {ev.get('e')} event without {field!r}: {ev!r}"
-        if not ok(ev[field]):
-            return f"a {ev.get('e')} event whose {field!r} is not {what}: {ev!r}"
-    return None
+# The worker's events ('@@ {json}' lines, MWC-8) live in video_chain/events.py (the worker must not import ui/).
+from ..events import (  # noqa: E402, F401
+    ByeEvent, ErrorEvent, IdleEvent, LoadingEvent, NodeEvent, NoteEvent, PlanEvent, StartEvent, StepEvent, event_problem)

@@ -16,9 +16,10 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, Callable, Mapping, cast
 
 from . import chain, logs, media
+from . import events as EV
 from . import tree as treemod
 
 logger = logging.getLogger(__name__)
@@ -121,7 +122,7 @@ class _Printer:
         self.enabled = enabled
         self.gone = False
 
-    def __call__(self, event: dict) -> None:
+    def __call__(self, event: Mapping[str, Any]) -> None:
         if not self.enabled or self.gone:
             return
         try:
@@ -150,13 +151,13 @@ def main(argv: list[str] | None = None) -> int:
         return _main(a, emit)
     except Exception as e:  # noqa: BLE001
         traceback.print_exc()
-        emit({"e": "error", "msg": f"{type(e).__name__}: {e}"})
+        emit(EV.error(f"{type(e).__name__}: {e}"))
         return 1
 
 
 def _fail(emit, msg: str) -> int:
     print(msg, file=sys.stderr)
-    emit({"e": "error", "msg": msg})
+    emit(EV.error(msg))
     return 2
 
 
@@ -170,9 +171,9 @@ def _cloud_generator(a, emit, current, holder: dict):
     """A RunPod pod made ready for this worker (holder["session"]: terminated when the worker ends), and the
     upscaler talking to its ComfyUI through the SSH tunnel."""
     from . import runpod as rp
-    emit({"e": "loading", "what": "runpod"})
+    emit(EV.loading("runpod"))
     def note(text):
-        emit({"e": "note", "id": current.get("id"), "text": str(text)})
+        emit(EV.note(current.get("id"), text))
 
     try:
         session = rp.RunpodSession(rp.RunpodApi(rp.api_key()), gpu=a.runpod_gpu or rp.DEFAULT_GPU,
@@ -182,14 +183,14 @@ def _cloud_generator(a, emit, current, holder: dict):
         holder["session"] = session
         session.start()
         gen = rp.CloudUpscaler(session, progress=lambda i, n: emit(
-            {"e": "step", "id": current.get("id"), "k": current.get("k", 0), "i": i, "n": n}))
+            EV.step(current.get("id"), current.get("k", 0), i, n)))
     except Exception as e:  # noqa: BLE001
         traceback.print_exc()
-        emit({"e": "error", "msg": f"RunPod: {e}"})
+        emit(EV.error(f"RunPod: {e}"))
         _close_cloud(holder, emit)
         raise SystemExit(CLOUD_FAILED)
     gen.note = note  # type: ignore[method-assign]  # (the worker's own hook replaces the no-op on this instance)
-    emit({"e": "loaded", "what": "runpod"})
+    emit(EV.loaded("runpod"))
     return gen
 
 
@@ -209,7 +210,7 @@ def _close_cloud(holder: dict, emit) -> None:
         session.close()
     except Exception as e:  # noqa: BLE001
         print(f"RunPod: {e}", file=sys.stderr, flush=True)
-        emit({"e": "error", "msg": f"RunPod: {e}"})
+        emit(EV.error(f"RunPod: {e}"))
     finally:
         for sig, handler in old.items():
             signal.signal(sig, handler)
@@ -219,16 +220,16 @@ def _generator(a, emit, current):
     """Connect to ComfyUI (it loads the model on the first clip and keeps it). Step progress goes out as events
     for the node in current."""
     from .comfy import ComfyGenerator, ComfyUnavailable
-    emit({"e": "loading", "what": "comfyui"})
+    emit(EV.loading("comfyui"))
     try:
         gen = ComfyGenerator(a.comfy_url, progress=lambda i, n: emit(
-            {"e": "step", "id": current.get("id"), "k": current.get("k", 0), "i": i, "n": n}),
+            EV.step(current.get("id"), current.get("k", 0), i, n)),
             comfy_dir=a.comfy_dir, cleanup=not a.keep_comfy_copies)
     except ComfyUnavailable as e:
-        emit({"e": "error", "msg": str(e), "comfy_down": True})
+        emit(EV.error(str(e), comfy_down=True))
         raise SystemExit(COMFY_DOWN)
-    gen.note = lambda text: emit({"e": "note", "id": current.get("id"), "text": str(text)})  # type: ignore[method-assign]  # (the worker's hook replaces the no-op on this instance)
-    emit({"e": "loaded", "what": "comfyui"})
+    gen.note = lambda text: emit(EV.note(current.get("id"), text))  # type: ignore[method-assign]  # (the worker's hook replaces the no-op on this instance)
+    emit(EV.loaded("comfyui"))
     from . import plugins                          # (a plugin may wrap the generator or give another backend)
     return plugins.wrap_generator(gen, a, log=lambda m: print(m, file=sys.stderr, flush=True))
 
@@ -291,8 +292,8 @@ def prepare_job(project: Path, targets: list[str]) -> dict:
 def run_job(job: dict, gen, emit, current: dict) -> None:
     """Make what a prepared job needs with an already loaded generator (None if nothing is to be made)."""
     s = job["settings"]
-    emit({"e": "start", "nodes": len(job["todo"]), "width": s["width"], "height": s["height"],
-          "frames": s["frames"], "steps": s["steps"], "out": str(job["project"])})
+    emit(EV.StartEvent(e="start", nodes=len(job["todo"]), width=s["width"], height=s["height"],
+                       frames=s["frames"], steps=s["steps"], out=str(job["project"])))
 
     def on_event(ev: dict) -> None:
         if ev.get("e") == "node" and ev.get("state") == "generating":
@@ -387,10 +388,10 @@ def _guarded(emit, job: Callable[[], None]) -> None:
     try:
         job()
     except (JobError, ValueError, FileNotFoundError, KeyError) as e:
-        emit({"e": "error", "msg": str(e)})
+        emit(EV.error(str(e)))
     except Exception as e:  # noqa: BLE001
         traceback.print_exc()
-        emit({"e": "error", "msg": f"{type(e).__name__}: {e}"})
+        emit(EV.error(f"{type(e).__name__}: {e}"))
 
 
 def serve(a, emit, make_generator: Callable[[dict], Any], stdin=None) -> int:
@@ -402,14 +403,14 @@ def serve(a, emit, make_generator: Callable[[dict], Any], stdin=None) -> int:
     current: dict[str, Any] = {"id": None, "k": 0}
     gen = make_generator(current)
     idle = a.idle_minutes * 60 if a.idle_minutes and a.idle_minutes > 0 else None
-    emit({"e": "idle", "timeout": idle})
+    emit(EV.idle(idle))
     while True:
         if getattr(emit, "gone", False):            # the GUI's pipe is closed: nobody to answer
             _free_quietly(gen)
             return 0
         if idle is not None and not lines.ready(idle):
             _free_quietly(gen)                      # unload ComfyUI's models after the idle time
-            emit({"e": "bye", "reason": "idle"})
+            emit(EV.bye("idle"))
             return 0
         line = lines.readline()
         if not line:                                # the GUI is gone: give ComfyUI's memory back too
@@ -420,12 +421,12 @@ def serve(a, emit, make_generator: Callable[[dict], Any], stdin=None) -> int:
         except ValueError:
             cmd = None
         if not isinstance(cmd, dict):
-            emit({"e": "error", "msg": f"bad command: {line.strip()[:80]}"})
+            emit(EV.error(f"bad command: {line.strip()[:80]}"))
             continue
         if cmd.get("cmd") == "quit":
             if cmd.get("free"):
                 _free_quietly(gen)
-            emit({"e": "bye", "reason": "quit"})
+            emit(EV.bye("quit"))
             return 0
         if cmd.get("cmd") == "refine":               # export a path at a higher size (2K refine)
             started = time.monotonic()
@@ -446,14 +447,14 @@ def serve(a, emit, make_generator: Callable[[dict], Any], stdin=None) -> int:
                                     denoise=bool(cmd.get("denoise")),
                                     events=on_refine_event)
             _guarded(emit, refine)
-            emit({"e": "idle", "timeout": idle, "took": round(time.monotonic() - started, 1)})
+            emit(EV.idle(idle, round(time.monotonic() - started, 1)))
             continue
         if cmd.get("cmd") != "run":
-            emit({"e": "error", "msg": f"unknown command {cmd.get('cmd')!r}"})
+            emit(EV.error(f"unknown command {cmd.get('cmd')!r}"))
             continue
         if getattr(gen, "upscale_only", False):     # (the cloud worker: an export only)
-            emit({"e": "error", "msg": "this worker only upscales on RunPod; clips are made by the local ComfyUI"})
-            emit({"e": "idle", "timeout": idle})
+            emit(EV.error("this worker only upscales on RunPod; clips are made by the local ComfyUI"))
+            emit(EV.idle(idle))
             continue
         started = time.monotonic()
 
@@ -469,7 +470,7 @@ def serve(a, emit, make_generator: Callable[[dict], Any], stdin=None) -> int:
                     raise JobError(problem)
             run_job(job, gen if job["ai_todo"] else None, emit, current)
         _guarded(emit, run)
-        emit({"e": "idle", "timeout": idle, "took": round(time.monotonic() - started, 1)})
+        emit(EV.idle(idle, round(time.monotonic() - started, 1)))
 
 
 def _main_serve(a, emit) -> int:
@@ -531,8 +532,8 @@ def _main(a, emit) -> int:
     print(f"{len(prompts)} prompts, {width}x{height}, {a.frames} frames ({a.frames / chain.FPS:.1f} s) per clip, "
           f"{a.steps} steps, seed {a.seed}{' (same for all)' if a.same_seed else '+'}")
 
-    emit({"e": "start", "clips": len(prompts), "width": width, "height": height, "frames": a.frames,
-          "steps": a.steps, "out": str(out)})
+    emit(EV.StartEvent(e="start", clips=len(prompts), width=width, height=height, frames=a.frames,
+                       steps=a.steps, out=str(out)))
     current: dict[str, Any] = {"k": 0}
 
     def on_event(ev: dict) -> None:
