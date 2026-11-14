@@ -1909,6 +1909,7 @@ class MainWindow(QMainWindow):
         self._tts_local: TTS.LocalTTS | None = None
         self._tts_busy = False
         self._uses_cache: tuple | None = None        # (tree, uses_index(tree)) until something changes
+        self._first_shown = False
         self._notices: list[QMessageBox] = []        # non-blocking notices, kept until they are closed
         self._eleven_voices: list | None = None
         self.h3_loras: list[tuple[str, str]] = []
@@ -4048,12 +4049,26 @@ class MainWindow(QMainWindow):
         self._warm_lora_hashes()
         self.refresh(rebuild_path=True)
         QTimer.singleShot(0, self.graph.fit)
+        QTimer.singleShot(0, self._focus_graph)
         self.status.setText(f"Project {folder.name}: {len(tree.nodes)} clip{'s' if len(tree.nodes) != 1 else ''}."
                             + synced + (f" Note: {film.problem}; the film's scene list is not changed until it is "
                                         "fixed." if film.problem else ""))
         if tree.recovered_from is not None:
             self._tell_recovered(folder, tree.recovered_from)
         return True
+
+    def _focus_graph(self):
+        """The keyboard goes to the clip graph (arrow keys walk the clips) unless something is being typed."""
+        fw = QApplication.focusWidget() or self.focusWidget()
+        typing = isinstance(fw, QPlainTextEdit) or (isinstance(fw, QLineEdit) and not fw.isReadOnly())
+        if not typing and self.tree is not None and self.graph.isVisible():
+            self.graph.setFocus(Qt.OtherFocusReason)
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        if not self._first_shown:
+            self._first_shown = True
+            QTimer.singleShot(0, lambda: self.graph.setFocus(Qt.OtherFocusReason))
 
     def _tell_recovered(self, folder: Path, backup: Path):
         """tree.json was damaged and its backup was opened: said in the status line and the log, and in a notice

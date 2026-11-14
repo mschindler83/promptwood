@@ -277,3 +277,37 @@ def test_the_frame_window_of_an_own_clip_does_not_probe(app, win, tmp_path, imag
     dlg = win.end_from_video(ids[1], video=str(clip), dialog=False)
     assert dlg is not None and dlg.frames == win.tree.nodes[ids[0]].made["frames"]
     dlg.deleteLater()
+
+
+# ---------------------------------------------------------------- UX-8: a frozen clip's buttons are disabled
+def test_a_frozen_clips_card_buttons_are_disabled(app, win, tmp_path, image):
+    from video_chain.ui.main_window import PromptCard
+    from test_ui import run_and_wait
+    ids = new_project(win, tmp_path, image, ("a",))
+    run_and_wait(app, win, win.generate_path)
+    wait(app, lambda: not win._joins, timeout=30)
+    assert win.freeze_clip(ids[0], confirm=False)
+    wait(app, lambda: not win._joins, timeout=30)
+    card = next(c for c in win.cards if c.nid == ids[0])
+    assert isinstance(card, PromptCard) and card.frozen
+    for name in ("b_refine", "b_speak", "b_end", "b_end_ai", "b_end_video", "b_end_clear", "b_hand", "b_hand_clear",
+                 "b_revert", "b_key"):
+        assert not getattr(card, name).isEnabled(), name
+    assert card.b_freeze.isEnabled()                    # (the way out stays)
+
+
+# ---------------------------------------------------------------- UX-11: the graph can be driven from the keyboard
+def test_the_graph_has_the_focus_when_the_window_shows(app, tmp_path):
+    w = _window(tmp_path)
+    try:
+        w.show()
+        wait(app, lambda: w.focusWidget() is w.graph)
+    finally:
+        w.close()
+
+
+def test_opening_a_project_puts_the_focus_on_the_graph(app, win, tmp_path, image):
+    from PySide6.QtWidgets import QLineEdit
+    win.project_edit.setFocus()
+    new_project(win, tmp_path, image, ("a",))
+    wait(app, lambda: win.focusWidget() is win.graph)
