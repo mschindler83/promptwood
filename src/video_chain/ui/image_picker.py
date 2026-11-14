@@ -40,6 +40,7 @@ MAX_CACHED = 20000                 # beyond this many cached thumbnails the olde
 
 class _Thumbs(QObject):
     ready = Signal(int, str, QImage)            # generation, path, thumbnail
+    preview = Signal(int, str, QImage, str)     # selection number, path, large frame (video), media details
 
 
 def _cache_file(cache_dir: Path, path: str, st: os.stat_result) -> Path:
@@ -161,6 +162,8 @@ class ImagePickerDialog(QDialog):
             self._pool.submit(prune_cache, self.cache_dir)
         self._thumbs = _Thumbs()
         self._thumbs.ready.connect(self._thumb_ready)
+        self._thumbs.preview.connect(self._preview_ready)
+        self._sel = 0                                  # which selection the preview is for (older answers drop)
         self._items: dict[str, QListWidgetItem] = {}
         from collections import OrderedDict
         self._cache: OrderedDict[tuple, QImage] = OrderedDict()     # the latest thumbnails (bounded)
@@ -492,6 +495,23 @@ class ImagePickerDialog(QDialog):
                 self._cache.popitem(last=False)
         self._thumbs.ready.emit(gen, path, img)
 
+    def _preview_ready(self, sel: int, path: str, img: QImage, media: str):
+        item = self.grid.currentItem()
+        if sel != self._sel or item is None or item.data(Qt.UserRole)[1] != path:
+            return
+        box = self.preview.size()
+        if not img.isNull():
+            self.preview.setPixmap(QPixmap.fromImage(img).scaled(box, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        else:
+            self.preview.setPixmap(self.style().standardIcon(QStyle.SP_MediaVolume).pixmap(96, 96))
+        try:
+            st = Path(path).stat()
+            mb, when = st.st_size / 2**20, time.strftime("%Y-%m-%d %H:%M", time.localtime(st.st_mtime))
+        except OSError:
+            mb, when = 0.0, ""
+        caption = item.data(Qt.UserRole + 2)
+        self.info.setText((f"{caption}\n" if caption else "") + f"{Path(path).name}\n{media}\n{mb:.1f} MB · {when}")
+
     def _count(self, what: str) -> None:
         with self._lock:
             self.stats[what] += 1
@@ -536,6 +556,7 @@ class ImagePickerDialog(QDialog):
         if item is None:
             return
         kind, path = item.data(Qt.UserRole)
+        self._sel += 1                                       # (a video's details still coming are for another item)
         if kind == "dir":
             self.preview.clear()
             self.info.setText(f"Folder {Path(path).name}")
@@ -554,20 +575,22 @@ class ImagePickerDialog(QDialog):
             return
         if ext in VIDEO_EXTS or ext in SOUND_EXTS:              # a frame of the video / the sound's icon, its details
             box = self.preview.size()
-            img = _video_frame(path, max(box.width(), box.height())) if ext in VIDEO_EXTS else QImage()
-            if not img.isNull():
-                self.preview.setPixmap(QPixmap.fromImage(img).scaled(box, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-            else:
-                self.preview.setPixmap(self.style().standardIcon(QStyle.SP_MediaVolume).pixmap(96, 96))
-            try:
-                st = Path(path).stat()
-                mb, when = st.st_size / 2**20, time.strftime("%Y-%m-%d %H:%M", time.localtime(st.st_mtime))
-            except OSError:
-                mb, when = 0.0, ""
-            caption = item.data(Qt.UserRole + 2)
-            self.info.setText((f"{caption}\n" if caption else "") + f"{Path(path).name}\n{_media_info(path)}\n"
-                              f"{mb:.1f} MB · {when}")
+            self._sel += 1
+            self.preview.clear()
+            self.info.setText(f"{Path(path).name}\nLoading …")        # (ffmpeg and ffprobe run in the pool)
             self.buttons.button(QDialogButtonBox.Open).setEnabled(True)
+            sel, thumbs, size = self._sel, self._thumbs, max(box.width(), box.height())
+
+            def work():
+                img = _video_frame(path, size) if ext in VIDEO_EXTS else QImage()
+                try:
+                    thumbs.preview.emit(sel, path, img, _media_info(path))
+                except RuntimeError:                   # the dialog is gone
+                    pass
+            try:
+                self._pool.submit(work)
+            except RuntimeError:                       # (closed)
+                pass
             return
         r = QImageReader(path)
         r.setAutoTransform(True)

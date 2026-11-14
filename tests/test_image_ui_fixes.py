@@ -257,3 +257,41 @@ def test_picker_zoom_is_saved_once_it_settles(app, tmp_path):
         time.sleep(0.02)
     assert writes == [160]
     dlg.deleteLater()
+
+
+def test_picker_video_preview_runs_off_the_ui_thread(app, tmp_path, monkeypatch):
+    import threading
+
+    from PySide6.QtGui import QImage
+
+    from video_chain.ui import image_picker as IP
+    (tmp_path / "v.mp4").write_bytes(b"x")
+    threads = []
+    gate = threading.Event()
+
+    def frame(path, box=IP.THUMB_MAX):
+        threads.append(threading.current_thread())
+        gate.wait(5)
+        img = QImage(8, 8, QImage.Format_RGB32)
+        img.fill(0x123456)
+        return img
+
+    def info(path):
+        threads.append(threading.current_thread())
+        return "0:01.0 · fake"
+    monkeypatch.setattr(IP, "_video_frame", frame)
+    monkeypatch.setattr(IP, "_media_info", info)
+    q = QSettings(str(tmp_path / "s.ini"), QSettings.IniFormat)
+    dlg = IP.ImagePickerDialog(None, "x", str(tmp_path), q, cache_dir=None, desktop_thumbs=None, kind="video")
+    item = dlg._items[str(tmp_path / "v.mp4")]
+    threads.clear()
+    dlg.grid.setCurrentItem(item)
+    assert "Loading" in dlg.info.text()                      # answered at once
+    gate.set()
+    end = time.time() + 5
+    while "fake" not in dlg.info.text() and time.time() < end:
+        app.processEvents()
+        time.sleep(0.02)
+    assert "fake" in dlg.info.text()
+    assert threads and all(t is not threading.main_thread() for t in threads)
+    dlg.deleteLater()
