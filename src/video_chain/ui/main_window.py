@@ -15,6 +15,7 @@ import os
 import random
 import re
 import shutil
+import stat as stat_module
 import sys
 import threading
 import time
@@ -535,6 +536,7 @@ class _Bridge(QObject):
     film = Signal(object, object, str)               # the joined film or None, error or None, 'play' / 'export'
     duplicated = Signal(object, object, str)         # (scene id, title) or None, error or None, film folder
     comfy = Signal(bool)                       # ComfyUI reachable
+    checked = Signal(int, list, list)          # Generate's pre-flight: its number, what is missing, empty prompts
     loras = Signal(list, bool)                 # H3 LoRAs found in ComfyUI's LoRA folders, report them
     triggers = Signal(dict)                    # the trigger word scan finished (its counts)
     trigger_progress = Signal(int, int, str)   # the scan asks CivitAI about the k-th of n LoRAs (its file name)
@@ -1790,6 +1792,7 @@ class MainWindow(QMainWindow):
         self.bridge.duplicated.connect(self._scene_duplicated)
         self._film_queue: list[str] | None = None    # Generate film: the scenes still to make
         self.bridge.comfy.connect(self._comfy_state)
+        self.bridge.checked.connect(self._checked)
         self.bridge.loras.connect(self._loras_found)
         self.bridge.triggers.connect(self._triggers_found)
         self.bridge.trigger_progress.connect(self._trigger_progress)
@@ -3374,7 +3377,7 @@ class MainWindow(QMainWindow):
             return
         take = self.film.take_of(sid, self.tree)
         self._start([take])
-        if self._job is None and self._waiting_comfy is None:
+        if not self.running and self._waiting_comfy is None:
             self._film_queue = None                # not started (the status says why)
         else:
             self.status.setText(f"Generating the film: scene {done} of {self._film_total} "
@@ -5783,10 +5786,33 @@ class MainWindow(QMainWindow):
         sel = self.selected_id()
         return self.tree.path_to(sel) if self.tree and sel and sel != START and sel in self.tree.nodes else []
 
+    # While the cards are updated every file is looked at once (a path of clips asked about the same pictures and
+    # videos several times each; on a network share every look is a round trip).
+    _stat_memo: dict | None = None
+    _cmp_memo: dict | None = None
+
+    def _stat(self, path) -> os.stat_result | None:
+        """os.stat of a path (None: not there), remembered while the cards are being updated."""
+        key = str(path)
+        memo = self._stat_memo
+        if memo is not None and key in memo:
+            return memo[key]
+        try:
+            st = os.stat(key)
+        except OSError:
+            st = None
+        if memo is not None:
+            memo[key] = st
+        return st
+
+    def _is_file(self, path) -> bool:
+        st = self._stat(path)
+        return st is not None and stat_module.S_ISREG(st.st_mode)
+
     def _pixmap(self, path: Path | None) -> QPixmap | None:
-        if path is None or not path.is_file():
+        st = self._stat(path) if path is not None else None
+        if st is None or not stat_module.S_ISREG(st.st_mode):
             return None
-        st = path.stat()
         key = (str(path), st.st_mtime_ns, st.st_size)
         if key not in self._pix:
             self._pix[key] = QPixmap.fromImage(QImage(str(path)))
@@ -5796,7 +5822,7 @@ class MainWindow(QMainWindow):
         """The frame shown for a node: where the clips after it start (its hand-over frame, else its last)."""
         if n.made and self.project:
             h = T.handover_file(self.project, self.tree, n)
-            return h if h is not None and h.is_file() else self.project / n.made["frame"]
+            return h if h is not None and self._is_file(h) else self.project / n.made["frame"]
         return None
 
     def state(self, nid: str) -> str:
@@ -6232,6 +6258,7 @@ class MainWindow(QMainWindow):
         path = self.selected_path()
         self.path_hint.setText("The start image is selected. Select a clip to see its path, or press Continue "
                                "(Ctrl+N) to add a clip after the start image.")
+        known, lora_dir = self.known_loras(), self._lora_dir()      # (once for all cards: each reads files / settings)
         for k, n in enumerate(path):
             if n.is_video:
                 card = VideoCard(n, view=self.view)
@@ -6249,10 +6276,10 @@ class MainWindow(QMainWindow):
             card.overridesChanged.connect(self._overrides_changed)
             card.chooseLora.connect(self._choose_node_lora)
             card.lora_picked.connect(self._lora_picked)
-            card.loras.file_dir = self._lora_dir()
+            card.loras.file_dir = lora_dir
             card.settings_toggle.toggled.connect(self._show_card_settings)
             card.set_choices(int(self.tree.options.get("frames", 73)), int(self.tree.options.get("steps", 28)),
-                             self.known_loras())
+                             known)
             card.action.connect(self.node_action)
             card.keyframe.connect(self.keyframe_action)
             card.play.connect(self._play_node)
@@ -6371,6 +6398,16 @@ class MainWindow(QMainWindow):
                 c._show_settings(on)
 
     def _update_cards(self):
+        outer = self._stat_memo is not None
+        if not outer:
+            self._stat_memo, self._cmp_memo = {}, {}
+        try:
+            self._update_cards_now()
+        finally:
+            if not outer:
+                self._stat_memo = self._cmp_memo = None
+
+    def _update_cards_now(self):
         path_nodes = [self.tree.nodes[c.nid] for c in self.cards if c.nid in self.tree.nodes]
         self.cast_strip.show_path(self.tree.options, path_nodes)
         cuts = dict(zip([n.id for n in path_nodes],
@@ -6396,7 +6433,7 @@ class MainWindow(QMainWindow):
             if n.is_video:
                 card.set_source(n)
                 step = ("will be converted again" if st == "changed" else
-                        "" if Path(n.source["file"]).is_file() or st == "done" else "the video file is missing")
+                        "" if self._is_file(n.source["file"]) or st == "done" else "the video file is missing")
             else:
                 why = self.why_of.get(n.id) if st == "changed" else ""
                 step = f"Will be made again: {why}." if why else ("will be made again" if st == "changed" else "")
@@ -6446,13 +6483,13 @@ class MainWindow(QMainWindow):
                 if vc is not None:
                     card.set_end(end, vc.id, self._pixmap(self.project / vc.made["first"]) if vc.made else None)
                 else:
-                    card.set_end(end, None, self._pixmap(end) if end is not None and end.is_file() else None)
+                    card.set_end(end, None, self._pixmap(end))
                 card.set_keyframes(T.clip_length(self.tree, n) / chain.FPS,
                                    [{"at": k["at"], "pixmap": self._pixmap(self.project / k["image"]),
-                                     "note": k["note"], "ok": (self.project / k["image"]).is_file()}
+                                     "note": k["note"], "ok": self._is_file(self.project / k["image"])}
                                     for k in n.keyframes],
                                    [c / chain.FPS for c in (n.made or {}).get("cuts") or []],
-                                   bool(n.made and (self.project / n.made["video"]).is_file()))
+                                   bool(n.made and self._is_file(self.project / n.made["video"])))
             card.set_state(st, self._pixmap(self._node_frame(n)), step)
             why = self.why_of.get(n.id) if st == "changed" else ""
             card.tag.setToolTip(f"Changed: {why}. It is made again with the path." if why else STATE_TIP.get(st, ""))
@@ -6924,7 +6961,7 @@ class MainWindow(QMainWindow):
                                                    if below else "") + "?"
             if made:
                 msg += "\nTheir video files are not deleted: they are moved to old/ in the project folder."
-            if QMessageBox.question(self, "Delete", msg) != QMessageBox.Yes:
+            if not self._confirm("Delete", msg):
                 return
             self.tree.remove(node.id, self.project)
             if self.tree.selected is None:
@@ -6954,6 +6991,11 @@ class MainWindow(QMainWindow):
                             "its card, or right-click → Unfreeze).")
         return True
 
+    def _confirm(self, title: str, text: str) -> bool:
+        """A question that loses or changes something: Enter answers No (the user has to say Yes on purpose)."""
+        return QMessageBox.question(self, title, text, QMessageBox.Yes | QMessageBox.No,
+                                    QMessageBox.No) == QMessageBox.Yes
+
     def freeze_clip(self, nid: str, confirm: bool = True) -> list[str]:
         """Keep a made clip as it is, with every clip before it (tree.freeze). Returns the ids frozen now."""
         if self.tree is None or self.running or nid not in self.tree.nodes:
@@ -6964,11 +7006,11 @@ class MainWindow(QMainWindow):
             self.status.setText(f"Cannot freeze {what} #{nid[1:]}: {why}.")
             return []
         edits = T.freeze_edits(self.tree, nid)
-        if confirm and edits and QMessageBox.question(
-                self, "Freeze",
+        if confirm and edits and not self._confirm(
+                "Freeze",
                 f"Freeze {what} #{nid[1:]} and the clips before it?\n\nThese edits are not made yet and are undone "
                 "(back to what the clips were made with):\n" +
-                "\n".join(f"#{i[1:]}: {', '.join(e)}" for i, e in edits.items())) != QMessageBox.Yes:
+                "\n".join(f"#{i[1:]}: {', '.join(e)}" for i, e in edits.items())):
             return []
         try:
             ids = T.freeze(self.project, self.tree, nid)
@@ -7297,10 +7339,17 @@ class MainWindow(QMainWindow):
         node = self.tree.nodes.get(nid) if self.tree else None
         if node is None:
             return []
-        sibs = [n for n in self.tree.children(node.parent) if n.id != nid and n.made and not n.is_video
-                and self.status_of.get(n.id) == "done"]
+        memo = self._cmp_memo                      # (while the cards are updated: sorted once per point, not per card)
+        if memo is not None and node.parent in memo:
+            made = memo[node.parent]
+        else:
+            sibs = [n for n in self.tree.children(node.parent) if n.made and not n.is_video
+                    and self.status_of.get(n.id) == "done"]
+            made = [n.id for n in sorted(sibs, key=lambda n: self.tree.number(n.id))]
+            if memo is not None:
+                memo[node.parent] = made
         own = [nid] if node.made else []
-        return own + [n.id for n in sorted(sibs, key=lambda n: self.tree.number(n.id))]
+        return own + [i for i in made if i != nid]
 
     def compare_variants(self, nid: str, player: bool = True) -> CompareDialog | None:
         """Play nid and the other made clips from the same point side by side; 'Keep this one' deletes the others
@@ -7342,7 +7391,7 @@ class MainWindow(QMainWindow):
             if made:
                 msg += (f"\n{made} of them are made; their video files are not deleted: they are moved to old/ in the "
                         "project folder.")
-            if QMessageBox.question(self, "Keep this one", msg) != QMessageBox.Yes:
+            if not self._confirm("Keep this one", msg):
                 return []
         gone = []
         for r in others:
@@ -7812,7 +7861,7 @@ class MainWindow(QMainWindow):
             if made:
                 msg += (f"\n{made} of them are made; their video files are not deleted: they are moved to old/ in the "
                         "project folder.")
-            if QMessageBox.question(self, "Keep this branch", msg) != QMessageBox.Yes:
+            if not self._confirm("Keep this branch", msg):
                 return []
         gone = []
         for r in roots:
@@ -8469,7 +8518,10 @@ class MainWindow(QMainWindow):
     @property
     def running(self) -> bool:
         """A generation job is in progress (editing is locked)."""
-        return self._job is not None
+        return self._job is not None or self._checking
+
+    _checking = False                           # Generate is checking the project (in the background)
+    _check_gen = 0
 
     @property
     def worker_alive(self) -> bool:
@@ -8521,64 +8573,107 @@ class MainWindow(QMainWindow):
         if self._tts_busy:
             self.status.setText("Wait until text to speech is done.")
             return
+        self._checking, self._check_gen = True, self._check_gen + 1
+        gen, project, tree, bridge = self._check_gen, self.project, self.tree, self.bridge
+        self._check_args = (list(targets), refine)
+        self.status.setText("Checking the project …")
+        for c in self.cards:
+            c.set_editable(False)
+        self._update_buttons()                     # (running: nothing can be edited while it is checked)
+
+        def work():
+            problems, empty = self._preflight(project, tree, targets, refine)
+            try:
+                bridge.checked.emit(gen, problems, empty)
+            except RuntimeError:                   # (the window was closed meanwhile)
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def _cancel_check(self):
+        """Stop waiting for the pre-flight (Stop, closing): its result is not used any more."""
+        self._checking, self._check_gen = False, self._check_gen + 1
+        for c in self.cards:
+            c.set_editable(not self.running)
+        self._update_buttons()
+
+    @staticmethod
+    def _preflight(project: Path, tree: T.Tree, targets: list[str], refine: dict | None) -> tuple[list[str], list[str]]:
+        """What keeps these targets from being made: (the problems as short phrases, ids of clips without a prompt).
+        Reads files and hashes LoRAs, so it runs in a thread; nothing is changed (the window is locked meanwhile)."""
         problems = []
-        turbo = self.tree.options.get("turbo") or {}
+        turbo = tree.options.get("turbo") or {}
         if turbo.get("on"):
             if not turbo.get("lora"):
                 problems.append("choose a turbo LoRA (Clips → Turbo LoRA) or switch Speed to Normal")
-        nodes = {n.id: n for t in targets for n in self.tree.path_to(t)}
+        nodes = {n.id: n for t in targets for n in tree.path_to(t)}
         empty = [n for n in nodes.values() if not n.is_video and not n.prompt.strip()]
         if empty:
             problems.append(f"write the prompt of clip #{empty[0].id[1:]}")
         try:
-            checker = T.Checker(self.project, self.tree)
+            checker = T.Checker(project, tree)
             if checker.base() is None:
                 problems.append("choose a start image (or begin with a real video)")
             else:
-                todo = T.plan(self.tree, checker, targets)
+                todo = T.plan(tree, checker, targets)
                 if refine and todo:
                     problems.append(f"generate the path first ({len(todo)} clip{'s are' if len(todo) != 1 else ' is'} "
                                     "new or changed)")
-                gone = [n for n in todo if self.tree.nodes[n].is_video
-                        and not Path(self.tree.nodes[n].source["file"]).is_file()]
+                gone = [n for n in todo if tree.nodes[n].is_video
+                        and not Path(tree.nodes[n].source["file"]).is_file()]
                 if gone:
                     problems.append(f"the file of video #{gone[0][1:]} is missing (Edit range… to choose it)")
-                problem = T.guide_problem(self.tree, checker, todo)
+                problem = T.guide_problem(tree, checker, todo)
                 if problem:
                     problems.append(problem)
-                no_end = T.missing_end_images(self.project, self.tree, todo)
+                no_end = T.missing_end_images(project, tree, todo)
                 if no_end:
                     problems.append(f"the end image of clip #{no_end[0][1:]} is missing (choose it again)")
-                sounds = T.audio_problems(self.project, self.tree, todo)
+                sounds = T.audio_problems(project, tree, todo)
                 if sounds:
                     problems.append(sounds[0] + " (Sound reference)")
-                cont = T.source_sound_problems(self.tree, todo, self.project)
+                cont = T.source_sound_problems(tree, todo, project)
                 if cont:
                     problems.append(cont[0] + " (the clip's “Sound” setting)")
-                faces = T.cast_problems(self.project, self.tree, todo)
+                faces = T.cast_problems(project, tree, todo)
                 if faces:
                     problems.append(faces[0] + " (Cast)")
             if checker.base() is not None:
-                for lo in T.loras_needed(self.tree, checker, list(nodes)):
+                for lo in T.loras_needed(tree, checker, list(nodes)):
                     if not Path(lo).is_file():
                         problems.append(f"the LoRA file does not exist ({Path(lo).name})")
                         break
         except Exception as e:  # noqa: BLE001
             problems.append(f"could not check the settings ({e})")
+        return problems, [n.id for n in empty]
+
+    def _checked(self, gen: int, problems: list, empty: list):
+        """Generate's pre-flight is done: report what is missing, or go on with the job."""
+        if gen != self._check_gen or not self._checking or self.tree is None:
+            return                                  # (stopped, closed or another project meanwhile)
+        self._checking = False
+        targets, refine = self._check_args
         if problems:
             self.status.setText("To start: " + ", ".join(problems) + ".")
+            self._film_queue = None                 # (a film run does not go on after a scene that cannot start)
+            self._cancel_check()
             if empty and len(targets) > 1:
-                self.select(empty[0].id)
+                self.select(empty[0])
             return
+        nodes = {n.id: n for t in targets for n in self.tree.path_to(t)}
         cloud = bool((refine or {}).get("cloud"))
         if cloud and not RP.api_key():
             self.status.setText("To upscale on RunPod: save your RunPod API key (Settings → Cloud upscaling).")
+            self._film_queue = None
+            self._cancel_check()
             return
         if not cloud and self.comfy_up is False and not self.worker_alive and self._autostart(targets, refine):
+            self._cancel_check()
             return
         self._waiting_comfy = None
         self._save_timer.stop()
         if not self._write_tree():
+            self._film_queue = None
+            self._cancel_check()
             return
         self.save_settings()
         self._job = {"targets": targets, "sent": False, "refine": refine}
@@ -8718,6 +8813,11 @@ class MainWindow(QMainWindow):
             self.status.setText("The image model was unloaded after the idle time.")
 
     def stop(self):
+        if self._checking:                         # still checking the project: nothing was started
+            self._cancel_check()
+            self._film_queue = None
+            self.status.setText("Stopped: nothing was started.")
+            return
         if self._waiting_comfy is not None and not self.running:   # generating once ComfyUI runs: not any more
             self._waiting_comfy = None
             self._film_queue = None
@@ -9111,52 +9211,110 @@ class MainWindow(QMainWindow):
                 time.monotonic() - getattr(self, "_scanned_at", 0.0) > 30:
             self.scan_loras()
 
-    def closeEvent(self, e):
-        if self.running:
-            if QMessageBox.question(self, "Promptwood", "Clips are being generated. Stop and quit?") \
-                    != QMessageBox.Yes:
-                e.ignore()
-                return
-        if self.project is not None and not self.running and not self._may_leave_project():
-            e.ignore()                                # the user keeps the window to save elsewhere / reopen
-            return
-        if getattr(self, "_trigger_scan", None) is not None:
-            self._trigger_scan.set()                  # the trigger word lookup stops at the next file
-        self.stop_llama()                             # never leave the language model server behind
-        self.stop_tts()
-        if self.proc is not None:                    # never leave the generator (and the model) behind
-            p, self.proc = self.proc, None
-            p.finished.disconnect()
-            if p.state() == QProcess.Running:
-                p.write(b'{"cmd": "quit", "free": true}\n')     # ComfyUI: give the memory back too
-                p.closeWriteChannel()
-                cloud = bool(self._worker_bound and self._worker_bound[0] == "runpod")   # (its pod is terminated)
-                if not p.waitForFinished(3000):
-                    p.terminate()
-                    if not p.waitForFinished(45000 if cloud else 5000):
-                        p.kill()
-                        p.waitForFinished(3000)
-            self._job = None
-        if self._comfy_model in ("qwen", "llm"):              # nor the image edit model
+    def _post_free(self, url: str, done: threading.Event | None = None):
+        """Ask ComfyUI to unload its models, in a thread (the GUI never waits for the network)."""
+        def work():
             try:
-                url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL).rstrip("/")
                 urllib.request.urlopen(urllib.request.Request(
-                    url + "/free", data=b'{"unload_models": true, "free_memory": true}',
+                    url.rstrip("/") + "/free", data=b'{"unload_models": true, "free_memory": true}',
                     headers={"Content-Type": "application/json"}, method="POST"), timeout=3).read()
             except Exception:  # noqa: BLE001
                 pass
-            self._comfy_model = None
-        self._qwen_timer.stop()
-        self._model_timer.stop()
-        self._gpu_timer.stop()
-        self._comfy_timer.stop()
+            finally:
+                if done is not None:
+                    done.set()
+        threading.Thread(target=work, daemon=True).start()
+
+    def _wait_for_shutdown(self, p: QProcess | None, cloud: bool, also: threading.Event | None):
+        """Wait (the window stays alive and says what it waits for) until the generator process has ended: it gets
+        3 s to quit by itself, then is asked to terminate (a cloud worker ends its pod: long), then killed."""
+        from PySide6.QtCore import QEventLoop
+        from PySide6.QtWidgets import QProgressDialog
+        def over() -> bool:
+            return (p is None or p.state() == QProcess.NotRunning) and (also is None or also.is_set())
+        if over():
+            return
+        loop = QEventLoop(self)
+        timers: list[QTimer] = []
+
+        def later(ms, fn):
+            t = QTimer(self)
+            t.setSingleShot(True)
+            t.timeout.connect(fn)
+            t.start(ms)
+            timers.append(t)
+
+        def check():
+            if over():
+                loop.quit()
+        later_ms = 3000 + (45000 if cloud else 5000)
+        if p is not None and p.state() != QProcess.NotRunning:
+            later(3000, lambda: p.terminate() if p.state() != QProcess.NotRunning else None)
+            later(later_ms, lambda: p.kill() if p.state() != QProcess.NotRunning else None)
+        later(later_ms + 3000, loop.quit)
+        tick = QTimer(self)
+        tick.timeout.connect(check)
+        tick.start(50)
+        timers.append(tick)
+        box = QProgressDialog("Shutting down the generator" + (" (ending the cloud pod, this can take a minute)"
+                                                               if cloud else "") + " …", "", 0, 0, self)
+        box.setCancelButton(None)
+        box.setWindowTitle("Promptwood")
+        box.setWindowModality(Qt.WindowModal)
+        box.show()
+        loop.exec()
+        box.close()
+        for t in timers:
+            t.stop()
+            t.deleteLater()
+
+    def closeEvent(self, e):
+        if self._checking:                             # Generate is still checking the project: nothing runs yet
+            self._cancel_check()
+        was_running = self.running
+        if was_running:
+            if QMessageBox.question(
+                    self, "Quit while generating?",
+                    "Clips are being generated. Stop and quit?\n\nClips that are finished are kept; the one being "
+                    "made is lost.", QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                e.ignore()
+                return
+        if self.project is not None and not was_running and not self._may_leave_project():
+            e.ignore()                                # the user keeps the window to save elsewhere / reopen
+            return                                    # (idle: the project is saved now, before anything is shut down)
+        self._save_timer.stop()
+        if self._trigger_scan is not None:
+            self._trigger_scan.set()                  # the trigger word lookup stops at the next file
+        self.stop_llama()                             # never leave the language model server behind
+        self.stop_tts()
+        for t in (self._qwen_timer, self._model_timer, self._gpu_timer, self._comfy_timer):
+            t.stop()
         if self._gpu_proc is not None:
             gp, self._gpu_proc = self._gpu_proc, None
             gp.finished.disconnect()
             gp.kill()
             gp.waitForFinished(1000)
-        self._save_timer.stop()
-        self._save_tree()
+        freed = None
+        if self._comfy_model in ("qwen", "llm"):              # nor the image edit model
+            freed = threading.Event()
+            self._post_free((self.comfy_url.text().strip() or DEFAULT_COMFY_URL), freed)
+            self._comfy_model = None
+        p = self.proc
+        cloud = self._cloud_worker
+        if p is not None:                            # never leave the generator (and the model) behind
+            self.proc = None
+            p.finished.disconnect()
+            if p.state() == QProcess.Running:
+                p.write(b'{"cmd": "quit", "free": true}\n')     # ComfyUI: give the memory back too
+                p.closeWriteChannel()
+        self._wait_for_shutdown(p, cloud, freed)
+        if was_running:                              # the generator wrote tree.json meanwhile: take that, then save
+            self._job = None
+            self._reload_made()
+            if not self._may_leave_project():
+                e.ignore()
+                self._update_buttons()
+                return
         self.preview.stop()
         self.save_settings()
         super().closeEvent(e)
