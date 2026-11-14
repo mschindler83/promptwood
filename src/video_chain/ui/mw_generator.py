@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import threading
@@ -458,7 +459,10 @@ class GeneratorMixin:
         self._plan = list(ev.get("make", []))
 
     def _ev_node(self, ev: dict):
-        nid, st = ev["id"], ev["state"]
+        nid, st = ev.get("id"), ev.get("state")
+        if not isinstance(nid, str) or not isinstance(st, str):
+            logging.getLogger(__name__).warning("ignoring a node event without id or state: %r", ev)
+            return
         if st == "generating":
             self._made_now.add(nid)
             self.live[nid] = "generating"
