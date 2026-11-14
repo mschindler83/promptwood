@@ -9,8 +9,16 @@ faceswap.py), the identity from up to four pictures of the new person; GPEN face
 VideoChainLanczosScale: ComfyUI's lanczos resize with the same frames, on all CPU cores (see scale.py).
 Copy this folder into ComfyUI/custom_nodes and restart ComfyUI.
 """
-import comfy.ldm.qwen_image21.model
-from comfy_extras.nodes_model_patch import QwenImage21FunControlPatch
+import logging
+
+try:                                     # ComfyUI's Qwen-Image 2.1 internals: not in every version; only this node needs them
+    import comfy.ldm.qwen_image21.model
+    from comfy_extras.nodes_model_patch import QwenImage21FunControlPatch
+    HAS_QWEN21 = True
+except ImportError:
+    HAS_QWEN21 = False
+
+log = logging.getLogger(__name__)
 
 
 class VideoChainQwen21FunInpaint:
@@ -54,15 +62,12 @@ def _full(folder: str, name: str) -> str:
     return folder_paths.get_full_path_or_raise(folder, name)
 
 
-_SWAPPERS: dict = {}
-
-
 class VideoChainFaceSwap:
     @classmethod
     def INPUT_TYPES(cls):
         swappers = _model_files("insightface", "hyperswap") or ["hyperswap_1b_256.onnx"]
         enhancers = ["none"] + (_model_files("facerestore_models", "gpen") or [])
-        return {"required": {"images": ("IMAGE",), "person": ("IMAGE",),
+        return {"required": {"images": ("IMAGE",), "person": ("IMAGE",),      # (the first picture of each person batch is used)
                              "swapper": (swappers,), "enhancer": (enhancers,),
                              "enhance": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 1.0, "step": 0.05})},
                 "optional": {"person_2": ("IMAGE",), "person_3": ("IMAGE",), "person_4": ("IMAGE",)}}
@@ -84,18 +89,14 @@ class VideoChainFaceSwap:
             raise ValueError("the face models det_10g.onnx and w600k_r50.onnx are needed in "
                              "models/insightface/models/buffalo_l") from e
         enh = None if enhancer == "none" else _full("facerestore_models", enhancer)
-        key = (swapper, enh)
-        if key not in _SWAPPERS:
-            _SWAPPERS.clear()
-            _SWAPPERS[key] = FaceSwapper(det, rec, _full("insightface", swapper), enh)
-        fs = _SWAPPERS[key]
+        fs = FaceSwapper(det, rec, _full("insightface", swapper), enh)   # (its models leave the GPU with the job)
 
         def u8(t):
             return (t[..., :3].clamp(0, 1) * 255).round().to(torch.uint8).cpu().numpy()
         try:
             pics = [u8(p)[0] for p in (person, person_2, person_3, person_4) if p is not None]
             identity = fs.identity(pics)
-            result = images[..., :3].clone().cpu()                 # filled frame by frame (little extra memory)
+            result = images[..., :3].to("cpu", copy=True)             # one copy, filled frame by frame
             bar = comfy.utils.ProgressBar(images.shape[0])
 
             def frames():
@@ -104,10 +105,11 @@ class VideoChainFaceSwap:
 
             def put(k, f):
                 result[k] = torch.from_numpy(f).float() / 255.0
+            total = images.shape[0]
             _none, done = fs.run(frames(), identity, enhance if enh else 0.0,
-                                 progress=lambda k, n: bar.update_absolute(k, images.shape[0]), out=put, total=images.shape[0])
+                                 progress=lambda k, n: bar.update_absolute(k, n), out=put, total=total)
         finally:
-            _SWAPPERS.clear()                                    # (its models leave the GPU with the job)
+            del fs
         if done == 0:
             raise ValueError("no face was found to swap in this clip")
         return (result, done)
@@ -115,9 +117,13 @@ class VideoChainFaceSwap:
 
 from .scale import VideoChainLanczosScale  # noqa: E402
 
-NODE_CLASS_MAPPINGS = {"VideoChainQwen21FunInpaint": VideoChainQwen21FunInpaint,
-                       "VideoChainFaceSwap": VideoChainFaceSwap,
+NODE_CLASS_MAPPINGS = {"VideoChainFaceSwap": VideoChainFaceSwap,
                        "VideoChainLanczosScale": VideoChainLanczosScale}
+if HAS_QWEN21:
+    NODE_CLASS_MAPPINGS["VideoChainQwen21FunInpaint"] = VideoChainQwen21FunInpaint
+else:
+    log.warning("video-chain: this ComfyUI has no Qwen-Image 2.1 Fun ControlNet internals: "
+                "VideoChainQwen21FunInpaint is not offered")
 NODE_DISPLAY_NAME_MAPPINGS = {"VideoChainQwen21FunInpaint": "Qwen-Image 2.1 Fun Inpaint (Promptwood)",
                               "VideoChainFaceSwap": "Face Swap, HyperSwap (Promptwood)",
                               "VideoChainLanczosScale": "Lanczos Scale, all cores (Promptwood)"}

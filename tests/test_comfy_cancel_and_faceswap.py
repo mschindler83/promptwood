@@ -53,3 +53,38 @@ def test_stop_ends_the_wait_of_a_job_still_queued(tmp_path):
         assert pid in srv.prompts_deleted
     finally:
         srv.close()
+
+
+def test_stop_before_the_job_is_queued_is_not_lost(tmp_path):
+    srv = FakeComfy(tmp_path / "comfy")
+    srv.hold = True
+    try:
+        g = C.ComfyGenerator(srv.url, timeout=30)
+        g.interrupt()                                   # Stop with nothing queued yet (during uploads, say)
+        with pytest.raises(C.ComfyJobFailed):
+            g._run_workflow({"1": {"class_type": "X", "inputs": {}}})
+        assert srv.prompts_deleted == ["p1"]    # the queued job was taken out again
+        assert g.current is None
+    finally:
+        srv.close()
+
+
+def test_a_new_job_starts_without_the_old_stop(tmp_path):
+    srv = FakeComfy(tmp_path / "comfy")
+    srv.render = lambda wf: {}
+    try:
+        g = C.ComfyGenerator(srv.url, timeout=30)
+        g.interrupt()
+        g._cancelled.clear()                            # what every job entry does first
+        entry = g._run_workflow({"1": {"class_type": "X", "inputs": {}}})
+        assert entry["status"]["completed"]
+    finally:
+        srv.close()
+
+
+def test_every_job_entry_clears_an_old_stop(tmp_path, monkeypatch):
+    import inspect
+    for fn in (C.ComfyGenerator.generate, C.ComfyImageEditor.edit, C.ComfyGenerator.refine,
+               C.ComfyGenerator.seedvr, C.ComfyPromptRefiner.describe_face, C.ComfyPromptRefiner.complete,
+               C.ComfyPromptRefiner.refine_prompt):
+        assert "_begin_job()" in inspect.getsource(fn), fn.__qualname__

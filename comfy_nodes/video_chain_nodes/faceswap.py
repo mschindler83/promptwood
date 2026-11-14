@@ -8,6 +8,9 @@ it can be used and tested on its own. Frames are RGB uint8 (h, w, 3).
 """
 from __future__ import annotations
 
+import logging
+from pathlib import Path
+
 import numpy as np
 
 TEMPLATES = {      # FaceFusion's warp templates (5 landmarks, as a share of the crop)
@@ -18,6 +21,7 @@ TEMPLATES = {      # FaceFusion's warp templates (5 landmarks, as a share of the
     "ffhq_512": [[0.37691676, 0.46864664], [0.62285697, 0.46912813], [0.50123859, 0.61331904],
                  [0.39308822, 0.72541100], [0.61150205, 0.72490465]],
 }
+log = logging.getLogger(__name__)
 DET_SIZE, DET_SCORE, MASK_BLUR = 640, 0.5, 0.3
 LOST = 12                                          # frames without the face before the largest face is taken again
 
@@ -26,6 +30,9 @@ def _session(path: str, gpu: bool = True):
     import onnxruntime as ort
     providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if gpu else ["CPUExecutionProvider"]
     providers = [p for p in providers if p in ort.get_available_providers()]
+    if gpu and "CUDAExecutionProvider" not in providers:
+        log.warning("video-chain face swap: onnxruntime has no CUDA provider, %s runs on the CPU (much slower)",
+                    Path(path).name)
     opts = ort.SessionOptions()
     opts.log_severity_level = 3
     return ort.InferenceSession(str(path), opts, providers=providers)

@@ -14,10 +14,16 @@ polled and there is no per-step progress).
 """
 from __future__ import annotations
 
+import functools
 import hashlib
+import http.client
+import ipaddress
 import json
+import logging
+import mimetypes
 import os
 import re
+import shutil
 import threading
 import time
 import urllib.error
@@ -25,6 +31,11 @@ import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
+
+try:
+    import websocket  # websocket-client (optional: without it the result is polled)
+except ImportError:
+    websocket = None
 
 DEFAULT_URL = "http://127.0.0.1:8188"
 UNET = "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
@@ -37,6 +48,12 @@ SAMPLER = "res_multistep"
 PIKA_SIGMAS = "1.0, 0.972973, 0.923077, 0.8, 0.571429, 0.333333, 0.0"   # ComfyUI's Pika H3 Flex templates
 SCHEDULER = "simple"
 SUBFOLDER = "video-chain"
+UPLOAD_MIN_RATE = 100 * 1024          # bytes/s an upload may be as slow as before it times out (at least 120 s)
+POLL_SECONDS = 5                      # the history is polled this often next to the websocket ...
+POLL_SECONDS_NO_WS = 2                # ... and this often without one
+DOWNLOAD_TRIES = 3
+_UPLOADS: dict[tuple[str, str], int] = {}     # (ComfyUI url, name there) -> jobs using that uploaded copy
+_UPLOADS_LOCK = threading.Lock()
 
 
 class ComfyError(RuntimeError):
@@ -114,7 +131,8 @@ def comfy_model_roots(comfy_dir: Path, kind: str) -> list[Path]:
         try:
             import yaml
             data = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001  (invalid yaml: only models/<kind>, but say why)
+            logging.getLogger(__name__).warning("%s is not readable: %s", cfg, e)
             data = {}
         if not isinstance(data, dict):
             data = {}
@@ -122,8 +140,9 @@ def comfy_model_roots(comfy_dir: Path, kind: str) -> list[Path]:
             if not isinstance(section, dict) or not section.get(kind):
                 continue
             base = Path(os.path.expanduser(str(section.get("base_path", ""))))
-            for entry in str(section[kind]).split("\n"):
-                entry = entry.strip()
+            value = section[kind]
+            for entry in (value if isinstance(value, list) else str(value).split("\n")):
+                entry = str(entry).strip()
                 if entry:
                     root = Path(os.path.expanduser(entry))
                     roots.append(root if root.is_absolute() else (comfy_dir / base / root if not base.is_absolute()
@@ -131,7 +150,33 @@ def comfy_model_roots(comfy_dir: Path, kind: str) -> list[Path]:
     return [r for r in roots if r.is_dir()]
 
 
-_TURBO_CACHE: dict[tuple, bool] = {}
+def _read_safetensors_keys(path: Path) -> frozenset[str] | None:
+    """The tensor names in a .safetensors header (None: not readable / no valid header)."""
+    try:
+        with open(path, "rb") as f:
+            n = int.from_bytes(f.read(8), "little")
+            if not 0 < n < 100 * 2**20:
+                return None
+            return frozenset(json.loads(f.read(n)))
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+@functools.lru_cache(maxsize=4096)
+def _safetensors_keys_cached(path: str, size: int, mtime_ns: int) -> frozenset[str] | None:
+    return _read_safetensors_keys(Path(path))
+
+
+def _safetensors_keys(path: Path) -> frozenset[str] | None:
+    """The tensor names of a file, read once per (path, size, mtime) for all the LoRA checks."""
+    try:
+        st = Path(path).stat()
+    except OSError:
+        return None
+    return _safetensors_keys_cached(str(path), st.st_size, st.st_mtime_ns)
+
+
+_safetensors_keys.cache_clear = _safetensors_keys_cached.cache_clear
 
 
 def is_turbo_lora(path: Path) -> bool:
@@ -139,77 +184,31 @@ def is_turbo_lora(path: Path) -> bool:
     name, or it trains final_layer, which normal H3 LoRAs do not."""
     if "turbo" in Path(path).name.lower():
         return True
-    try:
-        st = Path(path).stat()
-    except OSError:
-        return False
-    key = (str(path), st.st_size, st.st_mtime_ns)
-    if key not in _TURBO_CACHE:
-        ok = False
-        try:
-            with open(path, "rb") as f:
-                n = int.from_bytes(f.read(8), "little")
-                if 0 < n < 100 * 2**20:
-                    ok = any(k.startswith("final_layer") or ".final_layer" in k for k in json.loads(f.read(n)))
-        except (OSError, ValueError):
-            ok = False
-        _TURBO_CACHE[key] = ok
-    return _TURBO_CACHE[key]
+    keys = _safetensors_keys(path)
+    return keys is not None and any(k.startswith("final_layer") or ".final_layer" in k for k in keys)
 
 
 _H3_ATTN = re.compile(r"blocks[._]\d+[._]attn[._]qkv_proj")
 _H3_MLP = re.compile(r"blocks[._]\d+[._]mlp[._]fc1")
-_H3_CACHE: dict[tuple, bool] = {}
 
 
 def is_h3_lora(path: Path) -> bool:
     """Whether a .safetensors file is a MiniMax-H3 LoRA (any format: ai-toolkit/peft, kohya, LoKr), from the
     tensor names in its header only: H3's blocks have attn.qkv_proj and mlp.fc1."""
-    try:
-        st = Path(path).stat()
-    except OSError:
-        return False
-    key = (str(path), st.st_size, st.st_mtime_ns)
-    if key not in _H3_CACHE:
-        ok = False
-        try:
-            with open(path, "rb") as f:
-                n = int.from_bytes(f.read(8), "little")
-                if 0 < n < 100 * 2**20:
-                    names = json.loads(f.read(n)).keys()
-                    ok = any(_H3_ATTN.search(k) for k in names) and any(_H3_MLP.search(k) for k in names)
-        except (OSError, ValueError):
-            ok = False
-        _H3_CACHE[key] = ok
-    return _H3_CACHE[key]
+    names = _safetensors_keys(path)
+    return names is not None and any(_H3_ATTN.search(k) for k in names) and any(_H3_MLP.search(k) for k in names)
 
 
 _QWEN_IMG = re.compile(r"transformer_blocks[._]\d+[._]img_mlp")
 _QWEN_TXT = re.compile(r"transformer_blocks[._]\d+[._]txt_mlp")
-_QWEN_CACHE: dict[tuple, bool] = {}
 
 
 def is_qwen_lora(path: Path) -> bool:
     """Whether a .safetensors file is a Qwen-Image / Qwen-Image-Edit LoRA, from the tensor names in its header: the
     MMDiT's blocks have img_mlp and txt_mlp (Flux's have no such names; it also has single_transformer_blocks)."""
-    try:
-        st = Path(path).stat()
-    except OSError:
-        return False
-    key = (str(path), st.st_size, st.st_mtime_ns)
-    if key not in _QWEN_CACHE:
-        ok = False
-        try:
-            with open(path, "rb") as f:
-                n = int.from_bytes(f.read(8), "little")
-                if 0 < n < 100 * 2**20:
-                    names = json.loads(f.read(n)).keys()
-                    ok = (any(_QWEN_IMG.search(k) for k in names) and any(_QWEN_TXT.search(k) for k in names)
-                          and not any("single_transformer_blocks" in k for k in names))
-        except (OSError, ValueError):
-            ok = False
-        _QWEN_CACHE[key] = ok
-    return _QWEN_CACHE[key]
+    names = _safetensors_keys(path)
+    return (names is not None and any(_QWEN_IMG.search(k) for k in names) and any(_QWEN_TXT.search(k) for k in names)
+            and not any("single_transformer_blocks" in k for k in names))
 
 
 def find_qwen_loras(roots: list[Path]) -> list[tuple[str, str]]:
@@ -233,9 +232,14 @@ def find_h3_loras(roots: list[Path]) -> list[tuple[str, str]]:
 
 
 def _find_loras(roots: list[Path], test) -> list[tuple[str, str]]:
-    out, seen = [], set()
+    out, seen, visited = [], set(), set()
     for root in roots:
-        for dirpath, _dirs, files in os.walk(root, followlinks=True):
+        for dirpath, dirs, files in os.walk(root, followlinks=True):
+            real = os.path.realpath(dirpath)
+            if real in visited:                      # a link back into a folder already walked: not again
+                dirs[:] = []
+                continue
+            visited.add(real)
             for f in files:
                 if not f.endswith(".safetensors"):
                     continue
@@ -472,7 +476,17 @@ class ComfyGenerator:
         """comfy_dir: ComfyUI's folder on this machine (for its LoRA folders and, with cleanup, to delete the
         copies it keeps of every clip and start image after they were downloaded)."""
         self.url = url.rstrip("/")
+        parsed = urllib.parse.urlparse(self.url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise ComfyError(f"ComfyUI's address must be http:// or https://, not {url!r}")
         self.log, self.progress, self.timeout = log, progress, timeout
+        self._info: dict[str, dict] = {}          # /object_info answers (a node that is there stays there)
+        self.node_times: dict = {}                # seconds per workflow node of the last job
+        self._running_node: tuple | None = None
+        self._last_seedvr = False
+        self.seedvr_tiled = True                  # SeedVR2 options (the app sets them)
+        self.seedvr_precision = SEEDVR_PRECISION_LOCAL
+        self.seedvr_keep_cache = False
         self.client_id = uuid.uuid4().hex
         self.current: str | None = None          # prompt id being rendered
         self._cancelled = threading.Event()      # Stop was pressed: _wait gives up (a queued job has no history)
@@ -499,25 +513,48 @@ class ComfyGenerator:
                           else (base / "input" if base else None))
 
     # ---- HTTP
-    def _request(self, method: str, path: str, data: bytes | None = None, headers: dict | None = None,
+    def _open(self, req, timeout: float):
+        """urlopen; LAN and loopback addresses never go through a proxy from the environment."""
+        host = urllib.parse.urlparse(self.url).hostname or ""
+        try:
+            local = host == "localhost" or "." not in host and ":" not in host or ipaddress.ip_address(host).is_private
+        except ValueError:
+            local = "." not in host
+        if local:
+            return urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=timeout)
+        return urllib.request.urlopen(req, timeout=timeout)
+
+    def _sleep(self, seconds: float) -> None:
+        time.sleep(seconds)
+
+    def _request(self, method: str, path: str, data=None, headers: dict | None = None,
                  timeout: float = 30) -> bytes:
         req = urllib.request.Request(self.url + path, data=data, method=method, headers=headers or {})
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            with self._open(req, timeout) as r:
                 return r.read()
         except urllib.error.HTTPError as e:
             body = e.read().decode(errors="replace")
             raise ComfyError(f"ComfyUI {path}: HTTP {e.code} {body[:600]}") from e
-        except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as e:
+        except (urllib.error.URLError, ConnectionError, TimeoutError, OSError, http.client.HTTPException) as e:
             raise ComfyUnavailable(f"ComfyUI is not reachable at {self.url} ({e})") from e
 
     def _json(self, method: str, path: str, payload=None, timeout: float = 30):
         data = None if payload is None else json.dumps(payload).encode()
         headers = {"Content-Type": "application/json"} if payload is not None else {}
-        return json.loads(self._request(method, path, data, headers, timeout) or b"null")
+        raw = self._request(method, path, data, headers, timeout)
+        try:
+            return json.loads(raw or b"null")
+        except ValueError as e:
+            raise ComfyError(f"ComfyUI {path}: an answer that is not JSON: {raw[:200]!r}") from e
 
-    def _object_info(self, node: str) -> dict:
-        return (self._json("GET", f"/object_info/{node}") or {}).get(node) or {}
+    def _object_info(self, node: str, fresh: bool = False) -> dict:
+        if not fresh and node in self._info:
+            return self._info[node]
+        info = ((self._json("GET", f"/object_info/{node}") or {}).get(node)) or {}
+        if info:
+            self._info[node] = info              # (a missing node is asked again: ComfyUI may get it restarted)
+        return info
 
     def _check_models(self):
         """The H3 files must be in ComfyUI's model folders (and its H3 nodes present)."""
@@ -615,7 +652,7 @@ class ComfyGenerator:
 
     def lora_names(self, refresh: bool = False) -> list[str]:
         if self._loras is None or refresh:
-            req = self._object_info("LoraLoaderModelOnly").get("input", {}).get("required", {})
+            req = self._object_info("LoraLoaderModelOnly", fresh=refresh).get("input", {}).get("required", {})
             self._loras = _combo_options(req.get("lora_name"))
         return self._loras
 
@@ -627,82 +664,180 @@ class ComfyGenerator:
         """LoRA files ComfyUI cannot load (not in its LoRA folders)."""
         return [lo for lo in loras if self.name_for(lo) is None]
 
-    def free(self) -> None:
-        """Ask ComfyUI to unload its models and free the memory."""
+    def free(self) -> bool:
+        """Ask ComfyUI to unload its models and free the memory; False (and a log line) if that failed."""
         try:
             self._json("POST", "/free", {"unload_models": True, "free_memory": True})
-        except ComfyError:
-            pass
+            return True
+        except ComfyError as e:
+            self.log(f"ComfyUI could not unload its models: {e}")
+            return False
 
-    def free_cache(self) -> None:
+    def free_cache(self) -> bool:
         """Ask ComfyUI to drop its cached results (the last job's frames), keeping the models loaded."""
         try:
             self._json("POST", "/free", {"unload_models": False, "free_memory": True})
-        except ComfyError:
-            pass
+            return True
+        except ComfyError as e:
+            self.log(f"ComfyUI could not drop its cache: {e}")
+            return False
 
     def _save(self, f: dict, dest: Path) -> None:
         """Download a result into dest, written under a temporary name first (never a truncated file)."""
         dest = Path(dest)
         tmp = dest.with_name(dest.stem + ".part" + dest.suffix)
         try:
-            tmp.write_bytes(self._download(f))
+            self._download_to(f, tmp)
             tmp.replace(dest)
         finally:
             tmp.unlink(missing_ok=True)
 
+    def _download_to(self, f: dict, dest: Path) -> None:
+        """Stream a result into dest in chunks (clips are hundreds of MB); a cut connection is tried again."""
+        q = urllib.parse.urlencode({"filename": f["filename"], "subfolder": f.get("subfolder", ""),
+                                    "type": f.get("type", "output")})
+        for attempt in range(DOWNLOAD_TRIES):
+            try:
+                req = urllib.request.Request(f"{self.url}/view?{q}")
+                with self._open(req, 300) as r, open(dest, "wb") as out:
+                    shutil.copyfileobj(r, out, 1 << 20)
+                    want = r.headers.get("Content-Length")
+                if want is not None and dest.stat().st_size != int(want):
+                    raise ComfyUnavailable(f"the download of {f['filename']} was cut off")
+                return
+            except urllib.error.HTTPError as e:
+                raise ComfyError(f"ComfyUI /view: HTTP {e.code}") from e
+            except (ComfyUnavailable, urllib.error.URLError, ConnectionError, TimeoutError, OSError,
+                    http.client.HTTPException) as e:
+                if attempt == DOWNLOAD_TRIES - 1:
+                    raise ComfyUnavailable(f"the download of {f['filename']} failed ({e})") from e
+                self.log(f"download of {f['filename']} failed ({e}): trying again")
+                self._sleep(2 ** attempt)
+
     def _drop_uploads(self, uploads: list[tuple[str, Path]]) -> None:
-        if self.cleanup:
-            for up, local in uploads:
-                self._remove(self.input_dir, {"filename": Path(up).name, "subfolder": str(Path(up).parent)},
-                             Path(local), same_size=False)
+        """Remove ComfyUI's copies of uploaded files, unless another job still uses the same copy."""
+        if not self.cleanup:
+            return
+        for up, local in uploads:
+            with _UPLOADS_LOCK:
+                key = (self.url, up)
+                left = _UPLOADS.get(key, 1) - 1
+                if left > 0:
+                    _UPLOADS[key] = left
+                    continue
+                _UPLOADS.pop(key, None)
+            self._remove(self.input_dir, {"filename": Path(up).name, "subfolder": str(Path(up).parent)},
+                         Path(local), same_size=False)
 
     def _queue(self, wf: dict) -> str:
         """Queue a workflow under an id chosen here, set as current before it is sent: a Stop while the request is
         on its way (or after a lost answer) can still cancel the job ComfyUI may have accepted."""
         pid = str(uuid.uuid4())
         self.current = pid
-        self._cancelled.clear()
         self.node_times, self._running_node = {}, None
         res = self._json("POST", "/prompt", {"prompt": wf, "client_id": self.client_id, "prompt_id": pid})
+        if not isinstance(res, dict):
+            raise ComfyError(f"ComfyUI /prompt: an unexpected answer: {str(res)[:200]}")
         if res.get("node_errors"):
             self.current = None
             raise ComfyError(f"ComfyUI rejected the workflow: {json.dumps(res['node_errors'])[:600]}")
         self.current = res.get("prompt_id") or pid
         return self.current
 
+    def _begin_job(self) -> None:
+        """Start of a job: an earlier Stop is over, and ComfyUI's node descriptions are asked afresh (they are
+        kept only while one job checks them, as ComfyUI's nodes may change between jobs)."""
+        self._cancelled.clear()
+        self._info.clear()
+
+    def _run_workflow(self, wf: dict) -> dict:
+        """Queue a workflow and wait for its history entry. The websocket is connected first (the job's messages
+        are not missed) and closed after; a job that went wrong other than by ComfyUI's own error is cancelled so
+        it cannot hold up the next one."""
+        ws = self._connect_ws()
+        try:
+            self._queue(wf)
+            if self._cancelled.is_set():         # Stop came before the job was queued: take it out again
+                self.interrupt()
+                raise ComfyJobFailed("stopped")
+            return self._wait(self.current, ws)
+        except ComfyJobFailed:
+            raise
+        except Exception:
+            self.interrupt()
+            raise
+        finally:
+            if ws is not None:
+                try:
+                    ws.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            self.current = None
+
     def interrupt(self) -> None:
         """Stop the clip being rendered (and drop it from the queue)."""
+        self._cancelled.set()                    # also with no job queued yet: the job about to start gives up
         pid = self.current
         if not pid:
             return
-        self._cancelled.set()
         for path, payload in (("/queue", {"delete": [pid]}), ("/interrupt", {"prompt_id": pid})):
             try:
                 self._json("POST", path, payload, timeout=10)
-            except ComfyError:
-                pass
+            except ComfyError as e:
+                self.log(f"ComfyUI {path} (Stop) failed: {e}")
 
     # ---- one clip
     def upload(self, image: Path) -> str:
-        """Upload a file (an image, or a guide clip) into ComfyUI's input/video-chain; returns its name there."""
-        data = Path(image).read_bytes()
-        suffix = Path(image).suffix.lower() or ".png"
-        name = hashlib.sha1(data).hexdigest()[:20] + suffix
-        ctype = {".png": "image/png", ".mp4": "video/mp4", ".wav": "audio/wav"}.get(suffix, "application/octet-stream")
+        """Upload a file (an image, or a guide clip) into ComfyUI's input/video-chain; returns its name there.
+        The file is streamed, never held in memory. A copy another job uploaded and still uses is not sent again
+        (the name is the content's hash); _drop_uploads removes it when the last job is done."""
+        image = Path(image)
+        digest, size = hashlib.sha1(), 0
+        with open(image, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                digest.update(chunk)
+                size += len(chunk)
+        suffix = image.suffix.lower() or ".png"
+        if not re.fullmatch(r"\.[a-z0-9]{1,5}", suffix):
+            suffix = ".bin"                          # (never an odd suffix into the multipart header)
+        name = digest.hexdigest()[:20] + suffix
+        with _UPLOADS_LOCK:
+            have = _UPLOADS.get((self.url, f"{SUBFOLDER}/{name}"), 0) if self.cleanup else 0
+            if have:
+                _UPLOADS[(self.url, f"{SUBFOLDER}/{name}")] = have + 1
+                return f"{SUBFOLDER}/{name}"
+        ctype = {".png": "image/png", ".mp4": "video/mp4", ".wav": "audio/wav"}.get(suffix) \
+            or mimetypes.guess_type(name)[0] or "application/octet-stream"
         boundary = uuid.uuid4().hex
-        parts = []
-        for field, value in (("subfolder", SUBFOLDER), ("type", "input"), ("overwrite", "true")):
-            parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{field}"\r\n\r\n{value}\r\n'.encode())
-        parts.append((f'--{boundary}\r\nContent-Disposition: form-data; name="image"; filename="{name}"\r\n'
-                      f"Content-Type: {ctype}\r\n\r\n").encode() + data + b"\r\n")
-        parts.append(f"--{boundary}--\r\n".encode())
-        res = json.loads(self._request("POST", "/upload/image", b"".join(parts),
-                                       {"Content-Type": f"multipart/form-data; boundary={boundary}"}, 120))
-        return f"{res['subfolder']}/{res['name']}" if res.get("subfolder") else res["name"]
+        head = b"".join(f'--{boundary}\r\nContent-Disposition: form-data; name="{field}"\r\n\r\n{value}\r\n'.encode()
+                        for field, value in (("subfolder", SUBFOLDER), ("type", "input"), ("overwrite", "true")))
+        head += (f'--{boundary}\r\nContent-Disposition: form-data; name="image"; filename="{name}"\r\n'
+                 f"Content-Type: {ctype}\r\n\r\n").encode()
+        tail = f"\r\n--{boundary}--\r\n".encode()
+
+        def body():
+            yield head
+            with open(image, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    yield chunk
+            yield tail
+        raw = self._request("POST", "/upload/image", body(),
+                            {"Content-Type": f"multipart/form-data; boundary={boundary}",
+                             "Content-Length": str(len(head) + size + len(tail))},
+                            max(120, size / UPLOAD_MIN_RATE))
+        try:
+            res = json.loads(raw)
+            got = f"{res['subfolder']}/{res['name']}" if res.get("subfolder") else res["name"]
+        except (ValueError, KeyError, TypeError, AttributeError) as e:
+            raise ComfyError(f"ComfyUI /upload/image: an unexpected answer: {raw[:200]!r}") from e
+        if self.cleanup:
+            with _UPLOADS_LOCK:
+                _UPLOADS[(self.url, got)] = _UPLOADS.get((self.url, got), 0) + 1
+        return got
 
     def generate(self, prompt: str, start_image: Path, out_video: Path, out_last_frame: Path, seed: int,
                  settings: dict | None = None) -> None:
+        self._begin_job()
         s = settings or {}
         self._last_seedvr = False                  # (a SeedVR2 job after this one frees the H3 models first)
         loras = []
@@ -741,10 +876,7 @@ class ComfyGenerator:
             if not hyper:
                 self.last_hyperflow = False          # a clip without HyperFlow ran: the model is unpatched
         finally:
-            if self.cleanup:
-                for up, local in uploads:
-                    self._remove(self.input_dir, {"filename": Path(up).name, "subfolder": str(Path(up).parent)},
-                                 Path(local), same_size=False)
+            self._drop_uploads(uploads)
 
     def _run(self, prompt, start_image, out_video, out_last_frame, seed, s, loras, turbo, uploads,
              hyper=None, pika=None) -> None:
@@ -786,34 +918,20 @@ class ComfyGenerator:
                 sounds.append(self.upload(Path(a)))
                 uploads.append((sounds[-1], a))
         prefix = f"{SUBFOLDER}/{uuid.uuid4().hex[:12]}"
-        wf = build_workflow(prompt=prompt, image=image, seed=seed, width=s.get("width", 512),
-                            height=s.get("height", 512), frames=s.get("frames", 73), steps=s.get("steps", 20),
-                            loras=loras, audio=bool(s.get("audio", True)), prefix=prefix, refs=refs,
-                            ref_size=s.get("ref_size", "match"),
-                            ref_key=self.ref_key() if refs or frame_refs else None, frame_refs=frame_refs,
-                            turbo=turbo, end_image=end_image, guides=guides, hyperflow=hyper, pika=pika,
-                            cfg=float(s.get("cfg", 1.0)),
-                            audio_refs=sounds, **({"audio_key": self.audio_key()} if sounds else {}),
-                            start_pin=int(s.get("start_pin") or 1), recipe=s.get("recipe"), keyframes=keyframes,
-                            veda=self.veda_predictor(bool(refs or sounds)) if s.get("veda") else None)
-        ws = self._connect_ws()
         try:
-            self._queue(wf)
-            entry = self._wait(self.current, ws)
-        except ComfyJobFailed:
-            raise
-        except Exception:
-            # timed out, lost the connection, a bad answer: the job may still run in ComfyUI and would hold up
-            # the next clip, so cancel it (Stop cancels through the signal handler)
-            self.interrupt()
-            raise
-        finally:
-            if ws is not None:
-                try:
-                    ws.close()
-                except Exception:  # noqa: BLE001
-                    pass
-            self.current = None
+            wf = build_workflow(prompt=prompt, image=image, seed=seed, width=s.get("width", 512),
+                                height=s.get("height", 512), frames=s.get("frames", 73), steps=s.get("steps", 20),
+                                loras=loras, audio=bool(s.get("audio", True)), prefix=prefix, refs=refs,
+                                ref_size=s.get("ref_size", "match"),
+                                ref_key=self.ref_key() if refs or frame_refs else None, frame_refs=frame_refs,
+                                turbo=turbo, end_image=end_image, guides=guides, hyperflow=hyper, pika=pika,
+                                cfg=float(s.get("cfg", 1.0)),
+                                audio_refs=sounds, **({"audio_key": self.audio_key()} if sounds else {}),
+                                start_pin=int(s.get("start_pin") or 1), recipe=s.get("recipe"), keyframes=keyframes,
+                                veda=self.veda_predictor(bool(refs or sounds)) if s.get("veda") else None)
+        except ValueError as e:                # (a setting combination that cannot be built: say why)
+            raise ComfyError(str(e)) from e
+        entry = self._run_workflow(wf)
         outputs = entry.get("outputs") or {}
         video = self._first_file(outputs.get("save_video"))
         frame = self._first_file(outputs.get("save_last"))
@@ -874,20 +992,21 @@ class ComfyGenerator:
         """One websocket message: reports progress; returns 'done' or raises on an error for this prompt."""
         t, d = msg.get("type"), msg.get("data") or {}
         if d.get("prompt_id") not in (None, pid):
-            return None
-        if t == "executing" and d.get("prompt_id") == pid:
+            return None                                  # (another job's message)
+        mine = d.get("prompt_id") == pid
+        if t == "executing" and mine:
             self._node_clock(d.get("node"))
-        if t == "progress" and self.progress is not None and d.get("max"):
+            if d.get("node") is None:
+                return "done"
+        elif t == "progress" and self.progress is not None and d.get("max"):
             self.progress(int(d["value"]), int(d["max"]))
-        elif t == "executing" and d.get("node") is None and d.get("prompt_id") == pid:
-            return "done"
-        elif t == "execution_success" and d.get("prompt_id") == pid:
+        elif t == "execution_success" and mine:
             self._node_clock(None)
             return "done"
-        elif t == "execution_error" and d.get("prompt_id") == pid:
+        elif t == "execution_error" and mine:
             raise ComfyJobFailed(f"ComfyUI: {d.get('exception_type', 'error')}: {d.get('exception_message', '')}"
-                             f" (node {d.get('node_type', '?')})")
-        elif t == "execution_interrupted" and d.get("prompt_id") == pid:
+                                 f" (node {d.get('node_type', '?')})")
+        elif t == "execution_interrupted" and mine:
             raise ComfyJobFailed("ComfyUI: the job was interrupted")
         return None
 
@@ -895,54 +1014,86 @@ class ComfyGenerator:
         """Seconds per workflow node (node_times), from ComfyUI's "executing" messages: a node runs until the next
         one starts (None: the job ended). Cached nodes send none and are not counted."""
         now = time.monotonic()
-        last = getattr(self, "_running_node", None)
-        if not hasattr(self, "node_times"):
-            self.node_times = {}
+        last = self._running_node
         if last is not None:
             self.node_times[last[0]] = self.node_times.get(last[0], 0.0) + now - last[1]
         self._running_node = (node, now) if node is not None else None
 
+    @staticmethod
+    def _is_ws_timeout(e: Exception) -> bool:
+        return isinstance(e, TimeoutError) or (websocket is not None
+                                               and isinstance(e, websocket.WebSocketTimeoutException))
+
     def _wait(self, pid: str, ws) -> dict:
+        """Wait for the job's history entry. Messages come over the websocket (progress, the end); the history is
+        polled next to it, and alone (every POLL_SECONDS_NO_WS) when there is no socket or it dropped (then a new
+        one is tried every 10 s)."""
         end = time.monotonic() + self.timeout
         last_poll = 0.0
         poll_errors = 0
-        while time.monotonic() < end:
-            if self._cancelled.is_set():
-                raise ComfyJobFailed("stopped")
-            if ws is not None:
+        finished = False                                 # the end was announced: fetch the result now
+        reconnect_at = float("inf") if ws is None else 0.0
+        own_ws = None
+        try:
+            while time.monotonic() < end:
+                if self._cancelled.is_set():
+                    raise ComfyJobFailed("stopped")
+                if ws is not None:
+                    try:
+                        raw = ws.recv()
+                    except Exception as e:  # noqa: BLE001
+                        raw = None
+                        if not self._is_ws_timeout(e):   # a dropped socket: poll, and try to connect again
+                            self.log(f"ComfyUI's websocket dropped ({e}): polling the result")
+                            ws, reconnect_at = None, time.monotonic()
+                    if isinstance(raw, str):
+                        try:
+                            msg = json.loads(raw)
+                        except ValueError:
+                            msg = None
+                        if isinstance(msg, dict):
+                            try:
+                                if self.handle_message(msg, pid) == "done":
+                                    finished = True
+                            except ComfyError:
+                                raise
+                            except Exception as e:  # noqa: BLE001  (a bug in a progress callback: not the socket's fault)
+                                self.log(f"progress report failed: {e}")
+                else:
+                    self._sleep(0.5)
+                    if not finished and time.monotonic() >= reconnect_at:
+                        ws = own_ws = self._connect_ws() or own_ws
+                        reconnect_at = time.monotonic() + 10 if ws is None else float("inf")
+                every = POLL_SECONDS if ws is not None and not finished else POLL_SECONDS_NO_WS
+                if finished:
+                    every = 0.5
+                if time.monotonic() - last_poll >= every or last_poll == 0.0:
+                    last_poll = time.monotonic()
+                    try:
+                        entry = self._history(pid)
+                        poll_errors = 0
+                    except ComfyUnavailable:
+                        poll_errors += 1
+                        if poll_errors >= 5:                 # ~5 tries in a row: ComfyUI is really gone
+                            raise
+                        continue
+                    if entry is not None:
+                        st = entry.get("status") or {}
+                        if st.get("status_str") == "error":
+                            msgs = [m for m in st.get("messages", []) if m and m[0] == "execution_error"]
+                            detail = msgs[-1][1] if msgs else {}
+                            raise ComfyJobFailed(f"ComfyUI: {detail.get('exception_type', 'error')}: "
+                                                 f"{detail.get('exception_message', '')}")
+                        if st.get("completed", True):
+                            return entry
+            raise ComfyError(f"ComfyUI did not finish within {self.timeout / 60:.0f} min")
+        finally:
+            self._node_clock(None)                           # (the last node's time, also when the job failed)
+            if own_ws is not None:
                 try:
-                    raw = ws.recv()
-                    if isinstance(raw, str) and self.handle_message(json.loads(raw), pid) == "done":
-                        ws = None                       # finished: fetch the result below
-                except ValueError:
+                    own_ws.close()
+                except Exception:  # noqa: BLE001
                     pass
-                except ComfyError:
-                    raise
-                except Exception as e:  # noqa: BLE001  (a timeout: go on; a dropped socket: poll instead)
-                    if not (isinstance(e, TimeoutError) or type(e).__name__ == "WebSocketTimeoutException"):
-                        ws = None                       # (recv would fail at once forever: no busy loop)
-            else:
-                time.sleep(0.5)
-            if ws is None or time.monotonic() - last_poll > 5:
-                last_poll = time.monotonic()
-                try:
-                    entry = self._history(pid)
-                    poll_errors = 0
-                except ComfyUnavailable:
-                    poll_errors += 1
-                    if poll_errors >= 5:                 # ~5 tries in a row: ComfyUI is really gone
-                        raise
-                    continue
-                if entry is not None:
-                    st = entry.get("status") or {}
-                    if st.get("status_str") == "error":
-                        msgs = [m for m in st.get("messages", []) if m and m[0] == "execution_error"]
-                        detail = msgs[-1][1] if msgs else {}
-                        raise ComfyJobFailed(f"ComfyUI: {detail.get('exception_type', 'error')}: "
-                                         f"{detail.get('exception_message', '')}")
-                    if st.get("completed", True):
-                        return entry
-        raise ComfyError(f"ComfyUI did not finish within {self.timeout / 60:.0f} min")
 
 
 # ----------------------------------------------------------------------------- image edit (Qwen Image Edit)
@@ -1340,6 +1491,7 @@ class ComfyImageEditor(ComfyGenerator):
         """Edit image by prompt; the result goes to out_png. loras: (file, strength) in ComfyUI's LoRA folders.
         model: a key of EDIT_MODELS. mask: a picture at the image's size, white where it is drawn anew (inpaint;
         Qwen-Image 2.1 only). Returns what it was made with."""
+        self._begin_job()
         if mask is not None and self.can_inpaint(model):
             raise ComfyError(self.can_inpaint(model))
         names = []
@@ -1370,33 +1522,9 @@ class ComfyImageEditor(ComfyGenerator):
             wf = build_edit_workflow(prompt=prompt, image=name, refs=ref_names, seed=seed, steps=steps, cfg=cfg,
                                      files=self.files, lightning=light[0] if light else None, prefix=prefix,
                                      loras=names)
-            ws = self._connect_ws()
-            try:
-                self._queue(wf)
-                entry = self._wait(self.current, ws)
-            except ComfyJobFailed:
-                raise
-            except Exception:
-                self.interrupt()
-                raise
-            finally:
-                if ws is not None:
-                    try:
-                        ws.close()
-                    except Exception:  # noqa: BLE001
-                        pass
-                self.current = None
-            out = self._first_file((entry.get("outputs") or {}).get("edit_save"))
-            if out is None:
-                raise ComfyError("ComfyUI finished without the edited image")
-            self._save(out, Path(out_png))
-            if self.cleanup:
-                self._remove(self.output_dir, out, Path(out_png))
+            self._run_saving(wf, "edit_save", out_png, [])
         finally:
-            if self.cleanup:
-                for up, local in uploads:
-                    self._remove(self.input_dir, {"filename": Path(up).name, "subfolder": str(Path(up).parent)},
-                                 Path(local), same_size=False)
+            self._drop_uploads(uploads)
         return {"quality": quality, "steps": steps, "cfg": cfg, "model": self.files["unet"], "edit_model": "2511",
                 "lightning": light[0] if light else None,
                 "loras": [{"path": str(p), "strength": float(st)} for p, st in loras]}
@@ -1404,22 +1532,7 @@ class ComfyImageEditor(ComfyGenerator):
     def _run_saving(self, wf: dict, node: str, out_png: Path, uploads: list[tuple[str, Path]]) -> None:
         """Queue a workflow, wait, download what its SaveImage node `node` wrote to out_png; clean up after."""
         try:
-            ws = self._connect_ws()
-            try:
-                self._queue(wf)
-                entry = self._wait(self.current, ws)
-            except ComfyJobFailed:
-                raise
-            except Exception:
-                self.interrupt()
-                raise
-            finally:
-                if ws is not None:
-                    try:
-                        ws.close()
-                    except Exception:  # noqa: BLE001
-                        pass
-                self.current = None
+            entry = self._run_workflow(wf)
             out = self._first_file((entry.get("outputs") or {}).get(node))
             if out is None:
                 raise ComfyError("ComfyUI finished without the edited image")
@@ -1427,10 +1540,7 @@ class ComfyImageEditor(ComfyGenerator):
             if self.cleanup:
                 self._remove(self.output_dir, out, Path(out_png))
         finally:
-            if self.cleanup:
-                for up, local in uploads:
-                    self._remove(self.input_dir, {"filename": Path(up).name, "subfolder": str(Path(up).parent)},
-                                 Path(local), same_size=False)
+            self._drop_uploads(uploads)
 
     def _edit_moss(self, image, prompt, out_png, seed, refs, loras, names) -> dict:
         if self.files_moss is None:
@@ -1628,15 +1738,30 @@ def refine_size(width: int, height: int, target: str) -> tuple[int, int]:
     return canvas_size(width, height, {"1080p": 1440, "2k": 1920}[target])
 
 
+FFMPEG_TIMEOUT = 3600                  # seconds an ffmpeg job on a clip may take
+
+
+def _ffmpeg(args: list, timeout: float = FFMPEG_TIMEOUT) -> None:
+    """Run ffmpeg quietly; a failure (with ffmpeg's own reason), a missing ffmpeg or a hang is a ComfyError."""
+    import subprocess
+    cmd = ["ffmpeg", "-nostdin", "-v", "error", "-y", *map(str, args)]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=timeout)
+    except FileNotFoundError as e:
+        raise ComfyError("ffmpeg is not installed (it is needed to prepare and join the clips)") from e
+    except subprocess.TimeoutExpired as e:
+        raise ComfyError(f"ffmpeg did not finish within {timeout / 60:.0f} min") from e
+    except subprocess.CalledProcessError as e:
+        raise ComfyError(f"ffmpeg failed: {(e.stderr or b'').decode(errors='replace')[-400:].strip()}") from e
+
+
 def _with_audio(video: Path, out: Path) -> Path:
     """The clip with a sound track (silence if it has none): the refine encodes its sound into the AV latent."""
-    import subprocess
     from .chain import probe
     if probe(video)["audio"]:
         return video
-    subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(video), "-f", "lavfi", "-i",
-                    "anullsrc=r=48000:cl=stereo", "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac",
-                    "-shortest", str(out)], check=True, capture_output=True)
+    _ffmpeg(["-i", video, "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-map", "0:v", "-map", "1:a",
+             "-c:v", "copy", "-c:a", "aac", "-shortest", out])
     return out
 
 
@@ -1644,6 +1769,7 @@ def _refine(self, draft: Path, prompt: str, out: Path, seed: int, size: tuple[in
             loras: list[tuple[str, float]], first_frame: Path | None = None, last_frame: Path | None = None,
             sparse: float | None = None, strength: str = REFINE_DEFAULT) -> None:
     """ComfyGenerator.refine: re-render one finished clip at size (see build_refine_workflow)."""
+    self._begin_job()
     self._last_seedvr = False
     for node in REFINE_NODES:
         if not self._object_info(node):
@@ -1651,8 +1777,8 @@ def _refine(self, draft: Path, prompt: str, out: Path, seed: int, size: tuple[in
                              "master since 2026-10-28)")
     if self.last_hyperflow is not False:
         # a HyperFlow-patched H3 model (or one this process does not know about) must not refine: load it fresh
-        self.free()
-        self.last_hyperflow = False
+        if self.free():
+            self.last_hyperflow = False
     if sparse and not self._object_info("BlockSparseAttention"):
         raise ComfyError("this ComfyUI has no BlockSparseAttention node (Sol-Attn; update ComfyUI)")
     req = self._object_info("LatentUpscaleModelLoader").get("input", {}).get("required", {})
@@ -1686,35 +1812,15 @@ def _refine(self, draft: Path, prompt: str, out: Path, seed: int, size: tuple[in
                                        frames=frames, loras=names, refiner=files["refiner"],
                                        upscaler=files["upscaler"], prefix=prefix, sparse=sparse,
                                        strength=strength, **pins)
-            ws = self._connect_ws()
-            try:
-                self._queue(wf)
-                entry = self._wait(self.current, ws)
-            except ComfyJobFailed:
-                raise
-            except Exception:
-                self.interrupt()
-                raise
-            finally:
-                if ws is not None:
-                    try:
-                        ws.close()
-                    except Exception:  # noqa: BLE001
-                        pass
-                self.current = None
+            entry = self._run_workflow(wf)
             video = self._first_file((entry.get("outputs") or {}).get("refine_save"))
             if video is None:
                 raise ComfyError("ComfyUI finished without the refined clip")
-            part = Path(out).with_name(Path(out).stem + ".part.mp4")
-            part.write_bytes(self._download(video))
-            part.replace(out)
+            self._save(video, Path(out))
             if self.cleanup:
                 self._remove(self.output_dir, video, Path(out))
         finally:
-            if self.cleanup:
-                for up, local in uploads:
-                    self._remove(self.input_dir, {"filename": Path(up).name, "subfolder": str(Path(up).parent)},
-                                 Path(local), same_size=False)
+            self._drop_uploads(uploads)
 
 
 ComfyGenerator.refine = _refine
@@ -1870,6 +1976,8 @@ def seedvr_pieces(total: int, per: int, overlap: int = SEEDVR_PIECE_OVERLAP) -> 
     """(first frame, frame count) of the pieces a clip of `total` frames is upscaled in: at most `per` frames each,
     neighbours sharing `overlap` frames; one piece when it fits."""
     total, per = int(total), int(per)
+    if per <= overlap:
+        raise ValueError(f"a piece of {per} frames cannot overlap its neighbour by {overlap}")
     if total <= per:
         return [(0, total)]
     out, start = [], 0
@@ -1888,6 +1996,7 @@ def _seedvr(self, draft: Path, out: Path, size: tuple[int, int], method: str = "
     The first SeedVR2 job unloads ComfyUI's other models (their RAM); a long clip goes in pieces that fit
     SEEDVR_RAM_BUDGET, crossfaded over SEEDVR_PIECE_OVERLAP frames, with the clip's own sound. Progress: one bar
     for the whole clip (SeedvrProgress) and a note per piece. denoise: SEEDVR_DENOISE on the clip first."""
+    self._begin_job()
     import tempfile
     from .chain import probe
     if denoise:
@@ -1897,8 +2006,8 @@ def _seedvr(self, draft: Path, out: Path, size: tuple[int, int], method: str = "
             return self.seedvr(clean, out, size, method, seed)
     files = self._seedvr_files(method)
     if not getattr(self, "_last_seedvr", False):  # the job before was another model: its RAM goes to SeedVR2
-        self.free()
-        self.last_hyperflow = False
+        if self.free():
+            self.last_hyperflow = False
     self._last_seedvr = True
     total = probe(Path(draft))["frames"]
     ram_free = self._ram_free()                    # (after the unload: what SeedVR2 can really use)
@@ -1928,17 +2037,14 @@ def _ram_free(self) -> int:
 
 
 def _seedvr_pieces(self, files, draft, out, size, seed, pieces, total, track) -> None:
-    import subprocess
     import tempfile
     with tempfile.TemporaryDirectory(prefix="video-chain-seedvr-pieces-") as tmp:
         tmp, made = Path(tmp), []
         for i, (first, count) in enumerate(pieces):
             track.piece(i, self.note)
             part = tmp / f"in{i}.mp4"
-            subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(draft), "-vf",
-                            f"trim=start_frame={first}:end_frame={first + count},setpts=PTS-STARTPTS", "-an",
-                            "-c:v", "libx264", "-crf", "6", "-pix_fmt", "yuv420p", str(part)],
-                           check=True, capture_output=True)
+            _ffmpeg(["-i", draft, "-vf", f"trim=start_frame={first}:end_frame={first + count},setpts=PTS-STARTPTS",
+                     "-an", "-c:v", "libx264", "-crf", "6", "-pix_fmt", "yuv420p", part])
             done = tmp / f"out{i}.mp4"
             self._seedvr_job(files, part, done, size, seed)
             if not getattr(self, "seedvr_keep_cache", False):
@@ -1951,16 +2057,13 @@ def _seedvr_pieces(self, files, draft, out, size, seed, pieces, total, track) ->
 
 def _denoise(src: Path, out: Path) -> None:
     """The clip with SEEDVR_DENOISE applied, nearly lossless, its sound copied."""
-    import subprocess
-    subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(src), "-map", "0:v:0", "-map", "0:a:0?",
-                    "-vf", SEEDVR_DENOISE, "-c:v", "libx264", "-crf", "6", "-pix_fmt", "yuv420p", "-c:a", "copy",
-                    str(out)], check=True, capture_output=True)
+    _ffmpeg(["-i", src, "-map", "0:v:0", "-map", "0:a:0?", "-vf", SEEDVR_DENOISE, "-c:v", "libx264", "-crf", "6",
+             "-pix_fmt", "yuv420p", "-c:a", "copy", out])
 
 
 def _join_pieces(made: list[Path], pieces: list[tuple[int, int]], draft: Path, out: Path, total: int) -> None:
     """The upscaled pieces as one clip: each overlap crossfaded (ffmpeg xfade, frame-exact at 24 fps), the draft's
     own sound; checked to have the draft's frame count."""
-    import subprocess
     from .chain import probe
     args, filt, last, length = [], [], None, 0
     for i, (f, (first, count)) in enumerate(zip(made, pieces)):
@@ -1970,16 +2073,17 @@ def _join_pieces(made: list[Path], pieces: list[tuple[int, int]], draft: Path, o
             last, length = f"[p{i}]", count
             continue
         overlap = length - first                   # frames this piece shares with the clip so far
+        if overlap <= 0:
+            raise ComfyError("the upscaled pieces do not overlap, they cannot be crossfaded")
         filt.append(f"{last}[p{i}]xfade=transition=fade:duration={overlap / 24:.6f}:"
                     f"offset={(length - overlap) / 24:.6f}[x{i}]")
         last, length = f"[x{i}]", first + count
     args += ["-i", str(draft)]
     part = out.with_name(out.stem + ".part.mp4")
     try:
-        subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", *args, "-filter_complex", ";".join(filt),
-                        "-map", last, "-map", f"{len(made)}:a:0?", "-frames:v", str(int(total)), "-c:v", "libx264",
-                        "-crf", "12", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "256k", "-r", "24", str(part)],
-                       check=True, capture_output=True)
+        _ffmpeg([*args, "-filter_complex", ";".join(filt), "-map", last, "-map", f"{len(made)}:a:0?",
+                 "-frames:v", int(total), "-c:v", "libx264", "-crf", "12", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                 "-b:a", "256k", "-r", "24", part])
         got = probe(part)["frames"]
         if got != int(total):
             raise ComfyError(f"the upscaled pieces joined to {got} frames instead of {total}")
@@ -2036,41 +2140,21 @@ def _seedvr_job(self, files: dict, draft: Path, out: Path, size: tuple[int, int]
                                        vae=files["vae"], prefix=prefix, seed=seed,
                                        tiled=getattr(self, "seedvr_tiled", True), fast_scale=files.get("fast_scale",
                                                                                                          False))
-            ws = self._connect_ws()
             clock = time.monotonic()
-            try:
-                self._queue(wf)
-                entry = self._wait(self.current, ws)
-                t_run = time.monotonic() - clock
-            except ComfyJobFailed:
-                raise
-            except Exception:
-                self.interrupt()
-                raise
-            finally:
-                if ws is not None:
-                    try:
-                        ws.close()
-                    except Exception:  # noqa: BLE001
-                        pass
-                self.current = None
+            entry = self._run_workflow(wf)
+            t_run = time.monotonic() - clock
             video = self._first_file((entry.get("outputs") or {}).get("seedvr_save"))
             if video is None:
                 raise ComfyError("ComfyUI finished without the upscaled clip")
-            part = Path(out).with_name(Path(out).stem + ".part.mp4")
             clock = time.monotonic()
-            part.write_bytes(self._download(video))
+            self._save(video, Path(out))
             t_down = time.monotonic() - clock
-            part.replace(out)
             self.log(seedvr_timing(size, files["unet"], src.stat().st_size, t_up, t_run, Path(out).stat().st_size,
                                    t_down, getattr(self, "node_times", {}), wf))
             if self.cleanup:
                 self._remove(self.output_dir, video, Path(out))
         finally:
-            if self.cleanup:
-                for up, local in uploads:
-                    self._remove(self.input_dir, {"filename": Path(up).name, "subfolder": str(Path(up).parent)},
-                                 Path(local), same_size=False)
+            self._drop_uploads(uploads)
 
 
 ComfyGenerator.seedvr = _seedvr
@@ -2342,6 +2426,7 @@ class ComfyPromptRefiner(ComfyGenerator):
 
     def describe_face(self, picture: Path, seed: int = 0) -> str:
         """The face in a picture as the head swap LoRA's face details (a short attribute list)."""
+        self._begin_job()
         models = self.vision_models()
         if not models:
             raise ComfyError("ComfyUI lists no vision model to describe the face (e.g. the Qwen3-VL 4B text "
@@ -2349,22 +2434,7 @@ class ComfyPromptRefiner(ComfyGenerator):
         uploads = [(self.upload(Path(picture)), Path(picture))]
         try:
             wf = build_describe_face_workflow(image=uploads[0][0], model=models[0], seed=seed)
-            ws = self._connect_ws()                    # (before queueing: the job's messages are not missed)
-            try:
-                self._queue(wf)
-                entry = self._wait(self.current, ws)
-            except ComfyJobFailed:
-                raise
-            except Exception:
-                self.interrupt()
-                raise
-            finally:
-                self.current = None
-                if ws is not None:
-                    try:
-                        ws.close()
-                    except Exception:  # noqa: BLE001
-                        pass
+            entry = self._run_workflow(wf)
         finally:
             if self.cleanup:
                 self._drop_uploads(uploads)
@@ -2378,26 +2448,12 @@ class ComfyPromptRefiner(ComfyGenerator):
     def complete(self, system: str, user: str, max_tokens: int = 512, model_file: str | None = None,
                  seed: int = 0, temperature: float = 0.2) -> str:
         """The model's raw answer to one question (text only; e.g. a LoRA's note, lora_notes)."""
+        self._begin_job()
         model = next((m for m in self.models if m["file"] == model_file), self.models[0])
         wf = build_refine_prompt_workflow(prompt=user, kind="image", model=model, seed=seed,
                                           temperature=temperature)
         wf["gen"]["inputs"].update({"system_prompt": system, "prompt": user, "max_length": int(max_tokens)})
-        self._queue(wf)
-        ws = self._connect_ws()
-        try:
-            entry = self._wait(self.current, ws)
-        except ComfyJobFailed:
-            raise
-        except Exception:
-            self.interrupt()
-            raise
-        finally:
-            self.current = None
-            if ws is not None:
-                try:
-                    ws.close()
-                except Exception:  # noqa: BLE001
-                    pass
+        entry = self._run_workflow(wf)
         text = (((entry.get("outputs") or {}).get("show") or {}).get("text") or [""])[0]
         return text if isinstance(text, str) else str(text)
 
@@ -2406,6 +2462,7 @@ class ComfyPromptRefiner(ComfyGenerator):
                       start_image: Path | str | None = None, loras: str = "") -> str:
         """seconds, start_image (the "video_h3" kind): the clip's length and the frame it starts from; a vision
         model sees that frame, any other is told not to invent how it looks. loras: lora_notes.guidance."""
+        self._begin_job()
         model = next((m for m in self.models if m["file"] == model_file), self.models[0])
         start, uploads = None, []
         if kind == "video_h3" and start_image:     # (a frame still to be made: there, but not to be seen yet)
@@ -2417,22 +2474,7 @@ class ComfyPromptRefiner(ComfyGenerator):
             wf = build_refine_prompt_workflow(prompt=prompt, kind=kind, model=model, seed=seed, hint=hint, cast=cast,
                                               seconds=seconds if kind == "video_h3" else None, start=start,
                                               image=uploads[0][0] if uploads else None, loras=loras)
-            self._queue(wf)
-            ws = self._connect_ws()
-            try:
-                entry = self._wait(self.current, ws)
-            except ComfyJobFailed:
-                raise
-            except Exception:
-                self.interrupt()
-                raise
-            finally:
-                self.current = None
-                if ws is not None:
-                    try:
-                        ws.close()
-                    except Exception:  # noqa: BLE001
-                        pass
+            entry = self._run_workflow(wf)
         finally:
             if uploads and self.cleanup:
                 self._drop_uploads(uploads)

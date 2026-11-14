@@ -129,6 +129,8 @@ class FakeComfy:
         self.veda = True                           # the Veda node and its two predictors
         self.seedvr_jobs: list[str] = []           # the model of every SeedVR2 job
         self.audio_refs = True                     # MiniMaxH3ReferenceToVideo takes reference sounds
+        self.view_truncate = 0                     # the next n downloads end before their Content-Length
+        self.junk: set[str] = set()                # these POST paths answer with a non-JSON page (HTTP 200)
         self.hold = False                          # jobs stay queued: no history until it is cleared (a busy ComfyUI)
         self.fail_next: str | None = None          # the next job fails with this message (once)
         self.refine_answer: str | None = None      # the prompt refiner's raw answer (None: "REFINED <prompt>")
@@ -409,6 +411,15 @@ class FakeComfy:
                 if u.path == "/view":
                     q = urllib.parse.parse_qs(u.query)
                     f = fake.root / q["type"][0] / q.get("subfolder", [""])[0] / q["filename"][0]
+                    if fake.view_truncate > 0:
+                        fake.view_truncate -= 1
+                        data = f.read_bytes()
+                        self.send_response(200)
+                        self.send_header("Content-Length", str(len(data) + 50))
+                        self.end_headers()
+                        self.wfile.write(data[:len(data) // 2])
+                        self.close_connection = True
+                        return None
                     return self._send(200, f.read_bytes(), "application/octet-stream")
                 return self._send(404, {"error": "not found"})
 
@@ -416,6 +427,8 @@ class FakeComfy:
                 u = urllib.parse.urlparse(self.path)
                 body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
                 fake.calls.append(("POST", u.path))
+                if u.path in fake.junk:
+                    return self._send(200, b"<html>proxy error</html>", "text/html")
                 if u.path == "/upload/image":
                     ctype = self.headers["Content-Type"]
                     boundary = ctype.split("boundary=")[1].encode()
