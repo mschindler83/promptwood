@@ -112,7 +112,7 @@ def test_a_second_signal_quits_even_when_the_window_stays(qapp, monkeypatch):
 
 def test_main_without_ffmpeg_says_so_and_quits(qapp, monkeypatch):
     shown = []
-    monkeypatch.setattr(A.shutil, "which", lambda name: None)
+    monkeypatch.setattr(A.media.shutil, "which", lambda name: None)
     monkeypatch.setattr(QMessageBox, "critical", lambda *a: shown.append(a[2]))
     monkeypatch.setattr(sys, "excepthook", sys.excepthook)
     monkeypatch.setattr(threading, "excepthook", threading.excepthook)
@@ -131,7 +131,7 @@ def test_main_builds_the_window_and_runs_the_loop(qapp, monkeypatch):
         def show(self):
             events.append("shown")
     monkeypatch.setattr(M, "MainWindow", FakeWin)
-    monkeypatch.setattr(A.shutil, "which", lambda name: "/bin/true")
+    monkeypatch.setattr(A.media.shutil, "which", lambda name: "/bin/true")
     monkeypatch.setattr(QApplication, "exec", lambda self: 7)
     monkeypatch.setattr(sys, "excepthook", sys.excepthook)
     monkeypatch.setattr(threading, "excepthook", threading.excepthook)

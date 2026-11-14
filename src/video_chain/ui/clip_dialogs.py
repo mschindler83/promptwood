@@ -2,8 +2,6 @@
 side to pick one (CompareDialog)."""
 from __future__ import annotations
 
-import subprocess
-import tempfile
 import threading
 from pathlib import Path
 
@@ -12,7 +10,7 @@ from PySide6.QtGui import QImage, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QGridLayout, QHBoxLayout,
                                QPushButton, QSlider, QVBoxLayout, QWidget)
 
-from .. import chain
+from .. import chain, media
 from .theme import icon
 from .widgets import FrameTile, VideoView, icon_button, label
 
@@ -34,22 +32,8 @@ def decode_frames(video: Path, width: int = PREVIEW_W, on_start=None) -> list[QI
     info = chain.probe(video)
     w = max(2, min(width, info["width"]) // 2 * 2)
     h = max(2, round(info["height"] * w / info["width"] / 2) * 2)
-    proc = subprocess.Popen(["ffmpeg", "-nostdin", "-v", "error", "-i", str(video), "-map", "0:v:0", "-vf",
-                             f"scale={w}:{h}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if on_start is not None:
-        on_start(proc)
-    try:
-        out, err = proc.communicate(timeout=600)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.communicate()
-        raise
-    if proc.returncode != 0:
-        raise RuntimeError(err.decode(errors="replace").strip()[-300:] or "ffmpeg failed")
-    size = w * h * 3
-    return [QImage(out[i:i + size], w, h, 3 * w, QImage.Format_RGB888).copy()
-            for i in range(0, len(out) - size + 1, size)]
+    return [QImage(raw, w, h, 3 * w, QImage.Format_RGB888).copy()
+            for raw in media.iter_frames(video, (w, h), "rgb24", flags=None, on_start=on_start, timeout=600)]
 
 
 class HandoverDialog(QDialog):
@@ -384,11 +368,10 @@ def grab_frame(video: Path, at: float, out: Path, width: int | None = None) -> b
     (ffmpeg decodes from the keyframe before it). False if there is none."""
     vf = ["-vf", f"scale={int(width)}:-2:flags=lanczos"] if width else []
     try:
-        r = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-ss", f"{max(0.0, at):.6f}", "-i", str(video),
-                            "-frames:v", "1", *vf, str(out)], capture_output=True, timeout=60)
-    except (OSError, subprocess.TimeoutExpired):
+        media.ffmpeg(["-y", "-ss", f"{max(0.0, at):.6f}", "-i", video, "-frames:v", "1", *vf, out], timeout=60)
+    except (OSError, media.MediaError):
         return False
-    return r.returncode == 0 and Path(out).is_file() and Path(out).stat().st_size > 0
+    return Path(out).is_file() and Path(out).stat().st_size > 0
 
 
 class _Grabbed(QObject):
@@ -415,7 +398,7 @@ class VideoFrameDialog(QDialog):
         self._grabbing = self._again = False        # one ffmpeg at a time; the newest position after it
         self._sig = _Grabbed()
         self._sig.ready.connect(self._ready)
-        self._tmp = tempfile.TemporaryDirectory(prefix="video-chain-frame-")
+        self._tmp = media.scratch("frame")
         v = QVBoxLayout(self)
         self.tile = FrameTile(800, 450)
         self.tile.clear_frame("reading the frame …")

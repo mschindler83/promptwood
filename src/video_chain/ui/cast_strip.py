@@ -36,7 +36,7 @@ def cast_cells(options: dict, nodes: list) -> dict[tuple[str, str], tuple[str, s
                 if not mark and name in mentioned:
                     mark, what = "·", [f"mentioned, but no {'face picture' if person else 'picture'} is sent"]
             if mark:
-                out[(name, n.id)] = (mark, f"@{name} in #{n.id[1:]}: {', '.join(what)}")
+                out[(name, n.id)] = (mark, f"@{name} in #{T.short_id(n.id)}: {', '.join(what)}")
     return out
 
 
@@ -73,15 +73,15 @@ class CastStrip(QTableWidget):
         self.clear()
         self.setRowCount(len(cast))
         self.setColumnCount(len(nodes))
-        self.setHorizontalHeaderLabels([("▶" if n.is_video else "#") + n.id[1:] for n in nodes])
+        self.setHorizontalHeaderLabels([("▶" if n.is_video else "#") + T.short_id(n.id) for n in nodes])
         self.setVerticalHeaderLabels([f"@{c['name']}" for c in cast])
         for r, c in enumerate(cast):
             for k, n in enumerate(nodes):
                 mark, tip = cells.get((c["name"], n.id), ("", ""))
                 item = QTableWidgetItem(mark)
                 item.setTextAlignment(Qt.AlignCenter)
-                item.setToolTip(tip or (f"video #{n.id[1:]} (real footage)" if n.is_video else
-                                        f"@{c['name']} is not in #{n.id[1:]}"))
+                item.setToolTip(tip or (f"video #{T.short_id(n.id)} (real footage)" if n.is_video else
+                                        f"@{c['name']} is not in #{T.short_id(n.id)}"))
                 self.setItem(r, k, item)
         h = self.horizontalHeader().height() + sum(self.rowHeight(r) for r in range(len(cast))) + 4
         self.setFixedHeight(min(h, 24 + 20 * 5))

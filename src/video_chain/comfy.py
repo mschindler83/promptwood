@@ -31,6 +31,8 @@ import urllib.request
 import uuid
 from pathlib import Path
 
+from . import media
+
 try:
     import websocket  # websocket-client (optional: without it the result is polled)
 except ImportError:
@@ -688,12 +690,8 @@ class ComfyGenerator:
     def _save(self, f: dict, dest: Path) -> None:
         """Download a result into dest, written under a temporary name first (never a truncated file)."""
         dest = Path(dest)
-        tmp = dest.with_name(dest.stem + ".part" + dest.suffix)
-        try:
+        with media.part_file(dest) as tmp:
             self._download_to(f, tmp)
-            tmp.replace(dest)
-        finally:
-            tmp.unlink(missing_ok=True)
 
     def _download_to(self, f: dict, dest: Path) -> None:
         """Stream a result into dest in chunks (clips are hundreds of MB); a cut connection is tried again."""
@@ -1766,16 +1764,10 @@ FFMPEG_TIMEOUT = 3600                  # seconds an ffmpeg job on a clip may tak
 
 def _ffmpeg(args: list, timeout: float = FFMPEG_TIMEOUT) -> None:
     """Run ffmpeg quietly; a failure (with ffmpeg's own reason), a missing ffmpeg or a hang is a ComfyError."""
-    import subprocess
-    cmd = ["ffmpeg", "-nostdin", "-v", "error", "-y", *map(str, args)]
     try:
-        subprocess.run(cmd, check=True, capture_output=True, timeout=timeout)
-    except FileNotFoundError as e:
-        raise ComfyError("ffmpeg is not installed (it is needed to prepare and join the clips)") from e
-    except subprocess.TimeoutExpired as e:
-        raise ComfyError(f"ffmpeg did not finish within {timeout / 60:.0f} min") from e
-    except subprocess.CalledProcessError as e:
-        raise ComfyError(f"ffmpeg failed: {(e.stderr or b'').decode(errors='replace')[-400:].strip()}") from e
+        media.ffmpeg(["-y", *map(str, args)], timeout=timeout)
+    except media.MediaError as e:
+        raise ComfyError(str(e)) from e
 
 
 def _with_audio(video: Path, out: Path) -> Path:
@@ -1818,9 +1810,8 @@ def _refine(self, draft: Path, prompt: str, out: Path, seed: int, size: tuple[in
         if name is None:
             raise ComfyError(f"{Path(path).name} is not in ComfyUI's LoRA folders")
         names.append((name, float(weight)))
-    import tempfile
     uploads: list[tuple[str, Path]] = []
-    with tempfile.TemporaryDirectory(prefix="video-chain-refine-") as tmp:
+    with media.scratch("refine") as tmp:
         src = _with_audio(Path(draft), Path(tmp) / "draft.mp4")
         try:
             name = self.upload(src)
@@ -2020,10 +2011,9 @@ def _seedvr(self, draft: Path, out: Path, size: tuple[int, int], method: str = "
     SEEDVR_RAM_BUDGET, crossfaded over SEEDVR_PIECE_OVERLAP frames, with the clip's own sound. Progress: one bar
     for the whole clip (SeedvrProgress) and a note per piece. denoise: SEEDVR_DENOISE on the clip first."""
     self._begin_job()
-    import tempfile
     from .chain import probe
     if denoise:
-        with tempfile.TemporaryDirectory(prefix="video-chain-denoise-") as tmp:
+        with media.scratch("denoise") as tmp:
             clean = Path(tmp) / "denoised.mp4"
             _denoise(Path(draft), clean)
             return self.seedvr(clean, out, size, method, seed)
@@ -2060,8 +2050,7 @@ def _ram_free(self) -> int:
 
 
 def _seedvr_pieces(self, files, draft, out, size, seed, pieces, total, track) -> None:
-    import tempfile
-    with tempfile.TemporaryDirectory(prefix="video-chain-seedvr-pieces-") as tmp:
+    with media.scratch("seedvr-pieces") as tmp:
         tmp, made = Path(tmp), []
         for i, (first, count) in enumerate(pieces):
             track.piece(i, self.note)
@@ -2102,17 +2091,13 @@ def _join_pieces(made: list[Path], pieces: list[tuple[int, int]], draft: Path, o
                     f"offset={(length - overlap) / 24:.6f}[x{i}]")
         last, length = f"[x{i}]", first + count
     args += ["-i", str(draft)]
-    part = out.with_name(out.stem + ".part.mp4")
-    try:
+    with media.part_file(out) as part:
         _ffmpeg([*args, "-filter_complex", ";".join(filt), "-map", last, "-map", f"{len(made)}:a:0?",
                  "-frames:v", int(total), "-c:v", "libx264", "-crf", "12", "-pix_fmt", "yuv420p", "-c:a", "aac",
                  "-b:a", "256k", "-r", "24", part])
         got = probe(part)["frames"]
         if got != int(total):
             raise ComfyError(f"the upscaled pieces joined to {got} frames instead of {total}")
-        part.replace(out)
-    finally:
-        part.unlink(missing_ok=True)
 
 
 def _seedvr_files(self, method: str) -> dict:
@@ -2149,9 +2134,8 @@ def seedvr_timing(size, unet, up_bytes, t_up, t_run, down_bytes, t_down, node_ti
 
 def _seedvr_job(self, files: dict, draft: Path, out: Path, size: tuple[int, int], seed: int) -> None:
     """One SeedVR2 job in ComfyUI: draft (with its sound, silence if none) upscaled to size into out."""
-    import tempfile
     uploads: list[tuple[str, Path]] = []
-    with tempfile.TemporaryDirectory(prefix="video-chain-seedvr-") as tmp:
+    with media.scratch("seedvr") as tmp:
         src = _with_audio(Path(draft), Path(tmp) / "draft.mp4")
         clock = time.monotonic()
         try:

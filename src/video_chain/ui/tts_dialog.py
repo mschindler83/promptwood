@@ -2,7 +2,6 @@
 account's ElevenLabs voices. A sample sentence is made to listen to; "Use this voice" makes it the character's voice."""
 from __future__ import annotations
 
-import tempfile
 import threading
 from pathlib import Path
 
@@ -10,7 +9,7 @@ from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLineEdit,
                                QPlainTextEdit, QPushButton, QSpinBox, QStackedWidget, QVBoxLayout, QWidget)
 
-from .. import tts
+from .. import media, tts
 from .widgets import label
 
 
@@ -32,7 +31,7 @@ class VoiceTtsDialog(QDialog):
         self._sig = _Signals(self)
         self._sig.sample.connect(self._sample_done)
         self._sig.voices.connect(self._voices_done)
-        self._tmp = tempfile.TemporaryDirectory(prefix="video-chain-voice-")
+        self._tmp = media.scratch("voice")
         self.wav = Path(self._tmp.name) / "sample.wav"
         self.made: dict | None = None            # what the sample was made with (use_sample's label / text / eleven)
         self._pending: dict | None = None

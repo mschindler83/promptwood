@@ -32,7 +32,7 @@ import uuid
 import wave
 from pathlib import Path
 
-from . import chain
+from . import chain, media
 from . import tree as T
 from .llm_server import rotate_log
 
@@ -404,7 +404,7 @@ class ElevenLabs:
             raise TtsError("choose an ElevenLabs voice")
         mp3 = self._call("POST", f"/v1/text-to-speech/{urllib.parse.quote(voice_id)}?output_format=mp3_44100_128",
                          json.dumps(body).encode(), "application/json")
-        with tempfile.TemporaryDirectory(prefix="video-chain-tts-") as tmp:
+        with media.scratch("tts") as tmp:
             src = Path(tmp) / "line.mp3"
             src.write_bytes(mp3)
             chain.to_wav(src, Path(out))
@@ -508,13 +508,12 @@ def join_lines(parts: list[Path], out: Path, min_secs: float = T.AUDIO_REF_MIN) 
     short = min_secs - len(data) / (48000 * 4)
     if short > 0:
         data += _silence(short)
-    tmp = Path(out).with_name(Path(out).stem + ".part.wav")
-    with wave.open(str(tmp), "wb") as w:
-        w.setnchannels(2)
-        w.setsampwidth(2)
-        w.setframerate(48000)
-        w.writeframes(data)
-    os.replace(tmp, out)
+    with media.part_file(out) as tmp:
+        with wave.open(str(tmp), "wb") as w:
+            w.setnchannels(2)
+            w.setsampwidth(2)
+            w.setframerate(48000)
+            w.writeframes(data)
     return len(data) / (48000 * 4)
 
 
@@ -524,9 +523,9 @@ def frames_for(secs: float, have: int) -> int | None:
     need = int(secs * chain.FPS + 0.999)
     if need <= have:
         return None
-    for n in range(4, 22):
-        if 17 * n + 5 >= need:
-            return 17 * n + 5
+    frames = chain.h3_frames(max(need, 73))         # (a clip is at least 73 frames)
+    if frames <= chain.H3_MAX_FRAMES:
+        return frames
     raise TtsError(f"the lines take {secs:.1f} s; a clip is at most 15 s: split them over two clips")
 
 
@@ -541,15 +540,12 @@ def clean_line(text: str) -> str:
 
 def _tempo(wav: Path, speed: float) -> None:
     """Make a WAV slower or faster without changing its pitch."""
-    tmp = wav.with_name(wav.stem + ".tempo.wav")
     try:
-        subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(wav), "-af", f"atempo={speed:.3f}",
-                        "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le", str(tmp)], check=True, capture_output=True)
-        tmp.replace(wav)
-    except (OSError, subprocess.CalledProcessError) as e:
+        with media.part_file(wav) as tmp:
+            media.ffmpeg(["-y", "-i", wav, "-af", f"atempo={speed:.3f}", "-ar", "48000", "-ac", "2", "-c:a",
+                          "pcm_s16le", tmp], timeout=300)
+    except (OSError, media.MediaError) as e:
         raise TtsError(f"could not change the speed of a line ({e})") from None
-    finally:
-        tmp.unlink(missing_ok=True)
 
 
 def render_lines(project: Path, tree: T.Tree, nid: str, eng, log=lambda _m: None, take: int = 0,
@@ -597,7 +593,7 @@ def render_lines(project: Path, tree: T.Tree, nid: str, eng, log=lambda _m: None
     texts: dict[str, str] = {}
     voice_files = {d["speaker"]["name"]: d["speaker"]["voice"]["file"] for d in lines
                    if eng.name != "elevenlabs" and d["speaker"].get("voice")}
-    with tempfile.TemporaryDirectory(prefix="video-chain-tts-") as tmp:
+    with media.scratch("tts") as tmp:
         parts = []
         for k, d in enumerate(lines):
             c = d["speaker"]
@@ -647,7 +643,7 @@ def apply_lines(project: Path, tree: T.Tree, nid: str, r: dict) -> dict:
     tid = "t" + uuid.uuid4().hex[:6]
     while tid in have:
         tid = "t" + uuid.uuid4().hex[:6]
-    entry = {"id": tid, "name": f"Lines of clip #{nid[1:]}", "file": r["file"], "secs": r["secs"],
+    entry = {"id": tid, "name": f"Lines of clip #{T.short_id(nid)}", "file": r["file"], "secs": r["secs"],
              "source": str(Path(project) / r["file"]), "start": 0.0, "end": r["secs"],
              "tts": {"clip": nid, "provider": r["provider"], "language": r["language"], "lines": r["lines"]}}
     tree.options["tracks"] = T.tracks(tree) + [entry]

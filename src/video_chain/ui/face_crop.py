@@ -2,7 +2,6 @@
 it, its corner (or the mouse wheel) to resize it; click another found face to crop to that one."""
 from __future__ import annotations
 
-import tempfile
 import threading
 from pathlib import Path
 
@@ -10,7 +9,7 @@ from PySide6.QtCore import QObject, QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QHBoxLayout, QPushButton, QVBoxLayout, QWidget
 
-from .. import chain
+from .. import chain, media
 from .. import faces as F
 from .theme import theme
 from .widgets import label
@@ -192,7 +191,7 @@ class FaceCropDialog(QDialog):
         self.resize(820, 640)
         # one PNG for the view, the detector and the crop: ffmpeg turns a rotated (EXIF) photo upright, as it
         # does when the face picture is written, so the square lands where it is shown
-        self._tmp = tempfile.TemporaryDirectory(prefix="video-chain-crop-")
+        self._tmp = media.scratch("crop")
         self._given = crop
         self._closed = False
         self._result: tuple | None = None            # what the worker found, until the window takes it

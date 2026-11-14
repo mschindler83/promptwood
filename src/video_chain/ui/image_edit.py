@@ -12,7 +12,6 @@ import copy
 import json
 import os
 import random
-import subprocess
 import threading
 import time
 import uuid
@@ -29,6 +28,7 @@ from PySide6.QtWidgets import (QButtonGroup, QSlider, QStackedWidget, QCheckBox,
                                QWidget)
 
 from .image_picker import IMAGE_EXTS, pick_image
+from .. import media
 from ..comfy import EDIT_MODELS
 from ..triggers import stack_words, with_triggers
 from ..imagegen import FAMILIES, SAMPLERS, SCHEDULERS, default_sampling, size_for
@@ -60,16 +60,9 @@ CREATE_HINT = ("Describe the image: who or what, doing what, where; light, mood,
 
 def scale_to(src: Path, dst: Path, size: tuple[int, int]) -> None:
     """Scale an image to exactly this size (the result keeps the size of the image it was made from)."""
-    tmp = dst.with_name(dst.stem + ".part.png")
-    try:
-        r = subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(src), "-vf",
-                            f"scale={size[0]}:{size[1]}:flags=lanczos", "-frames:v", "1", str(tmp)],
-                           capture_output=True, timeout=120)
-        if r.returncode != 0 or not tmp.is_file():
-            raise RuntimeError(r.stderr.decode(errors="replace").strip()[-300:] or "ffmpeg failed")
-        tmp.replace(dst)
-    finally:
-        tmp.unlink(missing_ok=True)
+    with media.part_file(dst) as tmp:
+        media.ffmpeg(["-y", "-i", src, "-vf", f"scale={size[0]}:{size[1]}:flags=lanczos", "-frames:v", "1", tmp],
+                     timeout=120)
 
 
 def _decode_upright(path) -> QImage:
@@ -144,17 +137,7 @@ def _record(f: Path) -> dict:
 
 def write_meta(meta_file: Path, meta: dict) -> None:
     """A result's record, written atomically (a reader never sees half a file)."""
-    import os
-    import tempfile
-    meta_file = Path(meta_file)
-    fd, tmp = tempfile.mkstemp(prefix=meta_file.name + ".", suffix=".part", dir=str(meta_file.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(meta, fh, indent=2, ensure_ascii=False)
-        os.replace(tmp, meta_file)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+    media.atomic_write_json(meta_file, meta)
 
 
 def record_use(png: str | Path, use: dict) -> None:
@@ -232,7 +215,7 @@ def uses_of(project: Path, tree, meta: dict, index: dict | None = None) -> list[
             out.append("the start image")
         elif kind == "end" and tree is not None:
             for nid in dict.fromkeys(index["ends"].get(u.get("file"), [])) if u.get("file") else []:
-                out.append(f"the end image of clip #{nid[1:]}")
+                out.append(f"the end image of clip #{T.short_id(nid)}")
         elif kind == "ref" and u.get("file") in owner:
             out.append(f"face of @{owner[u['file']]}")
     return list(dict.fromkeys(out))

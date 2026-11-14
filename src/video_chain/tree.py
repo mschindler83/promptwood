@@ -67,6 +67,7 @@ except ImportError:                                  # (Windows)
 
 from . import camera as _camera
 from . import chain
+from . import media
 from . import h3_prompt as _h3
 
 TREE_FILE = "tree.json"
@@ -159,6 +160,11 @@ class Node:
     @property
     def is_video(self) -> bool:
         return self.kind == VIDEO
+
+
+def short_id(nid: str) -> str:
+    """The number shown for a clip id ("n3" -> "3", as in "clip #3"): the id without its one prefix letter."""
+    return str(nid)[1:]
 
 
 @dataclass
@@ -3097,12 +3103,8 @@ def ensure_handover(project: Path, tree: Tree, node: Node) -> Path | None:
         node.made["frames"] = chain.probe(Path(project) / node.made["video"])["frames"]   # older record: count once
     f = handover_file(project, tree, node)
     if f is not None and not f.is_file():
-        tmp = f.with_name(f.stem + ".part.png")
-        try:
+        with media.part_file(f) as tmp:
             chain.frame_at(Path(project) / node.made["video"], handover_index(tree, node), tmp)
-            tmp.replace(f)
-        finally:
-            tmp.unlink(missing_ok=True)
     if node.made and node.made.get("video") and not node.is_video:   # frames of an earlier choice in this take
         v = Path(project) / node.made["video"]
         area = (Path(project) / "nodes").resolve()
@@ -3242,7 +3244,7 @@ def remix_sound(project: Path, tree: Tree, nid: str, checker: Checker | None = N
     ss = settings["source_sound"]
     if not sound_file(project, ss).is_file():
         raise FileNotFoundError(f"the sound of clip #{nid[1:]} is missing ({Path(ss['file']).name})")
-    with tempfile.TemporaryDirectory(prefix="video-chain-", dir=str(project / "nodes")) as tmp:
+    with media.scratch("job", dir=str(project / "nodes")) as tmp:
         wav = Path(tmp) / "source_sound.wav"
         given_sound(project, node, ss, wav)
         if not chain.keep_copy(project, project / node.made["video"]):      # (never overwritten: the old mix stays)
@@ -3385,7 +3387,7 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
             if settings.get("audio_refs"):
                 call["audio_paths"] = [str(project / a["file"]) for a in settings["audio_refs"]]
             try:
-                with tempfile.TemporaryDirectory(prefix="video-chain-", dir=str(nodes_dir)) as tmp:
+                with media.scratch("job", dir=str(nodes_dir)) as tmp:
                     guides, end_image = _guides(project, tree, node, settings, Path(tmp))
                     if guides:
                         call["guides"] = guides
@@ -3597,7 +3599,7 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
     files: dict[str, Path] = {}
     emit({"e": "plan", "make": [n.id for n in order]})
     made_now = []
-    with tempfile.TemporaryDirectory(prefix="video-chain-", dir=str(project / "nodes")) as tmp:
+    with media.scratch("job", dir=str(project / "nodes")) as tmp:
         tmp = Path(tmp)
         for k, node in enumerate(order, start=1):
             target = refined_file(project, node, size)
@@ -3676,22 +3678,18 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
                 prompt = info.get("details") or info.get("prompt") or SWAPPED_REFINE_PROMPT
                 log(f"[{k}/{len(order)}] {node.id}: refining the video with the replaced person at {w}x{h}")
                 from .comfy import SOL_TAU
-                import subprocess
                 draft, n = project / node.made["video"], _clip_frames(project, node)
-                grid = n if n <= 5 or n % 17 == 5 else n + (5 - n) % 17       # H3's 17n+5 frame grid
+                grid = n if n <= 5 else chain.h3_frames(n)       # H3's 17n+5 frame grid
                 padded = tmp / f"{node.id}_draft.mp4"
                 if grid != n:                            # the last frame held to the grid, cut off again after
-                    subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(draft), "-vf",
-                                    f"tpad=stop_mode=clone:stop={grid - n}", "-c:v", "libx264", "-crf", "10",
-                                    "-pix_fmt", "yuv420p", "-c:a", "copy", str(padded)], check=True,
-                                   capture_output=True)
+                    media.ffmpeg(["-y", "-i", draft, "-vf", f"tpad=stop_mode=clone:stop={grid - n}", "-c:v", "libx264",
+                                  "-crf", "10", "-pix_fmt", "yuv420p", "-c:a", "copy", padded])
                 made = tmp / f"{node.id}_refined.mp4" if grid != n else target
                 generator.refine(padded if grid != n else draft, prompt, made, int(info.get("seed") or 0), (w, h),
                                  grid, [], None, None, sparse=SOL_TAU if fast_attention else None, strength=strength)
                 if grid != n:
-                    subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(made), "-frames:v", str(n),
-                                    "-c:v", "libx264", "-crf", "12", "-pix_fmt", "yuv420p", "-an", str(target)],
-                                   check=True, capture_output=True)
+                    media.ffmpeg(["-y", "-i", made, "-frames:v", str(n), "-c:v", "libx264", "-crf", "12", "-pix_fmt",
+                                  "yuv420p", "-an", target])
                 if chain.audio_seconds(draft):                # the recorded sound exactly, not the model's
                     wav = tmp / f"{node.id}_sound.wav"
                     chain.to_wav(draft, wav)
