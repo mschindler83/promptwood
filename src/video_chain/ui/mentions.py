@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QCompleter, QPlainTextEdit
 
 from .. import camera as CAM
 from .. import tree as T
+from .text_edit import insert_spaced
 from .theme import theme
 
 _TYPING = re.compile(r"(?<![\w@])@(\w[\w-]*)?$")      # an @mention being typed right before the cursor
@@ -117,11 +118,7 @@ class MentionHelper(QObject):
             return
         cur = self.edit.textCursor()
         cur.movePosition(QTextCursor.Left, QTextCursor.KeepAnchor, len(m.group(1) or ""))
-        doc = self.edit.document()
-        at_end = cur.selectionEnd() >= doc.characterCount() - 1
-        nxt = "" if at_end else doc.characterAt(cur.selectionEnd())
-        cur.insertText(name + ("" if nxt and (nxt.isspace() or nxt in ".,;:!?'\")") else " "))
-        self.edit.setTextCursor(cur)
+        insert_spaced(self.edit, name, cur, space_before=False, focus=False)
         self.completer.popup().hide()
 
     def eventFilter(self, obj, ev):

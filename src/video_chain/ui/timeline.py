@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QScrollArea, QSizePolicy, QWidget
 
 from .graph import status_colour
 from .theme import theme, with_alpha
-from .widgets import format_time
+from .widgets import format_time, small_font
 
 RULER = 16
 MIN_BLOCK = 46
@@ -101,7 +101,7 @@ class _Lane(QWidget):
         # spaced to be readable at this zoom
         p.setPen(QPen(t.textTertiary, 1))
         small = QFont(self.font())
-        small.setPointSizeF(max(7.0, small.pointSizeF() - 2))
+        small = small_font(small, 0.8)
         p.setFont(small)
         pos = self._pos
         px = pos[-1][0] + pos[-1][1] if pos else 8.0

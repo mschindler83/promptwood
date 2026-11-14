@@ -3610,10 +3610,11 @@ def test_lora_presets_in_the_image_window(app, tmp_path, monkeypatch):
     assert dlg.save_preset_as("Sprint", lora=str(b))
     texts = [dlg.preset.itemText(i) for i in range(1, dlg.preset.count())]
     assert texts == ["walk: Walk, cfg 7", "run: Sprint"]
-    monkeypatch.setattr(IE.QMessageBox, "question", lambda *a, **k: IE.QMessageBox.No)
+    from PySide6.QtWidgets import QMessageBox as _QMB
+    monkeypatch.setattr(_QMB, "question", lambda *a, **k: _QMB.No)
     assert not dlg.save_preset_as("Sprint", lora=str(b))                    # same name: replace only if confirmed
     assert not dlg.delete_preset()
-    monkeypatch.setattr(IE.QMessageBox, "question", lambda *a, **k: IE.QMessageBox.Yes)
+    monkeypatch.setattr(_QMB, "question", lambda *a, **k: _QMB.Yes)
     assert dlg.delete_preset() and presets.store().list(str(b)) == []
     assert [dlg.preset.itemText(i) for i in range(1, dlg.preset.count())] == ["walk: Walk, cfg 7"]
     dlg.reject()

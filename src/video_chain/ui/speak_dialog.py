@@ -6,11 +6,12 @@ from __future__ import annotations
 import threading
 
 from PySide6.QtCore import QObject, Signal
-from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QHBoxLayout,
+from PySide6.QtWidgets import (QComboBox, QDialog, QDoubleSpinBox, QFormLayout, QHBoxLayout,
                                QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSpinBox, QVBoxLayout)
 
 from .. import tts
-from .widgets import guard_wheel, label
+from .dialogs import button_row
+from .widgets import fit_size, guard_wheel, label, safe_emit
 
 
 class _Signals(QObject):
@@ -101,13 +102,10 @@ class SpeakLinesDialog(QDialog):
                           level="tertiary")
         self.info.setWordWrap(True)
         v.addWidget(self.info)
-        self.buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
-        self.b_use = self.buttons.addButton("Use this take", QDialogButtonBox.AcceptRole)
-        self.buttons.accepted.connect(self.accept)
-        self.buttons.rejected.connect(self.reject)
+        self.buttons, self.b_use = button_row(self, "Use this take")
         v.addWidget(self.buttons)
         self._enable()
-        self.resize(560, 520)
+        fit_size(self, 560, 520)
 
     def speak_values(self) -> dict:
         """The settings as they are set now (to keep in the project)."""
@@ -151,12 +149,6 @@ class SpeakLinesDialog(QDialog):
         self._left = n
         self._failed = False
 
-        def emit(signal, *args):
-            try:
-                signal.emit(*args)
-            except RuntimeError:                    # the dialog is gone
-                pass
-
         def work():
             try:
                 for k in range(n):
@@ -165,11 +157,11 @@ class SpeakLinesDialog(QDialog):
                     try:
                         take = self._render(first + k, how, said)
                     except Exception as e:  # noqa: BLE001
-                        emit(self._sig.take, None, str(e))
+                        safe_emit(self._sig.take, None, str(e))
                         break
-                    emit(self._sig.take, take, "")
+                    safe_emit(self._sig.take, take, "")
             finally:
-                emit(self._sig.done)
+                safe_emit(self._sig.done)
         threading.Thread(target=work, daemon=True).start()
 
     def _take_done(self, r, err: str):

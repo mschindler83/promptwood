@@ -10,7 +10,8 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFormLayout
                                QPlainTextEdit, QPushButton, QSpinBox, QStackedWidget, QVBoxLayout, QWidget)
 
 from .. import media, tts
-from .widgets import label
+from .dialogs import button_row
+from .widgets import fit_size, label, safe_emit
 
 
 class _Signals(QObject):
@@ -93,17 +94,13 @@ class VoiceTtsDialog(QDialog):
         self.info = label("", level="tertiary")
         self.info.setWordWrap(True)
         v.addWidget(self.info)
-        self.buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
-        self.b_use = self.buttons.addButton("Use this voice", QDialogButtonBox.AcceptRole)
-        self.b_use.setEnabled(False)
-        self.buttons.accepted.connect(self.accept)
-        self.buttons.rejected.connect(self.reject)
+        self.buttons, self.b_use = button_row(self, "Use this voice", enabled=False)
         v.addWidget(self.buttons)
         self.kind.currentIndexChanged.connect(self._kind_changed)
         if voices_cache:
             self._fill_voices(voices_cache)
         self._kind_changed()
-        self.resize(560, self.sizeHint().height())
+        fit_size(self, 560, self.sizeHint().height())
 
     def provider(self) -> str:
         return self.kind.currentData()
@@ -123,13 +120,6 @@ class VoiceTtsDialog(QDialog):
         self.kind.setEnabled(not self.busy)
         self.buttons.button(QDialogButtonBox.Cancel).setEnabled(not self.busy)   # (a thread is working for it)
 
-    def _emit_safe(self, signal, *args) -> None:
-        """Emit from a worker thread; the dialog (and its signals) may be gone by then."""
-        try:
-            signal.emit(*args)
-        except RuntimeError:
-            pass
-
     # ---- ElevenLabs voices
     def _load_voices(self):
         self.busy = True
@@ -140,9 +130,9 @@ class VoiceTtsDialog(QDialog):
             try:
                 voices = self._eleven().voices()
             except Exception as e:  # noqa: BLE001
-                self._emit_safe(self._sig.voices, None, str(e))
+                safe_emit(self._sig.voices, None, str(e))
                 return
-            self._emit_safe(self._sig.voices, voices, "")
+            safe_emit(self._sig.voices, voices, "")
         threading.Thread(target=work, daemon=True).start()
 
     def _voices_done(self, voices, err: str):
@@ -187,9 +177,9 @@ class VoiceTtsDialog(QDialog):
                                        model=self.model, seed=seed)
                 self._pending = made
             except Exception as e:  # noqa: BLE001
-                self._emit_safe(self._sig.sample, None, str(e))
+                safe_emit(self._sig.sample, None, str(e))
                 return
-            self._emit_safe(self._sig.sample, secs, "")
+            safe_emit(self._sig.sample, secs, "")
         threading.Thread(target=work, daemon=True).start()
 
     def _sample_done(self, secs, err: str):

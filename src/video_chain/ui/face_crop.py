@@ -12,7 +12,8 @@ from PySide6.QtWidgets import QDialog, QDialogButtonBox, QHBoxLayout, QPushButto
 from .. import chain, media
 from .. import faces as F
 from .theme import theme
-from .widgets import label
+from .dialogs import button_row
+from .widgets import fit_size, label, safe_emit, smooth_scaled
 
 MIN_SIDE = 32
 SMALL_SIDE = 160           # below this the face picture is soft for the model
@@ -73,7 +74,7 @@ class CropView(QWidget):
         dpr = self.devicePixelRatioF()
         size = QSize(round(self.image.width() * s * dpr), round(self.image.height() * s * dpr))
         if self._shown is None or self._shown.size() != size or self._shown.devicePixelRatio() != dpr:
-            self._shown = self.image.scaled(size, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+            self._shown = QImage(smooth_scaled(self.image, size, Qt.IgnoreAspectRatio))
             self._shown.setDevicePixelRatio(dpr)
 
     def paintEvent(self, _e):
@@ -188,7 +189,7 @@ class FaceCropDialog(QDialog):
                  crop: tuple[int, int, int] | None = None):
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.resize(820, 640)
+        fit_size(self, 820, 640)
         # one PNG for the view, the detector and the crop: ffmpeg turns a rotated (EXIF) photo upright, as it
         # does when the face picture is written, so the square lands where it is shown
         self._tmp = media.scratch("crop")
@@ -221,10 +222,7 @@ class FaceCropDialog(QDialog):
         row.addWidget(self.b_face)
         row.addWidget(self.b_whole)
         row.addStretch(1)
-        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        self.buttons.button(QDialogButtonBox.Ok).setText("Use this crop")
-        self.buttons.accepted.connect(self.accept)
-        self.buttons.rejected.connect(self.reject)
+        self.buttons, _ok = button_row(self, "Use this crop")
         row.addWidget(self.buttons)
         v.addLayout(row)
         self._set_busy(True)
@@ -263,10 +261,7 @@ class FaceCropDialog(QDialog):
         except Exception as e:  # noqa: BLE001  (the temporary folder removed by a close, ...)
             self._result = (QImage(), [], f"the picture could not be read: {e}", "")
         self._finished.set()
-        try:
-            self._loaded.done.emit()
-        except RuntimeError:
-            pass
+        safe_emit(self._loaded.done)
 
     def _apply(self) -> None:
         if self._result is None or self._closed:

@@ -12,14 +12,14 @@ from pathlib import Path
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (QColor, QGuiApplication, QPainter, QPen, QSyntaxHighlighter,
                            QTextCharFormat)
-from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QDialog, QDialogButtonBox, QFrame, QHBoxLayout, QInputDialog,
-                               QLabel, QLineEdit, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton,
+from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QDialog, QFrame, QHBoxLayout, QInputDialog,
+                               QLabel, QLineEdit, QMenu, QPlainTextEdit, QPushButton, QRadioButton,
                                QSizePolicy, QSpinBox, QTextBrowser, QToolButton, QVBoxLayout, QWidget)
 
 from .. import variations as V
-from .results_gallery import FlowBox
 from .theme import theme
-from .widgets import guard_wheel, icon_button, label
+from .dialogs import button_row, confirm, failed, tell, warn
+from .widgets import FlowBox, guard_wheel, icon_button, label
 
 COLORS = ("#e8a33d", "#5aa9e6", "#7bc96f", "#e46f8e", "#a98be0", "#4fc3b9", "#e07b53", "#c9c44f")
 MAX_ALL = 200                    # "every combination" above this asks first
@@ -37,12 +37,6 @@ often).<br>
 optional part: <i>{?style|, in {style} style}</i> is left out when <i>style</i> is empty.<br>
 Placeholders work in the negative prompt too. Click a value to switch it off, double-click to edit it,
 right-click for its weight."""
-
-
-def _ask(parent, text: str) -> bool:
-    """A yes/no question that defaults to No (for what cannot be taken back)."""
-    return QMessageBox.question(parent, "Variations", text, QMessageBox.Yes | QMessageBox.No,
-                                QMessageBox.No) == QMessageBox.Yes
 
 
 def _to_int(value, default: int, lo: int, hi: int) -> int:
@@ -84,6 +78,9 @@ class PlaceholderHighlighter(QSyntaxHighlighter):
                 bg.setAlpha(55)
                 f.setBackground(bg)
                 f.setForeground(c.lighter(125))
+                f.setUnderlineStyle(QTextCharFormat.SingleUnderline)          # (a cue besides the colour)
+                f.setUnderlineColor(c)
+                f.setToolTip(f"Variable {{{name}}} (number {names.index(name) + 1 if name in names else 0})")
             f.setFontWeight(600)
             self.setFormat(m.start(), m.end() - m.start(), f)
 
@@ -299,9 +296,7 @@ class VariableCard(QFrame):
         box = QPlainTextEdit()
         box.setMinimumSize(420, 260)
         lay.addWidget(box)
-        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        bb.accepted.connect(dlg.accept)
-        bb.rejected.connect(dlg.reject)
+        bb, _ok = button_row(dlg, "Add")
         lay.addWidget(bb)
         if dlg.exec() == QDialog.Accepted:
             text = "\n".join(x for x in box.toPlainText().splitlines() if not x.strip().startswith("#"))
@@ -325,7 +320,7 @@ class VariableCard(QFrame):
                 try:
                     self.add_values(V.wildcard_values(Path(path).read_text(encoding="utf-8", errors="replace")))
                 except OSError as e:
-                    QMessageBox.warning(self, "Wildcard file", f"Could not read it: {e}")
+                    failed(self, "Wildcard file", "read it", e)
         elif chosen is a_none:
             if not any(not v.text.strip() for v in self.var.values):
                 self.var.values.append(V.Value(""))
@@ -356,14 +351,14 @@ class VariableCard(QFrame):
         return f"{n} value{'s' if n != 1 else ''}"
 
     def clear_values(self):
-        if len(self.var.values) > FEW_VALUES and not _ask(self, f"Remove all {self._lost()} of {{{self.var.name}}}?"):
+        if len(self.var.values) > FEW_VALUES and not confirm(self, "Variations", f"Remove all {self._lost()} of {{{self.var.name}}}?"):
             return
         self.var.values.clear()
         self.changed.emit()
 
     def remove_variable(self):
-        if len(self.var.values) > FEW_VALUES and not _ask(
-                self, f"Remove {{{self.var.name}}} with its {self._lost()}?"):
+        if len(self.var.values) > FEW_VALUES and not confirm(
+                self, "Variations", f"Remove {{{self.var.name}}} with its {self._lost()}?"):
             return
         self.remove.emit(self.var.name)
 
@@ -400,7 +395,7 @@ class VariationsPanel(QFrame):
         b_new = icon_button("plus", "New variable: a name for {name}, written into the prompt at the cursor")
         b_new.clicked.connect(lambda: self.new_variable())
         b_help = icon_button("info", "How variations work")
-        b_help.clicked.connect(lambda: QMessageBox.information(self, "Prompt variations", HELP))
+        b_help.clicked.connect(lambda: tell(self, "Prompt variations", HELP))
         b_menu = icon_button("more", "Import / export (the Dynamic Prompter node's JSON), remove all")
         b_menu.clicked.connect(lambda: self._menu(b_menu))
         for b in (b_new, b_help, b_menu):
@@ -603,7 +598,7 @@ class VariationsPanel(QFrame):
         name = (name or "").strip().strip("{}")
         if not re.fullmatch(V.NAME, name):
             if name:
-                QMessageBox.information(self, "New variable", "Use letters, digits, _ and - (no spaces), e.g. hair_color.")
+                tell(self, "New variable", "Use letters, digits, _ and - (no spaces), e.g. hair_color.")
             return None
         if self.variable(name) is None:
             self.vars.append(V.Variable(name))
@@ -618,13 +613,13 @@ class VariationsPanel(QFrame):
 
     def _rename(self, old: str, new: str):
         if not re.fullmatch(V.NAME, new):
-            QMessageBox.information(self, "Rename", "Use letters, digits, _ and - (no spaces), e.g. hair_color.")
+            tell(self, "Rename", "Use letters, digits, _ and - (no spaces), e.g. hair_color.")
             return
         var = self.variable(old)
         if var is None:
             return
         if self.variable(new) is not None:
-            QMessageBox.information(self, "Rename", f"{{{new}}} is already used by another variable.")
+            tell(self, "Rename", f"{{{new}}} is already used by another variable.")
             return
         var.name = new
         self.rename.emit(old, new)
@@ -633,8 +628,8 @@ class VariationsPanel(QFrame):
     def remove_unused(self):
         used = set(V.names_in(self.prompt, self.negative))
         gone = [v for v in self.vars if v.name not in used]
-        if sum(len(v.values) for v in gone) > FEW_VALUES and not _ask(
-                self, f"Remove {len(gone)} variable{'s' if len(gone) != 1 else ''} that "
+        if sum(len(v.values) for v in gone) > FEW_VALUES and not confirm(
+                self, "Variations", f"Remove {len(gone)} variable{'s' if len(gone) != 1 else ''} that "
                       f"{'are' if len(gone) != 1 else 'is'} not in the prompt, with their values?"):
             return
         self.vars = [v for v in self.vars if v.name in used]
@@ -654,8 +649,7 @@ class VariationsPanel(QFrame):
             QGuiApplication.clipboard().setText(V.to_json(self.vars))
         elif chosen is a_unused:
             self.remove_unused()
-        elif chosen is a_all and QMessageBox.question(self, "Variations", "Remove all variables and their values?") \
-                == QMessageBox.Yes:
+        elif chosen is a_all and confirm(self, "Variations", "Remove all variables and their values?"):
             self.vars = []
             self._rebuild()
 
@@ -668,7 +662,7 @@ class VariationsPanel(QFrame):
         try:
             new = V.from_json(text)
         except ValueError as e:
-            QMessageBox.warning(self, "Import values", f"That is not valid: {e}")
+            warn(self, "Import values", f"That is not valid: {e}")
             return False
         for nv in new:
             cur = self.variable(nv.name)

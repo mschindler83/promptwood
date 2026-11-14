@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QMenu, QSizePolicy, QWidget
 
 from .. import chain
 from .theme import theme
+from .widgets import small_font
 
 FPS = chain.FPS
 THUMB_W, THUMB_H = 40, 23
@@ -102,7 +103,7 @@ class KeyframeStrip(QWidget):
         p.drawRoundedRect(QRectF(tr.left(), mid - 3, tr.width(), 6), 3, 3)
         p.setPen(QPen(t.textTertiary, 1))
         f = p.font()
-        f.setPointSizeF(max(6.5, f.pointSizeF() * 0.8))
+        f = small_font(f, 0.8)
         p.setFont(f)
         step = 1.0 if self.duration <= 12 else 2.0
         s = 0.0

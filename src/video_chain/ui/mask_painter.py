@@ -7,10 +7,11 @@ from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QShortcut
-from PySide6.QtWidgets import (QButtonGroup, QDialog, QDialogButtonBox, QHBoxLayout, QPushButton, QMessageBox,
+from PySide6.QtWidgets import (QButtonGroup, QDialog, QHBoxLayout, QPushButton, 
                                QSlider, QVBoxLayout, QWidget)
 
-from .widgets import label
+from .dialogs import button_row, confirm
+from .widgets import fit_size, label, smooth_scaled
 
 MASK_COLOUR = QColor(255, 40, 40, 120)
 UNDO_STEPS = 30                 # steps kept; each holds only the area it changed (Clear and Invert: the whole mask)
@@ -103,7 +104,7 @@ class MaskCanvas(QWidget):
         dpr = self.devicePixelRatioF()
         dev = QSize(round(size.width() * dpr), round(size.height() * dpr))     # (device pixels: sharp on HiDPI)
         if self._shown is None or self._shown[0] != (size, dpr):   # the image at the frame's size, once per size
-            shown = self.image.scaled(dev, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+            shown = QImage(smooth_scaled(self.image, dev, Qt.IgnoreAspectRatio))
             shown.setDevicePixelRatio(dpr)
             self._shown = ((size, dpr), shown)
             self._tint = None
@@ -257,7 +258,7 @@ class MaskPainterDialog(QDialog):
     def __init__(self, parent, image: QImage, mask: QImage | None = None):
         super().__init__(parent)
         self.setWindowTitle("Paint the part to draw anew")
-        self.resize(1100, 800)
+        fit_size(self, 1100, 800)
         v = QVBoxLayout(self)
         v.addWidget(label("Paint over what should change (red). The rest stays exactly as it is. Left mouse "
                           "paints, right mouse erases; Ctrl + wheel or [ and ]: brush size; B / E: paint / erase; Ctrl+Z: undo, "
@@ -292,10 +293,7 @@ class MaskPainterDialog(QDialog):
         self.area = label("", level="tertiary")
         row.addWidget(self.area)
         v.addLayout(row)
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Ok).setText("Use this mask")
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
+        buttons, _ok = button_row(self, "Use this mask")
         v.addWidget(buttons)
         QShortcut(QKeySequence.Undo, self, activated=self.canvas.undo)
         for key in (QKeySequence.Redo, QKeySequence("Ctrl+Y")):
@@ -310,8 +308,8 @@ class MaskPainterDialog(QDialog):
 
     def reject(self):
         """Cancel, Esc, the window's close button: painted work is only dropped after asking."""
-        if self.canvas.mask != self._start and QMessageBox.question(
-                self, "Mask", "Discard the changes to the mask?") != QMessageBox.Yes:
+        if self.canvas.mask != self._start and not confirm(
+                self, "Mask", "Discard the changes to the mask?"):
             return
         super().reject()
 

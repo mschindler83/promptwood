@@ -11,6 +11,7 @@ from PySide6.QtGui import QBrush, QColor, QFont, QFontMetrics, QPainter, QPainte
 from PySide6.QtWidgets import QGraphicsObject, QGraphicsPathItem, QGraphicsScene, QGraphicsView
 
 from .theme import theme, with_alpha
+from .widgets import small_font
 
 W, H = 216, 178
 THUMB_H = 114
@@ -138,8 +139,7 @@ class NodeItem(QGraphicsObject):
                        "not converted yet" if i.kind == "video" else "not made yet")
         if i.badge:
             base_font = QFont(p.font())
-            bf = QFont(base_font)
-            bf.setPointSizeF(max(6.5, bf.pointSizeF() * 0.82))
+            bf = small_font(base_font, 0.82)
             p.setFont(bf)
             bfm = QFontMetrics(bf)
             text = bfm.elidedText(i.badge, Qt.ElideRight, int(thumb.width() - 16))

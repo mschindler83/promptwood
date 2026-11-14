@@ -10,8 +10,8 @@ from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QPlainTe
                                QToolButton, QVBoxLayout, QWidget)
 
 from .. import tree as T
-from .results_gallery import FlowBox
-from .widgets import label
+from .dialogs import button_row
+from .widgets import fit_size, FlowBox, label
 
 KIND_NAMES = {"person": "Person", "place": "Place", "object": "Object", "style": "Style"}
 FORMAT_NAMES = {"h3": "official", "classic": "classic"}
@@ -208,11 +208,10 @@ class ModelPromptDialog(QDialog):
         self.inputs.setTextFormat(Qt.PlainText)
         self.inputs.setWordWrap(True)
         v.addWidget(self.inputs)
-        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons, _none = button_row(self)
         self.b_copy = QPushButton("Copy")
         self.b_copy.setToolTip("Copy the prompt to the clipboard")
         self.b_copy.clicked.connect(lambda: QApplication.clipboard().setText(self.text.toPlainText()))
         buttons.addButton(self.b_copy, QDialogButtonBox.ActionRole)
-        buttons.rejected.connect(self.reject)
         v.addWidget(buttons)
-        self.resize(720, 560)
+        fit_size(self, 720, 560)

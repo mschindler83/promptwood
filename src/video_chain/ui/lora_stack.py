@@ -8,10 +8,11 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QHBoxLayout, QLineEdit,
-                               QListWidget, QListWidgetItem, QMessageBox, QPushButton, QVBoxLayout, QWidget)
+                               QListWidget, QListWidgetItem, QPushButton, QVBoxLayout, QWidget)
 
 from .. import tree as T
-from .widgets import guard_wheel, icon_button, label
+from .dialogs import add_action, button_row, failed
+from .widgets import fit_size, guard_wheel, icon_button, label
 
 
 LORA_MIN, LORA_MAX = -10.0, 10.0       # strengths (ComfyUI allows -100..100 for LoRAs, -10..10 for the turbo LoRA)
@@ -72,7 +73,7 @@ class LoraPickerDialog(QDialog):
                  used: set[str] | None = None, title: str = "Choose a LoRA", file_dir: str = ""):
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.resize(720, 620)
+        fit_size(self, 720, 620)
         self.known, self.file_dir, self._chosen = list(known), file_dir, None
         used = {os.path.realpath(u) for u in (used or set())}
         v = QVBoxLayout(self)
@@ -87,8 +88,8 @@ class LoraPickerDialog(QDialog):
         self.list.setUniformItemSizes(False)
         self.list.setAlternatingRowColors(True)
         v.addWidget(self.list, 1)
-        for path, text in sorted(self.known, key=lambda x: Path(x[0]).stem.lower()):
-            name = Path(path).stem
+        for path, text in sorted(self.known, key=lambda x: lora_label(x[0]).lower()):
+            name = lora_label(path)
             mark = "   · in use" if os.path.realpath(path) in used else ""
             it = QListWidgetItem(f"{name}{mark}\n{_home(str(Path(path).parent))}")
             it.setData(Qt.UserRole, path)
@@ -97,14 +98,11 @@ class LoraPickerDialog(QDialog):
             self.list.addItem(it)
             if current and os.path.realpath(path) == os.path.realpath(current):
                 self.list.setCurrentItem(it)
-        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        self.buttons.button(QDialogButtonBox.Ok).setText("Choose")
-        self.b_other = self.buttons.addButton("Other file…", QDialogButtonBox.ResetRole)
+        self.buttons, _ok = button_row(self, "Choose", accept=self._accept)
+        self.b_other = add_action(self.buttons, "Other file…")
         self.b_other.setToolTip("A .safetensors file from any folder (ComfyUI must find it in its LoRA folders to "
                                 "use it)")
         self.b_other.clicked.connect(self._other)
-        self.buttons.accepted.connect(self._accept)
-        self.buttons.rejected.connect(self.reject)
         v.addWidget(self.buttons)
         self.search.textChanged.connect(self._filter)
         self.search.returnPressed.connect(self._accept)
@@ -247,7 +245,7 @@ class LoraStack(QWidget):
     def _set_button(self, button: QPushButton, path: str):
         button.setProperty("path", path)
         missing = "" if Path(path).is_file() else " (missing)"
-        button.setText(Path(path).stem + missing)
+        button.setText(lora_label(path) + missing)
         button.setToolTip(f"{path}{missing}\nClick to choose another LoRA; right-click for its trigger words and CivitAI details")
         trig = getattr(button.parentWidget(), "trigger_label", None)
         if trig is not None:
@@ -329,7 +327,7 @@ class LoraStack(QWidget):
                 triggers.db().set_user(path, list(info["suggested"]))
             elif chosen is a_edit:
                 words, ok = QInputDialog.getText(
-                    self, "Trigger words", f"Trigger words of {Path(path).stem} (comma-separated; empty: none):",
+                    self, "Trigger words", f"Trigger words of {lora_label(path)} (comma-separated; empty: none):",
                     text=", ".join(triggers.db().words(path) or info.get("suggested") or []))
                 if not ok:
                     return
@@ -339,7 +337,7 @@ class LoraStack(QWidget):
             else:
                 return
         except OSError as e:
-            QMessageBox.warning(self, "Trigger words", f"Could not save the trigger words: {e}")
+            failed(self, "Trigger words", "save the trigger words", e)
             return
         self.refresh_triggers()
         self.changed.emit()

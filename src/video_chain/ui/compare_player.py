@@ -16,7 +16,7 @@ from PySide6.QtWidgets import QHBoxLayout, QSlider, QToolButton, QVBoxLayout, QW
 
 from .. import chain, media
 from .theme import icon, theme
-from .widgets import icon_button, label
+from .widgets import icon_button, label, safe_emit
 
 MEMORY_BUDGET = 900 * 2**20               # bytes for the stored frames of both clips (RGB, 3 bytes a pixel)
 MAX_SIZE = (1280, 720)                    # never stored larger than this (the view is smaller)
@@ -258,10 +258,7 @@ class ComparePlayer(QWidget):
                 if not cancel():
                     sig.loaded.emit(tid, fr, "", which)
             except Exception as e:  # noqa: BLE001
-                try:
-                    sig.loaded.emit(tid, None, str(e), which)
-                except RuntimeError:
-                    pass
+                safe_emit(sig.loaded, tid, None, str(e), which)
         threading.Thread(target=work, daemon=True).start()
 
     def _progress(self, tid: int, which: int, k: int):
