@@ -375,3 +375,12 @@ def test_refresh_asks_for_the_selected_path_once(app, win, tmp_path, image, monk
     monkeypatch.setattr(win, "selected_path", counted)
     win.refresh()
     assert len(calls) == 1
+
+
+# ------------------------------------------------------------------ MWB-39: one place for the speed modes
+def test_speed_modes_are_named_in_one_place():
+    from video_chain.ui import ui_logic as UL
+    assert list(UL.SPEED_NAMES) == ["normal", "turbo", "hyperflow", "pika"]
+    for mode in ("turbo", "hyperflow", "pika"):
+        assert UL.speed_mode({mode: {"on": True}}) == mode
+    assert "options.get(\"hyperflow\")" not in (UI / "mw_generator.py").read_text(encoding="utf-8")

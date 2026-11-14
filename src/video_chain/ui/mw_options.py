@@ -12,7 +12,7 @@ from .. import tree as T, triggers, tts as TTS
 from ..comfy import REF_HINT
 from .clip_cards import PromptCard
 from .mw_support import select_frames
-from .ui_logic import FRAME_CHOICES, as_dict, speed_mode
+from .ui_logic import FRAME_CHOICES, SPEED_NAMES, as_dict, speed_mode
 from .mw_host import MainWindowHost
 
 
@@ -100,8 +100,7 @@ class OptionsMixin(MainWindowHost):
 
     def _cfg_hint(self):
         v = self.clip_cfg.value()
-        name = {"normal": "Normal", "turbo": "Turbo", "hyperflow": "HyperFlow", "pika": "Pika"}.get(
-            self.speed.currentData(), "")
+        name = SPEED_NAMES.get(self.speed.currentData(), "")
         self.cfg_note.setText(f"for {name}: off (one pass per step)" if abs(v - 1) < 1e-6 else
                               f"for {name}: two passes per step (about twice as slow)")
 

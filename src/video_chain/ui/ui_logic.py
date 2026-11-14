@@ -279,6 +279,9 @@ def classify_cast_problem(raw: str) -> CastProblem:
     return CastProblem(ProblemKind.CAST)
 
 
+SPEED_NAMES = {"normal": "Normal", "turbo": "Turbo", "hyperflow": "HyperFlow", "pika": "Pika"}   # (the modes, as named)
+
+
 def speed_mode(o: dict) -> str:
     """Which speed mode the project's options switch on: "turbo", "hyperflow", "pika" or "normal"."""
     for mode in ("turbo", "hyperflow", "pika"):
