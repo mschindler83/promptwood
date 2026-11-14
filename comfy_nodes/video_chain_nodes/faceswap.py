@@ -188,6 +188,7 @@ class FaceSwapper:
         crop, m = warp(frame, landmarks, "ffhq_512", 512)
         if crop is None:
             return frame
+        assert self.enh is not None                    # (swap_face only calls this with an enhancer)
         x = ((crop.astype(np.float32) / 255.0 - 0.5) / 0.5).transpose(2, 0, 1)[None]
         out = self.enh.run(None, {self.enh.get_inputs()[0].name: x})[0][0]
         out = ((np.clip(out, -1, 1) + 1) / 2 * 255).round().astype(np.uint8).transpose(1, 2, 0)

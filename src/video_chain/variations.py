@@ -27,7 +27,6 @@ _PLAIN = re.compile(r"\{(" + NAME + r")\}")
 _ANY = re.compile(_COND.pattern + "|" + _PLAIN.pattern)       # both in one pass (values are not read again)
 MAX_IMAGES = 100_000                       # one Generate makes at most this many
 SHUFFLE_LIMIT = 100_000                     # bigger products: shuffle falls back to random picks
-MODES = ("order", "shuffle", "random")
 
 
 @dataclass

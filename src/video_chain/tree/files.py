@@ -11,13 +11,15 @@ import shutil
 import tempfile
 import uuid
 from pathlib import Path
+from typing import Any, cast
 
 try:
     import fcntl
 except ImportError:                                  # (Windows)
-    fcntl = None
+    fcntl = None   # type: ignore[assignment]  # (Windows has no fcntl; the code checks for None)
 
 from .. import chain
+from .schema import Options, Overrides
 from .consts import (
     CLIP_KEYS,
     DEFAULT_OPTIONS,
@@ -56,10 +58,11 @@ def clip_files(project: Path, node: Node) -> list[Path]:
     """The files a node's current record points to."""
     if not node.made:
         return []
+    made = cast(dict[str, Any], node.made)         # (CLIP_KEYS are names, the checker wants literal keys)
     out = []
     for k in CLIP_KEYS:
-        if node.made.get(k):
-            f = Path(project) / node.made[k]
+        if made.get(k):
+            f = Path(project) / made[k]
             if inside(project, "nodes", f):           # a damaged/hand-edited record never reaches elsewhere
                 out.append(f)
     if node.made.get("video"):                    # hand-over frames and refined copies of this version
@@ -87,7 +90,8 @@ def remove_stale_files(project: Path, tree: Tree) -> list[Path]:
     d = Path(project) / "nodes"
     if not d.is_dir():
         return []
-    used = {Path(project) / n.made[k] for n in tree.nodes.values() if n.made for k in CLIP_KEYS if n.made.get(k)}
+    used = {Path(project) / cast(dict[str, Any], n.made)[k]
+            for n in tree.nodes.values() if n.made for k in CLIP_KEYS if n.made.get(k)}
     used |= {h for n in tree.nodes.values() if (h := handover_file(project, tree, n)) is not None}
     used |= {f for n in tree.nodes.values() if n.made and n.made.get("video") for size in REFINED
              for f in (refined_file(project, n, size), refined_file(project, n, size).with_suffix(".json"))}
@@ -131,14 +135,15 @@ def load(project: Path) -> Tree:
         t.image = old.get("image")
         s = dict(old.get("settings") or {})
         s.setdefault("backend", "ai-toolkit")        # linear chains were always made with ai-toolkit
+        opts = cast(dict[str, Any], t.options)     # (older projects: keys the current schema no longer has)
         for key in ("model", "lora", "strength", "frames", "steps", "audio"):
             if key in s:
-                t.options[key] = s[key]
+                opts[key] = s[key]
         parent = None
-        project_loras = {k: t.options.pop(k) for k in _OLD_LORA_KEYS if k in t.options}
+        project_loras = {k: opts.pop(k) for k in _OLD_LORA_KEYS if k in opts}
         for c in old.get("clips", []):
             n = t.add(parent, c.get("prompt", ""), c.get("seed"))
-            n.overrides = migrate_loras(project_loras, {})
+            n.overrides = cast(Overrides, migrate_loras(project_loras, {}))
             video, frame = project / c.get("video", ""), project / c.get("last_frame", "")
             if video.is_file() and frame.is_file():
                 n.made = {"prompt": n.prompt, "seed": n.seed, "settings": s, "start_sha1": c.get("start_sha1"),
@@ -148,16 +153,16 @@ def load(project: Path) -> Tree:
     return t
 
 
-def _merged_options(stored: dict) -> dict:
+def _merged_options(stored: dict) -> Options:
     """The defaults with the stored options on top; a stored sub-dict (turbo, style ...) is merged key by key, so a
     file saved before a sub-key existed still gets its default."""
-    out = copy.deepcopy(DEFAULT_OPTIONS)
+    out: dict[str, Any] = dict(copy.deepcopy(DEFAULT_OPTIONS))
     for k, v in stored.items():
         if isinstance(v, dict) and isinstance(out.get(k), dict) and k != "cast":
             out[k] = {**out[k], **v}
         else:
             out[k] = v
-    return out
+    return cast(Options, out)                       # (the keys of a stored file are not checked here)
 
 
 def _int_or(v, default: int) -> int:
@@ -278,5 +283,6 @@ def node_loras(node: Node) -> list[tuple[str, float]]:
 
 def refined_file(project: Path, node: Node, size: str) -> Path:
     """The refined copy of a node's current clip at an export size (named after its clip version)."""
+    assert node.made is not None                  # (only called for a made clip)
     v = Path(node.made["video"])
     return Path(project) / v.parent / f"{v.stem}_{size}.mp4"

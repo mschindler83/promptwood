@@ -131,8 +131,9 @@ def detect_rgb(img, w: int, h: int, model: Path) -> list[Box5]:
         return []
     b, s = np.concatenate(boxes), np.concatenate(scores)
     b = b / np.array([sw / w, sh / h, sw / w, sh / h])          # the exact factors of the scaled picture
-    found = [(*map(float, b[i]), float(s[i])) for i in _nms(b, s)]
-    found = [(max(0.0, x1), max(0.0, y1), min(float(w), x2), min(float(h), y2), sc) for x1, y1, x2, y2, sc in found]
+    raw_found = [(*map(float, b[i]), float(s[i])) for i in _nms(b, s)]
+    found: list[Box5] = [(max(0.0, x1), max(0.0, y1), min(float(w), x2), min(float(h), y2), sc)
+                         for x1, y1, x2, y2, sc in raw_found]
     found = [f for f in found if f[2] - f[0] >= 1 and f[3] - f[1] >= 1]   # e.g. a hit in the padding
     return sorted(found, key=lambda f: -(f[2] - f[0]) * (f[3] - f[1]))
 

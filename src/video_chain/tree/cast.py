@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from typing import Any
+from typing import cast as _cast
 
 from .. import chain
 from .consts import (
@@ -23,10 +25,10 @@ from .consts import (
     VOICE_REF_MAX_SECS)
 from .guard import retire
 from .model import Tree
-from .schema import AudioRef, CastEntry, Options
+from .schema import AudioRef, CastEntry, Options, Voice
 
 
-def _migrate_cast(options: dict, has_cast: bool) -> None:
+def _migrate_cast(options: Options, has_cast: bool) -> None:
     """Older projects had one list of face pictures (identity "images", used by every clip while "mode" was
     "reference"). They become one character, Person1, the lead while they were on: every clip is made with exactly
     the same pictures as before, so made clips stay done."""
@@ -38,10 +40,10 @@ def _migrate_cast(options: dict, has_cast: bool) -> None:
     for k in ("images", "mode"):
         ident.pop(k, None)
     options["identity"] = {**DEFAULT_OPTIONS["identity"], **ident}
-    cast = []
+    cast: list[CastEntry] = []
     for c in options.get("cast") or []:
         if isinstance(c, dict) and isinstance(c.get("name"), str) and c["name"]:
-            entry = {"name": c["name"], "images": [r for r in c.get("images") or [] if isinstance(r, str)],
+            entry: Any = {"name": c["name"], "images": [r for r in c.get("images") or [] if isinstance(r, str)],
                      "desc": str(c.get("desc") or ""), "lead": bool(c.get("lead"))}
             if c.get("kind") in CAST_KINDS and c["kind"] != "person":
                 entry["kind"] = c["kind"]                # (a person has no "kind": older files stay as they are)
@@ -82,14 +84,14 @@ def lead_of(src: Tree | Options) -> CastEntry | None:
     return next((c for c in cast_of(src) if c.get("lead") and kind_of(c) == "person"), None)
 
 
-def kind_of(c: dict | None) -> str:
+def kind_of(c: CastEntry | None) -> str:
     """What a cast entry is: person (also without "kind"), place, object or style. Only a person has a face (the
     crop window), a voice and can be the lead; the others are used with their whole pictures."""
-    k = (c or {}).get("kind")
+    k = c.get("kind") if c else None
     return k if k in CAST_KINDS else "person"
 
 
-def refiner_cast(src: Tree | Options) -> list[dict]:
+def refiner_cast(src: Tree | Options) -> list[dict[str, Any]]:
     """The cast as the prompt refiner is told about it (comfy.cast_instruction): [{"name", "desc", "voice": bool}],
     + "kind" for a place, object or style (so the refiner does not make it a person)."""
     return [{"name": c["name"], "desc": c.get("desc", ""), "voice": bool(c.get("voice")) and kind_of(c) == "person",
@@ -127,7 +129,12 @@ def check_name(tree: Tree, name: str, keep: str | None = None) -> str:
     return name
 
 
-def _set_cast(tree: Tree, cast: list[dict]) -> None:
+def _without(entry: CastEntry, key: str) -> CastEntry:
+    """The entry without one key (a TypedDict cannot be rebuilt from a filtered .items() for the checker)."""
+    return _cast(CastEntry, {k: v for k, v in entry.items() if k != key})
+
+
+def _set_cast(tree: Tree, cast: list[CastEntry]) -> None:
     tree.options["cast"] = cast
 
 
@@ -192,18 +199,19 @@ def _check_kind(kind: str) -> str:
 
 
 def add_character(project: Path, tree: Tree, name: str, image: Path | None = None, desc: str = "",
-                  crop: tuple[int, int, int] | None = None, kind: str = "person") -> dict:
+                  crop: tuple[int, int, int] | None = None, kind: str = "person") -> CastEntry:
     """A new cast entry (with a first picture; a person's face picture is cropped to crop = x, y, side, any other
     kind takes the whole picture). The first person of a cast is the lead."""
     name = check_name(tree, name)
     kind = _check_kind(kind)
     lead = kind == "person" and not any(kind_of(c) == "person" for c in cast_of(tree))
-    entry = {"name": name, "images": [], "desc": (desc or "").strip(), "lead": lead}
+    images: list[str] = []
+    entry: CastEntry = {"name": name, "images": images, "desc": (desc or "").strip(), "lead": lead}
     if kind != "person":
         entry["kind"] = kind
         crop = None
     if image is not None:
-        entry["images"].append(_copy_picture(project, image, tree, crop))
+        images.append(_copy_picture(project, image, tree, crop))
     _set_cast(tree, cast_of(tree) + [entry])
     return entry
 
@@ -268,16 +276,18 @@ def voices_in_use(src: Tree | Options) -> list[str]:
     return [c["voice"]["file"] for c in cast_of(src) if c.get("voice")]
 
 
-def clone_file(voice: dict) -> str:
+def clone_file(voice: Voice) -> str:
     """The file text to speech clones a voice from: its longer clone reference when it has one, else the voice."""
-    return (voice.get("ref") or {}).get("file") or voice["file"]
+    ref = voice.get("ref")
+    return (ref.get("file") if ref else None) or voice["file"]
 
 
-def clone_secs(voice: dict) -> float:
-    return float((voice.get("ref") or voice).get("secs") or 0)
+def clone_secs(voice: Voice) -> float:
+    ref = voice.get("ref")
+    return float((ref or voice).get("secs") or 0)
 
 
-def _drop_voice(project: Path, voice: dict, tree: Tree) -> None:
+def _drop_voice(project: Path, voice: Voice, tree: Tree) -> None:
     """A voice's files (the voice and its clone reference) that nothing uses any more go to old/ (never deleted)."""
     kept = {a["file"] for a in audio_refs(tree)}
     for c in cast_of(tree):
@@ -304,7 +314,7 @@ def set_voice(project: Path, tree: Tree, name: str, source: Path, start: float =
     if length is None:
         raise ValueError(f"{Path(source).name} has no sound")
     cut_end = end is not None and float(end) < length - 0.01
-    have = (float(end) if cut_end else length) - float(start)
+    have = (float(end) if cut_end and end is not None else length) - float(start)
     if have < AUDIO_REF_MIN:
         raise ValueError(f"a voice needs at least {AUDIO_REF_MIN:.0f} s of speech ({Path(source).name} has "
                          f"{max(have, 0):.1f} s" + (" in the chosen part)" if cut_end or start else ")"))
@@ -318,7 +328,7 @@ def set_voice(project: Path, tree: Tree, name: str, source: Path, start: float =
     rel = f"{REFS_DIR}/voice{k}.wav"
     chain.to_wav(Path(source), Path(project) / rel, start, secs if have > secs or cut_end else None)
     real = chain.audio_seconds(Path(project) / rel) or secs
-    entry = {"file": rel, "name": label or Path(source).name, "secs": round(real, 2)}
+    entry: Voice = {"file": rel, "name": label or Path(source).name, "secs": round(real, 2)}
     if have >= secs + 1.0:                          # (worth it: at least a second more to clone from)
         long = min(have, VOICE_REF_MAX_SECS)
         ref = f"{REFS_DIR}/voice{k}_ref.wav"
@@ -335,7 +345,7 @@ def remove_voice(project: Path, tree: Tree, name: str) -> None:
     c = character(tree, name)
     if c is None or not c.get("voice"):
         return
-    _set_cast(tree, [{k: v for k, v in x.items() if k != "voice"} if x is c else x for x in cast_of(tree)])
+    _set_cast(tree, [_without(x, "voice") if x is c else x for x in cast_of(tree)])
     _drop_voice(project, c["voice"], tree)
 
 
@@ -346,9 +356,9 @@ def update_character(tree: Tree, name: str, *, desc: str | None = None, lead: bo
         raise ValueError(f"no character called {name}")
     if lead and kind_of(c) != "person":
         raise ValueError(f"@{c['name']} is a {kind_of(c)}; only a person can be the lead")
-    cast = []
+    cast: list[CastEntry] = []
     for x in cast_of(tree):
-        x = dict(x)
+        x = CastEntry(**x)
         if x["name"] == c["name"]:
             if desc is not None:
                 x["desc"] = desc.strip()
@@ -370,10 +380,10 @@ def set_kind(tree: Tree, name: str, kind: str) -> None:
     kind = _check_kind(kind)
     if kind != "person" and c.get("voice"):
         raise ValueError(f"@{c['name']} has a voice; only a person can have one (remove the voice first)")
-    cast = []
+    cast: list[CastEntry] = []
     for x in cast_of(tree):
         if x["name"] == c["name"]:
-            x = {k: v for k, v in x.items() if k != "kind"}
+            x = _without(x, "kind")
             if kind != "person":
                 x["kind"] = kind
                 x["lead"] = False
@@ -416,10 +426,11 @@ def _unmention(line: str) -> str:
     return MENTION.sub(lambda m: m.group(1), line)
 
 
-def mentions(options: dict, text: str) -> tuple[list[dict], list[str]]:
+def mentions(options: Options, text: str) -> tuple[list[CastEntry], list[str]]:
     """The characters a prompt mentions as @Name, in the order they first appear, and the @words that name
     nobody in the cast. An @Name inside a quoted line is a spoken word, not a mention."""
-    found, unknown = [], []
+    found: list[CastEntry] = []
+    unknown: list[str] = []
     inside = _in_lines(text)
     for m in MENTION.finditer(text or ""):
         if inside(m.start()):
@@ -439,7 +450,7 @@ def audio_refs(tree: Tree) -> list[AudioRef]:
 
 
 def add_audio_reference(project: Path, source: Path, tree: Tree, start: float = 0.0,
-                        name: str | None = None) -> dict:
+                        name: str | None = None) -> dict[str, Any]:
     """Copy the sound of an audio or video file into refs/ as <Audio N> (from start, cut to what is left of the
     15 s all sounds may have together). Returns the new entry, with "cut": the source was longer."""
     refs = audio_refs(tree)
@@ -467,7 +478,7 @@ def add_audio_reference(project: Path, source: Path, tree: Tree, start: float = 
     rel = f"{REFS_DIR}/audio{k}.wav"
     chain.to_wav(Path(source), Path(project) / rel, start, secs if have > left else None)
     real = chain.audio_seconds(Path(project) / rel) or secs
-    entry = {"file": rel, "name": name or Path(source).name, "secs": round(real, 2)}
+    entry: AudioRef = {"file": rel, "name": name or Path(source).name, "secs": round(real, 2)}
     tree.options["audio_refs"] = refs + [entry]
     return {**entry, "cut": have > left + 0.01}
 

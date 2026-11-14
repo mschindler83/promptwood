@@ -12,14 +12,14 @@ from .model import Tree
 def video_source(file: str, start: float, end: float, rotate: int = 0) -> Source:
     """A video node's source: the file, the range (seconds) and, when it is turned, "rotate" (clockwise degrees;
     left out at 0, so videos without it keep the records and keys they had)."""
-    src = {"file": str(file), "start": round(float(start), 4), "end": round(float(end), 4)}
+    src: Source = {"file": str(file), "start": round(float(start), 4), "end": round(float(end), 4)}
     if chain.rotation(rotate):
         src["rotate"] = chain.rotation(rotate)
     return src
 
 
 def source_rotation(src: Source | None) -> int:
-    return chain.rotation((src or {}).get("rotate", 0))
+    return chain.rotation(src.get("rotate", 0) if src else 0)
 
 
 _SRC_INFO: dict[tuple, dict] = {}
@@ -70,14 +70,14 @@ def size_source(project: Path, tree: Tree | None) -> tuple[int, int] | None:
         return _IMG_SIZE[key]
     if tree is not None:
         for n in sorted(tree.nodes.values(), key=lambda n: tree.number(n.id)):
-            if not n.is_video:
+            if not n.is_video or n.source is None:
                 continue
             info = source_info(n.source["file"])
             if info:                                 # (as the video is turned)
                 return chain.rotated_size(info["width"], info["height"], source_rotation(n.source))
-            key = (n.made or {}).get("key") or {}
-            if key.get("width") and key.get("height"):     # the file is gone, its converted clip is still here
-                return int(key["width"]), int(key["height"])
+            made_key = (n.made or {}).get("key") or {}
+            if made_key.get("width") and made_key.get("height"):     # the file is gone, its converted clip is still here
+                return int(made_key["width"]), int(made_key["height"])
         a = ASPECTS.get(str(tree.options.get("aspect") or "16:9"), ASPECTS["16:9"])
         return a[0] * 120, a[1] * 120
     return None

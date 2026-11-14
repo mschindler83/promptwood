@@ -22,7 +22,7 @@ import shutil
 import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Any, Callable, Protocol
 
 from . import media
 from .media import MediaError
@@ -71,10 +71,10 @@ MAX_RATIO = 2.5          # H3 custom sizes go from 2:5 to 5:2
 
 
 class Generator(Protocol):
-    def generate(self, prompt: str, start_image: Path, out_video: Path, out_last_frame: Path, seed: int,
+    def generate(self, prompt: str, start_image: Path | None, out_video: Path, out_last_frame: Path, seed: int,
                  settings: dict | None = None) -> None:
         """Make one clip that starts at start_image; write it to out_video and its last frame to out_last_frame.
-        settings (chain.settings_dict) carries per-clip lora, strength, frames and steps; None: the generator's own."""
+        start_image None: a first clip made from text alone. settings (chain.settings_dict) carries per-clip lora, strength, frames and steps; None: the generator's own."""
 
 
 # ----------------------------------------------------------------------------- input
@@ -550,7 +550,9 @@ def file_signature(path: str | Path | None) -> str | None:
 
 
 def sha1_file(path: Path) -> str:
-    return media.file_digest(path, "sha1")
+    digest = media.file_digest(path, "sha1")
+    assert digest is not None                   # (None only when a stop() callback ends it; none is given)
+    return digest
 
 
 # ----------------------------------------------------------------------------- the chain
@@ -604,7 +606,7 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
     voice_language: a character speaks with its voice (MiniMax's structured format, lines tagged with this
     language); such a clip holds its start image like one with faces.
     style: the project's text before / after every prompt (only present when there is any)."""
-    s = {"model": model, "lora": lora or None, "lora_sha1": file_signature(lora) if lora else None,
+    s: dict[str, Any] = {"model": model, "lora": lora or None, "lora_sha1": file_signature(lora) if lora else None,
          "strength": float(strength) if lora else 1.0,
          "frames": int(frames), "steps": int(steps), "width": int(width), "height": int(height),
          "audio": bool(audio), "backend": backend}

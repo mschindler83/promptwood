@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import re
 
+from .schema import Options
+
 
 
 TREE_FILE = "tree.json"
@@ -42,7 +44,7 @@ CONTINUE_CHOICES = (22, 39, 56, 73, 90, 107, 124)
 DEFAULT_FRAMES = 73                 # a clip's length when nothing else is set
 
 
-DEFAULT_OPTIONS = {"model": "Comfy-Org/MiniMax-H3", "frames": DEFAULT_FRAMES, "steps": 28,
+DEFAULT_OPTIONS: Options = {"model": "Comfy-Org/MiniMax-H3", "frames": DEFAULT_FRAMES, "steps": 28,
                    "resolution": 512, "audio": True, "keep_repeated": False, "seed": 42,
                    # the aspect ratio of a project without a start image or video (its first clip starts from text)
                    "aspect": "16:9",

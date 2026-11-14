@@ -8,7 +8,7 @@ from pathlib import Path
 from .. import chain
 from .consts import AUDIO_REF_MIN, AUDIO_REF_TOTAL, MAX_AUDIO_REFS, REFS_DIR
 from .model import Node, Tree, short_id
-from .schema import Track
+from .schema import Options, Track
 from .timeline import _guide_of, clip_length, full_prompt, handover_index, made_frames, path_cuts
 from .files import load
 from .cast import audio_mentioned, audio_refs, cast_of
@@ -113,7 +113,7 @@ def tracks(tree: Tree) -> list[Track]:
     return [t for t in (tree.options.get("tracks") or []) if isinstance(t, dict) and t.get("id") and t.get("file")]
 
 
-def track_of(tree: Tree, tid: str) -> dict | None:
+def track_of(tree: Tree, tid: str) -> Track | None:
     return next((t for t in tracks(tree) if t["id"] == tid), None)
 
 
@@ -140,27 +140,27 @@ def _cut_track(project: Path, source: Path, start: float, end: float | None) -> 
 
 
 def add_track(project: Path, tree: Tree, source: Path, start: float = 0.0, end: float | None = None,
-              name: str | None = None) -> dict:
+              name: str | None = None) -> Track:
     """Cut the sound of an audio or video file (start-end, seconds) into refs/ as a new audio track."""
     rel, secs = _cut_track(project, source, start, end)
     have = {t["id"] for t in tracks(tree)}
     tid = "t" + uuid.uuid4().hex[:6]               # never reused: a removed track's clips keep pointing nowhere
     while tid in have:
         tid = "t" + uuid.uuid4().hex[:6]
-    entry = {"id": tid, "name": name or Path(source).stem, "file": rel, "secs": secs, "source": str(source),
+    entry: Track = {"id": tid, "name": name or Path(source).stem, "file": rel, "secs": secs, "source": str(source),
              "start": round(float(start), 3), "end": round(float(start) + secs, 3)}
     tree.options["tracks"] = tracks(tree) + [entry]
     return entry
 
 
 def recut_track(project: Path, tree: Tree, tid: str, source: Path, start: float, end: float | None,
-                name: str | None = None) -> dict:
+                name: str | None = None) -> Track:
     """Cut an audio track again (another range, or another file); the clips playing it count as changed."""
     old = track_of(tree, tid)
     if old is None:
         raise ValueError("this audio track is gone")
     rel, secs = _cut_track(project, source, start, end)
-    entry = {**old, "name": name or old["name"], "file": rel, "secs": secs, "source": str(source),
+    entry: Track = {**old, "name": name or old.get("name", ""), "file": rel, "secs": secs, "source": str(source),
              "start": round(float(start), 3), "end": round(float(start) + secs, 3)}
     tree.options["tracks"] = [entry if t["id"] == tid else t for t in tracks(tree)]
     return entry
@@ -276,6 +276,7 @@ def source_sound_problems(tree: Tree, todo: list[str], project: Path | None = No
                 out.append(f"clip #{short_id(nid)} plays an audio track that was removed; choose another sound")
                 continue
             track = track_of(tree, tid)
+            assert track is not None                   # (span is not None: the track is there)
             if not sound_file(project, span).is_file():
                 out.append(f"the file of the audio track “{track['name']}” is missing ({Path(span['file']).name})")
                 continue
@@ -374,7 +375,7 @@ def lora_trigger_words(paths: list[str]) -> list[str] | None:
         return None                                # unknown (e.g. the database cannot be read right now)
 
 
-def _stack_triggers(options: dict, node: Node, stack: list) -> list[str] | None:
+def _stack_triggers(options: Options, node: Node, stack: list) -> list[str] | None:
     """A clip's trigger words; while the database cannot be read, those it was made with (no false CHANGED)."""
     if not stack or not options.get("lora_triggers", True):
         return None

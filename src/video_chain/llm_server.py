@@ -26,7 +26,7 @@ import urllib.error
 import urllib.request
 import weakref
 from pathlib import Path
-from typing import Sequence
+from typing import IO, Sequence
 
 from . import config, net
 
@@ -91,15 +91,15 @@ def image_part(path: str | Path) -> dict:
 @functools.lru_cache(maxsize=24)
 def _image_url(path: str, _mtime_ns: int, _size: int) -> str:
     from PIL import Image, ImageOps
-    with Image.open(path) as im:
-        im = ImageOps.exif_transpose(im)
+    with Image.open(path) as opened:
+        im = ImageOps.exif_transpose(opened)
         if im.mode in ("RGBA", "LA", "P"):                # transparent parts on grey, not black
             im = im.convert("RGBA")
             bg = Image.new("RGBA", im.size, (128, 128, 128, 255))
             bg.alpha_composite(im)
             im = bg
         im = im.convert("RGB")
-        im.thumbnail((IMAGE_SIDE, IMAGE_SIDE), Image.LANCZOS)
+        im.thumbnail((IMAGE_SIDE, IMAGE_SIDE), Image.Resampling.LANCZOS)
         buf = io.BytesIO()
         im.save(buf, "PNG")
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
@@ -139,7 +139,7 @@ def chat_messages(*, prompt: str, kind: str, turns: list[tuple[str, str]], instr
     content: list[dict] = [{"type": "text", "text": opening}]
     for title, path in pictures:
         content += [{"type": "text", "text": f"\n[{title}]"}, image_part(path)]
-    msgs = [{"role": "system", "content": system},
+    msgs: list[dict] = [{"role": "system", "content": system},
             {"role": "user", "content": content if pictures else opening}]
     for i, (_ask, version) in enumerate(turns):
         msgs.append({"role": "assistant", "content": version})
@@ -294,7 +294,8 @@ class _Adopted:
     it needs. It is no child of this process, so its end is seen in /proc."""
 
     def __init__(self, pid: int, started: str):
-        self.pid, self.started, self.returncode = pid, started, None
+        self.pid, self.started = pid, started
+        self.returncode: int | None = None
 
     def poll(self):
         st = _proc_stat(self.pid)
@@ -307,7 +308,7 @@ class _Adopted:
         end = None if timeout is None else time.time() + timeout
         while self.poll() is None:
             if end is not None and time.time() > end:
-                raise subprocess.TimeoutExpired(str(self.pid), timeout)
+                raise subprocess.TimeoutExpired(str(self.pid), timeout or 0.0)
             time.sleep(0.1)
         return self.returncode
 
@@ -577,7 +578,7 @@ class LlamaServer:
             if gen != self._gen:
                 raise LlmServerError("cancelled")
             if not self.running():
-                log = subprocess.DEVNULL
+                log: int | IO[bytes] = subprocess.DEVNULL
                 if self.log_dir is not None:
                     self.log_dir.mkdir(parents=True, exist_ok=True)
                     rotate_log(self.log_dir / "llama-server.log")
@@ -588,11 +589,12 @@ class LlamaServer:
                 except OSError as e:
                     raise LlmServerError(f"the llama.cpp server could not be started: {e}") from e
                 finally:
-                    if log is not subprocess.DEVNULL:
+                    if not isinstance(log, int):
                         log.close()                    # (the process has its own copy)
                 _LIVE.add(self)
                 self._remember(self.proc)
             proc = self.proc
+        assert proc is not None                    # (just started, or running)
         log_hint = f"; see {self.log_dir / 'llama-server.log'}" if self.log_dir else ""
         end = time.time() + timeout
         while time.time() < end:
@@ -723,12 +725,12 @@ class LlamaServer:
             with _LOOPBACK.open(req, timeout=timeout) as r:
                 data = json.loads(r.read().decode("utf-8", "replace"))
         except urllib.error.HTTPError as e:
-            body = e.read()[:2000].decode("utf-8", "replace")
+            why = e.read()[:2000].decode("utf-8", "replace")
             try:
-                body = (json.loads(body).get("error") or {}).get("message") or body
+                why = (json.loads(why).get("error") or {}).get("message") or why
             except (ValueError, AttributeError):
                 pass
-            raise LlmServerError(f"the llama.cpp server answered {e.code}: {body[:300]}") from e
+            raise LlmServerError(f"the llama.cpp server answered {e.code}: {why[:300]}") from e
         except ValueError as e:
             raise LlmServerError(f"unreadable answer from the llama.cpp server: {e}") from e
         except (OSError, http.client.HTTPException) as e:

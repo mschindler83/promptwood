@@ -48,6 +48,7 @@ def _revert_fields(tree: Tree, nid: str) -> list[str]:
     what freezing finds. Returns what was restored."""
     node, done = tree.nodes[nid], changed_inputs(tree, nid)
     m = node.made
+    assert m is not None                              # (only a made clip has edits to undo)
     if "prompt" in done:
         node.prompt = m["prompt"]
     if "seed" in done:

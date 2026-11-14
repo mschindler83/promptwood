@@ -6,6 +6,7 @@ import logging
 import re
 import uuid
 from pathlib import Path
+from typing import Sequence
 
 from ..chain import image_size
 from .client import ComfyGenerator
@@ -42,9 +43,9 @@ def pick_qwen_files(unets: list[str], clips: list[str], vaes: list[str], loras: 
             "lightning": (light[0], _steps_in(light[0])) if light else None}
 
 
-def build_edit_workflow(*, prompt: str, image: str, refs: list[str] = (), seed: int, steps: int, cfg: float,
+def build_edit_workflow(*, prompt: str, image: str, refs: Sequence[str] = (), seed: int, steps: int, cfg: float,
                         files: dict, lightning: str | None, prefix: str,
-                        loras: list[tuple[str, float]] = ()) -> dict:
+                        loras: Sequence[tuple[str, float]] = ()) -> dict:
     """One Qwen Image Edit: the source image (scaled to the model's size) edited by the prompt; refs: up to two more
     pictures (Picture 2, Picture 3 in the prompt), e.g. a face. As ComfyUI's blueprint 'Image Edit (Qwen 2511)'.
     loras: (ComfyUI name, strength) chained after the model, in this order, before the Lightning LoRA."""
@@ -139,8 +140,8 @@ def pick_qwen21_inpaint(patches: list[str]) -> str | None:
 
 
 def build_qwen21_workflow(*, files: dict, prompt: str, seed: int, quality: str, prefix: str, save_as: str,
-                          images: list[str] = (), size: tuple[int, int] | None = None, negative: str = "",
-                          loras: list[tuple[str, float]] = (), model: str | None = None,
+                          images: Sequence[str] = (), size: tuple[int, int] | None = None, negative: str = "",
+                          loras: Sequence[tuple[str, float]] = (), model: str | None = None,
                           inpaint: dict | None = None) -> dict:
     """One Qwen-Image 2.1 picture. images: uploaded pictures (image_1 ... in the text encoder: an edit's source
     first); size: the new picture's (width, height); None: the size of images[0] as the model sees it (an edit).
@@ -264,12 +265,12 @@ def pick_moss_files(unets: list[str], clips: list[str], vaes: list[str], loras: 
             "clip": clip[0], "vae": vae[0], "edit_lora": edit[0] if edit else None}
 
 
-def build_moss_workflow(*, files: dict, prompt: str, seed: int, prefix: str, save_as: str, images: list[str] = (),
-                        size: tuple[int, int] | None = None, negative: str = "", loras: list[tuple[str, float]] = (),
+def build_moss_workflow(*, files: dict, prompt: str, seed: int, prefix: str, save_as: str, images: Sequence[str] = (),
+                        size: tuple[int, int] | None = None, negative: str = "", loras: Sequence[tuple[str, float]] = (),
                         model: str | None = None) -> dict:
     """One MOSS-Image picture. Without images: text to image at size. With images (uploaded; an edit's source
     first): the edit LoRA and TextEncodeMOSSImageEdit; size None: the size of the first picture scaled to ~1 MP."""
-    unet = model if model in (files.get("models") or []) else (files.get("sft") or files["base"])
+    unet = model if model and model in (files.get("models") or []) else (files.get("sft") or files["base"])
     if images:
         unet = files.get("sft") or unet            # the edit LoRA was trained on the SFT model
     wf: dict = {
@@ -384,7 +385,7 @@ class ComfyImageEditor(ComfyGenerator):
         return self.inpaint_missing
 
     def edit(self, image: Path, prompt: str, out_png: Path, seed: int, quality: str = "fast",
-             refs: list[Path] = (), loras: list[tuple[str, float]] = (), model: str = "2511",
+             refs: Sequence[Path] = (), loras: Sequence[tuple[str, float]] = (), model: str = "2511",
              mask: Path | None = None) -> dict:
         """Edit image by prompt; the result goes to out_png. loras: (file, strength) in ComfyUI's LoRA folders.
         model: a key of EDIT_MODELS. mask: a picture at the image's size, white where it is drawn anew (inpaint;
@@ -407,7 +408,9 @@ class ComfyImageEditor(ComfyGenerator):
         light = self.files.get("lightning") if quality == "fast" else None
         if quality == "fast" and not light:
             quality = "standard"
-        steps, cfg = (light[1], 1.0) if light else QUALITY.get(quality) or QUALITY["standard"]
+        fallback = QUALITY.get(quality) or QUALITY["standard"]
+        assert fallback is not None                   # ("standard" always has its steps)
+        steps, cfg = (light[1], 1.0) if light else fallback
         uploads: list[tuple[str, Path]] = []
         try:
             name = self.upload(Path(image))

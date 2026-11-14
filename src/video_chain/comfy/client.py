@@ -21,7 +21,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePath
 
 from .. import media, net
 from .errors import ComfyError, ComfyJobFailed, ComfyUnavailable, LocalWriteError
@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 try:
     import websocket  # websocket-client (optional: without it the result is polled)
 except ImportError:
-    websocket = None
+    websocket = None   # type: ignore[assignment]  # (optional dependency: the code checks for None)
 
 DEFAULT_URL = "http://127.0.0.1:8188"
 UPLOAD_MIN_RATE = 100 * 1024          # bytes/s an upload may be as slow as before it times out ...
@@ -118,12 +118,13 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
         self.roots = comfy_lora_roots(self.comfy_dir) if self.comfy_dir else []
         argv = list((self.stats.get("system") or {}).get("argv") or [])
         base = self.comfy_dir
-        if base is not None and _arg(argv, "--base-directory"):
-            base = Path(_arg(argv, "--base-directory")).expanduser()
-        self.output_dir = (Path(_arg(argv, "--output-directory")).expanduser() if _arg(argv, "--output-directory")
-                           else (base / "output" if base else None))
-        self.input_dir = (Path(_arg(argv, "--input-directory")).expanduser() if _arg(argv, "--input-directory")
-                          else (base / "input" if base else None))
+        base_arg, out_arg, in_arg = (_arg(argv, f"--{n}-directory") for n in ("base", "output", "input"))
+        if base is not None and base_arg:
+            base = Path(base_arg).expanduser()
+        self.output_dir: PurePath | None = (Path(out_arg).expanduser() if out_arg
+                                            else (base / "output" if base else None))
+        self.input_dir: PurePath | None = (Path(in_arg).expanduser() if in_arg
+                                           else (base / "input" if base else None))
 
     # ---- HTTP
     def _open(self, req, timeout: float):
@@ -329,6 +330,7 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
                     raise ComfyUnavailable(f"the download of {f['filename']} was cut off")
                 return
             except LocalWriteError as e:                # (a full disk or no right to write: no retry, no
+                assert e.__cause__ is not None           # (LocalWriteError(e) always chains the OSError)
                 raise e.__cause__ from None              #  "ComfyUI is unavailable"; the OSError itself)
             except urllib.error.HTTPError as e:
                 raise ComfyError(f"ComfyUI /view: HTTP {e.code}") from e
@@ -385,7 +387,7 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
             if self._cancelled.is_set():         # Stop came before the job was queued: take it out again
                 self.interrupt()
                 raise ComfyJobFailed("stopped")
-            return self._wait(self.current, ws)
+            return self._wait(self.current or "", ws)   # (_queue set it)
         except ComfyJobFailed:
             raise
         except BaseException:                    # (also a stop by KeyboardInterrupt / SystemExit: cancel the job)
@@ -460,7 +462,7 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
                 _UPLOADS[(self.url, got)] = _UPLOADS.get((self.url, got), 0) + 1
         return got
 
-    def generate(self, prompt: str, start_image: Path, out_video: Path, out_last_frame: Path, seed: int,
+    def generate(self, prompt: str, start_image: Path | None, out_video: Path, out_last_frame: Path, seed: int,
                  settings: ClipSettings | None = None) -> None:
         self._begin_job()
         s: ClipSettings = settings or {}
@@ -579,7 +581,7 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
             self._remove(self.output_dir, video, Path(out_video))
             self._remove(self.output_dir, frame, Path(out_last_frame))
 
-    def _remove(self, top: Path | None, f: dict, local: Path, same_size: bool = True) -> None:
+    def _remove(self, top: PurePath | None, f: dict, local: Path, same_size: bool = True) -> None:
         """Delete ComfyUI's copy of a file, only inside its video-chain subfolder and (for outputs) only if the
         downloaded file has the same size."""
         if top is None:
@@ -704,7 +706,7 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
                             self._close_ws(own_ws)           # (one this wait opened before, now dead)
                             ws = own_ws = new
                             reconnect_at = float("inf")
-                every = POLL_SECONDS if ws is not None and not finished else POLL_SECONDS_NO_WS
+                every: float = POLL_SECONDS if ws is not None and not finished else POLL_SECONDS_NO_WS
                 if finished:
                     every = POLL_SECONDS_FINISHED
                 if time.monotonic() - last_poll >= every or last_poll == 0.0:

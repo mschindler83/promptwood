@@ -18,7 +18,7 @@ import re
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable, TypeGuard
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +91,8 @@ def _words(text: str) -> set[str]:
 
 def _distinct(prompts: list[str], limit: int) -> list[str]:
     """The prompts without near-duplicates (the same prompt with another seed or a word changed), in order."""
-    out, seen = [], []
+    out: list[str] = []
+    seen: list = []
     for p in prompts:
         w = _words(p)
         if len(w) < 3:                               # (a bare trigger word tells nothing about the wording)
@@ -172,7 +173,11 @@ def settings_of(details: dict | None, file_name: str = "") -> dict:
         if isinstance(f, dict) and f.get("name"):
             names.add(Path(str(f["name"])).stem.lower())
     names.discard("")
-    strength, steps, cfg, samplers, count = [], [], [], Counter(), 0
+    strength: list[float] = []
+    steps: list[float] = []
+    cfg: list[float] = []
+    samplers: Counter[str] = Counter()
+    count = 0
     for it in d.get("examples") or []:
         meta = (it or {}).get("meta") if isinstance(it, dict) else None
         if not isinstance(meta, dict):
@@ -186,7 +191,7 @@ def settings_of(details: dict | None, file_name: str = "") -> dict:
             cfg.append(c)
         if meta.get("sampler"):
             samplers[str(meta["sampler"])[:40]] += 1
-    out = {"count": count}
+    out: dict[str, Any] = {"count": count}
     if len(strength) >= 2:
         out["strength"] = _span(strength, 2)
         mid = sorted(strength)[len(strength) // 2]         # the usual strength: the middle one, in steps of 0.05
@@ -233,15 +238,24 @@ def examples(details: dict | None) -> list[dict]:
     """A LoRA's gallery pictures that tell their prompt, for showing (the most liked first, each prompt once):
     [{"prompt" (as posted), "clean" (as the refiner reads it), "negative", "settings" (text), "likes", "user",
     "item" (CivitAI's record: id, url, type, rating …)}]."""
-    out, seen = [], set()
+    out: list[dict] = []
+    seen: set[str] = set()
     for it in _sound(details)["examples"]:
         meta = it.get("meta") if isinstance(it, dict) else None
-        prompt = str(meta.get("prompt") or "").strip() if isinstance(meta, dict) else ""
+        if not isinstance(it, dict) or not isinstance(meta, dict):
+            continue
+        prompt = str(meta.get("prompt") or "").strip()
         if not prompt or prompt in seen:
             continue
         seen.add(prompt)
-        stats = it.get("stats") if isinstance(it.get("stats"), dict) else {}
-        likes = sum(int(v) for k in ("likeCount", "heartCount") if (v := _num(stats.get(k))) is not None)
+        stats = it.get("stats")
+        if not isinstance(stats, dict):
+            stats = {}
+        likes = 0
+        for k in ("likeCount", "heartCount"):
+            v = _num(stats.get(k))
+            if v is not None:
+                likes += int(v)
         sett = ", ".join(f"{label} {meta[k]}" for k, label in (("steps", "steps"), ("cfgScale", "CFG"),
                                                               ("sampler", "sampler"), ("seed", "seed"))
                          if meta.get(k) not in (None, "") and len(str(meta[k])) <= 40)
@@ -342,10 +356,10 @@ def _bare(path: str) -> dict:
             "pool": [], "settings": {"count": 0}, "stamp": "bare"}
 
 
-def worth_a_note(mat: dict | None) -> bool:
+def worth_a_note(mat: dict | None) -> TypeGuard[dict]:
     """A note says more than the material itself only when there is something to read: several example prompts or
     a description of some length."""
-    return bool(mat) and (len(mat["examples"]) >= 3 or len(mat.get("about") or "") >= 200)
+    return mat is not None and bool(mat) and (len(mat["examples"]) >= 3 or len(mat.get("about") or "") >= 200)
 
 
 def make_notes(paths: list[str], complete: Callable[[str, str, int], str], db=None,
@@ -440,7 +454,7 @@ def _one(mat: dict, note: str, budget: int, prompt: str = "", remarks: str = "")
         lines.append("The user's own remarks on this LoRA (follow them): " + remarks)
     sett = settings_text(mat.get("settings") or {})
     used = sum(len(x) + 1 for x in lines)
-    examples = []
+    examples: list[str] = []
     for p in nearest(mat, prompt, GUIDE_EXAMPLES + (0 if note else 1)):
         p = _cut(p, GUIDE_EXAMPLE_CHARS)
         if examples and used + len(p) + 6 > budget:
@@ -485,7 +499,7 @@ def summary(paths: list[str], db=None) -> dict:
     one of what_is_known per LoRA of the stack (also those nothing is known of)}."""
     from . import triggers
     db = db or triggers.db()
-    out = {"known": [], "notes": 0, "missing": 0, "settings": [], "loras": []}
+    out: dict[str, Any] = {"known": [], "notes": 0, "missing": 0, "settings": [], "loras": []}
     for p in list(dict.fromkeys(paths))[:MAX_LORAS]:
         k = what_is_known(p, db)
         out["loras"].append(k)

@@ -21,17 +21,20 @@ class Source(TypedDict, total=False):
     replaced: dict[str, Any]            # swap.apply: what the person was replaced with, with "original" (a Source)
 
 
-class Overrides(TypedDict, total=False):
-    """A clip's own settings over the project's (OVERRIDE_KEYS)."""
-    loras: list[dict[str, Any]]         # [{"path", "strength"}], applied in order
-    frames: int
-    steps: int
-    guide: int                          # one of GUIDE_CHOICES
-    source_sound: str | None            # "previous", "track:<id>" or a real video's sound
-    sound_over: bool | str
-    sound_mix_level: float
-    camera: Any
-    lead: Any
+# (the functional form: "continue" is a Python keyword)
+Overrides = TypedDict("Overrides", {
+    "loras": list[dict[str, Any]],      # [{"path", "strength"}], applied in order
+    "frames": int,
+    "steps": int,
+    "guide": int,                       # one of GUIDE_CHOICES
+    "continue": int,                    # frames of the clip before shown to the model as <Video 1> (h3 format)
+    "source_sound": str | None,         # "previous", "track:<id>" or a real video's sound
+    "sound_over": bool | str,
+    "sound_mix_level": float,
+    "camera": Any,
+    "lead": Any,
+}, total=False)
+"""A clip's own settings over the project's (OVERRIDE_KEYS)."""
 
 
 class MadeRecord(TypedDict, total=False):
@@ -54,6 +57,7 @@ class MadeRecord(TypedDict, total=False):
     end_key: Any
     keyframe_key: Any
     guide_from: Any
+    continue_from: Any
     kind: str                           # a video node's record
     key: dict[str, Any]
 
@@ -100,6 +104,7 @@ class Track(TypedDict, total=False):
     source: str
     start: float
     end: float
+    tts: dict[str, Any]                 # a track made by speak_lines: {"clip", "provider", "language", "lines"}
 
 
 class Options(TypedDict, total=False):

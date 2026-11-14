@@ -16,6 +16,7 @@ import re
 import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any, cast
 
 from . import chain, media
 from . import tree as T
@@ -66,7 +67,8 @@ class Film:
     def load(root: Path) -> "Film":
         root = root_of(root)
         f = root / FILM_FILE
-        scenes, current, shared, problem = [], None, None, ""
+        scenes: list[Scene] = []
+        current, shared, problem = None, None, ""
         if f.is_file():
             try:
                 d = json.loads(f.read_text(encoding="utf-8"))
@@ -87,7 +89,7 @@ class Film:
                         continue
                     take = e.get("take") if isinstance(e.get("take"), str) and re.fullmatch(r"n\d+", e["take"]) \
                         else None
-                    join = e.get("join") if e.get("join") in JOINS else "cut"
+                    join = str(e["join"]) if e.get("join") in JOINS else "cut"
                     frm = e.get("from_sha") if isinstance(e.get("from_sha"), str) else None
                     notes = str(e.get("notes") or "")
                     scenes.append(Scene(sid, str(e.get("title") or sid), sdir, take, join, frm, notes))
@@ -174,7 +176,8 @@ class Film:
                               "file system with links") from e
             base = T.load(self.path(like)) if like else T.load(self.root)
             t = T.Tree()
-            t.options.update({k: v for k, v in base.options.items() if k in T.DEFAULT_OPTIONS})
+            cast(dict[str, Any], t.options).update(    # (the keys are the project's: those of the defaults)
+                {k: v for k, v in base.options.items() if k in T.DEFAULT_OPTIONS})
             t.options["style"] = {"prefix": "", "suffix": ""}           # a scene's look is its own
             if start_image is not None:
                 T.set_start_image(d, Path(start_image), t)
@@ -407,7 +410,7 @@ def summary(film: Film, sid: str, tree: "T.Tree | None" = None, status_of: dict 
     """What a scene's card shows: {"clips", "secs" (its selected path, joined), "done", "changed", "new",
     "thumb" (a picture of its start, or None)}. tree / status_of: the open scene as the window has it."""
     d = film.path(sid)
-    out = {"clips": 0, "secs": 0.0, "done": 0, "changed": 0, "new": 0, "thumb": None}
+    out: dict[str, Any] = {"clips": 0, "secs": 0.0, "done": 0, "changed": 0, "new": 0, "thumb": None}
     try:
         t = tree if tree is not None else T.load(d)
     except (OSError, ValueError):
@@ -421,9 +424,9 @@ def summary(film: Film, sid: str, tree: "T.Tree | None" = None, status_of: dict 
     out["join"] = film.scene(sid).join if film.scenes[0].id != sid else None
     out["notes"] = film.scene(sid).notes
     try:
-        ch = None if status_of is not None else T.Checker(d, t)
+        ch = T.Checker(d, t) if status_of is None else None
         for n in path:
-            st = status_of.get(n.id, "new") if status_of is not None else ch.status(n.id)
+            st = status_of.get(n.id, "new") if status_of is not None else ch.status(n.id)  # type: ignore[union-attr]  # (ch exists when status_of is None)
             out[st if st in ("done", "changed", "new") else "changed"] += 1
         cuts = T.path_cuts(t, path, bool(t.options.get("keep_repeated")), planned=True)
         frames = sum(max(0, T.clip_length(t, n) - a - b) for n, (a, b) in zip(path, cuts))
@@ -517,7 +520,7 @@ def cast_by_scene(film: Film) -> tuple[list[str], list[tuple[str, dict[str, str]
     """Who appears in which scene (along the path the film plays): (character names, [(scene title,
     {name: mark})]); mark: "face", "voice", "face+voice" or "picture" (a place, object or style)."""
     names: list[str] = []
-    rows = []
+    rows: list[tuple[str, dict[str, str]]] = []
     for sc in film.scenes:
         d = film.path(sc.id)
         try:

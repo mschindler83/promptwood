@@ -6,6 +6,7 @@ import signal
 import sys
 import threading
 import traceback
+from typing import cast
 
 from . import media
 
@@ -22,7 +23,7 @@ def _qt_error_relay():
 
         def __init__(self):
             super().__init__()
-            self.message.connect(self._open, Qt.QueuedConnection)   # (any thread may call show)
+            self.message.connect(self._open, Qt.ConnectionType.QueuedConnection)   # (any thread may call show)
             self._boxes = []
 
         def show(self, text: str) -> None:
@@ -30,11 +31,11 @@ def _qt_error_relay():
 
         @Slot(str)
         def _open(self, text: str) -> None:
-            box = QMessageBox(QMessageBox.Warning, "Promptwood", "Something went wrong. The app keeps running; "
+            box = QMessageBox(QMessageBox.Icon.Warning, "Promptwood", "Something went wrong. The app keeps running; "
                               "the details are below and in the terminal log.")
             box.setDetailedText(text)
             box.setText(box.text() + "\n\n" + text.strip().splitlines()[-1][:300])
-            box.setAttribute(Qt.WA_DeleteOnClose)
+            box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
             self._boxes.append(box)
             box.destroyed.connect(lambda _=None, b=box: self._boxes.remove(b) if b in self._boxes else None)
             box.open()                                               # (not modal: the app is not blocked)
@@ -79,7 +80,7 @@ def install_signal_handlers(app, window):
     window that stays (the user is asked about unsaved work), quits anyway. Returns the timer that lets Python see
     the signal while Qt's loop runs (keep it alive)."""
     from PySide6.QtCore import QTimer
-    asked = []
+    asked: list[int] = []
 
     def handle(_sig, _frame) -> None:
         w = window()
@@ -107,7 +108,7 @@ def main(argv: list[str] | None = None) -> int:
     # "Play videos on the GPU" (settings; read before Qt's media backend loads, so a change needs a restart): GPU =
     # hardware decoding and Qt's GPU video surface (smooth, but NVIDIA's EGL driver crashed once with a full GPU);
     # CPU = decoded and painted on the CPU (safe, lags with big clips). A decoder value set by the user is kept.
-    gpu = QSettings("video-chain", "Video Chain").value("videoGpu", True, type=bool)
+    gpu = bool(QSettings("video-chain", "Video Chain").value("videoGpu", True, type=bool))
     if not gpu:
         os.environ.setdefault("QT_FFMPEG_DECODING_HW_DEVICE_TYPES", "none")
     from PySide6.QtWidgets import QApplication, QMessageBox
@@ -121,7 +122,7 @@ def main(argv: list[str] | None = None) -> int:
     # desktop portal cannot register the app ID because the app has no installed .desktop file
     QLoggingCategory.setFilterRules("qt.qpa.wayland.textinput.warning=false\nqt.qpa.services.warning=false")
     argv = sys.argv if argv is None else argv
-    app = QApplication.instance() or QApplication(argv)
+    app = cast(QApplication, QApplication.instance() or QApplication(argv))
     app.setOrganizationName("video-chain")
     app.setApplicationName("Video Chain")
     app.setDesktopFileName("video-chain")
