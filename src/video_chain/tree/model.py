@@ -8,8 +8,10 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .. import chain
+from .guard import retire
 from .consts import (
     AI,
+    ENDS_DIR,
     DEFAULT_OPTIONS,
     NewerTreeError,
     OVERRIDE_KEYS,
@@ -161,7 +163,7 @@ class Tree:
         old/ in the project (chain.keep_aside). Returns the removed ids."""
         from .files import _unlink, clip_files, node_files
         from .freezing import heal_frozen
-        from .keyframes import _in_ends, keyframe_files
+        from .keyframes import keyframe_files
         from .starts import _drop_start_file
         gone = [nid] + [n.id for n in self.descendants(nid)]
         parent = self.nodes[nid].parent
@@ -171,8 +173,7 @@ class Tree:
                 for f in list(node_files(project, g)) + clip_files(project, node):
                     chain.keep_aside(project, f)        # (never deleted: moved to old/)
                 for rel in ({node.end_image, (node.made or {}).get("end_image")} | keyframe_files(node)) - {None}:
-                    if _in_ends(project, rel):
-                        chain.keep_aside(project, Path(project) / rel)
+                    retire(project, ENDS_DIR, rel, resolved=False)
                 _drop_start_file(project, node.start_image)
                 chain.keep_aside(project, Path(project) / "paths" / f"{g}.mp4")     # its joined path too
                 _unlink(Path(project) / "paths" / f"{g}.json")

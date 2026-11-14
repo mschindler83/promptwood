@@ -27,6 +27,7 @@ from .consts import (
     TREE_FILE,
     _CLIP_NAME,
     _OLD_LORA_KEYS)
+from .guard import inside
 from .model import Node, Tree
 from .timeline import handover_file
 
@@ -55,16 +56,15 @@ def clip_files(project: Path, node: "Node") -> list[Path]:
     """The files a node's current record points to."""
     if not node.made:
         return []
-    area = (Path(project) / "nodes").resolve()
     out = []
     for k in CLIP_KEYS:
         if node.made.get(k):
             f = Path(project) / node.made[k]
-            if area in f.resolve().parents:           # a damaged/hand-edited record never reaches elsewhere
+            if inside(project, "nodes", f):           # a damaged/hand-edited record never reaches elsewhere
                 out.append(f)
     if node.made.get("video"):                    # hand-over frames and refined copies of this version
         v = Path(project) / node.made["video"]
-        if area in v.resolve().parents and v.parent.is_dir():
+        if inside(project, "nodes", v) and v.parent.is_dir():
             out += sorted(handover_frames(v))
             out += [r for size in REFINED for r in (refined_file(project, node, size),
                                                      refined_file(project, node, size).with_suffix(".json"))

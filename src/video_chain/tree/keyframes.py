@@ -6,13 +6,13 @@ from pathlib import Path
 
 from .. import chain
 from .consts import ENDS_DIR
+from .guard import inside, retire
 from .model import Node, Tree, short_id
 
 
 def _in_ends(project: Path, rel: str) -> bool:
     """rel points into the project's ends/ folder (a damaged/hand-edited record never reaches elsewhere)."""
-    area = (Path(project) / ENDS_DIR).resolve()
-    return area in (Path(project) / rel).resolve().parents
+    return inside(project, ENDS_DIR, rel) is not None
 
 
 def set_end_image(project: Path, tree: Tree, nid: str, image: Path) -> str:
@@ -35,8 +35,8 @@ def clear_end_image(project: Path, tree: Tree, nid: str) -> None:
     """Remove a clip's end image. The copy its current clip was made with stays until the clip is made again
     (Undo changes can go back to it)."""
     node = tree.nodes[nid]
-    if node.end_image and node.end_image != (node.made or {}).get("end_image") and _in_ends(project, node.end_image):
-        chain.keep_aside(project, Path(project) / node.end_image)
+    if node.end_image and node.end_image != (node.made or {}).get("end_image"):
+        retire(project, ENDS_DIR, node.end_image, resolved=False)
     node.end_image = None
 
 
@@ -70,8 +70,8 @@ def keyframe_files(node: Node) -> set[str]:
 def _drop_keyframe_file(project: Path, node: Node, rel: str) -> None:
     """A keyframe picture no longer used goes to old/ (the made clip's stay until it is made again: Undo)."""
     made = {k.get("image") for k in (node.made or {}).get("keyframes") or [] if isinstance(k, dict)}
-    if rel not in made and rel not in {k["image"] for k in node.keyframes} and _in_ends(project, rel):
-        chain.keep_aside(project, Path(project) / rel)
+    if rel not in made and rel not in {k["image"] for k in node.keyframes}:
+        retire(project, ENDS_DIR, rel, resolved=False)
 
 
 def set_keyframe(project: Path, tree: Tree, nid: str, image: Path | None, at: float, note: str | None = None,

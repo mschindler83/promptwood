@@ -9,6 +9,7 @@ from typing import Callable
 from .. import chain
 from .. import media
 from .consts import VIDEO
+from .guard import inside
 from .model import Node, Tree, short_id
 from .timeline import clip_length, full_prompt, handover_file, handover_index
 from .files import _unlink, clip_files, handover_frames, load, new_clip_files, remove_stale_files, save
@@ -148,8 +149,7 @@ def ensure_handover(project: Path, tree: Tree, node: Node) -> Path | None:
             chain.frame_at(Path(project) / node.made["video"], handover_index(tree, node), tmp)
     if node.made and node.made.get("video") and not node.is_video:   # frames of an earlier choice in this take
         v = Path(project) / node.made["video"]
-        area = (Path(project) / "nodes").resolve()
-        if area in v.resolve().parents:
+        if inside(project, "nodes", v):
             for old in handover_frames(v):
                 if old != f:
                     _unlink(old)

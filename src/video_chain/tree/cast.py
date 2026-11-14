@@ -21,6 +21,7 @@ from .consts import (
     REFS_DIR,
     VOICE_MAX_SECS,
     VOICE_REF_MAX_SECS)
+from .guard import retire
 from .model import Tree
 
 
@@ -239,9 +240,7 @@ def _drop_file(project: Path, rel: str, tree: Tree) -> None:
     if rel in all_pictures(tree):
         return                                     # another character still uses it
     for f in (rel, source_of(rel)):
-        target = (Path(project) / f).resolve()
-        if (Path(project) / REFS_DIR).resolve() in target.parents:
-            chain.keep_aside(project, target)       # (never deleted: moved to old/)
+        retire(project, REFS_DIR, f)                # (never deleted: moved to old/)
 
 
 def remove_picture(project: Path, tree: Tree, rel: str) -> None:
@@ -280,9 +279,7 @@ def _drop_voice(project: Path, voice: dict, tree: Tree) -> None:
         if c.get("voice"):
             kept |= {c["voice"]["file"], clone_file(c["voice"])}
     for rel in {voice["file"], clone_file(voice)} - kept:
-        target = (Path(project) / rel).resolve()
-        if (Path(project) / REFS_DIR).resolve() in target.parents:
-            chain.keep_aside(project, target)
+        retire(project, REFS_DIR, rel)
 
 
 def set_voice(project: Path, tree: Tree, name: str, source: Path, start: float = 0.0,
@@ -471,9 +468,7 @@ def add_audio_reference(project: Path, source: Path, tree: Tree, start: float = 
 
 def remove_audio_reference(project: Path, rel: str, tree: Tree) -> None:
     tree.options["audio_refs"] = [a for a in audio_refs(tree) if a["file"] != rel]
-    target = (Path(project) / rel).resolve()
-    if (Path(project) / REFS_DIR).resolve() in target.parents:
-        chain.keep_aside(project, target)           # (never deleted: moved to old/)
+    retire(project, REFS_DIR, rel)                  # (never deleted: moved to old/)
 
 
 def audio_mentioned(prompt: str) -> int:

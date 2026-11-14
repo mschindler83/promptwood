@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .. import chain
 from .consts import STARTS_DIR, START_FILE
+from .guard import inside
 from .model import Node, Tree
 from .files import _unlink
 
@@ -17,8 +18,7 @@ logger = logging.getLogger(__name__)
 
 def _in_starts(project: Path, rel: str) -> bool:
     """rel points into the project's starts/ folder (a damaged/hand-edited record never reaches elsewhere)."""
-    area = (Path(project) / STARTS_DIR).resolve()
-    return area in (Path(project) / rel).resolve().parents
+    return inside(project, STARTS_DIR, rel) is not None
 
 
 def _drop_start_file(project: Path, rel: str | None) -> None:

@@ -90,6 +90,7 @@ from .consts import (  # noqa: F401
     REFINED,
     _CLIP_NAME,
     CLIP_KEYS)
+from .guard import inside, retire  # noqa: F401
 from .model import (  # noqa: F401
     Node,
     short_id,
