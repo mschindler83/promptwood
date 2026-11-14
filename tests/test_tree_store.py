@@ -165,7 +165,9 @@ def test_keyframe_indexes_are_checked(tmp_path):
 
 def test_sidecar_text_is_written_whole(tmp_path):
     from video_chain import chain
-    f = tmp_path / "pins.json"
+    d = tmp_path / "project"                     # (tmp_path also holds the test's own home folder)
+    d.mkdir()
+    f = d / "pins.json"
     chain.atomic_write_text(f, '{"a": 1}')
     chain.atomic_write_text(f, '{"a": 2}')
-    assert json.loads(f.read_text()) == {"a": 2} and [p.name for p in tmp_path.iterdir()] == ["pins.json"]
+    assert json.loads(f.read_text()) == {"a": 2} and [p.name for p in d.iterdir()] == ["pins.json"]

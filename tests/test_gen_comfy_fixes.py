@@ -19,20 +19,23 @@ def server(tmp_path):
 
 
 def test_image_is_never_left_truncated(server, tmp_path, monkeypatch):
+    out_dir = tmp_path / "pics"
+    out_dir.mkdir()
     cr = G.ComfyImageCreator(server.url)
-    out = tmp_path / "n.png"
+    logged = []
+    cr.log = logged.append
+    out = out_dir / "n.png"
     cr.create("krea2", None, "a fox", out, 5, "standard", 1024, 1024)
     good = out.read_bytes()
-    real = type(out).write_bytes
-
-    def half(self, data):
-        real(self, data[: len(data) // 2])
-        raise OSError("disk full")
-    monkeypatch.setattr(type(out), "write_bytes", half)
-    with pytest.raises(OSError):
-        cr.create("krea2", None, "a fox", out, 6, "standard", 1024, 1024)
-    monkeypatch.undo()
-    assert out.read_bytes() == good and not list(tmp_path.glob("*.part*"))
+    out_dir.chmod(0o555)                         # the picture's folder cannot be written (as with a full disk)
+    try:
+        with pytest.raises(OSError) as e:
+            cr.create("krea2", None, "a fox", out, 6, "standard", 1024, 1024)
+    finally:
+        out_dir.chmod(0o755)
+    assert not isinstance(e.value, ComfyError)   # (a local disk problem, not "ComfyUI is unavailable")
+    assert not [m for m in logged if "trying again" in m]   # ... and not tried again as if the network had failed
+    assert out.read_bytes() == good and not list(out_dir.glob("*.part*"))
 
 
 def test_stop_by_baseexception_cancels_the_job(server, tmp_path, monkeypatch):

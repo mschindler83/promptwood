@@ -23,7 +23,6 @@ import logging
 import mimetypes
 import os
 import re
-import shutil
 import threading
 import time
 import urllib.error
@@ -58,6 +57,10 @@ _UPLOADS_LOCK = threading.Lock()
 
 class ComfyError(RuntimeError):
     pass
+
+
+class _LocalWriteError(Exception):
+    """Wraps an OSError of writing a download to the local disk (told apart from a network error)."""
 
 
 class ComfyUnavailable(ComfyError):
@@ -699,12 +702,23 @@ class ComfyGenerator:
         for attempt in range(DOWNLOAD_TRIES):
             try:
                 req = urllib.request.Request(f"{self.url}/view?{q}")
-                with self._open(req, 300) as r, open(dest, "wb") as out:
-                    shutil.copyfileobj(r, out, 1 << 20)
+                with self._open(req, 300) as r:
+                    try:
+                        out = open(dest, "wb")
+                    except OSError as e:
+                        raise _LocalWriteError(e) from e
+                    with out:
+                        while chunk := r.read(1 << 20):
+                            try:
+                                out.write(chunk)
+                            except OSError as e:
+                                raise _LocalWriteError(e) from e
                     want = r.headers.get("Content-Length")
                 if want is not None and dest.stat().st_size != int(want):
                     raise ComfyUnavailable(f"the download of {f['filename']} was cut off")
                 return
+            except _LocalWriteError as e:                # (a full disk or no right to write: no retry, no
+                raise e.__cause__ from None              #  "ComfyUI is unavailable"; the OSError itself)
             except urllib.error.HTTPError as e:
                 raise ComfyError(f"ComfyUI /view: HTTP {e.code}") from e
             except (ComfyUnavailable, urllib.error.URLError, ConnectionError, TimeoutError, OSError,
