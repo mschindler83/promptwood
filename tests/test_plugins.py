@@ -13,6 +13,7 @@ from PIL import Image
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox
 
 from video_chain.ui.generator_state import Job  # noqa: E402
+import waiting as W
 from video_chain import plugins
 
 FAKE = [sys.executable, str(Path(__file__).resolve().parent / "fake_backend.py")]
@@ -87,13 +88,7 @@ def test_plugins_are_found_and_one_that_fails_is_left_out(made_up, monkeypatch):
 
 
 def wait(app, cond, timeout=60):
-    end = time.time() + timeout
-    while time.time() < end:
-        app.processEvents()
-        if cond():
-            return
-        time.sleep(0.02)
-    raise AssertionError("timed out")
+    W.wait(app, cond, timeout, raising=True)
 
 
 def test_what_a_plugin_adds_to_the_window(made_up, tmp_path, monkeypatch):

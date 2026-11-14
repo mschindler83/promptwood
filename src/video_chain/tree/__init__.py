@@ -316,6 +316,7 @@ from .engine import (  # noqa: F401
     _SOUND_OVERRIDES,
     remix_sound,
     remix_sounds,
+    sweep_scratch,
     run_tree)
 from .export import (  # noqa: F401
     swapped_video,

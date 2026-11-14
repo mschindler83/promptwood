@@ -29,7 +29,7 @@ from .media import MediaError
 
 logger = logging.getLogger(__name__)
 
-FPS = 24
+FPS = int(media.DEFAULT_FPS)        # (the one frame rate: media.DEFAULT_FPS, comfy.wfb.FPS)
 HYPERFLOW_STEPS = 8      # HyperFlow's trained sigma grid
 PIKA_STEPS = 6           # Pika H3 Flex (its template's 6-step sigmas)
 # Veda sparse attention (veda-sparse-attention node) pays off only for large clips: measured on an RTX 4090 it made a
@@ -62,9 +62,9 @@ def veda_useful(width: int, height: int, frames: int) -> bool:
 
 def veda_from_seconds(width: int, height: int) -> float | None:
     """The clip length (s) from which Veda is used at this size (None: not even at 15 s)."""
-    for frames in range(5, 15 * 24 + 3, 17):
+    for frames in range(5, 15 * FPS + 3, 17):
         if veda_useful(width, height, frames):
-            return frames / 24
+            return frames / FPS
     return None
 DIVISIBILITY = 32
 MAX_RATIO = 2.5          # H3 custom sizes go from 2:5 to 5:2

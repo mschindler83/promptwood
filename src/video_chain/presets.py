@@ -12,7 +12,8 @@ import threading
 import time
 from pathlib import Path
 
-from . import media
+from . import config, media
+from .media import squash
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +24,7 @@ def default_path() -> Path:
     env = os.environ.get("VIDEO_CHAIN_PRESETS")
     if env:
         return Path(env)
-    base = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
-    return base / "video-chain" / "lora_presets.json"
+    return config.data_dir() / "lora_presets.json"
 
 
 def lora_key(path: str) -> str:
@@ -86,7 +86,7 @@ class PresetStore:
 
     def save(self, lora: str, name: str, values: dict) -> dict:
         """Save (or replace) the preset `name` of a LoRA; returns it."""
-        name = " ".join(str(name or "").split())
+        name = squash(name)
         if not name:
             raise ValueError("a preset needs a name")
         preset = {"name": name, **{k: values.get(k) for k in FIELDS if k in values}, "updated": time.time()}
@@ -98,7 +98,7 @@ class PresetStore:
         return preset
 
     def rename(self, lora: str, old: str, new: str) -> None:
-        new = " ".join(str(new or "").split())
+        new = squash(new)
         if not new:
             raise ValueError("a preset needs a name")
         with self._exclusive():

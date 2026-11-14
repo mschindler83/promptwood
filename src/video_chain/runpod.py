@@ -38,7 +38,7 @@ from typing import IO
 from .comfy import (SEEDVR_FULL_VRAM, SEEDVR_METHODS, SEEDVR_NODES, SEEDVR_PRECISION_FULL, SUBFOLDER, ComfyError,
                     ComfyGenerator)
 
-from . import keys, media, net
+from . import config, keys, media, net
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ IDLE_MIN = 20                              # the pod removes itself after this l
 MIN_RAM_PER_GPU = 32                       # GB of system RAM: the SeedVR2 pieces are cut to what the pod has
                                            # (64 left out most RTX 4090 / 5090 hosts)
 KEYRING_SERVICE, KEYRING_USER = "video-chain", "runpod-api-key"
-CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "video-chain" / "runpod"
+CONFIG_DIR = config.config_dir() / "runpod"
 SETUP_SCRIPT = Path(__file__).with_name("cloud") / "pod_setup.sh"
 # video-chain's lanczos node (the same frames as ComfyUI's, on all cores), copied to the pod before the setup
 SCALE_NODE_FILE = Path(__file__).resolve().parents[2] / "comfy_nodes" / "video_chain_nodes" / "scale.py"

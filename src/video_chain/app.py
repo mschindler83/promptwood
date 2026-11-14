@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import sys
 import threading
@@ -99,10 +100,9 @@ def install_signal_handlers(app, window):
 
 
 def main(argv: list[str] | None = None) -> int:
-    import os
-
     from . import logs
     logs.setup()
+    media.sweep_scratch()                 # (temp folders a killed run left behind, a day or older)
 
     from PySide6.QtCore import QLoggingCategory, QSettings
     # "Play videos on the GPU" (settings; read before Qt's media backend loads, so a change needs a restart): GPU =

@@ -36,8 +36,14 @@ def _model(path: str, kind: str):
     if _loaded["path"] != path:
         _free()
         if kind == "whisper":
+            import transformers
             from transformers import pipeline
-            m = pipeline("automatic-speech-recognition", model=path, torch_dtype=torch.float16, device="cuda:0")
+            try:                                   # (transformers 4.56 renamed torch_dtype to dtype)
+                new = tuple(int(x) for x in getattr(transformers, "__version__", "99.0").split(".")[:2]) >= (4, 56)
+            except ValueError:
+                new = True
+            m = pipeline("automatic-speech-recognition", model=path, device="cuda:0",
+                         **{"dtype" if new else "torch_dtype": torch.float16})
         else:
             from qwen_tts import Qwen3TTSModel
             m = Qwen3TTSModel.from_pretrained(path, device_map="cuda:0", dtype=torch.bfloat16)

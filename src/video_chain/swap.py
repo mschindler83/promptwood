@@ -37,7 +37,7 @@ def probe(video: Path) -> tuple[int, int, int, float]:
     """(width, height, frames, fps) of a clip (its frames counted: exact). RuntimeError (MediaError) with a plain
     message when it cannot be read."""
     p = chain.probe(video)
-    return p["width"], p["height"], p["frames"], p["fps"] or 24.0
+    return p["width"], p["height"], p["frames"], p["fps"] or chain.FPS
 
 
 def _ffmpeg(args: list[str], timeout: float = 3600) -> None:
@@ -149,7 +149,7 @@ def mask_frame(box: tuple, width: int, height: int):
     return ((((xs + 0.5 - cx) / rx) ** 2 + ((ys + 0.5 - cy) / ry) ** 2) <= 1.0).astype(np.uint8) * 255
 
 
-def write_mask(boxes: list[Box], width: int, height: int, out: Path, fps: float = 24.0) -> None:
+def write_mask(boxes: list[Box], width: int, height: int, out: Path, fps: float = chain.FPS) -> None:
     """The head mask as a lossless video (one frame per box), white = the head."""
     out = Path(out)
     rate = Fraction(fps).limit_denominator(1001)          # (30000/1001 stays 30000/1001, not 29.97)
@@ -207,7 +207,7 @@ def replaced(node) -> dict | None:
     return r if isinstance(r, dict) and isinstance(r.get("original"), dict) else None
 
 
-def apply(node, file: Path, frames: int, info: dict, fps: float = 24.0) -> None:
+def apply(node, file: Path, frames: int, info: dict, fps: float = chain.FPS) -> None:
     """The video node plays the swapped clip (all of it) from now on; its source before is kept."""
     before = replaced(node)
     original = before["original"] if before else {k: v for k, v in (node.source or {}).items() if k != "replaced"}
@@ -250,14 +250,26 @@ def store_pose(project: Path, key: str, parts: dict, info: dict) -> dict:
     entry is never used). Returns all parts stored for key now."""
     d = Path(project) / POSE_CACHE_DIR / key
     d.mkdir(parents=True, exist_ok=True)
+    moved: list[tuple[Path, Path]] = []
     for name, f in parts.items():
         if Path(f).is_file():
             shutil.move(str(f), d / f"{name}.mkv")        # (replace() fails across file systems)
+            moved.append((Path(f), d / f"{name}.mkv"))
     try:                                        # (the info of the run that made a part first stays)
         before = json.loads((d / "info.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         before = {}
-    media.atomic_write_json(d / "info.json", {**info, **before, "parts": sorted(set(before.get("parts", [])) | set(parts))})
+    try:
+        media.atomic_write_json(d / "info.json",
+                                {**info, **before, "parts": sorted(set(before.get("parts", [])) | set(parts))})
+    except BaseException:
+        if not before:                          # (no entry without info.json: the parts go back, no orphan files)
+            for src, dest in moved:
+                try:
+                    shutil.move(str(dest), src)
+                except OSError:
+                    dest.unlink(missing_ok=True)
+        raise
     return cached_pose(project, key)
 
 
@@ -309,7 +321,7 @@ def h3_length(frames: int) -> int:
     return chain.h3_frames(frames)
 
 
-def trim_with_sound(made: Path, clip: Path, out: Path, frames: int, fps: float = 24.0) -> None:
+def trim_with_sound(made: Path, clip: Path, out: Path, frames: int, fps: float = chain.FPS) -> None:
     """The made video cut to the clip's frame count (at the clip's frame rate), with the clip's own sound
     (exactly as recorded)."""
     out = Path(out)

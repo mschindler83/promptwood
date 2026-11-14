@@ -7,6 +7,7 @@ from pathlib import Path
 from .client import ComfyGenerator
 from .errors import ComfyError
 from .wfb import TEXT_GEN_ID, TEXT_SHOW_ID, combo_options, loader_clip, text_generate_inputs
+from ..media import squash
 
 # ----------------------------------------------------------------------------- prompt refiner (an LLM in ComfyUI)
 
@@ -108,11 +109,11 @@ def clean_refined(text: str, lines: bool = False) -> str:
     if len(text) > 1 and pairs.get(text[0]) == text[-1] and text[0] not in inner and text[-1] not in inner:
         text = inner.strip()                       # only quotes around the whole answer, not spoken lines
     if not lines:
-        return " ".join(text.split())
+        return squash(text)
     text = "\n".join(x for x in text.splitlines()      # an official header line: the app writes its own
                      if not re.match(r"\s*(For the target video, at 0\.00 seconds|How the reference pictures align)",
                                      x, re.I))
-    text = " ".join(text.split())
+    text = squash(text)
     text = re.sub(r"\bintegrated_multimodal_description\s*:\s*", "", text, flags=re.I)
     text = re.sub(r"<d>\s*(?:\[[^\]]{1,30}\]\s*)?(.*?)\s*</d>", r'"\1"', text, flags=re.S | re.I)
     text = re.sub(r"\s*\(S\d+(?:\s*,\s*S\d+)*\)", "", text)

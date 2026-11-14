@@ -211,7 +211,9 @@ FACE_HELP = ("copy video-chain's comfy_nodes/video_chain_nodes into ComfyUI/cust
 
 def face_lock_nodes(wf: dict, images: list, lock: dict) -> list:
     """Promptwood's face swap node on images (the new person's identity from lock["persons"]); its output."""
-    persons = list(lock["persons"])[:MAX_PERSONS]      # (the node takes four pictures of the new person)
+    persons = list(lock["persons"])
+    if len(persons) > MAX_PERSONS:                      # (the node takes four pictures of the new person)
+        raise ComfyError(f"the face swap takes at most {MAX_PERSONS} pictures of the new person, not {len(persons)}")
     inputs = {"images": images, "swapper": lock["swapper"], "enhancer": lock.get("enhancer") or "none",
               "enhance": float(lock.get("enhance", 0.8))}
     for k, name in enumerate(persons):
@@ -270,10 +272,7 @@ class ComfyAnimator(ComfyGenerator):
                 if self.cleanup:
                     self._remove(self.output_dir, f, Path(dest))
         finally:
-            if self.cleanup:
-                for up, local in uploads:
-                    self._remove(self.input_dir, {"filename": Path(up).name, "subfolder": str(Path(up).parent)},
-                                 Path(local), same_size=False)
+            self._drop_uploads(uploads)
 
     def replace(self, video: Path, mask: Path, reference: Path, out: Path, seed: int, frames: int,
                 src_size: tuple[int, int], size: str = "480p", prompt: str = "", fps: float = FPS,
@@ -288,6 +287,7 @@ class ComfyAnimator(ComfyGenerator):
             raise ComfyError(self.missing)
         if lock and self.face_missing:
             raise ComfyError(self.face_missing)
+        lock = self._at_most_persons(lock)
         gen = gen_size(*src_size, SIZES.get(size, 480))
         pose = {k: Path(v) for k, v in (pose or {}).items() if v and (k == "face" or body)}
         uploads: list[tuple[str, Path]] = []
@@ -321,6 +321,14 @@ class ComfyAnimator(ComfyGenerator):
                 **({"lock": {"swapper": self.face_files["swapper"], "enhancer": self.face_files.get("enhancer"),
                              "enhance": float(enhance) if self.face_files.get("enhancer") else 0.0}} if lock else {})}
 
+    def _at_most_persons(self, pictures):
+        """The first MAX_PERSONS pictures of the new person; a longer list is said, not cut silently."""
+        if pictures and len(pictures) > MAX_PERSONS:
+            self.log(f"the face swap uses {MAX_PERSONS} pictures of the new person; "
+                     f"the other {len(pictures) - MAX_PERSONS} picture(s) are left out")
+            return list(pictures)[:MAX_PERSONS]
+        return pictures
+
     def _lock_cfg(self, persons: list[str], enhance: float) -> dict:
         return {"swapper": self.face_files["swapper"], "enhancer": self.face_files.get("enhancer") or "none",
                 "enhance": float(enhance), "persons": persons}
@@ -330,6 +338,7 @@ class ComfyAnimator(ComfyGenerator):
         """Face only: the clip's face swapped frame by frame with HyperSwap (all motion is the clip's own)."""
         if self.face_missing:
             raise ComfyError(self.face_missing)
+        persons = self._at_most_persons(persons)
         uploads: list[tuple[str, Path]] = []
         try:
             for p in [video, *persons]:

@@ -9,6 +9,7 @@ Needs no torch: only the standard library (+ websocket-client for step progress;
 polled and there is no per-step progress)."""
 from __future__ import annotations
 
+from collections.abc import Mapping
 import hashlib
 import http.client
 import json
@@ -57,6 +58,21 @@ WS_CONNECT_TIMEOUT = 5                # the websocket: connecting ...
 WS_RECV_TIMEOUT = 2.0                 # ... and waiting for a message (the wait loop looks at Stop between them)
 WS_RETRY_SECONDS = 10                 # a dropped websocket is connected again this often
 WAIT_SLEEP_SECONDS = 0.5              # the wait loop's pause without a websocket
+def _setting_dict(s: Mapping[str, object], key: str) -> dict:
+    """A clip setting that is a dict ({"strength": ...}); another shape is said, not a KeyError / AttributeError."""
+    v = s.get(key)
+    if not isinstance(v, dict):
+        raise ComfyError(f"the {key} setting is damaged (expected a dict, got {type(v).__name__})")
+    return v
+
+
+def _strength(d: dict) -> float:
+    try:
+        return float(d.get("strength", 1.0))
+    except (TypeError, ValueError) as e:
+        raise ComfyError(f"a LoRA strength is not a number: {d.get('strength')!r}") from e
+
+
 _UPLOADS: dict[tuple[str, str], int] = {}     # (ComfyUI url, name there) -> jobs using that uploaded copy
 _UPLOADS_LOCK = threading.Lock()
 
@@ -478,13 +494,16 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
         turbo = None
         if s.get("turbo"):
             self.check_turbo()
-            name = self.name_for(s["turbo"]["lora"])
+            t = _setting_dict(s, "turbo")
+            if not t.get("lora"):
+                raise ComfyError("the turbo setting has no LoRA")
+            name = self.name_for(t["lora"])
             if name is None:
-                raise ComfyError(f"{Path(s['turbo']['lora']).name} is not in ComfyUI's LoRA folders")
-            turbo = (name, float(s["turbo"].get("strength", 1.0)))
-        hyper = (self.hyperflow_file(), float(s["hyperflow"].get("strength", 1.0))) if s.get("hyperflow") else None
+                raise ComfyError(f"{Path(t['lora']).name} is not in ComfyUI's LoRA folders")
+            turbo = (name, _strength(t))
+        hyper = (self.hyperflow_file(), _strength(_setting_dict(s, "hyperflow"))) if s.get("hyperflow") else None
         pika = (self.pika_lora(bool(s.get("ref_paths") or s.get("audio_paths") or s.get("ref_videos"))),
-                float(s["pika"].get("strength", 1.0))) \
+                _strength(_setting_dict(s, "pika"))) \
             if s.get("pika") else None
         if turbo and self.last_hyperflow:
             self.free()                              # HyperFlow's patch would break the turbo LoRA

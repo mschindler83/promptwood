@@ -31,7 +31,7 @@ def freeze_problem(project: Path, tree: Tree, nid: str) -> str | None:
     nodes = freeze_set(trial, nid)
     ck = Checker(project, trial)
     for n in nodes:
-        if not ck._files_there(n):
+        if not ck.files_there(n):
             return f"{'video' if n.is_video else 'clip'} #{short_id(n.id)} is not made yet (or its files are missing)"
     for n in nodes:
         if not n.is_video:
@@ -222,7 +222,7 @@ class Checker:
         k = handover_index(self.tree, parent)
         return v + (f"@{k}" if k is not None else "")
 
-    def _files_there(self, node: Node) -> bool:
+    def files_there(self, node: Node) -> bool:
         m = node.made
         if not m or not m.get("video") or not m.get("frame") or (node.is_video and not m.get("first")):
             return False
@@ -239,7 +239,7 @@ class Checker:
             for above in self.tree.path_to(nid)[:-1]:   # parents first (path_to is iterative): no deep recursion
                 self.status(above.id)
         m: MadeRecord = node.made or {}
-        if not self._files_there(node):
+        if not self.files_there(node):
             st = "new"
         elif node.frozen:                          # kept as made, whatever the settings say now
             st = "done"

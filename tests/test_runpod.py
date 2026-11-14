@@ -9,6 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+from fakes import free_port
 
 from video_chain import chain
 from video_chain import comfy as C
@@ -442,9 +443,7 @@ def test_whole_session_over_real_ssh(tmp_path):
     subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(d / "host")], check=True)
     _key, pub = RP.ensure_key(tmp_path / "cfg")
     (d / "authorized_keys").write_text(pub + "\n")
-    with socket.socket() as s_:
-        s_.bind(("127.0.0.1", 0))
-        port = s_.getsockname()[1]
+    port = free_port()
     (d / "sshd_config").write_text(
         f"Port {port}\nListenAddress 127.0.0.1\nHostKey {d}/host\nAuthorizedKeysFile {d}/authorized_keys\n"
         f"PasswordAuthentication no\nKbdInteractiveAuthentication no\nUsePAM no\nStrictModes no\n"

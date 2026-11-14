@@ -262,3 +262,33 @@ def test_cli_gpus_without_id_and_missing_key(monkeypatch, capsys):
         raise RP.RunpodError("no RunPod API key")
     monkeypatch.setattr(RP, "api_key", nokey)
     assert RP.main(["status"]) == 1
+
+
+def test_a_chatty_tunnel_does_not_block_on_its_stderr(tmp_path):
+    """The tunnel's stderr goes to a file: ssh writing far more than a pipe holds (64 KB) while the tunnel lives
+    must still reach "connected". The fake ssh answers /system_stats on the forwarded port itself."""
+    import stat
+    import sys
+    fake = tmp_path / "fakessh"
+    fake.write_text(f"""#!{sys.executable}
+import sys, http.server
+port = int(sys.argv[sys.argv.index("-L") + 1].split(":")[1])
+sys.stderr.write("x" * 400000)
+sys.stderr.flush()
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200); self.send_header("Content-Length", "2"); self.end_headers(); self.wfile.write(b"{{}}")
+    def log_message(self, *a): pass
+http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
+""")
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    s = session(StubApi(), tmp_path, ssh=str(fake))
+    s.host = ("127.0.0.1", 22)
+    s.key = tmp_path / "k"
+    try:
+        s._open_tunnel_once()
+        assert s.url and s.url.startswith("http://127.0.0.1:")
+    finally:
+        if s.tunnel:
+            s.tunnel.kill()
+            s.tunnel.wait()

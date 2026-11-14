@@ -8,6 +8,7 @@ os.environ["QT_QPA_PLATFORM"] = "offscreen"
 import pytest  # noqa: E402
 from PIL import Image  # noqa: E402
 from PySide6.QtWidgets import QApplication, QDialogButtonBox  # noqa: E402
+import waiting as W  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -16,11 +17,7 @@ def app():
 
 
 def wait(app, cond, timeout=10):
-    end = time.time() + timeout
-    while time.time() < end and not cond():
-        app.processEvents()
-        time.sleep(0.01)
-    assert cond()
+    W.wait(app, cond, timeout, raising=True)
 
 
 @pytest.fixture

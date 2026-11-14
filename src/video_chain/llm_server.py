@@ -33,6 +33,7 @@ from . import config, net
 logger = logging.getLogger(__name__)
 
 from .comfy import clean_refined, refine_messages
+from .media import squash
 
 PREFIX = "llama:"                                # model ids of this backend in the refiner's list
 DEFAULT_PORT = 8091
@@ -205,9 +206,9 @@ def parse_ideas(text: str) -> list[dict]:
             d = {"prompt": d}
         if not isinstance(d, dict) or not str(d.get("prompt") or "").strip():
             continue
-        out.append({"title": " ".join(str(d.get("title") or f"Idea {k + 1}").split()),
-                    "angle": " ".join(str(d.get("angle") or "").split()),
-                    "prompt": " ".join(str(d["prompt"]).split())})
+        out.append({"title": squash(d.get("title") or f"Idea {k + 1}"),
+                    "angle": squash(d.get("angle")),
+                    "prompt": squash(d["prompt"])})
     if not out:
         raise LlmServerError("the model gave no usable ideas")
     return out

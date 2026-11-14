@@ -528,7 +528,7 @@ def _main(a, emit) -> int:
     settings = chain.settings_dict(model=treemod.DEFAULT_OPTIONS["model"], lora=str(lora) if lora else None,
                                    strength=a.strength, frames=a.frames, steps=a.steps, width=width, height=height,
                                    audio=not a.no_audio)
-    print(f"{len(prompts)} prompts, {width}x{height}, {a.frames} frames ({a.frames / 24:.1f} s) per clip, "
+    print(f"{len(prompts)} prompts, {width}x{height}, {a.frames} frames ({a.frames / chain.FPS:.1f} s) per clip, "
           f"{a.steps} steps, seed {a.seed}{' (same for all)' if a.same_seed else '+'}")
 
     emit({"e": "start", "clips": len(prompts), "width": width, "height": height, "frames": a.frames,

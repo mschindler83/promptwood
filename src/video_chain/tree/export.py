@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Callable, Protocol
 
+from ..triggers import with_triggers
 from .. import camera as _camera
 from .. import chain
 from .. import h3_prompt as _h3
@@ -180,7 +181,6 @@ def _refine_clip(generator: RefineGenerator, project: Path, node: Node, target: 
         made_prompt = _h3.split_sound_sections(made_prompt)[0]   # (the camera sentence before them)
     made_prompt = _camera.apply(made_prompt, s.get("camera"))
     prompt = " ".join(x for x in (s.get("prompt_prefix", ""), made_prompt, s.get("prompt_suffix", "")) if x)
-    from ..triggers import with_triggers
     prompt = with_triggers(prompt, list(s.get("lora_triggers") or []))   # as the clip was made
     loras = ([(s["lora"], s.get("strength", 1.0))] if s.get("lora") else []) + \
         [(e["lora"], e.get("strength", 1.0)) for e in s.get("extra_loras") or []]
@@ -300,14 +300,20 @@ def refine_path(generator: RefineGenerator, project: Path, nid: str, size: str, 
     return out
 
 
-def join_path(project: Path, tree: Tree, nid: str, out: Path | None = None, persist: bool = False) -> Path:
+def join_path(project: Path, tree: Tree, nid: str, out: Path | None = None, persist: bool = False,
+              remix: bool = True, remixed: list[str] | None = None) -> Path:
     """Join the clips from the start to nid into one video (paths/<id>.mp4 unless out is given).
     Every clip on the path must be done. A clip whose sound is due to be mixed again is remixed first (in tree;
-    persist: also saved; a window saves its own tree, so by default a remix not saved is simply done again later).
+    persist: also saved; a window saves its own tree, so by default a remix not saved is simply done again later;
+    remix=False: not at all, for a caller that did it itself; remixed: a list the ids remixed are appended to, so
+    the caller knows to save the tree).
     A kept join is reused while every clip file is unchanged (by date: a remixed clip is joined again)."""
     project = Path(project)
     path = tree.path_to(nid)
-    remix_sounds(project, tree, [n.id for n in path], persist=persist)
+    if remix:
+        done = remix_sounds(project, tree, [n.id for n in path], persist=persist)
+        if remixed is not None:
+            remixed.extend(done)
     checker = Checker(project, tree)
     missing = [n.id for n in path if checker.status(n.id) != "done"]
     if missing:

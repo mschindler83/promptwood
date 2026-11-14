@@ -97,3 +97,34 @@ def test_one_damaged_scene_does_not_stop_the_other_continues(project, tmp_path, 
     monkeypatch.setattr(T, "load", load)
     assert f.update_continues() == [s2.id]
     assert F.Film.load(project).scene(s2.id).from_sha == chain.file_signature(png)
+
+
+def test_a_duplicate_that_fails_to_save_leaves_no_scene_and_no_folder(project, monkeypatch):
+    f = F.Film.load(project)
+    before = [s.id for s in f.scenes]
+    folders = sorted(p.name for p in (project / F.SCENES_DIR).glob("*")) if (project / F.SCENES_DIR).exists() else []
+
+    def broken(self):
+        raise OSError("disk full")
+    monkeypatch.setattr(F.Film, "save", broken)
+    with pytest.raises(OSError):
+        f.duplicate("s1")
+    assert [s.id for s in f.scenes] == before
+    assert (sorted(p.name for p in (project / F.SCENES_DIR).glob("*")) if (project / F.SCENES_DIR).exists() else []) == folders
+
+
+def test_a_scene_that_cannot_be_checked_still_gets_its_card(project, monkeypatch):
+    f = F.Film.load(project)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("ffprobe failed")
+    monkeypatch.setattr(T, "path_cuts", boom)
+    card = F.summary(f, "s1")
+    assert card["clips"] == 1 and card["secs"] == 0.0
+
+
+def test_a_scene_with_a_damaged_tree_gets_an_empty_card(project):
+    f = F.Film.load(project)
+    (project / "tree.json").write_text("{not json")
+    (project / "tree.json.bak").unlink(missing_ok=True)
+    assert F.summary(f, "s1")["clips"] == 0

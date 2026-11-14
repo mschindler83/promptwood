@@ -55,3 +55,18 @@ check_untyped_defs = true
 [[tool.mypy.overrides]]
 module = ["video_chain.ui", "video_chain.ui.*"]
 ignore_errors = true
+
+# The linter: what mypy does not see. Silent broad excepts (BLE001 / S110 / S112 / E722: say why with a comment and
+# "# noqa: BLE001", or log it), unused imports / variables and undefined names (pyflakes).
+# (ruff is not in the dev extras yet: it needs a uv.lock update; the test skips without it)
+[tool.ruff]
+target-version = "py312"
+src = ["src", "tests"]
+# the ui/ package is being typed and cleaned by another agent; it removes this line when it is done
+extend-exclude = ["src/video_chain/ui"]
+
+[tool.ruff.lint]
+select = ["BLE", "F", "S110", "S112", "E722"]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]        # (the packages re-export their submodules' names)

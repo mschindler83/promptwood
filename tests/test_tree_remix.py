@@ -82,3 +82,16 @@ def test_remix_sounds_saves_once(project, tmp_path, monkeypatch):
     monkeypatch.setattr(T.engine, "save", lambda *a, **k: saves.append(1) or real(*a, **k))
     assert sorted(T.remix_sounds(project, t, ids)) == sorted(ids)
     assert len(saves) == 1
+
+
+def test_join_path_tells_what_it_remixed_and_can_leave_it(project, tmp_path):
+    """The remix inside join_path is visible (ids) and can be switched off, for a caller that did it explicitly."""
+    t, nid, tid = _made(project, tmp_path)
+    t.nodes[nid].overrides = {"source_sound": f"track:{tid}", "sound_over": "mix"}
+    video = project / t.nodes[nid].made["video"]
+    before = video.read_bytes()
+    T.join_path(project, t, nid, remix=False)
+    assert video.read_bytes() == before                       # nothing remixed behind the caller's back
+    remixed: list[str] = []
+    T.join_path(project, t, nid, remixed=remixed)
+    assert remixed == [nid] and video.read_bytes() != before

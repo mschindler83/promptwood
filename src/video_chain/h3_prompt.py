@@ -383,7 +383,6 @@ def compose(body: str, *, start: bool = False, end: bool = False, seconds: float
     lns = [d for d in lns if d.end <= cut]           # (a quote in the cut-off sound lines is no spoken line)
     scape = soundscape if soundscape is not None else scape0
     mus = music if music is not None else music0
-    by_name = {s.name: s for s in subs}
     if resolve is None:
         low = {s.name.lower(): s.name for s in subs}
         resolve = lambda w: low.get(w.lower())       # noqa: E731
