@@ -846,7 +846,7 @@ class PromptCard(_ClipCardBase):
 
     def _fill_cont(self):
         """The Continue choices: off, the lengths that fit, and the clip's own value if it does not fit (any more)."""
-        cur = (getattr(self, "ov", None) or {}).get("continue") or None
+        cur = (self.ov or {}).get("continue") or None
         fits = [] if self._cont_why else self._cont_choices
         want = [None] + fits + ([cur] if cur and cur not in fits else [])
         if [self.cont.itemData(k) for k in range(self.cont.count())] == want and self.cont.currentData() == cur:
@@ -898,7 +898,7 @@ class PromptCard(_ClipCardBase):
                  T.TRACK_PREFIX + tid) for k, (tid, name) in enumerate(tracks)]
         have = [(self.src_sound.itemText(k), self.src_sound.itemData(k)) for k in range(len(SOUND_MODES),
                                                                                        self.src_sound.count())]
-        cur = (getattr(self, "ov", None) or {}).get("source_sound") or None     # (the clip's own setting)
+        cur = (self.ov or {}).get("source_sound") or None     # (the clip's own setting)
         if isinstance(cur, str) and cur.startswith(T.TRACK_PREFIX) and cur not in [d for _t, d in want]:
             want.append(("Audio track: (removed)", cur))   # kept, so the setting shows and can be taken back
         if want == have:

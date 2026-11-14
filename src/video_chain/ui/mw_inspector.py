@@ -21,6 +21,7 @@ from .widgets import format_time
 from . import ui_logic as UL
 from .clip_cards import PromptCard
 from .ui_logic import REMIX_DELAY_MS, SourceSoundInfo, plain_problem, plural, row_start
+from ..__main__ import COMFY_DOWN
 from .mw_host import MainWindowHost
 
 log = logging.getLogger(__name__)
@@ -248,7 +249,7 @@ class InspectorMixin(MainWindowHost):
             todo = [n.id for t in self._targets if t in self.tree.nodes for n in self.tree.path_to(t)
                     if self.status_of.get(n.id) != "done" and not n.is_video]
             nids = todo[:1]
-        down = code == 4 or "not running" in err.lower() or "connection refused" in err.lower()
+        down = code == COMFY_DOWN or "not running" in err.lower() or "connection refused" in err.lower()
         missing = not down and any(w in err.lower() for w in ("missing", "not found", "not in comfyui"))
         if down:
             text = ("The video engine (ComfyUI) stopped or is not running, so this clip was not made. Start it, "

@@ -166,7 +166,7 @@ class GeneratorMixin(MainWindowHost):
 
     def _runpod_key_hint(self) -> str:
         """Where the RunPod key is set; in the Simple view that place is hidden, so the way there is named (UX-3)."""
-        where = "Settings → Cloud upscaling"
+        where = "Settings → Preferences → Cloud upscaling (RunPod)"
         if self.simple:
             where = "the Advanced view (View → Advanced view), then Settings → Preferences → Cloud upscaling"
         return f"To upscale on RunPod: save your RunPod API key ({where})."
@@ -634,7 +634,7 @@ class GeneratorMixin(MainWindowHost):
                         self._film_queue = film_rest
                 else:
                     self.status.setText(f"ComfyUI is not running at {self.comfy_url.text().strip()}. "
-                                        "Start it (Settings → ComfyUI and preferences → Start ComfyUI) and generate "
+                                        "Start it (Settings → Preferences → Start ComfyUI) and generate "
                                         "again.")
                 self._update_comfy_label()
         self._update_model_label()
