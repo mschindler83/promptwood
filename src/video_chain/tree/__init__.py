@@ -304,7 +304,6 @@ from .checker import (  # noqa: F401
     current_settings)
 from .engine import (  # noqa: F401
     clip_inputs,
-    path_videos,
     make_video,
     copy_video,
     ensure_handover,

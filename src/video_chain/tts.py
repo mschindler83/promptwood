@@ -805,7 +805,8 @@ def apply_lines(project: Path, tree: T.Tree, nid: str, r: dict[str, Any]) -> dic
 
 
 def speak_lines(project: Path, tree: T.Tree, nid: str, eng, log=lambda _m: None) -> dict:
-    """render_lines + apply_lines in one go."""
+    """render_lines + apply_lines in one go. (API for scripts and tests: the window renders in a worker thread and
+    applies the result on the GUI thread, so it calls the two steps itself.)"""
     return apply_lines(project, tree, nid, render_lines(project, tree, nid, eng, log))
 
 

@@ -107,18 +107,6 @@ def clip_inputs(project: Path, tree: Tree, nid: str, checker: Checker | None = N
             "prompt": model_prompt(tree.options, node, s, start=plain[0], end=plain[1]), "settings": s}
 
 
-def path_videos(tree: Tree, targets: list[str]) -> list[str]:
-    """Video nodes the targets need (on their paths, or led into by a clip on them)."""
-    out = []
-    for t in targets:
-        for n in tree.path_to(t):
-            child = tree.video_child(n.id)
-            for v in ([n] if n.is_video else []) + ([child] if child else []):
-                if v.id not in out:
-                    out.append(v.id)
-    return out
-
-
 def make_video(project: Path, node: Node, base: dict) -> dict:
     """Convert a video node's range to a chain clip (new file names); returns its record."""
     project = Path(project)

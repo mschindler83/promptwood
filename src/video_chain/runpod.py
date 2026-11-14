@@ -254,7 +254,8 @@ def direct_ssh(pod: dict) -> tuple[str, int] | None:
 
 
 def models_for(method: str) -> str:
-    """The SeedVR2 sizes pod_setup.sh fetches for an export method ('seedvr2_7b' -> '7b')."""
+    """The SeedVR2 sizes pod_setup.sh fetches for an export method ('seedvr2_7b' -> '7b'). (Kept as API for scripts;
+    the app itself has no caller, only tests.)"""
     if method not in SEEDVR_METHODS:
         raise RunpodError(f"cloud upscaling does SeedVR2 only, not {method!r}")
     return SEEDVR_METHODS[method]
