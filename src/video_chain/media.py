@@ -55,7 +55,8 @@ def run(cmd: list[str], *, timeout: float | None = None, text: bool = True) -> s
     (the message ends with its last stderr lines) or it does not finish within timeout seconds."""
     name = Path(str(cmd[0])).name
     try:
-        r = subprocess.run([str(c) for c in cmd], capture_output=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        r = subprocess.run([str(c) for c in cmd], capture_output=True, timeout=timeout, stdin=subprocess.DEVNULL,
+                           text=text, errors="replace" if text else None)
     except FileNotFoundError as e:
         raise _missing(name) from e
     except subprocess.TimeoutExpired as e:
@@ -65,7 +66,7 @@ def run(cmd: list[str], *, timeout: float | None = None, text: bool = True) -> s
         raise MediaError(f"{name} could not be started: {e}") from e
     if r.returncode != 0:
         raise MediaError(f"{name} failed: {tail(r.stderr) or 'exit code %d' % r.returncode}")
-    return r.stdout.decode(errors="replace") if text else r.stdout
+    return r.stdout
 
 
 def ffmpeg(args: list, *, timeout: float | None = FFMPEG_TIMEOUT, text: bool = True) -> str | bytes:
@@ -159,7 +160,7 @@ def image_size(path: str | Path) -> tuple[int, int]:
     data = ffprobe_json(path, "-select_streams", "v:0", "-show_entries", "stream=width,height")
     s = (data.get("streams") or [{}])[0]
     if "width" not in s or "height" not in s:
-        raise MediaError(f"{Path(str(path)).name} has no picture")
+        raise MediaError(f"{Path(str(path)).name} has no picture in it")
     return int(s["width"]), int(s["height"])
 
 
@@ -296,6 +297,11 @@ def file_digest(path: str | Path, algo: str = "sha256", stop: Callable[[], bool]
                 return None
             h.update(block)
     return h.hexdigest()
+
+
+def text_digest(text: str, algo: str = "sha256") -> str:
+    """Hex digest of a text (utf-8)."""
+    return hashlib.new(algo, text.encode("utf-8")).hexdigest()
 
 
 def scratch(name: str, dir: str | Path | None = None) -> tempfile.TemporaryDirectory:

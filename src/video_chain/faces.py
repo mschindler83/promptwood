@@ -5,10 +5,10 @@ buffalo_l), run on the CPU with onnxruntime. Both are optional: without them the
 The picture is read with ffmpeg (scaled to fit the detector's 640 x 640), so no image library is needed."""
 from __future__ import annotations
 
-import json
-import subprocess
 import threading
 from pathlib import Path
+
+from . import media
 
 Box5 = tuple[float, float, float, float, float]    # x1, y1, x2, y2, score
 
@@ -49,21 +49,8 @@ def available(model: Path | None) -> str | None:
 
 
 def image_size(path: Path) -> tuple[int, int]:
-    """(width, height) of a picture as stored. RuntimeError with a plain message when it cannot be read."""
-    try:
-        out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
-                              "stream=width,height", "-print_format", "json", str(path)],
-                             capture_output=True, text=True, check=True, timeout=60).stdout
-    except FileNotFoundError as e:
-        raise RuntimeError("ffprobe is not installed (it comes with ffmpeg)") from e
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"cannot read the picture {Path(path).name}: {(e.stderr or '').strip()[-200:]}") from e
-    except subprocess.TimeoutExpired as e:
-        raise RuntimeError(f"ffprobe did not answer for {Path(path).name}") from e
-    streams = json.loads(out).get("streams") or []
-    if not streams or "width" not in streams[0]:
-        raise RuntimeError(f"{Path(path).name} has no picture in it")
-    return int(streams[0]["width"]), int(streams[0]["height"])
+    """(width, height) of a picture as stored. RuntimeError (MediaError) with a plain message when it cannot be read."""
+    return media.image_size(path)
 
 
 def _session(model: Path):
@@ -101,17 +88,8 @@ def detect(path: Path, model: Path) -> list[Box5]:
     import numpy as np
     w, h = image_size(path)
     sw, sh = fit_size(w, h)
-    try:
-        raw = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", str(path), "-frames:v", "1", "-vf",
-                              f"scale={sw}:{sh}:flags=bilinear", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"],
-                             capture_output=True, check=True, timeout=120).stdout
-    except FileNotFoundError as e:
-        raise RuntimeError("ffmpeg is not installed") from e
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"cannot read the picture {Path(path).name}: "
-                           f"{e.stderr.decode(errors='replace').strip()[-200:]}") from e
-    except subprocess.TimeoutExpired as e:
-        raise RuntimeError(f"ffmpeg did not finish reading {Path(path).name}") from e
+    raw = media.ffmpeg(["-i", path, "-frames:v", "1", "-vf", f"scale={sw}:{sh}:flags=bilinear", "-pix_fmt", "rgb24",
+                        "-f", "rawvideo", "-"], timeout=120, text=False)
     img = np.frombuffer(raw, np.uint8)[: sw * sh * 3].reshape(sh, sw, 3)
     return detect_rgb(img, w, h, model)
 

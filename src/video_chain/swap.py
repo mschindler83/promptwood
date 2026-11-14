@@ -11,13 +11,14 @@ from __future__ import annotations
 import bisect
 import json
 import shutil
+import contextlib
 import subprocess
 import tempfile
 from fractions import Fraction
 from pathlib import Path
 from typing import Callable, TypedDict
 
-from . import chain, faces
+from . import chain, faces, media
 
 Box = tuple[float, float, float, float]            # x1, y1, x2, y2 in pixels
 Face = tuple[float, float, float, float, float]    # a Box and the detector's score
@@ -30,25 +31,15 @@ LOST = 12                                   # frames without the person before t
 
 
 def probe(video: Path) -> tuple[int, int, int, float]:
-    """(width, height, frames, fps) of a clip (its frames counted: exact). RuntimeError with a plain message when
-    it cannot be read."""
-    try:
-        p = chain.probe(video)
-    except FileNotFoundError as e:
-        raise RuntimeError("ffprobe is not installed (it comes with ffmpeg)") from e
+    """(width, height, frames, fps) of a clip (its frames counted: exact). RuntimeError (MediaError) with a plain
+    message when it cannot be read."""
+    p = chain.probe(video)
     return p["width"], p["height"], p["frames"], p["fps"] or 24.0
 
 
 def _ffmpeg(args: list[str], timeout: float = 3600) -> None:
-    """ffmpeg without stdin and with a time limit; RuntimeError with its own message when it fails."""
-    try:
-        r = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", *args], capture_output=True, timeout=timeout)
-    except FileNotFoundError as e:
-        raise RuntimeError("ffmpeg is not installed") from e
-    except subprocess.TimeoutExpired as e:
-        raise RuntimeError(f"ffmpeg did not finish within {timeout / 60:.0f} min") from e
-    if r.returncode != 0:
-        raise RuntimeError("ffmpeg failed: " + r.stderr.decode(errors="replace").strip()[-300:])
+    """ffmpeg without stdin and with a time limit; RuntimeError (MediaError) with its own message when it fails."""
+    media.ffmpeg(args, timeout=timeout)
 
 
 def detect_faces(video: Path, model: Path, progress: Callable[[int, int], None] | None = None,
@@ -59,30 +50,18 @@ def detect_faces(video: Path, model: Path, progress: Callable[[int, int], None] 
     import numpy as np
     w, h, n, _fps = info or probe(video)
     sw, sh = faces.fit_size(w, h)
-    err = tempfile.TemporaryFile()
-    proc = subprocess.Popen(["ffmpeg", "-nostdin", "-v", "error", "-i", str(video), "-fps_mode", "passthrough",
-                             "-vf", f"scale={sw}:{sh}:flags=bilinear", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"],
-                            stdout=subprocess.PIPE, stderr=err)
-    out, size = [], sw * sh * 3
+    out = []
     try:
-        while True:
-            if cancelled():
-                raise InterruptedError("cancelled")
-            raw = proc.stdout.read(size)
-            if len(raw) < size:
-                break
-            out.append(faces.detect_rgb(np.frombuffer(raw, np.uint8).reshape(sh, sw, 3), w, h, model))
-            if progress is not None:
-                progress(len(out), n)
-    finally:
-        if proc.poll() is None:
-            proc.kill()
-        code = proc.wait()
-        err.seek(0)
-        msg = err.read().decode(errors="replace").strip()
-        err.close()
-    if code != 0 and not out:
-        raise RuntimeError(f"cannot read the clip: {msg[-300:] or 'ffmpeg failed'}")
+        with contextlib.closing(media.iter_frames(video, (sw, sh), "rgb24", flags="bilinear", passthrough=True)) as frames:
+            for raw in frames:
+                if cancelled():
+                    raise InterruptedError("cancelled")
+                out.append(faces.detect_rgb(np.frombuffer(raw, np.uint8).reshape(sh, sw, 3), w, h, model))
+                if progress is not None:
+                    progress(len(out), n)
+    except media.MediaError as e:
+        if not out:
+            raise RuntimeError(f"cannot read the clip: {e}") from e
     if n and len(out) != n:
         raise RuntimeError(f"read {len(out)} frames of the clip, it has {n}")
     return out
@@ -163,35 +142,27 @@ def mask_frame(box: tuple, width: int, height: int):
 def write_mask(boxes: list[Box], width: int, height: int, out: Path, fps: float = 24.0) -> None:
     """The head mask as a lossless video (one frame per box), white = the head."""
     out = Path(out)
-    tmp = out.with_name(out.stem + ".part" + out.suffix)
     rate = Fraction(fps).limit_denominator(1001)          # (30000/1001 stays 30000/1001, not 29.97)
-    err = tempfile.TemporaryFile()
-    try:
-        proc = subprocess.Popen(["ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "gray",
-                                 "-s", f"{width}x{height}", "-r", f"{rate.numerator}/{rate.denominator}", "-i", "-",
-                                 "-c:v", "libx264", "-qp", "0", "-pix_fmt", "yuv444p", str(tmp)],
-                                stdin=subprocess.PIPE, stderr=err)
-    except FileNotFoundError as e:
-        err.close()
-        raise RuntimeError("ffmpeg is not installed") from e
-    try:
+    with media.part_file(out) as tmp, tempfile.TemporaryFile() as err:
+        proc = media.popen(["ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "gray",
+                            "-s", f"{width}x{height}", "-r", f"{rate.numerator}/{rate.denominator}", "-i", "-",
+                            "-c:v", "libx264", "-qp", "0", "-pix_fmt", "yuv444p", str(tmp)],
+                           stdin=subprocess.PIPE, stderr=err)
         try:
-            for b in boxes:
-                proc.stdin.write(mask_frame(b, width, height).tobytes())
-            proc.stdin.close()
-        except BrokenPipeError:                           # (ffmpeg stopped early: its message says why)
-            pass
-        code = proc.wait()
-        if code != 0:
-            err.seek(0)
-            raise RuntimeError("could not write the head mask: " + err.read().decode(errors="replace")[-300:])
-        tmp.replace(out)
-    finally:
-        if proc.poll() is None:
-            proc.kill()
-            proc.wait()
-        err.close()
-        tmp.unlink(missing_ok=True)
+            try:
+                for b in boxes:
+                    proc.stdin.write(mask_frame(b, width, height).tobytes())
+                proc.stdin.close()
+            except BrokenPipeError:                       # (ffmpeg stopped early: its message says why)
+                pass
+            code = proc.wait()
+            if code != 0:
+                err.seek(0)
+                raise RuntimeError("could not write the head mask: " + media.tail(err.read()))
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
 
 
 class Heads(TypedDict):
@@ -250,11 +221,9 @@ POSE_VERSION = 1                            # bumped when the DWPose settings of
 def pose_key(clip: Path, source: dict, gen: tuple[int, int]) -> str:
     """The cache key of a clip's DWPose videos: its source file and range, the converted clip's content and the
     size the head is made at (any change: another key)."""
-    import hashlib
-    from . import chain
     data = {"v": POSE_VERSION, "file": str((source or {}).get("file")), "start": (source or {}).get("start"),
             "end": (source or {}).get("end"), "clip": chain.file_signature(Path(clip)), "size": list(gen)}
-    return hashlib.sha1(json.dumps(data, sort_keys=True).encode()).hexdigest()[:20]
+    return media.text_digest(json.dumps(data, sort_keys=True), "sha1")[:20]
 
 
 def cached_pose(project: Path, key: str) -> dict:
@@ -277,10 +246,7 @@ def store_pose(project: Path, key: str, parts: dict, info: dict) -> dict:
         before = json.loads((d / "info.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         before = {}
-    tmp = d / "info.json.part"
-    tmp.write_text(json.dumps({**info, **before, "parts": sorted(set(before.get("parts", [])) | set(parts))},
-                              indent=2), encoding="utf-8")
-    tmp.replace(d / "info.json")
+    media.atomic_write_json(d / "info.json", {**info, **before, "parts": sorted(set(before.get("parts", [])) | set(parts))})
     return cached_pose(project, key)
 
 
@@ -336,20 +302,16 @@ def trim_with_sound(made: Path, clip: Path, out: Path, frames: int, fps: float =
     """The made video cut to the clip's frame count (at the clip's frame rate), with the clip's own sound
     (exactly as recorded)."""
     out = Path(out)
-    tmp = out.with_name(out.stem + ".part" + out.suffix)
     rate = Fraction(fps).limit_denominator(1001)
 
-    def run(audio: list[str]):
+    def run(audio: list[str], tmp: Path):
         _ffmpeg(["-y", "-i", str(made), "-i", str(clip), "-map", "0:v:0", "-map", "1:a:0?", "-frames:v",
                  str(int(frames)), "-r", f"{rate.numerator}/{rate.denominator}", "-c:v", "libx264", "-crf", "12",
                  "-pix_fmt", "yuv420p", *audio, str(tmp)])
-    try:
+    with media.part_file(out) as tmp:
         try:
-            run(["-c:a", "copy"])               # the clip's sound exactly
+            run(["-c:a", "copy"], tmp)          # the clip's sound exactly
         except RuntimeError as e:
             if not any(w in str(e).lower() for w in ("not currently supported in container", "could not find tag")):
                 raise                           # (not about the sound: a second encode would only repeat it)
-            run(["-c:a", "aac", "-b:a", "256k"])   # (a sound mp4 cannot carry as it is)
-        tmp.replace(out)
-    finally:
-        tmp.unlink(missing_ok=True)
+            run(["-c:a", "aac", "-b:a", "256k"], tmp)   # (a sound mp4 cannot carry as it is)
