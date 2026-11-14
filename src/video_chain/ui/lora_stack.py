@@ -557,19 +557,22 @@ class LoraStack(QWidget):
 
     def _set_button(self, button: QPushButton, path: str):
         button.setProperty("path", path)
-        missing = "" if Path(path).is_file() else " (missing)"
+        exists = Path(path).is_file()                  # (asked once: the trigger line below needs it too)
+        missing = "" if exists else " (missing)"
         button.setText(lora_label(path) + missing)
         button.setToolTip(f"{path}{missing}\nClick to choose another LoRA; right-click for its trigger words and CivitAI details")
         trig = getattr(button.parentWidget(), "trigger_label", None)
         if trig is not None:
-            self._show_trigger(trig, path)
+            self._show_trigger(trig, path, exists)
 
     @staticmethod
-    def _show_trigger(lab, path: str):
+    def _show_trigger(lab, path: str, exists: bool | None = None):
         """The LoRA's trigger words under its row (triggers.py), with where they come from."""
         try:
             from .. import triggers
-            info = triggers.db().info(path) if Path(path).is_file() else None
+            if exists is None:
+                exists = Path(path).is_file()
+            info = triggers.db().info(path) if exists else None
         except Exception:  # noqa: BLE001
             info = None
         if info is None:

@@ -454,7 +454,7 @@ class LoraWindow(QDialog):
         told = set()
         if self.told and mat:                      # (the examples a refine shows: those in the text it was told)
             told = {e["clean"] for e in self.examples if e["clean"] and
-                    lora_notes._cut(e["clean"], lora_notes.GUIDE_EXAMPLE_CHARS) in self.told}
+                    lora_notes.cut(e["clean"], lora_notes.GUIDE_EXAMPLE_CHARS) in self.told}
         for e in self.examples:
             e["told"] = e["clean"] in told
         self._ctx = (details, info, mat, k)
