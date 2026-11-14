@@ -151,7 +151,7 @@ def build_animate_workflow(*, files: dict, video: str, mask: str, reference: str
     for k in range(window_count(frames)):
         a = {"positive": ["pos", 0], "negative": ["neg", 0], "vae": ["vae", 0], "width": W, "height": H,
              "length": WINDOW, "batch_size": 1, "continue_motion_max_frames": OVERLAP,
-             "video_frame_offset": 0 if k == 0 else [f"anim{k - 1}", 5],
+             "video_frame_offset": 0 if k == 0 else [f"anim{k - 1}", OUT_NEXT_OFFSET],
              "clip_vision_output": ["ref_vision", 0], "reference_image": ["ref", 0], "face_video": face_in,
              "background_video": ["background", 0], "character_mask": ["mask_block", 0]}
         if pose_in is not None:
@@ -165,10 +165,11 @@ def build_animate_workflow(*, files: dict, video: str, mask: str, reference: str
                                        "positive": [f"anim{k}", 0], "negative": [f"anim{k}", 1],
                                        "latent_image": [f"anim{k}", 2], "denoise": 1.0}}
         wf[f"trim{k}"] = {"class_type": "TrimVideoLatent", "inputs": {"samples": [f"sample{k}", 0],
-                                                                      "trim_amount": [f"anim{k}", 3]}}
+                                                                      "trim_amount": [f"anim{k}", OUT_TRIM]}}
         wf[f"decode{k}"] = {"class_type": "VAEDecode", "inputs": {"samples": [f"trim{k}", 0], "vae": ["vae", 0]}}
         wf[f"new{k}"] = {"class_type": "ImageFromBatch", "inputs": {"image": [f"decode{k}", 0],
-                                                                    "batch_index": [f"anim{k}", 4], "length": 4096}}
+                                                                    "batch_index": [f"anim{k}", OUT_NEW_START],
+                                                                    "length": MAX_BATCH}}
         if acc is None:
             acc = [f"new{k}", 0]
         else:
@@ -197,6 +198,11 @@ def build_animate_workflow(*, files: dict, video: str, mask: str, reference: str
     return wf
 
 
+# WanAnimateToVideo's outputs by slot: 0 positive, 1 negative, 2 latent, then these
+OUT_TRIM, OUT_NEW_START, OUT_NEXT_OFFSET = 3, 4, 5      # (latents to trim off, first new frame, next video_frame_offset)
+MAX_BATCH = 4096                                        # ImageFromBatch: "all of it" (more than any clip has)
+MAX_PERSONS = 4                                         # pictures of the new person the face swap node takes
+
 FACE_NODE = "VideoChainFaceSwap"
 FACE_HELP = ("copy video-chain's comfy_nodes/video_chain_nodes into ComfyUI/custom_nodes and restart ComfyUI; "
              "hyperswap_1b_256.onnx in models/insightface")
@@ -204,7 +210,7 @@ FACE_HELP = ("copy video-chain's comfy_nodes/video_chain_nodes into ComfyUI/cust
 
 def face_lock_nodes(wf: dict, images: list, lock: dict) -> list:
     """Promptwood's face swap node on images (the new person's identity from lock["persons"]); its output."""
-    persons = list(lock["persons"])[:4]
+    persons = list(lock["persons"])[:MAX_PERSONS]      # (the node takes four pictures of the new person)
     inputs = {"images": images, "swapper": lock["swapper"], "enhancer": lock.get("enhancer") or "none",
               "enhance": float(lock.get("enhance", 0.8))}
     for k, name in enumerate(persons):
@@ -260,7 +266,7 @@ class ComfyAnimator(ComfyGenerator):
                 entry = self._wait(self.current, ws)
             except ComfyJobFailed:
                 raise
-            except Exception:
+            except BaseException:                # (also a stop by KeyboardInterrupt / SystemExit: cancel the job)
                 self.interrupt()
                 raise
             finally:
@@ -312,15 +318,15 @@ class ComfyAnimator(ComfyGenerator):
                                         prefix=f"{SUBFOLDER}/swap_{uuid.uuid4().hex[:12]}", fps=fps,
                                         feather=feather, pose=pose_names, keep_pose=keep_pose is not None,
                                         body=body, lock=lock_cfg)
+            outs = {"save": Path(out)}
+            made = []
+            for name in ("pose", "face"):              # the DWPose videos this run made (to be stored)
+                if keep_pose and keep_pose.get(name) and f"{name}_save" in wf:
+                    outs[f"{name}_save"] = Path(keep_pose[name])
+                    made.append(name)
         except BaseException:
             self._drop_uploads(uploads)
             raise
-        outs = {"save": Path(out)}
-        made = []
-        for name in ("pose", "face"):                  # the DWPose videos this run made (to be stored)
-            if keep_pose and keep_pose.get(name) and f"{name}_save" in wf:
-                outs[f"{name}_save"] = Path(keep_pose[name])
-                made.append(name)
         self._run_outputs(wf, outs, uploads)
         return {"method": "animate+lock" if lock else "animate", "model": self.files["unet"], "size": size,
                 "gen_size": list(gen), "windows": window_count(frames), "pose_cached": sorted(pose),
