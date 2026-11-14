@@ -529,7 +529,7 @@ class NodeMixin(MainWindowHost):
     def _context(self, nid: str, pos):
         """The right-click menu of a node. Every entry is added with what it does (a node action's name from
         NODE_ACTIONS, or a function); one dispatch runs the chosen one."""
-        if self.tree is None or self._wait_note():
+        if self.tree is None:
             return
         own = row_start_of(nid)
         m = QMenu(self)
@@ -544,7 +544,7 @@ class NodeMixin(MainWindowHost):
                 enabled = enabled and not (lock is not None and self._is_locked(lock, does))
             else:
                 calls[act] = does
-            act.setEnabled(enabled)
+            act.setEnabled(enabled and not self.running)        # (a run locks the project: greyed, not hidden)
             if tip:
                 act.setToolTip(tip)
             return act

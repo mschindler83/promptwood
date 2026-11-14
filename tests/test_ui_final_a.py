@@ -454,3 +454,32 @@ def test_help_has_about(app, win, monkeypatch):
     monkeypatch.setattr(QMessageBox, "about", lambda parent, title, text: shown.append((title, text)))
     next(a for a in help_.actions() if a.text() == "About Promptwood").trigger()
     assert shown and "Promptwood" in shown[0][1]
+
+
+# ------------------------------------------------------------------ UX-30: Generate is greyed, with the reason, not a status line later
+@pytest.mark.parametrize("flag, word", [("_tts_busy", "text to speech"), ("_copying", "copied"),
+                                        ("_converts", "converted"), ("_joins", "joined")])
+def test_generate_is_disabled_with_its_reason_while_something_else_works(app, win, tmp_path, image, flag, word):
+    new_project(win, tmp_path, image, ("a",))
+    flush(app, win)
+    assert win.b_gen.isEnabled() and win.b_gen_all.isEnabled()
+    old = getattr(win, flag)
+    setattr(win, flag, True if isinstance(old, bool) else 1)
+    try:
+        win._update_buttons()
+        assert not win.b_gen.isEnabled() and not win.b_gen_all.isEnabled()
+        assert word in win.b_gen.toolTip() and word in win.b_gen_all.toolTip()
+    finally:
+        setattr(win, flag, old)
+        win._update_buttons()
+    assert win.b_gen.isEnabled() and "Make every clip" in win.b_gen.toolTip()
+
+
+def test_the_context_menu_is_shown_greyed_while_generating(app, win, tmp_path, image, monkeypatch):
+    ids = new_project(win, tmp_path, image, ("a",))
+    seen = {}
+    monkeypatch.setattr(win, "_exec_menu", lambda m, pos: seen.update(
+        {a.text(): a.isEnabled() for a in m.actions() if not a.isSeparator()}))
+    monkeypatch.setattr(type(win), "running", property(lambda self: True))
+    win._context(ids[0], win.pos())
+    assert seen and not any(seen.values())

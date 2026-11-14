@@ -297,6 +297,18 @@ class PathMixin(MainWindowHost):
             self.path_info.setText("")
         self._update_problems()
 
+    def _busy_with(self) -> str:
+        """What keeps Generate from starting now ('' = nothing): the reason, as it is told on the greyed button."""
+        if self._joins:
+            return "a path is being joined"
+        if self._copying:
+            return "the project is being copied"
+        if self._converts:
+            return "a video is being converted"
+        if self._tts_busy:
+            return "text to speech is working"
+        return ""
+
     def _update_buttons(self):
         tree = self.tree
         has = tree is not None
@@ -315,8 +327,14 @@ class PathMixin(MainWindowHost):
         path = self.selected_path()
         all_done = bool(path) and all(self.state(n.id) == "done" for n in path)
         free = idle and not self._joins and not self._converts   # a join reads clips a new run would replace
-        self.b_gen.setEnabled(free and bool(path))
-        self.b_gen_all.setEnabled(free and tree is not None and bool(tree.nodes))
+        busy_with = self._busy_with()                  # (what else works now: Generate is greyed, with the reason)
+        can_gen = free and not busy_with
+        self.b_gen.setEnabled(can_gen and bool(path))
+        self.b_gen_all.setEnabled(can_gen and tree is not None and bool(tree.nodes))
+        for b, text in ((self.b_gen, "Make every clip on the selected path that is not made yet"),
+                        (self.b_gen_all, "Make every clip of every branch that is not made yet")):
+            b.setToolTip(S.tip(text, "generate" if b is self.b_gen else "generate_all") if not busy_with
+                         else f"Not now: {busy_with}")
         self.b_delete.setEnabled(is_clip and free)
         num = f" #{T.short_id(sel)}" if is_clip and sel else ""
         self.b_branch.setToolTip(S.tip(f"Branch: another continuation from the same point as clip{num}", "branch"))
