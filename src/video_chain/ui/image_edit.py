@@ -62,7 +62,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
                  settings: QSettings | None = None, places: list[tuple[str, str]] | None = None,
                  start_comfy: Callable[[], bool] | None = None, on_start: Callable[[], None] | None = None,
                  known_loras: list[tuple[str, str]] | None = None, lora_dir: str = "",
-                 uses: Callable[[dict], list[str]] | None = None, refine: Callable[[str, str], str | None] | None = None,
+                 uses: Callable[[ResultRecord], list[str]] | None = None, refine: Callable[..., str | list[str] | None] | None = None,
                  connect_create: Callable[[Callable | None], object] | None = None, family_loras: dict[str, list] | None = None,
                  start_aspect: float | None = None, mode: str = "edit",
                  check_lora: Callable[[str | None], bool | None] | None = None,
@@ -507,8 +507,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         self.results.setFixedHeight(130)
         self.results.setMovement(QListWidget.Static)
         self.results.setToolTip("The results shown (newest first); Gallery shows them all, grouped by run")
-        self.results.setStyleSheet("QListWidget { background: transparent; border: none; } "
-                                   "QListWidget::item:selected, QListWidget::item:hover { background: transparent; }")
+        self.results.setProperty("role", "resultStrip")      # (the theme styles it: transparent, no frame)
         self.results.currentItemChanged.connect(self._strip_selection)
         self.results.currentItemChanged.connect(lambda *_: self._show_selected())
         sv.addWidget(self.results)

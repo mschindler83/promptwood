@@ -232,3 +232,19 @@ def test_a_new_result_the_filter_hides_reloads_everything(app, tmp_path):
     dlg._result(png, {"prompt": "r3"})
     assert dlg.results.count() == 0 and dlg.f_count.text() == "0 of 4"
     dlg.reject()
+
+
+def test_strip_and_seed_chip_are_styled_by_the_theme_not_per_widget(app, tmp_path):
+    """UIM-39: no stylesheet on the widgets; the application stylesheet styles them by their role."""
+    from video_chain.ui.results_gallery import InfoCard
+    from video_chain.ui.theme import ThemeManager
+    ThemeManager.instance().apply(app)
+    qss = ThemeManager.instance().qss
+    assert 'QListWidget[role="resultStrip"]' in qss and 'QPushButton[role="chipButton"]' in qss
+    dlg = _dialog(tmp_path)
+    assert dlg.results.styleSheet() == "" and dlg.results.property("role") == "resultStrip"
+    dlg.reject()
+    card = InfoCard()
+    card.set({"seed": 5, "prompt": "x"})
+    chips = [b for b in card.findChildren(type(dlg.b_gen)) if b.property("role") == "chipButton"]
+    assert chips and all(b.styleSheet() == "" for b in chips)

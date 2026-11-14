@@ -25,6 +25,9 @@ QLabel[type="mono"] { font-family: "${monoFamily}"; font-size: ${font.mono}px; }
 QLabel[severity="warning"] { color: ${warning}; }
 QLabel[severity="error"] { color: ${negative}; }
 QLabel[severity="positive"] { color: ${positive}; }
+QListWidget[role="resultStrip"] { background: transparent; border: none; }
+QListWidget[role="resultStrip"]::item:selected, QListWidget[role="resultStrip"]::item:hover { background: transparent; }
+QPushButton[role="chipButton"] { padding: 0 6px; }
 QLabel[role="kbd"] { font-family: "${monoFamily}"; font-size: ${font.micro}px; color: ${textTertiary}; border: 1px solid ${lineControl};
                      border-radius: 3px; padding: 0 4px; }
 QLabel[role="badge"] { font-size: ${font.micro}px; font-weight: 600; background: ${bgTop}; color: ${textSecondary}; border-radius: 3px; padding: 0 4px; }

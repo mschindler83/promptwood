@@ -65,7 +65,10 @@ class PresetsMixin:
 
     def _chosen_preset(self) -> tuple[str, str] | None:
         data = self.preset.currentData()
-        return tuple(data.rsplit("\n", 1)) if data else None
+        if not data:
+            return None
+        lora, name = data.rsplit("\n", 1)
+        return lora, name
 
     def _preset_buttons(self):
         chosen = self.preset.currentData() is not None

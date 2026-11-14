@@ -9,9 +9,10 @@ import random
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QRectF, Qt, Signal
+from PySide6.QtCore import QObject, QRectF, QSettings, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLineEdit,
                                QProgressBar, QPushButton, QVBoxLayout)
@@ -61,8 +62,9 @@ class SwapDialog(QDialog):
     .result: (path, meta, frames) of the clip to use; it is played and compared with the clip in the window."""
 
     def __init__(self, parent, project: Path, nid: str, clip: Path, detector: Path | None,
-                 pictures: list[tuple[str, str]], connect, settings=None, on_start=None,
-                 source: dict | None = None, pick=None, groups: list[list[str]] | None = None,
+                 pictures: list[tuple[str, str]], connect: Callable, settings: QSettings | None = None,
+                 on_start: Callable[[], None] | None = None,
+                 source: dict | None = None, pick: Callable[[str], str | None] | None = None, groups: list[list[str]] | None = None,
                  h3: dict | None = None):
         super().__init__(parent)
         self.setWindowTitle(f"Replace a person in video #{T.short_id(nid)}")

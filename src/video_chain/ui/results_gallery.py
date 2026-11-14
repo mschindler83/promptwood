@@ -600,7 +600,6 @@ class InfoCard(QFrame):
             b.setProperty("role", "chipButton")
             b.setCursor(Qt.PointingHandCursor)
             b.setFixedHeight(max(16, self.chips.items[-1].sizeHint().height()) if self.chips.items else 18)
-            b.setStyleSheet("padding: 0 6px;")
             b.setToolTip("Use this seed for the next Generate (and keep it: New seed after each Generate is "
                          "switched off)")
             seed = info["seed"]
