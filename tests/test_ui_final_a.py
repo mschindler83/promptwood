@@ -384,3 +384,23 @@ def test_speed_modes_are_named_in_one_place():
     for mode in ("turbo", "hyperflow", "pika"):
         assert UL.speed_mode({mode: {"on": True}}) == mode
     assert "options.get(\"hyperflow\")" not in (UI / "mw_generator.py").read_text(encoding="utf-8")
+
+
+# ------------------------------------------------------------------ MWB-27: the llama server's settings have names
+def test_llama_config_names_what_decides_a_new_server(app, tmp_path):
+    from video_chain.ui.mw_llama import LlamaConfig
+    from video_chain.ui.main_window import MainWindow
+    w = MainWindow(settings(tmp_path), command=FAKE)
+    try:
+        w.llm_on.setChecked(True)
+        w.llm_model.setEditText("/m/x.gguf")
+        w.llm_port.setValue(8123)
+        cfg = w.llama_config()
+        assert isinstance(cfg, LlamaConfig) and cfg.model == "/m/x.gguf" and cfg.port == 8123
+        srv = w.llama_server()
+        assert srv is not None and srv is w.llama_server()          # the same settings: the same server
+        w.llm_port.setValue(8124)
+        srv2 = w.llama_server()
+        assert srv2 is not srv and srv2 is not None and srv2.port == 8124
+    finally:
+        w.close()
