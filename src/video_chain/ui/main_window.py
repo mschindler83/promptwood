@@ -8870,7 +8870,6 @@ class MainWindow(QMainWindow):
 
     def _event(self, ev: dict):
         e = ev.get("e")
-        self.plugins.emit("run_event", ev)
         if e == "loading":
             self._worker_idle = False
             self.status.setText("Starting a RunPod pod …" if ev.get("what") == "runpod" else "Connecting to ComfyUI …")
@@ -8967,12 +8966,19 @@ class MainWindow(QMainWindow):
             if self._job is None:                      # after the job (e.g. a RunPod pod that could not be ended)
                 self.status.setText(f"Warning: {self._error}")
                 self.log.appendPlainText(f"Warning: {self._error}")
+        self.plugins.emit("run_event", ev)             # (the plugins hear it once the app has handled it)
+
+    def _tell_plugins_finished(self, result: int):
+        try:
+            self.plugins.emit("run_finished", result)
+        except RuntimeError:                           # the window was closed before the timer fired
+            pass
 
     def _job_finished(self, code: int = 0):
         """End of a job: the worker reported idle again (code 0), or the worker ended (its exit code)."""
         ok = self._phase == "done" and code == 0 and not self._error
         result = 0 if ok else (int(code) or 1)           # (told to the plugins once the window is up to date)
-        QTimer.singleShot(0, lambda: self.plugins.emit("run_finished", result))
+        QTimer.singleShot(0, lambda: self._tell_plugins_finished(result))
         refine = (self._job or {}).get("refine")         # an export at a refined size
         for nid in [n for n, s in self.live.items() if s == "generating"]:
             if refine:                                   # an export never touches the clip itself, only its upscaled

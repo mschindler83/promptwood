@@ -2370,20 +2370,44 @@ def source_sound_span(tree: Tree, node: Node, project: Path | None = None) -> di
         return previous_sound_span(tree, node, project)
     if isinstance(mode, str) and mode.startswith(TRACK_PREFIX):
         return track_sound_span(tree, node)
+    cont = _continued_sound(tree, node)
+    if cont is None:
+        return None
+    v, t = cont
+    start = t - _join_lead(tree, node) / chain.FPS
+    return {"file": str((v.source or {})["file"]), "start": round(max(0.0, start), 3),
+            "secs": round(clip_length(tree, node) / chain.FPS, 3), "video": v.id}
+
+
+def _continued_sound(tree: Tree, node: Node) -> tuple[Node, float] | None:
+    """(the real video before a clip, the second in its file where the sound goes on after what the path has shown
+    up to the clip before), or None without a real video before the clip. Whatever the clip's Sound setting."""
     path = tree.path_to(node.id)
     vi = max((i for i, n in enumerate(path[:-1]) if n.is_video), default=None)
     if vi is None:
         return None
     v = path[vi]
-    src = v.source or {}
-    t = float(src["start"]) + clip_length(tree, v) / chain.FPS   # the frames the video really has (not the end)
+    t = float((v.source or {})["start"]) + clip_length(tree, v) / chain.FPS   # the frames the video really has (not the end)
     for p in path[vi + 1:-1]:
         n = made_frames(p) or clip_length(tree, p)
         h = handover_index(tree, p, n)
         t += ((h + 1 if h is not None else n) - _join_lead(tree, p)) / chain.FPS
-    start = t - _join_lead(tree, node) / chain.FPS
-    return {"file": str(src["file"]), "start": round(max(0.0, start), 3),
-            "secs": round(clip_length(tree, node) / chain.FPS, 3), "video": v.id}
+    return v, t
+
+
+def joined_sound_start(tree: Tree, node: Node) -> dict | None:
+    """Where in its real video's file the sound begins that the joined path hears in this clip, whatever the clip's
+    Sound setting: {"video": that video's Node, "file", "at"} (seconds in the file). The clip's first frame (or its
+    carry-over frames) repeats the clip before and is left out when the path is joined, so this is that much later
+    than where source_sound_span starts the clip's own sound. None for a real video itself and for a clip without
+    a real video before it."""
+    if node.is_video:
+        return None
+    cont = _continued_sound(tree, node)
+    if cont is None:
+        return None
+    v, t = cont
+    return {"video": v, "file": str((v.source or {})["file"]), "at": round(t, 3)}
 
 
 def _join_lead(tree: Tree, node: Node) -> int:

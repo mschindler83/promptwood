@@ -17,8 +17,15 @@ What a plugin module can define (each is optional):
                         clips and the run's arguments: return another object to use in its place (e.g. one that
                         wraps it, or another backend with the same methods), or None to keep it.
 
+setup() and generator() are independent. setup() runs in the window, once per window; it is never called in the
+generation process. So a plugin whose setup() failed in the window (and is "not in use" there) still has its
+generator() used in the generation process, and a plugin without generator() needs nothing from it.
+Listeners, actions and setup() run in the GUI thread, and the host's methods must be called from it.
+
 A plugin that cannot be imported, or whose setup fails, is left out and listed with its error (Plugins → About
-plugins…); the app starts without it."""
+plugins…); the app starts without it. Whatever fails later (an action, a listener) is listed with the plugin,
+which stays in use. A plugin cannot stop the app, not even with sys.exit(). What failed in a window is noted by
+that window's host (each window has its own); Plugin.error only says that the module could not be imported."""
 from __future__ import annotations
 
 import importlib
@@ -38,8 +45,10 @@ class Plugin:
     source: str                     # where it comes from: "package <name> <version>" / "VIDEO_CHAIN_PLUGINS"
     target: str                     # the module to import
     module: ModuleType | None = None
-    error: str = ""                 # why it is not in use ("" = loaded)
-    problems: list = field(default_factory=list)   # what failed while it was in use (it stays in use)
+    error: str = ""                 # why it could not be imported ("" = imported); a window's setup failure is that
+                                    # window's host's note (State), as all windows of a process share these objects
+    trace: str = ""                 # the traceback of that import error (or of a failure in the generation process)
+    problems: list = field(default_factory=list)   # what failed in the generation process (it stays in use)
 
     @property
     def loaded(self) -> bool:
@@ -87,8 +96,7 @@ def load(again: bool = False) -> list[Plugin]:
         try:
             p.module = importlib.import_module(p.target)
         except BaseException as e:  # noqa: BLE001  (also SystemExit in a plugin: the app still starts)
-            if isinstance(e, KeyboardInterrupt):
-                raise
+            interrupt(e)
             p.error = f"could not be imported: {type(e).__name__}: {e}"
             p.trace = traceback.format_exc()
     _LOADED = out
@@ -101,28 +109,51 @@ def reset() -> None:
     _LOADED = None
 
 
-def failed(p: Plugin, what: str, e: BaseException, fatal: bool = False) -> str:
+@dataclass
+class State:
+    """What failed for one plugin in one window (the host keeps one per plugin: the Plugin objects are shared)."""
+    error: str = ""                 # why its setup failed ("" = in use)
+    problems: list = field(default_factory=list)
+    trace: str = ""
+
+
+def interrupt(e: BaseException) -> None:
+    """Call in `except BaseException as e`: a plugin may raise SystemExit (sys.exit()) and the like, which must
+    not end the app, but Ctrl+C still does."""
+    if isinstance(e, KeyboardInterrupt):
+        raise e
+
+
+def failed(p: Plugin, what: str, e: BaseException, fatal: bool = False, state: State | None = None) -> str:
     """Note that one of a plugin's functions failed: -> the sentence about it. fatal (its setup): the plugin is
-    not in use; else it stays in use and the failure is listed with it."""
+    not in use; else it stays in use and the failure is listed with it. state: where a window notes it (without,
+    the plugin itself: the generation process has no window)."""
     text = f"{what} failed: {type(e).__name__}: {e}"
+    where = state if state is not None else p
     if fatal:
-        p.error = text
-    elif text not in p.problems:
-        p.problems.append(text)
-    p.trace = traceback.format_exc()
+        where.error = text
+    elif text not in where.problems:
+        where.problems.append(text)
+    where.trace = traceback.format_exc()
     return text
 
 
 def wrap_generator(gen, args, log=None):
     """The generator the run uses: each plugin's generator(gen, args) may give another one (see the module's
     text). A plugin that fails is skipped (logged) and the generator before it is kept."""
-    for p in load():
-        fn = getattr(p.module, "generator", None) if p.loaded else None
-        if not callable(fn):
-            continue
+    try:
+        found = load()
+    except BaseException as e:  # noqa: BLE001
+        interrupt(e)
+        return gen
+    for p in found:
         try:
+            fn = getattr(p.module, "generator", None) if p.loaded else None
+            if not callable(fn):
+                continue
             new = fn(gen, args)
-        except Exception as e:  # noqa: BLE001
+        except BaseException as e:  # noqa: BLE001  (also SystemExit: not the generation process's exit code)
+            interrupt(e)
             text = failed(p, "generator()", e)
             if log:
                 log(f"Plugin {p.name}: {text}")

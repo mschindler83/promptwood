@@ -2010,3 +2010,23 @@ def test_h3_continue_with_carry_over_and_a_remade_clip_before(tmp_path):
     m = t.nodes[b.id].made
     assert m["continue_from"] != ch.continue_from(t.nodes[b.id]) and m["guide_from"] != ch.guide_from(t.nodes[b.id])
     assert m["start_sha1"] != ch.sha(ch.start_frame(t.nodes[b.id]))   # (the start frame is checked with carry-over too)
+
+
+def test_joined_sound_start_is_where_the_joined_path_hears_the_clip(tmp_path):
+    """The sound the joined path has in a clip starts after the clip's repeated first frame(s), whatever its Sound
+    setting; the clip's own sound span starts that much earlier."""
+    t = T.Tree()
+    f = str(tmp_path / "talk.mp4")
+    v = t.add_video(None, f, 2.0, 3.0)
+    a = t.add(v.id, "she keeps talking")
+    b = t.add(a.id, "and talking")
+    b.overrides = {"source_sound": True, "guide": 5}
+    lone = t.add(None, "no video before")
+    before = dict(a.overrides or {})
+    assert T.joined_sound_start(t, a) == {"video": v, "file": f, "at": 3.0}
+    assert (a.overrides or {}) == before                              # (the node is not changed)
+    a.overrides = {"source_sound": True}
+    assert T.source_sound_span(t, a)["start"] == round(3.0 - 1 / chain.FPS, 3)
+    assert T.joined_sound_start(t, a)["at"] == 3.0
+    assert T.joined_sound_start(t, b)["at"] == round(T.source_sound_span(t, b)["start"] + 5 / chain.FPS, 3)
+    assert T.joined_sound_start(t, v) is None and T.joined_sound_start(t, lone) is None
