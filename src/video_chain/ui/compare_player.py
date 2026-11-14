@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from PySide6.QtCore import QObject, QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QImage, QPainter, QPen
@@ -142,7 +144,7 @@ class ComparePlayer(QWidget):
     def __init__(self, parent=None, fps: float = chain.FPS):
         super().__init__(parent)
         self.fps = fps
-        self.overlay = None
+        self.overlay: Callable[[int, QImage], Any] | None = None
         self.size_ = (0, 0)                              # the stored frame size
         self.clip_size = (0, 0)
         self.frames: list[bytes] = []

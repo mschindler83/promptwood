@@ -26,6 +26,9 @@ if TYPE_CHECKING:
     from .image_edit import _FamiliesSignal
 
     class ImageEditHost(QDialog):
+        _rehighlighting: bool
+        _sampling_family: str | None
+        _was_down: bool
         _built: bool
         _busy: bool
         _failed: set[tuple[str, int]]

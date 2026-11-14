@@ -11,6 +11,7 @@ import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from PySide6.QtCore import QObject, QRectF, QSettings, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen
@@ -61,6 +62,10 @@ class SwapDialog(QDialog):
     """clip: the converted clip of the video node; pictures: [(label, path)] offered as the new person;
     connect(progress) -> ComfyAnimator (worker thread); on_start(): before Generate (GUI thread);
     .result: (path, meta, frames) of the clip to use; it is played and compared with the clip in the window."""
+    # (these names shadow QObject / QDialog / QWidget methods, which this dialog never uses)
+    connect: Callable
+    result: tuple[Path, dict, int] | None  # type: ignore[assignment]
+    size: QComboBox  # type: ignore[assignment]
 
     def __init__(self, parent, project: Path, nid: str, clip: Path, detector: Path | None,
                  pictures: list[tuple[str, str]], connect: Callable, settings: QSettings | None = None,
@@ -80,8 +85,8 @@ class SwapDialog(QDialog):
         self.h3 = dict(h3 or {})
         self.heads: dict | None = None
         self.boxes: list[tuple] = []
-        self.result: tuple[Path, dict, int] | None = None
-        self.animator = None
+        self.result = None
+        self.animator: Any = None                 # (the ComfyAnimator of the running Generate)
         self._busy = False
         self._cancel = False
         self._tmp = media.scratch("swap")
@@ -316,8 +321,9 @@ class SwapDialog(QDialog):
             if self.pick is not None:
                 path = self.pick("Picture of the new person")
             else:
-                from .image_picker import pick_image
-                path = pick_image(self, "Picture of the new person", self.qs)
+                from .image_picker import pick_image, scratch_settings
+                path = pick_image(self, "Picture of the new person",
+                                  self.qs if self.qs is not None else scratch_settings())
             if not path:                                  # cancelled: the picture before stays shown
                 k = self.ref_combo.findData(self.ref) if self.ref else 0
                 self.ref_combo.setCurrentIndex(max(0, k))
@@ -490,6 +496,7 @@ class SwapDialog(QDialog):
         self._busy, self._cancel = True, False
         out_dir = self.project / swap.SWAPS_DIR
         stem = f"swap_{self.nid}_{time.strftime('%Y%m%d-%H%M%S')}_{uuid.uuid4().hex[:6]}"
+        assert self.heads is not None and self.ref is not None      # (Generate is enabled only then)
         boxes, (w, h), fps = list(self.boxes), self.heads["size"], self.heads["fps"]
         n, clip, ref = self.heads["frames"], self.clip, self.ref
         size, prompt, seed = self.size.currentData(), self.prompt.text().strip(), random.randint(1, 2**31 - 1)

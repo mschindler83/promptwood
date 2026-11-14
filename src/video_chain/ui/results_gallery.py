@@ -13,6 +13,7 @@ from PySide6.QtGui import QColor, QFont, QGuiApplication, QImage, QPainter, QPai
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy,
                                QToolButton, QVBoxLayout, QWidget)
 
+from ..edits import ResultRecord
 from .imageio import read_scaled
 from .theme import theme
 from .widgets import FlowBox, label, safe_emit, smooth_scaled
@@ -25,16 +26,16 @@ MODEL_TAGS = {"krea2": "K2", "qwen": "Q", "qwen21": "Q2.1", "moss": "MOSS", "flu
 EDIT_TAGS = {"2511": "EDIT", "qwen21": "Q2.1 EDIT", "moss": "MOSS EDIT"}
 
 
-def model_key(meta: dict) -> str:
+def model_key(meta: ResultRecord) -> str:
     """A result's model, for the filter: create:<family> / edit:<model>."""
     if meta.get("mode") == "create":
         return f"create:{meta.get('family') or '?'}"
     return f"edit:{meta.get('edit_model') or '2511'}"
 
 
-def model_tag(meta: dict) -> str:
+def model_tag(meta: ResultRecord) -> str:
     if meta.get("mode") == "create":
-        return MODEL_TAGS.get(meta.get("family"), "NEW")
+        return MODEL_TAGS.get(meta.get("family") or "", "NEW")
     return EDIT_TAGS.get(meta.get("edit_model") or "2511", "EDIT")
 
 
@@ -58,7 +59,7 @@ def when_text(t: float, now: float | None = None) -> str:
     return time.strftime("%Y-%m-%d %H:%M", day)
 
 
-def run_groups(items: list[tuple[str, dict, float]]) -> list[dict]:
+def run_groups(items: list[tuple[str, ResultRecord, float]]) -> list[dict]:
     """Results (png, meta, mtime; newest first) grouped by Generate run: {"key", "title", "items"} newest run first.
     A run is the results of one Generate (their "run" id); older results without one: the same prompt and model
     made within RUN_GAP of each other."""
@@ -74,6 +75,7 @@ def run_groups(items: list[tuple[str, dict, float]]) -> list[dict]:
             g = {"key": run or f"{png}", "run": run, "prompt": meta.get("prompt", ""), "model": model_key(meta),
                  "newest": t, "oldest": t, "items": []}
             groups.append(g)
+        assert g is not None                           # (same is only true with a group before)
         g["items"].append((png, meta, t))
         g["oldest"] = t
     for g in groups:
@@ -219,7 +221,7 @@ class Thumb(QWidget):
     opened = Signal(str)
     starred = Signal(str)
 
-    def __init__(self, png: str, meta: dict, parent=None):
+    def __init__(self, png: str, meta: ResultRecord, parent=None):
         super().__init__(parent)
         self.png, self.meta = png, meta
         self.pix = QPixmap()
@@ -242,7 +244,7 @@ class Thumb(QWidget):
     def sizeHint(self):                          # noqa: N802
         return self._size
 
-    def set_state(self, selected: bool | None = None, in_use: bool | None = None, meta: dict | None = None):
+    def set_state(self, selected: bool | None = None, in_use: bool | None = None, meta: ResultRecord | None = None):
         if selected is not None:
             self.selected = selected
         if in_use is not None:
@@ -304,6 +306,7 @@ class ResultGallery(QScrollArea):
         self.headers: list[QLabel] = []
         self.size_px = 200
         self._selected: str | None = None
+        self._scroll_pending: int | None = None
         self._build([])
 
     def _build(self, groups: list[dict]):
@@ -345,7 +348,7 @@ class ResultGallery(QScrollArea):
         self.setWidget(inner)
 
     def set_groups(self, groups: list[dict], in_use: set[str]):
-        if getattr(self, "_scroll_pending", None) is None:  # (two rebuilds in a row: the first position counts)
+        if self._scroll_pending is None:  # (two rebuilds in a row: the first position counts)
             self._scroll_pending = self.verticalScrollBar().value()
         self._build(groups)
         for png, th in self.thumbs.items():
@@ -357,7 +360,7 @@ class ResultGallery(QScrollArea):
                 self._scroll_pending = None
         QTimer.singleShot(0, restore)                          # (where it was, once laid out)
 
-    def update_thumb(self, png: str, meta: dict, in_use: bool | None = None):
+    def update_thumb(self, png: str, meta: ResultRecord, in_use: bool | None = None):
         """One result's badges anew (e.g. its star), without rebuilding the gallery."""
         th = self.thumbs.get(png)
         if th is not None:
@@ -376,7 +379,11 @@ class ResultGallery(QScrollArea):
         if th is not None:
             th.set_state(selected=True)
             if scroll:
-                        QTimer.singleShot(0, lambda: png in self.thumbs and self.ensureWidgetVisible(self.thumbs[png], 20, 20))
+                        QTimer.singleShot(0, lambda: self._reveal_thumb(png))
+
+    def _reveal_thumb(self, png: str) -> None:
+        if png in self.thumbs:
+            self.ensureWidgetVisible(self.thumbs[png], 20, 20)
 
     def set_thumb_size(self, px: int):
         self.size_px = int(px)
@@ -390,10 +397,11 @@ class ResultGallery(QScrollArea):
 
     def _row_neighbour(self, png: str | None, down: bool) -> str | None:
         """The thumbnail in the nearest row below / above `png`, the closest one sideways."""
-        cur = self.thumbs.get(png)
+        cur = self.thumbs.get(png) if png else None
         if cur is None:
             return None
         inner = self.widget()
+        assert inner is not None
         here = cur.mapTo(inner, cur.rect().center())
         rows = []
         for other, th in self.thumbs.items():
@@ -420,7 +428,7 @@ class ResultGallery(QScrollArea):
         elif key == Qt.Key.Key_End and order:
             self.clicked.emit(order[-1])
         elif key in (Qt.Key.Key_Down, Qt.Key.Key_Up, Qt.Key.Key_PageDown, Qt.Key.Key_PageUp) and order:
-            if self.thumbs.get(self._selected) is None:
+            if self._selected is None or self.thumbs.get(self._selected) is None:
                 self.clicked.emit(order[0])
                 return
             down = key in (Qt.Key.Key_Down, Qt.Key.Key_PageDown)

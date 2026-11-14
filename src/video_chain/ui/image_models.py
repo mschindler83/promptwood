@@ -99,9 +99,9 @@ class ModelsMixin(ImageEditHost):
             self.edit_model.setItemData(k, EDIT_MODELS[key] if ok else why, Qt.ItemDataRole.ToolTipRole)
         cur = self.edit_model.currentIndex()
         if not combo_item(self.edit_model, cur).isEnabled():   # the chosen one is not there: the first one that is
-            ok = [i for i in range(self.edit_model.count()) if combo_item(self.edit_model, i).isEnabled()]
-            if ok:
-                self.edit_model.setCurrentIndex(ok[0])
+            usable = [i for i in range(self.edit_model.count()) if combo_item(self.edit_model, i).isEnabled()]
+            if usable:
+                self.edit_model.setCurrentIndex(usable[0])
 
     def _remember_quality(self):
         if self.qs is not None and self.quality.currentData():

@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import json
 import random
+from collections.abc import Mapping
+from typing import Any
 
 from .dialogs import confirm as ask
 from .image_common import MAX_RESULTS, SEED_MAX
-from .image_picker import pick_image
+from .image_picker import pick_image, scratch_settings
 from .image_host import ImageEditHost
 
 
@@ -63,7 +65,8 @@ class PromptMixin(ImageEditHost):
         self.negative.setText(pat.sub(lambda m: "{" + m.group(1) + new + m.group(2), self.negative.text()))
 
     def _pick_list(self) -> str | None:
-        return pick_image(self, "Choose a wildcard list (.txt, one value per line)", self.qs, kind="text")
+        return pick_image(self, "Choose a wildcard list (.txt, one value per line)",
+                          self.qs if self.qs is not None else scratch_settings(), kind="text")
 
     def _variation_jobs(self) -> list | None:
         """The next Generate's prompts when variations are active (None: not active; [] after a refusal)."""
@@ -106,6 +109,7 @@ class PromptMixin(ImageEditHost):
         if self.refine is None:
             return
         import inspect
+        params: Mapping[str, Any]
         try:
             params = inspect.signature(self.refine).parameters
         except (TypeError, ValueError):
@@ -118,7 +122,7 @@ class PromptMixin(ImageEditHost):
             self.use_ideas(new)
         elif new:
             from .prompt_refiner import replace_text
-            replace_text(self.prompt, new)
+            replace_text(self.prompt, str(new))
 
     def use_ideas(self, prompts: list[str]):
         """All ideas from the refiner as one Generate: the prompt becomes {idea}, its values the ideas, every
@@ -127,7 +131,7 @@ class PromptMixin(ImageEditHost):
         from .prompt_refiner import replace_text
         p = self.variations
         name, k = "idea", 1
-        while p.variable(name) is not None and [v.text for v in p.variable(name).values] != prompts:
+        while (var := p.variable(name)) is not None and [v.text for v in var.values] != prompts:
             k += 1                                  # (an {idea} with other values stays: {idea2} …)
             name = f"idea{k}"
         replace_text(self.prompt, "{" + name + "}")

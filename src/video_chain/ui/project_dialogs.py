@@ -212,6 +212,8 @@ class ExportDialog(QDialog):
     ComfyUI by SeedVR2 (restores the clips as made) or re-rendered by the Open-H3 refine (draws detail anew); every
     clip once, the copies are kept for the next export. ready(size, method, strength, denoise) -> True when every
     clip has a kept copy for that choice (a dict {size: bool} works too)."""
+    # (these names shadow QWidget methods, which this class never uses)
+    size: QComboBox  # type: ignore[assignment]
 
     METHODS = (("seedvr2_7b", "SeedVR2 7B — restores the clips as made, clean (default)"),
                ("seedvr2_3b", "SeedVR2 3B — crisper, a little harder"),

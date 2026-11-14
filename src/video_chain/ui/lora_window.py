@@ -146,6 +146,9 @@ class LoraWindow(QDialog):
     What the window may do where it was opened from (each None: not offered): use_prompt(text) puts an example
     into the prompt; adapt(example) has the prompt rewritten in the example's manner (the window closes);
     strengths {path: strength} of the LoRAs in the prompt's stack and set_strength(path, value) -> bool."""
+    # (these names shadow QWidget methods, which this class never uses)
+    find: QLineEdit  # type: ignore[assignment]
+    scroll: QScrollArea  # type: ignore[assignment]
 
     def __init__(self, parent=None, loras=(), current: str | None = None, settings: QSettings | None = None,
                  prompt: str = "", told: str = "", told_title: str = "What the language model was told",
