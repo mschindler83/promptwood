@@ -32,7 +32,7 @@ from .. import lora_notes, lora_pictures, triggers
 from .lora_details import details_html, themed
 from .dialogs import add_action, button_row, confirm
 from .lora_stack import lora_label
-from .widgets import fit_size, guard_wheel, label
+from .widgets import fit_size, guard_wheel, label, remember_geometry
 from .qsvalue import qs_value
 
 log = logging.getLogger(__name__)
@@ -159,6 +159,7 @@ class LoraWindow(QDialog):
         self.setWindowTitle("LoRAs: what is known of them")
         fit_size(self, 1180, 780)
         self.qs = settings if settings is not None else getattr(parent, "qs", None)
+        remember_geometry(self, self.qs, "loraWindow")
         self.db = db or triggers.db()
         self.fetch = fetch or (lambda item: lora_pictures.fetch(item, self.db))
         self.prompt_text, self.told = prompt or "", told or ""

@@ -22,7 +22,8 @@ from .workers import post, run_in_background
 from .. import chain, media
 from .theme import icon, theme, with_alpha
 from .dialogs import button_row
-from .widgets import fit_size, format_time, FrameTile, guard_wheel, icon_button, label, VideoView, shortcut, timer
+from .widgets import (fit_size, format_time, FrameTile, guard_wheel, icon_button, label, remember_geometry, VideoView,
+                      shortcut, timer)
 
 if TYPE_CHECKING:
     from PySide6.QtMultimedia import QMediaPlayer
@@ -257,6 +258,7 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
         self.setWindowTitle("Real video")
         fit_size(self, 980, 760)
         self.settings, self.canvas, self.want_player = settings, canvas, player
+        remember_geometry(self, settings, "videoEditor")
         self.canvas_for = canvas_for
         self.rotate = chain.rotation(rotate)
         self.on_reference = on_reference              # callable(png path) -> bool: crop and add a face picture

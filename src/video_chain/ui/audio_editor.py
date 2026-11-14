@@ -23,7 +23,7 @@ from ..tree import AUDIO_REF_MIN, VOICE_MAX_SECS, VOICE_REF_MAX_SECS
 from .theme import theme, with_alpha
 from .video_editor import RangeBar, RangePlayerMixin, fmt
 from .dialogs import button_row
-from .widgets import VideoView, fit_size, guard_wheel, icon_button, label, shortcut
+from .widgets import VideoView, fit_size, guard_wheel, icon_button, label, remember_geometry, shortcut
 from .qsvalue import qs_value
 
 if TYPE_CHECKING:
@@ -123,6 +123,7 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
         self.setWindowTitle(title)
         fit_size(self, 920, 640 if voice else 420)
         self.settings, self.want_player, self.voice = settings, player, voice
+        remember_geometry(self, settings, "audioEditorVoice" if voice else "audioEditor")
         self.video: VideoView | None = None
         self._isolate = isolate if voice else None
         self.clean: dict | None = None                 # {"file", "start", "end"}: the chosen part without its music

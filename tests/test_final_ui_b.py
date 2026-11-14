@@ -400,3 +400,51 @@ def test_every_key_of_the_dialogs_is_in_the_shortcut_table_and_bound_from_it():
                  "clip_dialogs"):
         text = (ui / f"{name}.py").read_text()
         assert not re.search(r"QKeySequence\(\"", text), f"{name} binds a literal key"
+
+
+def test_a_dialog_remembers_its_size_and_position_in_its_settings(app, tmp_path):
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QDialog
+
+    from video_chain.ui.widgets import remember_geometry
+    q = QSettings(str(tmp_path / "g.ini"), QSettings.IniFormat)
+    first = QDialog()
+    first.resize(500, 410)
+    remember_geometry(first, q, "demo")
+    first.done(0)
+    assert q.value("geometry/demo") is not None
+    second = QDialog()
+    second.resize(300, 200)
+    remember_geometry(second, q, "demo")
+    assert (second.width(), second.height()) == (500, 410)
+    other = QDialog()
+    other.resize(300, 200)
+    remember_geometry(other, q, "another")                  # (each dialog has its own entry)
+    assert (other.width(), other.height()) == (300, 200)
+    remember_geometry(other, None, "x")                      # (no settings: nothing remembered, nothing breaks)
+    q.setValue("geometry/broken", "not a geometry")
+    broken = QDialog()
+    remember_geometry(broken, q, "broken")
+
+
+def test_the_big_dialogs_remember_their_geometry(app):
+    import re
+    ui = Path(__file__).parent.parent / "src" / "video_chain" / "ui"
+    for name in ("image_edit", "image_picker", "lora_window", "prompt_refiner", "swap_dialog", "audio_editor",
+                 "video_editor"):
+        assert "remember_geometry(self" in (ui / f"{name}.py").read_text(), name
+    assert re.search(r"def remember_geometry", (ui / "widgets.py").read_text())
+
+
+def test_garbage_is_collected_on_the_gui_thread_not_in_a_worker(app, monkeypatch):
+    import gc
+    import threading
+
+    from video_chain.ui import workers
+    workers.run_in_background(lambda: 1, on_done=lambda r: None)          # (starts the relay and the collector)
+    assert workers._gc_timer is not None and not gc.isenabled()
+    seen = []
+    real = gc.collect
+    monkeypatch.setattr(gc, "collect", lambda *a: (seen.append(threading.current_thread()), real(*a))[1])
+    workers._gc_timer.timeout.emit()
+    assert seen and all(t is threading.main_thread() for t in seen)

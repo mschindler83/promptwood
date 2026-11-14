@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QHBoxLayout
 from .. import media
 from .imageio import file_facts, read_scaled
 from .theme import icon, theme
-from .widgets import fit_size, format_time, icon_button, label, safe_emit
+from .widgets import fit_size, format_time, icon_button, label, remember_geometry, safe_emit
 from .qsvalue import qs_value
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
@@ -157,6 +157,7 @@ class ImagePickerDialog(QDialog):
         self.setWindowTitle(title)
         fit_size(self, 1100, 700)
         self.qs = settings
+        remember_geometry(self, settings, "imagePicker")
         self._gen = 0
         self._lock = threading.Lock()                  # the pool's threads share the cache and the counters
         self._zoom_px = 0

@@ -5,7 +5,7 @@ from collections import OrderedDict
 
 from typing import Any, cast
 
-from PySide6.QtCore import QEvent, QObject, QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QByteArray, QEvent, QObject, QRect, QSettings, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (QColor, QFont, QFontInfo, QImage, QPainter, QPixmap, QShortcut,
                            QStandardItem, QStandardItemModel, QTransform)
 from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QHBoxLayout, QLabel, QSizePolicy,
@@ -81,6 +81,24 @@ def fit_size(widget: QWidget, width: int, height: int) -> None:
     screen = widget.screen() if widget.window() is not None else None
     avail = screen.availableGeometry().size() if screen is not None else None
     widget.resize(capped_size(width, height, avail))
+
+
+def remember_geometry(dialog: QWidget, qs: QSettings | None, key: str) -> None:
+    """Give the dialog the size and place it had when it was closed last time (kept in the settings it is given, under
+    "geometry/<key>"), and keep them again when it closes. Without settings nothing is remembered. A saved size
+    that no longer fits the screen is cut to it."""
+    if qs is None:
+        return
+    name = f"geometry/{key}"
+    saved = qs.value(name)
+    if isinstance(saved, (QByteArray, bytes)) and dialog.restoreGeometry(saved):
+        fitted = capped_size(dialog.width(), dialog.height(),
+                             dialog.screen().availableGeometry().size() if dialog.screen() is not None else None, 1.0)
+        if fitted != dialog.size():
+            dialog.resize(fitted)
+    finished = getattr(dialog, "finished", None)
+    if finished is not None:
+        finished.connect(lambda _r: qs.setValue(name, dialog.saveGeometry()))
 
 
 def small_font(base: QFont, scale: float = 0.8) -> QFont:

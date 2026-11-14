@@ -22,7 +22,7 @@ from .lora_details import themed
 from .theme import repolish, theme
 from .dialogs import add_action, button_row
 from .text_edit import replace_text  # noqa: F401  (main_window and image_edit import it from here)
-from .widgets import fit_size, guard_wheel, label, shortcut
+from .widgets import fit_size, guard_wheel, label, remember_geometry, shortcut
 from .qsvalue import qs_value
 
 log = logging.getLogger(__name__)
@@ -77,6 +77,7 @@ class RefineDialog(QDialog):
         self.setWindowTitle(f"Refine the {KIND_TEXT.get(kind, 'prompt')}")
         fit_size(self, 1100, 680)
         self.kind, self.connect, self.qs, self.start_comfy = kind, connect, settings, start_comfy
+        remember_geometry(self, settings, "promptRefiner")
         self.refiner: Any = None                  # (the connected refiner)
         self._connecting = False
         self._retries = 0                         # (more tries to connect: ComfyUI is starting)

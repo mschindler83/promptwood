@@ -28,7 +28,7 @@ from .face_crop import FaceCropDialog
 from .image_picker import pick_image
 from .imageio import upright
 from .theme import theme
-from .widgets import fit_size, FrameTile, guard_wheel, label
+from .widgets import fit_size, FrameTile, guard_wheel, label, remember_geometry
 from .qsvalue import qs_value
 
 log = logging.getLogger(__name__)
@@ -77,6 +77,7 @@ class SwapDialog(QDialog):
         fit_size(self, 1180, 720)
         self.project, self.nid, self.clip, self.detector = Path(project), nid, Path(clip), detector
         self.connect, self.qs, self.on_start = connect, settings, on_start
+        remember_geometry(self, settings, "swapDialog")
         self.source = dict(source or {})          # the video's file and range (the DWPose cache is bound to it)
         self.pick = pick                          # pick(title) -> an image path or None (the app's image picker)
         self.groups = [list(g) for g in groups or []]   # the pictures of each Cast character (the face pass uses all)

@@ -47,7 +47,7 @@ from .imageio import decode_upright as _decode_upright, upright  # noqa: F401  (
 from .lora_stack import LoraStack
 from .results_gallery import InfoCard, ResultGallery, ResultView, ThumbLoader
 from .variations_panel import PlaceholderHighlighter, VariationsPanel
-from .widgets import FrameTile, fit_size, guard_wheel, icon_button, label, shortcut, combo_item
+from .widgets import FrameTile, fit_size, guard_wheel, icon_button, label, remember_geometry, shortcut, combo_item
 from .qsvalue import qs_value
 
 
@@ -107,6 +107,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         self.services = services
         self.setWindowTitle("Edit an image with AI")
         fit_size(self, 1240, 820)
+        remember_geometry(self, services.settings, "imageEdit")
         self._init_state(project, end_target, services)
         known_loras, lora_dir, family_loras, mode = (services.known_loras, services.lora_dir, services.family_loras,
                                                      services.mode)
