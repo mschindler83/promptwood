@@ -594,7 +594,7 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
     extra_loras: further LoRAs stacked after the first ([(path, strength)]), only present when there are any, so
     a single-LoRA setting is recorded exactly as before.
     refs: the face pictures this clip is made with ([{"file": path in the project, "sha1": ...}]), only present
-    when it uses any; such a clip holds its start image for START_PIN frames (start_pin). cast: with @mentions, the characters the model prompt describes ([{"name", "desc"}]).
+    when it uses any; such a clip holds its start image for START_PIN frames (start_pin). cast: with @mentions, the characters the model prompt describes ([{"name", "desc"}], + "kind" of a place / object / style).
     voice_language: a character speaks with its voice (MiniMax's structured format, lines tagged with this
     language); such a clip holds its start image like one with faces.
     style: the project's text before / after every prompt (only present when there is any)."""
@@ -618,7 +618,8 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
         s.update({"refs": [{"file": r["file"], "sha1": r["sha1"]} for r in refs], "ref_size": ref_size,
                   "ref_hint": bool(ref_hint), "start_pin": START_PIN})
     if (refs or voice_language) and cast:
-        s["cast"] = [{"name": c["name"], "desc": c.get("desc", "")} for c in cast]
+        s["cast"] = [{"name": c["name"], "desc": c.get("desc", ""), **({"kind": c["kind"]} if c.get("kind") else {})}
+                     for c in cast]
     if voice_language:
         s["voice_language"] = voice_language
         s["start_pin"] = START_PIN

@@ -160,3 +160,13 @@ def test_cli_rejects_bad_input_before_loading_anything(tmp_path, start, capsys):
     assert main([str(start), str(empty), "--out", str(tmp_path / "o")]) == 2
     assert main([str(tmp_path / "missing.png"), str(p), "--out", str(tmp_path / "o")]) == 2
     assert main([str(start), str(p), "--out", str(tmp_path / "o"), "--size", "500x500"]) == 2
+
+
+def test_recorded_cast_names_the_kind_of_a_non_person():
+    kw = dict(model="m", lora=None, strength=1.0, frames=73, steps=28, width=672, height=384, audio=True,
+              refs=[{"file": "refs/ref1.png", "sha1": "x"}])
+    s = chain.settings_dict(cast=[{"name": "Anna", "desc": "woman"}], **kw)
+    assert s["cast"] == [{"name": "Anna", "desc": "woman"}]                    # a person: as before
+    s = chain.settings_dict(cast=[{"name": "Anna", "desc": "woman"}, {"name": "Hall", "desc": "", "kind": "place"}],
+                            **kw)
+    assert s["cast"][1] == {"name": "Hall", "desc": "", "kind": "place"}

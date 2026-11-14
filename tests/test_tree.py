@@ -1487,3 +1487,344 @@ def test_seedvr2_cloud_variant_is_recorded(project, tmp_path):
     gen.seedvr_variant = None
     T.refine_path(gen, project, b1.id, "2k", tmp_path / "s2.mp4", log=lambda _m: None, method="seedvr2_7b")
     assert len(gen.seedvrs) == 6                                                     # back home: made again
+
+
+# ---------------------------------------------------------------------------- the official H3 prompt format
+
+from video_chain import h3_prompt as H  # noqa: E402
+
+ANNA = "woman, 30s, grey sweater"
+
+
+def h3_project(tmp_path, start=True, name="h3"):
+    """A project in the h3 format (the tests' default is classic), with a start image unless start=False."""
+    p = tmp_path / name
+    p.mkdir()
+    t = T.Tree()
+    t.options["prompt_format"] = "h3"
+    if start:
+        img = tmp_path / f"{name}_in.jpg"
+        Image.new("RGB", (96, 54), (250, 250, 250)).save(img)
+        T.set_start_image(p, img, t)
+    T.save(p, t)
+    return p, t
+
+
+def anna_and_kitchen(p, t, tmp_path):
+    T.add_character(p, t, "Anna", face(tmp_path / "a1.jpg", (200, 150, 130)), desc=ANNA)
+    T.add_picture(p, t, "Anna", face(tmp_path / "a2.jpg", (190, 140, 120)))
+    T.add_character(p, t, "Kitchen", face(tmp_path / "k.jpg", (90, 90, 200)), desc="a small sunny kitchen",
+                    kind="place")
+
+
+@pytest.mark.h3_default
+def test_prompt_format_of_new_and_loaded_projects(tmp_path):
+    """New projects write H3's official formats; a file from before the setting loads (and stays) classic."""
+    assert T.Tree().options["prompt_format"] == "h3" and T.is_h3(T.Tree())
+    empty = tmp_path / "new"
+    empty.mkdir()
+    assert T.load(empty).options["prompt_format"] == "h3"                       # a new project folder
+    d = T.Tree().to_json()
+    del d["options"]["prompt_format"]
+    assert T.Tree.from_json(d).options["prompt_format"] == "classic"
+    d["options"]["prompt_format"] = "fancy"
+    assert T.Tree.from_json(d).options["prompt_format"] == "classic"
+    for fmt in T.PROMPT_FORMATS:                                                 # saved once: stays as it is
+        t = T.Tree()
+        T.set_prompt_format(t, fmt)
+        T.save(empty, t)
+        assert T.load(empty).options["prompt_format"] == fmt
+    with pytest.raises(ValueError):
+        T.set_prompt_format(t, "fancy")
+    old = tmp_path / "linear"                                                    # a linear chain.json
+    old.mkdir()
+    (old / "chain.json").write_text(json.dumps({"tool": "video-chain", "settings": {}, "clips": []}))
+    assert T.load(old).options["prompt_format"] == "classic"
+
+
+def test_a_project_from_before_the_format_stays_done(project, tmp_path):
+    """Made clips of a project file without the setting stay done (classic, recorded as before); switching to h3
+    marks them changed."""
+    t = T.load(project)
+    T.add_character(project, t, "Anna", face(tmp_path / "a.jpg", (200, 150, 130)), desc=ANNA)
+    a = t.add(None, "@Anna waves.")
+    b = t.add(a.id, "She smiles.")
+    T.save(project, t)
+    run(project, [b.id])
+    d = json.loads((project / T.TREE_FILE).read_text())
+    del d["options"]["prompt_format"]
+    (project / T.TREE_FILE).write_text(json.dumps(d))
+    t = T.load(project)
+    assert t.options["prompt_format"] == "classic" and set(statuses(project).values()) == {"done"}
+    s = t.nodes[a.id].made["settings"]
+    assert "prompt_format" not in s and "frame_pictures" not in s and s["cast"] == [{"name": "Anna", "desc": ANNA}]
+    T.set_prompt_format(t, "h3")
+    T.save(project, t)
+    assert set(statuses(project).values()) == {"changed"}
+
+
+def test_h3_base_formats(tmp_path):
+    """Without references: three fields, with the header of what the clip has (nothing, start, start + end, end)."""
+    fields = ("integrated_multimodal_description: [Shot 1] A lighthouse at dusk.\n\noverall_soundscape: Natural "
+              "ambient sound that fits the scene.\n\nnon_diegetic_music: N/A")
+    p, t = h3_project(tmp_path, start=False, name="text")
+    a = t.add(None, "A lighthouse at dusk.")
+    T.save(p, t)
+    gen = run(p, [a.id])
+    assert gen.calls[0]["start"] is None and gen.calls[0]["prompt"] == fields
+    s = T.load(p).nodes[a.id].made["settings"]
+    assert s["prompt_format"] == "h3" and "frame_pictures" not in s and "refs" not in s
+    end = face(tmp_path / "end.png", (0, 0, 250))
+    T.set_end_image(p, t, a.id, end)                                            # end only: L2VA
+    T.save(p, t)
+    gen = run(p, [a.id])
+    assert gen.calls[0]["prompt"] == H.L2VA_HEADER.format(n=1, s="3.04") + "\n\n" + fields
+    assert gen.calls[0]["end_rgb"] is not None
+
+    p, t = h3_project(tmp_path, name="start")
+    a = t.add(None, "A lighthouse at dusk.")
+    T.save(p, t)
+    gen = run(p, [a.id])
+    assert gen.calls[0]["prompt"] == H.I2VA_HEADER + "\n\n" + fields                 # start frame: I2VA
+    t = T.load(p)
+    t.options["frames"] = 49
+    T.set_end_image(p, t, a.id, end)
+    b = t.add(a.id, "A lighthouse at dusk.")
+    b.overrides = {"guide": 5}                                                  # its start is a motion guide
+    T.save(p, t)
+    gen = run(p, [b.id])
+    assert gen.calls[0]["prompt"] == H.FL2VA_HEADER.format(n=1, s="2.04") + "\n\n" + fields   # 49 / 24 s
+    assert gen.calls[1]["guides"] and gen.calls[1]["prompt"] == fields          # no plain start frame: no header
+
+
+def test_h3_reference_format_numbers_the_start_frame(tmp_path):
+    """A person with 2 pictures and a place, from the start image: the start frame is <Picture 4> (after the
+    subject pictures), recorded as frame_pictures, sent after them; the end frame is <Picture 5>."""
+    p, t = h3_project(tmp_path)
+    anna_and_kitchen(p, t, tmp_path)
+    a = t.add(None, "@Anna walks into @Kitchen and looks around, smiling.")
+    T.save(p, t)
+    gen = run(p, [a.id])
+    call = gen.calls[0]
+    assert call["prompt"] == (
+        "subject_definitions:\n"
+        f"<Subject 1> is Anna ({ANNA}), the person in <Picture 1> and <Picture 2>.\n"
+        "<Subject 2> is Kitchen (a small sunny kitchen), the environment in <Picture 3>.\n"
+        "<Picture 4> is the first frame of [Shot 1].\n\n"
+        "summary:\n[keyframe completion + reference generation] The target video shows <Subject 1> and "
+        "<Subject 2>. It begins from <Picture 4>.\n\n"
+        "retention_analysis:\n"
+        "<Subject 1> (appears in [Shot 1]): fully_preserved - Anna's face and identity are retained.\n"
+        "<Subject 2> (appears in [Shot 1]): fully_preserved - the layout and look of Kitchen are retained.\n"
+        "<Picture 4> ([Shot 1] first frame): fully_preserved - the target video begins exactly from this picture."
+        "\n\ndetailed_description:\n[Shot 1] The shot begins from <Picture 4>. <Subject 1>, woman, 30s, grey "
+        "sweater, walks into <Subject 2>, a small sunny kitchen, and looks around, smiling.\n\n"
+        "overall_soundscape:\nNatural ambient sound that fits the scene.\n\nnon_diegetic_music:\nN/A")
+    s = call["settings"]
+    assert s["frame_pictures"] == ["start"] and s["prompt_format"] == "h3" and s["ref_hint"] is True
+    assert s["ref_paths"] == [str(p / r) for r in ("refs/ref1.png", "refs/ref2.png", "refs/ref3.png")]
+    assert s["cast"] == [{"name": "Anna", "desc": ANNA},
+                         {"name": "Kitchen", "desc": "a small sunny kitchen", "kind": "place"}]
+    made = T.load(p).nodes[a.id].made["settings"]
+    assert made["frame_pictures"] == ["start"] and "ref_paths" not in made
+    assert statuses(p)[a.prompt] == "done"
+    t = T.load(p)
+    T.set_end_image(p, t, a.id, face(tmp_path / "end.png", (0, 0, 250)))
+    T.save(p, t)
+    info = T.clip_inputs(p, t, a.id)
+    assert info["settings"]["frame_pictures"] == ["start", "end"] and info["model"] == "ref2va"
+    assert [(x["n"], x["what"]) for x in info["pictures"]] == [(1, "@Anna"), (2, "@Anna"), (3, "@Kitchen"),
+                                                               (4, "start frame"), (5, "end frame")]
+    assert info["end"] == {"given": "frame", "file": p / t.nodes[a.id].end_image, "picture": 5}
+    assert "<Picture 5> is the last frame of [Shot 1]." in info["prompt"]
+    assert info["prompt"].split("detailed_description:\n")[1].split("\n\n")[0].endswith(
+        "smiling. The shot ends on <Picture 5>.")
+    gen = run(p, [a.id])
+    assert gen.calls[0]["prompt"] == info["prompt"] and gen.calls[0]["settings"]["frame_pictures"] == ["start", "end"]
+
+
+def test_h3_frame_pictures_fit_in_nine(tmp_path):
+    """At most 9 pictures: the end frame loses its number first, then the start frame (both then in words)."""
+    p, t = h3_project(tmp_path)
+    for k, name in enumerate(("Ann", "Bea", "Cid")):
+        T.add_character(p, t, name, face(tmp_path / f"{name}0.jpg", (10 * k, 0, 0)))
+        for i in (1, 2):
+            if k < 2 or i < 2:                                                  # 3 + 3 + 2 = 8 pictures
+                T.add_picture(p, t, name, face(tmp_path / f"{name}{i}.jpg", (10 * k, 10 * i, 0)))
+    a = t.add(None, "@Ann, @Bea and @Cid dance.")
+    T.save(p, t)
+    T.set_end_image(p, t, a.id, face(tmp_path / "end.png", (0, 0, 250)))
+    info = T.clip_inputs(p, t, a.id)
+    assert info["settings"]["frame_pictures"] == ["start"] and info["start"]["picture"] == 9
+    assert info["end"]["picture"] is None and "The video ends exactly on the given end frame." in info["prompt"]
+    assert "[keyframe completion + reference generation]" in info["prompt"]
+    T.add_picture(p, t, "Cid", face(tmp_path / "Cid2.jpg", (20, 20, 0)))       # 9: no frame gets a number
+    info = T.clip_inputs(p, t, a.id)
+    assert "frame_pictures" not in info["settings"] and info["start"]["picture"] is None
+    assert "The video begins exactly from the given start frame." in info["prompt"]
+    assert "[reference generation]" in info["prompt"] and "<Picture 10>" not in info["prompt"]
+
+
+def test_h3_lead_and_the_lead_switch(project, tmp_path):
+    """A clip that mentions nobody gets the lead (h3: Subject 1, said so before [Shot 1]); switched off, it gets no
+    pictures in either format; switched on again, it is recorded exactly as before."""
+    t = T.load(project)
+    T.add_character(project, t, "Anna", face(tmp_path / "a.jpg", (200, 150, 130)), desc=ANNA)
+    a = t.add(None, 'She waves. "Hi."')
+    T.save(project, t)
+    ch = T.Checker(project, t)
+    classic = ch.settings(a.id)
+    assert classic["refs"] and T.node_cast(t.options, a)["mode"] == "lead"
+    T.set_lead_on(a, False)
+    assert a.overrides == {"lead": False}
+    ch = T.Checker(project, t)
+    assert "refs" not in ch.settings(a.id) and T.node_cast(t.options, a)["mode"] is None
+    assert T.model_prompt(t.options, a, ch.settings(a.id)) == 'She waves. "Hi."'
+    T.set_lead_on(a, True)
+    assert a.overrides == {} and T.Checker(project, t).settings(a.id) == classic
+    T.set_prompt_format(t, "h3")
+    info = T.clip_inputs(project, t, a.id)
+    assert info["subjects"] == [{"name": "Anna", "kind": "person", "pictures": [1], "files": ["refs/ref1.png"],
+                                 "lead": True, "voice": None}]
+    assert ("detailed_description:\nThe person in the video is <Subject 1>.\n[Shot 1] The shot begins from "
+            "<Picture 2>. She waves. <Subject 1> (S1), woman, 30s, grey sweater, says, <d>[English] Hi.</d>") \
+        in info["prompt"]
+    T.set_lead_on(a, False)
+    info = T.clip_inputs(project, t, a.id)
+    assert info["subjects"] == [] and info["model"] == "fl2va" and "refs" not in info["settings"]
+    assert info["prompt"] == (H.I2VA_HEADER + "\n\nintegrated_multimodal_description: [Shot 1] She waves. "
+                              "<d>[English] Hi.</d>\n\noverall_soundscape: Natural ambient sound that fits the scene."
+                              "\n\nnon_diegetic_music: N/A")
+    T.save(project, t)
+    assert T.load(project).nodes[a.id].overrides == {"lead": False}              # kept in tree.json
+
+
+def test_references_of_any_kind(project, tmp_path):
+    """Places, objects and styles: whole pictures, never the lead, no voice; named as what they are."""
+    t = T.load(project)
+    big = tmp_path / "room.png"
+    Image.new("RGB", (120, 90), (90, 90, 200)).save(big)
+    k = T.add_character(project, t, "Kitchen", big, desc="a small sunny kitchen", kind="place", crop=(0, 0, 40))
+    assert k["kind"] == "place" and k["lead"] is False
+    assert Image.open(project / k["images"][0]).size == (120, 90)               # not cropped
+    T.add_picture(project, t, "Kitchen", big, crop=(0, 0, 40))
+    assert Image.open(project / T.character(t, "Kitchen")["images"][1]).size == (120, 90)
+    anna = T.add_character(project, t, "Anna", face(tmp_path / "a.jpg", (200, 150, 130)), crop=(0, 0, 40))
+    assert anna["lead"] is True and "kind" not in anna and T.kind_of(anna) == "person"   # the first person
+    assert Image.open(project / anna["images"][0]).size == (40, 40)
+    with pytest.raises(ValueError, match="only a person can have a voice"):
+        T.set_voice(project, t, "Kitchen", sound(tmp_path / "v.wav", 3))
+    with pytest.raises(ValueError, match="only a person can be the lead"):
+        T.update_character(t, "Kitchen", lead=True)
+    with pytest.raises(ValueError, match="unknown kind"):
+        T.set_kind(t, "Kitchen", "animal")
+    T.add_character(project, t, "Cup", kind="object")
+    T.save(project, t)
+    t = T.load(project)
+    assert [T.kind_of(c) for c in T.cast_of(t)] == ["place", "person", "object"]
+    assert "kind" not in T.character(t, "Anna")                                  # persons are stored as before
+    # classic: the tying sentence names the kind; a person's stays as it was
+    use = T.clip_cast(t.options, "@Anna cooks in @Kitchen.")
+    assert use["prompt"] == ("Anna (the person in <Picture 1>) cooks in Kitchen (the place in <Picture 2> and "
+                             "<Picture 3>). Anna has exactly the face of the person in <Picture 1>. Kitchen is the "
+                             "place shown in <Picture 2> and <Picture 3>. Kitchen: a small sunny kitchen. The face "
+                             "pictures only show who the people are; their pose and framing come from the video.")
+    assert use["record"] == [{"name": "Anna", "desc": ""},
+                             {"name": "Kitchen", "desc": "a small sunny kitchen", "kind": "place"}]
+    assert T.clip_cast(t.options, "A view of @Kitchen.")["prompt"] == (
+        "A view of Kitchen (the place in <Picture 1> and <Picture 2>). Kitchen is the place shown in <Picture 1> and "
+        "<Picture 2>. Kitchen: a small sunny kitchen.")
+    assert T.dialogue(t.options, 'In @Kitchen, @Anna says "Hi."')[0]["speaker"]["name"] == "Anna"   # a place never speaks
+    a = t.add(None, "@Cup falls.")
+    assert T.cast_problems(project, t, [a.id]) == [f"@Cup (clip #{a.id[1:]}) has no picture yet"]
+    T.set_voice(project, t, "Anna", sound(tmp_path / "v.wav", 3))
+    with pytest.raises(ValueError, match="has a voice"):
+        T.set_kind(t, "Anna", "object")
+    T.remove_voice(project, t, "Anna")
+    T.set_kind(t, "Anna", "object")                                              # no longer the lead
+    assert T.lead_of(t) is None and T.character(t, "Anna")["lead"] is False
+    T.set_kind(t, "Anna", "person")
+    assert "kind" not in T.character(t, "Anna")
+    assert T.add_reference(project, face(tmp_path / "b.jpg", (1, 2, 3)), t) in T.character(t, "Anna")["images"]
+
+
+def test_h3_voices_sounds_and_a_given_soundtrack(tmp_path):
+    """Voices come after the sounds the prompt names (and are sent in that order); with the clip's whole sound
+    given, no voice is sent and the soundtrack is the last <Audio N>, reused 1:1."""
+    p, t = h3_project(tmp_path)
+    t.options["frames"] = 48
+    T.add_character(p, t, "Anna", face(tmp_path / "a.jpg", (200, 150, 130)), desc=ANNA)
+    T.set_voice(p, t, "Anna", sound(tmp_path / "anna.wav", 4))
+    T.add_audio_reference(p, sound(tmp_path / "rain.wav", 3), t)
+    a = t.add(None, '<Audio 1> rains outside. @Anna looks up and says "Good morning."\n'
+                    "overall_soundscape: Rain on the window.\nnon_diegetic_music: N/A")
+    T.save(p, t)
+    gen = run(p, [a.id])
+    call = gen.calls[0]
+    pr, s = call["prompt"], call["settings"]
+    assert s["audio_paths"] == [str(p / "refs/audio1.wav"), str(p / "refs/voice1.wav")]
+    assert s["voice_language"] == "English" and s["frame_pictures"] == ["start"]
+    assert "<Audio 2> is the voice-timbre reference for <Subject 1> (S1), the voice of one speaker." in pr
+    assert ("[Shot 1] The shot begins from <Picture 2>. <Audio 1> rains outside. <Subject 1> (S1), woman, 30s, grey "
+            "sweater, looks up and says, using the voice timbre referenced from <Audio 2>, <d>[English] Good "
+            "morning.</d>\n\noverall_soundscape:\nRain on the window.\n\nnon_diegetic_music:\nN/A") in pr
+    assert "[keyframe completion + reference generation + audio reference]" in pr
+    info = T.clip_inputs(p, T.load(p), a.id)
+    assert [(x["n"], x["what"]) for x in info["sounds"]] == [(1, "sound"), (2, "voice of @Anna")]
+    assert info["subjects"][0]["voice"] == 2
+
+    src = sound(tmp_path / "song.wav", 6)
+    t = T.load(p)
+    tid = T.add_track(p, t, src, 0.0, 5.0, "Song")["id"]
+    t.nodes[a.id].overrides = {"source_sound": f"track:{tid}"}
+    T.save(p, t)
+    gen = run(p, [a.id])
+    call = gen.calls[0]
+    pr, s = call["prompt"], call["settings"]
+    assert len(s["audio_paths"]) == 2 and s["audio_paths"][0] == str(p / "refs/audio1.wav")   # sound + soundtrack
+    assert "voice_language" not in s and s["frame_pictures"] == ["start"]
+    assert "<Audio 2> is the complete audio track of the target video, reused 1:1." in pr
+    assert "[keyframe completion + reference generation + audio reuse + audio reference]" in pr
+    assert T.TRACK_SOUND_TEXT.format(k=2) in pr and "voice timbre" not in pr
+    info = T.clip_inputs(p, T.load(p), a.id)
+    assert [x["what"] for x in info["sounds"]] == ["sound", "soundtrack"] and info["sounds"][1]["n"] == 2
+
+
+def test_h3_style_triggers_camera_and_notes_inside_the_description(tmp_path):
+    """The style text, trigger words, camera move and keyframe notes end up in the description; the user's own
+    sound lines are cut off before the style suffix; a structured prompt of the user's goes as written."""
+    p, t = h3_project(tmp_path, start=False)
+    t.options["style"] = {"prefix": "Cinematic, warm light.", "suffix": "Film grain."}
+    a = t.add(None, "A cat jumps. #push-in-slow.\noverall_soundscape: Soft thud.")
+    a.overrides = {"camera": {"move": "pan-left"}}
+    T.set_keyframe(p, t, a.id, face(tmp_path / "k.png", (1, 2, 3)), 1.0, "it lands")
+    T.save(p, t)
+    s = T.Checker(p, t).settings(a.id)
+    s["lora_triggers"] = ["mycat"]
+    pr = T.model_prompt(t.options, a, s)
+    assert pr == ("integrated_multimodal_description: [Shot 1] mycat. Cinematic, warm light. A cat jumps. The camera "
+                  "pushes in at slow speed. Film grain. The camera pans left. At 1.0 s: it lands.\n\n"
+                  "overall_soundscape: Soft thud.\n\nnon_diegetic_music: N/A")
+    own = "integrated_multimodal_description: [Shot 1] A dog.\n\noverall_soundscape: Barks.\n\nnon_diegetic_music: N/A"
+    a.prompt = own
+    assert T.model_prompt(t.options, a, s) == own
+
+
+def test_multi_line_prompts_survive(tmp_path):
+    """A refined h3 prompt has line breaks (shots, then the sound lines): kept by save / load and the checks; the
+    2K refine gets the description without the sound lines (its camera sentence after the shots)."""
+    p, t = h3_project(tmp_path)
+    text = ('A man says "Hi."\n[Shot 2] At 00:00.500, he leaves.\noverall_soundscape: Steps.\n'
+            "non_diegetic_music: N/A")
+    a = t.add(None, text)
+    a.overrides = {"camera": {"move": "static"}}
+    T.save(p, t)
+    assert T.load(p).nodes[a.id].prompt == text
+    assert T.refine_problems('A man says "Hi."', text) == [] and T.spoken_lines(text) == ["Hi."]
+    gen = run(p, [a.id])
+    assert gen.calls[0]["prompt"].endswith('[Shot 1] A man says <d>[English] Hi.</d>\n[Shot 2] At 00:00.500, he '
+                                           "leaves. The camera holds a static shot.\n\noverall_soundscape: Steps."
+                                           "\n\nnon_diegetic_music: N/A")
+    T.refine_path(gen, p, a.id, "2k", tmp_path / "out.mp4", log=lambda _m: None)
+    assert gen.refines[0]["prompt"] == ('A man says "Hi."\n[Shot 2] At 00:00.500, he leaves. The camera holds a '
+                                        "static shot.")

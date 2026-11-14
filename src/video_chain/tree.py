@@ -54,11 +54,12 @@ from typing import Callable
 
 from . import camera as _camera
 from . import chain
+from . import h3_prompt as _h3
 
 TREE_FILE = "tree.json"
 START_FILE = "start.png"
 NO_LORA = "none"                   # old override value: this node without any LoRA
-OVERRIDE_KEYS = ("loras", "frames", "steps", "guide", "source_sound", "sound_over", "camera")
+OVERRIDE_KEYS = ("loras", "frames", "steps", "guide", "source_sound", "sound_over", "camera", "lead")
 _OLD_LORA_KEYS = ("lora", "strength", "extra_loras")
 AI, VIDEO = "ai", "video"
 GUIDE_CHOICES = (5, 22, 39)        # motion guide lengths on H3's 17n+5 grid
@@ -89,7 +90,12 @@ DEFAULT_OPTIONS = {"model": "Comfy-Org/MiniMax-H3", "frames": 73, "steps": 28,
                    # style text put before / after every prompt (e.g. look, camera, a LoRA's trigger word)
                    "style": {"prefix": "", "suffix": ""},
                    # the trigger words of a clip's LoRAs (triggers.py: from the files and CivitAI) before its prompt
-                   "lora_triggers": True}
+                   "lora_triggers": True,
+                   # how the model prompt is written: "h3" (H3's official formats, h3_prompt.compose) or "classic"
+                   # (the app's own sentences, as before). New projects: h3; a file without it is classic (from_json)
+                   "prompt_format": "h3"}
+PROMPT_FORMATS = ("h3", "classic")
+CAST_KINDS = ("person", "place", "object", "style")   # what a cast entry is (no "kind": a person)
 REFS_DIR = "refs"
 ENDS_DIR = "ends"
 MAX_CAST_PICTURES = 9              # MiniMax H3 ref2va takes up to 9 reference images
@@ -285,6 +291,8 @@ class Tree:
         t = cls(options={**copy.deepcopy(DEFAULT_OPTIONS), **stored},
                 image=d.get("image"),
                 selected=d.get("selected"), next_num=int(d.get("next_num") or 1))
+        if stored.get("prompt_format") not in PROMPT_FORMATS:
+            t.options["prompt_format"] = "classic"   # a project from before the setting: as it was made
         _migrate_cast(t.options, "cast" in stored)
         for nd in d.get("nodes", []):
             if not isinstance(nd, dict) or not nd.get("id"):
@@ -428,6 +436,7 @@ def load(project: Path) -> Tree:
     old = chain.load_record(project)
     t = Tree()
     if old:
+        t.options["prompt_format"] = "classic"      # made before the setting existed
         t.image = old.get("image")
         s = dict(old.get("settings") or {})
         s.setdefault("backend", "ai-toolkit")        # linear chains were always made with ai-toolkit
@@ -476,6 +485,8 @@ def _migrate_cast(options: dict, has_cast: bool) -> None:
         if isinstance(c, dict) and isinstance(c.get("name"), str) and c["name"]:
             entry = {"name": c["name"], "images": [r for r in c.get("images") or [] if isinstance(r, str)],
                      "desc": str(c.get("desc") or ""), "lead": bool(c.get("lead"))}
+            if c.get("kind") in CAST_KINDS and c["kind"] != "person":
+                entry["kind"] = c["kind"]                # (a person has no "kind": older files stay as they are)
             v = c.get("voice")
             if isinstance(v, dict) and isinstance(v.get("file"), str) and v["file"]:
                 entry["voice"] = {"file": v["file"], "name": str(v.get("name") or ""),
@@ -505,7 +516,36 @@ def character(tree_or_options, name: str) -> dict | None:
 
 
 def lead_of(tree_or_options) -> dict | None:
-    return next((c for c in cast_of(tree_or_options) if c.get("lead")), None)
+    """The lead (only a person can be it)."""
+    return next((c for c in cast_of(tree_or_options) if c.get("lead") and kind_of(c) == "person"), None)
+
+
+def kind_of(c: dict | None) -> str:
+    """What a cast entry is: person (also without "kind"), place, object or style. Only a person has a face (the
+    crop window), a voice and can be the lead; the others are used with their whole pictures."""
+    k = (c or {}).get("kind")
+    return k if k in CAST_KINDS else "person"
+
+
+def refiner_cast(tree_or_options) -> list[dict]:
+    """The cast as the prompt refiner is told about it (comfy.cast_instruction): [{"name", "desc", "voice": bool}],
+    + "kind" for a place, object or style (so the refiner does not make it a person)."""
+    return [{"name": c["name"], "desc": c.get("desc", ""), "voice": bool(c.get("voice")) and kind_of(c) == "person",
+             **({"kind": kind_of(c)} if kind_of(c) != "person" else {})} for c in cast_of(tree_or_options)]
+
+
+def is_h3(tree_or_options) -> bool:
+    """The project writes H3's official prompt formats (options "prompt_format" == "h3"); else the classic one."""
+    options = tree_or_options.options if isinstance(tree_or_options, Tree) else tree_or_options
+    return (options or {}).get("prompt_format") == "h3"
+
+
+def set_prompt_format(tree: Tree, fmt: str) -> None:
+    """Switch the prompt format ("h3" | "classic"). Made clips are then CHANGED (their prompt and settings are
+    written another way)."""
+    if fmt not in PROMPT_FORMATS:
+        raise ValueError(f"unknown prompt format {fmt!r} (h3 or classic)")
+    tree.options["prompt_format"] = fmt
 
 
 def all_pictures(tree_or_options) -> list[str]:
@@ -583,12 +623,23 @@ def _copy_picture(project: Path, image: Path, tree: Tree, crop: tuple[int, int, 
     return rel
 
 
+def _check_kind(kind: str) -> str:
+    if kind not in CAST_KINDS:
+        raise ValueError(f"unknown kind {kind!r} (one of {', '.join(CAST_KINDS)})")
+    return kind
+
+
 def add_character(project: Path, tree: Tree, name: str, image: Path | None = None, desc: str = "",
-                  crop: tuple[int, int, int] | None = None) -> dict:
-    """A new character (with a first face picture, cropped to crop = x, y, side). The first character of a cast is
-    the lead."""
+                  crop: tuple[int, int, int] | None = None, kind: str = "person") -> dict:
+    """A new cast entry (with a first picture; a person's face picture is cropped to crop = x, y, side, any other
+    kind takes the whole picture). The first person of a cast is the lead."""
     name = check_name(tree, name)
-    entry = {"name": name, "images": [], "desc": (desc or "").strip(), "lead": not cast_of(tree)}
+    kind = _check_kind(kind)
+    lead = kind == "person" and not any(kind_of(c) == "person" for c in cast_of(tree))
+    entry = {"name": name, "images": [], "desc": (desc or "").strip(), "lead": lead}
+    if kind != "person":
+        entry["kind"] = kind
+        crop = None
     if image is not None:
         entry["images"].append(_copy_picture(project, image, tree, crop))
     _set_cast(tree, cast_of(tree) + [entry])
@@ -611,15 +662,16 @@ def add_picture(project: Path, tree: Tree, name: str, image: Path,
         raise ValueError(f"no character called {name}")
     if len(c["images"]) >= MAX_PICTURES_PER_CHARACTER:
         raise ValueError(f"at most {MAX_PICTURES_PER_CHARACTER} pictures per character")
-    rel = _copy_picture(project, image, tree, crop)
+    rel = _copy_picture(project, image, tree, crop if kind_of(c) == "person" else None)   # (others: whole)
     _set_cast(tree, [{**x, "images": x["images"] + [rel]} if x is c else x for x in cast_of(tree)])
     return rel
 
 
 def add_reference(project: Path, image: Path, tree: Tree, name: str | None = None,
                   crop: tuple[int, int, int] | None = None) -> str:
-    """A face picture for a character (name), else for the lead, else for a new character PersonN."""
-    target = character(tree, name) if name else (lead_of(tree) or (cast_of(tree) or [None])[0])
+    """A face picture for a character (name), else for the lead, else the first person, else a new PersonN."""
+    target = character(tree, name) if name else (lead_of(tree) or next((c for c in cast_of(tree)
+                                                                         if kind_of(c) == "person"), None))
     if name and target is None:
         raise ValueError(f"no character called {name}")
     if target is None:
@@ -691,6 +743,8 @@ def set_voice(project: Path, tree: Tree, name: str, source: Path, start: float =
     c = character(tree, name)
     if c is None:
         raise ValueError(f"no character called {name}")
+    if kind_of(c) != "person":
+        raise ValueError(f"@{c['name']} is a {kind_of(c)}; only a person can have a voice")
     length = chain.audio_seconds(Path(source))
     if length is None:
         raise ValueError(f"{Path(source).name} has no sound")
@@ -735,6 +789,8 @@ def update_character(tree: Tree, name: str, *, desc: str | None = None, lead: bo
     c = character(tree, name)
     if c is None:
         raise ValueError(f"no character called {name}")
+    if lead and kind_of(c) != "person":
+        raise ValueError(f"@{c['name']} is a {kind_of(c)}; only a person can be the lead")
     cast = []
     for x in cast_of(tree):
         x = dict(x)
@@ -745,6 +801,27 @@ def update_character(tree: Tree, name: str, *, desc: str | None = None, lead: bo
                 x["lead"] = bool(lead)
         elif lead:
             x["lead"] = False                       # one lead only
+        cast.append(x)
+    _set_cast(tree, cast)
+
+
+def set_kind(tree: Tree, name: str, kind: str) -> None:
+    """Make a cast entry a person, place, object or style. Not a person any more: it stops being the lead (a clip
+    that mentions nobody then gets no lead pictures); one with a voice cannot change (remove the voice first). Its
+    pictures stay as they are (recrop_picture(rel, None) gives a cropped one its whole picture again)."""
+    c = character(tree, name)
+    if c is None:
+        raise ValueError(f"no character called {name}")
+    kind = _check_kind(kind)
+    if kind != "person" and c.get("voice"):
+        raise ValueError(f"@{c['name']} has a voice; only a person can have one (remove the voice first)")
+    cast = []
+    for x in cast_of(tree):
+        if x["name"] == c["name"]:
+            x = {k: v for k, v in x.items() if k != "kind"}
+            if kind != "person":
+                x["kind"] = kind
+                x["lead"] = False
         cast.append(x)
     _set_cast(tree, cast)
 
@@ -821,7 +898,8 @@ def dialogue(options: dict, text: str, default: dict | None = None) -> list[dict
     - a "she" / "he" there, the last one: the last-mentioned character of that gender (from its description);
     - else the first @Name there (@Anna looks at @Ben and says "Hi." -> Anna);
     - else the first @Name after the line in its sentence ("Hi," says @Anna.);
-    - else the last @Name before the line, else default."""
+    - else the last @Name before the line, else default.
+    Only a person speaks: a place, object or style named there is passed over."""
     text = text or ""
     spans = [(m.start(), m.end(), next(g for g in m.groups() if g is not None).strip())
              for m in DIALOGUE.finditer(text)]
@@ -833,7 +911,7 @@ def dialogue(options: dict, text: str, default: dict | None = None) -> list[dict
     masked = "".join(masked)
     inside = _in_lines(text)
     marks = [(m.start(), character(options, m.group(1))) for m in MENTION.finditer(text) if not inside(m.start())]
-    marks = [(pos, c) for pos, c in marks if c is not None]
+    marks = [(pos, c) for pos, c in marks if c is not None and kind_of(c) == "person"]
     out, prev_end = [], 0
     for a, b, line in spans:
         if not line:
@@ -976,7 +1054,7 @@ def _voiced_prompt(options: dict, text: str, found: list[dict], lines: list[dict
     for c in found:
         desc = f" ({c['desc'].rstrip('.')})" if c.get("desc") else ""
         defs.append(f"<Subject {subj[c['name']]}> is {c['name']}{desc}"
-                    + (f", the person in {tags[c['name']]}." if c["name"] in tags else "."))
+                    + (f", {_h3._DEFINES[kind_of(c)]} {tags[c['name']]}." if c["name"] in tags else "."))
     defs += [f"<Audio {k}> is a sound reference, used as the description says." for k in range(1, n_sounds + 1)]
     defs += [f"<Audio {audio_no[n]}> is the voice-timbre reference for {token(n)}, the voice of one speaker."
              for n in voiced]
@@ -984,13 +1062,13 @@ def _voiced_prompt(options: dict, text: str, found: list[dict], lines: list[dict
     shows = who[0] if len(who) == 1 else ", ".join(who[:-1]) + " and " + who[-1]
     summary = (f"[reference generation + audio reference] The target video shows {shows}. "
                + " ".join(f"{token(n)} speaks with the voice timbre of <Audio {audio_no[n]}>." for n in voiced))
-    keep = [f"<Subject {subj[c['name']]}> (appears in [Shot 1]): fully_preserved - {c['name']}'s face and "
-            "identity are retained." for c in found if c["name"] in tags]
+    keep = [f"<Subject {subj[c['name']]}> (appears in [Shot 1]): fully_preserved - {_kept(c)}" for c in found
+            if c["name"] in tags]
     keep += [f"<Audio {audio_no[n]}>: reference - its vocal timbre guides the dialogue delivery of {token(n)} "
              "without copying the original signal or spoken words." for n in voiced]
     detail = ""
-    if hint and images:
-        detail += "The pictures only show who the people are; the scene, pose and framing come from the video.\n"
+    if hint and images and _pictures_note(found):
+        detail += _pictures_note(found) + "\n"
     if implicit and order:
         detail += f"{token(order[0])} is the one who speaks.\n"
     detail += f"[Shot 1] {body.strip()}"
@@ -1004,6 +1082,37 @@ def _voiced_prompt(options: dict, text: str, found: list[dict], lines: list[dict
     return prompt, images, [character(options, n)["voice"]["file"] for n in voiced]
 
 
+_KIND_WORD = {"person": "person", "place": "place", "object": "object", "style": "visual style"}
+PICTURES_NOTE = "The pictures only show who the people are; the scene, pose and framing come from the video."
+
+
+def _kept(c: dict) -> str:
+    """The retention reason of a cast entry with pictures (classic structured format)."""
+    k, n = kind_of(c), c["name"]
+    return {"person": f"{n}'s face and identity are retained.", "place": f"the layout and look of {n} are retained.",
+            "object": f"the shape and look of {n} are retained.",
+            "style": f"the visual style of {n} is retained."}[k]
+
+
+def _pictures_note(found: list[dict]) -> str:
+    """The classic sentence that keeps face pictures from setting the scene ('' when no person has pictures; with
+    places, objects or styles it speaks of the face pictures only, theirs do set the scene)."""
+    shown = [c for c in found if c.get("images")]
+    people = [c for c in shown if kind_of(c) == "person"]
+    if not people:
+        return ""
+    if len(people) == len(shown):
+        return PICTURES_NOTE
+    return "The face pictures only show who the people are; their pose and framing come from the video."
+
+
+def _tie(c: dict, tags: str) -> str:
+    """The classic sentence tying a cast entry to its pictures."""
+    if kind_of(c) == "person":
+        return f"{c['name']} has exactly the face of the person in {tags}."
+    return f"{c['name']} is the {_KIND_WORD[kind_of(c)]} shown in {tags}."
+
+
 def sound_given(node: Node) -> bool:
     """The clip's whole sound is given (its Sound setting plays a track, a video's or the clip before's sound, and
     the picture is made to it): the model speaks nothing itself, so it gets no voices (see clip_cast)."""
@@ -1011,17 +1120,35 @@ def sound_given(node: Node) -> bool:
     return not node.is_video and bool(ov.get("source_sound")) and not ov.get("sound_over")
 
 
+def lead_on(node: Node) -> bool:
+    """The clip may get the lead's pictures when its prompt mentions nobody (overrides "lead": False switches that
+    off for this clip)."""
+    return (node.overrides or {}).get("lead") is not False
+
+
+def set_lead_on(node: Node, on: bool) -> None:
+    """Switch a clip's lead on (the default: the key goes, so the clip is recorded as before) or off."""
+    ov = dict(node.overrides or {})
+    if on:
+        ov.pop("lead", None)
+    else:
+        ov["lead"] = False
+    node.overrides = ov
+
+
 def node_cast(options: dict, node: Node) -> dict:
-    """clip_cast for a clip as it is set up: without the voices when its sound is given."""
-    return clip_cast(options, node.prompt, voices=not sound_given(node))
+    """clip_cast for a clip as it is set up: without the voices when its sound is given, without the lead when its
+    lead switch is off."""
+    return clip_cast(options, node.prompt, voices=not sound_given(node), lead=lead_on(node))
 
 
-def clip_cast(options: dict, prompt: str, voices: bool = True) -> dict:
+def clip_cast(options: dict, prompt: str, voices: bool = True, lead: bool = True) -> dict:
     """How a clip uses the cast. The prompt is the clip's own (the style text is put around it here).
     voices=False: the clip's sound is given (sound_given), its spoken lines are in that sound already, so no voice
     is sent and the characters are used as if they had none (the lines stay in the prompt as written; the
     soundtrack sentence of model_prompt ties the lips to the sound). The voices would only use up the 15 s of
     sound the model takes, which the soundtrack needs.
+    lead=False: the clip's lead switch is off (lead_on): a prompt that mentions nobody gets no lead.
     {"mode": "voices" | "mention" | "tags" | "lead" | None, "characters": [...], "images": [rel], "voices": [rel],
     "language": the dialogue language and "lines": [{"name": speaker or None, "line"}] (voices only), "prompt": what
     the model gets, "record": [{"name", "desc"}]
@@ -1030,13 +1157,18 @@ def clip_cast(options: dict, prompt: str, voices: bool = True) -> dict:
              lead's lines): MiniMax's structured format (see _voiced_prompt); the voices come after the sounds the
              prompt names as <Audio N>.
     mention: the characters named as @Name, numbered in order of their first mention; each @Name becomes its name
-             (the first time with its <Picture> tags), and a sentence ties each to their face.
+             (the first time with its <Picture> tags), and a sentence ties each to their face (a place, object or
+             style: to what it is).
     tags:    the prompt writes <Picture N> itself: every face picture of the cast, in cast order.
     lead:    nobody is mentioned: the lead's pictures (the generator adds its <Picture 1> sentence).
-    None:    no face pictures (no cast, or no lead)."""
+    None:    no face pictures (no cast, or no lead).
+    In the h3 format (is_h3) the same modes pick the same kind of pictures, but the text is written by
+    h3_prompt.compose (see _h3_cast; model_prompt adds the clip's frames, camera, notes and soundtrack)."""
+    if is_h3(options):
+        return _h3_cast(options, prompt, voices, lead)
     text = full_prompt(options, prompt)
     found, _ = mentions(options, text)
-    lead = lead_of(options)
+    lead = lead_of(options) if lead else None
     implicit = not found and lead is not None and bool(lead.get("voice")) and not PICTURE_TAG.search(text)
     lines = dialogue(options, text, default=lead if implicit else None)
     talking = [c for c in ([lead] if implicit else found)
@@ -1048,7 +1180,7 @@ def clip_cast(options: dict, prompt: str, voices: bool = True) -> dict:
         said = [{"name": d["speaker"]["name"] if d["speaker"] else None, "line": d["line"]} for d in lines]
         return {"mode": "voices", "characters": talking, "images": images, "voices": voices, "language": lang,
                 "lines": said, "prompt": out,
-                "record": [{"name": c["name"], "desc": c.get("desc", "")} for c in talking]}
+                "record": [_cast_record(c) for c in talking]}
     found = [c for c in found if c["images"]]
     if found:
         tags, images = _picture_tags(found)
@@ -1062,17 +1194,17 @@ def clip_cast(options: dict, prompt: str, voices: bool = True) -> dict:
             if not c["images"] or c["name"] in seen or inside(m.start()):
                 return c["name"]
             seen.add(c["name"])
-            return f"{c['name']} (the person in {tags[c['name']]})"
+            return f"{c['name']} (the {_KIND_WORD[kind_of(c)]} in {tags[c['name']]})"
         out = MENTION.sub(name, text)
         if (options.get("identity") or {}).get("hint", True):
-            extra = [f"{c['name']} has exactly the face of the person in {tags[c['name']]}." for c in found]
+            extra = [_tie(c, tags[c["name"]]) for c in found]
             extra += [f"{c['name']}: {c['desc'].rstrip('.')}." for c in found if c.get("desc")]
-            extra.append("The pictures only show who the people are; the scene, pose and framing come from the "
-                         "video.")
+            if _pictures_note(found):
+                extra.append(_pictures_note(found))
             out = f"{out.rstrip()} {' '.join(extra)}"
         hint = (options.get("identity") or {}).get("hint", True)      # the descriptions are in the prompt only then
         return {"mode": "mention", "characters": found, "images": images, "voices": [], "prompt": out,
-                "record": [{"name": c["name"], "desc": c.get("desc", "") if hint else ""} for c in found]}
+                "record": [_cast_record(c, c.get("desc", "") if hint else "") for c in found]}
     plain = MENTION.sub(lambda m: (character(options, m.group(1)) or {"name": m.group(0)})["name"], text)
     if PICTURE_TAG.search(text) and all_pictures(options):
         return {"mode": "tags", "characters": cast_of(options), "images": all_pictures(options), "voices": [],
@@ -1081,6 +1213,94 @@ def clip_cast(options: dict, prompt: str, voices: bool = True) -> dict:
         return {"mode": "lead", "characters": [lead], "images": list(lead["images"]), "voices": [],
                 "prompt": plain, "record": None}
     return {"mode": None, "characters": [], "images": [], "voices": [], "prompt": plain, "record": None}
+
+
+def _cast_record(c: dict, desc: str | None = None) -> dict:
+    """What the clip's record keeps of a cast entry the model prompt describes: name, description, and the kind
+    of a non-person (a person is recorded as before)."""
+    out = {"name": c["name"], "desc": c.get("desc", "") if desc is None else desc}
+    if kind_of(c) != "person":
+        out["kind"] = kind_of(c)
+    return out
+
+
+def _language(options: dict) -> str:
+    return ((options.get("identity") or {}).get("language") or "English").strip() or "English"
+
+
+def _h3_cast(options: dict, prompt: str, voices: bool, lead_ok: bool) -> dict:
+    """clip_cast in the h3 format. The pictures are chosen as in the classic format: the cast entries the prompt
+    mentions (in order of first mention, their pictures numbered on), every picture in cast order when it writes
+    <Picture N> itself, else the lead (switched on, a person, with pictures or a voice that speaks). Every entry
+    the prompt mentions is a subject (also one without pictures: its description is put in at its first
+    mention); a person with a voice who speaks gets the voice (after the <Audio N> the prompt names, in speaking
+    order: h3_prompt.voice_numbers). Lines nobody is named for are the implicit lead's.
+    A prompt that already is a structured H3 prompt (h3_prompt.is_structured) is sent as written: the pictures as
+    above, no voices, nothing added.
+    Besides clip_cast's keys: "h3" = {"structured", "body" (style prefix + prompt + suffix, without the trailing
+    sound lines), "soundscape", "music" (those lines; None: not given), "subjects" (h3_prompt subjects), "lines"
+    (spoken lines with offsets into body), "lead_implicit", "sounds" (the highest <Audio N> named)}; "prompt" is the
+    text without the clip's frames, camera and notes (model_prompt gives the full one)."""
+    structured = _h3.is_structured(prompt)
+    if structured:
+        body, scape, music = (prompt or "").strip(), None, None
+    else:
+        own, scape, music = _h3.split_sound_sections(prompt)
+        body = full_prompt(options, own)
+    n_sounds = audio_mentioned(full_prompt(options, prompt))
+    found, _ = mentions(options, body)
+    lead = lead_of(options) if lead_ok else None
+    tags = bool(PICTURE_TAG.search(body)) and bool(all_pictures(options)) and not any(c["images"] for c in found)
+    implicit = not found and lead is not None and not PICTURE_TAG.search(body)
+    lines = [] if structured else dialogue(options, body, default=lead if implicit else None)
+    if implicit and not lead["images"]:              # a lead without pictures only counts with its voice
+        implicit = voices and bool(lead.get("voice")) and any((d["speaker"] or {}).get("name") == lead["name"]
+                                                                     for d in lines)
+        if not implicit:
+            lines = dialogue(options, body)
+    if tags:
+        chars = [c for c in cast_of(options) if c["images"]] + [c for c in found if not c["images"]]
+    else:
+        chars = [lead] if implicit else list(found)
+    subjects, images, record = [], [], []
+    for c in chars:
+        first = len(images) + 1
+        images += c["images"]
+        subjects.append({"name": c["name"], "kind": kind_of(c), "desc": (c.get("desc") or "").strip(),
+                         "pictures": list(range(first, len(images) + 1)),
+                         "voice": voices and not structured and kind_of(c) == "person" and bool(c.get("voice"))})
+        record.append(_cast_record(c))
+    said = [{"start": d["start"], "end": d["end"], "line": d["line"],
+             "speaker": d["speaker"]["name"] if d["speaker"] else None} for d in lines]
+    numbers = _h3.voice_numbers(subjects, said, n_sounds)
+    voice_files = [character(options, n)["voice"]["file"] for n in sorted(numbers, key=numbers.get)]
+    if voice_files:
+        mode = "voices"
+    elif tags:
+        mode = "tags"
+    elif implicit and lead["images"]:
+        mode = "lead"
+    elif images:
+        mode = "mention"
+    else:
+        mode = None
+    h = {"structured": structured, "body": body, "soundscape": scape, "music": music, "subjects": subjects,
+         "lines": said, "lead_implicit": implicit, "sounds": n_sounds}
+    out = {"mode": mode, "characters": chars, "images": images, "voices": voice_files,
+           "prompt": body if structured else _h3.compose(
+               body, subjects=subjects, sounds=n_sounds, lines=said, language=_language(options),
+               lead_implicit=implicit, soundscape=scape, music=music, resolve=_resolver(options),
+               reference=bool(images or voice_files or n_sounds)),
+           "record": record or None, "h3": h}
+    if mode == "voices":
+        out.update({"language": _language(options),
+                    "lines": [{"name": d["speaker"], "line": d["line"]} for d in said]})
+    return out
+
+
+def _resolver(options: dict):
+    """@word -> the cast name it means (None: nobody in the cast), for h3_prompt.compose."""
+    return lambda w: (character(options, w) or {}).get("name")
 
 
 def cast_problems(project: Path, tree: Tree, todo: list[str]) -> list[str]:
@@ -1098,7 +1318,9 @@ def cast_problems(project: Path, tree: Tree, todo: list[str]) -> list[str]:
             out.append(f"clip #{nid[1:]} mentions @{word}, but there is no such character"
                        + (f" — did you mean @{close}?" if close else " (add it in the Cast)"))
         for c in found:
-            if not c["images"] and not c.get("voice"):
+            if kind_of(c) != "person" and not c["images"]:
+                out.append(f"@{c['name']} (clip #{nid[1:]}) has no picture yet")
+            elif not c["images"] and not c.get("voice"):
                 out.append(f"@{c['name']} (clip #{nid[1:]}) has no face picture or voice yet")
         for m in WRONG_TAG.finditer(text):
             out.append(f"clip #{nid[1:]} writes <{m.group(1)} {m.group(2)}>; the model only knows <Picture "
@@ -1113,11 +1335,12 @@ def cast_problems(project: Path, tree: Tree, todo: list[str]) -> list[str]:
                 n = len(use["images"])
                 out.append(f"clip #{nid[1:]} names <Picture {top}>, but the cast has only {n} face "
                            f"picture{'' if n == 1 else 's'}")
+        faces = "face " if all(kind_of(c) == "person" for c in use["characters"]) else ""
         if len(use["images"]) > MAX_CAST_PICTURES:
-            out.append(f"clip #{nid[1:]} needs {len(use['images'])} face pictures; the model takes at most "
+            out.append(f"clip #{nid[1:]} needs {len(use['images'])} {faces}pictures; the model takes at most "
                        f"{MAX_CAST_PICTURES}")
         if any(not (Path(project) / r).is_file() for r in use["images"]):
-            out.append(f"a face picture of clip #{nid[1:]} is missing in refs/")
+            out.append(f"a {faces}picture of clip #{nid[1:]} is missing in refs/")
         if use["voices"]:
             if any(not (Path(project) / r).is_file() for r in use["voices"]):
                 out.append(f"a voice of clip #{nid[1:]} is missing in refs/")
@@ -1720,7 +1943,8 @@ class Checker:
         if span is not None and (node.overrides or {}).get("sound_over"):
             span = {**span, "overlay": True}       # laid over the clip afterwards: the plain model, no lip sync
         return None if base is None else node_settings(base, self.tree.options, node, self.audio_pool(),
-                                                       self.picture_sha, source_sound=span)
+                                                       self.picture_sha, source_sound=span,
+                                                       frames_given=plain_frames(self.project, self.tree, node))
 
     def start_frame(self, node: Node) -> Path | None:
         """The frame a generated clip starts from: the parent's last frame, the start image, or None (a first
@@ -2232,41 +2456,168 @@ def _stack_triggers(options: dict, node: Node, stack: list) -> list[str] | None:
     return words
 
 
-def model_prompt(options: dict, node: Node, settings: dict | None) -> str:
+def _soundtrack_sentence(ss, k: int) -> str:
+    mode = ss.get("mode") if isinstance(ss, dict) else ss
+    sentence = (REPEAT_SOUND_TEXT if mode == "previous" else
+                TRACK_SOUND_TEXT if mode == "track" or (isinstance(mode, str) and mode.startswith(TRACK_PREFIX))
+                else SOURCE_SOUND_TEXT)
+    return sentence.format(k=k)
+
+
+def model_prompt(options: dict, node: Node, settings: dict | None, *, start: bool = False,
+                 end: bool = False) -> str:
     """What the model gets for a generated clip: the cast's prompt (clip_cast) with its LoRAs' trigger words, and
-    with "Continue the video's sound" the sentence that makes the last sound reference its soundtrack."""
+    with "Continue the video's sound" the sentence that makes the last sound reference its soundtrack.
+    start / end: the clip is given a plain start / end frame (plain_frames; not one a motion guide replaces). Only
+    the h3 format uses them (the header of the base formats, or "begins exactly from the given start frame"); a
+    frame the settings number ("frame_pictures") counts as given anyway."""
+    if is_h3(options):
+        return _h3_model_prompt(options, node, settings or {}, start, end)
     from .triggers import with_triggers
     prompt = _camera.apply(node.prompt, (settings or {}).get("camera"))    # #tokens and the clip's camera move
     ss = (settings or {}).get("source_sound")
     given = bool(ss) and not (isinstance(ss, dict) and ss.get("overlay"))      # (then without the voices)
-    text = with_triggers(clip_cast(options, prompt, voices=not given)["prompt"],
+    text = with_triggers(clip_cast(options, prompt, voices=not given, lead=lead_on(node))["prompt"],
                          list((settings or {}).get("lora_triggers") or []))
     if ss and not (isinstance(ss, dict) and ss.get("overlay")):   # (a sound laid over is not the model's)
         k = len((settings or {}).get("audio_refs") or []) + 1
-        mode = ss.get("mode") if isinstance(ss, dict) else ss
-        sentence = (REPEAT_SOUND_TEXT if mode == "previous" else
-                    TRACK_SOUND_TEXT if mode == "track" or (isinstance(mode, str) and mode.startswith(TRACK_PREFIX))
-                    else SOURCE_SOUND_TEXT)
-        text = f"{text.rstrip()} {sentence.format(k=k)}"
+        text = f"{text.rstrip()} {_soundtrack_sentence(ss, k)}"
     notes = [f"At {k['at']:.1f} s: {k['note'].strip().rstrip('.')}." for k in node.keyframes if k["note"].strip()]
     if notes:                                      # what happens at each keyframe, in time order
         text = f"{text.rstrip()} {' '.join(notes)}"
     return text
 
 
+def frame_numbers(n_pictures: int, frames: list[str] | tuple[str, ...] | None) -> dict[str, int]:
+    """{"start": N, "end": M}: the <Picture N> of the frames sent as reference pictures (settings
+    "frame_pictures"), numbered after the clip's n_pictures subject pictures, start first (the workflow's order)."""
+    out, k = {}, n_pictures
+    for f in ("start", "end"):
+        if f in (frames or ()):
+            k += 1
+            out[f] = k
+    return out
+
+
+def _h3_model_prompt(options: dict, node: Node, s: dict, start: bool, end: bool) -> str:
+    """model_prompt in the h3 format: h3_prompt.compose with the cast plan of _h3_cast, the clip's frames (numbered
+    ones from s["frame_pictures"]), its seconds, trigger words, and as further sentences of the description the
+    camera move, the keyframe notes and the soundtrack sentence (its <Audio N> after the sounds and voices)."""
+    ss = s.get("source_sound")
+    given = bool(ss) and not (isinstance(ss, dict) and ss.get("overlay"))
+    use = clip_cast(options, _camera.expand(node.prompt), voices=not given, lead=lead_on(node))
+    h = use["h3"]
+    if h["structured"]:
+        return h["body"]
+    extra = [_camera.sentence(s.get("camera"))]
+    extra += [f"At {k['at']:.1f} s: {k['note'].strip().rstrip('.')}." for k in node.keyframes if k["note"].strip()]
+    soundtrack = None
+    if given:
+        soundtrack = len(s.get("audio_refs") or []) + 1
+        extra.append(_soundtrack_sentence(ss, soundtrack))
+    frames = int(s.get("frames") or (node.overrides or {}).get("frames") or options.get("frames", 73))
+    return _h3.compose(h["body"], start=start, end=end, seconds=frames / chain.FPS, subjects=h["subjects"],
+                       frame_pictures=frame_numbers(len(use["images"]), s.get("frame_pictures")),
+                       sounds=h["sounds"], soundtrack=soundtrack, lines=h["lines"], language=_language(options),
+                       lead_implicit=h["lead_implicit"], triggers=list(s.get("lora_triggers") or []),
+                       extra=[x for x in extra if x], soundscape=h["soundscape"], music=h["music"],
+                       resolve=_resolver(options),
+                       reference=bool(use["images"] or use["voices"] or h["sounds"] or soundtrack))
+
+
+def plain_frames(project: Path, tree: Tree, node: Node) -> tuple[bool, bool]:
+    """(start, end): a generated clip is given a plain start frame / end frame, as run_tree and the workflow send
+    them: a start frame unless it is a first clip without a start image or its start is a motion guide (one
+    after another clip), an end frame when a video follows (without a motion guide) or it has its own end image."""
+    if node.is_video:
+        return False, False
+    guide = int((node.overrides or {}).get("guide") or 0)
+    start = (Path(project) / START_FILE).is_file() if node.parent is None else not guide
+    vc = tree.video_child(node.id)
+    end = not guide if vc is not None else bool(end_image_used(tree, node))
+    return start, end
+
+
+def clip_inputs(project: Path, tree: Tree, nid: str, checker: "Checker | None" = None) -> dict:
+    """What a generated clip is made with, in the order the model gets it, and the exact prompt (for the clip card's
+    chips and the "Model prompt" dialog; nothing is made or written). Either format.
+    {"format": "h3" | "classic", "model": "ref2va" | "fl2va", "seconds": clip length,
+     "start": {"given": "frame" | "guide" | None, "file": Path | None, "picture": N | None},
+     "end":   {"given": "frame" | "guide" | None, "file": Path | None, "picture": N | None},
+     "subjects": [{"name", "kind", "pictures": [N ...], "files": [rel ...], "lead": True for the implicit lead,
+                   "voice": its <Audio N> or None}]  (in subject order: <Subject 1> ... in the h3 format),
+     "pictures": [{"n": N, "file": rel or Path, "what": "@Anna" | "start frame" | "end frame"}]  (ref_images order),
+     "sounds":   [{"n": N, "file": rel or None, "what": "sound" | "voice of @Anna" | "soundtrack"}]  (<Audio N>),
+     "prompt": what the model gets, "settings": the settings it is made with (Checker.settings)}
+    picture: the <Picture N> a frame has as a reference picture (h3 + reference model); a frame without one is
+    given only as a pinned / first / last frame. The soundtrack's file is cut when the clip is made (file None)."""
+    checker = checker or Checker(project, tree)
+    node = tree.nodes[nid]
+    if node.is_video:
+        raise ValueError(f"#{nid[1:]} is a real video")
+    s = checker.settings(nid) or {}
+    use = node_cast(tree.options, node)
+    plain = plain_frames(project, tree, node)
+    nums = frame_numbers(len(use["images"]), s.get("frame_pictures"))
+    guide = int((node.overrides or {}).get("guide") or 0)
+    vc = tree.video_child(nid)
+    start_file = checker.start_frame(node)
+    end_file = (Path(project) / vc.made["first"] if vc is not None and vc.made and vc.made.get("first") else None) \
+        if vc is not None else (Path(project) / node.end_image if end_image_used(tree, node) else None)
+    start = {"given": "frame" if plain[0] else "guide" if guide and node.parent is not None else None,
+             "file": start_file if plain[0] else None, "picture": nums.get("start")}
+    end = {"given": "frame" if plain[1] else "guide" if guide and vc is not None else None,
+           "file": end_file if plain[1] else None, "picture": nums.get("end")}
+    mentioned = {c["name"] for c in mentions(tree.options, full_prompt(tree.options, node.prompt))[0]}
+    sounds_n = audio_mentioned(full_prompt(tree.options, node.prompt))
+    pool = audio_refs(tree)
+    sounds = [{"n": k, "file": pool[k - 1]["file"] if k <= len(pool) else None, "what": "sound"}
+              for k in range(1, sounds_n + 1)]
+    by_voice = {c["voice"]["file"]: c["name"] for c in cast_of(tree) if c.get("voice")}
+    voice_no = {}
+    for f in use["voices"]:
+        voice_no[by_voice.get(f)] = len(sounds) + 1
+        sounds.append({"n": len(sounds) + 1, "file": f, "what": f"voice of @{by_voice.get(f)}"})
+    ss = s.get("source_sound")
+    if ss and not ss.get("overlay"):
+        sounds.append({"n": len(s.get("audio_refs") or []) + 1, "file": None, "what": "soundtrack"})
+    subjects, pictures, k = [], [], 0
+    for c in use["characters"]:
+        if use["mode"] == "tags" and not c["images"] and c["name"] not in mentioned:
+            continue                                 # (classic tags: the whole cast, those without pictures unused)
+        n = list(range(k + 1, k + 1 + len(c["images"])))
+        k += len(c["images"])
+        subjects.append({"name": c["name"], "kind": kind_of(c), "pictures": n, "files": list(c["images"]),
+                         "lead": use["mode"] != "tags" and c["name"] not in mentioned,
+                         "voice": voice_no.get(c["name"])})
+        pictures += [{"n": i, "file": f, "what": f"@{c['name']}"} for i, f in zip(n, c["images"])]
+    for f, d, what in (("start", start, "start frame"), ("end", end, "end frame")):
+        if d["picture"] is not None:
+            pictures.append({"n": d["picture"], "file": d["file"], "what": what})
+    return {"format": "h3" if is_h3(tree) else "classic", "model": "ref2va" if uses_ref_model(s) else "fl2va",
+            "seconds": int(s.get("frames") or clip_length(tree, node)) / chain.FPS, "start": start, "end": end,
+            "subjects": subjects, "pictures": pictures, "sounds": sounds,
+            "prompt": model_prompt(tree.options, node, s, start=plain[0], end=plain[1]), "settings": s}
+
+
 def node_settings(base: dict, options: dict, node: Node, audio_pool: list[dict] | None = None,
                   picture_sha: Callable[[str], str | None] | None = None,
-                  source_sound: dict | None = None) -> dict:
+                  source_sound: dict | None = None, frames_given: tuple[bool, bool] = (False, False)) -> dict:
     """The settings one node is made with: the project's, with the node's own LoRA stack and overrides.
     The first LoRA of the stack is recorded as "lora", the others as "extra_loras" (as before).
     audio_pool: the project's sound references ({"file", "sha1"}); the clip records those up to the highest
     <Audio N> its prompt names (none: nothing recorded, as before), then the voices of the characters who speak.
     picture_sha: the content hash of a face picture (project-relative name); the clip records the pictures it is
-    made with (see clip_cast), and with @mentions what the model prompt says about the characters."""
+    made with (see clip_cast), and with @mentions what the model prompt says about the characters.
+    In the h3 format (is_h3) it also records "prompt_format": "h3", the cast entries the prompt describes (also
+    without pictures: their descriptions are in it), and "frame_pictures": frames_given = plain_frames (start,
+    end) that are also sent as numbered reference pictures: with the reference model only, after the subject
+    pictures, within MAX_CAST_PICTURES (the end frame's number goes first, then the start frame's)."""
     ov = node.overrides or {}
     n_audio = 0 if node.is_video else audio_mentioned(full_prompt(options, node.prompt))
     given = source_sound is not None and not source_sound.get("overlay")       # (then without the voices)
-    use = clip_cast(options, node.prompt, voices=not given) if not node.is_video \
+    h3 = is_h3(options) and not node.is_video
+    use = clip_cast(options, node.prompt, voices=not given, lead=lead_on(node)) if not node.is_video \
         else {"images": [], "record": None, "voices": []}
     sha = picture_sha or (lambda rel: None)
     refs = [{"file": r, "sha1": sha(r)} for r in use["images"]]
@@ -2275,7 +2626,7 @@ def node_settings(base: dict, options: dict, node: Node, audio_pool: list[dict] 
     ident = options.get("identity") or {}
     stack = node_loras(node)
     lora, strength = stack[0] if stack else (None, 1.0)
-    return chain.settings_dict(model=base["model"], lora=lora, extra_loras=stack[1:],
+    s = chain.settings_dict(model=base["model"], lora=lora, extra_loras=stack[1:],
                                strength=strength,
                                frames=ov.get("frames", options.get("frames", 73)),
                                # turbo / HyperFlow: their steps for every clip (a clip's own steps would break it)
@@ -2287,7 +2638,7 @@ def node_settings(base: dict, options: dict, node: Node, audio_pool: list[dict] 
                                turbo=(base["turbo"]["lora"], base["turbo"]["strength"]) if base.get("turbo") else None,
                                cfg=float(base.get("cfg", 1.0)),
                                backend="comfyui", refs=refs or None, cast=use["record"],
-                               ref_size=ident.get("size", "match"), ref_hint=ident.get("hint", True),
+                               ref_size=ident.get("size", "match"), ref_hint=True if h3 else ident.get("hint", True),
                                guide=int(ov.get("guide") or 0),
                                style=(base.get("prompt_prefix", ""), base.get("prompt_suffix", "")),
                                audio_refs=sounds or None, voice_language=use.get("language"),
@@ -2296,6 +2647,17 @@ def node_settings(base: dict, options: dict, node: Node, audio_pool: list[dict] 
                                veda=veda_for(options, base["width"], base["height"],
                                              int(ov.get("frames", options.get("frames", 73)))),
                                camera=_camera.clean(ov.get("camera")))
+    if not h3:
+        return s
+    s["prompt_format"] = "h3"
+    if use["record"]:
+        s["cast"] = [dict(c) for c in use["record"]]
+    if (refs or sounds or given) and not use["h3"]["structured"]:     # the reference model: frames get numbers
+        room = max(0, MAX_CAST_PICTURES - len(refs))
+        frames = [f for f, on in zip(("start", "end"), frames_given) if on][:room]
+        if frames:
+            s["frame_pictures"] = frames
+    return s
 
 
 def veda_for(options: dict, width: int, height: int, frames: int) -> bool:
@@ -2659,8 +3021,14 @@ def run_tree(generator: chain.Generator, project: Path, targets: list[str],
                                      fill=ss.get("mode") == "track")
                         if not ss.get("overlay"):  # the model makes the picture to it (lip sync)
                             call["audio_paths"] = list(call.get("audio_paths") or []) + [str(sound)]
-                    generator.generate(model_prompt(tree.options, node, settings), send, new_video, new_frame,
-                                       node.seed, settings=call)
+                    plain = (send is not None and not any(g.get("at") == "start" for g in guides),
+                             end_image is not None)        # what the workflow really gets as plain frames
+                    numbered = settings.get("frame_pictures") or []
+                    if ("start" in numbered and not plain[0]) or ("end" in numbered and not plain[1]):
+                        raise RuntimeError(f"clip #{nid[1:]}: its frames are not the ones its settings number "
+                                           f"({', '.join(numbered)})")
+                    generator.generate(model_prompt(tree.options, node, settings, start=plain[0], end=plain[1]),
+                                       send, new_video, new_frame, node.seed, settings=call)
                     if sound is not None and new_video.exists():
                         chain.replace_audio(new_video, sound)    # exactly the recorded speech, not a remake
                 if not new_video.exists() or not new_frame.exists():
@@ -2928,7 +3296,10 @@ def refine_path(generator, project: Path, nid: str, size: str, out: Path,
             else:
                 s = node.made.get("settings") or {}
                 w, h = refine_size(int(s["width"]), int(s["height"]), size)
-                made_prompt = _camera.apply(node.made.get("prompt", node.prompt), s.get("camera"))
+                made_prompt = node.made.get("prompt", node.prompt)
+                if s.get("prompt_format") == "h3" and not _h3.is_structured(made_prompt):
+                    made_prompt = _h3.split_sound_sections(made_prompt)[0]   # (the camera sentence before them)
+                made_prompt = _camera.apply(made_prompt, s.get("camera"))
                 prompt = " ".join(x for x in (s.get("prompt_prefix", ""), made_prompt, s.get("prompt_suffix", "")) if x)
                 from .triggers import with_triggers
                 prompt = with_triggers(prompt, list(s.get("lora_triggers") or []))   # as the clip was made

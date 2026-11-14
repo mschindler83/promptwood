@@ -1,5 +1,8 @@
 """Every test gets its own LoRA trigger database and LoRA presets (never the app's real one in ~/.local/share) and an in-memory
-keyring (never the system keyring with the user's CivitAI key)."""
+keyring (never the system keyring with the user's CivitAI key).
+
+New trees are made in the classic prompt format here (the tests written before the h3 format assert its text); a test
+of the h3 format sets tree.options["prompt_format"] = "h3", one marked h3_default gets the app's real default."""
 import pytest
 
 
@@ -18,6 +21,13 @@ class _MemoryKeyring:
         if (service, user) not in self.store:
             raise keyring.errors.PasswordDeleteError("none")
         del self.store[(service, user)]
+
+
+@pytest.fixture(autouse=True)
+def classic_prompts(request, monkeypatch):
+    if request.node.get_closest_marker("h3_default") is None:
+        from video_chain import tree as T
+        monkeypatch.setitem(T.DEFAULT_OPTIONS, "prompt_format", "classic")
 
 
 @pytest.fixture(autouse=True)

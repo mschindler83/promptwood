@@ -494,7 +494,7 @@ def join_film(film: Film, out: Path, keep: bool = False) -> Path:
 
 def cast_by_scene(film: Film) -> tuple[list[str], list[tuple[str, dict[str, str]]]]:
     """Who appears in which scene (along the path the film plays): (character names, [(scene title,
-    {name: mark})]); mark: "face", "voice" or "face+voice"."""
+    {name: mark})]); mark: "face", "voice", "face+voice" or "picture" (a place, object or style)."""
     names: list[str] = []
     rows = []
     for sc in film.scenes:
@@ -515,7 +515,7 @@ def cast_by_scene(film: Film) -> tuple[list[str], list[tuple[str, dict[str, str]
             use = T.node_cast(t.options, n)
             for c in use["characters"]:
                 if c["images"]:
-                    marks.setdefault(c["name"], set()).add("face")
+                    marks.setdefault(c["name"], set()).add("face" if T.kind_of(c) == "person" else "picture")
                 if c.get("voice") and c["voice"]["file"] in (use.get("voices") or []):
                     marks.setdefault(c["name"], set()).add("voice")
         rows.append((sc.title, {k: "+".join(sorted(v)) for k, v in marks.items()}))

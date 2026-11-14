@@ -31,5 +31,6 @@ video_chain = ["theme/*.json", "theme/*.in", "theme/icons/*.svg", "theme/fonts/*
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "tests"]
-markers = ["models: needs real model files (run with -m models)"]
+markers = ["models: needs real model files (run with -m models)",
+           "h3_default: new trees get the app's real default prompt format (h3), not the tests' classic one"]
 addopts = "-m 'not models'"

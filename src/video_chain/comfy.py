@@ -280,7 +280,7 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
                    pika: tuple[str, float] | None = None, audio_refs: list[str] = (),
                    audio_key=lambda i: f"ref_audios.ref_audio_{i}", start_pin: int = 1,
                    recipe: dict | None = None, veda: str | None = None,
-                   keyframes: list[tuple[str, int]] = ()) -> dict:
+                   keyframes: list[tuple[str, int]] = (), frame_refs: list[str] = ()) -> dict:
     """The API-format workflow for one clip (image = the uploaded start image, as LoadImage names it; None: a
     clip without a start frame).
 
@@ -295,6 +295,10 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
     where the previous one ended and sees the same original face. start_pin > 1: the start image is anchored as a
     still of that many frames (RepeatImageBatch): one frame alone does not hold the start in the reference model when
     the prompt's story does not fit it, a short still does (as a motion guide does).
+    frame_refs ("start" and / or "end", the h3 prompt format's settings "frame_pictures"): the plain start / end
+    frame is also a reference picture, after all refs (start first), so the prompt can name it <Picture N>
+    (MiniMaxH3AddGuide only pins a frame, the text encoder never sees it); the pinning stays as it is. The frames
+    go whole (the node scales a reference picture down to the canvas area, never crops it).
 
     With audio_refs (uploaded sound files, <Audio 1> ... in the prompt): the ref2va model too (also without
     reference images); MiniMaxH3ReferenceToVideo gets them with the audio VAE, the prompt says what each one is for
@@ -343,6 +347,10 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
         for i, ref in enumerate(refs):
             wf[f"ref{i}"] = {"class_type": "LoadImage", "inputs": {"image": ref}}
             inputs[ref_key(i)] = [f"ref{i}", 0]
+        for i, f in enumerate([f for f in ("start", "end") if f in frame_refs], start=len(refs)):
+            if not (use_start if f == "start" else use_end):
+                raise ValueError(f"the {f} frame is to be a reference picture, but the clip has no plain {f} frame")
+            inputs[ref_key(i)] = [f, 0]                # the same LoadImage the guide pins
         for i, sound in enumerate(audio_refs):
             wf[f"aref{i}"] = {"class_type": "LoadAudio", "inputs": {"audio": sound}}
             inputs[audio_key(i)] = [f"aref{i}", 0]
@@ -364,6 +372,8 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
                                           "image": ["end", 0], "frame_idx": -1}}
             positive = ["end_guide", 0]
     else:
+        if frame_refs:
+            raise ValueError("frames are reference pictures only with the reference model (pictures or sounds)")
         inputs = {"clip": ["clip", 0], "vae": ["vae", 0], "prompt": prompt, "width": int(width),
                   "height": int(height), "length": int(frames)}
         if use_start:
@@ -756,16 +766,17 @@ class ComfyGenerator:
             end_image = self.upload(Path(s["end_image"]))
             uploads.append((end_image, s["end_image"]))
         refs = []
-        if s.get("ref_paths"):
+        frame_refs = [f for f in ("start", "end") if f in (s.get("frame_pictures") or [])]
+        if s.get("ref_paths") or frame_refs:
             self.check_ref_model()
-            for r in s["ref_paths"]:
+            for r in s.get("ref_paths") or []:
                 refs.append(self.upload(Path(r)))
                 uploads.append((refs[-1], r))
-            if s.get("ref_hint", True):
+            if refs and s.get("ref_hint", True) and s.get("prompt_format") != "h3":   # (h3: the prompt ties them)
                 prompt = with_ref_hint(prompt)
         sounds = []
         if s.get("audio_paths"):
-            if not refs:
+            if not refs and not frame_refs:
                 self.check_ref_model()
             for a in s["audio_paths"]:
                 sounds.append(self.upload(Path(a)))
@@ -774,7 +785,8 @@ class ComfyGenerator:
         wf = build_workflow(prompt=prompt, image=image, seed=seed, width=s.get("width", 512),
                             height=s.get("height", 512), frames=s.get("frames", 73), steps=s.get("steps", 20),
                             loras=loras, audio=bool(s.get("audio", True)), prefix=prefix, refs=refs,
-                            ref_size=s.get("ref_size", "match"), ref_key=self.ref_key() if refs else None,
+                            ref_size=s.get("ref_size", "match"),
+                            ref_key=self.ref_key() if refs or frame_refs else None, frame_refs=frame_refs,
                             turbo=turbo, end_image=end_image, guides=guides, hyperflow=hyper, pika=pika,
                             cfg=float(s.get("cfg", 1.0)),
                             audio_refs=sounds, **({"audio_key": self.audio_key()} if sounds else {}),
@@ -2180,14 +2192,29 @@ def clean_refined(text: str, lines: bool = False) -> str:
     return "\n".join([body] + [f"{k}: {sounds[k]}" for k in SOUND_FIELDS if k in sounds]).strip()
 
 
+_KIND_TEXT = {"place": "a place", "object": "an object", "style": "a visual style"}
+
+
 def cast_instruction(cast: list[dict]) -> str:
-    """What the refiner is told about the cast ([{"name", "desc", "voice": bool}]): the names stay @Name, and a
-    spoken line goes in quotes into a sentence that starts with its speaker's @Name (the app finds the speaker
-    there and gives the line that character's voice)."""
+    """What the refiner is told about the cast ([{"name", "desc", "voice": bool, "kind": person (also missing) |
+    place | object | style}]): the names stay @Name, and a spoken line goes in quotes into a sentence that starts
+    with its speaker's @Name (the app finds the speaker there and gives the line that character's voice). A place,
+    object or style is said to be one, so the refiner does not make it a person."""
     if not cast:
         return ""
-    people = "; ".join(f"@{c['name']}" + (f" ({c['desc'].strip().rstrip('.')})" if c.get("desc") else "")
-                       + (", has a voice" if c.get("voice") else "") for c in cast)
+
+    def one(c: dict) -> str:
+        desc = c.get("desc", "").strip().rstrip(".") if c.get("desc") else ""
+        what = _KIND_TEXT.get(c.get("kind") or "person")
+        if what:
+            return f"@{c['name']} ({what}" + (f": {desc}" if desc else "") + ")"
+        return (f"@{c['name']}" + (f" ({c['desc'].strip().rstrip('.')})" if c.get("desc") else "")
+                + (", has a voice" if c.get("voice") else ""))
+    people = "; ".join(one(c) for c in cast)
+    things = [f"@{c['name']}" for c in cast if c.get("kind") in _KIND_TEXT]
+    if things:
+        people += (f". {', '.join(things)} {'is' if len(things) == 1 else 'are'} not a person: never give "
+                   f"{'it' if len(things) == 1 else 'them'} a spoken line or a person's actions")
     return (f"The cast, written as @Name: {people}. The descriptions are for your information; do not repeat "
             "them in the prompt. Write a cast member always as @Name, exactly as written (not "
             "as a description or a plain name), at least once in each sentence about them. Mention a cast member only "

@@ -1298,3 +1298,78 @@ def test_seedvr2_lanczos_on_all_cores_when_comfyui_has_the_node(server, tmp_path
     gen.seedvr(draft, tmp_path / "b.mp4", (128, 72))
     r = server.prompts[-1]["resize"]
     assert r == {"class_type": "VideoChainLanczosScale", "inputs": {"image": ["parts", 0], "width": 128, "height": 72}}
+
+
+def test_frames_as_numbered_reference_pictures():
+    """h3: the plain start / end frame also goes in as a reference picture after the subject pictures (start
+    first), the pinning stays; a frame that is not there, or the plain model, refuses it."""
+    kw = dict(seed=1, width=512, height=512, frames=39, steps=20, loras=[], audio=False, prefix="p")
+    wf = C.build_workflow(prompt="x", image="s.png", end_image="e.png", refs=["r1.png", "r2.png"],
+                          frame_refs=["end", "start"], **kw)
+    ref = wf["refcond"]["inputs"]
+    assert [ref[f"ref_images.ref_image_{i}"] for i in range(4)] == [["ref0", 0], ["ref1", 0], ["start", 0],
+                                                                    ["end", 0]]
+    assert wf["cond"]["inputs"]["image"] == ["start", 0] and wf["end_guide"]["inputs"]["image"] == ["end", 0]
+    assert ref["ref_image_size"] == "match"                    # (the node scales a picture down, never crops it)
+    wf = C.build_workflow(prompt="x", image="s.png", audio_refs=["a.wav"], frame_refs=["start"], **kw)
+    assert wf["refcond"]["inputs"]["ref_images.ref_image_0"] == ["start", 0]          # sounds only: Picture 1
+    with pytest.raises(ValueError, match="no plain end frame"):
+        C.build_workflow(prompt="x", image="s.png", refs=["r.png"], frame_refs=["end"], **kw)
+    with pytest.raises(ValueError, match="no plain start frame"):
+        C.build_workflow(prompt="x", image="s.png", refs=["r.png"], frame_refs=["start"],
+                         guides=[{"name": "g.mp4", "frame_idx": 0, "at": "start"}], **kw)
+    with pytest.raises(ValueError, match="only with the reference model"):
+        C.build_workflow(prompt="x", image="s.png", frame_refs=["start"], **kw)
+
+
+def test_h3_tree_and_workflow_agree_on_the_numbers(server, tmp_path):
+    """A clip of an h3 project made through ComfyUI: the prompt's <Picture N> are the workflow's ref_images in
+    that order (a person's 2 pictures, a place, the start frame), no reference sentence is added."""
+    from video_chain import tree as T
+    (server.root / "main.py").write_text("")
+    img = tmp_path / "in.png"
+    Image.new("RGB", (192, 108), (200, 10, 10)).save(img)
+    proj = tmp_path / "proj"
+    t = T.Tree()
+    t.options.update({"prompt_format": "h3", "frames": 39})
+    T.set_start_image(proj.mkdir() or proj, img, t)
+    for i, rgb in enumerate([(200, 150, 130), (190, 140, 120), (90, 90, 200)]):
+        Image.new("RGB", (64, 80), rgb).save(tmp_path / f"p{i}.png")
+    T.add_character(proj, t, "Anna", tmp_path / "p0.png", desc="woman, 30s")
+    T.add_picture(proj, t, "Anna", tmp_path / "p1.png")
+    T.add_character(proj, t, "Kitchen", tmp_path / "p2.png", kind="place")
+    a = t.add(None, "@Anna walks into @Kitchen.")
+    T.save(proj, t)
+    T.run_tree(C.ComfyGenerator(server.url, comfy_dir=server.root), proj, [a.id], log=lambda _m: None)
+    wf = server.prompts[-1]
+    ref = wf["refcond"]["inputs"]
+    keys = sorted(k for k in ref if k.startswith("ref_images."))
+    assert keys == [f"ref_images.ref_image_{i}" for i in range(4)] and ref["ref_images.ref_image_3"] == ["start", 0]
+    assert [wf[ref[k][0]]["inputs"]["image"].startswith("video-chain/") for k in keys[:3]] == [True] * 3
+    assert wf["cond"]["inputs"]["image"] == ["start_still", 0]                    # the start is still pinned
+    t = T.load(proj)
+    assert ref["prompt"] == T.clip_inputs(proj, t, a.id)["prompt"] and C.REF_HINT not in ref["prompt"]
+    assert "<Subject 1> is Anna (woman, 30s), the person in <Picture 1> and <Picture 2>." in ref["prompt"]
+    assert "<Subject 2> is Kitchen, the environment in <Picture 3>." in ref["prompt"]
+    assert "<Picture 4> is the first frame of [Shot 1]." in ref["prompt"]
+    assert t.nodes[a.id].made["settings"]["frame_pictures"] == ["start"]
+    assert T.Checker(proj, t).status(a.id) == "done"
+
+
+def test_refiner_is_told_what_a_reference_is():
+    persons = [{"name": "Anna", "desc": "woman, 30s.", "voice": True}, {"name": "Ben", "desc": ""}]
+    before = C.cast_instruction(persons)
+    assert "@Anna (woman, 30s), has a voice; @Ben." in before and "not a person" not in before
+    text = C.cast_instruction(persons + [{"name": "Kitchen", "desc": "sunny", "kind": "place"},
+                                         {"name": "Noir", "desc": "", "kind": "style"}])
+    assert "@Kitchen (a place: sunny); @Noir (a visual style). @Kitchen, @Noir are not a person: never give them " \
+           "a spoken line or a person's actions." in text
+    assert text.replace("; @Kitchen (a place: sunny); @Noir (a visual style). @Kitchen, @Noir are not a person: "
+                        "never give them a spoken line or a person's actions", "") == before
+    from video_chain import tree as T
+    t = T.Tree()
+    t.options["cast"] = [{"name": "Anna", "images": [], "desc": "woman, 30s.", "lead": True, "voice": {"file": "v"}},
+                         {"name": "Ben", "images": [], "desc": "", "lead": False},
+                         {"name": "Kitchen", "images": [], "desc": "sunny", "lead": False, "kind": "place"},
+                         {"name": "Noir", "images": [], "desc": "", "lead": False, "kind": "style"}]
+    assert C.cast_instruction(T.refiner_cast(t)) == text
