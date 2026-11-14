@@ -9,6 +9,7 @@ from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtWidgets import QAbstractItemView, QHBoxLayout, QListWidget, QListWidgetItem, QMenu, QPushButton, QWidget
 
+from .. import tree as T
 from .widgets import format_time, label
 
 THUMB = QSize(96, 54)
@@ -21,7 +22,7 @@ def state_text(s: dict) -> str:
     length = format_time(secs)
     if not n:
         return "no clip chosen" if s.get("clips") else "empty"
-    end = f" · ends at #{s['take'][1:]}" if s.get("fixed") and s.get("take") else ""
+    end = f" · ends at #{T.short_id(s['take'])}" if s.get("fixed") and s.get("take") else ""
     if s.get("done", 0) == n:
         return f"{length} · done{end}"
     parts = [f"{s[k]} {k}" for k in ("changed", "new") if s.get(k)]
@@ -118,7 +119,7 @@ class Storyboard(QWidget):
                 notes = html.escape(s["notes"]).replace("\n", "<br>") if s.get("notes") else ""
                 item.setToolTip("<p>" + (f"{notes}<br><br>" if notes else "") +
                                 f"Scene {k}: {html.escape(title)}. {s.get('clips', 0)} clips; the film plays it up to "
-                                + (f"clip #{s['take'][1:]}" if s.get("fixed") else "its selected clip") +
+                                + (f"clip #{T.short_id(s['take'])}" if s.get("fixed") else "its selected clip") +
                                 ". Click to work on it, drag to move it, right-click for more</p>")
                 item.setFlags(item.flags() | Qt.ItemIsDragEnabled)
                 self.list.addItem(item)
