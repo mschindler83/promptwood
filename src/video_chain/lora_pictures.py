@@ -2,9 +2,13 @@
 the gallery's text (prompts, settings); a picture is loaded only when the LoRA window shows it, as a small still
 (a video: its thumbnail frame), and kept in pictures/ next to the details so it is loaded once.
 
+A LoRA's cover (the thumbnail in the LoRA picker) is the first picture the Pictures setting allows of the creator's
+showcase on the LoRA's page (the version's images, CivitAI's own cover first), else of its gallery: covers().
+
 Only CivitAI's picture server is asked, without the API key, and only for a picture address CivitAI gave."""
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import tempfile
@@ -17,13 +21,18 @@ WIDTH = 320                      # pixels wide (CivitAI's server scales)
 MAX_BYTES = 4 * 2**20            # a small still is ~50 kB; more is not a still
 HOSTS = ("civitai.com", "civitai.red")
 LEVELS = ("None", "Soft", "Mature", "X")       # CivitAI's ratings, mildest first
+_LEVEL_NUMBERS = {1: "None", 2: "Soft", 4: "Mature"}   # (a version's images rate by number: 1 PG … 8 X, 16 XXX)
+COVER_TRIES = 3                  # pictures tried for a cover before the LoRA is shown without one
 USER_AGENT = "video-chain (LoRA example pictures)"
 _SIZE = re.compile(r"/(original=true|width=\d+)[^/]*/")
 
 
 def level(item: dict) -> str:
     """A gallery picture's rating: None (safe) / Soft / Mature / X; one CivitAI did not rate counts as X."""
-    lv = str((item or {}).get("nsfwLevel") or "")
+    raw = (item or {}).get("nsfwLevel")
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        return _LEVEL_NUMBERS.get(raw, "X")
+    lv = str(raw or "")
     if lv in LEVELS:
         return lv
     return "None" if (item or {}).get("nsfw") is False else "X"
@@ -78,11 +87,44 @@ def cache_dir(db=None) -> Path:
 
 
 def cached(item: dict, db=None) -> Path | None:
-    """Where a picture's still is kept (the file may not be there yet); None for a picture without an id."""
+    """Where a picture's still is kept (the file may not be there yet): by its id, else by its address; None for
+    a picture without either."""
     try:
         return cache_dir(db) / f"{int(item['id'])}.jpg"
     except (KeyError, TypeError, ValueError):
-        return None
+        pass
+    url = str((item or {}).get("url") or "") if isinstance(item, dict) else ""
+    return cache_dir(db) / f"u{hashlib.sha256(url.encode()).hexdigest()[:24]}.jpg" if url else None
+
+
+def covers(details: dict | None, show: str) -> list[dict]:
+    """The pictures that may be a LoRA's cover, best first (details: triggers.TriggerDB.details): the creator's
+    showcase on its page, then the gallery; only those `show` allows and that have a still to load."""
+    if not isinstance(details, dict) or show == "off":
+        return []
+    version = details.get("version") if isinstance(details.get("version"), dict) else {}
+    out = []
+    for group in (version.get("images"), details.get("examples")):
+        for it in group if isinstance(group, list) else []:
+            if isinstance(it, dict) and allowed(it, show) and still_url(it):
+                out.append(it)
+    return out
+
+
+def cover_file(path: str, db=None, show: str = "safe", load=None) -> Path | None:
+    """The local still of a LoRA's cover, loaded when needed (load(item) -> file, default: fetch); the next
+    picture is tried when one cannot be loaded. None when there is none to show."""
+    from . import triggers
+    db = db or triggers.db()
+    load = load or (lambda item: fetch(item, db))
+    for item in covers(db.details(path), show)[:COVER_TRIES]:
+        try:
+            f = load(item)
+        except OSError:
+            continue
+        if f:
+            return Path(f)
+    return None
 
 
 def fetch(item: dict, db=None, timeout: float = 20.0) -> Path | None:

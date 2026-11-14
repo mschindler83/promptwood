@@ -575,3 +575,86 @@ def test_refine_window_starts_from_or_rewrites_like_an_example(tmp_path, monkeyp
     dlg.refine()
     wait_idle(dlg)
     assert asks[-1][0][-1][1] == "ink4sketch, an example" and asks[-1][1] == "at night"
+
+
+def test_a_loras_cover_is_the_first_picture_it_may_show(tmp_path):
+    """The picker's thumbnail: the creator's showcase pictures first (as on the LoRA's CivitAI page), then the
+    gallery; only those the Pictures setting allows; a video by its thumbnail frame."""
+    from video_chain import lora_pictures as LP
+    url = "https://image.civitai.com/k/{}/original=true/{}.jpeg"
+    d = details(3)
+    for i, it in enumerate(d["examples"]):
+        it.update({"id": 200 + i, "nsfwLevel": "None", "url": url.format("g", i)})
+    d["version"]["images"] = [
+        {"id": 301, "nsfwLevel": 8, "type": "image", "url": url.format("v", 1)},                # X (CivitAI's number)
+        {"nsfwLevel": 1, "type": "image", "url": url.format("v", 2)},                            # safe, no id
+        {"id": 303, "nsfwLevel": 1, "type": "video", "url": "https://image.civitai.com/k/v/x.mp4"}]  # no still
+    assert LP.level({"nsfwLevel": 1}) == "None" and LP.level({"nsfwLevel": 2}) == "Soft"
+    assert LP.level({"nsfwLevel": 4}) == "Mature" and LP.level({"nsfwLevel": 16}) == "X"
+    assert [x.get("id") for x in LP.covers(d, "all")][:3] == [301, None, 200]
+    assert [x.get("id") for x in LP.covers(d, "safe")][:2] == [None, 200]
+    assert LP.covers(d, "off") == [] and LP.covers(None, "all") == [] and LP.covers({"version": None}, "all") == []
+    db, p = db_with(tmp_path, d)
+    a, b = LP.cached({"url": url.format("v", 2)}, db), LP.cached({"url": url.format("v", 3)}, db)
+    assert a and b and a != b and a.parent == LP.cache_dir(db)                     # kept by its address
+    asked = []
+
+    def fetch(item, _db=None):
+        asked.append(item.get("id"))
+        if item.get("id") is None:
+            raise OSError("CivitAI answered 500")
+        return tmp_path / f"{item['id']}.jpg"
+    assert LP.cover_file(p, db, "safe", fetch) == tmp_path / "200.jpg" and asked == [None, 200]    # next one
+    assert LP.cover_file(p, db, "all", fetch) == tmp_path / "301.jpg"
+    assert LP.cover_file(p, db, "off", fetch) is None
+    other = str(lora(tmp_path / "loras" / "unknown.safetensors", {"y": "2"}))
+    assert LP.cover_file(other, db, "all", fetch) is None                          # nothing known of it
+
+
+def test_lora_picker_shows_covers_and_no_paths(tmp_path):
+    from PySide6.QtCore import QSettings, Qt
+    from PySide6.QtGui import QImage
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from video_chain.ui.lora_stack import LoraPickerDialog
+    d = details(2)
+    d["version"]["images"] = [{"id": 9, "nsfwLevel": 1, "type": "image",
+                               "url": "https://image.civitai.com/k/v/original=true/9.jpeg"}]
+    db, p = db_with(tmp_path, d)
+    other = str(lora(tmp_path / "loras" / "deep" / "folder" / "unknown.safetensors", {"y": "2"}))
+    still = tmp_path / "still.png"
+    QImage(40, 30, QImage.Format_RGB32).save(str(still))
+    loaded = []
+
+    def fetch(item):
+        loaded.append(item["id"])
+        return still
+    qs = QSettings(str(tmp_path / "s.ini"), QSettings.IniFormat)
+    dlg = LoraPickerDialog(None, [(p, "inksketch_v2"), (other, "unknown")], used={other}, settings=qs, db=db,
+                           fetch=fetch)
+    end = time.time() + 5
+    while time.time() < end and not loaded:
+        app.processEvents()
+        time.sleep(0.01)
+    for _ in range(20):
+        app.processEvents()
+        time.sleep(0.01)
+    rows = {dlg.list.item(i).data(Qt.UserRole): dlg.list.item(i) for i in range(dlg.list.count())}
+    assert rows[p].text() == "inksketch_v2" and rows[other].text() == "unknown"     # the name only, no folder
+    assert "folder" not in rows[other].text() + str(rows[other].data(dlg.SUBTITLE))
+    assert loaded == [9] and not rows[p].data(dlg.COVER).isNull()                   # the creator's first picture
+    assert rows[other].data(dlg.COVER) is None
+    assert "Flux.1 D" in rows[p].data(dlg.SUBTITLE) and "ink4sketch" in rows[p].data(dlg.SUBTITLE)
+    assert rows[other].data(dlg.IN_USE) and not rows[p].data(dlg.IN_USE)
+    dlg.search.setText("deep folder")                                                # the folder is still searched
+    assert dlg.visible_paths() == [other]
+    dlg.pictures.setCurrentIndex(dlg.pictures.findData("off"))                       # off: no covers
+    assert rows[p].data(dlg.COVER) is None and qs.value("loraPictures") == "off"
+    dlg.reject()
+    loaded.clear()
+    dlg2 = LoraPickerDialog(None, [(p, "inksketch_v2")], settings=qs, db=db, fetch=fetch)
+    for _ in range(30):
+        app.processEvents()
+        time.sleep(0.01)
+    assert loaded == [] and dlg2.list.item(0).data(dlg2.COVER) is None              # the setting is kept
+    dlg2.reject()
