@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import copy
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
 
 from PySide6.QtCore import QTimer
-from PySide6.QtGui import QCursor
+from PySide6.QtGui import QAction, QCursor
 from PySide6.QtWidgets import QDialog, QMenu, QToolTip
 
 from .. import chain, swap, tree as T
@@ -18,157 +21,248 @@ from .ui_logic import FREEZE_TIP, plural, row_start_of, variant_strengths
 from .mw_host import MainWindowHost
 
 
+@dataclass(frozen=True)
+class NodeAction:
+    """One node action: what it needs (applies: "any" node or none, "node", "clip" = a generated clip, "video" = a
+    real video), whether a frozen clip refuses it (frozen_check; FROZEN_LOCKED names which), and what runs."""
+    run: Callable[[Any, str, T.Node | None, str | None], None]
+    applies: str = "node"
+    frozen_check: bool = True
+
+    def fits(self, node: T.Node | None) -> bool:
+        if self.applies == "any":
+            return True
+        if node is None:
+            return False
+        return {"node": True, "clip": not node.is_video, "video": node.is_video}[self.applies]
+
+
+NODE_ACTIONS: dict[str, NodeAction] = {}
+
+
+def _node_action(*names: str, applies: str = "node", frozen_check: bool = True):
+    """Register the decorated method as the action(s) `names` (the one place that maps a name to what it does)."""
+    def register(fn):
+        for name in names:
+            NODE_ACTIONS[name] = NodeAction(fn, applies, frozen_check)
+        return fn
+    return register
+
+
 class NodeMixin(MainWindowHost):
     """What the node menu does: freeze, delete, branch, variants."""
 
     def node_action(self, action: str, nid: str | None):
+        """Do a node action by name (the node menu, the card buttons, the shortcuts): the registry NODE_ACTIONS says
+        what it needs (a node, a clip, a video) and what runs; an action that does not fit the node does nothing."""
         if self.tree is None or self._wait_note():
             return
-        if action in ("take", "take_clear") and self.film is not None:
-            assert self.project is not None
-            cur = self.film.scene_of(self.project)
-            if cur is not None and nid:
-                try:
-                    self.film.set_take(cur.id, nid if action == "take" else None)
-                except OSError as e:
-                    self._report_error(f"Could not save the scene's ending: {e}")
-                    return
-                self._update_continues()               # a scene continuing this one starts from the new end
-                self._show_storyboard()
-                self.status.setText(f"The film plays “{cur.title}” up to clip #{T.short_id(nid)}." if action == "take"
-                                    else f"The film plays “{cur.title}” up to its selected clip.")
+        spec = NODE_ACTIONS.get(action)
+        if spec is None:
             return
         node = self.tree.nodes.get(nid) if nid and nid != START else None
-        if action in ("freeze_toggle", "freeze", "unfreeze") and node is not None:
-            if action == "unfreeze" or action == "freeze_toggle" and node.frozen:
-                self.unfreeze_clip(node.id)
-            else:
-                self.freeze_clip(node.id)
+        if not spec.fits(node):
             return
-        if node is not None and self._frozen_block(node, action):
+        if node is not None and spec.frozen_check and self._frozen_block(node, action):
             return
-        if action in ("start_rows", "row_apply", "start_own", "start_own_clear") and node is not None:
-            if node.is_video or node.parent is not None:
-                self.status.setText("Start images are for a first generated clip (one that starts the video).")
-            elif action == "start_rows":
-                self.add_start_rows(node.id)
-            elif action == "row_apply":
-                self.apply_to_row(node.id)
-            else:
-                self.set_row_start(node.id, clear=action == "start_own_clear")
+        spec.run(self, action, node, nid)
+
+    # ---- the actions (registered in NODE_ACTIONS by their names)
+    @_node_action("take", "take_clear", applies="any", frozen_check=False)
+    def _act_take(self, action: str, node: T.Node | None, nid: str | None):
+        """End the scene at this clip (take), or clear that (take_clear)."""
+        if self.film is None:
             return
-        if action in ("variant", "variants") and node is not None and node.is_video:
+        assert self.project is not None
+        cur = self.film.scene_of(self.project)
+        if cur is None or not nid:
+            return
+        try:
+            self.film.set_take(cur.id, nid if action == "take" else None)
+        except OSError as e:
+            self._report_error(f"Could not save the scene's ending: {e}")
+            return
+        self._update_continues()               # a scene continuing this one starts from the new end
+        self._show_storyboard()
+        self.status.setText(f"The film plays “{cur.title}” up to clip #{T.short_id(nid)}." if action == "take"
+                            else f"The film plays “{cur.title}” up to its selected clip.")
+
+    @_node_action("freeze_toggle", "freeze", "unfreeze", frozen_check=False)
+    def _act_freeze(self, action: str, node: T.Node | None, nid: str | None):
+        assert node is not None
+        if action == "unfreeze" or action == "freeze_toggle" and node.frozen:
+            self.unfreeze_clip(node.id)
+        else:
+            self.freeze_clip(node.id)
+
+    @_node_action("start_rows", "row_apply", "start_own", "start_own_clear")
+    def _act_start_images(self, action: str, node: T.Node | None, nid: str | None):
+        assert node is not None
+        if node.is_video or node.parent is not None:
+            self.status.setText("Start images are for a first generated clip (one that starts the video).")
+        elif action == "start_rows":
+            self.add_start_rows(node.id)
+        elif action == "row_apply":
+            self.apply_to_row(node.id)
+        else:
+            self.set_row_start(node.id, clear=action == "start_own_clear")
+
+    @_node_action("video", applies="any")
+    def _act_video(self, action: str, node: T.Node | None, nid: str | None):
+        self._ask_video(node.id if node else None)
+
+    @_node_action("swap", applies="video")
+    def _act_swap(self, action: str, node: T.Node | None, nid: str | None):
+        assert node is not None
+        self.replace_person(node.id)
+
+    @_node_action("swap_undo", applies="video")
+    def _act_swap_undo(self, action: str, node: T.Node | None, nid: str | None):
+        assert node is not None
+        self.undo_replacement(node.id)
+
+    @_node_action("edit", applies="video")
+    def _act_edit(self, action: str, node: T.Node | None, nid: str | None):
+        assert node is not None
+        self.edit_video(node.id)
+
+    @_node_action("split", applies="video")
+    def _act_split(self, action: str, node: T.Node | None, nid: str | None):
+        assert node is not None
+        self.split_video(node.id)
+
+    @_node_action("end_image", applies="clip")
+    def _act_end_image(self, action: str, node: T.Node | None, nid: str | None):
+        assert node is not None
+        self.choose_end_image(node.id)
+
+    @_node_action("end_video", applies="clip")
+    def _act_end_video(self, action: str, node: T.Node | None, nid: str | None):
+        assert node is not None
+        self.end_from_video(node.id)
+
+    @_node_action("end_ai", applies="clip")
+    def _act_end_ai(self, action: str, node: T.Node | None, nid: str | None):
+        assert node is not None
+        self.edit_image(node.id)
+
+    @_node_action("edit_ai")
+    def _act_edit_ai(self, action: str, node: T.Node | None, nid: str | None):
+        assert node is not None
+        self.edit_image(node.id, from_node=True)
+
+    @_node_action("end_clear", applies="clip")
+    def _act_end_clear(self, action: str, node: T.Node | None, nid: str | None):
+        assert node is not None
+        self.set_end_image(node.id, None)
+
+    @_node_action("revert", applies="clip")
+    def _act_revert(self, action: str, node: T.Node | None, nid: str | None):
+        assert node is not None
+        self.revert_clip(node.id)
+
+    @_node_action("speak", applies="clip")
+    def _act_speak(self, action: str, node: T.Node | None, nid: str | None):
+        assert node is not None
+        self.speak_clip_window(node.id)
+
+    @_node_action("refine", applies="clip")
+    def _act_refine(self, action: str, node: T.Node | None, nid: str | None):
+        """Refine the clip's prompt with the language model (the pictures the clip is made from go with it)."""
+        assert node is not None and self.tree is not None and self.project is not None
+        card = self._card_of(node.id, PromptCard)
+        if card is None:
+            return
+        ck = T.Checker(self.project, self.tree)
+        start = ck.start_frame(node)
+        end = T.end_image_used(self.tree, node)
+        pics = [("The frame the clip starts from", str(start), True)] if start and start.is_file() else []
+        for k in node.keyframes:
+            if (self.project / k["image"]).is_file():
+                pics.append((f"The picture the clip passes through at {k['at']:.1f} s",
+                             str(self.project / k["image"]), True))
+        if end and (self.project / end).is_file():
+            pics.append(("The image the clip should end at", str(self.project / end), True))
+        h3 = self.tree.options.get("prompt_format") == "h3"   # the official H3 format: its own refine
+        frames = int((node.overrides or {}).get("frames", self.tree.options.get("frames", 73)))
+        new = self.refine_text(card.edit.toPlainText(), "video_h3" if h3 else "video", pictures=pics,
+                               seconds=frames / chain.FPS, start_image=start,
+                               loras=[p for p, _s in T.node_loras(node)])
+        if new:
+            replace_text(card.edit, new)          # Ctrl+Z in the prompt takes it back
+            self.status.setText(f"Clip #{T.short_id(node.id)}: prompt refined (Ctrl+Z in the prompt undoes it).")
+
+    @_node_action("handover", applies="clip")
+    def _act_handover(self, action: str, node: T.Node | None, nid: str | None):
+        assert node is not None
+        self.choose_handover(node.id)
+
+    @_node_action("handover_clear", applies="clip")
+    def _act_handover_clear(self, action: str, node: T.Node | None, nid: str | None):
+        assert node is not None
+        self.set_handover(node.id, None)
+
+    @_node_action("compare")
+    def _act_compare(self, action: str, node: T.Node | None, nid: str | None):
+        assert node is not None
+        self.compare_variants(node.id)
+
+    @_node_action("variants")
+    def _act_variants(self, action: str, node: T.Node | None, nid: str | None):
+        assert node is not None
+        if node.is_video:
             self.status.setText("Variants are for generated clips; a real video stays as it is.")
             return
-        if action == "video":
-            self._ask_video(node.id if node else None)
+        dlg = VariantsDialog(self, node)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self.create_variants(node.id, dlg.count.value(), dlg.generate.isChecked(),
+                                 strength_steps=dlg.strength_steps(), keep_seed=dlg.keep_seed())
+
+    @_node_action("continue", "branch", "variant", applies="any")
+    def _act_add_clip(self, action: str, node: T.Node | None, nid: str | None):
+        """A new clip: after this one (continue), next to it (branch), or next to it with the same prompt (variant)."""
+        assert self.tree is not None
+        if action != "continue" and node is None:
             return
-        if action == "swap" and node is not None and node.is_video:
-            self.replace_person(node.id)
-            return
-        if action == "swap_undo" and node is not None and node.is_video:
-            self.undo_replacement(node.id)
-            return
-        if action == "edit" and node is not None and node.is_video:
-            self.edit_video(node.id)
-            return
-        if action == "split" and node is not None and node.is_video:
-            self.split_video(node.id)
-            return
-        if action == "end_image" and node is not None and not node.is_video:
-            self.choose_end_image(node.id)
-            return
-        if action == "end_video" and node is not None and not node.is_video:
-            self.end_from_video(node.id)
-            return
-        if action == "end_ai" and node is not None and not node.is_video:
-            self.edit_image(node.id)
-            return
-        if action == "edit_ai" and node is not None:
-            self.edit_image(node.id, from_node=True)
-            return
-        if action == "end_clear" and node is not None and not node.is_video:
-            self.set_end_image(node.id, None)
-            return
-        if action == "revert" and node is not None and not node.is_video:
-            self.revert_clip(node.id)
-            return
-        if action == "speak" and node is not None and not node.is_video:
-            self.speak_clip_window(node.id)
-            return
-        if action == "refine" and node is not None and not node.is_video:
-            card = self._card_of(node.id, PromptCard)
-            if card is not None:
-                assert self.project is not None
-                ck = T.Checker(self.project, self.tree)
-                start = ck.start_frame(node)
-                end = T.end_image_used(self.tree, node)
-                pics = [("The frame the clip starts from", str(start), True)] if start and start.is_file() else []
-                for k in node.keyframes:
-                    if (self.project / k["image"]).is_file():
-                        pics.append((f"The picture the clip passes through at {k['at']:.1f} s",
-                                     str(self.project / k["image"]), True))
-                if end and (self.project / end).is_file():
-                    pics.append(("The image the clip should end at", str(self.project / end), True))
-                h3 = self.tree.options.get("prompt_format") == "h3"   # the official H3 format: its own refine
-                frames = int((node.overrides or {}).get("frames", self.tree.options.get("frames", 73)))
-                new = self.refine_text(card.edit.toPlainText(), "video_h3" if h3 else "video", pictures=pics,
-                                       seconds=frames / chain.FPS, start_image=start,
-                                       loras=[p for p, _s in T.node_loras(node)])
-                if new:
-                    replace_text(card.edit, new)          # Ctrl+Z in the prompt takes it back
-                    self.status.setText(f"Clip #{T.short_id(node.id)}: prompt refined (Ctrl+Z in the prompt undoes "
-                                        "it).")
-            return
-        if action == "handover" and node is not None and not node.is_video:
-            self.choose_handover(node.id)
-            return
-        if action == "handover_clear" and node is not None and not node.is_video:
-            self.set_handover(node.id, None)
-            return
-        if action == "compare" and node is not None:
-            self.compare_variants(node.id)
+        if action == "variant" and node is not None and node.is_video:
+            self.status.setText("Variants are for generated clips; a real video stays as it is.")
             return
         if action == "continue":
             new = self.tree.add(node.id if node else None, "")
-        elif action == "variants" and node is not None:
-            dlg = VariantsDialog(self, node)
-            if dlg.exec() == QDialog.DialogCode.Accepted:
-                self.create_variants(node.id, dlg.count.value(), dlg.generate.isChecked(),
-                                     strength_steps=dlg.strength_steps(), keep_seed=dlg.keep_seed())
-            return
-        elif action in ("branch", "variant") and node is not None:
+        else:
+            assert node is not None
             new = self.tree.add(node.parent, node.prompt if action == "variant" else "",
                                 self._new_seed() if action == "variant" else None)
             if action == "variant":                # the same clip with another seed: its own settings too
                 new.overrides = copy.deepcopy(node.overrides)
                 self._copy_video_child(node.id, new.id)
                 self._copy_row_start(node.id, new.id)
-        elif action == "delete" and node is not None:
-            if self._busy_files():
-                return
-            below = len(self.tree.descendants(node.id))
-            made = node.made is not None or any(d.made for d in self.tree.descendants(node.id))
-            after = f" and the {plural(below, 'clip')} after it" if below else ""
-            msg = f"Delete {'video' if node.is_video else 'clip'} #{T.short_id(node.id)}{after}?"
-            if made:
-                msg += "\nTheir video files are not deleted: they are moved to old/ in the project folder."
-            if not D.confirm(self, "Delete", msg):
-                return
-            self.tree.remove(node.id, self.project, later=True)      # (its files move once tree.json is saved)
-            if self.tree.selected is None:
-                self.tree.selected = START
-            self._write_tree()
-            self.refresh()
-            return
-        else:
-            return
         self.tree.selected = new.id
         self._write_tree()
         self.refresh()
         self.graph.reveal(new.id)
         if self.cards and self.cards[-1].nid == new.id and isinstance(self.cards[-1], PromptCard):
             self.cards[-1].edit.setFocus()
+
+    @_node_action("delete")
+    def _act_delete(self, action: str, node: T.Node | None, nid: str | None):
+        """Delete the clip with everything after it (its files move to old/ once tree.json is saved)."""
+        assert node is not None and self.tree is not None
+        if self._busy_files():
+            return
+        below = len(self.tree.descendants(node.id))
+        made = node.made is not None or any(d.made for d in self.tree.descendants(node.id))
+        after = f" and the {plural(below, 'clip')} after it" if below else ""
+        msg = f"Delete {'video' if node.is_video else 'clip'} #{T.short_id(node.id)}{after}?"
+        if made:
+            msg += "\nTheir video files are not deleted: they are moved to old/ in the project folder."
+        if not D.confirm(self, "Delete", msg):
+            return
+        self.tree.remove(node.id, self.project, later=True)      # (its files move once tree.json is saved)
+        if self.tree.selected is None:
+            self.tree.selected = START
+        self._write_tree()
+        self.refresh()
 
     @classmethod
     def _is_locked(cls, node: T.Node, action: str) -> bool:
@@ -433,143 +527,123 @@ class NodeMixin(MainWindowHost):
         return ids
 
     def _context(self, nid: str, pos):
+        """The right-click menu of a node. Every entry is added with what it does (a node action's name from
+        NODE_ACTIONS, or a function); one dispatch runs the chosen one."""
         if self.tree is None or self._wait_note():
             return
         own = row_start_of(nid)
+        m = QMenu(self)
+        calls: dict[QAction, Callable[[], None]] = {}
+        lock = self.tree.nodes.get(own or nid)      # (a frozen clip refuses the node actions that would change it)
+
+        def add(text: str, does: str | Callable[[], None], enabled: bool = True, tip: str = "") -> QAction:
+            act = m.addAction(text)
+            if isinstance(does, str):
+                target = own or nid                 # (a row's start image acts on the row's clip)
+                calls[act] = lambda: self.node_action(does, target)
+                enabled = enabled and not (lock is not None and self._is_locked(lock, does))
+            else:
+                calls[act] = does
+            act.setEnabled(enabled)
+            if tip:
+                act.setToolTip(tip)
+            return act
+
         if own:                                    # a row's start image
             if own not in self.tree.nodes:
                 return
-            m = QMenu(self)
-            acts = {m.addAction("Another picture for this row…"): "start_own",
-                    m.addAction("Start from the project's start image instead"): "start_own_clear",
-                    m.addAction("More start images… (the same clip for each)"): "start_rows"}
-            for a_, what in acts.items():            # (a frozen clip refuses to change its start image)
-                if self._is_locked(self.tree.nodes[own], what):
-                    a_.setEnabled(False)
-            chosen = self._exec_menu(m, pos.toPoint() if hasattr(pos, "toPoint") else pos)
-            if chosen in acts:
-                act = acts[chosen]
-                QTimer.singleShot(0, lambda: self.node_action(act, own))
-            return
-        m = QMenu(self)
-        acts = {m.addAction("Continue from here"): "continue"}
-        node = self.tree.nodes.get(nid)
-        vid = m.addAction("Add a real video after this…")
-        vid.setEnabled(self.tree.can_add_video(None if nid == START else nid))
-        acts[vid] = "video"
-        play = gen = delete = keep_here = keep_path = ref_first = ref_last = export_one = None
-        if nid != START:
-            if node is not None and node.is_video:
-                acts[m.addAction("Edit range…")] = "edit"
-                split = m.addAction("Split here and insert a clip…")
-                split.setEnabled(bool(node.made) and self.state(nid) == "done")
-                split.setToolTip("Put a generated clip into the middle of this video: the video ends at a frame you "
-                                 "choose, the clip follows, then the rest of the video")
-                acts[split] = "split"
-                acts[m.addAction("Replace a person…")] = "swap"
-                if swap.replaced(node):
-                    acts[m.addAction("Back to the original video (undo the replacement)")] = "swap_undo"
-            acts[m.addAction("Branch (another continuation)")] = "branch"
-            if node is not None and not node.is_video:
-                acts[m.addAction("Variant (same prompt, other seed)")] = "variant"
-                acts[m.addAction("Variants… (several, generated at once)")] = "variants"
-                if node.parent is None:
-                    acts[m.addAction("More start images… (the same clip for each)")] = "start_rows"
-                    if len(T.row_members(self.tree, nid)) > 1:
-                        acts[m.addAction("Give this prompt and settings to its other start images")] = "row_apply"
-                    acts[m.addAction("Its own start image…")] = "start_own"
-                    if node.start_image:
-                        acts[m.addAction("Start from the project's start image instead")] = "start_own_clear"
-                vc = self.tree.video_child(nid)
-                end = m.addAction("End image…" if vc is None else f"End image… (ends at video #{T.short_id(vc.id)})")
-                end.setEnabled(vc is None)
-                acts[end] = "end_image"
-                endv = m.addAction("End image from a video frame…")
-                endv.setEnabled(vc is None)
-                acts[endv] = "end_video"
-                if node.end_image:
-                    acts[m.addAction("Clear end image")] = "end_clear"
-                if T.changed_inputs(self.tree, nid):
-                    acts[m.addAction("Undo changes (back to the made clip)")] = "revert"
-                hand = m.addAction("Hand-over frame…")
-                hand.setEnabled(bool(node.made) and vc is None)
-                acts[hand] = "handover"
-                if T.handover_index(self.tree, node) is not None:
-                    acts[m.addAction("Hand over at the last frame")] = "handover_clear"
-                sp = m.addAction("Speak the lines with text to speech" if T.spoken_lines(node.prompt) else
-                                 "Speak the lines with text to speech (write a line in quotes first)")
-                sp.setEnabled(not self._tts_busy and bool(T.spoken_lines(node.prompt)))
-                acts[sp] = "speak"
-                ai = m.addAction("Edit an image with AI…")
-                acts[ai] = "edit_ai"
-                cmp_ = m.addAction("Compare with its variants…")
-                cmp_.setEnabled(len(self.compare_candidates(nid)) > 1)
-                acts[cmp_] = "compare"
-            if node is not None:
-                if node.frozen:
-                    acts[m.addAction("Unfreeze (edit it, follow the settings again)")] = "unfreeze"
-                else:
-                    fr = m.addAction("Freeze (keep it and the clips before it as made)")
-                    fr.setEnabled(self.state(nid) == "done")
-                    fr.setToolTip(FREEZE_TIP)
-                    acts[fr] = "freeze"
-                for a_, what in acts.items():
-                    if self._is_locked(node, what):
-                        a_.setEnabled(False)
-            m.addSeparator()
-            play = m.addAction("Play this video" if node is not None and node.is_video else "Play this clip")
-            play.setEnabled(bool(self.tree.nodes[nid].made))
-            export_one = m.addAction("Export this video…" if node is not None and node.is_video else
-                                     "Export this clip…")
-            export_one.setEnabled(bool(self.tree.nodes[nid].made) and self.state(nid) == "done")
-            ref = "face reference" if self._ref_word() == "face picture" else \
-                f"picture of @{self._selected_character()['name']}"
-            if node is not None and node.is_video:
-                ref_first = m.addAction(f"Add first frame as {ref}")
-                ref_first.setEnabled(bool(node.made))
-            ref_last = m.addAction(f"Add last frame as {ref}")
-            ref_last.setEnabled(bool(node is not None and node.made))
-            gen = m.addAction("Generate the path to here")
-            if self.film is not None:
-                assert self.project is not None
-                cur = self.film.scene_of(self.project)
-                if cur is not None and cur.take == nid:
-                    acts[m.addAction("Clear the scene's ending (the film plays its selected path)")] = "take_clear"
-                else:
-                    acts[m.addAction("End the scene here (the film plays up to this clip)")] = "take"
-            m.addSeparator()
-            keep_here = m.addAction("Keep this branch, delete the other branches here")
-            keep_here.setEnabled(bool(self.tree.siblings(nid)))
-            keep_path = m.addAction("Keep only this path, delete all other branches")
-            keep_path.setEnabled(bool(self.tree.others_than_path(nid)))
-            delete = m.addAction("Delete (with everything after it)")
-        extra = self.plugins.context_actions(m, nid) if nid != START else {}     # (the plugins' clip actions)
+            add("Another picture for this row…", "start_own")
+            add("Start from the project's start image instead", "start_own_clear")
+            add("More start images… (the same clip for each)", "start_rows")
+            extra: dict = {}
+        else:
+            node = self.tree.nodes.get(nid)
+            add("Continue from here", "continue")
+            add("Add a real video after this…", "video", self.tree.can_add_video(None if nid == START else nid))
+            if nid != START:
+                self._node_entries(m, add, nid, node)
+            extra = self.plugins.context_actions(m, nid) if nid != START else {}   # (the plugins' clip actions)
         chosen = self._exec_menu(m, pos.toPoint() if hasattr(pos, "toPoint") else pos)
         if chosen is None:
             return
-        if chosen in extra:
-            QTimer.singleShot(0, extra[chosen])
-            return
         # run it later: this is still inside the node's mouse handler, and the action may rebuild the graph
         # (deleting that very node)
-        if chosen in acts:
-            act = acts[chosen]
-            QTimer.singleShot(0, lambda: self.node_action(act, nid))
-        elif chosen is play:
-            QTimer.singleShot(0, lambda: self._play_node(nid))
-        elif chosen is export_one:
-            QTimer.singleShot(0, lambda: self.export_path(nid))
-        elif chosen is not None and chosen in (ref_first, ref_last):
-            which = "first" if chosen is ref_first else "last"
-            QTimer.singleShot(0, lambda: self.reference_from_node(nid, which))
-        elif chosen is gen:
-            QTimer.singleShot(0, self.generate_path)
-        elif chosen is delete:
-            QTimer.singleShot(0, lambda: self.node_action("delete", nid))
-        elif chosen is keep_here:
-            QTimer.singleShot(0, lambda: self.keep_branch(nid, whole_path=False))
-        elif chosen is keep_path:
-            QTimer.singleShot(0, lambda: self.keep_branch(nid, whole_path=True))
+        if chosen in extra:
+            QTimer.singleShot(0, extra[chosen])
+        elif chosen in calls:
+            QTimer.singleShot(0, calls[chosen])
+
+    def _node_entries(self, m: QMenu, add: Callable[..., QAction], nid: str, node: T.Node | None):
+        """The entries of a clip's or video's menu (not of START)."""
+        assert self.tree is not None
+        if node is not None and node.is_video:
+            add("Edit range…", "edit")
+            add("Split here and insert a clip…", "split", bool(node.made) and self.state(nid) == "done",
+                "Put a generated clip into the middle of this video: the video ends at a frame you choose, the clip "
+                "follows, then the rest of the video")
+            add("Replace a person…", "swap")
+            if swap.replaced(node):
+                add("Back to the original video (undo the replacement)", "swap_undo")
+        add("Branch (another continuation)", "branch")
+        if node is not None and not node.is_video:
+            vc = self.tree.video_child(nid)
+            add("Variant (same prompt, other seed)", "variant")
+            add("Variants… (several, generated at once)", "variants")
+            if node.parent is None:
+                add("More start images… (the same clip for each)", "start_rows")
+                if len(T.row_members(self.tree, nid)) > 1:
+                    add("Give this prompt and settings to its other start images", "row_apply")
+                add("Its own start image…", "start_own")
+                if node.start_image:
+                    add("Start from the project's start image instead", "start_own_clear")
+            add("End image…" if vc is None else f"End image… (ends at video #{T.short_id(vc.id)})", "end_image",
+                vc is None)
+            add("End image from a video frame…", "end_video", vc is None)
+            if node.end_image:
+                add("Clear end image", "end_clear")
+            if T.changed_inputs(self.tree, nid):
+                add("Undo changes (back to the made clip)", "revert")
+            add("Hand-over frame…", "handover", bool(node.made) and vc is None)
+            if T.handover_index(self.tree, node) is not None:
+                add("Hand over at the last frame", "handover_clear")
+            lines = bool(T.spoken_lines(node.prompt))
+            add("Speak the lines with text to speech" if lines else
+                "Speak the lines with text to speech (write a line in quotes first)", "speak",
+                not self._tts_busy and lines)
+            add("Edit an image with AI…", "edit_ai")
+            add("Compare with its variants…", "compare", len(self.compare_candidates(nid)) > 1)
+        if node is not None:
+            if node.frozen:
+                add("Unfreeze (edit it, follow the settings again)", "unfreeze")
+            else:
+                add("Freeze (keep it and the clips before it as made)", "freeze", self.state(nid) == "done",
+                    FREEZE_TIP)
+        m.addSeparator()
+        made = bool(self.tree.nodes[nid].made)
+        video = node is not None and node.is_video
+        add("Play this video" if video else "Play this clip", lambda: self._play_node(nid), made)
+        add("Export this video…" if video else "Export this clip…", lambda: self.export_path(nid),
+            made and self.state(nid) == "done")
+        ref = "face reference" if self._ref_word() == "face picture" else \
+            f"picture of @{self._selected_character()['name']}"
+        if video:
+            add(f"Add first frame as {ref}", lambda: self.reference_from_node(nid, "first"), made)
+        add(f"Add last frame as {ref}", lambda: self.reference_from_node(nid, "last"),
+            bool(node is not None and node.made))
+        add("Generate the path to here", self.generate_path)
+        if self.film is not None:
+            assert self.project is not None
+            cur = self.film.scene_of(self.project)
+            if cur is not None and cur.take == nid:
+                add("Clear the scene's ending (the film plays its selected path)", "take_clear")
+            else:
+                add("End the scene here (the film plays up to this clip)", "take")
+        m.addSeparator()
+        add("Keep this branch, delete the other branches here", lambda: self.keep_branch(nid, whole_path=False),
+            bool(self.tree.siblings(nid)))
+        add("Keep only this path, delete all other branches", lambda: self.keep_branch(nid, whole_path=True),
+            bool(self.tree.others_than_path(nid)))
+        add("Delete (with everything after it)", "delete")
 
     def _exec_menu(self, menu: QMenu, pos):
         return menu.exec(pos)

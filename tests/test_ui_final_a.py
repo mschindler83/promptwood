@@ -223,3 +223,22 @@ def test_dialog_policy_is_a_constructor_argument(app, tmp_path):
     finally:
         w.close()
         v.close()
+
+
+# ------------------------------------------------------------------ MWC-10 / MWC-11: one registry of node actions
+def test_every_node_action_the_window_names_is_in_the_registry():
+    from video_chain.ui.mw_nodes import NODE_ACTIONS
+    names = set()
+    for f in UI.glob("*.py"):
+        src = f.read_text(encoding="utf-8")
+        names |= set(re.findall(r'node_action\(\s*"(\w+)"', src))
+        names |= set(re.findall(r'\badd\(f?"[^"\n]*", "(\w+)"', src)) if f.name == "mw_nodes.py" else set()
+    names -= {"x"}
+    assert names and names <= set(NODE_ACTIONS), names - set(NODE_ACTIONS)
+    assert {"continue", "branch", "variant", "variants", "delete", "freeze", "refine", "take"} <= set(NODE_ACTIONS)
+
+
+def test_the_context_menu_has_one_dispatch(app):
+    src = (UI / "mw_nodes.py").read_text(encoding="utf-8")
+    ctx = src[src.index("    def _context("):]
+    assert "elif chosen is" not in ctx and "chosen is play" not in ctx
