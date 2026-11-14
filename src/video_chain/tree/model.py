@@ -131,9 +131,8 @@ class Tree:
     def add_video(self, parent: str | None, file: str, start: float, end: float, rotate: int = 0) -> Node:
         """A real video (file, start..end seconds, turned clockwise by rotate degrees) after parent. A generated clip
         can lead into one video only."""
-        if not self.can_add_video(parent):
-            raise ValueError(f"{'the start image' if parent is None else 'clip #' + short_id(parent)} "
-                             "already leads into a video")
+        if parent is not None and not self.can_add_video(parent):      # (a first video after the start image: always)
+            raise ValueError(f"clip #{short_id(parent)} already leads into a video")
         if float(end) <= float(start):
             raise ValueError("the end of the range must be after its start")
         from .sources import video_source               # (the modules below this one import this module)
