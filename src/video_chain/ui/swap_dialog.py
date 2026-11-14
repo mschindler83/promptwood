@@ -14,13 +14,15 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLineEdit,
-                               QMessageBox, QProgressBar, QPushButton, QVBoxLayout)
+                               QProgressBar, QPushButton, QVBoxLayout)
 
 from .. import chain, media, swap
 from .. import tree as T
 from ..animate import DEFAULT_PROMPT, SIZES, gen_size, window_count
 from .compare_player import ComparePlayer
-from .widgets import FrameTile, guard_wheel, label
+from .dialogs import confirm
+from .theme import theme
+from .widgets import fit_size, FrameTile, guard_wheel, label, safe_emit
 
 METHODS = (("animate+lock", "Head + face lock (Animate, then face swap)"), ("animate", "Head only (Animate)"),
            ("face", "Face only (face swap, the clip's own motion)"),
@@ -64,7 +66,7 @@ class SwapDialog(QDialog):
                  h3: dict | None = None):
         super().__init__(parent)
         self.setWindowTitle(f"Replace a person in video #{T.short_id(nid)}")
-        self.resize(1180, 720)
+        fit_size(self, 1180, 720)
         self.project, self.nid, self.clip, self.detector = Path(project), nid, Path(clip), detector
         self.connect, self.qs, self.on_start = connect, settings, on_start
         self.source = dict(source or {})          # the video's file and range (the DWPose cache is bound to it)
@@ -255,10 +257,7 @@ class SwapDialog(QDialog):
                                     cancelled=lambda: self._cancel)
                 sig.found.emit(h, "")
             except Exception as e:  # noqa: BLE001
-                try:
-                    sig.found.emit(None, str(e))
-                except RuntimeError:
-                    pass
+                safe_emit(sig.found, None, str(e))
         self._busy = True
         self.bar.show()
         threading.Thread(target=work, daemon=True).start()
@@ -298,7 +297,7 @@ class SwapDialog(QDialog):
         x1, y1, x2, y2 = (v * self.player.scale() for v in self.boxes[k])
         p = QPainter(img)
         p.setRenderHint(QPainter.Antialiasing)
-        p.setPen(QPen(QColor(255, 60, 60), max(2, img.width() // 300)))
+        p.setPen(QPen(theme().negative, max(2, img.width() // 300)))
         p.setBrush(QColor(255, 40, 40, 70))
         p.drawEllipse(QRectF(x1, y1, x2 - x1, y2 - y1))
         p.end()
@@ -364,10 +363,7 @@ class SwapDialog(QDialog):
                 out = use if ok else None
             except Exception:  # noqa: BLE001  (the temporary folder removed by a close, ...)
                 out = None
-            try:
-                sig.reference.emit(gen, str(path), out, crop)
-            except RuntimeError:                         # the window is gone
-                pass
+            safe_emit(sig.reference, gen, str(path), out, crop)
         threading.Thread(target=work, daemon=True).start()
         self._update()
 
@@ -425,7 +421,7 @@ class SwapDialog(QDialog):
         if crop is not None:
             x, y, side = crop
             p = QPainter(img)
-            p.setPen(QPen(QColor(255, 60, 60), max(2, img.width() // 200)))
+            p.setPen(QPen(theme().negative, max(2, img.width() // 200)))
             p.drawRect(QRectF(x, y, side, side))
             p.end()
         self.ref_tile.set_image(img)
@@ -584,10 +580,7 @@ class SwapDialog(QDialog):
                 ok = True
                 sig.finished.emit((out, meta, n), "")
             except Exception as e:  # noqa: BLE001
-                try:
-                    sig.finished.emit(None, "cancelled" if self._cancel else str(e))
-                except RuntimeError:
-                    pass
+                safe_emit(sig.finished, None, "cancelled" if self._cancel else str(e))
             finally:                                   # nothing of a failed or stopped try stays in swaps/
                 for f in temp + ([] if ok else [out, mask]):
                     try:
@@ -650,9 +643,9 @@ class SwapDialog(QDialog):
 
     def reject(self):
         """Close: a made result is kept only with "Use this"; ask before it is dropped."""
-        if self.result is not None and not self._busy and QMessageBox.question(
+        if self.result is not None and not self._busy and not confirm(
                 self, "Replace a person", "Close without using the result? It stays in the project's swaps folder "
-                "but the video keeps playing its own clip.") != QMessageBox.Yes:
+                "but the video keeps playing its own clip."):
             return
         super().reject()
 

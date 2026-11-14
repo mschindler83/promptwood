@@ -22,13 +22,15 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QSettings, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QGuiApplication, QImage, QPixmap
-from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
+from PySide6.QtWidgets import (QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSplitter,
                                QTabWidget, QTextBrowser, QToolButton, QVBoxLayout, QWidget)
 
 from .. import lora_notes, lora_pictures, triggers
 from .lora_details import details_html, themed
-from .widgets import guard_wheel, label
+from .dialogs import add_action, button_row, confirm
+from .lora_stack import lora_label
+from .widgets import fit_size, guard_wheel, label, safe_emit
 
 PER_PAGE = 8
 PICTURE = 200                    # pixels: the side of a card's picture
@@ -152,17 +154,17 @@ class LoraWindow(QDialog):
                  set_strength: Callable[[str, float], bool] | None = None):
         super().__init__(parent)
         self.setWindowTitle("LoRAs: what is known of them")
-        self.resize(1180, 780)
+        fit_size(self, 1180, 780)
         self.qs = settings if settings is not None else getattr(parent, "qs", None)
         self.db = db or triggers.db()
         self.fetch = fetch or (lambda item: lora_pictures.fetch(item, self.db))
         self.prompt_text, self.told = prompt or "", told or ""
         self.use_prompt, self.adapt, self.set_strength = use_prompt, adapt, set_strength
         self.strengths = dict(strengths or {})
-        self.loras = [(str(x), Path(str(x)).stem) if isinstance(x, (str, Path)) else (str(x[0]), str(x[1]))
+        self.loras = [(str(x), lora_label(str(x))) if isinstance(x, (str, Path)) else (str(x[0]), str(x[1]))
                       for x in loras]
         if current and str(current) not in [p for p, _l in self.loras]:
-            self.loras.insert(0, (str(current), Path(str(current)).stem))
+            self.loras.insert(0, (str(current), lora_label(str(current))))
         self.path: str | None = None
         self.material: dict | None = None
         self.examples: list[dict] = []
@@ -328,9 +330,8 @@ class LoraWindow(QDialog):
         self.state = label("", level="secondary")
         self.state.setWordWrap(True)
         v.addWidget(self.state)
-        buttons = QDialogButtonBox(QDialogButtonBox.Close, self)
-        buttons.rejected.connect(self.reject)
-        self.b_forget = buttons.addButton("Delete the kept pictures", QDialogButtonBox.ActionRole)
+        buttons, _none = button_row(self)
+        self.b_forget = add_action(buttons, "Delete the kept pictures", destructive=True)
         self.b_forget.setToolTip("Delete the stills kept on disk (they are loaded again when shown)")
         self.b_forget.clicked.connect(self._forget_pictures)
         v.addWidget(buttons)
@@ -401,9 +402,7 @@ class LoraWindow(QDialog):
                 if closed.is_set():
                     return
                 k = lora_notes.what_is_known(p, db)
-                try:
-                    sig.known.emit(gen, k)
-                except RuntimeError:
+                if not safe_emit(sig.known, gen, k):
                     return
         threading.Thread(target=work, daemon=True).start()
 
@@ -544,11 +543,8 @@ class LoraWindow(QDialog):
         self.b_save.setEnabled(bool(self.path) and changed)
         self.b_rewrite.setEnabled(bool(self.path) and bool(self._saved["note"]))
 
-    def _confirm(self, title: str, text: str) -> bool:
-        return QMessageBox.question(self, title, text, QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes
-
     def _forget_note(self):
-        if self._confirm("Forget the note", "Forget this note (yours or the model's)? The language model writes a "
+        if confirm(self, "Forget the note", "Forget this note (yours or the model's)? The language model writes a "
                          "new one at the next refine with this LoRA. Your remarks stay."):
             self.save_note(forget=True)
 
@@ -694,9 +690,7 @@ class LoraWindow(QDialog):
                 out = (str(f), "") if f else ("", "CivitAI gave no picture for it")
             except Exception as e:  # noqa: BLE001
                 out = ("", f"Could not be loaded ({e})")
-            try:
-                self._sig.picture.emit(gen, i, *out)
-            except RuntimeError:
+            if not safe_emit(self._sig.picture, gen, i, *out):
                 return
 
     def _picture(self, gen: int, i: int, path: str, error: str):
@@ -711,7 +705,7 @@ class LoraWindow(QDialog):
         self.show_page(self.page)
 
     def _forget_pictures(self):
-        if not self._confirm("Delete the kept pictures", "Delete the pictures kept on disk? They are loaded from "
+        if not confirm(self, "Delete the kept pictures", "Delete the pictures kept on disk? They are loaded from "
                              "CivitAI again when shown."):
             return
         n = lora_pictures.forget(self.db)

@@ -6,9 +6,11 @@ The widgets only show; MainWindow decides what is done (set_state) and connects 
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from .theme import icon, repolish
+from . import shortcuts as K
 from .widgets import label
 
 
@@ -23,7 +25,7 @@ def _button(text: str, tip: str = "", primary: bool = False) -> QPushButton:
 
 
 class _Step(QWidget):
-    """One step: a tick (or its number), the text, its button(s)."""
+    """One step: its number until it is done, then a tick; the text and its button(s)."""
 
     def __init__(self, number: int, text: str, tip: str, buttons: list[QPushButton]):
         super().__init__()
@@ -51,10 +53,12 @@ class _Step(QWidget):
             return
         self.done = on
         if on:
+            self.mark.setText("")
             self.mark.setPixmap(icon("check").pixmap(14, 14))
             self.mark.setToolTip("Done")
         else:
-            self.mark.setPixmap(icon("dot").pixmap(14, 14))
+            self.mark.setPixmap(QPixmap())
+            self.mark.setText(str(self.number) if self.number else "")      # (not by its dot alone: a number says "step 2")
             self.mark.setToolTip("Still to do")
         self.text.setProperty("level", "secondary" if on else "")
         repolish(self.text)
@@ -75,36 +79,36 @@ class GuidePanel(QFrame):
         head = QHBoxLayout()
         head.addWidget(label("Getting started", type_="heading"))
         head.addStretch(1)
-        self.b_hide = _button("Hide guide", "Hide this guide (View → Getting started shows it again)")
+        self.b_hide = _button("Hide", "Hide this guide (View → Getting started shows it again)")
         self.b_hide.setProperty("variant", "ghost")
         self.b_hide.clicked.connect(self.hideWanted)
         head.addWidget(self.b_hide)
         v.addLayout(head)
         # step 0: no project open
-        self.b_new = _button("New project…", "Make a new project folder (Ctrl+Shift+N)", primary=True)
-        self.b_open = _button("Open…", "Open a project folder (Ctrl+O)")
+        self.b_new = _button("New project…", K.tip("Make a new project folder", "new_project"), primary=True)
+        self.b_open = _button("Open…", K.tip("Open a project folder", "open"))
         self.step0 = _Step(0, "Create or open a project.", "A project is a folder: it keeps the clips, the pictures and "
                            "the sounds of one video", [self.b_new, self.b_open])
         v.addWidget(self.step0)
         # the three steps of a project
-        self.b_picture = _button("Choose…", "Choose the picture the first clip starts from")
+        self.b_picture = _button("Choose a picture…", "Choose the picture the first clip starts from")
         self.b_text_only = _button("Text only", "Begin without a picture: the first clip is made from its "
                                                 "description alone (choose its Aspect in the Project tab on the right)")
-        self.step1 = _Step(1, "Choose a start picture, or start from text only.", "The first clip starts from this "
+        self.step1 = _Step(1, "Choose a start image, or start from text only.", "The first clip starts from this "
                            "picture; every clip after it continues from the one before",
                            [self.b_picture, self.b_text_only])
-        self.b_cast = _button("Add…", "Open Cast & references: add a person (with face pictures and a voice) or "
-                                      "a place, then name it as @Name in a description")
+        self.b_cast = _button("Add a person or place…", "Open Cast & references: add a person (with face pictures and a voice) or "
+                                                      "a place, then name it as @Name in a description")
         self.b_skip_cast = _button("Skip", "Go on without people or places (you can add them any time)")
         self.step2 = _Step(2, "Add people or places (optional).", "With pictures of a person or a place the clips "
                            "keep the same face and look", [self.b_cast, self.b_skip_cast])
-        self.b_write = _button("Write", "Go to the first clip's description")
+        self.b_write = _button("Go to the description", "Go to the first clip's description")
         self.step3 = _Step(3, "Describe what happens in the first clip.", "A few sentences: who does what, what "
                            "is said (in quotes), what the camera does, what is heard", [self.b_write])
         for s in (self.step1, self.step2, self.step3):
             v.addWidget(s)
         grow = QHBoxLayout()
-        self.gen_hint = label("Now press Generate path (Ctrl+Enter) to make the clip.", severity="positive")
+        self.gen_hint = label(f"Now press Generate path ({K.keys('generate')}) to make the clip.", severity="positive")
         self.gen_hint.setWordWrap(True)
         self.b_show_gen = _button("Show me", "Put the keyboard focus on Generate path; Enter or Space presses it")
         grow.addWidget(self.gen_hint, 1)
@@ -173,8 +177,8 @@ class NextHint(QFrame):
                           "prompt, add LoRAs or a sound in the clip's settings; when the path is done, use Export "
                           "path. Simple / Advanced (top right) shows fewer or more settings.")
         self.text.setWordWrap(True)
-        self.b_next = _button("Add the next clip", "A new clip after the selected one (Ctrl+N)", primary=True)
-        self.b_close = _button("Got it", "Do not show this again")
+        self.b_next = _button("Add the next clip", K.tip("A new clip after the selected one", "continue"), primary=True)
+        self.b_close = _button("Hide", "Do not show this again")
         self.b_close.clicked.connect(self.closeWanted)
         h.addWidget(self.text, 1)
         h.addWidget(self.b_next, 0, Qt.AlignVCenter)

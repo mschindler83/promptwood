@@ -9,14 +9,16 @@ import threading
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QIcon, QImage, QKeySequence, QPixmap, QShortcut, QTextCursor
+from PySide6.QtGui import QIcon, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLineEdit, QPlainTextEdit,
                                QPushButton, QSpinBox, QTextBrowser, QToolButton, QVBoxLayout, QWidget)
 
 from ..tree import refine_problems
 from .lora_details import themed
 from .theme import repolish, theme
-from .widgets import guard_wheel, icon_button, label
+from .dialogs import add_action, button_row
+from .text_edit import replace_text  # noqa: F401  (main_window and image_edit import it from here)
+from .widgets import fit_size, guard_wheel, icon_button, label, safe_emit
 
 LIKE_EXAMPLE = ("Rewrite my prompt in the manner of this example prompt, which is known to work with the LoRA: take "
                 "its wording, its structure and its level of detail. Keep what my prompt is about (my subjects, my "
@@ -31,26 +33,8 @@ def refine_button(tip: str = "Refine this prompt with a language model (ComfyUI)
     return b
 
 
-def replace_text(edit: QPlainTextEdit, text: str) -> None:
-    """Replace a text field's content as one step Ctrl+Z takes back."""
-    cur = edit.textCursor()
-    cur.beginEditBlock()
-    cur.select(QTextCursor.Document)
-    cur.insertText(text)
-    cur.endEditBlock()
-    edit.setTextCursor(cur)
-
-
 SETUP_HINT = ("More models: set up a local language model (llama.cpp, GGUF files) in the main window under "
               "Preferences, Prompt refiner.")
-
-
-def _emit(signal, *args):
-    """Emit from a worker thread; a dialog that is already closed has no receiver any more: nothing to tell."""
-    try:
-        signal.emit(*args)
-    except RuntimeError:
-        pass
 
 
 class _Sig(QObject):
@@ -80,7 +64,7 @@ class RefineDialog(QDialog):
         self.cast = cast or []                    # the project's characters: the refiner keeps @Name, writes lines
         self.seconds, self.start_image = seconds, (str(start_image) if start_image else None)
         self.setWindowTitle(f"Refine the {KIND_TEXT.get(kind, 'prompt')}")
-        self.resize(1100, 680)
+        fit_size(self, 1100, 680)
         self.kind, self.connect, self.qs, self.start_comfy = kind, connect, settings, start_comfy
         self.refiner = None
         self._connecting = False
@@ -221,14 +205,10 @@ class RefineDialog(QDialog):
         self.state = label("", level="secondary")
         self.state.setWordWrap(True)
         v.addWidget(self.state)
-        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        self.buttons.button(QDialogButtonBox.Ok).setText("Use this")
-        self.buttons.button(QDialogButtonBox.Ok).setEnabled(False)
-        self.b_start = self.buttons.addButton("Start ComfyUI", QDialogButtonBox.ResetRole)
+        self.buttons, _ok = button_row(self, "Use this", enabled=False, accept=self._use)
+        self.b_start = add_action(self.buttons, "Start ComfyUI")
         self.b_start.hide()
         self.b_start.clicked.connect(self._start_comfy)
-        self.buttons.accepted.connect(self._use)
-        self.buttons.rejected.connect(self.reject)
         v.addWidget(self.buttons)
         self.out.textChanged.connect(lambda: self.buttons.button(QDialogButtonBox.Ok).setEnabled(
             bool(self.out.toPlainText().strip()) and not self._busy))
@@ -381,15 +361,15 @@ class RefineDialog(QDialog):
             if loras:
                 try:
                     from .. import lora_notes
-                    _emit(sig.loras, lora_notes.summary(loras))
+                    safe_emit(sig.loras, lora_notes.summary(loras))
                 except Exception:  # noqa: BLE001  (nothing known of the LoRAs: a plain refine)
                     pass
             try:
                 refiner = connect()
-                _emit(sig.connected, refiner)              # (queued before the list: set in the GUI thread)
-                _emit(sig.models, refiner.models, "")
+                safe_emit(sig.connected, refiner)              # (queued before the list: set in the GUI thread)
+                safe_emit(sig.models, refiner.models, "")
             except Exception as e:  # noqa: BLE001
-                _emit(sig.models, [], str(e))
+                safe_emit(sig.models, [], str(e))
         threading.Thread(target=work, daemon=True).start()
 
     def _models(self, models: list, error: str):
@@ -509,7 +489,7 @@ class RefineDialog(QDialog):
         def work():
             try:
                 from .. import lora_notes
-                _emit(sig.loras, lora_notes.summary(loras))
+                safe_emit(sig.loras, lora_notes.summary(loras))
             except Exception:  # noqa: BLE001
                 pass
         threading.Thread(target=work, daemon=True).start()
@@ -528,23 +508,23 @@ class RefineDialog(QDialog):
 
         def guide() -> str:
             if not paths:
-                _emit(sig.told, "")
+                safe_emit(sig.told, "")
                 return ""
             from .. import lora_notes
             try:
                 if hasattr(refiner, "complete"):
                     def said(name, i, n):
-                        _emit(sig.progress, f"Reading up on the LoRA {name} ({i} of {n}; once per LoRA) …")
+                        safe_emit(sig.progress, f"Reading up on the LoRA {name} ({i} of {n}; once per LoRA) …")
                     lora_notes.make_notes(paths, lambda system, user, n: refiner.complete(
                         system, user, n, model_file=model), progress=said)
-                    _emit(sig.progress, "")
+                    safe_emit(sig.progress, "")
                 told = lora_notes.guidance(paths, prompt=text)
             except Exception:  # noqa: BLE001  (the LoRAs' data cannot be read: a plain refine)
                 told = ""
             try:
-                _emit(sig.told, told)
+                safe_emit(sig.told, told)
                 if told:
-                    _emit(sig.loras, lora_notes.summary(paths))    # (a note may be new: the counts say so)
+                    safe_emit(sig.loras, lora_notes.summary(paths))    # (a note may be new: the counts say so)
             except Exception:  # noqa: BLE001
                 pass
             return told
@@ -673,9 +653,9 @@ class RefineDialog(QDialog):
                 else:
                     out = refiner.refine_prompt(text, kind, model, seed, ask, **({"cast": cast} if cast else {}),
                                                 **more)
-                _emit(sig.result, out, "")
+                safe_emit(sig.result, out, "")
             except Exception as e:  # noqa: BLE001
-                _emit(sig.result, "", str(e))
+                safe_emit(sig.result, "", str(e))
         threading.Thread(target=work, daemon=True).start()
 
     def _clip(self) -> dict:
@@ -732,10 +712,10 @@ class RefineDialog(QDialog):
         def work():
             try:
                 loras = guide()
-                _emit(sig.ideas, refiner.ideas(bullets, n, wish, pictures=pics, cast=cast or None, seed=seed,
+                safe_emit(sig.ideas, refiner.ideas(bullets, n, wish, pictures=pics, cast=cast or None, seed=seed,
                                                **({"loras": loras} if loras else {})), "")
             except Exception as e:  # noqa: BLE001
-                _emit(sig.ideas, [], str(e))
+                safe_emit(sig.ideas, [], str(e))
         threading.Thread(target=work, daemon=True).start()
 
     def _ideas_ready(self, ideas: list, error: str):

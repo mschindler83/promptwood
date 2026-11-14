@@ -18,7 +18,8 @@ from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QDoubleSpinBox, QHBoxL
 
 from .. import chain, media
 from .theme import icon, theme, with_alpha
-from .widgets import FrameTile, VideoView, format_time, guard_wheel, icon_button, label
+from .dialogs import button_row
+from .widgets import fit_size, format_time, FrameTile, guard_wheel, icon_button, label, safe_emit, VideoView
 
 FPS = chain.FPS
 
@@ -30,8 +31,9 @@ def fmt(t: float) -> str:
 def choose_video(parent, settings: QSettings | None, start: str | None = None,
                  places: list | None = None, collections: list | None = None) -> str | None:
     """The app's own file browser for videos (frames as thumbnails; it remembers its folder, 'videoDir')."""
-    from .image_picker import pick_image
-    return pick_image(parent, "Real video", settings, start, places=places, collections=collections, kind="video")
+    from .image_picker import pick_image, scratch_settings
+    return pick_image(parent, "Real video", settings if settings is not None else scratch_settings(), start,
+                      places=places, collections=collections, kind="video")
 
 
 class RangeBar(QWidget):
@@ -229,7 +231,7 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
                  on_reference=None, rotate: int = 0, canvas_for=None):
         super().__init__(parent)
         self.setWindowTitle("Real video")
-        self.resize(980, 760)
+        fit_size(self, 980, 760)
         self.settings, self.canvas, self.want_player = settings, canvas, player
         self.canvas_for = canvas_for
         self.rotate = chain.rotation(rotate)
@@ -349,10 +351,7 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
         tiles.addStretch(1)
         v.addLayout(tiles)
 
-        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        self.buttons.button(QDialogButtonBox.Ok).setText("Use this range")
-        self.buttons.accepted.connect(self.accept)
-        self.buttons.rejected.connect(self.reject)
+        self.buttons, _ok = button_row(self, "Use this range")
         v.addWidget(self.buttons)
         for key, fn in (("Space", self.toggle), ("Left", lambda: self.step_frames(-1)),
                         ("Right", lambda: self.step_frames(1)), ("[", lambda: self.set_range(self.position(), self.end)),
@@ -561,9 +560,7 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
                                     "-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "-"], gen)
                 if img is None:                           # the range moved on (or the dialog closed): stopped
                     return
-                try:
-                    sig.ready.emit(gen, which, img)
-                except RuntimeError:                      # the dialog is gone
+                if not safe_emit(sig.ready, gen, which, img):
                     return
         threading.Thread(target=work, daemon=True).start()
 

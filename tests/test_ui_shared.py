@@ -215,7 +215,7 @@ def test_the_shortcut_table_is_valid_and_has_no_double_chords():
     from video_chain.ui import shortcuts
     seen = {}
     for s in shortcuts.SHORTCUTS:
-        assert QKeySequence(s.keys).toString() , s
+        assert all(QKeySequence(k).toString() for k in s.keys.split(" / ")), s
         assert s.text and s.where, s
         if s.where == "main window":
             assert s.keys not in seen, (s.keys, seen.get(s.keys))
@@ -315,7 +315,8 @@ def test_replace_text_is_one_undo_step_and_is_shared():
 
 # ---------------------------------------------------------------- one word per thing (UX-14 .. 16, UMD-39)
 REJECTED = [(r"\bstart pictures?\b", "start image"), (r"\bend pictures?\b", "end image"),
-            (r"\bUse this part\b", "Use this range"), (r"\bH3\b", "the video model"),
+            (r"\bUse this part\b", "Use this range"), (r"H3 cuts to it", "the video model"),
+            (r"H3's last-frame", "the video model's last-frame input"),
             (r"\b[Vv]ariations? of (this|the) clip\b", "variant")]
 
 
@@ -347,3 +348,32 @@ def test_the_ui_files_use_one_word_per_thing():
 def test_the_terms_are_written_down():
     from video_chain.ui import widgets
     assert widgets.TERMS["start image"] and "variant" in widgets.TERMS
+
+
+# ---------------------------------------------------------------- fonts, colours (UX-22, UX-23, UX-24)
+def test_painted_labels_do_not_shrink_below_the_themes_small_size():
+    for name in ("graph", "keyframe_strip", "timeline", "results_gallery"):
+        text = (UI / f"{name}.py").read_text()
+        assert not re.search(r"max\(\s*[67]\.[05]\s*,|setPixelSize\(10\)", text), name
+
+
+def test_error_red_comes_from_the_theme():
+    assert "QColor(255, 60, 60)" not in (UI / "swap_dialog.py").read_text()
+
+
+def test_a_variable_in_the_prompt_is_not_marked_by_colour_alone():
+    from video_chain import variations as V
+    from video_chain.ui import variations_panel as VP
+    p = VP.VariationsPanel()
+    p.set_templates("a {x} cat")
+    p.on.setChecked(True)
+    p.variable("x").values = [V.Value("red")]
+    p._rebuild()
+    from PySide6.QtWidgets import QPlainTextEdit
+    e = QPlainTextEdit("a {x} cat")
+    h = VP.PlaceholderHighlighter(e.document(), p)
+    got = []
+    h.setFormat = lambda start, n, f: got.append(f)
+    h.highlightBlock("a {x} cat")
+    assert got and got[0].underlineStyle() == got[0].UnderlineStyle.SingleUnderline
+    assert "{x}" in got[0].toolTip()

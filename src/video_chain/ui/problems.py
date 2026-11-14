@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPush
 
 from .. import camera as CAM
 from .theme import icon, repolish
+from .text_edit import insert_spaced
 from .widgets import label
 
 # short example prompts (generic, harmless): a spoken line in quotes, a #camera move, a described sound
@@ -23,19 +24,7 @@ EXAMPLES = (
 
 def insert_at_cursor(edit: QPlainTextEdit, text: str) -> None:
     """Put text in at the cursor, with a space before / after where words would run together (one undo step)."""
-    cur = edit.textCursor()
-    doc = edit.document()
-    pos = cur.selectionStart()
-    before = doc.characterAt(pos - 1) if pos > 0 else ""
-    end = cur.selectionEnd()
-    after = doc.characterAt(end) if end < doc.characterCount() - 1 else ""
-    pre = " " if before and not before.isspace() else ""
-    post = "" if after and (after.isspace() or after in ".,;:!?'\")") else " "
-    cur.beginEditBlock()
-    cur.insertText(pre + text + post)
-    cur.endEditBlock()
-    edit.setTextCursor(cur)
-    edit.setFocus()
+    insert_spaced(edit, text)
 
 
 def add_example(edit: QPlainTextEdit, text: str) -> None:

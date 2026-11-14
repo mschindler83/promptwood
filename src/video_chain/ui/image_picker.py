@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QHBoxLayout
 
 from .. import media
 from .theme import icon, theme
-from .widgets import icon_button, label
+from .widgets import fit_size, format_time, icon_button, label, safe_emit
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mts", ".m2ts", ".wmv", ".flv", ".mpg", ".mpeg"}
@@ -114,8 +114,7 @@ def _media_info(path: str) -> str:
     except (OSError, ValueError, media.MediaError):
         return ""
     secs = float((d.get("format") or {}).get("duration") or 0)
-    m, sec = divmod(secs, 60)
-    parts = [f"{int(m)}:{sec:04.1f}"]
+    parts = [format_time(secs, 1)]
     v = next((x for x in d.get("streams", []) if x.get("codec_type") == "video"), None)
     if v and v.get("width"):
         parts.append(f"{v['width']}×{v['height']}")
@@ -151,16 +150,15 @@ class ImagePickerDialog(QDialog):
     project" (captions such as "Clip #5 · last frame"); folders can be browsed as well.
     kind: what is listed (KINDS): 'image', 'video' (thumbnails are frames) or 'media' (sounds and videos)."""
 
-    def __init__(self, parent=None, title: str = "Choose an image", start_dir: str | None = None,
-                 settings: QSettings | None = None, places: list[tuple[str, str]] | None = None,
+    def __init__(self, parent, title: str, start_dir: str | None, settings: QSettings, places: list[tuple[str, str]] | None = None,
                  cache_dir: Path | None = CACHE_DIR, desktop_thumbs: Path | None = DESKTOP_THUMBS,
                  collections: list[tuple[str, list[tuple[str, str]]]] | None = None, kind: str = "image"):
         super().__init__(parent)
         self.kind = kind if kind in KINDS else "image"
         self.exts, self.noun, self.dir_key = KINDS[self.kind]
         self.setWindowTitle(title)
-        self.resize(1100, 700)
-        self.qs = settings or QSettings()
+        fit_size(self, 1100, 700)
+        self.qs = settings
         self._gen = 0
         self._lock = threading.Lock()                  # the pool's threads share the cache and the counters
         self._zoom_px = 0
@@ -596,10 +594,7 @@ class ImagePickerDialog(QDialog):
 
             def work():
                 img = _video_frame(path, size) if ext in VIDEO_EXTS else QImage()
-                try:
-                    thumbs.preview.emit(sel, path, img, _media_info(path))
-                except RuntimeError:                   # the dialog is gone
-                    pass
+                safe_emit(thumbs.preview, sel, path, img, _media_info(path))
             try:
                 self._pool.submit(work)
             except RuntimeError:                       # (closed)
@@ -675,12 +670,19 @@ class ImagePickerDialog(QDialog):
         super().done(r)
 
 
-def pick_image(parent, title: str, settings: QSettings | None = None, start_dir: str | None = None,
+def scratch_settings() -> QSettings:
+    """Settings that live only for this session (a window made without settings of its own: its picker remembers
+    nothing; it never reads or writes the user's real store)."""
+    import tempfile
+    return QSettings(str(Path(tempfile.mkdtemp(prefix="video-chain-")) / "picker.ini"), QSettings.IniFormat)
+
+
+def pick_image(parent, title: str, settings: QSettings, start_dir: str | None = None,
                places: list[tuple[str, str]] | None = None,
                collections: list[tuple[str, list[tuple[str, str]]]] | None = None, kind: str = "image") -> str | None:
     """Show the picker; the chosen file's path or None. kind: 'image', 'video' or 'media' (sounds and videos).
     The thumbnail cache can be moved with the setting 'thumbCacheDir' (empty = no disk cache)."""
-    qs = settings or QSettings()
+    qs = settings
     cache = qs.value("thumbCacheDir", None)
     cache_dir = CACHE_DIR if cache is None else (Path(cache) if cache else None)
     dlg = ImagePickerDialog(parent, title, start_dir, qs, places, cache_dir=cache_dir, collections=collections,

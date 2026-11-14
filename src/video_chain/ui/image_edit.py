@@ -21,9 +21,9 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QSettings, QSize, QTimer, Qt, Signal
 from PySide6.QtGui import QIcon, QImage, QImageReader, QKeySequence, QPixmap, QShortcut
-from PySide6.QtWidgets import (QButtonGroup, QSlider, QStackedWidget, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
+from PySide6.QtWidgets import (QButtonGroup, QSlider, QStackedWidget, QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
                                QFrame, QGridLayout, QHBoxLayout, QInputDialog, QLineEdit, QListWidget,
-                               QFileDialog, QListWidgetItem, QMessageBox,
+                               QFileDialog, QListWidgetItem, 
                                QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSpinBox, QVBoxLayout,
                                QWidget)
 
@@ -37,7 +37,8 @@ from .variations_panel import PlaceholderHighlighter, VariationsPanel
 from .results_gallery import (InfoCard, ResultGallery, ResultView, ThumbLoader, badged, model_key, model_name,
                               run_groups)
 from .mask_painter import MaskPainterDialog, mask_area, overlay
-from .widgets import FrameTile, guard_wheel, icon_button, label
+from .dialogs import button_row, confirm as ask, failed
+from .widgets import fit_size, FrameTile, guard_wheel, icon_button, label, safe_emit
 
 MAX_RESULTS = 20                           # results per Generate (made one after another, Cancel stops)
 SEED_MAX = 2**31 - 1                      # (the seeds ComfyUI's image samplers take here)
@@ -288,7 +289,7 @@ class ImageEditDialog(QDialog):
                  use_triggers: bool = True, collections: list | None = None):
         super().__init__(parent)
         self.setWindowTitle("Edit an image with AI")
-        self.resize(1240, 820)
+        fit_size(self, 1240, 820)
         self.project, self.connect_editor, self.on_use = Path(project), connect, on_use
         self.end_target, self.qs, self.places, self.start_comfy = end_target, settings, places or [], start_comfy
         self.on_start = on_start                         # called (GUI thread) before each Generate
@@ -710,7 +711,7 @@ class ImageEditDialog(QDialog):
         self.b_use_start.clicked.connect(lambda: self._use("start"))
         self.b_use_end = QPushButton(f"Use as end image of clip #{end_target[1:]}" if end_target else
                                      "Use as end image")
-        self.b_use_end.setToolTip("The frame this clip steers its end to (H3's last-frame input)" if end_target else
+        self.b_use_end.setToolTip("The frame this clip steers its end to (the video model's last-frame input)" if end_target else
                                   "Open this from a clip (its End row or its menu) to make its end image")
         self.b_use_end.clicked.connect(lambda: self._use("end"))
         self.b_further = QPushButton("Edit this one further")
@@ -738,8 +739,7 @@ class ImageEditDialog(QDialog):
         arow.addWidget(self.b_undo)
         arow.addWidget(self.b_delete)
         right.addLayout(arow)
-        close = QDialogButtonBox(QDialogButtonBox.Close)
-        close.rejected.connect(self.reject)
+        close, _none = button_row(self)
         right.addWidget(close)
         top.addLayout(right, 1)
 
@@ -874,10 +874,7 @@ class ImageEditDialog(QDialog):
             try:
                 sig.families.emit(connect(None).files, "")
             except Exception as e:  # noqa: BLE001
-                try:
-                    sig.families.emit({}, str(e))
-                except RuntimeError:
-                    pass
+                safe_emit(sig.families, {}, str(e))
         threading.Thread(target=work, daemon=True).start()
 
     def _families_found(self, files: dict, error: str):
@@ -1382,9 +1379,9 @@ class ImageEditDialog(QDialog):
         sources = list(self.batch) or [source]       # (a folder: each of its images in turn, with all of it)
         base_n, per = n, n * len(runs)
         n = per * len(sources)
-        if len(sources) > 1 and n > ASK_ABOVE and QMessageBox.question(
+        if len(sources) > 1 and n > ASK_ABOVE and not ask(
                 self, "Edit a folder", f"This makes {n:,} images: {len(sources)} pictures × {per} each. "
-                "They are made one after another (Cancel stops after the current one). Start?") != QMessageBox.Yes:
+                "They are made one after another (Cancel stops after the current one). Start?"):
             self._busy = False
             return
         run_words = [self._trigger_words(r) for r in runs]
@@ -1469,10 +1466,7 @@ class ImageEditDialog(QDialog):
                         sig.result.emit(str(out), meta)
                 sig.finished.emit("")
             except Exception as e:  # noqa: BLE001
-                try:
-                    sig.finished.emit("cancelled" if self._cancel else str(e))
-                except RuntimeError:
-                    pass
+                safe_emit(sig.finished, "cancelled" if self._cancel else str(e))
             finally:
                 for kept, mask_file, made in copies:
                     if not made:                 # no result refers to them: the copies of source and mask go
@@ -1774,14 +1768,13 @@ class ImageEditDialog(QDialog):
         name = " ".join(str(name).split())
         if not name:
             return False
-        if presets.store().get(lora, name) is not None and QMessageBox.question(
-                self, "New preset", f"{lora_label(lora)} already has a preset “{name}”. Replace it?") \
-                != QMessageBox.Yes:
+        if presets.store().get(lora, name) is not None and not ask(
+                self, "New preset", f"{lora_label(lora)} already has a preset “{name}”. Replace it?"):
             return False
         try:
             presets.store().save(lora, name, self._preset_values(lora))
         except (OSError, ValueError) as e:
-            QMessageBox.warning(self, "New preset", f"Could not save the preset: {e}")
+            failed(self, "New preset", "save the preset", e)
             return False
         self._fill_presets((lora, name))
         self.state.setText(f"Saved the preset “{name}” of {lora_label(lora)}.")
@@ -1796,7 +1789,7 @@ class ImageEditDialog(QDialog):
         try:
             presets.store().save(data[0], data[1], self._preset_values(data[0]))
         except (OSError, ValueError) as e:
-            QMessageBox.warning(self, "Preset", f"Could not save the preset: {e}")
+            failed(self, "Preset", "save the preset", e)
             return False
         self._fill_presets(data)
         self.state.setText(f"Saved the changes to the preset “{data[1]}”.")
@@ -1817,7 +1810,7 @@ class ImageEditDialog(QDialog):
         try:
             presets.store().rename(data[0], data[1], new)
         except (OSError, ValueError) as e:
-            QMessageBox.warning(self, "Rename preset", f"Could not rename it: {e}")
+            failed(self, "Rename preset", "rename it", e)
             return False
         self._fill_presets((data[0], new))
         return True
@@ -1827,13 +1820,13 @@ class ImageEditDialog(QDialog):
         data = self._chosen_preset()
         if not data:
             return False
-        if confirm and QMessageBox.question(self, "Delete preset", f"Delete the preset “{data[1]}” of "
-                                            f"{lora_label(data[0])}?") != QMessageBox.Yes:
+        if confirm and not ask(self, "Delete preset", f"Delete the preset “{data[1]}” of "
+                                                f"{lora_label(data[0])}?"):
             return False
         try:
             presets.store().delete(*data)
         except OSError as e:
-            QMessageBox.warning(self, "Delete preset", f"Could not delete it: {e}")
+            failed(self, "Delete preset", "delete it", e)
             return False
         self._fill_presets()
         self.state.setText(f"Deleted the preset “{data[1]}”.")
@@ -1897,9 +1890,9 @@ class ImageEditDialog(QDialog):
         self._templates_changed()
         many = self.variations.too_many()
         from ..variations import MAX_IMAGES
-        if many and QMessageBox.question(self, "Variations", f"Every combination makes {many:,} images"
-                                         + (f" (one Generate makes at most {MAX_IMAGES:,})" if many > MAX_IMAGES
-                                            else "") + ". Make them all?") != QMessageBox.Yes:
+        if many and not ask(self, "Variations", f"Every combination makes {many:,} images"
+                                    + (f" (one Generate makes at most {MAX_IMAGES:,})" if many > MAX_IMAGES
+                                       else "") + ". Make them all?"):
             return []
         jobs = self.variations.jobs()
         key = self.variations.position_key()
@@ -1994,10 +1987,7 @@ class ImageEditDialog(QDialog):
                     sig.result.emit(str(out), meta)
                 sig.finished.emit("")
             except Exception as e:  # noqa: BLE001
-                try:
-                    sig.finished.emit("cancelled" if self._cancel else str(e))
-                except RuntimeError:
-                    pass
+                safe_emit(sig.finished, "cancelled" if self._cancel else str(e))
         threading.Thread(target=work, daemon=True).start()
 
     def _run_on_start(self) -> bool:
@@ -2336,8 +2326,8 @@ class ImageEditDialog(QDialog):
 
     def reject(self):
         """Close, Esc: a running job is only stopped after asking (the rest of its images would be lost)."""
-        if self._busy and QMessageBox.question(
-                self, "Edit an image", "Images are being made. Stop and close?") != QMessageBox.Yes:
+        if self._busy and not ask(
+                self, "Edit an image", "Images are being made. Stop and close?"):
             return
         super().reject()
 

@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPus
                                QToolButton, QVBoxLayout, QWidget)
 
 from .theme import theme
-from .widgets import FlowBox, label, smooth_scaled
+from .widgets import FlowBox, label, safe_emit, smooth_scaled
 
 THUMB_DECODE = 400                    # thumbnails are decoded once at this size (the gallery's largest)
 RUN_GAP = 15 * 60                     # older results without a run id: the same prompt within 15 min is one run
@@ -110,7 +110,7 @@ def badged(pix: QPixmap, size: QSize, tag: str, fav: bool, in_use: bool, selecte
         p.drawPixmap(QRect(int((size.width() - w) / 2), int((size.height() - h) / 2), int(w), int(h)), img)
         p.setClipping(False)
     f = QFont(p.font())
-    f.setPixelSize(10)
+    f.setPixelSize(t.font.small)
     f.setBold(True)
     p.setFont(f)
     fm = p.fontMetrics()
@@ -476,9 +476,7 @@ class ThumbLoader(QObject):
                 img = read_thumb(png)
             except Exception:  # noqa: BLE001  (one bad file or a decoder error must not stop the other thumbnails)
                 img = QImage()
-            try:
-                self.ready.emit(png, mt, img)
-            except RuntimeError:                  # the window is gone
+            if not safe_emit(self.ready, png, mt, img):
                 return
 
 

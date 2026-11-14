@@ -31,9 +31,10 @@ def failed(parent, title: str, what: str, exc) -> None:
 
 
 def button_row(dialog: QDialog, ok_text: str | None = None, *, cancel_text: str = "Cancel",
-               enabled: bool = True) -> tuple[QDialogButtonBox, QPushButton | None]:
+               enabled: bool = True, accept=None) -> tuple[QDialogButtonBox, QPushButton | None]:
     """The buttons of a dialog, wired to it. With ok_text: that action button (Ok role: what it does, in words) and
-    Cancel; the box and the action button come back. Without: a Close button, and None for the action."""
+    Cancel; the box and the action button come back (accept: what the action does instead of dialog.accept).
+    Without ok_text: a Close button, and None for the action."""
     if ok_text is None:
         box = QDialogButtonBox(QDialogButtonBox.Close)
         box.rejected.connect(dialog.reject)
@@ -43,7 +44,7 @@ def button_row(dialog: QDialog, ok_text: str | None = None, *, cancel_text: str 
     ok.setText(ok_text)
     ok.setEnabled(enabled)
     box.button(QDialogButtonBox.Cancel).setText(cancel_text)
-    box.accepted.connect(dialog.accept)
+    box.accepted.connect(accept or dialog.accept)
     box.rejected.connect(dialog.reject)
     return box, ok
 

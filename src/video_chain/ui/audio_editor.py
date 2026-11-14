@@ -20,7 +20,8 @@ from .. import chain, media
 from ..tree import AUDIO_REF_MIN, VOICE_MAX_SECS, VOICE_REF_MAX_SECS
 from .theme import theme, with_alpha
 from .video_editor import RangeBar, RangePlayerMixin, fmt
-from .widgets import guard_wheel, icon_button, label
+from .dialogs import button_row
+from .widgets import fit_size, guard_wheel, icon_button, label, safe_emit
 
 PEAKS = 1200                                    # waveform columns
 
@@ -121,7 +122,7 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
                  voice: bool = False, isolate=None, no_isolate: str = ""):
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.resize(920, 640 if voice else 420)
+        fit_size(self, 920, 640 if voice else 420)
         self.settings, self.want_player, self.voice = settings, player, voice
         self.video = None
         self._isolate = isolate if voice else None
@@ -240,10 +241,7 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
             mrow.addWidget(self.clean_info, 1)
             v.addLayout(mrow)
 
-        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        self.buttons.button(QDialogButtonBox.Ok).setText("Use this part")
-        self.buttons.accepted.connect(self.accept)
-        self.buttons.rejected.connect(self.reject)
+        self.buttons, _ok = button_row(self, "Use this range")
         v.addWidget(self.buttons)
         for key, fn in (("Space", self.toggle), ("[", lambda: self.set_range(self.position(), self.end)),
                         ("]", lambda: self.set_range(self.start, self.position(), moved="end"))):
@@ -256,9 +254,10 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
     def _choose(self):
         folder = str(Path(self.file).parent) if self.file else (
             self.settings.value("soundDir", "", type=str) if self.settings is not None else "")
-        from .image_picker import pick_image
+        from .image_picker import pick_image, scratch_settings
         f = pick_image(self, "A recording of the voice (audio or video)" if self.voice else "Sound for an audio track",
-                       self.settings, folder or None, kind="media")
+                       self.settings if self.settings is not None else scratch_settings(), folder or None,
+                       kind="media")
         if f:
             self.load(f)
 
@@ -294,10 +293,7 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
             peaks = waveform(f, dur, cancelled=lambda: gen != self._gen)
             if gen != self._gen:
                 return
-            try:
-                sig.ready.emit(gen, peaks)
-            except RuntimeError:                       # the dialog is gone
-                pass
+            safe_emit(sig.ready, gen, peaks)
         threading.Thread(target=work, daemon=True).start()
         self._update_enabled()
         return True
@@ -419,10 +415,7 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
                 isolate(raw, out)
                 sig.ready.emit(out, "", start, end)
             except Exception as e:  # noqa: BLE001
-                try:
-                    sig.ready.emit(None, str(e), start, end)
-                except RuntimeError:                    # the dialog was closed
-                    pass
+                safe_emit(sig.ready, None, str(e), start, end)
         threading.Thread(target=work, daemon=True).start()
 
     def _cleaned(self, out, err: str, start: float, end: float):
