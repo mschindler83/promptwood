@@ -17,9 +17,10 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
+from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, QSettings, QSize, QTimer, Qt, Signal
 from PySide6.QtGui import QIcon, QImage, QImageReader, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (QButtonGroup, QSlider, QStackedWidget, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
                                QFrame, QGridLayout, QHBoxLayout, QInputDialog, QLineEdit, QListWidget,
@@ -293,11 +294,15 @@ class ImageEditDialog(QDialog):
     on_use(kind 'start' | 'end', png) -> bool; start_comfy() -> bool."""
 
     def __init__(self, parent, project: Path, sources: list[tuple[str, str]], source: str | None,
-                 end_target: str | None, connect, on_use, settings=None, places=None, start_comfy=None,
-                 on_start=None, known_loras: list[tuple[str, str]] | None = None, lora_dir: str = "",
-                 uses=None, refine=None, connect_create=None, family_loras=None,
-                 start_aspect: float | None = None, mode: str = "edit", check_lora=None,
-                 use_triggers: bool = True, collections=None):
+                 end_target: str | None, connect: Callable, on_use: Callable[[str, str], bool],
+                 settings: QSettings | None = None, places: list[tuple[str, str]] | None = None,
+                 start_comfy: Callable[[], bool] | None = None, on_start: Callable[[], None] | None = None,
+                 known_loras: list[tuple[str, str]] | None = None, lora_dir: str = "",
+                 uses: Callable[[dict], list[str]] | None = None, refine: Callable[[str, str], str | None] | None = None,
+                 connect_create: Callable | None = None, family_loras: dict[str, list] | None = None,
+                 start_aspect: float | None = None, mode: str = "edit",
+                 check_lora: Callable[[str | None], bool | None] | None = None,
+                 use_triggers: bool = True, collections: list | None = None):
         super().__init__(parent)
         self.setWindowTitle("Edit an image with AI")
         self.resize(1240, 820)

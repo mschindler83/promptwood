@@ -325,4 +325,7 @@ class FaceCropDialog(QDialog):
         if self.loading and not self._closed:             # asked before the picture is ready (not by the buttons)
             self._finished.wait(60)
             self._apply()
-        return None if self.whole else tuple(int(v) for v in self.view.crop)
+        if self.whole:
+            return None
+        x, y, side = self.view.crop
+        return int(x), int(y), int(side)
