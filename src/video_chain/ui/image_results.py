@@ -12,6 +12,7 @@ from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtWidgets import QListWidgetItem
 
 from .. import edits
+from ..edits import ResultRecord
 from .imageio import upright
 from .lora_stack import lora_label
 from .results_gallery import badged, model_key, model_name, run_groups
@@ -43,38 +44,18 @@ class ResultsMixin:
             self.f_model.addItem(model_name(k), k)
         self.f_model.setCurrentIndex(max(0, self.f_model.findData(want)))
         self.f_model.blockSignals(False)
-        show, model = self.f_show.currentData(), self.f_model.currentData()
-        words = self.f_search.text().lower().split()
-
-        def keep_it(png, meta):
-            if show == "fav" and not meta.get("favorite"):
-                return False
-            if show == "used" and png not in used:
-                return False
-            if model and model_key(meta) != model:
-                return False
-            text = " ".join(str(meta.get(k) or "") for k in ("prompt", "negative")).lower()
-            return all(w in text for w in words)
-        shown = [(p, m, t, ns) for p, m, t, ns in entries if keep_it(p, m)]
+        shown = [(p, m, t, ns) for p, m, t, ns in entries if self._passes(p, m)]
+        self._shown = shown
         self.results.blockSignals(True)
         self.results.clear()
         self._strip_items = {}                       # png -> its item (a thumbnail arriving finds it at once)
         for png, meta, _t, ns in shown:
-            it = QListWidgetItem(self._strip_icon(png, meta), "")
-            it.setData(Qt.UserRole, (png, meta))
-            it.setToolTip(meta.get("prompt", Path(png).name))
-            self.results.addItem(it)
-            self._strip_items[png] = it
-            if self._thumbs.get(png, (None,))[0] != ns and (png, ns) not in self._requested \
-                    and (png, ns) not in self._failed:
-                self._requested.add((png, ns))
-                self._loader.request(png, ns)
+            self.results.addItem(self._strip_item(png, meta, ns))
         self.results.blockSignals(False)
         self.gallery.set_groups(run_groups([(p, m, t) for p, m, t, _ns in shown]), used)
         for png, (_ns, pix) in self._thumbs.items():
             self.gallery.set_thumb(png, pix)
-        n, total = len(shown), len(entries)
-        self.f_count.setText(f"{n} result{'s' if n != 1 else ''}" if n == total else f"{n} of {total}")
+        self._show_count(len(shown), len(entries))
         alive = {p for p, *_r in entries}
         for png in [p for p in self._thumbs if p not in alive]:     # deleted results: their thumbnails go
             del self._thumbs[png]
@@ -85,6 +66,59 @@ class ResultsMixin:
             self.results.setCurrentRow(k)
             self.results.blockSignals(False)
             self._strip_selection(self.results.currentItem(), None)
+        self._show_selected()
+
+    def _passes(self, png: str, meta: ResultRecord) -> bool:
+        """Whether the filters (favourites / in use, model, search words) show this result."""
+        show, model = self.f_show.currentData(), self.f_model.currentData()
+        if show == "fav" and not meta.get("favorite"):
+            return False
+        if show == "used" and png not in self._in_use:
+            return False
+        if model and model_key(meta) != model:
+            return False
+        text = " ".join(str(meta.get(k) or "") for k in ("prompt", "negative")).lower()
+        return all(w in text for w in self.f_search.text().lower().split())
+
+    def _show_count(self, n: int, total: int):
+        self.f_count.setText(f"{n} result{'s' if n != 1 else ''}" if n == total else f"{n} of {total}")
+
+    def _strip_item(self, png: str, meta: ResultRecord, ns: int) -> QListWidgetItem:
+        """A strip item for a result; its thumbnail is asked for unless it is there or was asked (or failed)."""
+        it = QListWidgetItem(self._strip_icon(png, meta), "")
+        it.setData(Qt.UserRole, (png, meta))
+        it.setToolTip(meta.get("prompt", Path(png).name))
+        self._strip_items[png] = it
+        if self._thumbs.get(png, (None,))[0] != ns and (png, ns) not in self._requested \
+                and (png, ns) not in self._failed:
+            self._requested.add((png, ns))
+            self._loader.request(png, ns)
+        return it
+
+    def _result_added(self, png: str, meta: ResultRecord):
+        """A new result (the newest) joins the strip and the gallery without reloading the others. When the filters
+        hide it, it is a new model, or the strip is empty, everything is loaded as usual."""
+        try:
+            st = Path(png).stat()
+        except OSError:
+            return self._load_results(select=png)
+        used = bool(self.uses(meta))
+        if used:
+            self._in_use.add(png)
+        known = self.f_model.findData(model_key(meta)) >= 0
+        if png in self._strip_items or not known or not self.results.count() or not self._passes(png, meta):
+            self._in_use.discard(png)
+            return self._load_results(select=png)
+        self._entries.insert(0, (png, meta, st.st_mtime))
+        self._shown.insert(0, (png, meta, st.st_mtime, st.st_mtime_ns))
+        prev = self.results.currentItem()
+        self.results.blockSignals(True)
+        self.results.insertItem(0, self._strip_item(png, meta, st.st_mtime_ns))
+        self.results.setCurrentRow(0)
+        self.results.blockSignals(False)
+        self._strip_selection(self.results.currentItem(), prev)
+        self.gallery.set_groups(run_groups([(p, m, t) for p, m, t, _ns in self._shown]), self._in_use)
+        self._show_count(len(self._shown), len(self._entries))
         self._show_selected()
 
     def _strip_icon(self, png: str, meta: dict, selected: bool = False) -> QIcon:

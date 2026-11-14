@@ -117,6 +117,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         self._failed: set[tuple[str, int]] = set()
         self._entries: list[tuple[str, ResultRecord, float]] = []
         self._in_use: set[str] = set()                   # the results that are used somewhere
+        self._shown: list[tuple[str, ResultRecord, float, int]] = []   # the strip's results: png, record, mtime, ns
         self._strip_items: dict[str, QListWidgetItem] = {}
         self._loader = ThumbLoader(self)
         self._loader.ready.connect(self._thumb_ready)
@@ -753,7 +754,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
     def _result(self, png: str, meta: dict):
         if isinstance(meta.get("variation"), dict) and meta["variation"].get("step") is not None:
             self.variations.done(int(meta["variation"]["step"]), meta["variation"].get("key"))   # continues after
-        self._load_results(select=png)
+        self._result_added(png, meta)
         self.b_before.setChecked(False)
 
     def _finished(self, error: str):
