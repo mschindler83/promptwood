@@ -12,6 +12,7 @@ from PIL import Image  # noqa: E402
 from PySide6.QtGui import QTextCursor  # noqa: E402
 from PySide6.QtWidgets import QApplication, QInputDialog, QMessageBox  # noqa: E402
 
+from video_chain.ui.generator_state import Job, RunpodBinding  # noqa: E402
 from video_chain import chain  # noqa: E402
 from conftest import settings  # noqa: E402,F401  (the shared isolated settings file)
 from video_chain import tree as T  # noqa: E402
@@ -571,6 +572,7 @@ def test_lora_lists_offer_the_h3_loras(app, tmp_path, image, monkeypatch):
 
 
 def test_identity_references_in_the_window(app, win, tmp_path, image, monkeypatch):
+    from video_chain.ui import image_picker as IP
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
     ids = new_project(win, tmp_path, image, ("a", "b"))
     run_and_wait(app, win, win.generate_path)
@@ -663,7 +665,7 @@ def test_identity_references_in_the_window(app, win, tmp_path, image, monkeypatc
     film = tmp_path / "talk.mp4"
     subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=200:duration=40", "-f", "lavfi",
                     "-i", "color=gray:s=64x48:d=40", "-shortest", str(film)], check=True)
-    monkeypatch.setattr(M, "pick_image", lambda *a, **k: str(film))
+    monkeypatch.setattr(IP, "pick_image", lambda *a, **k: str(film))
     seen = {}
 
     def choose(dlg):
@@ -770,7 +772,7 @@ def test_identity_references_in_the_window(app, win, tmp_path, image, monkeypatc
     win._tts_local = None
     mute = tmp_path / "mute.mp4"
     subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=gray:s=64x48:d=3", str(mute)], check=True)
-    monkeypatch.setattr(M, "pick_image", lambda *a, **k: str(mute))
+    monkeypatch.setattr(IP, "pick_image", lambda *a, **k: str(mute))
     win._voice_from_file()
     assert "has no sound" in win.status.text()
     assert win.set_character_voice(str(speech))
@@ -1923,7 +1925,7 @@ def test_export_on_runpod(app, win, tmp_path, image, monkeypatch):
     monkeypatch.setenv("FAKE_LOAD_DELAY", "0.5")                             # (the pod "prepares" a moment)
     win.export(out, "2k", method="seedvr2_3b", cloud=True)
     wait(app, lambda: win._job is not None)                                   # (checked in the background first)
-    assert win.running and win._worker_key()[0] == "runpod"
+    assert win.running and isinstance(win._worker_key(), RunpodBinding)
     seen = []
     wait(app, lambda: seen.append(win.status.text()) or not win.running, timeout=120)
     assert any(t.startswith("RunPod: downloading") for t in seen)
@@ -1998,6 +2000,7 @@ def test_lora_picker_search_and_full_names(app, tmp_path):
 
 
 def test_prompt_refiner_on_the_card(app, win, tmp_path, image, monkeypatch):
+    from video_chain.ui import prompt_refiner as PR
     from video_chain.ui import main_window as M
     ids = new_project(win, tmp_path, image, ("a man walks",))
     seen, seen_pics, seen_clip = {}, [], {}
@@ -2018,7 +2021,7 @@ def test_prompt_refiner_on_the_card(app, win, tmp_path, image, monkeypatch):
 
         def deleteLater(self):
             pass
-    monkeypatch.setattr(M, "RefineDialog", FakeDialog)
+    monkeypatch.setattr(PR, "RefineDialog", FakeDialog)
     card = win.cards[0]
     card.b_refine.click()
     assert seen == {"text": "a man walks", "kind": "video", "cast": []}
@@ -3252,8 +3255,8 @@ def test_progress_says_what_runs_and_how_long_it_still_takes(app, win, tmp_path,
     assert time_left(100, 0.01) is None and time_left(1, 0.5) is None and time_left(60, 0.25) == 180
     ids = new_project(win, tmp_path, image, ("a", "b"))
     clock = [1000.0]
-    monkeypatch.setattr("video_chain.ui.main_window.time.monotonic", lambda: clock[0])
-    win._job, win._plan = {"refine": {"size": "2k"}}, list(ids)            # (an export of 2 clips)
+    monkeypatch.setattr("time.monotonic", lambda: clock[0])
+    win._job, win._plan = Job(list(ids), {"size": "2k"}), list(ids)            # (an export of 2 clips)
     win._run_started = clock[0]
     win._event({"e": "node", "id": ids[0], "state": "generating"})
     win._event({"e": "note", "id": ids[0], "text": "SeedVR2 piece 2 of 5"})
@@ -3862,6 +3865,7 @@ def test_all_ideas_become_variations(app, tmp_path):
 
 
 def test_middle_keyframes_on_the_card(app, win, tmp_path, image, monkeypatch):
+    from video_chain.ui import image_picker as IP
     """The keyframe strip: add (picture; the strip's menu), move, note, keep a moment of the made clip, remove;
     the clip counts as changed and the made clip's hard cuts show as a warning."""
     from PIL import Image as PImage
@@ -3875,7 +3879,7 @@ def test_middle_keyframes_on_the_card(app, win, tmp_path, image, monkeypatch):
     assert card.keys.isEnabled() and card.keys.items == [] and not card.keys.made
     pic = tmp_path / "key.png"
     PImage.new("RGB", (192, 108), (0, 200, 0)).save(pic)
-    monkeypatch.setattr(M, "pick_image", lambda *a, **k: str(pic))
+    monkeypatch.setattr(IP, "pick_image", lambda *a, **k: str(pic))
     monkeypatch.setattr(M.PromptCard, "_exec_menu", lambda self, m: m.actions()[0])     # "A picture at …"
     card.keys.addAt.emit(1.0)                                     # a click on the strip at 1 s
     node = win.tree.nodes[nid]
@@ -3953,6 +3957,8 @@ def tr_lines(win, nid):
 
 
 def test_text_to_speech_in_the_app(app, win, tmp_path, image, monkeypatch):
+    from video_chain.ui import speak_dialog as SPD
+    from video_chain.ui import tts_dialog as TD
     """Speak the lines on a card (a fake engine) makes them the clip's sound; a voice made in the TTS window becomes
     the character's voice; the provider and the ElevenLabs key are kept (the key in the keyring only)."""
     import subprocess
@@ -4011,7 +4017,7 @@ def test_text_to_speech_in_the_app(app, win, tmp_path, image, monkeypatch):
         dlg._make()
         wait(app, lambda: dlg.made is not None or "Could not" in dlg.info.text(), timeout=30)
         return dlg.made is not None
-    monkeypatch.setattr(M, "run_voice_dialog", accept)
+    monkeypatch.setattr(TD, "run_dialog", accept)
     win._voice_with_tts()
     c = T.character(win.tree, "Anna")
     assert c["voice"]["name"].startswith("designed: warm young voice") and c["voice"]["text"]
@@ -4048,7 +4054,7 @@ def test_text_to_speech_in_the_app(app, win, tmp_path, image, monkeypatch):
         dlg.list.setCurrentRow(dlg.list.count() - 1)
         dlg.accept()
         return dlg.chosen is not None
-    monkeypatch.setattr(M, "run_speak_dialog", choose)
+    monkeypatch.setattr(SPD, "run_dialog", choose)
     old_track = T.track_id(win.tree.nodes[nid])
     win.node_action("speak", nid)
     assert seen["lines"] == ["Hallo, schön dich zu sehen."] and not seen["use"] and not seen["empty"]
@@ -4064,7 +4070,7 @@ def test_text_to_speech_in_the_app(app, win, tmp_path, image, monkeypatch):
     assert tr["id"] != old_track and win.project / tr["file"] == seen["files"][-1] and "spoken" in win.status.text()
     assert T.load(win.project).options["tts"]["speak"] == {"takes": 1, "delivery": "lively", "speed": 0.8}
     assert win.played[-1] == seen["files"][0] and not win._tts_busy
-    monkeypatch.setattr(M, "run_speak_dialog", lambda dlg: (seen.update(again=dlg.speak_values()), False)[1])
+    monkeypatch.setattr(SPD, "run_dialog", lambda dlg: (seen.update(again=dlg.speak_values()), False)[1])
     win.node_action("speak", nid)                            # cancelled: nothing changes; the settings were kept
     assert seen["again"]["delivery"] == "lively" and T.track_id(win.tree.nodes[nid]) == tr["id"]
     # a frozen clip's lines are not spoken
@@ -4289,7 +4295,7 @@ def test_continue_the_clip_before_on_the_card(app, win, tmp_path, image):
     dlg.deleteLater()
     win.set_simple(True)                                                 # Simple: hidden, the note counts it
     card = next(c for c in win.cards if c.nid == ids[1])
-    assert _row_hidden(card._link, card.cont) and card.adv_note.text.text() == "1 advanced setting is active:"
+    assert _row_hidden(card.link_form, card.cont) and card.adv_note.text.text() == "1 advanced setting is active:"
     win.set_simple(False)
     win.prompt_format.setCurrentIndex(win.prompt_format.findData("classic"))   # set, but classic: no effect
     flush(app, win)
@@ -4361,13 +4367,13 @@ def test_simple_view_hides_the_expert_controls_also_on_rebuilt_cards(app, win, t
     for w in (card.seed, card.b_seed, card.seed_label, card.steps, card.chips.model_chip, card.chips.b_prompt):
         assert w.isHidden(), w
     for f in (card.loras, card.guide, card.keys_row, card.hand_row):
-        assert _row_hidden(card._link, f)
+        assert _row_hidden(card.link_form, f)
     for w in (card.edit, card.cam_move, card.b_end, card.length, card.b_variant, card.b_more, card.b_refine,
               card.settings_toggle):
         assert not w.isHidden(), w
     win._rebuild_path()                                                   # new cards: in the current view at once
     new = win.cards[-1]
-    assert new is not card and new.seed.isHidden() and _row_hidden(new._link, new.loras)
+    assert new is not card and new.seed.isHidden() and _row_hidden(new.link_form, new.loras)
     win.speed.setCurrentIndex(win.speed.findData("turbo"))                # the app shows the turbo rows: Simple wins
     assert _row_hidden(c, win.turbo_lora) and _row_hidden(c, win._turbo_row)
     win.speed.setCurrentIndex(win.speed.findData("normal"))
@@ -4378,7 +4384,7 @@ def test_simple_view_hides_the_expert_controls_also_on_rebuilt_cards(app, win, t
     win.act_advanced.trigger()
     assert seen == [False] and not win.simple and win.qs.value("viewMode") == "advanced"
     new = win.cards[-1]
-    assert not new.seed.isHidden() and not _row_hidden(new._link, new.loras) and not _row_hidden(c, win.steps)
+    assert not new.seed.isHidden() and not _row_hidden(new.link_form, new.loras) and not _row_hidden(c, win.steps)
     assert new.chips.model_chip is not None and not new.chips.model_chip.isHidden()
     assert _row_hidden(c, win.turbo_lora)                                 # not turbo: hidden by the app itself
     assert win.steps.value() == steps_before and win.tabs.isTabVisible(win.tabs.indexOf(win.log))
@@ -4419,13 +4425,14 @@ def test_simple_view_says_when_hidden_settings_are_active(app, win, tmp_path, im
 
 
 def test_view_default_first_run_simple_existing_settings_advanced(app, tmp_path, monkeypatch):
+    from video_chain.ui import ui_logic as UL
     """No settings at all (a first run): Simple; settings from before the views: Advanced. Stored at once, so the
     choice does not flip once the app has written other settings."""
     from PySide6.QtCore import QSettings
     from video_chain.ui import main_window as MW
     for name in ("_poll_comfy", "scan_loras", "_poll_gpu"):              # no ComfyUI, no GPU, no LoRA folders
         monkeypatch.setattr(MW.MainWindow, name, lambda self, *a, **k: None)
-    monkeypatch.setattr(MW, "DEFAULT_COMFY_DIR", str(tmp_path / "no-comfyui"))
+    monkeypatch.setattr(UL, "DEFAULT_COMFY_DIR", str(tmp_path / "no-comfyui"))
     q = QSettings(str(tmp_path / "first.ini"), QSettings.IniFormat)
     assert q.allKeys() == []
     w = MW.MainWindow(q, command=FAKE)

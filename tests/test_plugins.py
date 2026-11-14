@@ -12,6 +12,7 @@ import pytest
 from PIL import Image
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox
 
+from video_chain.ui.generator_state import Job  # noqa: E402
 from video_chain import plugins
 
 FAKE = [sys.executable, str(Path(__file__).resolve().parent / "fake_backend.py")]
@@ -357,7 +358,7 @@ def test_events_come_after_the_app_and_clips_of_an_export_are_not_new(made_up, t
         assert plug_events.seen == [("run_event", "step one")]       # (the app had handled the event)
         host = win.plugins
         host.emit("run_event", {"e": "node", "id": "n1", "state": "done"})
-        win._job = {"targets": ["n2"], "sent": True, "refine": {"width": 640}}     # an export at another size
+        win._job = Job(["n2"], {"width": 640}, sent=True)     # an export at another size
         host.emit("run_event", {"e": "node", "id": "n2", "state": "done"})
         win._job = None
         assert [x for x in plug_events.seen if x[0] == "clip_made"] == [("clip_made", "n1")]
@@ -375,7 +376,7 @@ def test_changed_saves_only_when_the_app_would(made_up, tmp_path, monkeypatch):
         refreshed = []
         monkeypatch.setattr(win, "refresh", lambda **k: refreshed.append(k))
         assert host.changed() is True and refreshed == [{"rebuild_path": True}]
-        win._job = {"targets": [nid], "sent": True, "refine": None}  # a generation runs: the app does not save
+        win._job = Job([nid], sent=True)  # a generation runs: the app does not save
         saved = []
         monkeypatch.setattr(win, "_write_tree", lambda: saved.append(1) or True)
         assert host.changed() is False and saved == [] and len(refreshed) == 1

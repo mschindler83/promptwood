@@ -158,7 +158,7 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
         self.path.setReadOnly(True)
         self.path.setPlaceholderText("MP3, WAV, OGG, FLAC … or a video")
         b = QPushButton("Choose…")
-        b.clicked.connect(self._choose)
+        b.clicked.connect(self.choose)
         frow.addWidget(self.path, 1)
         frow.addWidget(b)
         v.addLayout(frow)
@@ -260,7 +260,7 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
         self._update_enabled()
 
     # ---- file
-    def _choose(self):
+    def choose(self):
         folder = str(Path(self.file).parent) if self.file else (
             self.settings.value("soundDir", "", type=str) if self.settings is not None else "")
         from .image_picker import pick_image, scratch_settings

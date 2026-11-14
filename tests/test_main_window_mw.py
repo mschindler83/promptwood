@@ -143,9 +143,10 @@ def test_the_window_needs_its_settings():
 
 
 def test_the_new_project_dialog_picks_images_with_the_windows_settings(app, win, tmp_path, monkeypatch):
+    from video_chain.ui import image_picker as IP
     from video_chain.ui import main_window as M
     got = []
-    monkeypatch.setattr(M, "pick_image", lambda parent, title, qs, *a, **k: got.append(qs) or None)
+    monkeypatch.setattr(IP, "pick_image", lambda parent, title, qs, *a, **k: got.append(qs) or None)
     d = M.NewProjectDialog(None, str(tmp_path), win.qs)
     d._choose_image()
     assert got == [win.qs]
@@ -220,11 +221,12 @@ def test_speaking_does_not_stay_busy_when_it_cannot_start(app, win, tmp_path, im
 
 # ---------------------------------------------------------------- UIM-26: one index per reload
 def test_the_uses_callback_builds_its_index_once_per_change(app, win, tmp_path, image, monkeypatch):
+    from video_chain.ui import image_edit as IE
     from video_chain.ui import main_window as M
     ids = new_project(win, tmp_path, image, ("a",))
     built = []
-    real = M.uses_index
-    monkeypatch.setattr(M, "uses_index", lambda tree: built.append(1) or real(tree))
+    real = IE.uses_index
+    monkeypatch.setattr(IE, "uses_index", lambda tree: built.append(1) or real(tree))
     for _ in range(5):
         win._uses({"uses": []})
     assert len(built) == 1

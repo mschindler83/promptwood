@@ -15,6 +15,7 @@ from PySide6.QtWidgets import QMessageBox  # noqa: E402
 
 from test_ui import (FAKE, app, crop_accepted, image, new_project, run_and_wait,  # noqa: E402,F401
                      settings, silent_player, wait, win)
+from video_chain.ui.generator_state import Job  # noqa: E402
 from video_chain import tree as T  # noqa: E402
 
 
@@ -438,7 +439,7 @@ def test_job_that_cannot_be_written_ends_the_generator(app, win, tmp_path, image
 
         def write(self, data):
             return -1
-    win._job = {"targets": [], "sent": False, "refine": None}
+    win._job = Job([])
     win.proc = Dead()
     killed = []
     monkeypatch.setattr(win, "_kill", lambda: killed.append(1))
