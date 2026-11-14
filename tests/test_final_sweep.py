@@ -345,3 +345,31 @@ def test_the_project_dialogs_and_the_clip_card_name_their_fields(app, tmp_path):
     card = PromptCard(T.Node("n1", None, 'a cat', overrides={}), names=lambda: [], view=None)
     for name in ("edit", "seed", "steps", "mix_level", "length", "cam_move", "cam_amp", "cam_speed", "src_sound"):
         assert getattr(card, name).accessibleName(), name
+
+
+def test_the_tab_order_of_a_clip_card_is_the_order_it_is_shown_in(app):
+    """MWA-31: no setTabOrder is needed while the focus chain follows the rows top to bottom, left to right. A new
+    widget built out of order breaks this."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QAbstractSpinBox
+
+    from video_chain import tree as T
+    from video_chain.ui.clip_cards import PromptCard
+    card = PromptCard(T.Node("n1", None, '@Anna says "hi"', overrides={}), names=lambda: [], view=None)
+    card.resize(520, 900)
+    card.show()
+    app.processEvents()
+    stops, w = [], card.nextInFocusChain()
+    first = w
+    while True:
+        if (w.focusPolicy() & Qt.FocusPolicy.TabFocus and w.isVisibleTo(card) and w.isEnabledTo(card)
+                and card.isAncestorOf(w) and not isinstance(w.parentWidget(), QAbstractSpinBox)):
+            p = w.mapTo(card, w.rect().topLeft())
+            stops.append((p.y(), p.x(), w.accessibleName() or w.toolTip()[:30]))
+        w = w.nextInFocusChain()
+        if w is first:
+            break
+    assert len(stops) > 15
+    rows = [y for y, _x, _n in stops]
+    assert all(b >= a - 4 for a, b in zip(rows, rows[1:])), stops          # (a row's widgets may differ by a few px)
+    card.close()
