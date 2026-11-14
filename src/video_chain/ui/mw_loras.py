@@ -273,6 +273,6 @@ class LorasMixin(MainWindowHost):
                         self._lora_hits = {**self._lora_hits, (key, comfy_dir): (str(f), now)}
                         return str(f)
         except Exception:  # noqa: BLE001  (no ComfyUI folder set, a folder offline)
-            pass
+            log.info("looking for the LoRA %r failed", key, exc_info=True)
         self._lora_misses = {**miss, (key, comfy_dir): time.monotonic()}
         return None

@@ -1,6 +1,7 @@
 """Voices, sounds and audio tracks."""
 from __future__ import annotations
 
+import logging
 import copy
 import os
 from pathlib import Path
@@ -13,6 +14,8 @@ from .. import chain, tree as T, tts as TTS
 from . import dialogs as D, image_picker as IP
 from .ui_logic import AUDIO_REF_RANGE, plural
 from .mw_host import MainWindowHost
+
+log = logging.getLogger(__name__)
 
 
 class AudioMixin(MainWindowHost):
@@ -404,7 +407,7 @@ class AudioMixin(MainWindowHost):
             try:
                 n += len(T.track_users(T.load(Path(d)), tid))
             except Exception:  # noqa: BLE001  (a scene that cannot be read: not counted)
-                pass
+                log.warning("the tracks of the scene %s could not be counted", d, exc_info=True)
         return n
 
     def _drop_unused_tracks(self):

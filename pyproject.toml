@@ -55,8 +55,6 @@ check_untyped_defs = true
 [tool.ruff]
 target-version = "py312"
 src = ["src", "tests"]
-# ui/ is cleaned in the last wave; that agent removes this line
-extend-exclude = ["src/video_chain/ui"]
 
 [tool.ruff.lint]
 select = ["BLE", "F", "S110", "S112", "E722"]

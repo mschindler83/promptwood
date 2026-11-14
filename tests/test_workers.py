@@ -112,3 +112,16 @@ def test_an_error_after_the_owner_is_gone_is_logged_not_raised(caplog):
         gate.set()
         assert wait(app, lambda: any("late one" in r.getMessage() for r in caplog.records))
     assert errs == []
+
+
+def test_a_failing_size_hook_is_logged_not_swallowed(caplog):
+    """XC-6: the video editor used to drop an error of canvas_for without a trace."""
+    from video_chain.ui import video_editor as VE
+    def bad(file, rotate):
+        raise ValueError("no size")
+    d = VE.VideoRangeDialog(None, player=False, canvas_for=bad)
+    d.file = "x.mp4"
+    with caplog.at_level(logging.WARNING):
+        d._apply_rotation()
+    assert any("no size" in str(r.exc_info) for r in caplog.records)
+    d.deleteLater()

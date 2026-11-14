@@ -1,6 +1,7 @@
 """Refresh, node states, problems and the texts of the cards."""
 from __future__ import annotations
 
+import logging
 import os
 import re
 import stat as stat_module
@@ -21,6 +22,8 @@ from . import ui_logic as UL
 from .clip_cards import PromptCard
 from .ui_logic import REMIX_DELAY_MS, SourceSoundInfo, plain_problem, plural, row_start
 from .mw_host import MainWindowHost
+
+log = logging.getLogger(__name__)
 
 
 class InspectorMixin(MainWindowHost):
@@ -231,7 +234,7 @@ class InspectorMixin(MainWindowHost):
                         f"The LoRA file does not exist: {lo}", "loras", "Show")
                     break
         except Exception:  # noqa: BLE001  (Generate says what it could not check)
-            pass
+            log.warning("what the clip needs could not be checked", exc_info=True)
         return out
 
     def _note_failure(self, code: int):

@@ -7,6 +7,7 @@ video ends, the last one where a clip after it starts.
 """
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -26,6 +27,8 @@ if TYPE_CHECKING:
     from PySide6.QtMultimedia import QMediaPlayer
 
 FPS = chain.FPS
+
+log = logging.getLogger(__name__)
 
 
 def fmt(t: float) -> str:
@@ -506,7 +509,7 @@ class VideoRangeDialog(RangePlayerMixin, QDialog):
             try:
                 self.canvas = self.canvas_for(self.file, self.rotate) or self.canvas
             except Exception:  # noqa: BLE001  (the size stays as it was)
-                pass
+                log.warning("the video size for the turned picture could not be worked out", exc_info=True)
         if self.player is not None and self.video is not None:
             self.video.set_rotation(self.rotate)
         self._show_info()

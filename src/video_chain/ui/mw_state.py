@@ -1,6 +1,7 @@
 """The tree's state: saving, change marks, the start image."""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from PySide6.QtGui import QImage, QImageReader
@@ -11,6 +12,8 @@ from .graph import START
 from .ui_logic import as_dict
 from .image_edit import EDITS_DIR, project_edits, uses_of
 from .mw_host import MainWindowHost
+
+log = logging.getLogger(__name__)
 
 
 class StateMixin(MainWindowHost):
@@ -240,8 +243,8 @@ class StateMixin(MainWindowHost):
             size = chain.canvas_size(*chain.image_size(Path(path)), int(self.tree.options.get("resolution", 512)))
             if base is not None and size != (base["width"], base["height"]):
                 made = [i for i, st in self.status_of.items() if st == "done"]
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:  # noqa: BLE001  (the clips stay as they are; the question is asked without this check)
+            log.warning("the new start image's video size could not be compared", exc_info=True)
         if confirm and made and not D.confirm(
                 self, "Replace the start image",
                 f"Use {Path(path).name} as the start image?\n\n{len(made)} made "
@@ -312,8 +315,8 @@ class StateMixin(MainWindowHost):
             dims = None
             try:
                 dims = T.size_source(self.project, self.tree) if self.project else None
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception:  # noqa: BLE001  (no size known: the aspect ratio decides)
+                log.warning("the size of the project's source could not be read", exc_info=True)
             origin = T.size_origin(self.project, self.tree) if self.project else "aspect"
             self.aspect.setEnabled(origin == "aspect" and not self.running)
             if dims and origin == "aspect":
