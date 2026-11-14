@@ -16,12 +16,13 @@ from .clipcast import _language, _resolver, clip_cast, lead_on
 from .keyframes import end_image_used
 from .starts import start_source
 from .audio_tracks import _soundtrack_sentence, _stack_triggers
+from .schema import Options
 
 if TYPE_CHECKING:
     from .checker import Checker
 
 
-def model_prompt(options: dict, node: Node, settings: dict | None, *, start: bool = False,
+def model_prompt(options: Options, node: Node, settings: dict | None, *, start: bool = False,
                  end: bool = False) -> str:
     """What the model gets for a generated clip: the cast's prompt (clip_cast) with its LoRAs' trigger words, and
     with "Continue the video's sound" the sentence that makes the last sound reference its soundtrack.
@@ -56,7 +57,7 @@ def frame_numbers(n_pictures: int, frames: list[str] | tuple[str, ...] | None) -
     return out
 
 
-def _h3_model_prompt(options: dict, node: Node, s: dict, start: bool, end: bool) -> str:
+def _h3_model_prompt(options: Options, node: Node, s: dict, start: bool, end: bool) -> str:
     """model_prompt in the h3 format: h3_prompt.compose with the cast plan of _h3_cast, the clip's frames (numbered
     ones from s["frame_pictures"]), its seconds, trigger words, and as further sentences of the description the
     camera move, the keyframe notes and the soundtrack sentence (its <Audio N> after the sounds and voices)."""
@@ -96,7 +97,7 @@ def plain_frames(project: Path, tree: Tree, node: Node) -> tuple[bool, bool]:
     return start, end
 
 
-def node_settings(base: dict, options: dict, node: Node, audio_pool: list[dict] | None = None,
+def node_settings(base: dict, options: Options, node: Node, audio_pool: list[dict] | None = None,
                   picture_sha: Callable[[str], str | None] | None = None,
                   source_sound: dict | None = None, frames_given: tuple[bool, bool] = (False, False)) -> dict:
     """The settings one node is made with: the project's, with the node's own LoRA stack and overrides.
@@ -161,7 +162,7 @@ def node_settings(base: dict, options: dict, node: Node, audio_pool: list[dict] 
     return s
 
 
-def continue_frames(options: dict, node: Node) -> int:
+def continue_frames(options: Options, node: Node) -> int:
     """How many frames of the end of the clip before a clip is shown as <Video 1> (override "continue"); 0: none,
     also in the classic format (its prompt cannot say what the video is) and for a first clip (nothing before it)."""
     if node.is_video or node.parent is None or not is_h3(options):
@@ -188,7 +189,7 @@ def continue_choices(tree: Tree, node: Node) -> list[int]:
     return [c for c in CONTINUE_CHOICES if c <= have and c <= own]
 
 
-def veda_for(options: dict, width: int, height: int, frames: int) -> bool:
+def veda_for(options: Options, width: int, height: int, frames: int) -> bool:
     """A clip of this size is made with Veda sparse attention: the project allows it and it is large enough."""
     return bool((options.get("veda") or {"on": True}).get("on", True)) and chain.veda_useful(width, height, frames)
 

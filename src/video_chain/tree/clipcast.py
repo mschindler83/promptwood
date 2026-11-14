@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any
 
 from .. import chain
 from .. import h3_prompt as _h3
@@ -21,12 +22,13 @@ from .cast import (
     lead_of,
     mentions)
 from .prompts import _picture_tags, _pictures_note, _voiced_prompt, dialogue, without_speech_tags
+from .schema import CastEntry, Options, Overrides
 
 
 _KIND_WORD = {"person": "person", "place": "place", "object": "object", "style": "visual style"}
 
 
-def _tie(c: dict, tags: str) -> str:
+def _tie(c: CastEntry, tags: str) -> str:
     """The classic sentence tying a cast entry to its pictures."""
     if kind_of(c) == "person":
         return f"{c['name']} has exactly the face of the person in {tags}."
@@ -66,7 +68,7 @@ def lead_on(node: Node) -> bool:
 
 def set_lead_on(node: Node, on: bool) -> None:
     """Switch a clip's lead on (the default: the key goes, so the clip is recorded as before) or off."""
-    ov = dict(node.overrides or {})
+    ov: Overrides = {**(node.overrides or {})}
     if on:
         ov.pop("lead", None)
     else:
@@ -74,13 +76,13 @@ def set_lead_on(node: Node, on: bool) -> None:
     node.overrides = ov
 
 
-def node_cast(options: dict, node: Node) -> dict:
+def node_cast(options: Options, node: Node) -> dict[str, Any]:
     """clip_cast for a clip as it is set up: without the voices when its sound is given, without the lead when its
     lead switch is off."""
     return clip_cast(options, node.prompt, voices=not sound_given(node), lead=lead_on(node))
 
 
-def clip_cast(options: dict, prompt: str, voices: bool = True, lead: bool = True) -> dict:
+def clip_cast(options: Options, prompt: str, voices: bool = True, lead: bool = True) -> dict[str, Any]:
     """How a clip uses the cast. The prompt is the clip's own (the style text is put around it here).
     voices=False: the clip's sound is given (sound_given), its spoken lines are in that sound already, so no voice
     is sent and the characters are used as if they had none (the lines stay in the prompt as written; the
@@ -107,17 +109,17 @@ def clip_cast(options: dict, prompt: str, voices: bool = True, lead: bool = True
         return _h3_cast(options, prompt, voices, lead)
     text = full_prompt(options, prompt)
     found, _ = mentions(options, text)
-    lead = lead_of(options) if lead else None
-    implicit = not found and lead is not None and bool(lead.get("voice")) and not PICTURE_TAG.search(text)
-    lines = dialogue(options, text, default=lead if implicit else None)
-    talking = [c for c in ([lead] if implicit else found)
+    the_lead = lead_of(options) if lead else None
+    implicit = not found and the_lead is not None and bool(the_lead.get("voice")) and not PICTURE_TAG.search(text)
+    lines = dialogue(options, text, default=the_lead if implicit else None)
+    talking = [c for c in ([the_lead] if implicit and the_lead is not None else found)
                if (c["images"] or c.get("voice"))]
     if voices and any(d["speaker"] is not None and d["speaker"].get("voice")
                       and any(d["speaker"]["name"] == c["name"] for c in talking) for d in lines):
-        out, images, voices = _voiced_prompt(options, text, talking, lines, audio_mentioned(text), implicit)
+        out, images, voice_files = _voiced_prompt(options, text, talking, lines, audio_mentioned(text), implicit)
         lang = ((options.get("identity") or {}).get("language") or "English").strip() or "English"
         said = [{"name": d["speaker"]["name"] if d["speaker"] else None, "line": d["line"]} for d in lines]
-        return {"mode": "voices", "characters": talking, "images": images, "voices": voices, "language": lang,
+        return {"mode": "voices", "characters": talking, "images": images, "voices": voice_files, "language": lang,
                 "lines": said, "prompt": out,
                 "record": [_cast_record(c) for c in talking]}
     found = [c for c in found if c["images"]]
@@ -148,26 +150,26 @@ def clip_cast(options: dict, prompt: str, voices: bool = True, lead: bool = True
     if PICTURE_TAG.search(text) and all_pictures(options):
         return {"mode": "tags", "characters": cast_of(options), "images": all_pictures(options), "voices": [],
                 "prompt": plain, "record": None}
-    if lead and lead["images"] and not mentions(options, text)[0]:
-        return {"mode": "lead", "characters": [lead], "images": list(lead["images"]), "voices": [],
+    if the_lead and the_lead["images"] and not mentions(options, text)[0]:
+        return {"mode": "lead", "characters": [the_lead], "images": list(the_lead["images"]), "voices": [],
                 "prompt": plain, "record": None}
     return {"mode": None, "characters": [], "images": [], "voices": [], "prompt": plain, "record": None}
 
 
-def _cast_record(c: dict, desc: str | None = None) -> dict:
+def _cast_record(c: CastEntry, desc: str | None = None) -> dict[str, Any]:
     """What the clip's record keeps of a cast entry the model prompt describes: name, description, and the kind
     of a non-person (a person is recorded as before)."""
-    out = {"name": c["name"], "desc": c.get("desc", "") if desc is None else desc}
+    out: dict[str, Any] = {"name": c["name"], "desc": c.get("desc", "") if desc is None else desc}
     if kind_of(c) != "person":
         out["kind"] = kind_of(c)
     return out
 
 
-def _language(options: dict) -> str:
+def _language(options: Options) -> str:
     return ((options.get("identity") or {}).get("language") or "English").strip() or "English"
 
 
-def _h3_cast(options: dict, prompt: str, voices: bool, lead_ok: bool) -> dict:
+def _h3_cast(options: Options, prompt: str, voices: bool, lead_ok: bool) -> dict[str, Any]:
     """clip_cast in the h3 format. The pictures are chosen as in the classic format: the cast entries the prompt
     mentions (in order of first mention, their pictures numbered on), every picture in cast order when it writes
     <Picture N> itself, else the lead (switched on, a person, with pictures or a voice that speaks). Every entry
@@ -192,16 +194,18 @@ def _h3_cast(options: dict, prompt: str, voices: bool, lead_ok: bool) -> dict:
     tags = bool(PICTURE_TAG.search(body)) and bool(all_pictures(options)) and not any(c["images"] for c in found)
     implicit = not found and lead is not None and not PICTURE_TAG.search(body)
     lines = [] if structured else dialogue(options, body, default=lead if implicit else None)
-    if implicit and not lead["images"]:              # a lead without pictures only counts with its voice
+    if implicit and lead is not None and not lead["images"]:     # a lead without pictures only counts with its voice
         implicit = voices and bool(lead.get("voice")) and any((d["speaker"] or {}).get("name") == lead["name"]
-                                                                     for d in lines)
+                                                              for d in lines)
         if not implicit:
             lines = dialogue(options, body)
     if tags:
         chars = [c for c in cast_of(options) if c["images"]] + [c for c in found if not c["images"]]
     else:
-        chars = [lead] if implicit else list(found)
-    subjects, images, record = [], [], []
+        chars = [lead] if implicit and lead is not None else list(found)
+    subjects: list[dict[str, Any]] = []
+    images: list[str] = []
+    record: list[dict[str, Any]] = []
     for c in chars:
         first = len(images) + 1
         images += c["images"]
@@ -212,12 +216,12 @@ def _h3_cast(options: dict, prompt: str, voices: bool, lead_ok: bool) -> dict:
     said = [{"start": d["start"], "end": d["end"], "line": d["line"],
              "speaker": d["speaker"]["name"] if d["speaker"] else None} for d in lines]
     numbers = _h3.voice_numbers(subjects, said, n_sounds)
-    voice_files = [character(options, n)["voice"]["file"] for n in sorted(numbers, key=numbers.get)]
+    voice_files = [(character(options, n) or {})["voice"]["file"] for n in sorted(numbers, key=lambda n: numbers[n])]
     if voice_files:
         mode = "voices"
     elif tags:
         mode = "tags"
-    elif implicit and lead["images"]:
+    elif implicit and lead is not None and lead["images"]:
         mode = "lead"
     elif images:
         mode = "mention"
@@ -225,7 +229,7 @@ def _h3_cast(options: dict, prompt: str, voices: bool, lead_ok: bool) -> dict:
         mode = None
     h = {"structured": structured, "body": body, "soundscape": scape, "music": music, "subjects": subjects,
          "lines": said, "lead_implicit": implicit, "sounds": n_sounds}
-    out = {"mode": mode, "characters": chars, "images": images, "voices": voice_files,
+    out: dict[str, Any] = {"mode": mode, "characters": chars, "images": images, "voices": voice_files,
            "prompt": body if structured else _h3.compose(
                body, subjects=subjects, sounds=n_sounds, lines=said, language=_language(options),
                lead_implicit=implicit, soundscape=scape, music=music, resolve=_resolver(options),
@@ -237,7 +241,7 @@ def _h3_cast(options: dict, prompt: str, voices: bool, lead_ok: bool) -> dict:
     return out
 
 
-def _resolver(options: dict):
+def _resolver(options: Options):
     """@word -> the cast name it means (None: nobody in the cast), for h3_prompt.compose."""
     return lambda w: (character(options, w) or {}).get("name")
 

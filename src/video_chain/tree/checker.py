@@ -18,6 +18,7 @@ from .starts import start_source
 from .sources import size_source, source_rotation
 from .audio_tracks import source_sound_span
 from .inputs import node_settings, plain_frames
+from .schema import Options
 
 logger = logging.getLogger(__name__)
 
@@ -336,7 +337,7 @@ class Checker:
         return "something it depends on changed"
 
 
-def current_settings(project: Path, options: dict, tree: Tree | None = None) -> dict | None:
+def current_settings(project: Path, options: Options, tree: Tree | None = None) -> dict | None:
     """What every clip depends on besides prompt, seed and start frame (None while there is neither a start image
     nor a video to take the size from)."""
     dims = size_source(project, tree)

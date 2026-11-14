@@ -8,7 +8,7 @@ from pathlib import Path
 from .. import chain
 from .consts import AUDIO_REF_MIN, AUDIO_REF_TOTAL, MAX_AUDIO_REFS, REFS_DIR
 from .model import Node, Tree, short_id
-from .schema import Track
+from .schema import Options, Track
 from .timeline import _guide_of, clip_length, full_prompt, handover_index, made_frames, path_cuts
 from .files import load
 from .cast import audio_mentioned, audio_refs, cast_of
@@ -374,7 +374,7 @@ def lora_trigger_words(paths: list[str]) -> list[str] | None:
         return None                                # unknown (e.g. the database cannot be read right now)
 
 
-def _stack_triggers(options: dict, node: Node, stack: list) -> list[str] | None:
+def _stack_triggers(options: Options, node: Node, stack: list) -> list[str] | None:
     """A clip's trigger words; while the database cannot be read, those it was made with (no false CHANGED)."""
     if not stack or not options.get("lora_triggers", True):
         return None
