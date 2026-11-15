@@ -35,6 +35,7 @@ class ViewMixin(MainWindowHost):
         self.advanced_only(
             # project: speed and quality knobs, prompt wording, path joining
             (c, self.steps), (c, self.speed), (c, self._cfg_row), (c, self.veda), (c, self.turbo_lora),
+            (c, self._h3_model_row), (c, self.two_pass),
             (c, self._turbo_row), (c, self.keep_rep), (c, self.prompt_format), (c, self.style_prefix),
             (c, self.style_suffix), (c, self.lora_triggers),
             # cast: how the pictures are sent
@@ -208,6 +209,7 @@ class ViewMixin(MainWindowHost):
         c = self._clips_form
         return {"steps": (c, self.steps), "speed": (c, self.speed), "turbo": (c, self._turbo_row),
                 "cfg": (c, self._cfg_row), "veda": (c, self.veda), "keep_repeated": (c, self.keep_rep),
+                "h3_model": (c, self._h3_model_row), "two_pass": (c, self.two_pass),
                 "style_prefix": (c, self.style_prefix), "style_suffix": (c, self.style_suffix),
                 "prompt_format": (c, self.prompt_format), "lora_triggers": (c, self.lora_triggers),
                 "ref_size": (self._tts_form, self.ref_size), "ref_hint": self.ref_hint,

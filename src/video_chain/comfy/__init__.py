@@ -40,7 +40,8 @@ from .loras import (comfy_lora_roots, comfy_model_roots, find_h3_checkpoints, fi
                     _H3_MLP, is_h3_lora, is_ic_lora, is_qwen_lora, is_turbo_lora, lora_name_for, _QWEN_IMG,
                     _QWEN_TXT, _read_safetensors_keys, _safetensors_keys, _safetensors_keys_cached)  # noqa: F401
 from .ffutil import (ffmpeg, FFMPEG_TIMEOUT, with_audio)  # noqa: F401
-from .video import (AUDIO_VAE, DISTILLED_CHECKPOINT, build_workflow, default_audio_key, default_ref_key, default_video_key, pick_veda_predictor,
+from .video import (AUDIO_VAE, DISTILLED_CHECKPOINT, TWO_PASS, TWO_PASS_NODES, build_two_pass_workflow,
+                    build_workflow, two_pass_size, two_pass_steps, TWO_PASS_MIN_STEPS, default_audio_key, default_ref_key, default_video_key, pick_veda_predictor,
                     PIKA_SIGMAS,
                     REF_HINT, SAMPLER, SCHEDULER, TEXT_ENCODER, UNET, UNET_REF, VEDA_NODE, VEDA_SETTINGS, VIDEO_VAE,
                     with_ref_hint)  # noqa: F401

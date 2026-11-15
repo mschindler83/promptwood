@@ -123,6 +123,7 @@ class Options(TypedDict, total=False):
     hyperflow: dict[str, Any]
     pika: dict[str, Any]
     veda: dict[str, Any]
+    two_pass: dict[str, Any]            # {"on": bool}: every clip in two passes (consts.TWO_PASS)
     checkpoint: dict[str, Any]          # another H3 checkpoint: {"name", "distilled"} (consts.checkpoint_of)
     cast: list[CastEntry]
     identity: dict[str, Any]

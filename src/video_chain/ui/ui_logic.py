@@ -315,7 +315,11 @@ def project_setting_changes(o: dict) -> list[tuple[str, str]]:
     own, the ElevenLabs model with local text to speech) is left out. ui keys, not option keys: see
     MainWindow._project_controls."""
     d, out = T.DEFAULT_OPTIONS, []
-    mode = speed_mode(o)
+    mode = T.speed_mode_used(o)                 # (none while a distilled checkpoint is chosen)
+    if T.checkpoint_of(o):
+        out.append(("h3_model", "H3 model"))
+    if (o.get("two_pass") or {}).get("on"):
+        out.append(("two_pass", "Two passes"))
     if mode == "normal" and int(o.get("steps", d["steps"])) != d["steps"]:
         out.append(("steps", "Steps"))
     if mode != "normal":

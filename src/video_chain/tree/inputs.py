@@ -149,7 +149,7 @@ def node_settings(base: dict, options: Options, node: Node, audio_pool: list[dic
                                source_sound=source_sound,
                                veda=veda_for(options, base["width"], base["height"],
                                              int(ov.get("frames", options.get("frames", DEFAULT_FRAMES)))),
-                               checkpoint=base.get("checkpoint"),
+                               checkpoint=base.get("checkpoint"), two_pass=base.get("two_pass"),
                                camera=_camera.clean(ov.get("camera")))
     recipe = {k: own[k] for k in ("sampler", "scheduler", "shift") if k in own}
     if recipe:                                   # (only when the clip sets any: other clips are recorded as before)

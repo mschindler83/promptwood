@@ -184,6 +184,9 @@ CLIP_KEYS = ("video", "frame", "first", "own_sound")
 # another H3 checkpoint (options["checkpoint"]: {"name": ComfyUI's name, "distilled": bool}; no name: the standard
 # files); a distilled one (its turbo built in) makes every clip in this many steps, without a speed mode or Veda
 DISTILLED_STEPS = 8
+# two passes (options["two_pass"]["on"]): pass 1 at this share of the size, pass 2 this share of the schedule at the
+# full size (comfy.TWO_PASS); what a clip records
+TWO_PASS = {"scale": 0.5, "denoise": 0.3}
 
 
 def checkpoint_of(o: Any) -> dict | None:

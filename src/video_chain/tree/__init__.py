@@ -61,6 +61,7 @@ from .consts import (  # noqa: F401
     TREE_FILE,
     SPEED_MODES,
     DISTILLED_STEPS,
+    TWO_PASS,
     checkpoint_of,
     speed_mode,
     speed_mode_used,

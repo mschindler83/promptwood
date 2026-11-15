@@ -27,12 +27,12 @@ from pathlib import Path, PurePath
 from .. import media, net
 from .errors import ComfyError, ComfyJobFailed, ComfyUnavailable, LocalWriteError
 from .loras import comfy_lora_roots, lora_name_for, trains_adaln
-from .refine import RefineMixin
+from .refine import RefineMixin, pick_refine_files
 from .seedvr import SEEDVR_PRECISION_LOCAL, SeedvrMixin
 from .settings import (DEFAULT_FRAMES, DEFAULT_HEIGHT, DEFAULT_REF_SIZE, DEFAULT_STEPS, DEFAULT_WIDTH,
                        ClipSettings)
-from .video import (AUDIO_VAE, DISTILLED_CHECKPOINT, TEXT_ENCODER, UNET, UNET_REF, VEDA_NODE, VIDEO_VAE,
-                    build_workflow, clip_recipe,
+from .video import (AUDIO_VAE, DISTILLED_CHECKPOINT, TEXT_ENCODER, TWO_PASS_NODES, UNET, UNET_REF, VEDA_NODE,
+                    VIDEO_VAE, build_two_pass_workflow, build_workflow, clip_recipe,
                     pick_veda_predictor, with_ref_hint)
 from .wfb import H3_LORA_NODE, SAVE_LAST_ID, SAVE_VIDEO_ID, SUBFOLDER, combo_options
 
@@ -241,6 +241,18 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
         if ck.get("distilled") and not self._object_info("MiniMaxH3SigmaShift"):
             raise ComfyError("this ComfyUI has no MiniMaxH3SigmaShift node, which distilled H3 checkpoints sample "
                              "with (update ComfyUI)")
+
+    def two_pass_upscaler(self) -> str:
+        """The H3 latent upscaler a two-pass clip upscales pass 1 with (its nodes must be there too)."""
+        for node in TWO_PASS_NODES:
+            if not self._object_info(node):
+                raise ComfyError(f"this ComfyUI has no {node} node, which two-pass clips need (update ComfyUI)")
+        req = self._object_info("LatentUpscaleModelLoader").get("input", {}).get("required", {})
+        name = pick_refine_files([], combo_options(req.get("model_name")))["upscaler"]
+        if not name:
+            raise ComfyError("ComfyUI lists no H3 latent upscaler for two-pass clips "
+                             "(minimax_h3_latent_upscaler_3d_conv_v1_bf16.safetensors in models/latent_upscale_models)")
+        return name
 
     def adaln_names(self, loras: list[tuple[str, str]]) -> set[str]:
         """The ComfyUI names of these LoRAs ((local file, name)) that train the adaln projections, to be loaded by
@@ -605,8 +617,11 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
                 videos.append(self.upload(Path(v)))
                 uploads.append((videos[-1], v))
         prefix = f"{SUBFOLDER}/{uuid.uuid4().hex[:12]}"
+        two = _setting_dict(s, "two_pass") if s.get("two_pass") else None
+        build = (lambda **kw: build_two_pass_workflow(two_pass=two, upscaler=self.two_pass_upscaler(), **kw)) \
+            if two else build_workflow
         try:
-            wf = build_workflow(prompt=prompt, image=image, seed=seed, width=s.get("width", DEFAULT_WIDTH),
+            wf = build(prompt=prompt, image=image, seed=seed, width=s.get("width", DEFAULT_WIDTH),
                                 height=s.get("height", DEFAULT_HEIGHT), frames=s.get("frames", DEFAULT_FRAMES),
                                 steps=s.get("steps", DEFAULT_STEPS),
                                 loras=loras, audio=bool(s.get("audio", True)), prefix=prefix, refs=refs,

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from .. import chain
-from .consts import DEFAULT_FRAMES, DEFAULT_OPTIONS, DISTILLED_STEPS, checkpoint_of
+from .consts import DEFAULT_FRAMES, DEFAULT_OPTIONS, DISTILLED_STEPS, TWO_PASS, checkpoint_of
 from .model import Node, Tree, short_id
 from .timeline import clip_length, handover_file, handover_index
 from .files import _old_record, node_files
@@ -366,5 +366,6 @@ def current_settings(project: Path, options: Options, tree: Tree | None = None) 
                                cfg=float(cast(dict[str, Any], ck if distilled else turbo if turbo_on else hyper
                                               if hyper_on else pika if pika_on else options).get("cfg", 1.0)),
                                checkpoint=ck,
+                               two_pass=dict(TWO_PASS) if (options.get("two_pass") or {}).get("on") else None,
                                backend="comfyui",
                                style=(style.get("prefix") or "", style.get("suffix") or ""))

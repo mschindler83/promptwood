@@ -3,7 +3,7 @@ import shutil
 import time
 
 import pytest
-from fake_comfy import FakeComfy
+from fake_comfy import UPSCALER, FakeComfy
 from PIL import Image
 
 from video_chain import chain
@@ -1627,3 +1627,60 @@ def test_loras_that_train_adaln_go_through_video_chains_h3_lora_node(server, sta
     gen.generate("x", start, out, frame, 1, settings(lora=str(full), strength=0.7))
     assert server.prompts[-1]["lora0"]["class_type"] == "LoraLoaderModelOnly"
     assert any(C.H3_LORA_NODE in m and "nose.safetensors" in m for m in logs)
+
+
+def test_two_pass_workflow():
+    """Two passes in one job (as Lokken's two-pass H3 workflow): pass 1 at about half the size, its video latent
+    upscaled to the clip's size with H3's latent upscaler and its sound kept; pass 2 at the full size with the
+    same prompt, frames and pins, only the last part of the schedule; the video from pass 2, the sound from pass 1.
+    The model files and the LoRAs are loaded once."""
+    assert C.two_pass_size(672, 384) == (352, 192) and C.two_pass_size(1344, 768) == (672, 384)
+    assert C.two_pass_size(64, 64) == (32, 32)
+    tp = dict(C.TWO_PASS)
+    wf = C.build_two_pass_workflow(two_pass=tp, upscaler="minimax_h3_latent_upscaler_3d_conv_v1_bf16.safetensors",
+                                   prompt="x", image="s.png", seed=3, width=1344, height=768, frames=73, steps=8,
+                                   loras=[("A/one.safetensors", 0.8)], audio=True, prefix="video-chain/abc",
+                                   refs=["r.png"], recipe={"sampler": "euler", "scheduler": "simple",
+                                                           "shift": (12.0, 3.0)})
+    t = {k: v["class_type"] for k, v in wf.items()}
+    assert t["p1_refcond"] == "MiniMaxH3ReferenceToVideo" and t["refcond"] == "MiniMaxH3ReferenceToVideo"
+    assert (wf["p1_refcond"]["inputs"]["width"], wf["p1_refcond"]["inputs"]["height"]) == (672, 384)
+    assert (wf["refcond"]["inputs"]["width"], wf["refcond"]["inputs"]["height"]) == (1344, 768)
+    assert not any(k.startswith("p1_") and t[k] in ("UNETLoader", "CLIPLoader", "VAELoader", "LoraLoaderModelOnly",
+                                                    "MiniMaxH3SigmaShift") for k in t)   # (loaded once)
+    assert wf["p1_guider"]["inputs"]["model"] == wf["guider"]["inputs"]["model"] == ["shift", 0]
+    assert wf["p1_sigmas"]["inputs"] == {"model": ["shift", 0], "scheduler": "simple", "steps": 8, "denoise": 1.0}
+    assert wf["p1_av"] == {"class_type": "LTXVSeparateAVLatent", "inputs": {"av_latent": ["p1_sample", 0]}}
+    up = wf["up"]["inputs"]
+    assert t["up"] == "MiniMaxH3LatentUpscaleWithModel" and up["samples"] == ["p1_av", 0]
+    assert (up["width"], up["height"]) == (1344, 768) and wf[up["model"][0]]["inputs"]["model_name"].startswith(
+        "minimax_h3_latent_upscaler")
+    assert wf["p2_latent"]["inputs"] == {"video_latent": ["up", 0], "audio_latent": ["p1_av", 1]}
+    assert wf["sample"]["inputs"]["latent_image"] == ["p2_latent", 0]
+    assert wf["sigmas"]["inputs"] == {"model": ["shift", 0], "scheduler": "simple", "steps": 3,
+                                      "denoise": tp["denoise"]}                    # 8 steps x 0.3: at least 3
+    assert C.two_pass_steps(8, 0.3) == 3 and C.two_pass_steps(28, 0.3) == 9 and C.two_pass_steps(4, 0.3) == 3
+    assert wf["p1_noise"]["inputs"]["noise_seed"] == wf["noise"]["inputs"]["noise_seed"] == 3
+    assert wf["video"]["inputs"]["images"] == ["decode", 0] and wf["video"]["inputs"]["audio"] == ["p1_decode_audio", 0]
+    assert wf["p1_decode_audio"]["inputs"]["samples"] == ["p1_sample", 0] and "decode_audio" not in wf
+    assert sum(1 for v in t.values() if v == "SaveVideo") == 1 and "p1_" + C.SAVE_LAST_ID not in wf
+    assert wf["last"]["inputs"]["image"] == ["decode", 0]                       # (the last frame from pass 2)
+    for nid, node in wf.items():                                                  # every link points at a node
+        for v in node["inputs"].values():
+            assert not (isinstance(v, list) and len(v) == 2 and isinstance(v[0], str)) or v[0] in wf, (nid, v)
+
+
+def test_generating_in_two_passes(server, start, tmp_path):
+    """A clip whose settings say two_pass is made by build_two_pass_workflow with the H3 latent upscaler ComfyUI
+    lists; without the upscaler ComfyUI is asked for it by name."""
+    gen = C.ComfyGenerator(server.url)
+    out, frame = tmp_path / "v.mp4", tmp_path / "v.png"
+    gen.generate("x", start, out, frame, 1, settings(two_pass=dict(C.TWO_PASS)))
+    wf = server.prompts[-1]
+    assert wf["p2_latent"]["inputs"]["video_latent"] == ["up", 0] and wf["upmodel"]["inputs"]["model_name"] == UPSCALER
+    assert (wf["p1_cond"]["inputs"]["width"], wf["cond"]["inputs"]["width"]) == (352, 672)
+    info = chain.probe(out)
+    assert (info["width"], info["height"]) == (672, 384) and info["audio"]
+    server.refine = False                                          # (no latent upscaler listed, nor its node)
+    with pytest.raises(C.ComfyError, match="(?i)upscale"):
+        gen.generate("x", start, out, frame, 1, settings(two_pass=dict(C.TWO_PASS)))

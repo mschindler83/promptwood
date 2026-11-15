@@ -568,6 +568,14 @@ class BuildMixin(MainWindowHost):
             "coherent; a 5 s clip at 672×384 got 25–30 % slower, so small clips keep full attention. A clip made "
             "with Veda differs slightly from one made without (switching this makes such clips CHANGED)")
         c.addRow("", self.veda)
+        self.two_pass = QCheckBox("Two passes: half size first, then detail at the full size")
+        self.two_pass.setToolTip(
+            "Every clip in two passes (with any H3 model): pass 1 makes it at about half the size (motion and "
+            "composition), H3's latent upscaler brings it to the full size and pass 2 redraws the last 30 % of the "
+            "detail there; the sound is pass 1's. Needs the H3 latent upscaler in ComfyUI's models/"
+            "latent_upscale_models. Measured with a distilled 8-step model, 3 s at 1344×768: 74 s instead of 95 s, "
+            "detail alike. Switching it makes made clips CHANGED")
+        c.addRow("", self.two_pass)
         self.turbo_lora = QComboBox()
         self.turbo_lora.setToolTip("The turbo LoRA (only turbo LoRAs are listed here, and they are left out of the "
                                    "normal LoRA lists); v4 step600 ema is the recommended one")
@@ -1160,7 +1168,7 @@ class BuildMixin(MainWindowHost):
         for sig in (self.frames.currentIndexChanged, self.resolution.currentIndexChanged, self.exact_size.toggled,
                     self.aspect.currentIndexChanged, self.audio.toggled, self.keep_rep.toggled,
                     self.speed.currentIndexChanged, self.veda.toggled, self.turbo_lora.currentIndexChanged,
-                    self.h3_distilled.toggled):
+                    self.h3_distilled.toggled, self.two_pass.toggled):
             sig.connect(self._options_changed)
         self.h3_model.currentIndexChanged.connect(self._h3_model_chosen)
         for sig in (self.steps.valueChanged, self.turbo_steps.valueChanged, self.turbo_strength.valueChanged,

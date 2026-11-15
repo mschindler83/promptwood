@@ -322,6 +322,19 @@ def test_a_distilled_checkpoint_is_not_blocked_by_a_hidden_turbo_setting(app, wi
     assert win.clip_cfg.isEnabled()
 
 
+def test_two_passes_switch(app, win, tmp_path, image):
+    """Clips → Two passes: saved with the project, recorded by every clip, for the standard model too."""
+    ids = new_project(win, tmp_path, image, ("a",))
+    assert not win.two_pass.isChecked()
+    win.two_pass.setChecked(True)
+    assert win.tree.options["two_pass"] == {"on": True}
+    assert T.Checker(win.project, win.tree).settings(ids[0])["two_pass"]
+    win.open_project(tmp_path / "proj")
+    assert win.two_pass.isChecked()
+    win.two_pass.setChecked(False)
+    assert "two_pass" not in T.Checker(win.project, win.tree).settings(ids[0])
+
+
 def test_scenes_in_the_window(app, win, tmp_path, image, monkeypatch):
     """Scenes: the storyboard shows them; a new one opens; switching keeps each scene's clips; the cast is shared."""
     ids = new_project(win, tmp_path, image, ("kitchen clip",))
@@ -680,3 +693,16 @@ def test_exact_video_size_in_the_project_settings(app, win, tmp_path, image):
     base = T.Checker(win.project, win.tree).base()
     assert (base["width"], base["height"]) == (usual["width"], usual["height"])
     assert ids
+
+
+def test_advanced_note_names_the_h3_model_and_two_passes():
+    """The Simple view's note lists the H3 model and Two passes when set; a speed mode a distilled checkpoint
+    switches off is not listed."""
+    from video_chain.ui import ui_logic as UL
+    o = dict(T.DEFAULT_OPTIONS)
+    assert UL.project_setting_changes(o) == []
+    o["two_pass"] = {"on": True}
+    o["checkpoint"] = {"name": "h3/fine.safetensors", "distilled": True}
+    T.set_speed_mode(o, "turbo")
+    keys = [k for k, _n in UL.project_setting_changes(o)]
+    assert "two_pass" in keys and "h3_model" in keys and "speed" not in keys

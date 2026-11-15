@@ -219,6 +219,8 @@ if TYPE_CHECKING:
         h3_checkpoints: list[str]
         h3_model: QComboBox
         h3_distilled: QCheckBox
+        two_pass: QCheckBox
+        _h3_model_row: QWidget
         ident_info: QLabel
         idle_minutes: QSpinBox
         image_loras: dict[str, list[tuple[str, str]]]

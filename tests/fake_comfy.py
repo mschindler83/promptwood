@@ -17,7 +17,7 @@ KNOWN = {"UNETLoader", "CLIPLoader", "VAELoader", "LoadImage", "MiniMaxH3ImageTo
          "FluxKontextImageScale", "ModelSamplingAuraFlow", "CFGNorm", "TextEncodeQwenImageEditPlus",
          "FluxKontextMultiReferenceLatentMethod", "VAEEncode", "KSampler", "ApplyHyperFlowH3",
          # 2K refine
-         "VAEEncodeAudio", "LTXVConcatAVLatent", "LatentUpscaleModelLoader", "MiniMaxH3LatentUpscaleWithModel",
+         "VAEEncodeAudio", "LTXVConcatAVLatent", "LTXVSeparateAVLatent", "LatentUpscaleModelLoader", "MiniMaxH3LatentUpscaleWithModel",
          "ManualSigmas", "VAEDecodeTiled", "BlockSparseAttention", "TextGenerate", "PreviewAny",
          # image creation
          "CLIPTextEncode", "ConditioningZeroOut", "EmptyLatentImage", "EmptySD3LatentImage", "CFGGuider",
@@ -200,7 +200,8 @@ class FakeComfy:
             return {node: {"input": {"required": {}}}} if self.h3_lora_node else {}
         if node == "VideoChainQwen21FunInpaint":
             return {node: {"input": {"required": {}}}} if self.inpaint21 else {}
-        if node in C.REFINE_NODES + ("BlockSparseAttention",) and node != "LatentUpscaleModelLoader":
+        if node in C.REFINE_NODES + ("BlockSparseAttention", "LTXVSeparateAVLatent") \
+                and node != "LatentUpscaleModelLoader":
             return {node: {"input": {"required": {}}}} if self.refine else {}
         if node == "TextGenerate":
             return {node: {"input": {"required": {}}}}

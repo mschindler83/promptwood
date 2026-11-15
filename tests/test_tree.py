@@ -2208,3 +2208,24 @@ def test_a_distilled_checkpoint_has_no_speed_mode_and_no_veda(project):
     assert T.speed_mode_used(o) == "normal" and T.speed_mode(o) == "turbo" and not T.veda_for(o, 1344, 768, 241)
     o["checkpoint"]["distilled"] = False                          # a full fine-tune: as the standard model
     assert T.speed_mode_used(o) == "turbo" and T.veda_for(o, 1344, 768, 241)
+
+
+def test_two_passes_for_every_clip(project):
+    """Clips → Two passes: every clip records it (made clips change), with any H3 model; off: as before."""
+    t, a, b1, b2, c = build(project)
+    run(project, [c.id])
+    t = T.load(project)
+    t.options["two_pass"] = {"on": True}
+    T.save(project, t)
+    s = T.Checker(project, t).settings(b1.id)
+    assert s["two_pass"] == {"scale": 0.5, "denoise": 0.3} and s["steps"] == 28
+    assert statuses(project) == {"a": "changed", "b1": "changed", "c": "changed", "b2": "new"}
+    t.options["checkpoint"] = {"name": "h3/fine.safetensors", "distilled": True}
+    T.save(project, t)
+    s = T.Checker(project, t).settings(b1.id)
+    assert s["two_pass"] and s["steps"] == T.DISTILLED_STEPS
+    t.options["two_pass"] = {"on": False}
+    t.options.pop("checkpoint")
+    T.save(project, t)
+    assert "two_pass" not in T.Checker(project, t).settings(b1.id)
+    assert statuses(project) == {"a": "done", "b1": "done", "c": "done", "b2": "new"}

@@ -630,7 +630,7 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
                   pika: float | None = None, audio_refs: list | None = None, cast: list | None = None,
                   voice_language: str | None = None, lora_triggers: list | None = None,
                   source_sound: dict | None = None, veda: bool = False, camera: dict | None = None,
-                  cfg: float = 1.0, checkpoint: dict | None = None) -> dict:
+                  cfg: float = 1.0, checkpoint: dict | None = None, two_pass: dict | None = None) -> dict:
     """What a clip depends on besides prompt, seed and start image; a clip is reused only if this is unchanged.
     The LoRA counts by content (lora_sha1), so a LoRA retrained into the same file makes its clips change.
     extra_loras: further LoRAs stacked after the first ([(path, strength)]), only present when there are any, so
@@ -640,7 +640,8 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
     voice_language: a character speaks with its voice (MiniMax's structured format, lines tagged with this
     language); such a clip holds its start image like one with faces.
     style: the project's text before / after every prompt (only present when there is any).
-    checkpoint: another H3 checkpoint ({"name", "distilled"}), only present when one is chosen."""
+    checkpoint: another H3 checkpoint ({"name", "distilled"}), only present when one is chosen.
+    two_pass: made in two passes ({"scale", "denoise"}), only present when on."""
     s: dict[str, Any] = {"model": model, "lora": lora or None, "lora_sha1": file_signature(lora) if lora else None,
          "strength": float(strength) if lora else 1.0,
          "frames": int(frames), "steps": int(steps), "width": int(width), "height": int(height),
@@ -653,6 +654,8 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
         s["turbo"] = {"lora": turbo[0], "sha1": file_signature(turbo[0]), "strength": float(turbo[1])}
     if checkpoint:                              # a chosen H3 checkpoint instead of the standard files
         s["checkpoint"] = {"name": str(checkpoint["name"]), "distilled": bool(checkpoint.get("distilled"))}
+    if two_pass:                                # pass 1 at a smaller size, pass 2 adds the detail at the full size
+        s["two_pass"] = {"scale": float(two_pass["scale"]), "denoise": float(two_pass["denoise"])}
     if abs(float(cfg) - 1.0) > 1e-6:            # CFG of the speed mode (only when not 1: earlier clips keep theirs)
         s["cfg"] = round(float(cfg), 2)
     if extra_loras:

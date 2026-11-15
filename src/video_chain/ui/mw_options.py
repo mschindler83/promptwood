@@ -32,7 +32,7 @@ class OptionsMixin(MainWindowHost):
                 kind(o[k])
             except (KeyError, TypeError, ValueError):
                 o[k] = d[k]
-        for k in ("identity", "style", "turbo", "hyperflow", "pika", "veda", "checkpoint"):
+        for k in ("identity", "style", "turbo", "hyperflow", "pika", "veda", "checkpoint", "two_pass"):
             if k in o and not isinstance(o[k], dict):
                 if k in d:
                     o[k] = copy.deepcopy(d[k])
@@ -97,6 +97,7 @@ class OptionsMixin(MainWindowHost):
             self._fill_h3_models()
             self.keep_rep.setChecked(bool(o.get("keep_repeated", d["keep_repeated"])))
             self.veda.setChecked(bool((o.get("veda") or d["veda"]).get("on", d["veda"]["on"])))
+            self.two_pass.setChecked(bool((o.get("two_pass") or {}).get("on")))
             style = o.get("style") or {}
             self.style_prefix.setText(style.get("prefix") or "")
             self.style_suffix.setText(style.get("suffix") or "")
@@ -207,7 +208,7 @@ class OptionsMixin(MainWindowHost):
             "turbo": {**(self.tree.options.get("turbo") or {}),
                       "lora": self.turbo_lora.currentData(),
                       "steps": self.turbo_steps.value(), "strength": round(self.turbo_strength.value(), 2)},
-            "veda": {"on": self.veda.isChecked()},
+            "veda": {"on": self.veda.isChecked()}, "two_pass": {"on": self.two_pass.isChecked()},
             "checkpoint": {"name": self.h3_model.currentData() or "",
                            "distilled": bool(self.h3_model.currentData()) and self.h3_distilled.isChecked()}})
         T.set_speed_mode(self.tree.options, mode)
