@@ -33,6 +33,31 @@ def test_undo_changes_on_the_card(app, win, tmp_path, image):
     assert T.load(tmp_path / "proj").nodes[ids[0]].prompt == "walks in"
 
 
+def test_a_long_own_settings_summary_does_not_widen_the_card(app, win, tmp_path, image):
+    """The "Own settings" toggle shows as much of a long summary as fits ("…", the whole text in its tooltip):
+    the card, and so the panel, keeps its width."""
+    from PySide6.QtWidgets import QToolButton
+    new_project(win, tmp_path, image, ("a",))
+    card = win.cards[0]
+    card.set_summary("")
+    flush(app, win)
+    narrow = card.minimumSizeHint().width()
+    long = " · ".join(f"LoRA number {k} at strength 0.85" for k in range(12))
+    card.set_summary(long)
+    flush(app, win)
+    assert card.minimumSizeHint().width() <= narrow                     # not widened by the text
+    assert card.settings_toggle.minimumSizeHint().width() < 200
+    assert card.settings_toggle.text() == "Own settings: " + long        # (the whole text, for the app)
+    card.settings_toggle.resize(240, card.settings_toggle.height())
+    shown = QToolButton.text(card.settings_toggle)
+    assert shown.endswith("…") and len(shown) < len(long)
+    assert long in card.settings_toggle.toolTip()
+    card.set_summary("3.8 s")
+    card.settings_toggle.resize(400, card.settings_toggle.height())
+    assert QToolButton.text(card.settings_toggle) == "Own settings: 3.8 s"
+    assert "3.8 s" not in card.settings_toggle.toolTip()                 # (shown whole: the plain tooltip)
+
+
 def test_clearer_controls(app, win, tmp_path, image):
     ids = new_project(win, tmp_path, image, ("a", "b"))
     card = win.cards[0]

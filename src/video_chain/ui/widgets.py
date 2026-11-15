@@ -629,3 +629,54 @@ class FrameStepper(QWidget):
 
     def _moved(self, k: int) -> None:
         self.label.setText(f"frame {k + 1} / {self.slider.maximum() + 1} · {k / self.fps:.2f} s")
+
+
+ELIDED_MIN_CHARS = 12          # what an ElidedToolButton shows at least before it is cut ("Own settin…")
+
+
+class ElidedToolButton(QToolButton):
+    """A tool button whose text is cut to the width it gets, with "…" (the whole text then in its tooltip): a
+    long text never makes its layout, and so a panel, wider. text() is the whole text; it is never wider than it
+    needs (QSizePolicy.Maximum) and at least about ELIDED_MIN_CHARS characters wide."""
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._full, self._tip, self._overhead = "", "", 0
+        self._hint = super().sizeHint()
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, self.sizePolicy().verticalPolicy())
+
+    def setText(self, text: str) -> None:  # noqa: N802
+        self._full = text
+        super().setText(text)
+        self._hint = super().sizeHint()          # (the whole text: what the button would like)
+        self._overhead = self._hint.width() - self.fontMetrics().horizontalAdvance(text)
+        self.setAccessibleName(text)
+        self.updateGeometry()
+        self._elide()
+
+    def text(self) -> str:
+        return self._full
+
+    def setToolTip(self, tip: str) -> None:  # noqa: N802
+        self._tip = tip
+        self._elide()
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return QSize(self._hint)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        least = self._overhead + self.fontMetrics().horizontalAdvance("M" * ELIDED_MIN_CHARS)
+        return QSize(min(self._hint.width(), least), super().minimumSizeHint().height())
+
+    def resizeEvent(self, e) -> None:  # noqa: N802
+        super().resizeEvent(e)
+        self._elide()
+
+    def _elide(self) -> None:
+        shown = self.fontMetrics().elidedText(self._full, Qt.TextElideMode.ElideRight,
+                                              max(0, self.width() - self._overhead))
+        if super().text() != shown:
+            super().setText(shown)
+        tip = self._tip if shown == self._full else "\n\n".join(x for x in (self._tip, self._full) if x)
+        if super().toolTip() != tip:
+            super().setToolTip(tip)

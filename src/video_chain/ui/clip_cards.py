@@ -22,7 +22,7 @@ from .problems import EXAMPLES, ProblemBox, add_example, camera_menu_items, inse
 from .prompt_refiner import replace_text
 from .theme import icon, repolish, theme
 from .view_mode import AdvancedNote, ViewMode, row_widget
-from .widgets import FrameTile, SeedBox, combo_item, format_time, guard_wheel, icon_button, label
+from .widgets import ElidedToolButton, FrameTile, SeedBox, combo_item, format_time, guard_wheel, icon_button, label
 from .clip_dialogs import SamplingDialog, sampling_text
 from .mw_support import FileDrop, select_frames
 from .ui_logic import (
@@ -327,7 +327,7 @@ class PromptCard(_ClipCardBase):
     def _build_own_settings(self, shared):
         """Build the clip's own settings: length, steps, LoRAs."""
         self.steps_locked = False                 # turbo mode: the turbo steps apply to every clip
-        self.settings_toggle = QToolButton()
+        self.settings_toggle = ElidedToolButton()        # (a long summary is cut, never widens the panel)
         self.settings_toggle.setCheckable(True)
         self.settings_toggle.setAutoRaise(True)
         self.settings_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
