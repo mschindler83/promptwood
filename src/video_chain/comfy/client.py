@@ -38,6 +38,11 @@ from .wfb import H3_LORA_NODE, SAVE_LAST_ID, SAVE_VIDEO_ID, SUBFOLDER, combo_opt
 
 logger = logging.getLogger(__name__)
 
+# Promptwood's H3 LoRA node (comfy_nodes/video_chain_nodes/h3_lora.py) is switched off: ComfyUI exited during its
+# first real run (2026-11-15, cause not found yet). Off: every LoRA goes through ComfyUI's own loader, which skips the
+# adaln part of LoRAs trained on the unpruned H3 (and says so in its log), as before.
+H3_LORA_NODE_ON = False
+
 try:
     import websocket  # websocket-client (optional: without it the result is polled)
 except ImportError:
@@ -258,6 +263,8 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
         """The ComfyUI names of these LoRAs ((local file, name)) that train the adaln projections, to be loaded by
         Promptwood's H3 LoRA node (it also applies that part on the pruned H3 files). Without the node: none, and a
         log line (ComfyUI's own loader applies the rest and skips that part)."""
+        if not H3_LORA_NODE_ON:
+            return set()
         names = {n for p, n in loras if trains_adaln(Path(p))}
         if names and not self._object_info(H3_LORA_NODE):
             self.log(f"ComfyUI has no {H3_LORA_NODE} node: the adaln part of {', '.join(sorted(names))} is skipped "

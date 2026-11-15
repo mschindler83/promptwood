@@ -1594,10 +1594,11 @@ ADALN_KEYS = ["diffusion_model.blocks.0.attn.qkv_proj.lora_A.weight", "diffusion
               "diffusion_model.blocks.0.adaln_proj.linear.lora_A.weight"]
 
 
-def test_loras_that_train_adaln_go_through_video_chains_h3_lora_node(server, start, tmp_path):
-    """A LoRA that trains the adaln projections (made on the unpruned H3) is loaded by VideoChainH3LoRA, which also
-    applies that part on the pruned H3 files (ComfyUI's LoRA loader skips it there); other LoRAs as before; a
-    ComfyUI without the node gets the plain loader and a log line; the 2K refine does the same."""
+def test_loras_that_train_adaln_go_through_video_chains_h3_lora_node(server, start, tmp_path, monkeypatch):
+    """Switched off (H3_LORA_NODE_ON: ComfyUI crashed in its first real run): every LoRA through ComfyUI's own
+    loader. Switched on: a LoRA that trains the adaln projections (made on the unpruned H3) is loaded by
+    VideoChainH3LoRA, which also applies that part on the pruned H3 files; other LoRAs as before; a ComfyUI without
+    the node gets the plain loader and a log line; the 2K refine does the same."""
     from ui_helpers import H3_KEYS, write_lora
     full = tmp_path / "loras" / "MiniMax H3" / "nose.safetensors"
     plain = tmp_path / "loras" / "MiniMax H3" / "plain.safetensors"
@@ -1612,6 +1613,11 @@ def test_loras_that_train_adaln_go_through_video_chains_h3_lora_node(server, sta
                                                                     "lora_name": "b.safetensors", "strength": 0.5}}
     server.loras = ["MiniMax H3/glow.safetensors", "MiniMax H3/plain.safetensors"]
     logs = []
+    assert C.client.H3_LORA_NODE_ON is False                                      # (off: the plain loader)
+    off = C.ComfyGenerator(server.url, log=logs.append)
+    off.generate("x", start, tmp_path / "o.mp4", tmp_path / "o.png", 1, settings(lora=str(full), strength=0.7))
+    assert server.prompts[-1]["lora0"]["class_type"] == "LoraLoaderModelOnly" and not logs
+    monkeypatch.setattr(C.client, "H3_LORA_NODE_ON", True)
     gen = C.ComfyGenerator(server.url, log=logs.append)
     out, frame = tmp_path / "v.mp4", tmp_path / "v.png"
     gen.generate("x", start, out, frame, 1, settings(lora=str(full), strength=0.7,
