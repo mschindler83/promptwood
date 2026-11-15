@@ -1127,6 +1127,14 @@ def test_refined_export_can_refine_a_video_with_a_replaced_person(project, tmp_p
     T.refine_path(gen, project, a.id, "2k", tmp_path / "plain.mp4", log=lambda _m: None)
     assert json.loads(refined.with_suffix(".json").read_text())["video"] == "converted"   # only scaled up now
     assert len(gen.refines) == 3 and gen.refines[2]["prompt"] == "a"   # (pinned to the other first frame)
+    assert all(r["checkpoint"] is None for r in gen.refines)
+    t = T.load(project)                                              # a checkpoint chosen: the replaced person's
+    t.options["checkpoint"] = {"name": "h3/fine.safetensors", "distilled": False}   # video is refined with it
+    T.save(project, t)
+    run(project, [a.id], gen)
+    T.refine_path(gen, project, a.id, "2k", tmp_path / "tuned.mp4", log=lambda _m: None, refine_swapped=True)
+    assert [r["checkpoint"] for r in gen.refines[3:]] == ["h3/fine.safetensors"] * 2
+    assert json.loads(refined.with_suffix(".json").read_text())["checkpoint"] == "h3/fine.safetensors"
 
 
 def test_new_clips_get_random_unused_seeds():
@@ -2111,3 +2119,27 @@ def test_a_clip_can_have_its_own_sampling(project, tmp_path):
     for bad in (None, "x", {"shift": [0, 3]}, {"shift": [8]}, {"shift": "8/3"}, {"cfg": 99}, {"cfg": "x"},
                 {"sampler": 5}, {"cfg": True}):
         assert T.clean_sampling(bad) == {}
+
+
+def test_a_project_can_have_an_exact_video_size(project):
+    """options["size"] = [width, height]: every clip is made at exactly this size instead of the size worked out
+    from the resolution and the start image's ratio; a size the model cannot take does not count."""
+    from video_chain import chain
+    t, a, *_ = build(project)
+    t = T.load(project)
+    usual = T.Checker(project, t).base()
+    assert (usual["width"], usual["height"]) == chain.canvas_size(96, 54, 512)
+    t.options["size"] = [768, 1152]
+    base = T.Checker(project, t).base()
+    assert (base["width"], base["height"]) == (768, 1152) and T.video_size(t.options, 96, 54) == (768, 1152)
+    T.save(project, t)
+    assert T.load(project).options["size"] == [768, 1152]
+    gen = run(project, [a.id])
+    assert (gen.calls[0]["settings"]["width"], gen.calls[0]["settings"]["height"]) == (768, 1152)
+    for bad in ([700, 1152], [768], "768x1152", [768, 4096], [32, 768], [2048, 256], [768.5, 1152], [True, 768], None):
+        t.options["size"] = bad
+        assert chain.exact_size(bad) is None
+        base = T.Checker(project, t).base()
+        assert (base["width"], base["height"]) == (usual["width"], usual["height"]), bad
+    assert chain.exact_size([768, 1152]) == (768, 1152) and chain.exact_size((1344, 768)) == (1344, 768)
+    assert chain.snap_size(700, 1150) == (704, 1152) and chain.snap_size(10, 99999) == (256, 640)

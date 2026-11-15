@@ -54,6 +54,12 @@ def size_origin(project: Path, tree: Tree | None) -> str:
     return "aspect"
 
 
+def video_size(options, width: int, height: int) -> tuple[int, int]:
+    """The size a project's clips are made at for a source of width × height: its exact size (options["size"]) when
+    it has one, else worked out from its resolution and the source's ratio (chain.video_size)."""
+    return chain.video_size(width, height, int(options.get("resolution", 512)), options.get("size"))
+
+
 def size_source(project: Path, tree: Tree | None) -> tuple[int, int] | None:
     """The picture whose aspect ratio the video size follows: the start image, else the first video of the tree
     (by number), else the project's aspect setting (ASPECTS; a first clip then starts from its text). None only

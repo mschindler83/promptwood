@@ -16,7 +16,7 @@ from .clipcast import mix_level, sound_mixed
 from .keyframes import end_image_used, keyframe_frame
 from .freezing import _revert_fields, changed_inputs, freeze_set, revert
 from .starts import start_source
-from .sources import size_source, source_rotation
+from .sources import size_source, source_rotation, video_size
 from .audio_tracks import source_sound_span
 from .inputs import node_settings, plain_frames
 from .schema import MadeRecord, Options
@@ -344,7 +344,7 @@ def current_settings(project: Path, options: Options, tree: Tree | None = None) 
     dims = size_source(project, tree)
     if dims is None:
         return None
-    w, h = chain.canvas_size(*dims, int(options.get("resolution", 512)))
+    w, h = video_size(options, *dims)
     ck = checkpoint_of(options)
     distilled = bool(ck and ck["distilled"])        # (its turbo built in: no speed mode on top)
     turbo = options.get("turbo") or {}

@@ -473,6 +473,26 @@ class BuildMixin(MainWindowHost):
                                    "image's aspect ratio (bigger is sharper and slower). 512: like the training (the "
                                    "default); 768p: MiniMax H3's native size (fast attention, Veda, helps there)")
         c.addRow("Size", self.resolution)
+        self.exact_size = QCheckBox("Exact")
+        self.exact_size.setToolTip(
+            "Make the clips at exactly this width × height instead of the size worked out from Size and the start "
+            "image's ratio (to match a clip made elsewhere). Each side is a multiple of 32; a start image of "
+            "another ratio is stretched to fit")
+        self.exact_width, self.exact_height = QSpinBox(), QSpinBox()
+        for spin, name in ((self.exact_width, "Exact width"), (self.exact_height, "Exact height")):
+            spin.setRange(chain.SIZE_MIN, chain.SIZE_MAX)
+            spin.setSingleStep(chain.DIVISIBILITY)
+            spin.setAccessibleName(name)
+            spin.setEnabled(False)
+        self.exact_width.setValue(768)
+        self.exact_height.setValue(768)
+        erow = QHBoxLayout()
+        erow.setContentsMargins(0, 0, 0, 0)
+        erow.addWidget(self.exact_size)
+        erow.addWidget(self.exact_width, 1)
+        erow.addWidget(label("×", level="tertiary"))
+        erow.addWidget(self.exact_height, 1)
+        c.addRow("Exact size", erow)
         self.aspect = QComboBox()
         for key in T.ASPECTS:
             self.aspect.addItem(key, key)
@@ -1134,7 +1154,10 @@ class BuildMixin(MainWindowHost):
                      lambda: self.project is not None)
         FileDrop(self, self._dropped_on_window)         # a project folder dropped anywhere on the window
         self.start_tile.dropped.connect(lambda f: self.set_image(f, confirm=True))
-        for sig in (self.frames.currentIndexChanged, self.resolution.currentIndexChanged,
+        for spin in (self.exact_width, self.exact_height):
+            spin.valueChanged.connect(self._options_typing)
+            spin.editingFinished.connect(self._exact_shown)     # (typed in full: the nearest size into the field)
+        for sig in (self.frames.currentIndexChanged, self.resolution.currentIndexChanged, self.exact_size.toggled,
                     self.aspect.currentIndexChanged, self.audio.toggled, self.keep_rep.toggled,
                     self.speed.currentIndexChanged, self.veda.toggled, self.turbo_lora.currentIndexChanged,
                     self.h3_distilled.toggled):

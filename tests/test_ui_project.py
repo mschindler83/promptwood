@@ -629,3 +629,30 @@ def test_fish_engine_in_the_window(win, monkeypatch):
     monkeypatch.setattr(win._tts_local, "stop", lambda: stops.append("qwen") or True)
     monkeypatch.setattr(win._tts_fish, "stop", lambda: stops.append("fish") or True)
     assert win.stop_tts("test") and stops == ["qwen", "fish"]
+
+def test_exact_video_size_in_the_project_settings(app, win, tmp_path, image):
+    """Clips → Exact size: the clips are made at exactly this width × height; off again: the size worked out from
+    Size and the start image, as before."""
+    ids = new_project(win, tmp_path, image)
+    usual = T.Checker(win.project, win.tree).base()
+    assert not win.exact_size.isChecked() and "size" not in win.tree.options
+    win.exact_size.setChecked(True)
+    win.exact_width.setValue(768)
+    win.exact_height.setValue(1150)                              # not a size the model takes: the nearest is used
+    win.exact_height.editingFinished.emit()
+    flush(app, win)
+    assert win.tree.options["size"] == [768, 1152] and win.exact_height.value() == 1152
+    base = T.Checker(win.project, win.tree).base()
+    assert (base["width"], base["height"]) == (768, 1152)
+    assert "768×1152" in win.size_info.text() and "stretched" in win.size_info.text()
+    assert not win.resolution.isEnabled()
+    folder = win.project
+    win.open_project(folder)                                     # shown again when the project is opened
+    flush(app, win)
+    assert win.exact_size.isChecked() and (win.exact_width.value(), win.exact_height.value()) == (768, 1152)
+    win.exact_size.setChecked(False)
+    flush(app, win)
+    assert "size" not in win.tree.options and win.resolution.isEnabled()
+    base = T.Checker(win.project, win.tree).base()
+    assert (base["width"], base["height"]) == (usual["width"], usual["height"])
+    assert ids

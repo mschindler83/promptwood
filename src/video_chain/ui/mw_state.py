@@ -241,7 +241,7 @@ class StateMixin(MainWindowHost):
         try:                                        # another aspect ratio: another video size for every clip
             assert self.tree is not None
             base = T.Checker(self.project, self.tree).base()
-            size = chain.canvas_size(*chain.image_size(Path(path)), int(self.tree.options.get("resolution", 512)))
+            size = T.video_size(self.tree.options, *chain.image_size(Path(path)))
             if base is not None and size != (base["width"], base["height"]):
                 made = [i for i, st in self.status_of.items() if st == "done"]
         except Exception:  # noqa: BLE001  (the clips stay as they are; the question is asked without this check)
@@ -321,13 +321,13 @@ class StateMixin(MainWindowHost):
             origin = T.size_origin(self.project, self.tree) if self.project else "aspect"
             self.aspect.setEnabled(origin == "aspect" and not self.running)
             if dims and origin == "aspect":
-                vw, vh = chain.canvas_size(*dims, self.resolution.currentData())
+                vw, vh = self._chosen_size(*dims)
                 self._canvas = (vw, vh)
                 self.size_info.setText(f"No start image: {self.aspect.currentData()} → {vw}×{vh} (Aspect); the first "
                                        "clip starts from its prompt (and the cast's face pictures)."
                                        + self._veda_note(vw, vh))
             elif dims:
-                vw, vh = chain.canvas_size(*dims, self.resolution.currentData())
+                vw, vh = self._chosen_size(*dims)
                 self._canvas = (vw, vh)
                 self.size_info.setText(f"No start image: the size follows the first video ({dims[0]}×{dims[1]} → "
                                        f"{vw}×{vh}); a first generated clip starts without a start frame."
@@ -342,9 +342,10 @@ class StateMixin(MainWindowHost):
         if w < 1 or h < 1:
             self.size_info.setText(f"The start image ({T.START_FILE}) cannot be read: choose it again.")
             return
-        vw, vh = chain.canvas_size(w, h, self.resolution.currentData())
+        vw, vh = self._chosen_size(w, h)
         r = (w / h) / (vw / vh)
-        note = "" if 0.97 < r < 1.03 else " (ratio outside 2:5 … 5:2: its edges are cut off to fit)"
+        note = ("" if 0.97 < r < 1.03 else " (exact size with another ratio: the start image is stretched to fit)"
+                if self.exact_size.isChecked() else " (ratio outside 2:5 … 5:2: its edges are cut off to fit)")
         if w < vw or h < vh:
             note += f" · smaller than the video: the first frame starts soft (best: at least {vw}×{vh})"
         name = Path(self.tree.image).name if self.tree and self.tree.image else T.START_FILE

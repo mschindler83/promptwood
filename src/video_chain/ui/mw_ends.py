@@ -522,7 +522,7 @@ class EndsMixin(MainWindowHost):
             if file:
                 info = chain.probe_source(Path(file))
                 w, h = chain.rotated_size(info["width"], info["height"], rotate)
-                return chain.canvas_size(w, h, int(tree.options.get("resolution", 512)))
+                return T.video_size(tree.options, w, h)
         except Exception:  # noqa: BLE001  (an unreadable file: no size)
             logging.getLogger(__name__).debug("canvas of %s", file, exc_info=True)
         return None

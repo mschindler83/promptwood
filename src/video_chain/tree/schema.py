@@ -118,6 +118,7 @@ class Options(TypedDict, total=False):
     keep_repeated: bool
     seed: int
     aspect: str
+    size: list[int]                     # [width, height]: the clips' exact size (chain.exact_size); none: worked out
     turbo: dict[str, Any]
     hyperflow: dict[str, Any]
     pika: dict[str, Any]

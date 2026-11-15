@@ -10,7 +10,7 @@ from PySide6.QtCore import QTimer
 
 from .workers import post, run_in_background
 from . import settings_keys as SK
-from .. import tree as T, triggers, tts as TTS
+from .. import chain, tree as T, triggers, tts as TTS
 from ..comfy import REF_HINT
 from .clip_cards import PromptCard
 from .mw_support import select_frames
@@ -65,6 +65,12 @@ class OptionsMixin(MainWindowHost):
                 select_frames(self.frames, fr)
             i = self.resolution.findData(int(o.get("resolution", d["resolution"])))
             self.resolution.setCurrentIndex(i if i >= 0 else 1)
+            exact = chain.exact_size(o.get("size"))
+            self.exact_size.setChecked(exact is not None)
+            if exact:
+                self.exact_width.setValue(exact[0])
+                self.exact_height.setValue(exact[1])
+            self._exact_widgets()
             self.aspect.setCurrentIndex(max(0, self.aspect.findData(o.get("aspect", d["aspect"]))))
             self.steps.setValue(int(o.get("steps", d["steps"])))
             self.audio.setChecked(bool(o.get("audio", d["audio"])))
@@ -136,6 +142,34 @@ class OptionsMixin(MainWindowHost):
         """Where a speed mode keeps its settings (its CFG): the project options for Normal."""
         return options if mode == "normal" else (options.get(mode) or {})
 
+    def _exact_from_widgets(self) -> tuple[int, int] | None:
+        """The exact size chosen (None: off): the nearest size the model takes to what the fields say."""
+        if not self.exact_size.isChecked():
+            return None
+        return chain.snap_size(self.exact_width.value(), self.exact_height.value())
+
+    def _exact_shown(self) -> None:
+        """A field was left: it shows the size that is used (while typing it is left alone)."""
+        size = self._exact_from_widgets()
+        for spin, value in zip((self.exact_width, self.exact_height), size or ()):
+            if spin.value() != value:
+                spin.blockSignals(True)
+                spin.setValue(value)
+                spin.blockSignals(False)
+
+    def _exact_widgets(self, idle: bool | None = None) -> None:
+        """The fields of the exact size, and Size, which does not count while an exact size is set."""
+        idle = (not self.running) if idle is None else idle
+        on = self.exact_size.isChecked()
+        self.exact_width.setEnabled(on and idle)
+        self.exact_height.setEnabled(on and idle)
+        self.resolution.setEnabled(idle and not on)
+
+    def _chosen_size(self, width: int, height: int) -> tuple[int, int]:
+        """The clips' size for a source of this size, as the widgets say now."""
+        return chain.video_size(width, height, self.resolution.currentData(),
+                                list(self._exact_from_widgets() or ()) or None)
+
     def _cfg_hint(self):
         v = self.clip_cfg.value()
         name = SPEED_NAMES.get(self.speed.currentData(), "")
@@ -160,6 +194,12 @@ class OptionsMixin(MainWindowHost):
             self.clip_cfg.blockSignals(False)
         cfg = round(self.clip_cfg.value(), 2)
         self._cfg_hint()
+        exact = self._exact_from_widgets()
+        if exact:
+            self.tree.options["size"] = list(exact)
+        else:
+            self.tree.options.pop("size", None)
+        self._exact_widgets()
         self.tree.options.update({
             "frames": self.frames.currentData(), "resolution": self.resolution.currentData(),
             "aspect": self.aspect.currentData(),

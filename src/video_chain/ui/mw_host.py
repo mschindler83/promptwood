@@ -257,6 +257,9 @@ if TYPE_CHECKING:
         refs: QListWidget
         remix_due: set[str]
         resolution: QComboBox
+        exact_size: QCheckBox
+        exact_width: QSpinBox
+        exact_height: QSpinBox
         runpod_fallback: QCheckBox
         runpod_gpu: QComboBox
         runpod_volume: QLineEdit

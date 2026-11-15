@@ -121,6 +121,40 @@ def canvas_size(width: int, height: int, resolution: int = 512, divisibility: in
     return w, h
 
 
+SIZE_MIN, SIZE_MAX = 256, 2048      # the sides of an exact video size
+
+
+def exact_size(value) -> tuple[int, int] | None:
+    """A project's exact video size ([width, height]) as it counts: two whole numbers, each a multiple of 32 from
+    SIZE_MIN to SIZE_MAX, with a ratio the model takes (2:5 … 5:2). Anything else: None (the size is worked out)."""
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return None
+    if not all(isinstance(x, int) and not isinstance(x, bool) for x in value):
+        return None
+    w, h = value
+    if not all(SIZE_MIN <= x <= SIZE_MAX and x % DIVISIBILITY == 0 for x in (w, h)):
+        return None
+    return (w, h) if 1 / MAX_RATIO <= w / h <= MAX_RATIO else None
+
+
+def snap_size(width: int, height: int) -> tuple[int, int]:
+    """The nearest exact video size the model takes (see exact_size) to a wanted width × height."""
+    def side(x: float) -> int:
+        return min(SIZE_MAX, max(SIZE_MIN, round(x / DIVISIBILITY) * DIVISIBILITY))
+    w, h = side(width), side(height)
+    if w / h > MAX_RATIO:
+        w = int(h * MAX_RATIO // DIVISIBILITY * DIVISIBILITY)
+    elif h / w > MAX_RATIO:
+        h = int(w * MAX_RATIO // DIVISIBILITY * DIVISIBILITY)
+    return w, h
+
+
+def video_size(width: int, height: int, resolution: int = 512, exact=None) -> tuple[int, int]:
+    """The size the clips are made at for a source of width × height: the project's exact size when it has one
+    (exact_size), else canvas_size at the resolution."""
+    return exact_size(exact) or canvas_size(width, height, resolution)
+
+
 def parse_size(text: str) -> tuple[int, int]:
     w, _, h = text.lower().partition("x")
     try:

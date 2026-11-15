@@ -261,7 +261,7 @@ from .sources import (  # noqa: F401
     source_info,
     ASPECTS,
     size_origin,
-    size_source)
+    size_source, video_size)
 from .audio_tracks import (  # noqa: F401
     REPEAT_MIN,
     TRACK_PREFIX,
