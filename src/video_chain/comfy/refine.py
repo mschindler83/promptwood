@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Collection
 import uuid
 from pathlib import Path
 
@@ -86,7 +87,7 @@ def build_refine_workflow(*, prompt: str, draft: str, seed: int, width: int, hei
                           loras: list[tuple[str, float]], refiner: str, upscaler: str, prefix: str,
                           first_frame: str | None = None, last_frame: str | None = None,
                           sparse: float | None = None, strength: str = REFINE_DEFAULT,
-                          checkpoint: str | None = None) -> dict:
+                          checkpoint: str | None = None, adaln_loras: Collection[str] = ()) -> dict:
     """Re-render a finished clip (the uploaded draft video, with sound) at width x height: its video and sound are
     encoded into H3's AV latent, the video upscaled with the latent upscaler, then refined in 3 steps with the
     refiner LoRA (and the clip's own LoRAs, as it was made); the clip's own sound is kept.
@@ -95,7 +96,8 @@ def build_refine_workflow(*, prompt: str, draft: str, seed: int, width: int, hei
     sparse: Sol-Attn block-sparse attention at this threshold (ComfyUI's BlockSparseAttention; not exact).
     strength: how much is drawn anew (REFINE_STRENGTHS).
     checkpoint: the H3 checkpoint the clip was made with (ComfyUI's name of a fine-tune) instead of the standard file;
-    the refiner LoRA goes on top of it as on the standard model."""
+    the refiner LoRA goes on top of it as on the standard model.
+    adaln_loras: names of the clip's LoRAs that train the adaln projections (Promptwood's H3 LoRA node)."""
     wf: dict = {
         "unet": loader_unet(checkpoint or UNET),
         "clip": loader_clip(TEXT_ENCODER, "minimax"),
@@ -122,7 +124,7 @@ def build_refine_workflow(*, prompt: str, draft: str, seed: int, width: int, hei
         wf["first"] = {"class_type": "LoadImage", "inputs": {"image": first_frame}}
     if last_frame:
         wf["last"] = {"class_type": "LoadImage", "inputs": {"image": last_frame}}
-    model = lora_chain(wf, ["unet", 0], list(loras) + [(refiner, 1.0)])
+    model = lora_chain(wf, ["unet", 0], list(loras) + [(refiner, 1.0)], h3_full=adaln_loras)
     window = context_window(frames, width, height)
     if window:                                  # a long clip: refined in overlapping windows (memory)
         wf["windows"] = {"class_type": "MiniMaxH3ContextWindows",
@@ -188,6 +190,7 @@ class RefineMixin(ComfyHost):
             if name is None:
                 raise ComfyError(f"{Path(path).name} is not in ComfyUI's LoRA folders")
             names.append((name, float(weight)))
+        adaln = self.adaln_names([(p, n) for (p, _w), (n, _w2) in zip(loras, names)])
         uploads: list[tuple[str, Path]] = []
         with media.scratch("refine") as tmp:
             src = with_audio(Path(draft), Path(tmp) / "draft.mp4")
@@ -203,7 +206,7 @@ class RefineMixin(ComfyHost):
                 wf = build_refine_workflow(prompt=prompt, draft=name, seed=seed, width=size[0], height=size[1],
                                            frames=frames, loras=names, refiner=files["refiner"],
                                            upscaler=files["upscaler"], prefix=prefix, sparse=sparse,
-                                           strength=strength, checkpoint=checkpoint, **pins)
+                                           strength=strength, checkpoint=checkpoint, adaln_loras=adaln, **pins)
                 entry = self._run_workflow(wf)
                 video = self._first_file((entry.get("outputs") or {}).get(REFINE_SAVE_ID))
                 if video is None:

@@ -9,7 +9,7 @@ Needs no torch: only the standard library (+ websocket-client for step progress;
 polled and there is no per-step progress)."""
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 import hashlib
 import http.client
 import json
@@ -26,7 +26,7 @@ from pathlib import Path, PurePath
 
 from .. import media, net
 from .errors import ComfyError, ComfyJobFailed, ComfyUnavailable, LocalWriteError
-from .loras import comfy_lora_roots, lora_name_for
+from .loras import comfy_lora_roots, lora_name_for, trains_adaln
 from .refine import RefineMixin
 from .seedvr import SEEDVR_PRECISION_LOCAL, SeedvrMixin
 from .settings import (DEFAULT_FRAMES, DEFAULT_HEIGHT, DEFAULT_REF_SIZE, DEFAULT_STEPS, DEFAULT_WIDTH,
@@ -34,7 +34,7 @@ from .settings import (DEFAULT_FRAMES, DEFAULT_HEIGHT, DEFAULT_REF_SIZE, DEFAULT
 from .video import (AUDIO_VAE, DISTILLED_CHECKPOINT, TEXT_ENCODER, UNET, UNET_REF, VEDA_NODE, VIDEO_VAE,
                     build_workflow, clip_recipe,
                     pick_veda_predictor, with_ref_hint)
-from .wfb import SAVE_LAST_ID, SAVE_VIDEO_ID, SUBFOLDER, combo_options
+from .wfb import H3_LORA_NODE, SAVE_LAST_ID, SAVE_VIDEO_ID, SUBFOLDER, combo_options
 
 logger = logging.getLogger(__name__)
 
@@ -241,6 +241,18 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
         if ck.get("distilled") and not self._object_info("MiniMaxH3SigmaShift"):
             raise ComfyError("this ComfyUI has no MiniMaxH3SigmaShift node, which distilled H3 checkpoints sample "
                              "with (update ComfyUI)")
+
+    def adaln_names(self, loras: list[tuple[str, str]]) -> set[str]:
+        """The ComfyUI names of these LoRAs ((local file, name)) that train the adaln projections, to be loaded by
+        Promptwood's H3 LoRA node (it also applies that part on the pruned H3 files). Without the node: none, and a
+        log line (ComfyUI's own loader applies the rest and skips that part)."""
+        names = {n for p, n in loras if trains_adaln(Path(p))}
+        if names and not self._object_info(H3_LORA_NODE):
+            self.log(f"ComfyUI has no {H3_LORA_NODE} node: the adaln part of {', '.join(sorted(names))} is skipped "
+                     "(copy video-chain's comfy_nodes/video_chain_nodes into ComfyUI/custom_nodes and restart "
+                     "ComfyUI)")
+            return set()
+        return names
 
     def veda_predictor(self, refs: bool) -> str:
         """The Veda predictor to use (the node must be there: a clip recorded as made with Veda is never made
@@ -503,6 +515,7 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
             if name is None:
                 raise ComfyError(f"{Path(path).name} is not in ComfyUI's LoRA folders")
             loras.append((name, float(strength)))
+        adaln = self.adaln_names([(p, n) for (p, _st), (n, _st2) in zip(stack, loras)])
         turbo = None
         if s.get("turbo"):
             self.check_turbo()
@@ -526,21 +539,23 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
         uploads: list[tuple[str, Path]] = []        # (ComfyUI name, local file); removed again even on errors
         try:
             try:
-                self._run(prompt, start_image, out_video, out_last_frame, seed, s, loras, turbo, uploads, hyper, pika)
+                self._run(prompt, start_image, out_video, out_last_frame, seed, s, loras, turbo, uploads, hyper, pika,
+                          adaln)
             except ComfyJobFailed as e:
                 # a HyperFlow-patched model left from before this process: unload once and try again
                 if not (turbo and self.last_hyperflow is None and "shapes cannot be multiplied" in str(e)):
                     raise
                 self.log("ComfyUI still had a HyperFlow-patched model: unloading it and trying again")
                 self.free()
-                self._run(prompt, start_image, out_video, out_last_frame, seed, s, loras, turbo, uploads, hyper, pika)
+                self._run(prompt, start_image, out_video, out_last_frame, seed, s, loras, turbo, uploads, hyper, pika,
+                          adaln)
             if not hyper:
                 self.last_hyperflow = False          # a clip without HyperFlow ran: the model is unpatched
         finally:
             self._drop_uploads(uploads)
 
     def _run(self, prompt, start_image, out_video, out_last_frame, seed, s: ClipSettings, loras, turbo, uploads,
-             hyper=None, pika=None) -> None:
+             hyper=None, pika=None, adaln: Collection[str] = ()) -> None:
         ck = _setting_dict(s, "checkpoint") if s.get("checkpoint") else {}
         own = bool(ck)                             # a chosen H3 checkpoint makes every clip (no ref2va file)
         distilled = DISTILLED_CHECKPOINT if ck.get("distilled") else None
@@ -602,7 +617,7 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
                                 audio_refs=sounds, **({"audio_key": self.audio_key()} if sounds else {}),
                                 start_pin=int(s.get("start_pin") or 1),
                                 recipe=clip_recipe(s.get("recipe"), distilled["recipe"] if distilled else None),
-                                keyframes=keyframes, unet=ck.get("name") or None,
+                                keyframes=keyframes, unet=ck.get("name") or None, adaln_loras=adaln,
                                 ref_videos=videos, **({"video_key": self.video_key()} if videos else {}),
                                 veda=self.veda_predictor(bool(refs or sounds or videos))
                                 if s.get("veda") and not distilled else None)

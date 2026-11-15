@@ -121,6 +121,13 @@ def is_h3_lora(path: Path) -> bool:
     return names is not None and any(_H3_ATTN.search(k) for k in names) and any(_H3_MLP.search(k) for k in names)
 
 
+def trains_adaln(path: Path) -> bool:
+    """Whether an H3 LoRA trains the adaln projections (made on the unpruned H3): ComfyUI's LoRA loader cannot add
+    that part to the pruned H3 files, Promptwood's H3 LoRA node can (from the tensor names in its header only)."""
+    names = _safetensors_keys(path)
+    return names is not None and any("adaln_proj" in k for k in names)
+
+
 _H3_VIDEO_IN = re.compile(r"(^|\.)video_patch_proj\.")
 _H3_AUDIO_IN = re.compile(r"(^|\.)audio_patch_proj\.")
 _ADAPTER = re.compile(r"lora|lokr|loha|\.alpha$", re.IGNORECASE)

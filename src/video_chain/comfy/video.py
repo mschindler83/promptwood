@@ -1,7 +1,7 @@
 """The workflow of one MiniMax-H3 clip, as ComfyUI's blueprint "Image to Video (MiniMax H3)" (see __init__)."""
 from __future__ import annotations
 
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Collection, Sequence
 
 from .wfb import (FPS, SAVE_LAST_ID, SAVE_VIDEO_ID, loader_clip, loader_unet, loader_vae, lora_chain, save_video)
 
@@ -70,7 +70,7 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
                    recipe: dict | None = None, veda: str | None = None,
                    keyframes: Sequence[tuple[str, int]] = (), frame_refs: Sequence[str] = (),
                    ref_videos: Sequence[str] = (), video_key: Callable[[int], str] | None = None,
-                   unet: str | None = None) -> dict:
+                   unet: str | None = None, adaln_loras: Collection[str] = ()) -> dict:
     """The API-format workflow for one clip (image = the uploaded start image, as LoadImage names it; None: a
     clip without a start frame).
 
@@ -117,6 +117,8 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
 
     unet: another H3 checkpoint (ComfyUI's name of a fine-tune) instead of the standard files, for plain clips and
     clips with references alike (a distilled one samples with DISTILLED_CHECKPOINT's recipe).
+    adaln_loras: names of LoRAs that train the adaln projections (loras.trains_adaln): loaded by Promptwood's
+    H3 LoRA node, which also applies that part on the pruned H3 files.
 
     The parts: _check_combination (every invalid mix is refused before a node is built), _skeleton,
     _conditioning (the start / end frames, references, sounds), _guides, _keyframes, _model_chain (speed modes,
@@ -147,7 +149,8 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
         latent, positive = _conditioning_plain(wf, **cond)
     positive = _guides(wf, positive, latent, guides, audio)
     positive = _keyframes(wf, positive, latent, keyframes)
-    model = _model_chain(wf, loras=loras, turbo=turbo, hyperflow=hyperflow, pika=pika, recipe=recipe)
+    model = _model_chain(wf, loras=loras, turbo=turbo, hyperflow=hyperflow, pika=pika, recipe=recipe,
+                         adaln_loras=adaln_loras)
     _sampling(wf, model=model, positive=positive, latent=latent, steps=steps, cfg=cfg, hyperflow=hyperflow,
               pika=pika, recipe=recipe, veda=veda)
     _output(wf, audio=audio, prefix=prefix)
@@ -267,7 +270,8 @@ def _keyframes(wf: dict, positive: list, latent: list, keyframes: Sequence[tuple
     return positive
 
 
-def _model_chain(wf: dict, *, loras: Sequence[tuple[str, float]], turbo, hyperflow, pika, recipe) -> list:
+def _model_chain(wf: dict, *, loras: Sequence[tuple[str, float]], turbo, hyperflow, pika, recipe,
+                 adaln_loras: Collection[str] = ()) -> list:
     """The model with its speed mode (pika, hyperflow or turbo, in that order), the LoRAs and the recipe's sigma
     shift. Returns the last model output."""
     model = ["unet", 0]
@@ -286,7 +290,7 @@ def _model_chain(wf: dict, *, loras: Sequence[tuple[str, float]], turbo, hyperfl
                        "inputs": {"model": model, "lora_name": turbo[0], "strength": float(turbo[1]),
                                   "low_vram": False}}
         model = ["turbo", 0]
-    model = lora_chain(wf, model, loras)
+    model = lora_chain(wf, model, loras, h3_full=adaln_loras)
     if recipe and recipe.get("shift"):
         wf["shift"] = {"class_type": "MiniMaxH3SigmaShift",
                        "inputs": {"model": model, "shift_video": float(recipe["shift"][0]),

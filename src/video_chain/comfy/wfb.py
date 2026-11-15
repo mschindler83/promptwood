@@ -5,7 +5,7 @@ ComfyUI renames inputs now and then (the code already tracks "old vs new combo f
 here is fixed in one place."""
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Collection, Sequence
 
 from ..media import DEFAULT_FPS
 
@@ -74,10 +74,17 @@ def lora_node(model: list, name: str, strength: float) -> dict:
             "inputs": {"model": model, "lora_name": name, "strength_model": float(strength)}}
 
 
-def lora_chain(wf: dict, model: list, loras: Sequence[tuple[str, float]], prefix: str = "lora") -> list:
-    """Chain the LoRAs after `model` in this order (nodes `<prefix>0`, `<prefix>1` ... into wf); the last model."""
+H3_LORA_NODE = "VideoChainH3LoRA"     # Promptwood's node: also the adaln part of an H3 LoRA on the pruned files
+
+
+def lora_chain(wf: dict, model: list, loras: Sequence[tuple[str, float]], prefix: str = "lora",
+               h3_full: Collection[str] = ()) -> list:
+    """Chain the LoRAs after `model` in this order (nodes `<prefix>0`, `<prefix>1` ... into wf); the last model.
+    h3_full: names of H3 LoRAs that train the adaln projections: loaded by H3_LORA_NODE instead."""
     for k, (name, strength) in enumerate(loras):
-        wf[f"{prefix}{k}"] = lora_node(model, name, strength)
+        wf[f"{prefix}{k}"] = ({"class_type": H3_LORA_NODE, "inputs": {"model": model, "lora_name": name,
+                                                                       "strength": float(strength)}}
+                              if name in h3_full else lora_node(model, name, strength))
         model = [f"{prefix}{k}", 0]
     return model
 

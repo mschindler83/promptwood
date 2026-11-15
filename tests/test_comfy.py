@@ -1588,3 +1588,42 @@ def test_a_clips_own_sampling_over_a_distilled_checkpoints():
     kinds = {n["class_type"]: n["inputs"] for n in wf.values()}
     assert kinds["MiniMaxH3SigmaShift"]["shift_video"] == 8.0
     assert kinds["KSamplerSelect"]["sampler_name"] == C.SAMPLER and kinds["BasicScheduler"]["scheduler"] == C.SCHEDULER
+
+
+ADALN_KEYS = ["diffusion_model.blocks.0.attn.qkv_proj.lora_A.weight", "diffusion_model.blocks.0.mlp.fc1.lora_A.weight",
+              "diffusion_model.blocks.0.adaln_proj.linear.lora_A.weight"]
+
+
+def test_loras_that_train_adaln_go_through_video_chains_h3_lora_node(server, start, tmp_path):
+    """A LoRA that trains the adaln projections (made on the unpruned H3) is loaded by VideoChainH3LoRA, which also
+    applies that part on the pruned H3 files (ComfyUI's LoRA loader skips it there); other LoRAs as before; a
+    ComfyUI without the node gets the plain loader and a log line; the 2K refine does the same."""
+    from ui_helpers import H3_KEYS, write_lora
+    full = tmp_path / "loras" / "MiniMax H3" / "nose.safetensors"
+    plain = tmp_path / "loras" / "MiniMax H3" / "plain.safetensors"
+    write_lora(full, ADALN_KEYS)
+    write_lora(plain, H3_KEYS)
+    assert C.trains_adaln(full) and not C.trains_adaln(plain) and not C.trains_adaln(tmp_path / "missing.safetensors")
+    wf = C.build_workflow(prompt="x", image=None, seed=1, width=64, height=64, frames=22, steps=8, audio=False,
+                          prefix="p", loras=[("a.safetensors", 0.8), ("b.safetensors", 0.5)],
+                          adaln_loras={"b.safetensors"})
+    assert wf["lora0"]["class_type"] == "LoraLoaderModelOnly"
+    assert wf["lora1"] == {"class_type": C.H3_LORA_NODE, "inputs": {"model": ["lora0", 0],
+                                                                    "lora_name": "b.safetensors", "strength": 0.5}}
+    server.loras = ["MiniMax H3/glow.safetensors", "MiniMax H3/plain.safetensors"]
+    logs = []
+    gen = C.ComfyGenerator(server.url, log=logs.append)
+    out, frame = tmp_path / "v.mp4", tmp_path / "v.png"
+    gen.generate("x", start, out, frame, 1, settings(lora=str(full), strength=0.7,
+                                                     extra_loras=[{"lora": str(plain), "strength": 1.0}]))
+    wf = server.prompts[-1]
+    assert wf["lora0"]["class_type"] == C.H3_LORA_NODE and wf["lora0"]["inputs"]["strength"] == 0.7
+    assert wf["lora1"]["class_type"] == "LoraLoaderModelOnly"
+    gen.refine(out, "x", tmp_path / "r.mp4", 5, (1888, 1088), 39, [(str(full), 0.7)])
+    assert server.prompts[-1]["lora0"]["class_type"] == C.H3_LORA_NODE
+    assert "regenerate_2k" in server.prompts[-1]["lora1"]["inputs"]["lora_name"]       # (the refiner: plain)
+    server.h3_lora_node = False                                                       # an older node package
+    gen = C.ComfyGenerator(server.url, log=logs.append)
+    gen.generate("x", start, out, frame, 1, settings(lora=str(full), strength=0.7))
+    assert server.prompts[-1]["lora0"]["class_type"] == "LoraLoaderModelOnly"
+    assert any(C.H3_LORA_NODE in m and "nose.safetensors" in m for m in logs)

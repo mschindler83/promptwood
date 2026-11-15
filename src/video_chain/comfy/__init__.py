@@ -30,13 +30,13 @@ Tests that replace a function patch it in the module that uses it (e.g. comfy.se
 from __future__ import annotations
 
 from .errors import (ComfyError, ComfyJobFailed, ComfyUnavailable, LocalWriteError)  # noqa: F401
-from .wfb import (combo_options, EDIT_SAVE_ID, FPS, loader_clip, loader_unet, loader_vae, lora_chain, lora_node,
+from .wfb import (combo_options, EDIT_SAVE_ID, FPS, H3_LORA_NODE, loader_clip, loader_unet, loader_vae, lora_chain, lora_node,
                   low_name, QWEN_SHIFT, REFINE_SAVE_ID, SAVE_LAST_ID, save_video, SAVE_VIDEO_ID, SEEDVR_SAVE_ID,
                   SUBFOLDER, TEXT_GEN_ID, text_generate_inputs, TEXT_MIN_P, TEXT_REPETITION_PENALTY, TEXT_SHOW_ID,
                   TEXT_TOP_K, TEXT_TOP_P, VIDEO_CRF)  # noqa: F401
 from .settings import (ClipSettings, DEFAULT_FRAMES, DEFAULT_HEIGHT, DEFAULT_REF_SIZE, DEFAULT_STEPS, DEFAULT_WIDTH,
                        Guide, Keyframe, LoraEntry)  # noqa: F401
-from .loras import (comfy_lora_roots, comfy_model_roots, find_h3_checkpoints, find_h3_loras, is_h3_checkpoint, _find_loras, find_qwen_loras, _H3_ATTN,
+from .loras import (comfy_lora_roots, comfy_model_roots, find_h3_checkpoints, find_h3_loras, is_h3_checkpoint, trains_adaln, _find_loras, find_qwen_loras, _H3_ATTN,
                     _H3_MLP, is_h3_lora, is_ic_lora, is_qwen_lora, is_turbo_lora, lora_name_for, _QWEN_IMG,
                     _QWEN_TXT, _read_safetensors_keys, _safetensors_keys, _safetensors_keys_cached)  # noqa: F401
 from .ffutil import (ffmpeg, FFMPEG_TIMEOUT, with_audio)  # noqa: F401

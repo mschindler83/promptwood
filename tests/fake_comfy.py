@@ -35,7 +35,7 @@ KNOWN = {"UNETLoader", "CLIPLoader", "VAELoader", "LoadImage", "MiniMaxH3ImageTo
          # Wan 2.2 Animate (replace a person)
          "WanAnimateToVideo", "TrimVideoLatent", "DWPreprocessor", "BlockifyMask", "DrawMaskOnImage",
          "CLIPVisionEncode", "CLIPVisionLoader", "ModelSamplingSD3", "ImageBatch", "ImageScale",
-         "VideoChainFaceSwap",
+         "VideoChainFaceSwap", "VideoChainH3LoRA",
          # MOSS-Image
          "T5TokenizerOptions", "TextEncodeMOSSImageEdit", "SkipLayerGuidanceDiTSimple", "ImageScaleToTotalPixels", "GetImageSize"}
 IMAGE_UNETS = ["Chroma1-HD.safetensors", "Chroma1-HD-Flash.safetensors",
@@ -135,6 +135,7 @@ class FakeComfy:
         self.video_refs = True                     # ... and reference videos (with their soundtracks)
         self.fail_next: str | None = None          # the next job fails with this message (once)
         self.extra_unets: list[str] = []           # further diffusion models listed (e.g. H3 fine-tunes)
+        self.h3_lora_node = True                   # Promptwood's VideoChainH3LoRA node is installed
         self.refine_answer: str | None = None      # the prompt refiner's raw answer (None: "REFINED <prompt>")
         self.prompts, self.calls, self.history = [], [], {}
         self.prompts_deleted: list[str] = []       # ids removed with /queue delete while held
@@ -195,6 +196,8 @@ class FakeComfy:
         if node == "VedaSparseAttention":
             return {node: {"input": {"required": {"predictor": ["COMBO", {"options": VEDA_PREDICTORS}]}}}} \
                 if self.veda else {}
+        if node == "VideoChainH3LoRA":
+            return {node: {"input": {"required": {}}}} if self.h3_lora_node else {}
         if node == "VideoChainQwen21FunInpaint":
             return {node: {"input": {"required": {}}}} if self.inpaint21 else {}
         if node in C.REFINE_NODES + ("BlockSparseAttention",) and node != "LatentUpscaleModelLoader":

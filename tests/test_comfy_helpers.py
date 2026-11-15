@@ -147,7 +147,7 @@ def load_nodes(monkeypatch, with_qwen: bool):
 
 def test_the_other_nodes_load_without_qwen_21_internals(monkeypatch):
     mod = load_nodes(monkeypatch, with_qwen=False)
-    assert set(mod.NODE_CLASS_MAPPINGS) == {"VideoChainFaceSwap", "VideoChainLanczosScale"}
+    assert set(mod.NODE_CLASS_MAPPINGS) == {"VideoChainFaceSwap", "VideoChainLanczosScale", "VideoChainH3LoRA"}
 
 
 def test_all_nodes_load_with_qwen_21_internals(monkeypatch):
