@@ -1550,6 +1550,9 @@ def test_h3_checkpoints_found_in_comfyuis_model_folders(tmp_path):
     (root / "broken_h3.safetensors").write_bytes(b"no header")
     assert C.find_h3_checkpoints([root, unet, tmp_path / "missing"]) == [
         "style_tune.safetensors", "sub/my_tune.safetensors"]
+    link = tmp_path / "unet2"                                      # the same folder reached twice: listed once
+    link.symlink_to(root, target_is_directory=True)
+    assert C.find_h3_checkpoints([root, link]) == ["sub/my_tune.safetensors"]
 
 
 def test_generating_with_another_h3_checkpoint(server, start, tmp_path):

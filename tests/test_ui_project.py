@@ -296,6 +296,30 @@ def test_another_h3_checkpoint_chosen_and_saved(app, win, tmp_path, image):
     assert "checkpoint" not in T.Checker(win.project, win.tree).settings(ids[0])
     assert not UL.looks_distilled("h3_full_bf16.safetensors") and UL.looks_distilled("x_8step_int8.safetensors")
     assert UL.looks_distilled("FastH3_omniref.safetensors") and UL.looks_distilled("h3_DMD.safetensors")
+    assert not UL.looks_distilled("h3_ft_3000steps.safetensors") and not UL.looks_distilled("h3-2000step.safetensors")
+    assert UL.looks_distilled("h3_4-step.safetensors") and UL.looks_distilled("h3_12steps_v2.safetensors")
+
+
+def test_a_distilled_checkpoint_is_not_blocked_by_a_hidden_turbo_setting(app, win, tmp_path, image):
+    """Speed was Turbo without a LoRA, then a distilled checkpoint was chosen (Speed is locked): Generate and the
+    clip card do not ask for a turbo LoRA; the CFG field is locked like the speed (the checkpoint samples at 1)."""
+    from video_chain.ui.ui_logic import ProblemKind as PK
+    ids = new_project(win, tmp_path, image, ("a",))
+    T.set_speed_mode(win.tree.options, "turbo")
+    win.tree.options["turbo"]["lora"] = None
+    problems, _empty = win._preflight(win.project, win.tree, ids, None)
+    assert any("turbo LoRA" in p for p in problems)
+    assert any(p.kind == PK.TURBO for p in win.clip_problems(ids[0]))
+    win.h3_checkpoints = ["tunes/my_h3_8step.safetensors"]
+    win._options_to_widgets()
+    win.h3_model.setCurrentIndex(1)
+    assert win.tree.options["checkpoint"]["distilled"] and T.speed_mode(win.tree.options) == "turbo"
+    problems, _empty = win._preflight(win.project, win.tree, ids, None)
+    assert not any("turbo LoRA" in p for p in problems)
+    assert not any(p.kind == PK.TURBO for p in win.clip_problems(ids[0]))
+    assert not win.clip_cfg.isEnabled() and not win.speed.isEnabled()
+    win.h3_distilled.setChecked(False)
+    assert win.clip_cfg.isEnabled()
 
 
 def test_scenes_in_the_window(app, win, tmp_path, image, monkeypatch):

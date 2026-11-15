@@ -192,7 +192,7 @@ class InspectorMixin(MainWindowHost):
         out: list[Problem] = []
         try:
             turbo = self.tree.options.get("turbo") or {}
-            if turbo.get("on") and not turbo.get("lora"):
+            if T.speed_mode_used(self.tree.options) == "turbo" and not turbo.get("lora"):
                 out.append(Problem(
                     PK.TURBO, "The fast speed (turbo) needs an add-on that is not chosen yet. Choose it, or set Speed "
                     "to Normal.", "Clips → Turbo LoRA: choose a turbo LoRA (or switch Speed to Normal)", "turbo", "Show"))

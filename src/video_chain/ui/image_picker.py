@@ -666,6 +666,8 @@ class ImagePickerDialog(QDialog):
             self._chosen = self._chosen_all[0] if self._chosen_all else None
         if self._chosen is None and item is not None and item.data(Qt.ItemDataRole.UserRole)[0] == "img":
             self._chosen = item.data(Qt.ItemDataRole.UserRole)[1]
+            if self.multi:                       # (nothing selected, e.g. a double-click on a picture Ctrl-click
+                self._chosen_all = [self._chosen]   # had just deselected: the picture the user is on)
         if self._chosen is None:
             if item is not None and item.data(Qt.ItemDataRole.UserRole)[0] == "dir":
                 self.open_folder(Path(item.data(Qt.ItemDataRole.UserRole)[1]))

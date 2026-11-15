@@ -204,6 +204,13 @@ def speed_mode(o: Any) -> str:
     return "normal"
 
 
+def speed_mode_used(o: Any) -> str:
+    """The speed mode clips are made with: "normal" while a distilled checkpoint is chosen (its turbo is built in;
+    the stored mode stays for when it is not), else speed_mode."""
+    ck = checkpoint_of(o)
+    return "normal" if ck and ck["distilled"] else speed_mode(o)
+
+
 def set_speed_mode(o: Any, mode: str) -> None:
     """Switch exactly one speed mode on (or none, for "normal"); the other settings of each mode stay."""
     if mode not in SPEED_MODES:

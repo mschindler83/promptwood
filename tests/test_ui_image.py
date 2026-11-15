@@ -755,7 +755,8 @@ def test_replace_a_person_in_a_real_video(app, tmp_path, image, monkeypatch):
                 pass
         dlg.h3 = {"lora": "/loras/MiniMax H3/minimax_h3_head_swap_v1.0_r32.safetensors",
                   "turbo": "/loras/MiniMax H3/minimax_h3_dmd_ref2va_8step_turbo_pruned.safetensors",
-                  "settings": {"steps": 6, "turbo": {"lora": "/t.safetensors"}, "pika": {"strength": 1.0}},
+                  "settings": {"steps": 6, "turbo": {"lora": "/t.safetensors"}, "pika": {"strength": 1.0},
+                               "checkpoint": {"name": "h3/fine.safetensors", "distilled": True}},
                   "connect": lambda progress: Gen()}
         # a 16:9 photo: the head square found in it is what the H3 head swap gets (not the whole wide picture)
         from video_chain import faces as F
@@ -793,6 +794,7 @@ def test_replace_a_person_in_a_real_video(app, tmp_path, image, monkeypatch):
         assert seen_ref and seen_ref[-1] == (256, 256, False)              # the head square, no black bars
         assert not Path(st["ref_paths"][0]).exists()                  # (a temporary copy, removed after)
         assert "turbo" not in st and "pika" not in st and "hyperflow" not in st     # (the project's speed modes)
+        assert "checkpoint" not in st                         # (the swap's own model, not the project's H3 checkpoint)
         assert prompt.startswith("head_swap:") and "Male, oval face, short black hair" in prompt
         assert dlg.prompt.text() == "Male, oval face, short black hair"   # shown (and editable) for the next try
         h3_out = dlg.result[0]
@@ -1150,3 +1152,23 @@ def test_image_picker_chooses_several_pictures(app, tmp_path, monkeypatch):
     assert shown == [QAbstractItemView.SelectionMode.ExtendedSelection]
     monkeypatch.setattr(IP.ImagePickerDialog, "exec", lambda self: QDialog.DialogCode.Rejected)
     assert IP.pick_images(None, "x", q, str(d)) == []
+
+
+def test_multi_picker_double_click_on_a_deselected_picture_takes_it(app, tmp_path):
+    """A double-click on a picture that Ctrl-click had just deselected (nothing selected, the picture current):
+    that picture is taken, not an empty list that reads as Cancel."""
+    from PySide6.QtWidgets import QDialog
+
+    from video_chain.ui import image_picker as IP
+    d = tmp_path / "pics"
+    d.mkdir()
+    for n in ("a.png", "b.png"):
+        Image.new("RGB", (32, 32), (9, 9, 9)).save(d / n)
+    dlg = IP.ImagePickerDialog(None, "x", str(d), settings(tmp_path, "dc.ini"), cache_dir=None,
+                               desktop_thumbs=None, multi=True)
+    b = next(dlg.grid.item(i) for i in range(dlg.grid.count()) if dlg.grid.item(i).text() == "b.png")
+    dlg.grid.setCurrentItem(b)
+    dlg.grid.clearSelection()                                                    # (deselected, still current)
+    dlg._activated(b)
+    assert dlg.result() == QDialog.DialogCode.Accepted
+    assert dlg.chosen_all() == [str((d / "b.png").resolve())] and dlg.chosen() == dlg.chosen_all()[0]

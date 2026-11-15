@@ -8,7 +8,7 @@ from ..triggers import with_triggers
 from .. import camera as _camera
 from .. import chain
 from .. import h3_prompt as _h3
-from .consts import CONTINUE_CHOICES, DEFAULT_FRAMES, MAX_CAST_PICTURES, clean_sampling
+from .consts import CONTINUE_CHOICES, DEFAULT_FRAMES, MAX_CAST_PICTURES, checkpoint_of, clean_sampling
 from .model import Node, Tree
 from .timeline import clip_length, full_prompt, handover_index, made_frames
 from .files import node_loras
@@ -123,7 +123,7 @@ def node_settings(base: dict, options: Options, node: Node, audio_pool: list[dic
     sounds = (audio_pool or [])[:n_audio] if n_audio else []
     sounds = sounds + [{"file": r, "sha1": sha(r)} for r in use.get("voices", [])]
     ident = options.get("identity") or {}
-    distilled = bool((base.get("checkpoint") or {}).get("distilled"))   # (its own steps, no Veda)
+    distilled = bool((base.get("checkpoint") or {}).get("distilled"))   # (its own steps)
     stack = node_loras(node)
     lora, strength = stack[0] if stack else (None, 1.0)
     # the clip's own sampling; a speed mode samples its own way (as it has its own steps)
@@ -147,9 +147,8 @@ def node_settings(base: dict, options: Options, node: Node, audio_pool: list[dic
                                audio_refs=sounds or None, voice_language=use.get("language"),
                                lora_triggers=_stack_triggers(options, node, stack),
                                source_sound=source_sound,
-                               veda=not distilled and veda_for(options, base["width"], base["height"],
-                                                               int(ov.get("frames", options.get("frames",
-                                                                                                DEFAULT_FRAMES)))),
+                               veda=veda_for(options, base["width"], base["height"],
+                                             int(ov.get("frames", options.get("frames", DEFAULT_FRAMES)))),
                                checkpoint=base.get("checkpoint"),
                                camera=_camera.clean(ov.get("camera")))
     recipe = {k: own[k] for k in ("sampler", "scheduler", "shift") if k in own}
@@ -200,8 +199,11 @@ def continue_choices(tree: Tree, node: Node) -> list[int]:
 
 
 def veda_for(options: Options, width: int, height: int, frames: int) -> bool:
-    """A clip of this size is made with Veda sparse attention: the project allows it and it is large enough."""
-    return bool((options.get("veda") or {"on": True}).get("on", True)) and chain.veda_useful(width, height, frames)
+    """A clip of this size is made with Veda sparse attention: the project allows it, it is large enough, and no
+    distilled checkpoint is chosen (that one samples with exact attention)."""
+    ck = checkpoint_of(options)
+    return bool((options.get("veda") or {"on": True}).get("on", True)) and not (ck and ck["distilled"]) \
+        and chain.veda_useful(width, height, frames)
 
 
 def loras_needed(tree: Tree, checker: Checker, nids: list[str]) -> list[str]:

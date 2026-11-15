@@ -536,6 +536,7 @@ class SwapDialog(QDialog):
                     st = dict(self.h3["settings"] or {})
                     for speed in ("turbo", "hyperflow", "pika"):   # the recipe's own turbo LoRA instead
                         st.pop(speed, None)
+                    st.pop("checkpoint", None)          # (its LoRAs are made for the standard reference model)
                     st.update({"steps": swap.H3_SWAP_STEPS, "frames": length, "width": w, "height": h,
                                "lora": self.h3["turbo"], "strength": 1.0, "recipe": dict(swap.H3_SWAP_RECIPE),
                                "extra_loras": [{"lora": self.h3["lora"], "strength": 1.0}],

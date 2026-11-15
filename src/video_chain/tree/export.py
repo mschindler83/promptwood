@@ -98,7 +98,11 @@ def _refine_checkpoint(tree: Tree, node: Node) -> str | None:
     if node.is_video:
         ck = checkpoint_of(tree.options)
         return ck["name"] if ck else None
-    return ((node.made_dict().get("settings") or {}).get("checkpoint") or {}).get("name") or None
+    ck = (node.made_dict().get("settings") or {}).get("checkpoint") or {}
+    if not isinstance(ck, dict):
+        raise ValueError(f"clip #{short_id(node.id)}: its recorded checkpoint setting is damaged (expected a dict, "
+                         f"got {type(ck).__name__}); make the clip again")
+    return ck.get("name") or None
 
 
 def _refine_choices(generator: RefineGenerator, method: str, strength: str, fast_attention: bool,

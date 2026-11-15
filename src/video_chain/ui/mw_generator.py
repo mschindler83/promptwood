@@ -18,7 +18,7 @@ from ..__main__ import COMFY_DOWN
 from .generator_state import (
     ByeEvent, ComfyBinding, ComfyModel, ErrorEvent, IdleEvent, Job, LoadingEvent, ModelState,
     NodeEvent, Phase, PlanEvent, Refine, RunpodBinding, StartEvent, StepEvent, WorkerBinding, event_problem)
-from .ui_logic import CLOUD_KILL_GRACE_MS, DEFAULT_COMFY_URL, KILL_GRACE_MS, as_dict, fmt_left, plural, speed_mode, time_left
+from .ui_logic import CLOUD_KILL_GRACE_MS, DEFAULT_COMFY_URL, KILL_GRACE_MS, as_dict, fmt_left, plural, time_left
 from .mw_host import MainWindowHost
 
 log = logging.getLogger(__name__)
@@ -126,7 +126,7 @@ class GeneratorMixin(MainWindowHost):
         Reads files and hashes LoRAs, so it runs in a thread; nothing is changed (the window is locked meanwhile)."""
         problems = []
         turbo = tree.options.get("turbo") or {}
-        if turbo.get("on"):
+        if T.speed_mode_used(tree.options) == "turbo":      # (not while a distilled checkpoint is chosen)
             if not turbo.get("lora"):
                 problems.append("choose a turbo LoRA (Clips → Turbo LoRA) or switch Speed to Normal")
         nodes = {n.id: n for t in targets for n in tree.path_to(t)}
@@ -299,7 +299,7 @@ class GeneratorMixin(MainWindowHost):
             self._update_model_label()
             return
         self.stop_idle_unload()
-        hyper = speed_mode(as_dict(self.tree.options)) == "hyperflow" and not self._job.refine \
+        hyper = T.speed_mode_used(as_dict(self.tree.options)) == "hyperflow" and not self._job.refine \
             if self.tree is not None else False
         self.comfy.model = ComfyModel.H3_HYPERFLOW if hyper else ComfyModel.H3
         self._write_job(cmd)

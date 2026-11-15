@@ -85,6 +85,7 @@ class LorasMixin(MainWindowHost):
         self.h3_model.setEnabled(idle)
         self.speed.setEnabled(idle and not distilled)
         self.veda.setEnabled(idle and not distilled)
+        self.clip_cfg.setEnabled(idle and not distilled)         # (it belongs to the speed mode, which is off)
         on, hyper = on and not distilled, hyper and not distilled
         for w in (self.turbo_lora, self.turbo_steps, self.turbo_strength):
             w.setEnabled(on and idle)

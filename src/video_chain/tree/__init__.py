@@ -63,6 +63,7 @@ from .consts import (  # noqa: F401
     DISTILLED_STEPS,
     checkpoint_of,
     speed_mode,
+    speed_mode_used,
     set_speed_mode,
     TREE_VERSION,
     NewerTreeError,

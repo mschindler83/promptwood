@@ -1128,12 +1128,25 @@ def test_refined_export_can_refine_a_video_with_a_replaced_person(project, tmp_p
     assert json.loads(refined.with_suffix(".json").read_text())["video"] == "converted"   # only scaled up now
     assert len(gen.refines) == 3 and gen.refines[2]["prompt"] == "a"   # (pinned to the other first frame)
     assert all(r["checkpoint"] is None for r in gen.refines)
-    t = T.load(project)                                              # a checkpoint chosen: the replaced person's
-    t.options["checkpoint"] = {"name": "h3/fine.safetensors", "distilled": False}   # video is refined with it
+
+
+def test_a_video_with_a_replaced_person_is_refined_with_the_projects_checkpoint(project, tmp_path):
+    """Such a video has no checkpoint of its own: its refine loads the project's choice, recorded with the copy."""
+    from video_chain import swap
+    clip = tmp_path / "swapped.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=96x54:r=24:d=1", "-f", "lavfi",
+                    "-i", "sine=frequency=440:duration=1", "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", str(clip)], check=True)
+    t = T.load(project)
+    v = t.add_video(None, str(clip), 0.0, 1.0)
+    a = t.add(v.id, "a")
+    swap.apply(v, clip, 24, {"method": "h3", "details": "Male, short black hair", "seed": 7})
+    t.options["checkpoint"] = {"name": "h3/fine.safetensors", "distilled": False}
     T.save(project, t)
-    run(project, [a.id], gen)
-    T.refine_path(gen, project, a.id, "2k", tmp_path / "tuned.mp4", log=lambda _m: None, refine_swapped=True)
-    assert [r["checkpoint"] for r in gen.refines[3:]] == ["h3/fine.safetensors"] * 2
+    gen = run(project, [a.id])
+    T.refine_path(gen, project, a.id, "2k", tmp_path / "out.mp4", log=lambda _m: None, refine_swapped=True)
+    assert [r["checkpoint"] for r in gen.refines] == ["h3/fine.safetensors"] * 2
+    refined = T.refined_file(project, T.load(project).nodes[v.id], "2k")
     assert json.loads(refined.with_suffix(".json").read_text())["checkpoint"] == "h3/fine.safetensors"
 
 
@@ -2172,3 +2185,26 @@ def test_refined_copies_with_the_clips_h3_checkpoint(project, tmp_path):
     f.write_text(json.dumps(rec))
     T.refine_path(gen, project, b1.id, "2k", tmp_path / "tuned3.mp4", log=lambda _m: None)
     assert len(gen.refines) == 5 and gen.refines[-1]["checkpoint"] == "h3/fine.safetensors"
+
+
+def test_a_damaged_checkpoint_record_is_said_not_crashed(project, tmp_path):
+    """A clip whose recorded checkpoint is not a dict (a hand-edited tree.json): the refined export says so."""
+    t, a, b1, b2, c = build(project)
+    run(project, [a.id])
+    t = T.load(project)
+    t.nodes[a.id].made_dict()["settings"]["checkpoint"] = "h3/fine.safetensors"
+    with pytest.raises(ValueError, match="checkpoint.*damaged"):
+        T.export._refine_checkpoint(t, t.nodes[a.id])
+    assert T.export._refine_checkpoint(t, t.nodes[b1.id]) is None                   # (not made: none recorded)
+
+
+def test_a_distilled_checkpoint_has_no_speed_mode_and_no_veda(project):
+    """With a distilled checkpoint the speed mode in use is Normal (the stored one stays for later) and no clip is
+    made with Veda, also where the window asks (veda_for, speed_mode_used)."""
+    o = dict(T.DEFAULT_OPTIONS)
+    T.set_speed_mode(o, "turbo")
+    assert T.speed_mode_used(o) == "turbo" and T.veda_for(o, 1344, 768, 241)
+    o["checkpoint"] = {"name": "h3/fine.safetensors", "distilled": True}
+    assert T.speed_mode_used(o) == "normal" and T.speed_mode(o) == "turbo" and not T.veda_for(o, 1344, 768, 241)
+    o["checkpoint"]["distilled"] = False                          # a full fine-tune: as the standard model
+    assert T.speed_mode_used(o) == "turbo" and T.veda_for(o, 1344, 768, 241)

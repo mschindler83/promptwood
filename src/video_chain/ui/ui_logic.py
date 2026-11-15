@@ -298,7 +298,9 @@ SPEED_NAMES = {"normal": "Normal", "turbo": "Turbo", "hyperflow": "HyperFlow", "
 
 speed_mode = T.speed_mode   # (the tree reads the mode; kept here for the window's imports)
 
-_DISTILLED_NAME = re.compile(r"turbo|distill|dmd|lightning|fasth3|\d+[-_ ]?steps?(?![a-z])", re.IGNORECASE)
+# a few-step model: turbo / distilled / DMD / Lightning / FastH3, or 1-16 steps (not a training step count, 3000steps)
+_DISTILLED_NAME = re.compile(r"turbo|distill|dmd|lightning|fasth3|(?<!\d)(?:[1-9]|1[0-6])[-_ ]?steps?(?![a-z])",
+                             re.IGNORECASE)
 
 
 def looks_distilled(name: str) -> bool:
