@@ -85,16 +85,19 @@ def pick_refine_files(loras: list[str], upscalers: list[str]) -> dict:
 def build_refine_workflow(*, prompt: str, draft: str, seed: int, width: int, height: int, frames: int,
                           loras: list[tuple[str, float]], refiner: str, upscaler: str, prefix: str,
                           first_frame: str | None = None, last_frame: str | None = None,
-                          sparse: float | None = None, strength: str = REFINE_DEFAULT) -> dict:
+                          sparse: float | None = None, strength: str = REFINE_DEFAULT,
+                          checkpoint: str | None = None) -> dict:
     """Re-render a finished clip (the uploaded draft video, with sound) at width x height: its video and sound are
     encoded into H3's AV latent, the video upscaled with the latent upscaler, then refined in 3 steps with the
     refiner LoRA (and the clip's own LoRAs, as it was made); the clip's own sound is kept.
     first_frame / last_frame (uploaded images): pinned as keyframes, so a refined clip starts exactly where the
     refined clip before it hands over (and ends at a real video's refined first frame).
     sparse: Sol-Attn block-sparse attention at this threshold (ComfyUI's BlockSparseAttention; not exact).
-    strength: how much is drawn anew (REFINE_STRENGTHS)."""
+    strength: how much is drawn anew (REFINE_STRENGTHS).
+    checkpoint: the H3 checkpoint the clip was made with (ComfyUI's name of a fine-tune) instead of the standard file;
+    the refiner LoRA goes on top of it as on the standard model."""
     wf: dict = {
-        "unet": loader_unet(UNET),
+        "unet": loader_unet(checkpoint or UNET),
         "clip": loader_clip(TEXT_ENCODER, "minimax"),
         "vae": loader_vae(VIDEO_VAE),
         "audio_vae": loader_vae(AUDIO_VAE),
@@ -155,8 +158,8 @@ class RefineMixin(ComfyHost):
 
     def refine(self, draft: Path, prompt: str, out: Path, seed: int, size: tuple[int, int], frames: int,
                loras: list[tuple[str, float]], first_frame: Path | None = None, last_frame: Path | None = None,
-               sparse: float | None = None, strength: str = REFINE_DEFAULT) -> None:
-        """Re-render one finished clip at size (see build_refine_workflow)."""
+               sparse: float | None = None, strength: str = REFINE_DEFAULT, checkpoint: str | None = None) -> None:
+        """Re-render one finished clip at size (see build_refine_workflow); checkpoint: the clip's H3 checkpoint."""
         self._begin_job()
         self._last_seedvr = False
         for node in REFINE_NODES:
@@ -167,6 +170,8 @@ class RefineMixin(ComfyHost):
             # a HyperFlow-patched H3 model (or one this process does not know about) must not refine: load it fresh
             if self.free():
                 self.last_hyperflow = False
+        if checkpoint:
+            self.check_checkpoint({"name": checkpoint})
         if sparse and not self._object_info("BlockSparseAttention"):
             raise ComfyError("this ComfyUI has no BlockSparseAttention node (Sol-Attn; update ComfyUI)")
         req = self._object_info("LatentUpscaleModelLoader").get("input", {}).get("required", {})
@@ -198,7 +203,7 @@ class RefineMixin(ComfyHost):
                 wf = build_refine_workflow(prompt=prompt, draft=name, seed=seed, width=size[0], height=size[1],
                                            frames=frames, loras=names, refiner=files["refiner"],
                                            upscaler=files["upscaler"], prefix=prefix, sparse=sparse,
-                                           strength=strength, **pins)
+                                           strength=strength, checkpoint=checkpoint, **pins)
                 entry = self._run_workflow(wf)
                 video = self._first_file((entry.get("outputs") or {}).get(REFINE_SAVE_ID))
                 if video is None:

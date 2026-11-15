@@ -589,6 +589,23 @@ def test_refine_with_sol_attn(server, start, tmp_path):
     assert sp["model"] == ["lora0", 0]                                          # after the refiner LoRA
 
 
+def test_refine_with_a_chosen_h3_checkpoint(server, start, tmp_path):
+    """The 2K refine loads the clip's H3 checkpoint instead of the standard file (the refiner LoRA on top); one
+    ComfyUI does not list is refused with its name."""
+    server.extra_unets = ["h3/fine_8step.safetensors"]
+    gen = C.ComfyGenerator(server.url)
+    draft = tmp_path / "d.mp4"
+    gen.generate("x", start, draft, tmp_path / "d.png", 1, settings())
+    gen.refine(draft, "x", tmp_path / "r.mp4", 5, (1888, 1088), 39, [], checkpoint="h3/fine_8step.safetensors")
+    wf = server.prompts[-1]
+    assert wf["unet"]["inputs"]["unet_name"] == "h3/fine_8step.safetensors"
+    assert wf["lora0"]["inputs"]["model"] == ["unet", 0] and "regenerate_2k" in wf["lora0"]["inputs"]["lora_name"]
+    gen.refine(draft, "x", tmp_path / "r.mp4", 5, (1888, 1088), 39, [])
+    assert server.prompts[-1]["unet"]["inputs"]["unet_name"] == C.UNET                  # (none: the standard file)
+    with pytest.raises(C.ComfyError, match="gone.safetensors"):
+        gen.refine(draft, "x", tmp_path / "r.mp4", 5, (1888, 1088), 39, [], checkpoint="gone.safetensors")
+
+
 def _write_lora(path, keys):
     import json as _json
     import struct

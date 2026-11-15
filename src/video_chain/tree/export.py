@@ -10,7 +10,7 @@ from .. import camera as _camera
 from .. import chain
 from .. import h3_prompt as _h3
 from .. import media
-from .consts import REFINED
+from .consts import REFINED, checkpoint_of
 from .model import Node, Tree, short_id
 from .timeline import SWAPPED_REFINE_PROMPT, handover_index, made_frames, path_cuts
 from .files import load, refined_file
@@ -26,7 +26,7 @@ class RefineGenerator(Protocol):
 
     def refine(self, draft: Path, prompt: str, out: Path, seed: int, size: tuple[int, int], frames: int,
                loras: list[tuple[str, float]], first_frame: Path | None = None, last_frame: Path | None = None,
-               sparse: float | None = None, strength: str = ...) -> None: ...
+               sparse: float | None = None, strength: str = ..., checkpoint: str | None = None) -> None: ...
 
     def seedvr(self, draft: Path, out: Path, size: tuple[int, int], method: str = ..., seed: int = ...,
                denoise: bool = ...) -> None: ...
@@ -92,9 +92,20 @@ def _pin_frames(project: Path, tree: Tree, path: list[Node], node: Node, size: s
     return first, last
 
 
+def _refine_checkpoint(tree: Tree, node: Node) -> str | None:
+    """The H3 checkpoint a node's refine loads: the one a generated clip was made with, for a video with a replaced
+    person the project's choice; None: the standard file."""
+    if node.is_video:
+        ck = checkpoint_of(tree.options)
+        return ck["name"] if ck else None
+    return ((node.made_dict().get("settings") or {}).get("checkpoint") or {}).get("name") or None
+
+
 def _refine_choices(generator: RefineGenerator, method: str, strength: str, fast_attention: bool,
-                    denoise: bool) -> dict:
-    """What a re-rendered copy records of how it was made (a copy is reused only while these are the same)."""
+                    denoise: bool, checkpoint: str | None = None) -> dict:
+    """What a re-rendered copy records of how it was made (a copy is reused only while these are the same);
+    checkpoint: the H3 checkpoint a refine loads (recorded only when there is one: standard copies stay as they
+    were)."""
     pins: dict = {}
     if method != "refine":
         pins["method"] = method
@@ -107,6 +118,8 @@ def _refine_choices(generator: RefineGenerator, method: str, strength: str, fast
         pins["strength"] = strength
         if fast_attention:
             pins["attention"] = "sol-attn"
+        if checkpoint:
+            pins["checkpoint"] = checkpoint
     return pins
 
 
@@ -130,7 +143,8 @@ def _seedvr_clip(generator: RefineGenerator, project: Path, node: Node, target: 
 
 
 def _refine_swapped(generator: RefineGenerator, project: Path, node: Node, target: Path, size: str, tmp: Path,
-                    fast_attention: bool, strength: str, log: Callable[[str], None], who: str) -> None:
+                    fast_attention: bool, strength: str, log: Callable[[str], None], who: str,
+                    checkpoint: str | None = None) -> None:
     """A video whose person was replaced, re-rendered like a generated clip (with the recorded sound)."""
     from ..comfy import SOL_TAU, refine_size
     key = node.made_dict().get("key") or {}
@@ -146,7 +160,8 @@ def _refine_swapped(generator: RefineGenerator, project: Path, node: Node, targe
                       "-crf", "10", "-pix_fmt", "yuv420p", "-c:a", "copy", padded])
     made = tmp / f"{node.id}_refined.mp4" if grid != n else target
     generator.refine(padded if grid != n else draft, prompt, made, int(info.get("seed") or 0), (w, h),
-                     grid, [], None, None, sparse=SOL_TAU if fast_attention else None, strength=strength)
+                     grid, [], None, None, sparse=SOL_TAU if fast_attention else None, strength=strength,
+                     **({"checkpoint": checkpoint} if checkpoint else {}))
     if grid != n:
         media.ffmpeg(["-y", "-i", made, "-frames:v", str(n), "-c:v", "libx264", "-crf", "12", "-pix_fmt",
                       "yuv420p", "-an", target])
@@ -171,7 +186,7 @@ def _convert_video(project: Path, node: Node, target: Path, size: str, log: Call
 
 def _refine_clip(generator: RefineGenerator, project: Path, node: Node, target: Path, size: str, tmp: Path,
                  first: Path | None, last: Path | None, fast_attention: bool, strength: str,
-                 log: Callable[[str], None], who: str) -> None:
+                 log: Callable[[str], None], who: str, checkpoint: str | None = None) -> None:
     """A generated clip re-rendered as it was made (its prompt, style text, LoRAs, seed), with its sound."""
     from ..comfy import SOL_TAU, refine_size
     s = node.made_dict().get("settings") or {}
@@ -187,7 +202,8 @@ def _refine_clip(generator: RefineGenerator, project: Path, node: Node, target: 
     log(f"{who}: refining at {w}x{h}")
     generator.refine(project / node.made_dict()["video"], prompt, target, node.seed, (w, h),
                      made_frames(node) or _clip_frames(project, node), loras, first, last,
-                     sparse=SOL_TAU if fast_attention else None, strength=strength)
+                     sparse=SOL_TAU if fast_attention else None, strength=strength,
+                     **({"checkpoint": checkpoint} if checkpoint else {}))
     _refined_sound(project, node, target, tmp, log, who)
 
 
@@ -248,8 +264,9 @@ def refine_path(generator: RefineGenerator, project: Path, nid: str, size: str, 
             regen = not node.is_video or bool(refine_swapped and swapped_video(node))
             if node.is_video:
                 pins["video"] = "refined" if regen else "converted"
+            ck_name = _refine_checkpoint(tree, node) if regen and method == "refine" else None
             if regen:
-                pins.update(_refine_choices(generator, method, strength, fast_attention, denoise))
+                pins.update(_refine_choices(generator, method, strength, fast_attention, denoise, ck_name))
             record = refine_record(target)
             sound_rev = None if node.is_video else node.made_dict().get("sound_rev")   # (its sound mixed again since)
             copy_rev = record.pop("sound", None)
@@ -278,12 +295,13 @@ def refine_path(generator: RefineGenerator, project: Path, nid: str, size: str, 
             if regen and method != "refine":             # SeedVR2: the clip as made, restored at the size
                 _seedvr_clip(generator, project, node, target, size, method, denoise, log, who)
             elif node.is_video and regen:                # a replaced person: re-rendered like a generated clip
-                _refine_swapped(generator, project, node, target, size, tmp, fast_attention, strength, log, who)
+                _refine_swapped(generator, project, node, target, size, tmp, fast_attention, strength, log, who,
+                                ck_name)
             elif node.is_video:
                 _convert_video(project, node, target, size, log, who)
             else:
                 _refine_clip(generator, project, node, target, size, tmp, first, last, fast_attention, strength, log,
-                             who)
+                             who, ck_name)
             if sound_rev:
                 pins["sound"] = sound_rev
             chain.atomic_write_text(target.with_suffix(".json"), json.dumps(pins))

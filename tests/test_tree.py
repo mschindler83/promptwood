@@ -2143,3 +2143,32 @@ def test_a_project_can_have_an_exact_video_size(project):
         assert (base["width"], base["height"]) == (usual["width"], usual["height"]), bad
     assert chain.exact_size([768, 1152]) == (768, 1152) and chain.exact_size((1344, 768)) == (1344, 768)
     assert chain.snap_size(700, 1150) == (704, 1152) and chain.snap_size(10, 99999) == (256, 640)
+
+
+def test_refined_copies_with_the_clips_h3_checkpoint(project, tmp_path):
+    """The 2K refine of a clip uses the checkpoint it was made with; its copy records it, so a copy refined with
+    another model is made again; copies of standard clips record nothing new (they stay reused)."""
+    t, a, b1, b2, c = build(project)
+    gen = run(project, [b1.id])
+    T.refine_path(gen, project, b1.id, "2k", tmp_path / "std.mp4", log=lambda _m: None)
+    assert [r["checkpoint"] for r in gen.refines] == [None, None]
+    assert "checkpoint" not in T.refine_record(T.refined_file(project, T.load(project).nodes[a.id], "2k"))
+    T.refine_path(gen, project, b1.id, "2k", tmp_path / "again.mp4", log=lambda _m: None)
+    assert len(gen.refines) == 2                                                # reused as before
+    t = T.load(project)
+    t.options["checkpoint"] = {"name": "h3/fine.safetensors", "distilled": True}
+    T.save(project, t)
+    run(project, [b1.id], gen)                                                  # made again with the checkpoint
+    T.refine_path(gen, project, b1.id, "2k", tmp_path / "tuned.mp4", log=lambda _m: None)
+    assert [r["checkpoint"] for r in gen.refines[2:]] == ["h3/fine.safetensors"] * 2
+    t = T.load(project)
+    assert T.refine_record(T.refined_file(project, t.nodes[a.id], "2k"))["checkpoint"] == "h3/fine.safetensors"
+    T.refine_path(gen, project, b1.id, "2k", tmp_path / "tuned2.mp4", log=lambda _m: None)
+    assert len(gen.refines) == 4                                                # and then reused
+    # a copy refined with the standard model before, of a clip made with the checkpoint: made again
+    f = T.refined_file(project, t.nodes[a.id], "2k").with_suffix(".json")
+    rec = T.refine_record(T.refined_file(project, t.nodes[a.id], "2k"))
+    rec.pop("checkpoint")
+    f.write_text(json.dumps(rec))
+    T.refine_path(gen, project, b1.id, "2k", tmp_path / "tuned3.mp4", log=lambda _m: None)
+    assert len(gen.refines) == 5 and gen.refines[-1]["checkpoint"] == "h3/fine.safetensors"
