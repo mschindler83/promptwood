@@ -619,3 +619,32 @@ def test_a_clip_seed_can_be_as_large_as_comfyui_takes(app, win, tmp_path, image)
     assert card.seed.value() == 0
     card.random_seed()                                            # a new random seed stays in the usual range
     assert 1 <= card.seed.value() <= T.SEED_MAX
+
+
+def test_a_clips_own_sampling_on_the_card(app, win, tmp_path, image):
+    """The card's Sampling button: a clip's own sampler, scheduler, shift and CFG, kept through other changes."""
+    from video_chain.ui.clip_dialogs import SamplingDialog
+    ids = new_project(win, tmp_path, image, ("a",))
+    card = win.cards[0]
+    assert card.sampling == {} and "•" not in card.b_sampling.text()
+    card.set_sampling({"sampler": "euler", "shift": [8, 3], "cfg": 1})
+    flush(app, win)
+    assert win.tree.nodes[ids[0]].overrides["sampling"] == {"sampler": "euler", "shift": [8.0, 3.0]}
+    card = win.cards[0]
+    assert "•" in card.b_sampling.text() and "euler" in card.b_sampling.toolTip()
+    card.steps.setValue(12)                                        # another own setting: the sampling stays
+    flush(app, win)
+    ov = win.tree.nodes[ids[0]].overrides
+    assert ov["steps"] == 12 and ov["sampling"] == {"sampler": "euler", "shift": [8.0, 3.0]}
+    d = SamplingDialog(ov["sampling"], parent=win)
+    assert d.values() == {"sampler": "euler", "shift": [8.0, 3.0]}
+    d.scheduler.setCurrentText("beta57")                           # (a name ComfyUI may list: typed)
+    d.cfg.setValue(2.5)
+    d.shift_video.setValue(0)                                      # one side at "model's own": no shift of its own
+    assert d.values() == {"sampler": "euler", "scheduler": "beta57", "cfg": 2.5}
+    d.reset()
+    assert d.values() == {}
+    d.deleteLater()
+    win.cards[0].set_sampling({})
+    flush(app, win)
+    assert "sampling" not in win.tree.nodes[ids[0]].overrides

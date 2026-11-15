@@ -13,6 +13,7 @@ from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QDialog
 
 from .. import camera as CAM, chain, tree as T
+from .clip_dialogs import sampling_text
 from .clip_inputs import ModelPromptDialog
 from .graph import START, NodeInfo
 from .lora_stack import lora_label
@@ -536,6 +537,8 @@ class InspectorMixin(MainWindowHost):
             parts.append(f"{ov['frames'] / chain.FPS:.1f} s")
         if "steps" in ov:
             parts.append(f"{ov['steps']} steps")
+        if sampling_text(ov.get("sampling") or {}):
+            parts.append(sampling_text(ov.get("sampling") or {}))
         if CAM.describe(ov.get("camera")):
             parts.append("🎥 " + CAM.describe(ov.get("camera")))
         if ov.get("lead") is False:

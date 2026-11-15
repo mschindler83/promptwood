@@ -33,6 +33,7 @@ Overrides = TypedDict("Overrides", {
     "sound_mix_level": float,
     "camera": Any,
     "lead": Any,
+    "sampling": dict[str, Any],         # the clip's own sampler / scheduler / shift / cfg (consts.clean_sampling)
 }, total=False)
 """A clip's own settings over the project's (OVERRIDE_KEYS)."""
 

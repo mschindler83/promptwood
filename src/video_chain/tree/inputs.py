@@ -8,7 +8,7 @@ from ..triggers import with_triggers
 from .. import camera as _camera
 from .. import chain
 from .. import h3_prompt as _h3
-from .consts import CONTINUE_CHOICES, DEFAULT_FRAMES, MAX_CAST_PICTURES
+from .consts import CONTINUE_CHOICES, DEFAULT_FRAMES, MAX_CAST_PICTURES, clean_sampling
 from .model import Node, Tree
 from .timeline import clip_length, full_prompt, handover_index, made_frames
 from .files import node_loras
@@ -126,6 +126,9 @@ def node_settings(base: dict, options: Options, node: Node, audio_pool: list[dic
     distilled = bool((base.get("checkpoint") or {}).get("distilled"))   # (its own steps, no Veda)
     stack = node_loras(node)
     lora, strength = stack[0] if stack else (None, 1.0)
+    # the clip's own sampling; a speed mode samples its own way (as it has its own steps)
+    speed = base.get("turbo") or base.get("hyperflow") or base.get("pika")
+    own = {} if speed or node.is_video else clean_sampling(ov.get("sampling"))
     s = chain.settings_dict(model=base["model"], lora=lora, extra_loras=stack[1:],
                                strength=strength,
                                frames=ov.get("frames", options.get("frames", DEFAULT_FRAMES)),
@@ -136,7 +139,7 @@ def node_settings(base: dict, options: Options, node: Node, audio_pool: list[dic
                                pika=(base["pika"]["strength"] if base.get("pika") else None),
                                width=base["width"], height=base["height"], audio=base["audio"],
                                turbo=(base["turbo"]["lora"], base["turbo"]["strength"]) if base.get("turbo") else None,
-                               cfg=float(base.get("cfg", 1.0)),
+                               cfg=float(own.get("cfg", base.get("cfg", 1.0))),
                                backend="comfyui", refs=refs or None, cast=use["record"],
                                ref_size=ident.get("size", "match"), ref_hint=True if h3 else ident.get("hint", True),
                                guide=int(ov.get("guide") or 0),
@@ -149,6 +152,9 @@ def node_settings(base: dict, options: Options, node: Node, audio_pool: list[dic
                                                                                                 DEFAULT_FRAMES)))),
                                checkpoint=base.get("checkpoint"),
                                camera=_camera.clean(ov.get("camera")))
+    recipe = {k: own[k] for k in ("sampler", "scheduler", "shift") if k in own}
+    if recipe:                                   # (only when the clip sets any: other clips are recorded as before)
+        s["recipe"] = recipe
     if not h3:
         return s
     s["prompt_format"] = "h3"

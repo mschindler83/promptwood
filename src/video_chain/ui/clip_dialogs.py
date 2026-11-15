@@ -3,18 +3,19 @@ side to pick one (CompareDialog)."""
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt, QTimer, QUrl
 from PySide6.QtGui import QImage
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QGridLayout, QHBoxLayout,
-                               QLabel, QPushButton, QSlider, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
+                               QGridLayout, QHBoxLayout, QLabel, QPushButton, QSlider, QVBoxLayout, QWidget)
 
 from . import shortcuts as S
 from .audio_devices import follow_default_output
 from .workers import run_in_background
-from .. import chain, media
+from .. import chain, imagegen, media
+from .. import tree as T
 from .theme import icon
 from .dialogs import add_action, button_row
 from .widgets import fit_size, FrameStepper, FrameTile, icon_button, label, remember_geometry, VideoView, shortcut
@@ -488,3 +489,85 @@ class VideoFrameDialog(QDialog):
         self._closed = True                         # (no further grabs after it closed)
         self._req += 1
         super().done(r)
+
+
+def sampling_text(sampling: dict) -> str:
+    """A clip's own sampling in a few words ("" when it has none)."""
+    s = T.clean_sampling(sampling)
+    parts = [s[k] for k in ("sampler", "scheduler") if k in s]
+    if "shift" in s:
+        parts.append(f"shift {s['shift'][0]:g} / {s['shift'][1]:g}")
+    if "cfg" in s:
+        parts.append(f"CFG {s['cfg']:g}")
+    return ", ".join(parts)
+
+
+class SamplingDialog(QDialog):
+    """A clip's own sampling: sampler, scheduler, sigma shift (video / audio) and CFG. Every field can stay at the
+    model's own, so a clip changes only what it needs. values(): what is set (tree.clean_sampling's form)."""
+
+    def __init__(self, sampling: dict | None = None, samplers: Sequence[str] | None = None,
+                 schedulers: Sequence[str] | None = None, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("Sampling of this clip")
+        now = T.clean_sampling(sampling)
+        v = QVBoxLayout(self)
+        note = label("How this clip is sampled. An empty field uses the model's own setting. A speed mode (Turbo, "
+                     "HyperFlow, Pika H3 Flex) samples its own way: the clip's sampling is not used with one.",
+                     level="secondary")
+        note.setWordWrap(True)
+        v.addWidget(note)
+        form = QFormLayout()
+        self.sampler, self.scheduler = QComboBox(), QComboBox()
+        for combo, names, key, tip in (
+                (self.sampler, samplers or imagegen.SAMPLERS, "sampler", "The sampler, by ComfyUI's name"),
+                (self.scheduler, schedulers or imagegen.SCHEDULERS, "scheduler",
+                 "The scheduler: how the noise levels are spread over the steps, by ComfyUI's name")):
+            combo.setEditable(True)                      # (a name of this ComfyUI that is not listed can be typed)
+            combo.addItem("")
+            combo.addItems(list(names))
+            combo.setCurrentText(now.get(key, ""))
+            edit = combo.lineEdit()
+            if edit is not None:
+                edit.setPlaceholderText("the model's own")
+            combo.setToolTip(tip)
+        form.addRow("Sampler", self.sampler)
+        form.addRow("Scheduler", self.scheduler)
+        self.shift_video, self.shift_audio, self.cfg = QDoubleSpinBox(), QDoubleSpinBox(), QDoubleSpinBox()
+        for spin, top, step, own in ((self.shift_video, 50.0, 0.5, "model's own"),
+                                     (self.shift_audio, 50.0, 0.5, "model's own"), (self.cfg, T.CFG_MAX, 0.1, "project's")):
+            spin.setRange(0.0, top)
+            spin.setSingleStep(step)
+            spin.setDecimals(2)
+            spin.setSpecialValueText(own)
+        shift = now.get("shift") or [0.0, 0.0]
+        self.shift_video.setValue(shift[0])
+        self.shift_audio.setValue(shift[1])
+        self.cfg.setValue(now.get("cfg", 0.0))
+        row = QHBoxLayout()
+        row.addWidget(self.shift_video)
+        row.addWidget(label("audio", level="tertiary"))
+        row.addWidget(self.shift_audio)
+        self.shift_video.setToolTip("Sigma shift of the picture (higher: more of the steps go into the structure). "
+                                    "Both the video and the audio shift must be set for the clip to have its own")
+        self.shift_audio.setToolTip("Sigma shift of the sound")
+        form.addRow("Shift, video", row)
+        self.cfg.setToolTip("CFG. Above 1 every step runs twice (about twice as slow); the model is made for 1")
+        form.addRow("CFG", self.cfg)
+        v.addLayout(form)
+        box, _ok = button_row(self, "Use for this clip")
+        b_reset = box.addButton("Model's own", QDialogButtonBox.ButtonRole.ResetRole)
+        b_reset.setToolTip("Empty every field: the clip is sampled like the others")
+        b_reset.clicked.connect(self.reset)
+        v.addWidget(box)
+
+    def reset(self) -> None:
+        self.sampler.setCurrentText("")
+        self.scheduler.setCurrentText("")
+        for spin in (self.shift_video, self.shift_audio, self.cfg):
+            spin.setValue(0.0)
+
+    def values(self) -> dict:
+        return T.clean_sampling({"sampler": self.sampler.currentText(), "scheduler": self.scheduler.currentText(),
+                                 "shift": [self.shift_video.value(), self.shift_audio.value()],
+                                 "cfg": self.cfg.value()})

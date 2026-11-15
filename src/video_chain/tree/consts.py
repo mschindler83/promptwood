@@ -25,7 +25,30 @@ NO_LORA = "none"                   # old override value: this node without any L
 
 
 OVERRIDE_KEYS = ("loras", "frames", "steps", "guide", "source_sound", "sound_over", "sound_mix_level", "camera",
-                 "lead", "continue")
+                 "lead", "continue", "sampling")
+
+
+CFG_MAX = 30.0
+
+
+def clean_sampling(s: Any) -> dict:
+    """A clip's own sampling as it counts: {"sampler", "scheduler" (ComfyUI's names), "shift" ([video, audio]
+    sigma shift, both above 0), "cfg" (above 0, up to CFG_MAX; 1 is the usual one and not kept)}, each only when
+    set. Anything else is left out, so {} means: nothing of its own."""
+    out: dict = {}
+    if not isinstance(s, dict):
+        return out
+    for key in ("sampler", "scheduler"):
+        if isinstance(s.get(key), str) and s[key].strip():
+            out[key] = s[key].strip()
+    shift = s.get("shift")
+    if isinstance(shift, (list, tuple)) and len(shift) == 2 and \
+            all(isinstance(x, (int, float)) and not isinstance(x, bool) and x > 0 for x in shift):
+        out["shift"] = [float(shift[0]), float(shift[1])]
+    cfg = s.get("cfg")
+    if isinstance(cfg, (int, float)) and not isinstance(cfg, bool) and 0 < cfg <= CFG_MAX and abs(cfg - 1.0) > 1e-6:
+        out["cfg"] = round(float(cfg), 2)
+    return out
 
 
 _OLD_LORA_KEYS = ("lora", "strength", "extra_loras")

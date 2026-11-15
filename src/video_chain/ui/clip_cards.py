@@ -23,6 +23,7 @@ from .prompt_refiner import replace_text
 from .theme import icon, repolish, theme
 from .view_mode import AdvancedNote, ViewMode, row_widget
 from .widgets import FrameTile, SeedBox, combo_item, format_time, guard_wheel, icon_button, label
+from .clip_dialogs import SamplingDialog, sampling_text
 from .mw_support import FileDrop, select_frames
 from .ui_logic import (
     CARD_WIDTH, CONTINUE_FIRST_TIP, CONTINUE_SHORT_TIP, CONTINUE_TIP, END_TIP, FRAME_CHOICES, FREEZE_TIP,
@@ -354,6 +355,10 @@ class PromptCard(_ClipCardBase):
         self.steps_label = label("Steps", level="tertiary")
         srow.addWidget(self.steps_label)
         srow.addWidget(self.steps)
+        self.sampling: dict = {}                  # the clip's own sampler / scheduler / shift / CFG (none: {})
+        self.b_sampling = QPushButton("Sampling")
+        self.b_sampling.clicked.connect(self.choose_sampling)
+        srow.addWidget(self.b_sampling)
         grid.addRow("Length", srow)
         shared.v.addWidget(self.own)
 
@@ -529,6 +534,7 @@ class PromptCard(_ClipCardBase):
         self.adv_note = AdvancedNote(self.view)
         shared.v.addWidget(self.adv_note)
         self.view.advanced(self.seed_label, self.seed, self.b_seed, self.veda_mark, self.steps_label, self.steps,
+                           self.b_sampling,
                            (shared.link, self.loras), (shared.link, self.guide), (shared.link,
                                                                                   self.cont), (shared.link,
                                                                                                self.keys_row),
@@ -583,6 +589,8 @@ class PromptCard(_ClipCardBase):
                 self.length.addItem(frames_text(n), n)
             select_frames(self.length, self.ov.get("frames"))
             self.steps.setValue(int(self.ov.get("steps", STEPS_UNSET)))
+            self.sampling = T.clean_sampling(self.ov.get("sampling"))
+            self._show_sampling()
             while self.guide.count() > len(GUIDE_TEXT):         # (an odd value shown earlier is not kept)
                 self.guide.removeItem(self.guide.count() - 1)
             g = self.guide.findData(self.ov.get("guide"))
@@ -623,6 +631,8 @@ class PromptCard(_ClipCardBase):
             ov["frames"] = self.length.currentData()
         if self.steps.value() > STEPS_UNSET:
             ov["steps"] = self.steps.value()
+        if self.sampling:
+            ov["sampling"] = dict(self.sampling)
         if self.guide.currentData():
             ov["guide"] = self.guide.currentData()
         if self.cont.currentData():
@@ -643,6 +653,25 @@ class PromptCard(_ClipCardBase):
         self.ov = ov
         self._update_note()
         self.overridesChanged.emit(self.nid, ov)
+
+    def _show_sampling(self) -> None:
+        text = sampling_text(self.sampling)
+        self.b_sampling.setText("Sampling •" if text else "Sampling")
+        self.b_sampling.setToolTip((f"This clip's own sampling: {text}. " if text else "") +
+                                   "Sampler, scheduler, sigma shift and CFG of this clip (the model's own unless set). "
+                                   "Not used with a speed mode (Turbo, HyperFlow, Pika H3 Flex): those sample their "
+                                   "own way")
+
+    def set_sampling(self, sampling: dict | None) -> None:
+        """The clip's own sampling ({}: none), as an own setting of the clip."""
+        self.sampling = T.clean_sampling(sampling)
+        self._show_sampling()
+        self._ov_changed()
+
+    def choose_sampling(self) -> None:
+        dlg = SamplingDialog(self.sampling, parent=self)
+        if dlg.exec():
+            self.set_sampling(dlg.values())
 
     def _enable_camera(self):
         """Amplitude and speed only for a move that takes them (not for none, static, shake, POV)."""
@@ -736,8 +765,9 @@ class PromptCard(_ClipCardBase):
         self._on = bool(on)
         edit = self._on and not self.frozen
         self.edit.setReadOnly(not edit)
-        for w in (self.seed, self.b_seed, self.length, self.steps, self.loras, self.guide, self.src_sound,
-                  self.sound_over, self.b_refine, self.b_speak, self.b_mention, self.b_camera, self.b_examples):
+        for w in (self.seed, self.b_seed, self.length, self.steps, self.b_sampling, self.loras, self.guide,
+                  self.src_sound, self.sound_over, self.b_refine, self.b_speak, self.b_mention, self.b_camera,
+                  self.b_examples):
             w.setEnabled(edit)
         self._enable_speak()
         self._show_mix()
@@ -791,7 +821,8 @@ class PromptCard(_ClipCardBase):
         for key, name, target in (("loras", "LoRAs", (self.link_form, self.loras)),
                                   ("guide", "Carry-over", (self.link_form, self.guide)),
                                   ("continue", "Continue", (self.link_form, self.cont)), ("steps", "Steps",
-                                                                                          self.steps)):
+                                                                                          self.steps),
+                                  ("sampling", "Sampling", self.b_sampling)):
             if ov.get(key) and self.view.is_advanced(target):
                 names.append(name)
         if self.keys.items and self.view.is_advanced((self.link_form, self.keys_row)):

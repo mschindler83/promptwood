@@ -32,7 +32,7 @@ from .seedvr import SEEDVR_PRECISION_LOCAL, SeedvrMixin
 from .settings import (DEFAULT_FRAMES, DEFAULT_HEIGHT, DEFAULT_REF_SIZE, DEFAULT_STEPS, DEFAULT_WIDTH,
                        ClipSettings)
 from .video import (AUDIO_VAE, DISTILLED_CHECKPOINT, TEXT_ENCODER, UNET, UNET_REF, VEDA_NODE, VIDEO_VAE,
-                    build_workflow,
+                    build_workflow, clip_recipe,
                     pick_veda_predictor, with_ref_hint)
 from .wfb import SAVE_LAST_ID, SAVE_VIDEO_ID, SUBFOLDER, combo_options
 
@@ -601,7 +601,7 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
                                 cfg=float(s.get("cfg", 1.0)),
                                 audio_refs=sounds, **({"audio_key": self.audio_key()} if sounds else {}),
                                 start_pin=int(s.get("start_pin") or 1),
-                                recipe=s.get("recipe") or (distilled["recipe"] if distilled else None),
+                                recipe=clip_recipe(s.get("recipe"), distilled["recipe"] if distilled else None),
                                 keyframes=keyframes, unet=ck.get("name") or None,
                                 ref_videos=videos, **({"video_key": self.video_key()} if videos else {}),
                                 veda=self.veda_predictor(bool(refs or sounds or videos))

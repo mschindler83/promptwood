@@ -28,6 +28,13 @@ def with_ref_hint(prompt: str) -> str:
 DISTILLED_CHECKPOINT: dict[str, Any] = {"steps": 8, "recipe": {"sampler": "euler", "scheduler": "simple",
                                                                "shift": (12.0, 3.0)}}
 
+def clip_recipe(own: dict | None, distilled: dict | None) -> dict | None:
+    """The sampling recipe of a clip: its own ({"sampler", "scheduler", "shift"}, each optional) over a distilled
+    checkpoint's (what the clip does not set stays the checkpoint's). None: the standard sampling."""
+    merged = {**(distilled or {}), **(own or {})}
+    return merged or None
+
+
 VEDA_NODE = "VedaSparseAttention"            # veda-sparse-attention (Veda-on-ComfyUI): learned sparse attention
 VEDA_SETTINGS = {"generated_sparsity": "32", "reference_sparsity": "32", "full_attention_layers": "",
                  "full_attention_steps": "", "verbose": False}   # the node's defaults (as benchmarked)

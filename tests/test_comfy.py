@@ -1553,3 +1553,18 @@ def test_generating_with_another_h3_checkpoint(server, start, tmp_path):
     assert wf["unet"]["inputs"]["unet_name"] == "h3/fine_8step.safetensors" and "shift" not in wf
     with pytest.raises(C.ComfyError, match="gone.safetensors"):
         gen.generate("x", start, out, frame, 1, settings(checkpoint={"name": "gone.safetensors", "distilled": True}))
+
+
+def test_a_clips_own_sampling_over_a_distilled_checkpoints():
+    """A clip's own sampling replaces what it sets and keeps the rest of the distilled checkpoint's recipe."""
+    from video_chain.comfy.video import DISTILLED_CHECKPOINT, clip_recipe
+    d = DISTILLED_CHECKPOINT["recipe"]
+    assert clip_recipe(None, None) is None and clip_recipe(None, d) == d
+    assert clip_recipe({"scheduler": "beta"}, None) == {"scheduler": "beta"}
+    got = clip_recipe({"scheduler": "beta", "shift": [8.0, 3.0]}, d)
+    assert got == {"sampler": d["sampler"], "scheduler": "beta", "shift": [8.0, 3.0]} and d["scheduler"] == "simple"
+    wf = C.build_workflow(prompt="p", image="s.png", seed=1, width=384, height=384, frames=73, steps=8, loras=[],
+                          audio=False, prefix="p", recipe={"shift": [8.0, 3.0]})
+    kinds = {n["class_type"]: n["inputs"] for n in wf.values()}
+    assert kinds["MiniMaxH3SigmaShift"]["shift_video"] == 8.0
+    assert kinds["KSamplerSelect"]["sampler_name"] == C.SAMPLER and kinds["BasicScheduler"]["scheduler"] == C.SCHEDULER

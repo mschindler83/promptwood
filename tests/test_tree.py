@@ -2078,3 +2078,36 @@ def test_another_h3_checkpoint(project):
     T.save(project, t)
     assert "checkpoint" not in T.Checker(project, t).settings(b1.id)
     assert statuses(project) == {"a": "done", "b1": "done", "c": "done", "b2": "new"}
+
+
+def test_a_clip_can_have_its_own_sampling(project, tmp_path):
+    """A clip's own sampler, scheduler, sigma shift and CFG (overrides["sampling"]): recorded with the clip, so it
+    is made with them and counts as changed when they change; a speed mode has its own sampling, which wins."""
+    turbo = tmp_path / "turbo.safetensors"
+    turbo.write_bytes(b"x")
+    t, a, b1, b2, c = build(project)
+    t = T.load(project)
+    t.nodes[a.id].overrides = {"sampling": {"sampler": "euler", "scheduler": "beta", "shift": [8, 3], "cfg": 2.5,
+                                            "junk": 1}}
+    t.nodes[b1.id].overrides = {"sampling": {"sampler": " ", "cfg": 1}}            # nothing of its own
+    T.save(project, t)
+    t = T.load(project)
+    ch = T.Checker(project, t)
+    sa, sb = ch.settings(a.id), ch.settings(b1.id)
+    assert sa["recipe"] == {"sampler": "euler", "scheduler": "beta", "shift": [8.0, 3.0]} and sa["cfg"] == 2.5
+    assert "recipe" not in sb and "cfg" not in sb and "recipe" not in ch.settings(c.id)
+    gen = run(project, [a.id])
+    assert gen.calls[0]["settings"]["recipe"]["scheduler"] == "beta"
+    t = T.load(project)
+    assert T.Checker(project, t).status(a.id) == "done"
+    t.nodes[a.id].overrides["sampling"]["shift"] = [10, 3]
+    assert T.Checker(project, t).status(a.id) == "changed"
+    t.options["turbo"] = {"on": True, "lora": str(turbo), "steps": 6, "strength": 1.0}
+    st = T.Checker(project, t).settings(a.id)
+    assert "recipe" not in st and "cfg" not in st                                  # Turbo's own sampling
+    # what is kept of a sampling setting: names, a shift of two positive numbers, a CFG in range
+    assert T.clean_sampling({"sampler": "euler", "shift": [8, 3], "cfg": 1}) == {"sampler": "euler", "shift": [8.0, 3.0]}
+    assert T.clean_sampling({"cfg": 1.0}) == {} and T.clean_sampling({"cfg": 4}) == {"cfg": 4.0}
+    for bad in (None, "x", {"shift": [0, 3]}, {"shift": [8]}, {"shift": "8/3"}, {"cfg": 99}, {"cfg": "x"},
+                {"sampler": 5}, {"cfg": True}):
+        assert T.clean_sampling(bad) == {}
