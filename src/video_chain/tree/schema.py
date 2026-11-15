@@ -121,6 +121,7 @@ class Options(TypedDict, total=False):
     hyperflow: dict[str, Any]
     pika: dict[str, Any]
     veda: dict[str, Any]
+    checkpoint: dict[str, Any]          # another H3 checkpoint: {"name", "distilled"} (consts.checkpoint_of)
     cast: list[CastEntry]
     identity: dict[str, Any]
     audio_refs: list[AudioRef]

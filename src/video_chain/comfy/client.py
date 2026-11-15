@@ -31,7 +31,8 @@ from .refine import RefineMixin
 from .seedvr import SEEDVR_PRECISION_LOCAL, SeedvrMixin
 from .settings import (DEFAULT_FRAMES, DEFAULT_HEIGHT, DEFAULT_REF_SIZE, DEFAULT_STEPS, DEFAULT_WIDTH,
                        ClipSettings)
-from .video import (AUDIO_VAE, TEXT_ENCODER, UNET, UNET_REF, VEDA_NODE, VIDEO_VAE, build_workflow,
+from .video import (AUDIO_VAE, DISTILLED_CHECKPOINT, TEXT_ENCODER, UNET, UNET_REF, VEDA_NODE, VIDEO_VAE,
+                    build_workflow,
                     pick_veda_predictor, with_ref_hint)
 from .wfb import SAVE_LAST_ID, SAVE_VIDEO_ID, SUBFOLDER, combo_options
 
@@ -223,12 +224,23 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
             prefix = (spec[1].get("template") or {}).get("prefix", prefix)
         return lambda i: f"ref_videos.{prefix}{i}"
 
-    def check_ref_model(self):
+    def check_ref_model(self, checkpoint: bool = False):
+        """The reference model is there (checkpoint: a chosen H3 checkpoint makes these clips, no ref2va file)."""
         req = self._object_info("UNETLoader").get("input", {}).get("required", {})
-        if UNET_REF not in combo_options(req.get("unet_name")):
+        if not checkpoint and UNET_REF not in combo_options(req.get("unet_name")):
             raise ComfyError(f"ComfyUI does not list {UNET_REF} (needed for reference images)")
         if not self._object_info("MiniMaxH3ReferenceToVideo"):
             raise ComfyError("this ComfyUI has no MiniMax H3 Reference to Video node")
+
+    def check_checkpoint(self, ck: dict) -> None:
+        """A chosen H3 checkpoint must be listed by ComfyUI (UNETLoader) and its sigma shift node be there."""
+        req = self._object_info("UNETLoader").get("input", {}).get("required", {})
+        if ck.get("name") not in combo_options(req.get("unet_name")):
+            raise ComfyError(f"ComfyUI does not list the H3 checkpoint {ck.get('name')} (UNETLoader); is it in its "
+                             "diffusion model folders?")
+        if ck.get("distilled") and not self._object_info("MiniMaxH3SigmaShift"):
+            raise ComfyError("this ComfyUI has no MiniMaxH3SigmaShift node, which distilled H3 checkpoints sample "
+                             "with (update ComfyUI)")
 
     def veda_predictor(self, refs: bool) -> str:
         """The Veda predictor to use (the node must be there: a clip recorded as made with Veda is never made
@@ -501,6 +513,8 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
             if name is None:
                 raise ComfyError(f"{Path(t['lora']).name} is not in ComfyUI's LoRA folders")
             turbo = (name, _strength(t))
+        if s.get("checkpoint"):
+            self.check_checkpoint(_setting_dict(s, "checkpoint"))
         hyper = (self.hyperflow_file(), _strength(_setting_dict(s, "hyperflow"))) if s.get("hyperflow") else None
         pika = (self.pika_lora(bool(s.get("ref_paths") or s.get("audio_paths") or s.get("ref_videos"))),
                 _strength(_setting_dict(s, "pika"))) \
@@ -527,6 +541,9 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
 
     def _run(self, prompt, start_image, out_video, out_last_frame, seed, s: ClipSettings, loras, turbo, uploads,
              hyper=None, pika=None) -> None:
+        ck = _setting_dict(s, "checkpoint") if s.get("checkpoint") else {}
+        own = bool(ck)                             # a chosen H3 checkpoint makes every clip (no ref2va file)
+        distilled = DISTILLED_CHECKPOINT if ck.get("distilled") else None
         image = self.upload(Path(start_image)) if start_image is not None else None
         if image:
             uploads.append((image, start_image))
@@ -551,7 +568,7 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
         refs = []
         frame_refs = [f for f in ("start", "end") if f in (s.get("frame_pictures") or [])]
         if s.get("ref_paths") or frame_refs:
-            self.check_ref_model()
+            self.check_ref_model(own)
             for r in s.get("ref_paths") or []:
                 refs.append(self.upload(Path(r)))
                 uploads.append((refs[-1], r))
@@ -560,14 +577,14 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
         sounds = []
         if s.get("audio_paths"):
             if not refs and not frame_refs:
-                self.check_ref_model()
+                self.check_ref_model(own)
             for a in s["audio_paths"]:
                 sounds.append(self.upload(Path(a)))
                 uploads.append((sounds[-1], a))
         videos = []
         if s.get("ref_videos"):                    # the end of the clip before (a continuation): ref2va as well
             if not refs and not frame_refs and not sounds:
-                self.check_ref_model()
+                self.check_ref_model(own)
             self.check_guides()                    # (LoadVideo + GetVideoComponents)
             for v in s["ref_videos"]:
                 videos.append(self.upload(Path(v)))
@@ -583,9 +600,12 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
                                 turbo=turbo, end_image=end_image, guides=guides, hyperflow=hyper, pika=pika,
                                 cfg=float(s.get("cfg", 1.0)),
                                 audio_refs=sounds, **({"audio_key": self.audio_key()} if sounds else {}),
-                                start_pin=int(s.get("start_pin") or 1), recipe=s.get("recipe"), keyframes=keyframes,
+                                start_pin=int(s.get("start_pin") or 1),
+                                recipe=s.get("recipe") or (distilled["recipe"] if distilled else None),
+                                keyframes=keyframes, unet=ck.get("name") or None,
                                 ref_videos=videos, **({"video_key": self.video_key()} if videos else {}),
-                                veda=self.veda_predictor(bool(refs or sounds or videos)) if s.get("veda") else None)
+                                veda=self.veda_predictor(bool(refs or sounds or videos))
+                                if s.get("veda") and not distilled else None)
         except ValueError as e:                # (a setting combination that cannot be built: say why)
             raise ComfyError(str(e)) from e
         entry = self._run_workflow(wf)

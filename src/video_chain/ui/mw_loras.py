@@ -79,13 +79,21 @@ class LorasMixin(MainWindowHost):
         on = self.speed.currentData() == "turbo"
         hyper = self.speed.currentData() in ("hyperflow", "pika")
         idle = not self.running
+        own = bool(self.h3_model.currentData())
+        distilled = own and self.h3_distilled.isChecked()     # its turbo built in: its own steps, no speed mode
+        self.h3_distilled.setEnabled(idle and own)
+        self.h3_model.setEnabled(idle)
+        self.speed.setEnabled(idle and not distilled)
+        self.veda.setEnabled(idle and not distilled)
+        on, hyper = on and not distilled, hyper and not distilled
         for w in (self.turbo_lora, self.turbo_steps, self.turbo_strength):
             w.setEnabled(on and idle)
         self.view.show((self._clips_form, self.turbo_lora), on)  # the turbo settings only matter in turbo mode
         self.view.show((self._clips_form, self._turbo_row), on)
-        locked = on or hyper                                      # their own steps for every clip
+        locked = on or hyper or distilled                         # their own steps for every clip
         self.steps.setEnabled(idle and not locked)
-        self.steps.setToolTip("Turbo mode: every clip uses the turbo steps" if on else
+        self.steps.setToolTip(f"Distilled checkpoint: every clip uses {T.DISTILLED_STEPS} steps" if distilled else
+                              "Turbo mode: every clip uses the turbo steps" if on else
                               "HyperFlow / Pika H3 Flex: every clip uses their own steps" if hyper else STEPS_TIP)
         for card in self.cards:
             if isinstance(card, PromptCard):
@@ -117,6 +125,8 @@ class LorasMixin(MainWindowHost):
             found += [(p, n, "qwen") for p, n in CMF.find_qwen_loras(roots)]
             for fam, items in imagegen.find_image_loras(roots).items():
                 found += [(p, n, fam) for p, n in items]
+            models = CMF.comfy_model_roots(comfy_dir, "diffusion_models") + CMF.comfy_model_roots(comfy_dir, "unet")
+            found += [("", n, "h3_checkpoint") for n in CMF.find_h3_checkpoints(list(dict.fromkeys(models)))]
             return found
 
         # (a newer scan was started, e.g. another ComfyUI folder: only its answer counts; a failed scan keeps the
@@ -127,6 +137,7 @@ class LorasMixin(MainWindowHost):
     def _loras_found(self, found: list, report: bool = False):
         self.h3_loras = [(p, n) for p, n, kind in found if kind == "h3"]
         self.turbo_loras = [(p, n) for p, n, kind in found if kind == "turbo"]
+        self.h3_checkpoints = [n for _p, n, kind in found if kind == "h3_checkpoint"]
         self.qwen_loras = [(p, n) for p, n, kind in found if kind == "qwen"]     # for the image edit window
         self.image_loras = {fam: [(p, n) for p, n, kind in found if kind == fam]
                             for fam in ("flux1", "sdxl", "krea2", "qwen21", "moss")}
@@ -137,6 +148,7 @@ class LorasMixin(MainWindowHost):
                                 "ComfyUI's LoRA folders.")
         if self.tree is not None:
             self._fill_turbo((self.tree.options.get("turbo") or {}).get("lora"))
+            self._fill_h3_models()
         if self.tree is None:
             return
         self._refresh_card_choices()

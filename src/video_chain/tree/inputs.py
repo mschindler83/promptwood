@@ -123,6 +123,7 @@ def node_settings(base: dict, options: Options, node: Node, audio_pool: list[dic
     sounds = (audio_pool or [])[:n_audio] if n_audio else []
     sounds = sounds + [{"file": r, "sha1": sha(r)} for r in use.get("voices", [])]
     ident = options.get("identity") or {}
+    distilled = bool((base.get("checkpoint") or {}).get("distilled"))   # (its own steps, no Veda)
     stack = node_loras(node)
     lora, strength = stack[0] if stack else (None, 1.0)
     s = chain.settings_dict(model=base["model"], lora=lora, extra_loras=stack[1:],
@@ -130,7 +131,7 @@ def node_settings(base: dict, options: Options, node: Node, audio_pool: list[dic
                                frames=ov.get("frames", options.get("frames", DEFAULT_FRAMES)),
                                # turbo / HyperFlow: their steps for every clip (a clip's own steps would break it)
                                steps=(base["steps"] if base.get("turbo") or base.get("hyperflow") or base.get("pika")
-                                      else ov.get("steps", options.get("steps", 28))),
+                                      or distilled else ov.get("steps", options.get("steps", 28))),
                                hyperflow=(base["hyperflow"]["strength"] if base.get("hyperflow") else None),
                                pika=(base["pika"]["strength"] if base.get("pika") else None),
                                width=base["width"], height=base["height"], audio=base["audio"],
@@ -143,8 +144,10 @@ def node_settings(base: dict, options: Options, node: Node, audio_pool: list[dic
                                audio_refs=sounds or None, voice_language=use.get("language"),
                                lora_triggers=_stack_triggers(options, node, stack),
                                source_sound=source_sound,
-                               veda=veda_for(options, base["width"], base["height"],
-                                             int(ov.get("frames", options.get("frames", DEFAULT_FRAMES)))),
+                               veda=not distilled and veda_for(options, base["width"], base["height"],
+                                                               int(ov.get("frames", options.get("frames",
+                                                                                                DEFAULT_FRAMES)))),
+                               checkpoint=base.get("checkpoint"),
                                camera=_camera.clean(ov.get("camera")))
     if not h3:
         return s

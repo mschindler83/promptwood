@@ -121,6 +121,26 @@ def is_h3_lora(path: Path) -> bool:
     return names is not None and any(_H3_ATTN.search(k) for k in names) and any(_H3_MLP.search(k) for k in names)
 
 
+_H3_VIDEO_IN = re.compile(r"(^|\.)video_patch_proj\.")
+_H3_AUDIO_IN = re.compile(r"(^|\.)audio_patch_proj\.")
+_ADAPTER = re.compile(r"lora|lokr|loha|\.alpha$", re.IGNORECASE)
+
+
+def is_h3_checkpoint(path: Path) -> bool:
+    """Whether a .safetensors file is a whole MiniMax-H3 model (the standard one or a fine-tune), from the tensor
+    names in its header only: H3 alone has both a video and an audio patch layer; a LoRA has adapter tensors."""
+    names = _safetensors_keys(path)
+    return names is not None and any(_H3_VIDEO_IN.search(k) for k in names) and \
+        any(_H3_AUDIO_IN.search(k) for k in names) and not any(_ADAPTER.search(k) for k in names)
+
+
+def find_h3_checkpoints(roots: list[Path]) -> list[str]:
+    """The H3 checkpoints other than the standard files in these folders (ComfyUI's diffusion model folders), as the
+    names ComfyUI lists them by (relative to their folder), sorted."""
+    from .video import UNET, UNET_REF
+    return [n for _p, n in _find_loras(roots, is_h3_checkpoint) if Path(n).name not in (UNET, UNET_REF)]
+
+
 _QWEN_IMG = re.compile(r"transformer_blocks[._]\d+[._]img_mlp")
 _QWEN_TXT = re.compile(r"transformer_blocks[._]\d+[._]txt_mlp")
 

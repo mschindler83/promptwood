@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import logging
 import threading
+from pathlib import Path
 
 from PySide6.QtCore import QTimer
 
@@ -13,7 +14,7 @@ from .. import tree as T, triggers, tts as TTS
 from ..comfy import REF_HINT
 from .clip_cards import PromptCard
 from .mw_support import select_frames
-from .ui_logic import FRAME_CHOICES, SPEED_NAMES, as_dict, speed_mode
+from .ui_logic import FRAME_CHOICES, SPEED_NAMES, as_dict, looks_distilled, speed_mode
 from .mw_host import MainWindowHost
 
 
@@ -31,9 +32,12 @@ class OptionsMixin(MainWindowHost):
                 kind(o[k])
             except (KeyError, TypeError, ValueError):
                 o[k] = d[k]
-        for k in ("identity", "style", "turbo", "hyperflow", "pika", "veda"):
+        for k in ("identity", "style", "turbo", "hyperflow", "pika", "veda", "checkpoint"):
             if k in o and not isinstance(o[k], dict):
-                o[k] = copy.deepcopy(d[k])
+                if k in d:
+                    o[k] = copy.deepcopy(d[k])
+                else:
+                    del o[k]
         for k in ("turbo", "hyperflow", "pika"):
             for key, kind2 in (("steps", int), ("strength", float), ("cfg", float)):
                 try:
@@ -84,6 +88,7 @@ class OptionsMixin(MainWindowHost):
             self.clip_cfg.setValue(float(self._mode_options(as_dict(o), self._cfg_mode).get("cfg", 1.0)))
             self._cfg_hint()
             self._fill_turbo(turbo.get("lora"))
+            self._fill_h3_models()
             self.keep_rep.setChecked(bool(o.get("keep_repeated", d["keep_repeated"])))
             self.veda.setChecked(bool((o.get("veda") or d["veda"]).get("on", d["veda"]["on"])))
             style = o.get("style") or {}
@@ -93,6 +98,38 @@ class OptionsMixin(MainWindowHost):
         finally:
             self._loading = False
         self._update_adv_note()
+
+    def _fill_h3_models(self):
+        """The H3 model list: the standard files, the checkpoints found, and the project's own choice (also when
+        it was not found: it may be on another machine's ComfyUI); the Distilled switch as the project has it."""
+        ck = T.checkpoint_of(self.tree.options) if self.tree is not None else None
+        chosen = ck["name"] if ck else ""
+        loading, self._loading = self._loading, True
+        self.h3_model.blockSignals(True)
+        try:
+            self.h3_model.clear()
+            self.h3_model.addItem("MiniMax H3 (standard)", "")
+            for name in self.h3_checkpoints:
+                self.h3_model.addItem(Path(name).stem, name)
+            if chosen and self.h3_model.findData(chosen) < 0:
+                self.h3_model.addItem(f"{Path(chosen).stem} (not found)", chosen)
+            self.h3_model.setCurrentIndex(max(0, self.h3_model.findData(chosen)))
+            self.h3_distilled.setChecked(bool(ck and ck["distilled"]))
+        finally:
+            self.h3_model.blockSignals(False)
+            self._loading = loading
+        self._turbo_widgets()
+
+    def _h3_model_chosen(self, *_):
+        """Another H3 model chosen: the Distilled switch takes the guess from its name, then it counts as a
+        change of the project's settings."""
+        if self._loading:
+            return
+        name = self.h3_model.currentData() or ""
+        self.h3_distilled.blockSignals(True)
+        self.h3_distilled.setChecked(bool(name) and looks_distilled(name))
+        self.h3_distilled.blockSignals(False)
+        self._options_changed()
 
     @staticmethod
     def _mode_options(options: dict, mode: str) -> dict:
@@ -130,7 +167,9 @@ class OptionsMixin(MainWindowHost):
             "turbo": {**(self.tree.options.get("turbo") or {}),
                       "lora": self.turbo_lora.currentData(),
                       "steps": self.turbo_steps.value(), "strength": round(self.turbo_strength.value(), 2)},
-            "veda": {"on": self.veda.isChecked()}})
+            "veda": {"on": self.veda.isChecked()},
+            "checkpoint": {"name": self.h3_model.currentData() or "",
+                           "distilled": bool(self.h3_model.currentData()) and self.h3_distilled.isChecked()}})
         T.set_speed_mode(self.tree.options, mode)
         if mode == "normal":                        # the CFG belongs to the speed mode it was set for
             as_dict(self.tree.options)["cfg"] = cfg          # (not in the Options schema: tree/ should list it)

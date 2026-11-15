@@ -60,6 +60,8 @@ from .. import h3_prompt as _h3
 from .consts import (  # noqa: F401
     TREE_FILE,
     SPEED_MODES,
+    DISTILLED_STEPS,
+    checkpoint_of,
     speed_mode,
     set_speed_mode,
     TREE_VERSION,
@@ -94,6 +96,7 @@ from .consts import (  # noqa: F401
     VOICE_MAX_SECS,
     VOICE_REF_MAX_SECS,
     WRONG_TAG,
+    SEED_LIMIT,
     SEED_MAX,
     REFINED,
     _CLIP_NAME,

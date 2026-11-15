@@ -481,6 +481,23 @@ class BuildMixin(MainWindowHost):
                                "mentions someone). With a start image or video, their format is used instead")
         self.aspect.setCurrentIndex(max(0, self.aspect.findData(d["aspect"])))
         c.addRow("Aspect", self.aspect)
+        mrow = QHBoxLayout()
+        mrow.setContentsMargins(0, 0, 0, 0)
+        self.h3_model = QComboBox()
+        self.h3_model.addItem("MiniMax H3 (standard)", "")
+        self.h3_model.setToolTip(
+            "The video model: the standard MiniMax H3 files, or another H3 checkpoint (a fine-tune) found in "
+            "ComfyUI's diffusion model folders. A checkpoint makes every clip, with and without references. "
+            "Clips made with another model count as changed")
+        self.h3_distilled = QCheckBox(f"Distilled ({T.DISTILLED_STEPS} steps)")
+        self.h3_distilled.setToolTip(
+            f"The checkpoint has its turbo built in (a few-step model): every clip takes {T.DISTILLED_STEPS} steps "
+            "with the FastH3 recipe (euler, sigma shift 12 / 3); the speed modes and Veda are off. Off: the "
+            "checkpoint is sampled like the standard H3 (steps and speed mode as set)")
+        mrow.addWidget(self.h3_model, 1)
+        mrow.addWidget(self.h3_distilled)
+        self._h3_model_row = row_widget(mrow)
+        c.addRow("H3 model", self._h3_model_row)
         self.steps = QSpinBox()
         self.steps.setRange(4, 80)
         self.steps.setValue(d["steps"])
@@ -1119,8 +1136,10 @@ class BuildMixin(MainWindowHost):
         self.start_tile.dropped.connect(lambda f: self.set_image(f, confirm=True))
         for sig in (self.frames.currentIndexChanged, self.resolution.currentIndexChanged,
                     self.aspect.currentIndexChanged, self.audio.toggled, self.keep_rep.toggled,
-                    self.speed.currentIndexChanged, self.veda.toggled, self.turbo_lora.currentIndexChanged):
+                    self.speed.currentIndexChanged, self.veda.toggled, self.turbo_lora.currentIndexChanged,
+                    self.h3_distilled.toggled):
             sig.connect(self._options_changed)
+        self.h3_model.currentIndexChanged.connect(self._h3_model_chosen)
         for sig in (self.steps.valueChanged, self.turbo_steps.valueChanged, self.turbo_strength.valueChanged,
                     self.clip_cfg.valueChanged):             # (spin boxes tick many times: settled after a pause)
             sig.connect(self._options_typing)

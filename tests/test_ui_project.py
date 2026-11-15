@@ -265,6 +265,39 @@ def test_pika_speed_saved_and_steps_locked(app, win, tmp_path, image):
     assert "pika" not in T.Checker(win.project, win.tree).settings(ids[0])
 
 
+def test_another_h3_checkpoint_chosen_and_saved(app, win, tmp_path, image):
+    """The H3 model list: the checkpoints the scan found; choosing a few-step one (by its name) sets Distilled,
+    locks the steps and the speed mode; it is saved with the project, also when it is no longer found."""
+    from video_chain.ui import ui_logic as UL
+    ids = new_project(win, tmp_path, image, ("a",))
+    win.h3_checkpoints = ["tunes/my_h3_8step.safetensors", "tunes/my_h3_full.safetensors"]
+    win._fill_h3_models()
+    assert [win.h3_model.itemData(i) for i in range(win.h3_model.count())] == [
+        "", "tunes/my_h3_8step.safetensors", "tunes/my_h3_full.safetensors"]
+    assert not win.h3_distilled.isEnabled() and win.speed.isEnabled()
+    win.h3_model.setCurrentIndex(1)
+    o = win.tree.options
+    assert o["checkpoint"] == {"name": "tunes/my_h3_8step.safetensors", "distilled": True}
+    assert win.h3_distilled.isChecked() and not win.steps.isEnabled() and not win.speed.isEnabled()
+    assert not win.veda.isEnabled()
+    s = T.Checker(win.project, win.tree).settings(ids[0])
+    assert s["checkpoint"]["name"] == "tunes/my_h3_8step.safetensors" and s["steps"] == T.DISTILLED_STEPS
+    win.h3_model.setCurrentIndex(2)                                        # a full fine-tune: sampled as H3
+    assert not win.h3_distilled.isChecked() and win.steps.isEnabled() and win.speed.isEnabled()
+    assert win.tree.options["checkpoint"] == {"name": "tunes/my_h3_full.safetensors", "distilled": False}
+    win.h3_distilled.setChecked(True)                                     # the guess can be overruled
+    assert win.tree.options["checkpoint"]["distilled"] is True
+    win.h3_checkpoints = []                                               # not found any more (another ComfyUI)
+    win.open_project(tmp_path / "proj")
+    assert win.h3_model.currentData() == "tunes/my_h3_full.safetensors" and "not found" in win.h3_model.currentText()
+    assert win.h3_distilled.isChecked()
+    win.h3_model.setCurrentIndex(0)
+    assert T.checkpoint_of(win.tree.options) is None and win.steps.isEnabled()
+    assert "checkpoint" not in T.Checker(win.project, win.tree).settings(ids[0])
+    assert not UL.looks_distilled("h3_full_bf16.safetensors") and UL.looks_distilled("x_8step_int8.safetensors")
+    assert UL.looks_distilled("FastH3_omniref.safetensors") and UL.looks_distilled("h3_DMD.safetensors")
+
+
 def test_scenes_in_the_window(app, win, tmp_path, image, monkeypatch):
     """Scenes: the storyboard shows them; a new one opens; switching keeps each scene's clips; the cast is shared."""
     ids = new_project(win, tmp_path, image, ("kitchen clip",))

@@ -1438,7 +1438,7 @@ def test_generate_continuing_a_clip(server, start, tmp_path, monkeypatch):
     gen = C.ComfyGenerator(server.url, comfy_dir=server.root)
     checked = []
     real = gen.check_ref_model
-    monkeypatch.setattr(gen, "check_ref_model", lambda: checked.append(1) or real())
+    monkeypatch.setattr(gen, "check_ref_model", lambda *a: checked.append(1) or real(*a))
     gen.generate("The car drives on.", start, tmp_path / "v.mp4", tmp_path / "v.png", 3,
                  settings(ref_videos=[str(tail)]))
     wf = server.prompts[-1]
@@ -1496,3 +1496,60 @@ def test_h3_tree_continuation_through_comfyui(server, tmp_path):
     assert ref["prompt"] == T.clip_inputs(proj, t, b.id)["prompt"]
     assert "[keyframe completion + video continuation]" in ref["prompt"]
     assert T.Checker(proj, t).status(b.id) == "done"
+
+
+def test_another_h3_checkpoint_in_the_workflow():
+    """A chosen H3 checkpoint (a fine-tune) replaces the standard model for plain and reference clips; a distilled
+    one samples with its few-step recipe (shift, sampler, scheduler), with exact attention."""
+    plain = C.build_workflow(prompt="x", image="s.png", seed=1, width=672, height=384, frames=73, steps=28,
+                             loras=[], audio=True, prefix="p", unet="h3/fine.safetensors")
+    assert plain["unet"]["inputs"]["unet_name"] == "h3/fine.safetensors"
+    assert plain["sampler"]["inputs"]["sampler_name"] == C.SAMPLER and plain["sigmas"]["inputs"]["steps"] == 28
+    d = C.DISTILLED_CHECKPOINT
+    from video_chain import tree as T
+    assert d["steps"] == T.DISTILLED_STEPS                                        # (the tree records these steps)
+    wf = C.build_workflow(prompt="x", image="s.png", seed=1, width=672, height=384, frames=73, steps=d["steps"],
+                          loras=[("A/one.safetensors", 0.8)], audio=True, prefix="p", refs=["r.png"],
+                          unet="h3/fine.safetensors", recipe=d["recipe"])
+    assert wf["unet"]["inputs"]["unet_name"] == "h3/fine.safetensors"            # (not the ref2va file)
+    assert (wf["shift"]["inputs"]["shift_video"], wf["shift"]["inputs"]["shift_audio"]) == (12.0, 3.0)
+    assert wf["shift"]["inputs"]["model"] == ["lora0", 0]
+    assert wf["sampler"]["inputs"]["sampler_name"] == "euler" and wf["sigmas"]["inputs"]["scheduler"] == "simple"
+    assert wf["sigmas"]["inputs"]["steps"] == 8
+    assert wf["guider"]["inputs"]["model"] == ["shift", 0] and "sparse" not in wf       # (exact attention)
+
+
+def test_h3_checkpoints_found_in_comfyuis_model_folders(tmp_path):
+    """H3 checkpoints are told by their tensors (the video and audio patch layers), not their names; LoRAs, other
+    models and the standard H3 files are left out; the name is the one ComfyUI lists."""
+    from ui_helpers import H3_KEYS, write_lora
+    root, unet = tmp_path / "diffusion_models", tmp_path / "unet"
+    full = ["video_patch_proj.weight", "audio_patch_proj.weight", "blocks.0.attn.qkv_proj.weight"]
+    write_lora(root / "sub" / "my_tune.safetensors", full)
+    write_lora(unet / "style_tune.safetensors", ["model.diffusion_model." + k for k in full])
+    write_lora(root / C.UNET, full)
+    write_lora(root / "wan.safetensors", ["blocks.0.self_attn.q.weight"])
+    write_lora(root / "h3_lora.safetensors", H3_KEYS + ["video_patch_proj.lora_A.weight"])
+    (root / "broken_h3.safetensors").write_bytes(b"no header")
+    assert C.find_h3_checkpoints([root, unet, tmp_path / "missing"]) == [
+        "style_tune.safetensors", "sub/my_tune.safetensors"]
+
+
+def test_generating_with_another_h3_checkpoint(server, start, tmp_path):
+    """The clip's checkpoint goes into the workflow (also with references: no ref2va file needed); a distilled one
+    with its recipe; one ComfyUI does not list is refused with its name."""
+    server.extra_unets = ["h3/fine_8step.safetensors"]
+    gen = C.ComfyGenerator(server.url)
+    out, frame = tmp_path / "v.mp4", tmp_path / "v.png"
+    face = tmp_path / "face.png"
+    Image.new("RGB", (64, 64), (1, 2, 3)).save(face)
+    ck = {"name": "h3/fine_8step.safetensors", "distilled": True}
+    gen.generate("x", start, out, frame, 1, settings(checkpoint=ck, steps=8, ref_paths=[str(face)]))
+    wf = server.prompts[-1]
+    assert wf["unet"]["inputs"]["unet_name"] == "h3/fine_8step.safetensors" and "refcond" in wf
+    assert wf["shift"]["inputs"]["shift_video"] == 12.0 and wf["sampler"]["inputs"]["sampler_name"] == "euler"
+    gen.generate("x", start, out, frame, 1, settings(checkpoint={**ck, "distilled": False}))
+    wf = server.prompts[-1]
+    assert wf["unet"]["inputs"]["unet_name"] == "h3/fine_8step.safetensors" and "shift" not in wf
+    with pytest.raises(C.ComfyError, match="gone.safetensors"):
+        gen.generate("x", start, out, frame, 1, settings(checkpoint={"name": "gone.safetensors", "distilled": True}))

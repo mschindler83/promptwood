@@ -21,6 +21,13 @@ def with_ref_hint(prompt: str) -> str:
     return prompt if "<Picture" in prompt else f"{prompt.rstrip()} {REF_HINT}"
 
 
+# A distilled H3 checkpoint (a few-step fine-tune with its turbo built in, as FastVideo's FastH3 OmniRef): the
+# sampling of ComfyUI's FastH3 OmniRef template (8 steps, euler, simple, sigma shift 12 / 3), with exact attention.
+# (Its template adds VSA sparse attention; measured with an H3 fine-tune without VSA gates, a 3 s clip at 672x384
+# came out pixel-identical with and without it, so the approximation is left out.)
+DISTILLED_CHECKPOINT: dict[str, Any] = {"steps": 8, "recipe": {"sampler": "euler", "scheduler": "simple",
+                                                               "shift": (12.0, 3.0)}}
+
 VEDA_NODE = "VedaSparseAttention"            # veda-sparse-attention (Veda-on-ComfyUI): learned sparse attention
 VEDA_SETTINGS = {"generated_sparsity": "32", "reference_sparsity": "32", "full_attention_layers": "",
                  "full_attention_steps": "", "verbose": False}   # the node's defaults (as benchmarked)
@@ -55,7 +62,8 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
                    audio_key: Callable[[int], str] | None = None, start_pin: int = 1,
                    recipe: dict | None = None, veda: str | None = None,
                    keyframes: Sequence[tuple[str, int]] = (), frame_refs: Sequence[str] = (),
-                   ref_videos: Sequence[str] = (), video_key: Callable[[int], str] | None = None) -> dict:
+                   ref_videos: Sequence[str] = (), video_key: Callable[[int], str] | None = None,
+                   unet: str | None = None) -> dict:
     """The API-format workflow for one clip (image = the uploaded start image, as LoadImage names it; None: a
     clip without a start frame).
 
@@ -100,6 +108,9 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
     "shift": (12.0, 3.0)}): MiniMaxH3SigmaShift after the LoRAs, that sampler and scheduler (not with turbo,
     hyperflow or pika).
 
+    unet: another H3 checkpoint (ComfyUI's name of a fine-tune) instead of the standard files, for plain clips and
+    clips with references alike (a distilled one samples with DISTILLED_CHECKPOINT's recipe).
+
     The parts: _check_combination (every invalid mix is refused before a node is built), _skeleton,
     _conditioning (the start / end frames, references, sounds), _guides, _keyframes, _model_chain (speed modes,
     LoRAs), _sampling and _output."""
@@ -112,7 +123,7 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
     has_refs = bool(refs or audio_refs or ref_videos)
     _check_combination(has_refs=has_refs, frame_refs=frame_refs, use_start=use_start, use_end=use_end,
                        turbo=turbo, hyperflow=hyperflow, pika=pika, recipe=recipe)
-    wf = _skeleton(seed=seed, frames=frames, prefix=prefix, turbo=turbo, ref_model=has_refs)
+    wf = _skeleton(seed=seed, frames=frames, prefix=prefix, turbo=turbo, ref_model=has_refs, unet=unet)
     if use_start:
         wf["start"] = {"class_type": "LoadImage", "inputs": {"image": image}}
     if use_end:
@@ -151,11 +162,11 @@ def _check_combination(*, has_refs: bool, frame_refs: Sequence[str], use_start: 
         raise ValueError("a LoRA's own sampling recipe cannot be combined with Turbo, HyperFlow or Pika")
 
 
-def _skeleton(*, seed: int, frames: int, prefix: str, turbo, ref_model: bool) -> dict:
-    """The nodes every clip has: the model files, the noise, the sampler (replaced later by a speed mode or a
-    recipe), the decode and the last frame saved as a PNG."""
+def _skeleton(*, seed: int, frames: int, prefix: str, turbo, ref_model: bool, unet: str | None = None) -> dict:
+    """The nodes every clip has: the model files (unet: a chosen checkpoint for every clip), the noise, the sampler
+    (replaced later by a speed mode or a recipe), the decode and the last frame saved as a PNG."""
     return {
-        "unet": loader_unet(UNET_REF if ref_model else UNET),
+        "unet": loader_unet(unet or (UNET_REF if ref_model else UNET)),
         "clip": loader_clip(TEXT_ENCODER, "minimax"),
         "vae": loader_vae(VIDEO_VAE),
         "noise": {"class_type": "RandomNoise", "inputs": {"noise_seed": int(seed)}},

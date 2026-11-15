@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from .. import chain
-from .consts import DEFAULT_FRAMES, DEFAULT_OPTIONS
+from .consts import DEFAULT_FRAMES, DEFAULT_OPTIONS, DISTILLED_STEPS, checkpoint_of
 from .model import Node, Tree, short_id
 from .timeline import clip_length, handover_file, handover_index
 from .files import _old_record, node_files
@@ -345,22 +345,26 @@ def current_settings(project: Path, options: Options, tree: Tree | None = None) 
     if dims is None:
         return None
     w, h = chain.canvas_size(*dims, int(options.get("resolution", 512)))
+    ck = checkpoint_of(options)
+    distilled = bool(ck and ck["distilled"])        # (its turbo built in: no speed mode on top)
     turbo = options.get("turbo") or {}
-    turbo_on = bool(turbo.get("on") and turbo.get("lora"))
+    turbo_on = bool(turbo.get("on") and turbo.get("lora")) and not distilled
     hyper = options.get("hyperflow") or {}
-    hyper_on = bool(hyper.get("on")) and not turbo_on
+    hyper_on = bool(hyper.get("on")) and not turbo_on and not distilled
     pika = options.get("pika") or {}
-    pika_on = bool(pika.get("on")) and not turbo_on and not hyper_on
+    pika_on = bool(pika.get("on")) and not turbo_on and not hyper_on and not distilled
     style = options.get("style") or {}
     return chain.settings_dict(model=options.get("model", DEFAULT_OPTIONS["model"]), lora=None,
                                strength=1.0, frames=options.get("frames", DEFAULT_FRAMES),
-                               steps=(int(turbo.get("steps", 6)) if turbo_on else chain.HYPERFLOW_STEPS if hyper_on
+                               steps=(DISTILLED_STEPS if distilled else
+                                      int(turbo.get("steps", 6)) if turbo_on else chain.HYPERFLOW_STEPS if hyper_on
                                       else chain.PIKA_STEPS if pika_on else options.get("steps", 28)),
                                hyperflow=float(hyper.get("strength", 1.0)) if hyper_on else None,
                                pika=float(pika.get("strength", 1.0)) if pika_on else None,
                                width=w, height=h, audio=options.get("audio", True),
                                turbo=(turbo["lora"], turbo.get("strength", 1.0)) if turbo_on else None,
-                               cfg=float(cast(dict[str, Any], turbo if turbo_on else hyper if hyper_on
-                                              else pika if pika_on else options).get("cfg", 1.0)),
+                               cfg=float(cast(dict[str, Any], ck if distilled else turbo if turbo_on else hyper
+                                              if hyper_on else pika if pika_on else options).get("cfg", 1.0)),
+                               checkpoint=ck,
                                backend="comfyui",
                                style=(style.get("prefix") or "", style.get("suffix") or ""))

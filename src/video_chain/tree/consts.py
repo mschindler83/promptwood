@@ -142,7 +142,8 @@ VOICE_REF_MAX_SECS = 30.0          # ... and text to speech clones this much of 
 WRONG_TAG = re.compile(r"<(Image|Img|Face|Person|Photo|Pic|Ref|Reference)\s*(\d+)>", re.IGNORECASE)
 
 
-SEED_MAX = 2_000_000_000            # (the seed field's range)
+SEED_MAX = 2_000_000_000            # (new random seeds come from 1 … this)
+SEED_LIMIT = 2**64 - 1             # the largest seed a clip can have (what ComfyUI's noise takes)
 
 
 REFINED = ("1080p", "2k")          # refined copies of a clip version for export: nodes/<id>_<tag>_<size>.mp4
@@ -155,6 +156,18 @@ _CLIP_NAME = re.compile(r"^n\d+(_[0-9a-f]{8})?((_first|_f\d+)?\.(mp4|png)|_(1080
 # the files of a clip version its record names (own_sound: the model's sound of a clip with a sound laid over, kept
 # for remix_sound); they travel together: kept aside, made again, removed as one
 CLIP_KEYS = ("video", "frame", "first", "own_sound")
+
+
+# another H3 checkpoint (options["checkpoint"]: {"name": ComfyUI's name, "distilled": bool}; no name: the standard
+# files); a distilled one (its turbo built in) makes every clip in this many steps, without a speed mode or Veda
+DISTILLED_STEPS = 8
+
+
+def checkpoint_of(o: Any) -> dict | None:
+    """The H3 checkpoint the options choose ({"name", "distilled"}), None for the standard model."""
+    c = o.get("checkpoint") if hasattr(o, "get") else None
+    name = str(c.get("name") or "").strip() if isinstance(c, dict) else ""
+    return {"name": name, "distilled": bool(c.get("distilled"))} if name and isinstance(c, dict) else None
 
 
 SPEED_MODES = ("normal", "turbo", "hyperflow", "pika")      # the speed modes; each but "normal" has its own option dict

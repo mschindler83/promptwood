@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from collections import Counter
 from dataclasses import dataclass
 from enum import StrEnum
@@ -296,6 +297,14 @@ SPEED_NAMES = {"normal": "Normal", "turbo": "Turbo", "hyperflow": "HyperFlow", "
 
 
 speed_mode = T.speed_mode   # (the tree reads the mode; kept here for the window's imports)
+
+_DISTILLED_NAME = re.compile(r"turbo|distill|dmd|lightning|fasth3|\d+[-_ ]?steps?(?![a-z])", re.IGNORECASE)
+
+
+def looks_distilled(name: str) -> bool:
+    """Whether an H3 checkpoint's file name says it is a few-step model (its turbo built in): the first guess for
+    the Distilled switch when it is chosen."""
+    return bool(_DISTILLED_NAME.search(Path(name).name))
 
 
 def project_setting_changes(o: dict) -> list[tuple[str, str]]:

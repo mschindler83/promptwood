@@ -138,6 +138,7 @@ class MainWindow(BuildMixin, GeneratorMixin, ComfyMixin, ExportMixin, VideosMixi
         self._notices: list[QMessageBox] = []        # non-blocking notices, kept until they are closed
         self._eleven_voices: list | None = None
         self.h3_loras: list[tuple[str, str]] = []
+        self.h3_checkpoints: list[str] = []          # other H3 checkpoints in ComfyUI's diffusion model folders
         self.qwen_loras: list[tuple[str, str]] = []
         self.image_loras: dict[str, list[tuple[str, str]]] = {}
         self.turbo_loras: list[tuple[str, str]] = []

@@ -2050,3 +2050,31 @@ def test_seam_problem_names_a_continuation_cut_from_another_clip(tmp_path, monke
     assert ch.seam_problem(b) and "continu" in ch.seam_problem(b)
     monkeypatch.setattr(ch, "continue_from", lambda _n: "a1.mp4@3")
     assert ch.seam_problem(b) is None
+
+
+def test_another_h3_checkpoint(project):
+    """A chosen H3 checkpoint is recorded with every clip (made clips change); a distilled one takes its few steps
+    for every clip and switches the speed modes off; without one the clips are as before."""
+    t, a, b1, b2, c = build(project)
+    run(project, [c.id])
+    t = T.load(project)
+    t.options["checkpoint"] = {"name": "h3/fine.safetensors", "distilled": True}
+    t.options["hyperflow"] = {"on": True, "strength": 1.0}
+    t.nodes[b1.id].overrides = {"steps": 40}
+    T.save(project, t)
+    ch = T.Checker(project, t)
+    s = ch.settings(b1.id)
+    assert s["checkpoint"] == {"name": "h3/fine.safetensors", "distilled": True}
+    assert s["steps"] == T.DISTILLED_STEPS == 8 and "hyperflow" not in s and "turbo" not in s
+    assert ch.base()["checkpoint"] == s["checkpoint"]
+    assert statuses(project) == {"a": "changed", "b1": "changed", "c": "changed", "b2": "new"}
+    t.options["checkpoint"]["distilled"] = False                  # a full fine-tune: its speed mode and steps
+    t.options["hyperflow"]["on"] = False
+    T.save(project, t)
+    s = T.Checker(project, t).settings(b1.id)
+    assert s["checkpoint"]["distilled"] is False and s["steps"] == 40
+    t.options["checkpoint"] = {"name": "", "distilled": False}    # the standard model again
+    t.nodes[b1.id].overrides = {}
+    T.save(project, t)
+    assert "checkpoint" not in T.Checker(project, t).settings(b1.id)
+    assert statuses(project) == {"a": "done", "b1": "done", "c": "done", "b2": "new"}

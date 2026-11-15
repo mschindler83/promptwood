@@ -590,3 +590,32 @@ def test_failed_run_shows_on_the_card_in_simple_and_details_shows_the_log(app, w
     flush(app, win)
     card = next(c for c in win.cards if c.nid == ids[1])
     assert not card.problems.isVisibleTo(card) and ids[1] not in win._failures
+
+def test_a_clip_seed_can_be_as_large_as_comfyui_takes(app, win, tmp_path, image):
+    """ComfyUI's noise takes 64-bit seeds (workflows made elsewhere often have such): the card's field takes them
+    too, typed or set, and the project keeps them exactly."""
+    from PySide6.QtTest import QTest
+    ids = new_project(win, tmp_path, image, ("a",))
+    card = win.cards[0]
+    big = 18398908909522129001
+    assert big > 2**63 and T.SEED_LIMIT == 2**64 - 1
+    card.seed.setValue(big)
+    flush(app, win)
+    assert card.seed.value() == big and win.tree.nodes[ids[0]].seed == big
+    assert T.Tree.from_json(json.loads(json.dumps(win.tree.to_json()))).nodes[ids[0]].seed == big
+    edit = card.seed.lineEdit()
+    edit.selectAll()
+    QTest.keyClicks(edit, str(T.SEED_LIMIT))
+    flush(app, win)
+    assert win.tree.nodes[ids[0]].seed == T.SEED_LIMIT
+    card.seed.stepBy(1)                                           # at the end of the range: it stays
+    assert card.seed.value() == T.SEED_LIMIT
+    edit.selectAll()
+    QTest.keyClicks(edit, str(T.SEED_LIMIT + 1) + "x-")           # more than fits, letters, a sign: not taken
+    flush(app, win)
+    assert 0 <= card.seed.value() <= T.SEED_LIMIT and win.tree.nodes[ids[0]].seed == card.seed.value()
+    card.seed.setValue(7)
+    card.seed.stepBy(-10)
+    assert card.seed.value() == 0
+    card.random_seed()                                            # a new random seed stays in the usual range
+    assert 1 <= card.seed.value() <= T.SEED_MAX

@@ -216,6 +216,9 @@ if TYPE_CHECKING:
         graph: GraphView
         guide_panel: GuidePanel
         h3_loras: list[tuple[str, str]]
+        h3_checkpoints: list[str]
+        h3_model: QComboBox
+        h3_distilled: QCheckBox
         ident_info: QLabel
         idle_minutes: QSpinBox
         image_loras: dict[str, list[tuple[str, str]]]

@@ -12,7 +12,7 @@ KNOWN = {"UNETLoader", "CLIPLoader", "VAELoader", "LoadImage", "MiniMaxH3ImageTo
          "KSamplerSelect", "BasicScheduler", "BasicGuider", "SamplerCustomAdvanced", "VAEDecode", "VAEDecodeAudio",
          "ImageFromBatch", "SaveImage", "CreateVideo", "SaveVideo", "LoraLoaderModelOnly",
          "MiniMaxH3ReferenceToVideo", "MiniMaxH3AddGuide", "MiniMaxH3TurboLoRA", "MiniMaxH3TurboSampler",
-         "LoadVideo", "GetVideoComponents", "LoadAudio", "RepeatImageBatch",
+         "LoadVideo", "GetVideoComponents", "LoadAudio", "RepeatImageBatch", "MiniMaxH3SigmaShift",
          # Qwen Image Edit
          "FluxKontextImageScale", "ModelSamplingAuraFlow", "CFGNorm", "TextEncodeQwenImageEditPlus",
          "FluxKontextMultiReferenceLatentMethod", "VAEEncode", "KSampler", "ApplyHyperFlowH3",
@@ -134,6 +134,7 @@ class FakeComfy:
         self.hold = False                          # jobs stay queued: no history until it is cleared (a busy ComfyUI)
         self.video_refs = True                     # ... and reference videos (with their soundtracks)
         self.fail_next: str | None = None          # the next job fails with this message (once)
+        self.extra_unets: list[str] = []           # further diffusion models listed (e.g. H3 fine-tunes)
         self.refine_answer: str | None = None      # the prompt refiner's raw answer (None: "REFINED <prompt>")
         self.prompts, self.calls, self.history = [], [], {}
         self.prompts_deleted: list[str] = []       # ids removed with /queue delete while held
@@ -150,7 +151,7 @@ class FakeComfy:
         q, q21, mo = self.qwen, self.qwen21, self.moss
         files = {"UNETLoader": ("unet_name", [C.UNET, C.UNET_REF] + ([QWEN_UNET] if q else []) + IMAGE_UNETS
                                 + (QWEN21_UNETS if q21 else []) + ([MOSS_UNET] if mo else [])
-                                + (SEEDVR_UNETS if self.seedvr else [])),
+                                + (SEEDVR_UNETS if self.seedvr else []) + self.extra_unets),
                  "CLIPLoader": ("clip_name", [C.TEXT_ENCODER] + ([QWEN_CLIP] if q else []) + LLM_FILES + IMAGE_CLIPS
                                 + ([QWEN21_CLIP] if q21 else []) + ([MOSS_CLIP] if mo else [])),
                  "VAELoader": ("vae_name", [C.VIDEO_VAE, C.AUDIO_VAE] + ([QWEN_VAE] if q else []) + IMAGE_VAES
@@ -210,7 +211,7 @@ class FakeComfy:
         if node in C.QWEN_NODES:
             return {node: {"input": {"required": {}}}} if q else {}
         if node in ("MiniMaxH3ImageToVideo", "MiniMaxH3TurboSampler", "MiniMaxH3TurboLoRA", "MiniMaxH3AddGuide",
-                    "LoadVideo", "GetVideoComponents"):
+                    "LoadVideo", "GetVideoComponents", "MiniMaxH3SigmaShift"):
             return {} if node.startswith("MiniMaxH3Turbo") and not self.turbo_nodes else {node: {"input": {"required": {}}}}
         if node == "MiniMaxH3ReferenceToVideo":
             opt = {"ref_images": ["COMFY_AUTOGROW_V3", {"template": {"prefix": "ref_image_", "min": 0, "max": 9}}]}
@@ -346,7 +347,8 @@ class FakeComfy:
                                               "type": "output"}]}}
         if "refcond" in wf:                         # identity references: ref2va + the start image as guide
             cond = wf["refcond"]["inputs"]
-            assert wf["unet"]["inputs"]["unet_name"].startswith("minimax_h3_ref2va")
+            assert wf["unet"]["inputs"]["unet_name"].startswith("minimax_h3_ref2va") \
+                or wf["unet"]["inputs"]["unet_name"] in self.extra_unets          # (a chosen H3 checkpoint)
             if "start" in wf:
                 assert wf["cond"]["class_type"] == "MiniMaxH3AddGuide"
                 still = wf.get("start_still")      # faces: the start image held as a short still

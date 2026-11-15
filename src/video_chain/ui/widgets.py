@@ -6,7 +6,7 @@ from collections import OrderedDict
 from typing import Any, cast
 
 from PySide6.QtCore import QByteArray, QEvent, QObject, QRect, QSettings, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import (QColor, QFont, QFontInfo, QImage, QPainter, QPixmap, QShortcut,
+from PySide6.QtGui import (QColor, QFont, QFontInfo, QImage, QPainter, QPixmap, QShortcut, QValidator,
                            QStandardItem, QStandardItemModel, QTransform)
 from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QHBoxLayout, QLabel, QSizePolicy,
                                QSlider, QToolButton, QVBoxLayout, QWidget)
@@ -378,6 +378,61 @@ def guard_wheel(*roots: QWidget) -> None:
                 w.setProperty("wheelGuard", True)
                 w.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
                 w.installEventFilter(_GUARD)
+
+
+class SeedBox(QAbstractSpinBox):
+    """A spin box for seeds: whole numbers from 0 to limit, which may be more than a QSpinBox holds (ComfyUI's
+    noise takes 64 bit). value(), setValue() and valueChanged as a QSpinBox has them; valueChanged carries a
+    Python int (connect it to slots that take an object)."""
+    valueChanged = Signal(object)
+
+    def __init__(self, limit: int, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._limit, self._value = int(limit), 0
+        edit = self.lineEdit()
+        edit.setText("0")
+        edit.textEdited.connect(self._typed)
+        self.editingFinished.connect(self._show)
+        self.setMinimumWidth(self.fontMetrics().horizontalAdvance("0" * 11) + 34)   # (longer seeds scroll)
+
+    def value(self) -> int:
+        return self._value
+
+    def setValue(self, value: int) -> None:
+        v = min(max(int(value), 0), self._limit)
+        changed, self._value = v != self._value, v
+        self._show()
+        if changed:
+            self.valueChanged.emit(v)
+
+    def _show(self) -> None:
+        if self.lineEdit().text() != str(self._value):
+            self.lineEdit().setText(str(self._value))
+
+    def _typed(self, text: str) -> None:
+        if text.isascii() and text.isdigit() and int(text) <= self._limit and int(text) != self._value:
+            self._value = int(text)
+            self.valueChanged.emit(self._value)
+
+    def validate(self, text: str, pos: int):         # noqa: D102  (Qt's: what may be typed)
+        if not text:
+            return QValidator.State.Intermediate, text, pos
+        ok = text.isascii() and text.isdigit() and int(text) <= self._limit
+        return (QValidator.State.Acceptable if ok else QValidator.State.Invalid), text, pos
+
+    def fixup(self, text: str) -> str:               # (an emptied field: back to the value)
+        return str(self._value)
+
+    def stepBy(self, steps: int) -> None:
+        self.setValue(self._value + int(steps))
+
+    def stepEnabled(self):
+        flags = QAbstractSpinBox.StepEnabledFlag.StepNone
+        if self._value > 0:
+            flags |= QAbstractSpinBox.StepEnabledFlag.StepDownEnabled
+        if self._value < self._limit:
+            flags |= QAbstractSpinBox.StepEnabledFlag.StepUpEnabled
+        return flags
 
 
 def badge(text: str, severity: str | None = None) -> QLabel:

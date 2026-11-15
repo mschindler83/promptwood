@@ -22,7 +22,7 @@ from .problems import EXAMPLES, ProblemBox, add_example, camera_menu_items, inse
 from .prompt_refiner import replace_text
 from .theme import icon, repolish, theme
 from .view_mode import AdvancedNote, ViewMode, row_widget
-from .widgets import FrameTile, combo_item, format_time, guard_wheel, icon_button, label
+from .widgets import FrameTile, SeedBox, combo_item, format_time, guard_wheel, icon_button, label
 from .mw_support import FileDrop, select_frames
 from .ui_logic import (
     CARD_WIDTH, CONTINUE_FIRST_TIP, CONTINUE_SHORT_TIP, CONTINUE_TIP, END_TIP, FRAME_CHOICES, FREEZE_TIP,
@@ -126,7 +126,7 @@ class PromptCard(_ClipCardBase):
     _end_free: bool
     settings_open = False                      # the own-settings part is open (the same on every card)
     edited = Signal(str)
-    seedChanged = Signal(str, int)
+    seedChanged = Signal(str, object)       # (object: a seed can be larger than a Qt int)
     overridesChanged = Signal(str, dict)
     chooseLora = Signal(str)
     lora_picked = Signal(str, str)             # node id, LoRA path chosen in the picker
@@ -309,8 +309,7 @@ class PromptCard(_ClipCardBase):
         foot.addWidget(self.veda_mark)
         self.seed_label = label("Seed", level="tertiary")
         foot.addWidget(self.seed_label)
-        self.seed = QSpinBox()
-        self.seed.setRange(0, T.SEED_MAX)
+        self.seed = SeedBox(T.SEED_LIMIT)
         self.seed.setValue(node.seed)
         self.seed.setToolTip("Seed: the number the clip's randomness starts from. The same seed and settings make "
                              "the same clip again; another seed gives another version")
@@ -607,8 +606,8 @@ class PromptCard(_ClipCardBase):
             self.steps.setToolTip(f"Sampling steps of this clip (lowest value = the project's: {project_steps})")
             self.steps.setEnabled(not self.edit.isReadOnly() and not self.steps_locked)
             if self.steps_locked:
-                self.steps.setToolTip("Turbo / HyperFlow / Pika H3 Flex: every clip uses their own steps (Clips → "
-                                      "Speed)")
+                self.steps.setToolTip("Turbo / HyperFlow / Pika H3 Flex or a distilled H3 checkpoint: every clip "
+                                      "uses their own steps (Clips → Speed / H3 model)")
         finally:
             for w in widgets:
                 w.blockSignals(False)

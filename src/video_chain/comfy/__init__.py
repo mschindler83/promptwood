@@ -36,11 +36,11 @@ from .wfb import (combo_options, EDIT_SAVE_ID, FPS, loader_clip, loader_unet, lo
                   TEXT_TOP_K, TEXT_TOP_P, VIDEO_CRF)  # noqa: F401
 from .settings import (ClipSettings, DEFAULT_FRAMES, DEFAULT_HEIGHT, DEFAULT_REF_SIZE, DEFAULT_STEPS, DEFAULT_WIDTH,
                        Guide, Keyframe, LoraEntry)  # noqa: F401
-from .loras import (comfy_lora_roots, comfy_model_roots, find_h3_loras, _find_loras, find_qwen_loras, _H3_ATTN,
+from .loras import (comfy_lora_roots, comfy_model_roots, find_h3_checkpoints, find_h3_loras, is_h3_checkpoint, _find_loras, find_qwen_loras, _H3_ATTN,
                     _H3_MLP, is_h3_lora, is_ic_lora, is_qwen_lora, is_turbo_lora, lora_name_for, _QWEN_IMG,
                     _QWEN_TXT, _read_safetensors_keys, _safetensors_keys, _safetensors_keys_cached)  # noqa: F401
 from .ffutil import (ffmpeg, FFMPEG_TIMEOUT, with_audio)  # noqa: F401
-from .video import (AUDIO_VAE, build_workflow, default_audio_key, default_ref_key, default_video_key, pick_veda_predictor,
+from .video import (AUDIO_VAE, DISTILLED_CHECKPOINT, build_workflow, default_audio_key, default_ref_key, default_video_key, pick_veda_predictor,
                     PIKA_SIGMAS,
                     REF_HINT, SAMPLER, SCHEDULER, TEXT_ENCODER, UNET, UNET_REF, VEDA_NODE, VEDA_SETTINGS, VIDEO_VAE,
                     with_ref_hint)  # noqa: F401
