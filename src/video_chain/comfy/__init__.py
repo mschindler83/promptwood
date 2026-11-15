@@ -58,7 +58,7 @@ from .client import (_arg, CHUNK_BYTES, ComfyGenerator, DEFAULT_URL, DOWNLOAD_TI
                      STOP_TIMEOUT, UPLOAD_MIN_RATE, UPLOAD_MIN_TIMEOUT, _UPLOADS, _UPLOADS_LOCK, WAIT_SLEEP_SECONDS,
                      WS_CONNECT_TIMEOUT, WS_RECV_TIMEOUT, WS_RETRY_SECONDS)  # noqa: F401
 from .image_edit import (build_edit_workflow, build_moss_workflow, build_qwen21_workflow,
-                         ComfyImageEditor, EDIT21_QUALITIES, EDIT_MODELS, GREY, INPAINT21_NODE,
+                         ComfyImageEditor, EDIT21_QUALITIES, EDIT_MODELS, INPAINT21_NODE,
                          INPAINT_BLUR_SIGMA_MAX, INPAINT_FEATHER, inpaint_feather, INPAINT_FEATHER_MAX,
                          INPAINT_FEATHER_MIN, is_qwen21_name, MOSS_EDIT_STEPS, MOSS_NEGATIVE, MOSS_NODES,
                          MOSS_STEPS, pick_moss_files, pick_qwen21_files, pick_qwen21_inpaint, pick_qwen_files,

@@ -125,7 +125,6 @@ INPAINT_FEATHER = 12                        # px: the soft edge (the mask grown 
                                             # a 2 MP picture; it grows with the picture (inpaint_feather)
 INPAINT_FEATHER_MIN, INPAINT_FEATHER_MAX = 4, 20   # px: the clamp of inpaint_feather
 INPAINT_BLUR_SIGMA_MAX = 10.0               # ImageBlur's sigma never goes above this
-GREY = 0x808080                             # the grey the masked part is filled with before the edit
 
 
 def inpaint_feather(width: int, height: int) -> int:
@@ -178,17 +177,10 @@ def build_qwen21_workflow(*, files: dict, prompt: str, seed: int, quality: str, 
                                     "inpaint_image": ["pic0", 0], "mask": ["imask", 0],
                                     "strength": float(inpaint.get("strength", 1.0))}}
         m = ["inpaint", 0]
-        # measured (Qwen-Image 2.1 Turbo, a head masked, "She is looking up"): with the whole source as the edit's
-        # picture the masked part comes back as it was (the prompt is ignored); without a picture it follows the
-        # prompt but loses the person; with the masked part grey it follows the prompt and keeps the person
-        ref = inpaint.get("reference", "hole")
-        if ref == "hole":                      # the edit's picture with the masked part grey: nothing there to copy
-            wf["igrey"] = {"class_type": "EmptyImage", "inputs": {"width": 64, "height": 64, "batch_size": 1,
-                                                                   "color": GREY}}
-            wf["ihole"] = {"class_type": "ImageCompositeMasked",
-                           "inputs": {"destination": ["pic0", 0], "source": ["igrey", 0], "x": 0, "y": 0,
-                                      "resize_source": True, "mask": ["imask", 0]}}
-            te["images.image_1"] = ["ihole", 0]
+        # the edit's picture is the source as it is (images[0]). Measured (Qwen-Image 2.1 Turbo, a head masked):
+        # with the masked part grey (or coarse) the model draws the grey disc itself, text and all; with the source
+        # it follows "a red hat" / "blonde hair, sunglasses" and keeps the person (a pose change like "looking up"
+        # stays weak); without a picture it follows the prompt but draws another person
     if inpaint:                                # (the ControlNet's block patches turn the prefix cache off anyway)
         sampling_model = m
     else:
@@ -489,7 +481,7 @@ class ComfyImageEditor(ComfyGenerator):
                 except (RuntimeError, ValueError, OSError) as e:
                     logger.warning("mask feather not computed: %s", e)
                 inpaint = {"patch": self.inpaint_patch, "mask": uploads[-1][0], "strength": 1.0,
-                           "feather": feather, "reference": "hole"}
+                           "feather": feather}
             wf = build_qwen21_workflow(files=self.files21, prompt=prompt, seed=seed, quality=quality,
                                        prefix=f"{SUBFOLDER}/edit_{uuid.uuid4().hex[:12]}", save_as=EDIT_SAVE_ID,
                                        images=pics, loras=names, inpaint=inpaint)
