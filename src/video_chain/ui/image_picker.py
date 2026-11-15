@@ -158,12 +158,15 @@ def _thumbnail(path: str) -> QImage:
 class ImagePickerDialog(QDialog):
     """collections: the open project's pictures by kind, [(name, [(path, caption)])], shown first under "This
     project" (captions such as "Clip #5 · last frame"); folders can be browsed as well.
-    kind: what is listed (KINDS): 'image', 'video' (thumbnails are frames) or 'media' (sounds and videos)."""
+    kind: what is listed (KINDS): 'image', 'video' (thumbnails are frames) or 'media' (sounds and videos).
+    multi: several files can be chosen (Ctrl / Shift); chosen_all() gives them in the grid's order."""
 
     def __init__(self, parent, title: str, start_dir: str | None, settings: QSettings, places: list[tuple[str, str]] | None = None,
                  cache_dir: Path | None = CACHE_DIR, desktop_thumbs: Path | None = DESKTOP_THUMBS,
-                 collections: list[tuple[str, list[tuple[str, str]]]] | None = None, kind: str = "image"):
+                 collections: list[tuple[str, list[tuple[str, str]]]] | None = None, kind: str = "image",
+                 multi: bool = False):
         super().__init__(parent)
+        self.multi = multi
         self.kind = kind if kind in KINDS else "image"
         self.exts, self.noun, self.dir_key = KINDS[self.kind]
         self.setWindowTitle(title)
@@ -191,6 +194,7 @@ class ImagePickerDialog(QDialog):
         self._cache: OrderedDict[tuple, QImage] = OrderedDict()     # the latest thumbnails (bounded)
         self.folder: Path = Path.home()
         self._chosen: str | None = None
+        self._chosen_all: list[str] = []
         self._extra_places = places or []
         self.collections = [(n, [(str(p), c) for p, c in items if Path(p).is_file()]) for n, items in collections or []]
         self.collections = [(n, items) for n, items in self.collections if items]   # (all files gone: not listed)
@@ -238,6 +242,9 @@ class ImagePickerDialog(QDialog):
         self.grid.setWordWrap(True)
         self.grid.setSpacing(6)
         self.grid.currentItemChanged.connect(self._selected)
+        if multi:
+            self.grid.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+            self.grid.itemSelectionChanged.connect(self._update_open)
         self.grid.itemDoubleClicked.connect(self._activated)
         split.addWidget(self.grid)
         side = QWidget()
@@ -588,14 +595,16 @@ class ImagePickerDialog(QDialog):
         if kind == "dir":
             self.preview.clear()
             self.info.setText(f"Folder {Path(path).name}")
-            self.buttons.button(QDialogButtonBox.StandardButton.Open).setEnabled(False)
+            if not self.multi:
+                self.buttons.button(QDialogButtonBox.StandardButton.Open).setEnabled(False)
             return
         ext = Path(path).suffix.lower()
         box = self.preview.size()
         self.preview.clear()
         caption = item.data(Qt.ItemDataRole.UserRole + 2)
         self.info.setText((f"{caption}\n" if caption else "") + f"{Path(path).name}\nLoading …")   # (every read of the file runs in the pool: a
-        self.buttons.button(QDialogButtonBox.StandardButton.Open).setEnabled(True)   # network share can be slow)
+        if not self.multi:                                                            # network share can be slow)
+            self.buttons.button(QDialogButtonBox.StandardButton.Open).setEnabled(True)
         sel, thumbs, size = self._sel, self._thumbs, max(box.width(), box.height())
 
         def work():
@@ -619,12 +628,22 @@ class ImagePickerDialog(QDialog):
         except RuntimeError:                                     # (closed)
             pass
 
+    def _picked(self) -> list[str]:
+        """The files selected (multi), in the grid's order; folders are left out."""
+        items = [self.grid.item(i) for i in range(self.grid.count())]
+        return [it.data(Qt.ItemDataRole.UserRole)[1] for it in items
+                if it.isSelected() and it.data(Qt.ItemDataRole.UserRole)[0] == "img"]
+
+    def _update_open(self):
+        self.buttons.button(QDialogButtonBox.StandardButton.Open).setEnabled(bool(self._picked()))
+
     def _activated(self, item):
         kind, path = item.data(Qt.ItemDataRole.UserRole)
         if kind == "dir":
             self.open_folder(Path(path))
         else:
-            self._chosen = path
+            if not self.multi:
+                self._chosen = path
             self._accept()
 
     def go_up(self):
@@ -642,6 +661,9 @@ class ImagePickerDialog(QDialog):
 
     def _accept(self):
         item = self.grid.currentItem()
+        if self.multi:
+            self._chosen_all = self._picked()
+            self._chosen = self._chosen_all[0] if self._chosen_all else None
         if self._chosen is None and item is not None and item.data(Qt.ItemDataRole.UserRole)[0] == "img":
             self._chosen = item.data(Qt.ItemDataRole.UserRole)[1]
         if self._chosen is None:
@@ -659,6 +681,10 @@ class ImagePickerDialog(QDialog):
 
     def chosen(self) -> str | None:
         return self._chosen
+
+    def chosen_all(self) -> list[str]:
+        """multi: every file chosen, in the grid's order (else the one chosen)."""
+        return list(self._chosen_all) if self.multi else [self._chosen] if self._chosen else []
 
     def done(self, r):
         self._gen += 1                           # pending thumbnails are dropped
@@ -706,5 +732,21 @@ def pick_image(parent, title: str, settings: QSettings | None, start_dir: str | 
                             kind=kind)
     try:
         return dlg.chosen() if dlg.exec() == QDialog.DialogCode.Accepted else None
+    finally:
+        dlg.deleteLater()
+
+
+def pick_images(parent, title: str, settings: QSettings | None, start_dir: str | None = None,
+                places: list[tuple[str, str]] | None = None,
+                collections: list[tuple[str, list[tuple[str, str]]]] | None = None, kind: str = "image") -> list[str]:
+    """Like pick_image, but several files can be chosen (Ctrl / Shift); their paths in the grid's order, [] when
+    cancelled."""
+    qs = settings if settings is not None else scratch_settings()
+    cache: Any = qs.value(SK.THUMB_CACHE_DIR, None)
+    cache_dir = CACHE_DIR if cache is None else (Path(cache) if cache else None)
+    dlg = ImagePickerDialog(parent, title, start_dir, qs, places, cache_dir=cache_dir, collections=collections,
+                            kind=kind, multi=True)
+    try:
+        return dlg.chosen_all() if dlg.exec() == QDialog.DialogCode.Accepted else []
     finally:
         dlg.deleteLater()

@@ -1107,3 +1107,46 @@ def test_all_ideas_become_variations(app, tmp_path):
     dlg.prompt.undo()
     assert dlg.prompt.toPlainText() == "- an animal"                  # Ctrl+Z: the bullet points back
     dlg.reject()
+
+def test_image_picker_chooses_several_pictures(app, tmp_path, monkeypatch):
+    """multi: Ctrl / Shift choose several pictures (grid order); a folder in the selection is left out, Open
+    with only a folder opens it; pick_images returns the list ([] when cancelled)."""
+    from PySide6.QtWidgets import QAbstractItemView, QDialog
+
+    from video_chain.ui import image_picker as IP
+    d = tmp_path / "pics"
+    (d / "sub").mkdir(parents=True)
+    for n in ("a.png", "b.png", "c.png"):
+        Image.new("RGB", (32, 32), (9, 9, 9)).save(d / n)
+    q = settings(tmp_path, "multi.ini")
+    one = IP.ImagePickerDialog(None, "x", str(d), q, cache_dir=None, desktop_thumbs=None)
+    assert one.grid.selectionMode() == QAbstractItemView.SelectionMode.SingleSelection    # (as before)
+    one.reject()
+    dlg = IP.ImagePickerDialog(None, "x", str(d), q, cache_dir=None, desktop_thumbs=None, multi=True)
+    assert dlg.grid.selectionMode() == QAbstractItemView.SelectionMode.ExtendedSelection
+    item = {dlg.grid.item(i).text(): dlg.grid.item(i) for i in range(dlg.grid.count())}
+    open_b = dlg.buttons.button(dlg.buttons.StandardButton.Open)
+    item["sub"].setSelected(True)
+    assert not open_b.isEnabled()                                               # only a folder
+    for n in ("c.png", "a.png"):
+        item[n].setSelected(True)
+    assert open_b.isEnabled()
+    dlg._accept()
+    assert dlg.result() == QDialog.DialogCode.Accepted
+    assert dlg.chosen_all() == [str((d / n).resolve()) for n in ("a.png", "c.png")]   # grid order, no folder
+    assert dlg.chosen() == str((d / "a.png").resolve())
+    assert q.value("pickerDir") == str(d.resolve())
+
+    shown = []
+
+    def fake_exec(self):
+        shown.append(self.grid.selectionMode())
+        self.grid.item(2).setSelected(True)
+        self.grid.item(3).setSelected(True)
+        self._accept()
+        return self.result()
+    monkeypatch.setattr(IP.ImagePickerDialog, "exec", fake_exec)
+    assert IP.pick_images(None, "x", q, str(d)) == [str((d / n).resolve()) for n in ("b.png", "c.png")]
+    assert shown == [QAbstractItemView.SelectionMode.ExtendedSelection]
+    monkeypatch.setattr(IP.ImagePickerDialog, "exec", lambda self: QDialog.DialogCode.Rejected)
+    assert IP.pick_images(None, "x", q, str(d)) == []

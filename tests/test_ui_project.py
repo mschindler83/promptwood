@@ -485,12 +485,15 @@ def test_more_start_pictures_make_rows(app, win, tmp_path, image, monkeypatch):
         pics.append(str(f))
     assert win.add_start_rows(second, pics, generate=False) == []            # only a clip that starts the video
     assert "first generated clip" in win.status.text()
-    monkeypatch.setattr(win, "_pick_images", lambda title: pics[:2])         # the file dialog: two pictures chosen
+    from video_chain.ui import image_picker as IP
+    picked = []                                                              # the app's own picker, several at once
+    monkeypatch.setattr(IP, "pick_images", lambda *a, **k: picked.append((a, k)) or pics[:2])
     asked = []
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: asked.append(a[2]) or QMessageBox.Yes)
     win.node_action("start_rows", first)                                      # (asked "make them now?": yes)
     new = [n.id for n in T.row_members(win.tree, first) if n.id != first]
     assert len(new) == 2 and win.running
+    assert len(picked) == 1 and picked[0][1]["collections"] is not None       # (with the project's pictures)
     assert "2 start images added" in asked[0] and "cut from its centre" in asked[0] and "Make the 3 clips" in asked[0]
     nodes = [win.tree.nodes[n] for n in new]
     src = win.tree.nodes[first]
