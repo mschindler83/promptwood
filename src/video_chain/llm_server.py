@@ -148,6 +148,44 @@ def chat_messages(*, prompt: str, kind: str, turns: list[tuple[str, str]], instr
     return msgs
 
 
+# Describe (Cast → Describe): what a place, object or style looks like, from its pictures, for its description.
+# The description goes into every clip that mentions it ("Kitchen (…), the environment in <Picture 2>"), so it is
+# short and says only what stays the same in every clip.
+DESCRIBE_FOCUS = {
+    "place": "the kind of place, its main furniture or features and where they are, the materials and colours, "
+             "and the light",
+    "object": "what the object is, its shape, size, materials, colours and the details that make it recognisable",
+    "style": "the visual style: the medium or technique, the colour palette, the lines and textures, the lighting "
+             "and the mood; not what is shown",
+}
+DESCRIBE_RULES = ("You write the description of a {kind} that a video model is given together with its "
+                  "picture{s}. Look at the picture{s} and describe {focus}. Leave out people, animals, actions, "
+                  "the time of day unless it is part of the look, the camera and anything that only happens in "
+                  "this picture. Write one noun phrase or one short sentence in English, at most {words} words, "
+                  "with no preface (never 'The image shows'), no quotes, no list and no markdown.")
+DESCRIBE_WORDS = 40
+
+
+def describe_messages(*, kind: str, name: str, pictures: Sequence[str], desc: str = "") -> list[dict]:
+    """The request for the description of a place, object or style (kind) from its pictures. desc: the one it has
+    (kept in mind: what the user wrote there is meant)."""
+    if kind not in DESCRIBE_FOCUS:
+        raise ValueError(f"only a place, object or style is described from its pictures (not a {kind})")
+    system = DESCRIBE_RULES.format(kind=kind, s="s" if len(pictures) > 1 else "", focus=DESCRIBE_FOCUS[kind],
+                                   words=DESCRIBE_WORDS)
+    text = f"Describe @{name}, a {kind}." + (f" Its description so far: {desc.strip()}" if desc.strip() else "")
+    content: list[dict] = [{"type": "text", "text": text}]
+    for k, path in enumerate(pictures, start=1):
+        content += [{"type": "text", "text": f"\n[Picture {k} of @{name}]"}, image_part(path)]
+    return [{"role": "system", "content": system}, {"role": "user", "content": content}]
+
+
+def clean_description(text: str) -> str:
+    """A description as the cast keeps it: one line, without a preface the model wrote anyway."""
+    text = re.sub(r"^\s*(the|this) (image|picture|photo)s? (shows?|depicts?|features?)\s*:?\s*", "", text, flags=re.I)
+    return text.strip()
+
+
 IDEA_RULES = ("Now the user gives bullet points instead of a prompt. Make {n} creative, interesting and clearly "
               "different image ideas from them. Every idea uses every bullet point (each subject, attribute, place and "
               "action stays as given; @Names stay exactly as written) and must not add other people. Make the ideas "
@@ -699,6 +737,20 @@ class LlamaServer:
                                            loras=loras), seed,
                              temperature, timeout, max_tokens=300 * int(n) + 300, clean=False, schema=shape)
         return parse_ideas(raw)
+
+    def describe(self, kind: str, name: str, pictures: Sequence[str], desc: str = "", seed: int = 0,
+                 temperature: float = 0.3, timeout: float = 300.0) -> str:
+        """The description of a place, object or style from its pictures (see describe_messages); needs the
+        vision projector."""
+        if not self.mmproj:
+            raise LlmServerError("this model has no vision part (mmproj file) next to it: it cannot see pictures")
+        if not pictures:
+            raise LlmServerError(f"@{name} has no picture to describe")
+        out = clean_description(self._complete(describe_messages(kind=kind, name=name, pictures=pictures, desc=desc),
+                                               seed, temperature, timeout, max_tokens=200))
+        if not out:
+            raise LlmServerError("the language model gave no description")
+        return out
 
     def complete(self, system: str, user: str, max_tokens: int = 512, model_file: str | None = None,
                  seed: int = 0, temperature: float = 0.2, timeout: float = 300.0) -> str:

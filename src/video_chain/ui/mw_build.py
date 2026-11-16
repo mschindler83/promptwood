@@ -253,7 +253,16 @@ class BuildMixin(MainWindowHost):
         self.char_desc.setPlaceholderText("Description (optional), e.g. woman, 30s, grey knit sweater")
         self.char_desc.setToolTip("Goes into the prompt the model gets for clips that mention this character")
         self.char_desc.editingFinished.connect(self._character_desc_changed)
-        iv.addWidget(self.char_desc)
+        self.b_char_describe = QPushButton("Describe")
+        self.b_char_describe.setToolTip("Write the description from the pictures with the prompt refiner's llama.cpp "
+                                        "model (one that can see pictures: an mmproj file next to it). It goes "
+                                        "into every clip that mentions this entry; edit it as you like")
+        self.b_char_describe.clicked.connect(lambda: self.describe_entry())
+        drow = QHBoxLayout()
+        drow.setContentsMargins(0, 0, 0, 0)
+        drow.addWidget(self.char_desc, 1)
+        drow.addWidget(self.b_char_describe)
+        iv.addLayout(drow)
         self.char_lead = QCheckBox("Lead: clips that mention nobody get this face")
         self.char_lead.toggled.connect(self._character_lead_changed)
         iv.addWidget(self.char_lead)

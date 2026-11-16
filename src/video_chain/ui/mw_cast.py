@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QInputDialog, QListWidgetIt
 
 from .. import faces, tree as T
 from . import dialogs as D, image_picker as IP
+from .workers import run_in_background
 from .clip_inputs import KIND_NAMES
 from .face_crop import FaceCropDialog
 from .clip_cards import PromptCard
@@ -212,6 +213,75 @@ class CastMixin(MainWindowHost):
         if not self._report_remade(before, f"Description of @{c['name']} changed"):
             self._say(f"Description of @{c['name']} saved (used by clips that mention it).")
 
+    # ---- Describe: a place, object or style's description from its pictures (the refiner's llama.cpp model)
+    _describing: str | None = None              # (the entry being described: one at a time)
+
+    def describe_entry(self, confirm: bool = True) -> bool:
+        """Ask the prompt refiner's llama.cpp model (one that sees pictures) for the selected place, object or
+        style's description, from its pictures (in a thread; _described puts it in). False: not started."""
+        c = self._selected_character()
+        if c is None or not self._cast_edit_ok():
+            return False
+        kind = T.kind_of(c)
+        if kind == "person":
+            self.status.setText("Describe is for places, objects and styles: a person's look comes from its face "
+                                "pictures.")
+            return False
+        if self._describing is not None:
+            self.status.setText(f"@{self._describing} is being described; wait until it is done.")
+            return False
+        if not c["images"]:
+            self.status.setText(f"@{c['name']} has no picture yet: add one first, then Describe writes the "
+                                "description from it.")
+            return False
+        llama = self.llama_server()
+        if llama is None:
+            self.status.setText("Describe needs the prompt refiner's llama.cpp model: in the settings, switch on "
+                                "“Prompt refiner: also a llama.cpp server” and choose a GGUF model that can see "
+                                "pictures.")
+            return False
+        if not llama.mmproj:
+            self.status.setText(f"{Path(llama.model).name} cannot see pictures (no mmproj file next to it): "
+                                "choose a vision model for the prompt refiner to use Describe.")
+            return False
+        desc = c.get("desc", "")
+        if confirm and desc and not D.confirm(self, "Describe", f"Replace the description of @{c['name']} "
+                                              f"(“{desc}”) with one written from its pictures?"):
+            return False
+        assert self.project is not None
+        name, project = c["name"], self.project
+        pictures = [str(project / rel) for rel in c["images"]]
+        self._describing = name
+        self._update_cast_buttons()
+        self.status.setText(f"Describing @{name} from its pictures (the llama.cpp model is loaded first)…")
+        run_in_background(lambda: llama.describe(kind, name, pictures, desc),
+                          on_done=lambda text: self._described(name, desc, str(project), text, ""),
+                          on_error=lambda e: self._described(name, desc, str(project), "",
+                                                             str(e) or type(e).__name__),
+                          owner=self)
+        return True
+
+    def _described(self, name: str, was: str, project: str, text: str, err: str) -> None:
+        self._describing = None
+        self.stop_llama("the description was written")     # (its RAM / VRAM back for clips and images)
+        self._update_cast_buttons()
+        if err:
+            self._report_error(f"Could not describe @{name}: {err}")
+            return
+        c = T.character(self.tree, name) if self.tree is not None and str(self.project) == project else None
+        if c is None or T.kind_of(c) == "person" or c.get("desc", "") != was or self.running:
+            self.status.setText(f"@{name} changed meanwhile, so its description was not replaced. The model's "
+                                f"description: {text}")
+            return
+        before = self._done_clips()
+        assert self.tree is not None
+        T.update_character(self.tree, name, desc=text)
+        self._show_references(select=name)
+        self._write_tree()
+        self._changed()
+        if not self._report_remade(before, f"Description of @{name} written from its pictures"):
+            self._say(f"Description of @{name} written from its pictures: {text}")
+
     def _character_lead_changed(self, on: bool):
         c = self._selected_character()
         if c is None or self._loading or bool(c.get("lead")) == on or not self._cast_edit_ok():
@@ -375,7 +445,10 @@ class CastMixin(MainWindowHost):
         self._write_tree()
         self._changed()
         what = "Face" if word == "face picture" else "Picture"
-        self._say(f"{what} added to @{owner_name}." if owner_name in known else
+        owner = T.character(self.tree, owner_name)
+        hint = (" Describe can write its description from the picture." if owner is not None
+                and T.kind_of(owner) != "person" and not owner.get("desc") else "")
+        self._say(f"{what} added to @{owner_name}.{hint}" if owner_name in known else
                   f"New character @{owner_name} with this face (rename it with Rename…).")
         self._report_remade(before, f"{what} added to @{owner_name}")
         return True
@@ -518,6 +591,7 @@ class CastMixin(MainWindowHost):
         switch; a place, object or style has (whole) pictures only."""
         person = c is None or T.kind_of(c) == "person"
         self._voice_row.setVisible(person)
+        self.b_char_describe.setVisible(not person)
         self.char_lead.setVisible(person)
         self.ref_add_label.setText("Add face:" if person else "Add picture:")
         if person:
@@ -566,6 +640,7 @@ class CastMixin(MainWindowHost):
         self.b_voice_del.setEnabled(idle and v)
         self.b_voice_play.setEnabled(v)
         self.b_voice_lib.setEnabled(self.project is not None)
+        self.b_char_describe.setEnabled(idle and c is not None and bool(c["images"]) and self._describing is None)
         self.b_cast_lib.setEnabled(self.project is not None)
         self._update_library_windows()
         pic = self.refs.currentItem() is not None
