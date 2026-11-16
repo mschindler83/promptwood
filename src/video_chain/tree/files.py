@@ -252,7 +252,8 @@ def _old_record(s: dict | None) -> dict | None:
 
 
 def _extras(items) -> list[tuple[str, float]]:
-    return [(e["path"], float(e.get("strength", 1.0))) for e in (items or []) if e.get("path")]
+    """(path, strength) of the LoRAs that are used: an entry with "off": True stays in the list but is not used."""
+    return [(e["path"], float(e.get("strength", 1.0))) for e in (items or []) if e.get("path") and not e.get("off")]
 
 
 def migrate_loras(project: dict, ov: dict) -> dict:
@@ -278,7 +279,7 @@ def migrate_loras(project: dict, ov: dict) -> dict:
 
 
 def node_loras(node: Node) -> list[tuple[str, float]]:
-    """A clip's LoRA stack as (path, strength), in order."""
+    """A clip's LoRA stack as (path, strength), in order: the LoRAs it is made with (not those switched off)."""
     return _extras((node.overrides or {}).get("loras"))
 
 

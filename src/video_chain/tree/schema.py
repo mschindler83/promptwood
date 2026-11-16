@@ -23,7 +23,7 @@ class Source(TypedDict, total=False):
 
 # (the functional form: "continue" is a Python keyword)
 Overrides = TypedDict("Overrides", {
-    "loras": list[dict[str, Any]],      # [{"path", "strength"}], applied in order
+    "loras": list[dict[str, Any]],      # [{"path", "strength", "off"?}], applied in order; "off": kept, not used
     "frames": int,
     "steps": int,
     "guide": int,                       # one of GUIDE_CHOICES

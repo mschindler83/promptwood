@@ -23,11 +23,11 @@ class LorasMixin(ImageEditHost):
         project wants them)."""
         if not self.use_triggers:
             return []
-        return stack_words([it["path"] for it in self.loras.items()] if loras is None else [p for p, _s in loras])
+        return stack_words([it["path"] for it in self.loras.active_items()] if loras is None else [p for p, _s in loras])
 
     def _lora_runs(self) -> list[list[tuple[str, float]]]:
         """The LoRAs of each image in turn: one list with all of them, or (One image per LoRA) each alone."""
-        loras = [(it["path"], it["strength"]) for it in self.loras.items()]
+        loras = [(it["path"], it["strength"]) for it in self.loras.active_items()]   # (not those switched off)
         if self.lora_each.isChecked() and loras:
             return [[lo] for lo in loras]
         return [loras]

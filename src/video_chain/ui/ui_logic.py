@@ -158,9 +158,9 @@ def row_start_of(gid) -> str | None:
 
 def variant_strengths(loras: list[dict], steps: list[float], k: int) -> list[dict]:
     """The LoRA stack of variant k (1, 2, ...): each strength moved by k times its step (within the LoRA range).
-    steps go with the entries that have a path, in order; other entries are kept as they are."""
+    steps go with the entries that are used (a path, not switched off), in order; others are kept as they are."""
     out = copy.deepcopy(loras)
-    for e, step in zip([e for e in out if e.get("path")], steps):
+    for e, step in zip([e for e in out if e.get("path") and not e.get("off")], steps):
         if step:
             e["strength"] = round(min(LORA_MAX, max(LORA_MIN, float(e.get("strength", 1.0)) + k * step)), 4)
     return out
@@ -169,10 +169,11 @@ def variant_strengths(loras: list[dict], steps: list[float], k: int) -> list[dic
 def repeated_variants(loras: list[dict], steps: list[float], count: int) -> list[int]:
     """Variants (1..count) whose stepped strengths equal the clip's own or an earlier variant's (the range limit
     reached): with the same seed they would be the same clip."""
-    seen = [[float(e.get("strength", 1.0)) for e in loras if e.get("path")]]
+    seen = [[float(e.get("strength", 1.0)) for e in loras if e.get("path") and not e.get("off")]]
     out = []
     for k in range(1, count + 1):
-        st = [float(e.get("strength", 1.0)) for e in variant_strengths(loras, steps, k) if e.get("path")]
+        st = [float(e.get("strength", 1.0)) for e in variant_strengths(loras, steps, k)
+              if e.get("path") and not e.get("off")]
         if st in seen:
             out.append(k)
         seen.append(st)

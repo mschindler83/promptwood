@@ -117,7 +117,7 @@ class PromptMixin(ImageEditHost):
             params = {}
         more = {"pictures": self._refine_pictures()} if "pictures" in params else {}
         if "loras" in params:                      # the refiner is told what is known of the chosen LoRAs
-            more["loras"] = [it["path"] for it in self.loras.items()]
+            more["loras"] = [it["path"] for it in self.loras.active_items()]
         new = self.refine(self.prompt.toPlainText(), self.prompt_kind(), **more)
         if new is None:
             return

@@ -1,4 +1,4 @@
-"""A list of LoRAs with a strength each (rows of LoRA, strength, remove; '+ LoRA'), the LoRA picker (search, a grid
+"""A list of LoRAs with a strength each (rows of on/off, LoRA, strength, remove; '+ LoRA'), the LoRA picker (search, a grid
 of covers from CivitAI, other files), and the helpers to fill a LoRA combo box. Used by the clip cards (H3 LoRAs) and the image edit window (Qwen LoRAs)."""
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import threading
 
 from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QFontMetrics, QImage, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
                                QListView, QListWidget, QListWidgetItem, QPushButton,
                                QStyledItemDelegate, QToolButton, QVBoxLayout, QWidget)
 
@@ -30,6 +30,12 @@ def lora_path(p: str) -> str:
     """How a chosen LoRA file is stored: absolute, links kept as they are (a link in ComfyUI's LoRA folder keeps
     its own name)."""
     return os.path.abspath(os.path.expanduser(p))
+
+
+def active(items: list[dict]) -> list[dict]:
+    """The LoRAs of a stack that are used: those with a file that are not switched off ({"off": True} keeps a LoRA
+    in the list, with its strength, without using it)."""
+    return [it for it in items or [] if it.get("path") and not it.get("off")]
 
 
 def clean_words(text: str) -> list[str]:
@@ -524,8 +530,10 @@ class LoraStack(QWidget):
 
     def set_items(self, known: list[tuple[str, str]], items: list[dict]):
         self.known = list(known)
-        wanted = [(it["path"], round(float(it.get("strength", 1.0)), 2)) for it in items or [] if it.get("path")]
-        if wanted and wanted == [(b.property("path"), round(s.value(), 2)) for _w, b, s in self.rows]:
+        wanted = [(it["path"], round(float(it.get("strength", 1.0)), 2), not it.get("off"))
+                  for it in items or [] if it.get("path")]
+        if wanted and wanted == [(b.property("path"), round(s.value(), 2), w.on_box.isChecked())
+                                 for w, b, s in self.rows]:
             self.filled.emit()                         # (the same list: the rows, and the reading of their files, stay)
             return
         for w, _b, _s in self.rows:
@@ -535,7 +543,7 @@ class LoraStack(QWidget):
         self.rows = []
         for it in items or []:
             if it.get("path"):
-                self._add_row(it["path"], float(it.get("strength", 1.0)))
+                self._add_row(it["path"], float(it.get("strength", 1.0)), on=not it.get("off"))
         self.none.setVisible(not self.rows)
         self.filled.emit()
 
@@ -659,7 +667,7 @@ class LoraStack(QWidget):
         self.refresh_triggers()
         self.changed.emit()
 
-    def _add_row(self, path: str, strength: float):
+    def _add_row(self, path: str, strength: float, on: bool = True):
         w = _LoraRow(self)
         outer = QVBoxLayout(w)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -691,6 +699,10 @@ class LoraStack(QWidget):
                         "e.g. for slider LoRAs)")
         rm = icon_button("x", "Remove this LoRA", w)
         w.remove_button = rm                           # (setEnabled reaches it through the row's widget)
+        box = QCheckBox(w)
+        box.setChecked(on)
+        w.on_box = box
+        h.addWidget(box)
         h.addWidget(button, 1)
         h.addWidget(spin)
         h.addWidget(rm)
@@ -699,10 +711,24 @@ class LoraStack(QWidget):
         self.rows.append(row)
         spin.valueChanged.connect(lambda *_: self.changed.emit())
         rm.clicked.connect(lambda: self._remove(row))
-        for x in (button, spin, rm):
+        self._show_on(w, button)
+        box.toggled.connect(lambda *_: (self._show_on(w, button), self.changed.emit()))
+        for x in (box, button, spin, rm):
             x.setEnabled(self._enabled)
         guard_wheel(spin)
         self.none.hide()
+
+    @staticmethod
+    def _show_on(w, button: QPushButton):
+        """A LoRA that is off: its name struck through, and the box says what it does."""
+        on = w.on_box.isChecked()
+        f = button.font()
+        f.setStrikeOut(not on)
+        button.setFont(f)
+        w.on_box.setToolTip("On: this LoRA is used. Click to switch it off: it stays in the list with its strength, "
+                            "but is not used" if on else
+                            "Off: this LoRA is not used (it stays in the list with its strength). Click to use it "
+                            "again")
 
     def _remove(self, row):
         if row in self.rows:
@@ -714,12 +740,19 @@ class LoraStack(QWidget):
             self.changed.emit()
 
     def items(self) -> list[dict]:
-        return [{"path": b.property("path"), "strength": round(spin.value(), 2)} for _w, b, spin in self.rows]
+        """Every LoRA of the list, in order; one that is switched off with "off": True."""
+        return [{"path": b.property("path"), "strength": round(spin.value(), 2),
+                 **({} if w.on_box.isChecked() else {"off": True})} for w, b, spin in self.rows]
+
+    def active_items(self) -> list[dict]:
+        """The LoRAs that are used (not switched off), in order."""
+        return active(self.items())
 
     def setEnabled(self, on: bool):          # noqa: N802  (Qt naming)
         self._enabled = on
         self.b_add.setEnabled(on)
         for w, b, spin in self.rows:
+            w.on_box.setEnabled(on)
             b.setEnabled(on)
             spin.setEnabled(on)
             w.remove_button.setEnabled(on)

@@ -104,7 +104,7 @@ class VariantsDialog(QDialog):
         self.setWindowTitle("Create variants")
         remember_geometry(self, settings, "variants")
         self.stack = list((node.overrides or {}).get("loras") or [])
-        self.loras = [e for e in self.stack if e.get("path")]
+        self.loras = [e for e in self.stack if e.get("path") and not e.get("off")]   # (those switched off: kept)
         f = QFormLayout(self)
         text = node.prompt if len(node.prompt) < 90 else node.prompt[:87] + "…"
         info = label(f"Clip #{T.short_id(node.id)}: “{text}”\nEach variant is a new branch from the same point with "

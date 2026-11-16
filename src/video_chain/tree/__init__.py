@@ -40,7 +40,7 @@ A first clip normally starts from the project's start image. It can have a start
 prompt, seed and settings (a set, Node.row), which can then go its own way. The video size stays the project's
 (it follows start.png): every start picture is cut from its centre to that shape, as start.png is.
 
-Every generated clip has its own LoRA stack (Node.overrides["loras"]: [{"path", "strength"}], applied in order;
+Every generated clip has its own LoRA stack (Node.overrides["loras"]: [{"path", "strength", "off"?}], applied in order, "off" ones kept but not used;
 none by default) and can override the project's clip length and steps
 (Node.overrides); the video size and sound stay per project, so the clips of a path fit together.
 

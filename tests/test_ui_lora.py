@@ -453,3 +453,79 @@ def test_lora_presets_in_the_image_window(app, tmp_path, monkeypatch):
     assert dlg.delete_preset() and presets.store().list(str(b)) == []
     assert [dlg.preset.itemText(i) for i in range(1, dlg.preset.count())] == ["walk: Walk, cfg 7"]
     dlg.reject()
+
+def test_lora_on_off_switch_in_a_clip(app, win, tmp_path, image):
+    """Each LoRA row has an on/off box: a LoRA switched off stays in the clip's list with its strength, but the
+    clip is made without it (settings, trigger words, the summary); switched on again, the clip is as before."""
+    a, b = tmp_path / "a.safetensors", tmp_path / "b.safetensors"
+    write_lora(a, H3_KEYS)
+    write_lora(b, H3_KEYS)
+    ids = new_project(win, tmp_path, image, ("one",))
+    node = win.tree.nodes[ids[0]]
+    node.overrides = {"loras": [{"path": str(a), "strength": 0.7}, {"path": str(b), "strength": 0.4}]}
+    win.refresh(rebuild_path=True)
+    before = T.Checker(win.project, win.tree).settings(ids[0])
+    stack = win.cards[0].loras
+    assert [w.on_box.isChecked() for w, _b, _s in stack.rows] == [True, True]
+    stack.rows[1][0].on_box.click()                                 # b off
+    assert node.overrides["loras"] == [{"path": str(a), "strength": 0.7},
+                                       {"path": str(b), "strength": 0.4, "off": True}]
+    assert T.node_loras(node) == [(str(a), 0.7)]
+    s = T.Checker(win.project, win.tree).settings(ids[0])
+    assert s["lora"] == str(a) and not s.get("extra_loras")
+    assert stack.rows[1][1].font().strikeOut() and stack.rows[1][2].isEnabled()   # (its strength stays editable)
+    win.refresh(rebuild_path=True)                                  # shown again as it was stored
+    stack = win.cards[0].loras
+    assert [w.on_box.isChecked() for w, _b, _s in stack.rows] == [True, False]
+    stack.rows[0][0].on_box.click()                                 # a off too: the clip is made without LoRAs
+    assert T.node_loras(node) == [] and T.Checker(win.project, win.tree).settings(ids[0])["lora"] is None
+    stack.rows[0][0].on_box.click()
+    stack.rows[1][0].on_box.click()                                 # both on again: the same clip as before
+    assert node.overrides["loras"] == [{"path": str(a), "strength": 0.7}, {"path": str(b), "strength": 0.4}]
+    assert T.Checker(win.project, win.tree).settings(ids[0]) == before
+
+
+def test_variants_leave_lora_that_is_off_alone(app, win, tmp_path, image):
+    """A strength sweep offers only the LoRAs that are on; the one that is off is kept in every variant as it is."""
+    from video_chain.ui.main_window import VariantsDialog
+    a, b = tmp_path / "a.safetensors", tmp_path / "b.safetensors"
+    a.write_bytes(b"x")
+    b.write_bytes(b"y")
+    ids = new_project(win, tmp_path, image, ("one",))
+    node = win.tree.nodes[ids[0]]
+    node.overrides = {"loras": [{"path": str(a), "strength": 0.5, "off": True}, {"path": str(b), "strength": 1.0}]}
+    dlg = VariantsDialog(win, node)
+    assert len(dlg.steps) == 1
+    dlg.done(0)
+    new = win.create_variants(ids[0], 2, generate=False, strength_steps=[0.25], keep_seed=True)
+    got = [win.tree.nodes[n].overrides["loras"] for n in new]
+    assert got == [[{"path": str(a), "strength": 0.5, "off": True}, {"path": str(b), "strength": 1.25}],
+                   [{"path": str(a), "strength": 0.5, "off": True}, {"path": str(b), "strength": 1.5}]]
+
+
+def test_lora_on_off_switch_in_the_image_window(app, tmp_path):
+    """The image window: a LoRA that is off is not used (runs, trigger words) but is remembered with its switch."""
+    from PySide6.QtCore import QSettings
+
+    from video_chain.ui.image_edit import ImageEditDialog, ImageEditServices
+    a, b = tmp_path / "a.safetensors", tmp_path / "b.safetensors"
+    a.write_bytes(b"x")
+    b.write_bytes(b"y")
+    q = QSettings(str(tmp_path / "onoff.ini"), QSettings.IniFormat)
+    services = ImageEditServices(connect=lambda p: None, on_use=lambda k, p: False, settings=q,
+                                 known_loras=[(str(a), "a"), (str(b), "b")], connect_create=lambda p: None)
+    dlg = ImageEditDialog(None, tmp_path, [], None, None, services=services)
+    dlg.set_mode("edit")
+    dlg.add_lora_file(str(a), 0.6)
+    dlg.add_lora_file(str(b), 0.9)
+    dlg.loras.rows[0][0].on_box.click()                             # a off
+    assert dlg._lora_runs() == [[(str(b), 0.9)]]
+    dlg.lora_each.setChecked(True)
+    assert dlg._lora_runs() == [[(str(b), 0.9)]]                    # one image per LoRA: only those that are on
+    assert dlg.loras.active_items() == [{"path": str(b), "strength": 0.9}]
+    dlg.reject()
+    dlg = ImageEditDialog(None, tmp_path, [], None, None, services=services)
+    dlg.set_mode("edit")
+    assert dlg.loras.items() == [{"path": str(a), "strength": 0.6, "off": True}, {"path": str(b), "strength": 0.9}]
+    assert not dlg.loras.rows[0][0].on_box.isChecked()
+    dlg.reject()
