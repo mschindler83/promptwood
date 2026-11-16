@@ -195,7 +195,7 @@ class MainWindow(BuildMixin, GeneratorMixin, ComfyMixin, ExportMixin, VideosMixi
     # what a frozen clip / video cannot do: it would change the clip as made (or what it ends at)
     FROZEN_LOCKED = {"end_image", "end_video", "end_ai", "end_clear", "revert", "refine", "speak", "handover",
                      "handover_clear", "edit", "split", "swap", "swap_undo", "video", "keyframe", "start_own",
-                     "start_own_clear"}
+                     "start_own_clear", "start_cut"}
     @property
     def _comfy_model(self) -> ComfyModel | None:
         """The model ComfyUI holds for this app (comfy.model; the old name stays for callers and tests)."""
@@ -210,7 +210,9 @@ class MainWindow(BuildMixin, GeneratorMixin, ComfyMixin, ExportMixin, VideosMixi
     _shared_sent = None                         # the shared settings last written into the film's other scenes
     _copy_scene, _copy_scene_id = ".", None     # Save as: the scene to open in the copy
     _tracks_shown = None                        # what the audio tracks list shows (a signature)
-    _canvas = None                              # the clips' size as _update_size_info last worked it out
+    _canvas: tuple[int, int] | None = None      # the clips' size as _update_size_info last worked it out
+    _start_img: QImage | None = None            # the start image as the tile shows it (decoded once per change)
+    _tile_cut = None                            # (canvas, cut) the tile shows the start image's cut for
     _llama = None                               # the llama.cpp server of this window
     _llm_on_saved = False                       # a "llmServerOn" setting was saved
     _runpod_loading = False                     # the settings are being loaded (the RunPod fields change unsaved)

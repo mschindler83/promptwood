@@ -12,12 +12,15 @@ from .graph import START
 from .ui_logic import as_dict
 from .image_edit import EDITS_DIR, project_edits, uses_of
 from .mw_host import MainWindowHost
+from . import start_crop as SC
+from .start_crop import StartCropDialog
 
 log = logging.getLogger(__name__)
 
 
 class StateMixin(MainWindowHost):
     """The tree's state: saving, change marks, the start image."""
+    _cut_dialog: StartCropDialog | None = None  # a start's cut check (made, not run, without modal dialogs)
 
     def _uses(self, meta: IE.ResultRecord) -> list[str]:
         """Where an image-edit result is used (the AI image window asks for every result of a reload): the index of
@@ -242,7 +245,7 @@ class StateMixin(MainWindowHost):
             assert self.tree is not None
             base = T.Checker(self.project, self.tree).base()
             size = T.video_size(self.tree.options, *chain.image_size(Path(path)))
-            if base is not None and size != (base["width"], base["height"]):
+            if base is not None and size != (base["width"], base["height"]) and not T.shape_of(self.tree.options):
                 made = [i for i, st in self.status_of.items() if st == "done"]
         except Exception:  # noqa: BLE001  (the clips stay as they are; the question is asked without this check)
             log.warning("the new start image's video size could not be compared", exc_info=True)
@@ -300,8 +303,9 @@ class StateMixin(MainWindowHost):
     def _show_start_image(self):
         self._update_ref_start_button()
         start = self.project / T.START_FILE if self.project else None
-        if start and start.is_file():
-            self.start_tile.set_image(QImage(str(start)))
+        self._start_img = QImage(str(start)) if start and start.is_file() else None
+        self._tile_cut = None
+        if self._start_img is not None:
             assert self.tree is not None
             self.start_tile.setToolTip(self.tree.image or str(start))
         else:
@@ -309,48 +313,143 @@ class StateMixin(MainWindowHost):
         self.b_start_clear.setEnabled(bool(start and start.is_file()) and not self.running)
         self._update_size_info()
 
+    def _show_tile_cut(self):
+        """The start tile: the start image, with the part the clips cut away shaded (when they cut)."""
+        img = self._start_img
+        if img is None or img.isNull() or self.tree is None or self.project is None:
+            return
+        crop = T.get_crop(self.tree, self.project, self.project / T.START_FILE)
+        key = (self._canvas, None if crop is None else (crop["cx"], crop["cy"], crop["zoom"]))
+        if key == self._tile_cut:
+            return
+        self._tile_cut = key
+        self.start_tile.set_image(SC.cut_image(img, *self._canvas, crop) if self._canvas else img)
+
     def _update_size_info(self):
+        """The line under the start image: the clips' size and shape and what decides it; whether (and how) the
+        start image is cut to it. Reads the start image's size from its header (no decoding per option change)."""
         self._canvas = None                            # (set again below when the size is known)
-        start = self.project / T.START_FILE if self.project else None
-        if not start or not start.is_file():
+        self.b_cut.setVisible(False)
+        if self.project is None or self.tree is None:
+            self.size_info.setText("")
+            return
+        start = self.project / T.START_FILE
+        pic = None
+        if start.is_file():
+            reader = QImageReader(str(start))
+            size = reader.size() if reader.canRead() else None
+            pic = (size.width(), size.height()) if size is not None else (0, 0)
+            if pic[0] < 1 or pic[1] < 1:
+                self.size_info.setText(f"The start image ({T.START_FILE}) cannot be read: choose it again.")
+                return
+        shape = self.shape.currentData()
+        origin = "shape" if shape else "image" if pic else T.size_origin(self.project, self.tree)
+        if origin == "shape":
+            a = T.ASPECTS[shape]
+            dims: tuple[int, int] | None = (a[0] * 120, a[1] * 120)
+            why = "the Shape chosen for this project"
+        elif origin == "image" and pic is not None:
+            dims, why = pic, f"like the start image ({pic[0]}×{pic[1]})"
+        else:
             dims = None
             try:
-                dims = T.size_source(self.project, self.tree) if self.project else None
-            except Exception:  # noqa: BLE001  (no size known: the aspect ratio decides)
+                dims = T.size_source(self.project, self.tree)
+            except Exception:  # noqa: BLE001  (no size known)
                 log.warning("the size of the project's source could not be read", exc_info=True)
-            origin = T.size_origin(self.project, self.tree) if self.project else "aspect"
-            self.aspect.setEnabled(origin == "aspect" and not self.running)
-            if dims and origin == "aspect":
-                vw, vh = self._chosen_size(*dims)
-                self._canvas = (vw, vh)
-                self.size_info.setText(f"No start image: {self.aspect.currentData()} → {vw}×{vh} (Aspect); the first "
-                                       "clip starts from its prompt (and the cast's face pictures)."
-                                       + self._veda_note(vw, vh))
-            elif dims:
-                vw, vh = self._chosen_size(*dims)
-                self._canvas = (vw, vh)
-                self.size_info.setText(f"No start image: the size follows the first video ({dims[0]}×{dims[1]} → "
-                                       f"{vw}×{vh}); a first generated clip starts without a start frame."
-                                       + self._veda_note(vw, vh))
-            else:
+            if dims is None:
                 self.size_info.setText("Choose a start image, or begin with a real video (Clips → camera button).")
-            return
-        self.aspect.setEnabled(False)                  # (the start image's format applies)
-        reader = QImageReader(str(start))              # (its size from the header: no full decode per option change)
-        size = reader.size() if reader.canRead() else None
-        w, h = (size.width(), size.height()) if size is not None else (0, 0)
-        if w < 1 or h < 1:
-            self.size_info.setText(f"The start image ({T.START_FILE}) cannot be read: choose it again.")
-            return
-        vw, vh = self._chosen_size(w, h)
-        r = (w / h) / (vw / vh)
-        note = ("" if 0.97 < r < 1.03 else " (exact size with another ratio: the start image is stretched to fit)"
-                if self.exact_size.isChecked() else " (ratio outside 2:5 … 5:2: its edges are cut off to fit)")
-        if w < vw or h < vh:
-            note += f" · smaller than the video: the first frame starts soft (best: at least {vw}×{vh})"
-        name = Path(self.tree.image).name if self.tree and self.tree.image else T.START_FILE
+                return
+            why = (f"like the first video ({dims[0]}×{dims[1]})" if origin == "video" else
+                   f"no start image or video yet, so {self.tree.options.get('aspect') or '16:9'} (choose a Shape "
+                   "to change it)")
+        assert dims is not None
+        vw, vh = self._chosen_size(*dims)
+        if self.exact_size.isChecked():
+            why = "the exact size (Shape and Size do not count)"
         self._canvas = (vw, vh)
-        self.size_info.setText(f"{name}: {w}×{h} → {vw}×{vh} video{note}" + self._veda_note(vw, vh))
+        text = f"Clips: {vw}×{vh} ({SC.shape_text(vw, vh)}), {why}."
+        if pic:
+            w, h = pic
+            if T.mismatched(w, h, vw, vh):
+                crop = T.get_crop(self.tree, self.project, start)
+                where = "at the centre" if T.is_centre(crop) else "where you set it"
+                text += (f" The start image ({w}×{h}, {SC.shape_text(w, h)}) is cut to {SC.shape_text(vw, vh)} "
+                         f"{where}: the frame on it shows the part used (Edit cut…).")
+                self.b_cut.setVisible(True)
+            if w < vw or h < vh:
+                text += f" · smaller than the video: the first frame starts soft (best: at least {vw}×{vh})"
+        elif origin == "video":
+            text += " A first generated clip starts without a start frame."
+        else:
+            text += " The first clip starts from its prompt (and the cast's face pictures)."
+        self.size_info.setText(text + self._veda_note(vw, vh))
+        self._show_tile_cut()
+
+    def _cut_canvas(self) -> tuple[int, int] | None:
+        """The clips' size (as the project says now)."""
+        if self.project is None or self.tree is None:
+            return None
+        base = T.Checker(self.project, self.tree).base()
+        return (base["width"], base["height"]) if base else None
+
+    def edit_start_cut(self, nid: str | None = None) -> StartCropDialog | bool | None:
+        """Choose the part of a start image the clips use: the project's start image, or (nid) a first clip's own
+        start image. True: a cut was stored; False: cancelled / nothing to cut. Without modal dialogs the window
+        is made and handed back (not run)."""
+        if self.project is None or self.tree is None or self.running:
+            return False
+        node = self.tree.nodes.get(nid) if nid else None
+        pic = T.start_source(self.project, node) if node is not None else self.project / T.START_FILE
+        canvas = self._cut_canvas()
+        if pic is None or not pic.is_file() or canvas is None:
+            self.status.setText("There is no start image to cut.")
+            return False
+        if node is not None and node.frozen:
+            self.status.setText(f"Clip #{T.short_id(node.id)} is frozen: unfreeze it to change its start image.")
+            return False
+        dlg = StartCropDialog(self, pic, *canvas, T.get_crop(self.tree, self.project, pic),
+                              title="The start image's cut" + (f": clip #{T.short_id(nid)}" if nid else ""),
+                              settings=self.qs)
+        dlg.accepted.connect(lambda: self._cut_chosen(pic, canvas, dlg.crop()))
+        if not self.modal_dialogs:
+            return dlg
+        return dlg.exec() == StartCropDialog.DialogCode.Accepted
+
+    def _cut_chosen(self, pic: Path, canvas: tuple[int, int], crop: dict, write: bool = True):
+        assert self.tree is not None and self.project is not None
+        before = self._done_clips()
+        T.set_crop(self.tree, self.project, pic, crop["cx"], crop["cy"], crop["zoom"], seen=T.shape_key(*canvas))
+        if not write:
+            return
+        self._pix.clear()
+        self._write_tree()
+        self._update_size_info()
+        self.refresh()
+        if not self._report_remade(before, "New cut of the start image"):
+            self._say("Cut of the start image kept.")
+
+    def confirm_start_cuts(self, pending: list[tuple[str, Path]]) -> bool:
+        """Before a start: each start image of another shape than the clips whose cut was not looked at for
+        this shape is shown, to keep or move its cut. False: the user did not want to start."""
+        canvas = self._cut_canvas()
+        if canvas is None or self.tree is None or self.project is None:
+            return True
+        for k, (nid, pic) in enumerate(pending, 1):
+            note = (f"Start image {k} of {len(pending)}: " if len(pending) > 1 else "") + \
+                   (f"clip #{T.short_id(nid)} starts from it." if pic.name != T.START_FILE else
+                    "the project's start image.")
+            dlg = StartCropDialog(self, pic, *canvas, T.get_crop(self.tree, self.project, pic),
+                                  title="Check the cut before the clips are made", note=note,
+                                  cancel_text="Don't start", settings=self.qs)
+            if not self.modal_dialogs:
+                self._cut_dialog = dlg                 # (tests: made, not run; the start waits)
+                return False
+            if dlg.exec() != StartCropDialog.DialogCode.Accepted:
+                return False
+            self._cut_chosen(pic, canvas, dlg.crop(), write=False)
+        self._pix.clear()
+        self._update_size_info()
+        return True
 
     def _veda_note(self, vw: int, vh: int) -> str:
         """Where Veda is used at this size (for the size line)."""

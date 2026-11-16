@@ -117,7 +117,9 @@ class Options(TypedDict, total=False):
     audio: bool
     keep_repeated: bool
     seed: int
-    aspect: str
+    aspect: str                         # the shape of a project without a start picture or video (shape unset)
+    shape: str                          # the clips' shape (a sources.ASPECTS key); unset: the start image's / video's
+    crops: dict[str, dict[str, Any]]    # the cut of each start picture of another shape (crops.py)
     size: list[int]                     # [width, height]: the clips' exact size (chain.exact_size); none: worked out
     turbo: dict[str, Any]
     hyperflow: dict[str, Any]

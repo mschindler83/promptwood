@@ -71,7 +71,7 @@ class OptionsMixin(MainWindowHost):
                 self.exact_width.setValue(exact[0])
                 self.exact_height.setValue(exact[1])
             self._exact_widgets()
-            self.aspect.setCurrentIndex(max(0, self.aspect.findData(o.get("aspect", d["aspect"]))))
+            self.shape.setCurrentIndex(max(0, self.shape.findData(self._shape_shown(o))))
             self.steps.setValue(int(o.get("steps", d["steps"])))
             self.audio.setChecked(bool(o.get("audio", d["audio"])))
             ident = o.get("identity") or {}
@@ -166,6 +166,16 @@ class OptionsMixin(MainWindowHost):
         self.exact_height.setEnabled(on and idle)
         self.resolution.setEnabled(idle and not on)
 
+    def _shape_shown(self, o) -> str | None:
+        """The Shape box for these options: the shape chosen; a project of an older version without a start image or
+        video showed its Aspect setting, which gave its shape: that one (stored as the shape with the next change)."""
+        if "shape" in o or self.project is None:
+            return T.shape_of(o)
+        if T.size_origin(self.project, self.tree) == "aspect":
+            a = o.get("aspect")
+            return a if a in T.ASPECTS else None
+        return None
+
     def _chosen_size(self, width: int, height: int) -> tuple[int, int]:
         """The clips' size for a source of this size, as the widgets say now."""
         return chain.video_size(width, height, self.resolution.currentData(),
@@ -203,7 +213,6 @@ class OptionsMixin(MainWindowHost):
         self._exact_widgets()
         self.tree.options.update({
             "frames": self.frames.currentData(), "resolution": self.resolution.currentData(),
-            "aspect": self.aspect.currentData(),
             "steps": self.steps.value(), "audio": self.audio.isChecked(), "keep_repeated": self.keep_rep.isChecked(),
             "turbo": {**(self.tree.options.get("turbo") or {}),
                       "lora": self.turbo_lora.currentData(),
@@ -211,6 +220,10 @@ class OptionsMixin(MainWindowHost):
             "veda": {"on": self.veda.isChecked()}, "two_pass": {"on": self.two_pass.isChecked()},
             "checkpoint": {"name": self.h3_model.currentData() or "",
                            "distilled": bool(self.h3_model.currentData()) and self.h3_distilled.isChecked()}})
+        if self.shape.currentData():
+            self.tree.options["shape"] = self.shape.currentData()
+        else:
+            self.tree.options.pop("shape", None)
         T.set_speed_mode(self.tree.options, mode)
         if mode == "normal":                        # the CFG belongs to the speed mode it was set for
             as_dict(self.tree.options)["cfg"] = cfg          # (not in the Options schema: tree/ should list it)

@@ -95,7 +95,7 @@ class NodeMixin(MainWindowHost):
         else:
             self.freeze_clip(node.id)
 
-    @_node_action("start_rows", "row_apply", "start_own", "start_own_clear")
+    @_node_action("start_rows", "row_apply", "start_own", "start_own_clear", "start_cut")
     def _act_start_images(self, action: str, node: T.Node | None, nid: str | None):
         assert node is not None
         if node.is_video or node.parent is not None:
@@ -104,6 +104,8 @@ class NodeMixin(MainWindowHost):
             self.add_start_rows(node.id)
         elif action == "row_apply":
             self.apply_to_row(node.id)
+        elif action == "start_cut":
+            self.edit_start_cut(node.id)
         else:
             self.set_row_start(node.id, clear=action == "start_own_clear")
 
@@ -554,6 +556,7 @@ class NodeMixin(MainWindowHost):
             if own not in self.tree.nodes:
                 return
             add("Another picture for this row…", "start_own")
+            add("Cut of this picture… (the part the clip uses)", "start_cut")
             add("Start from the project's start image instead", "start_own_clear")
             add("More start images… (the same clip for each)", "start_rows")
             extra: dict = {}
@@ -595,6 +598,8 @@ class NodeMixin(MainWindowHost):
                 if len(T.row_members(self.tree, nid)) > 1:
                     add("Give this prompt and settings to its other start images", "row_apply")
                 add("Its own start image…", "start_own")
+                if self.project is not None and T.start_source(self.project, node) is not None:
+                    add("Cut of its start image… (the part the clip uses)", "start_cut")
                 if node.start_image:
                     add("Start from the project's start image instead", "start_own_clear")
             add("End image…" if vc is None else f"End image… (ends at video #{T.short_id(vc.id)})", "end_image",

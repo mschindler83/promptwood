@@ -46,7 +46,7 @@ def _check_widgets(w):
     assert w.frames.currentData() == 90
     assert w.steps.value() == 30
     assert w.resolution.currentData() == 768
-    assert w.aspect.currentData() == "9:16"
+    assert w.shape.currentData() is None                     # (no shape of its own: like the start image)
     assert not w.audio.isChecked()
     assert w.keep_rep.isChecked()
     assert not w.lora_triggers.isChecked()

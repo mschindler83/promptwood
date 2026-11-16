@@ -44,9 +44,17 @@ ASPECTS = {"16:9": (16, 9), "9:16": (9, 16), "1:1": (1, 1), "4:5": (4, 5), "5:4"
            "2:3": (2, 3), "21:9": (21, 9)}
 
 
+def shape_of(options) -> str | None:
+    """The clips' shape the user chose (an ASPECTS key); None: it follows the start image or the first video."""
+    s = (options or {}).get("shape")
+    return s if isinstance(s, str) and s in ASPECTS else None
+
+
 def size_origin(project: Path, tree: Tree | None) -> str:
-    """What the video size follows: 'image' (the start image), 'video' (the first video) or 'aspect' (the project's
-    aspect setting: a project without either)."""
+    """What the video size follows: 'shape' (the shape chosen for the project), 'image' (the start image), 'video'
+    (the first video) or 'aspect' (the project's aspect setting: a project without either)."""
+    if tree is not None and shape_of(tree.options):
+        return "shape"
     if (Path(project) / START_FILE).is_file():
         return "image"
     if tree is not None and any(n.is_video for n in tree.nodes.values()):
@@ -61,9 +69,13 @@ def video_size(options, width: int, height: int) -> tuple[int, int]:
 
 
 def size_source(project: Path, tree: Tree | None) -> tuple[int, int] | None:
-    """The picture whose aspect ratio the video size follows: the start image, else the first video of the tree
+    """The picture whose aspect ratio the video size follows: the shape chosen for the project (shape_of), else the
+    start image, else the first video of the tree
     (by number), else the project's aspect setting (ASPECTS; a first clip then starts from its text). None only
     without a tree and a start image."""
+    if tree is not None and shape_of(tree.options):
+        a = ASPECTS[shape_of(tree.options) or "16:9"]
+        return a[0] * 120, a[1] * 120
     start = Path(project) / START_FILE
     try:
         st = start.stat()

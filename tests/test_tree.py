@@ -2229,3 +2229,60 @@ def test_two_passes_for_every_clip(project):
     T.save(project, t)
     assert "two_pass" not in T.Checker(project, t).settings(b1.id)
     assert statuses(project) == {"a": "done", "b1": "done", "c": "done", "b2": "new"}
+
+
+def test_shape_wins_over_the_start_image(project):
+    """A shape chosen for the project gives the clips' size, also with a start image of another shape (then cut);
+    unset, the start image's shape is used as before."""
+    t = T.load(project)                                                   # start image 96x54 (16:9)
+    base = T.Checker(project, t).base()
+    assert base["width"] > base["height"] and T.size_origin(project, t) == "image"
+    t.options["shape"] = "9:16"
+    assert T.size_origin(project, t) == "shape"
+    base = T.Checker(project, t).base()
+    assert base["width"] < base["height"] and abs(base["width"] / base["height"] - 9 / 16) < 0.05
+    t.options["shape"] = "nonsense"                                       # (a damaged value: as unset)
+    assert T.shape_of(t.options) is None and T.size_origin(project, t) == "image"
+
+
+def test_crop_box_and_values():
+    assert T.crop_box(1920, 1080, 768, 1344) == (651, 0, 617, 1080)       # centre, the largest 9:16 cut
+    assert T.crop_box(1920, 1080, 768, 1344, [0.0, 0.5, 1.0])[0] == 0      # kept inside the picture
+    assert T.crop_box(1920, 1080, 768, 1344, [1.0, 0.5, 1.0])[0] == 1920 - 617
+    x, y, w, h = T.crop_box(1920, 1080, 768, 1344, {"cx": 0.5, "cy": 0.5, "zoom": 0.5})
+    assert (w, h) == (309, 540) and (x, y) == (806, 270)
+    assert T.crop_value({"cx": 0.5, "cy": 0.5, "zoom": 1.0, "seen": "0.56"}) is None   # the centre: not recorded
+    assert T.crop_value({"cx": 0.25, "cy": 0.5, "zoom": 1.0}) == [0.25, 0.5, 1.0]
+    assert T.mismatched(1920, 1080, 768, 1344) and not T.mismatched(1920, 1080, 1344, 768)
+
+
+def test_a_start_picture_cut_is_recorded_and_used(project, tmp_path):
+    """A moved cut makes the clip changed and is used when the start picture is prepared; the centre cut is not
+    recorded (clips made before stay done); a new start image starts at the centre again."""
+    t, a, b1, b2, c = build(project)
+    t.options["shape"] = "9:16"
+    T.save(project, t)
+    run(project, [a.id])
+    assert statuses(project)["a"] == "done"
+    t = T.load(project)
+    base = T.Checker(project, t).base()
+    todo = T.starts_to_confirm(project, t, [n.id for n in t.nodes.values()], base["width"], base["height"])
+    assert [(nid, pic.name) for nid, pic in todo] == [(a.id, T.START_FILE)]   # 16:9 picture, 9:16 clips: shown
+    T.set_crop(t, project, project / T.START_FILE, 0.5, 0.5, 1.0, seen=T.shape_key(base["width"], base["height"]))
+    T.save(project, t)
+    t = T.load(project)
+    assert statuses(project)["a"] == "done"                               # looked at, the centre kept: unchanged
+    assert T.starts_to_confirm(project, t, [a.id], base["width"], base["height"]) == []
+    T.set_crop(t, project, project / T.START_FILE, 0.0, 0.5, 1.0, seen=T.shape_key(base["width"], base["height"]))
+    T.save(project, t)
+    assert statuses(project)["a"] == "changed"
+    s = T.Checker(project, T.load(project)).settings(a.id)
+    assert s["start_crop"] == [0.0, 0.5, 1.0]
+    out = T.prepared_start(project, base["width"], base["height"], crop=s["start_crop"])
+    rec = json.loads(out.with_suffix(".json").read_text())
+    assert rec["crop"] == [0.0, 0.5, 1.0]
+    t = T.load(project)
+    img = tmp_path / "next.png"
+    Image.new("RGB", (96, 54), (10, 10, 10)).save(img)
+    T.set_start_image(project, img, t)                                    # another picture: its own cut
+    assert T.get_crop(t, project, project / T.START_FILE) is None

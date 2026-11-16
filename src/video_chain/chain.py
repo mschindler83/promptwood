@@ -215,13 +215,17 @@ START_BACKGROUND = "0x808080"   # what transparent parts of a start image become
 TO_PNG_TIMEOUT = 120               # seconds a picture conversion may take (a hung ffmpeg must not block a worker for ever)
 
 
-def prepare_image(src: Path, dst: Path, width: int, height: int) -> None:
-    """A start image exactly as H3 takes it best: cut from the centre to the canvas's exact aspect ratio (H3 would
-    stretch it), scaled once with Lanczos in RGB to width x height, transparent parts on neutral grey. The image's
-    own EXIF rotation is applied by ffmpeg when it reads it. Written under a temporary name first."""
+def prepare_image(src: Path, dst: Path, width: int, height: int,
+                  box: tuple[int, int, int, int] | None = None) -> None:
+    """A start image exactly as H3 takes it best: cut to the canvas's exact aspect ratio (H3 would stretch it), from
+    the centre or at box (x, y, w, h in its pixels: tree.crops.crop_box), scaled once with Lanczos in RGB to
+    width x height, transparent parts on neutral grey. The image's own EXIF rotation is applied by ffmpeg when it
+    reads it. Written under a temporary name first."""
     dst = Path(dst)
     r = int(width) / int(height)
-    graph = (f"[0:v]crop=w='min(iw,ih*{r:.8f})':h='min(ih,iw/{r:.8f})',"
+    cut = (f"crop={int(box[2])}:{int(box[3])}:{int(box[0])}:{int(box[1])}" if box is not None else
+           f"crop=w='min(iw,ih*{r:.8f})':h='min(ih,iw/{r:.8f})'")
+    graph = (f"[0:v]{cut},"
              f"scale={int(width)}:{int(height)}:flags=lanczos+accurate_rnd+full_chroma_int,format=rgba[fg];"
              f"color=c={START_BACKGROUND}:s={int(width)}x{int(height)}:d=1,format=rgba[bg];"
              f"[bg][fg]overlay=shortest=1,format=rgb24")

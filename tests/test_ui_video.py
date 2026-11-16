@@ -26,7 +26,7 @@ def test_video_first_then_generated_clip(app, win, tmp_path):
     wait(app, lambda: not win._converts)
     assert win.state(v) == "done" and win.tree.nodes[v].made["frames"] == 36
     assert isinstance(win.cards[0], VideoCard) and "real.mp4" in win.cards[0].file.text()
-    assert "follows the first video" in win.size_info.text()
+    assert "like the first video" in win.size_info.text()
     assert win.graph.items_by_id[v].info.kind == "video"
     # no start image: the reference button takes the selected video's first frame
     assert not win.b_ref_start.isEnabled() and "no start image" in win.b_ref_start.toolTip()

@@ -361,7 +361,7 @@ def test_simple_view_hides_the_expert_controls_also_on_rebuilt_cards(app, win, t
     for f in (win.steps, win.speed, win._cfg_row, win.veda, win.prompt_format, win.style_prefix, win.lora_triggers):
         assert _row_hidden(c, f), f
     assert win.tabs.isTabVisible(win.tabs.indexOf(win.log)) and win.ref_hint.isHidden()   # (the log stays: UX-31)
-    for f in (win.frames, win.resolution, win.aspect, win.audio):        # kept
+    for f in (win.frames, win.resolution, win.shape, win.audio):        # kept
         assert not f.isHidden() and not (c.labelForField(f) and c.labelForField(f).isHidden())
     for w in (win.b_gen, win.b_stop, win.b_play_path, win.b_export, win.start_tile, win.cast_list, win.comfy_label):
         assert not w.isHidden()

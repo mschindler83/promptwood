@@ -254,7 +254,17 @@ from .starts import (  # noqa: F401
     apply_to_row,
     prepared_start,
     clear_start_image,
-    set_start_image)
+    set_start_image,
+    picture_shape,
+    starts_to_confirm)
+from .crops import (  # noqa: F401
+    crop_box,
+    crop_value,
+    get_crop,
+    set_crop,
+    is_centre,
+    mismatched,
+    shape_key)
 from .sources import (  # noqa: F401
     video_source,
     source_rotation,
@@ -262,6 +272,7 @@ from .sources import (  # noqa: F401
     _IMG_SIZE,
     source_info,
     ASPECTS,
+    shape_of,
     size_origin,
     size_source, video_size)
 from .audio_tracks import (  # noqa: F401

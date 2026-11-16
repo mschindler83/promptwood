@@ -153,6 +153,26 @@ class BuildMixin(MainWindowHost):
         sv.setContentsMargins(10, 8, 10, 8)
         self.start_tile = StartTile(320, 180)
         sv.addWidget(self.start_tile, 0, Qt.AlignmentFlag.AlignHCenter)
+        shrow = QHBoxLayout()
+        shrow.setContentsMargins(0, 0, 0, 0)
+        self.shape = QComboBox()
+        self.shape.setAccessibleName("Shape")
+        self.shape.addItem("Like the start image", None)
+        for key in T.ASPECTS:
+            a, b = T.ASPECTS[key]
+            self.shape.addItem(f"{key} " + ("landscape" if a > b else "portrait" if a < b else "square"), key)
+        self.shape.setToolTip("The shape of every clip of this project. 'Like the start image': the start image's "
+                              "shape (without one: the first real video's). A shape chosen here is used also when "
+                              "the start image has another shape: the picture is then cut to it, and you see and set "
+                              "the cut (Edit cut…). The line below says what the clips will be")
+        self.b_cut = QPushButton("Edit cut…")
+        self.b_cut.setToolTip("The start image has another shape than the clips: choose which part of it is used")
+        self.b_cut.clicked.connect(lambda: self.edit_start_cut())
+        self.b_cut.setVisible(False)
+        shrow.addWidget(label_for("Shape", self.shape, level="secondary"))
+        shrow.addWidget(self.shape, 1)
+        shrow.addWidget(self.b_cut)
+        sv.addLayout(shrow)
         self.size_info = label("", level="tertiary")
         self.size_info.setWordWrap(True)
         sv.addWidget(self.size_info)
@@ -170,7 +190,7 @@ class BuildMixin(MainWindowHost):
         airow.addWidget(self.b_ai_create)
         airow.addStretch(1)
         self.b_start_clear = icon_button("trash", "Remove the start image: the first clip then starts from its "
-                                                  "prompt (the size follows the Aspect setting or a real video)")
+                                                  "prompt (the size follows the Shape setting or a real video)")
         self.b_start_clear.clicked.connect(lambda: self.clear_image(confirm=True))
         airow.addWidget(self.b_start_clear)
         sv.addLayout(airow)
@@ -477,7 +497,7 @@ class BuildMixin(MainWindowHost):
         self.exact_size.setToolTip(
             "Make the clips at exactly this width × height instead of the size worked out from Size and the start "
             "image's ratio (to match a clip made elsewhere). Each side is a multiple of 32; a start image of "
-            "another ratio is stretched to fit")
+            "another ratio is cut to fit (Edit cut… under the start image)")
         self.exact_width, self.exact_height = QSpinBox(), QSpinBox()
         for spin, name in ((self.exact_width, "Exact width"), (self.exact_height, "Exact height")):
             spin.setRange(chain.SIZE_MIN, chain.SIZE_MAX)
@@ -493,14 +513,6 @@ class BuildMixin(MainWindowHost):
         erow.addWidget(label("×", level="tertiary"))
         erow.addWidget(self.exact_height, 1)
         c.addRow("Exact size", erow)
-        self.aspect = QComboBox()
-        for key in T.ASPECTS:
-            self.aspect.addItem(key, key)
-        self.aspect.setToolTip("The picture format of a project without a start image or real video: its first clip "
-                               "starts from the prompt alone (with the cast's face pictures as references when it "
-                               "mentions someone). With a start image or video, their format is used instead")
-        self.aspect.setCurrentIndex(max(0, self.aspect.findData(d["aspect"])))
-        c.addRow("Aspect", self.aspect)
         mrow = QHBoxLayout()
         mrow.setContentsMargins(0, 0, 0, 0)
         self.h3_model = QComboBox()
@@ -1166,7 +1178,7 @@ class BuildMixin(MainWindowHost):
             spin.valueChanged.connect(self._options_typing)
             spin.editingFinished.connect(self._exact_shown)     # (typed in full: the nearest size into the field)
         for sig in (self.frames.currentIndexChanged, self.resolution.currentIndexChanged, self.exact_size.toggled,
-                    self.aspect.currentIndexChanged, self.audio.toggled, self.keep_rep.toggled,
+                    self.shape.currentIndexChanged, self.audio.toggled, self.keep_rep.toggled,
                     self.speed.currentIndexChanged, self.veda.toggled, self.turbo_lora.currentIndexChanged,
                     self.h3_distilled.toggled, self.two_pass.toggled):
             sig.connect(self._options_changed)

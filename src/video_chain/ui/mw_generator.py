@@ -121,10 +121,13 @@ class GeneratorMixin(MainWindowHost):
         self._update_buttons()
 
     @staticmethod
-    def _preflight(project: Path, tree: T.Tree, targets: list[str], refine: Refine | None) -> tuple[list[str], list[str]]:
-        """What keeps these targets from being made: (the problems as short phrases, ids of clips without a prompt).
+    def _preflight(project: Path, tree: T.Tree, targets: list[str], refine: Refine | None
+                   ) -> tuple[list[str], list[str], list[tuple[str, Path]]]:
+        """What keeps these targets from being made: (the problems as short phrases, ids of clips without a prompt,
+        the start images of another shape whose cut is to be looked at first: T.starts_to_confirm).
         Reads files and hashes LoRAs, so it runs in a thread; nothing is changed (the window is locked meanwhile)."""
         problems = []
+        cuts: list[tuple[str, Path]] = []
         turbo = tree.options.get("turbo") or {}
         if T.speed_mode_used(tree.options) == "turbo":      # (not while a distilled checkpoint is chosen)
             if not turbo.get("lora"):
@@ -139,6 +142,9 @@ class GeneratorMixin(MainWindowHost):
                 problems.append("choose a start image (or begin with a real video)")
             else:
                 todo = T.plan(tree, checker, targets)
+                base = checker.base() or {}
+                if not refine and base.get("width") and base.get("height"):
+                    cuts = T.starts_to_confirm(project, tree, todo, base["width"], base["height"])
                 if refine and todo:
                     problems.append(f"generate the path first ({len(todo)} clip{'s are' if len(todo) != 1 else ' is'} "
                                     "new or changed)")
@@ -168,7 +174,7 @@ class GeneratorMixin(MainWindowHost):
                         break
         except Exception as e:  # noqa: BLE001
             problems.append(f"could not check the settings ({e})")
-        return problems, [n.id for n in empty]
+        return problems, [n.id for n in empty], cuts
 
     def _runpod_key_hint(self) -> str:
         """Where the RunPod key is set; in the Simple view that place is hidden, so the way there is named (UX-3)."""
@@ -177,7 +183,7 @@ class GeneratorMixin(MainWindowHost):
             where = "the Advanced view (View → Advanced view), then Settings → Preferences → Cloud upscaling"
         return f"To upscale on RunPod: save your RunPod API key ({where})."
 
-    def _checked(self, problems: list, empty: list):
+    def _checked(self, problems: list, empty: list, cuts: list | None = None):
         """Generate's pre-flight is done: report what is missing, or go on with the job."""
         if not self._checking or self.tree is None:
             return                                  # (stopped, closed or another project meanwhile)
@@ -189,6 +195,12 @@ class GeneratorMixin(MainWindowHost):
             self._cancel_check()
             if empty and len(targets) > 1:
                 self.select(empty[0])
+            return
+        if cuts and not self.confirm_start_cuts(cuts):
+            self.status.setText("Not started: the cut of a start image is to be checked first (it has another "
+                                "shape than the clips).")
+            self._film_queue = None
+            self._cancel_check()
             return
         nodes = {n.id: n for t in targets for n in self.tree.path_to(t)}
         cloud = bool(refine and refine.cloud)

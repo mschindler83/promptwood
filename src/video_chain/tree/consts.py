@@ -70,8 +70,8 @@ DEFAULT_FRAMES = 73                 # a clip's length when nothing else is set
 
 DEFAULT_OPTIONS: Options = {"model": "Comfy-Org/MiniMax-H3", "frames": DEFAULT_FRAMES, "steps": 28,
                    "resolution": 512, "audio": True, "keep_repeated": False, "seed": 42,
-                   # the aspect ratio of a project without a start image or video (its first clip starts from text)
-                   "aspect": "16:9",
+                   # (no "shape": the clips take the start image's / first video's; without either 16:9, or the
+                   # "aspect" an older version stored for such a project)
                    # turbo: a step-distilled LoRA + its sampler, few steps for every clip (ComfyUI only)
                    "turbo": {"on": False, "lora": None, "steps": 6, "strength": 1.0},
                    # HyperFlow: Video Rebirth's 8-step LoRA with its own sigma grid (ComfyUI-HyperFlow-H3 nodes)

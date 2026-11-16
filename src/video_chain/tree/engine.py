@@ -491,7 +491,8 @@ def _make_ai_clip(generator: chain.Generator, project: Path, tree: Tree, node: N
     if start is not None and node.parent is None:   # (the record keeps the picture's own hash)
         base = checker.base() or {}
         if base.get("width") and base.get("height"):
-            send = prepared_start(project, base["width"], base["height"], start)
+            send = prepared_start(project, base["width"], base["height"], start,
+                                  crop=(checker.settings(nid) or {}).get("start_crop"))
     emit({"e": "node", "id": nid, "state": "generating", "k": k, "n": total})
     # a new clip gets new file names: nothing is overwritten, a failed or stopped generation keeps the
     # previous clip and its record, and a still-open old file (SMB) does not stop anything

@@ -490,9 +490,10 @@ def pick_lora(parent, known, current=None, used=None, file_dir: str = "") -> str
 
 
 class _LoraRow(QWidget):
-    """One LoRA of the stack: its picker button, strength and remove button (the widgets are set by _add_row)."""
+    """One LoRA of the stack: its on/off box, picker button, strength and remove button (set by _add_row)."""
     trigger_label: QLabel
     remove_button: QToolButton
+    on_box: QCheckBox
 
 
 class LoraStack(QWidget):
@@ -712,7 +713,10 @@ class LoraStack(QWidget):
         spin.valueChanged.connect(lambda *_: self.changed.emit())
         rm.clicked.connect(lambda: self._remove(row))
         self._show_on(w, button)
-        box.toggled.connect(lambda *_: (self._show_on(w, button), self.changed.emit()))
+        def toggled(*_):
+            self._show_on(w, button)
+            self.changed.emit()
+        box.toggled.connect(toggled)
         for x in (box, button, spin, rm):
             x.setEnabled(self._enabled)
         guard_wheel(spin)

@@ -17,6 +17,7 @@ from .clip_dialogs import sampling_text
 from .clip_inputs import ModelPromptDialog
 from .graph import START, NodeInfo
 from .lora_stack import lora_label
+from . import start_crop as SC
 from .widgets import format_time
 from . import ui_logic as UL
 from .clip_cards import PromptCard
@@ -60,6 +61,18 @@ class InspectorMixin(MainWindowHost):
             self._pix[key] = QPixmap.fromImage(QImage(str(path)))
         return self._pix[key]
 
+    def _cut_pixmap(self, path: Path) -> QPixmap | None:
+        """A start picture with the part the clips cut away shaded (as _pixmap when nothing is cut)."""
+        pm = self._pixmap(path)
+        if pm is None or self._canvas is None or self.tree is None or self.project is None:
+            return pm
+        crop = T.get_crop(self.tree, self.project, path)
+        key = ("cut", str(path), self._canvas, None if crop is None else tuple(sorted(crop.items())))
+        if key not in self._pix:
+            cw, ch = self._canvas
+            self._pix[key] = QPixmap.fromImage(SC.cut_image(pm.toImage(), cw, ch, crop))
+        return self._pix[key]
+
     def _node_frame(self, n: T.Node) -> Path | None:
         """The frame shown for a node: where the clips after it start (its hand-over frame, else its last)."""
         if n.made and self.project:
@@ -98,7 +111,7 @@ class InspectorMixin(MainWindowHost):
         sel = self.selected_id()
         path = self.selected_path()
         on_path = {n.id for n in path}
-        start_pm = self._pixmap(self.project / T.START_FILE)
+        start_pm = self._cut_pixmap(self.project / T.START_FILE)
         infos = [NodeInfo(START, None, "Start", "", Path(self.tree.image).name if self.tree.image else "",
                           "start", start_pm, on_path=True, selected=sel == START)]
         tree = self.tree
@@ -114,7 +127,7 @@ class InspectorMixin(MainWindowHost):
                 parent = row_start(n.id)
                 infos.append(NodeInfo(parent, None, "Start", f"for #{T.short_id(n.id)}", "The start image of clip "
                                       f"#{T.short_id(n.id)} (its own, instead of the project's start image)", "start",
-                                      self._pixmap(self.project / n.start_image), on_path=n.id in on_path))
+                                      self._cut_pixmap(self.project / n.start_image), on_path=n.id in on_path))
             infos.append(NodeInfo(n.id, parent,
                                   f"{'Video' if n.is_video else 'Clip'} {self.tree.depth(n.id)}",
                                   f"#{T.short_id(n.id)}",

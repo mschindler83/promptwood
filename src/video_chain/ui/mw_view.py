@@ -111,15 +111,15 @@ class ViewMixin(MainWindowHost):
         self._update_guide()
 
     def _guide_text_only(self):
-        """Step 1 without a picture: the first clip is made from its description; its picture format is the Aspect
+        """Step 1 without a picture: the first clip is made from its description; its picture format is the Shape
         setting."""
         if self.project is None:
             return
         self._guide_mark("text_only")
         self.inspector.setCurrentWidget(self.proj_scroll)
-        QTimer.singleShot(0, lambda: self.proj_scroll.ensureWidgetVisible(self.aspect, 0, 40))
-        self.status.setText("Text only: the first clip is made from its description. Choose its Aspect "
-                            "(Project tab on the right).")
+        QTimer.singleShot(0, lambda: self.proj_scroll.ensureWidgetVisible(self.shape, 0, 40))
+        self.status.setText("Text only: the first clip is made from its description. Choose its Shape "
+                            "(under the start image, Project tab on the right).")
 
     def _guide_cast(self):
         """Step 2: Cast & references, with New in focus (it adds a person or a place)."""

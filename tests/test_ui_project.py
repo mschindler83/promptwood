@@ -307,14 +307,14 @@ def test_a_distilled_checkpoint_is_not_blocked_by_a_hidden_turbo_setting(app, wi
     ids = new_project(win, tmp_path, image, ("a",))
     T.set_speed_mode(win.tree.options, "turbo")
     win.tree.options["turbo"]["lora"] = None
-    problems, _empty = win._preflight(win.project, win.tree, ids, None)
+    problems, _empty, _cuts = win._preflight(win.project, win.tree, ids, None)
     assert any("turbo LoRA" in p for p in problems)
     assert any(p.kind == PK.TURBO for p in win.clip_problems(ids[0]))
     win.h3_checkpoints = ["tunes/my_h3_8step.safetensors"]
     win._options_to_widgets()
     win.h3_model.setCurrentIndex(1)
     assert win.tree.options["checkpoint"]["distilled"] and T.speed_mode(win.tree.options) == "turbo"
-    problems, _empty = win._preflight(win.project, win.tree, ids, None)
+    problems, _empty, _cuts = win._preflight(win.project, win.tree, ids, None)
     assert not any("turbo LoRA" in p for p in problems)
     assert not any(p.kind == PK.TURBO for p in win.clip_problems(ids[0]))
     assert not win.clip_cfg.isEnabled() and not win.speed.isEnabled()
@@ -391,22 +391,28 @@ def test_scene_duplicate_notes_and_film_cast(app, win, tmp_path, image, monkeypa
 
 
 def test_a_project_without_a_start_image(app, win, tmp_path, image):
-    """No start image nor video: the Aspect setting gives the size, the first clip starts from its text."""
+    """No start image nor video: 16:9 unless a Shape is chosen; the first clip starts from its text. A start image
+    then keeps the chosen shape (it is cut to it)."""
     win.open_project(tmp_path / "proj")
     nid = win.selected_id()
     type_prompt(win, nid, "a lighthouse at dusk")
     flush(app, win)
-    assert win.aspect.isEnabled() and win.aspect.currentData() == "16:9"
-    assert "16:9 → 672×384 (Aspect)" in win.size_info.text() and "starts from its prompt" in win.size_info.text()
-    win.aspect.setCurrentIndex(win.aspect.findData("9:16"))
-    assert win.tree.options["aspect"] == "9:16" and "9:16 → 384×672" in win.size_info.text()
+    assert win.shape.isEnabled() and win.shape.currentData() is None
+    assert "Clips: 672×384 (16:9), no start image or video yet" in win.size_info.text()
+    assert "starts from its prompt" in win.size_info.text()
+    win.shape.setCurrentIndex(win.shape.findData("9:16"))
+    assert win.tree.options["shape"] == "9:16"
+    assert "Clips: 384×672 (9:16), the Shape chosen for this project" in win.size_info.text()
     run_and_wait(app, win, win.generate_path)
     assert win.state(nid) == "done" and win.tree.nodes[nid].made["settings"]["width"] == 384
-    win.aspect.setCurrentIndex(win.aspect.findData("1:1"))                   # another format: made again
+    win.shape.setCurrentIndex(win.shape.findData("1:1"))                     # another format: made again
     flush(app, win)
     assert win.state(nid) == "changed"
-    win.set_image(str(image))                                                 # a start image: its format
-    assert not win.aspect.isEnabled() and "(Aspect)" not in win.size_info.text()
+    win.set_image(str(image))                                                 # a start image (16:9): cut to 1:1
+    assert win.shape.isEnabled() and "is cut to 1:1 at the centre" in win.size_info.text()
+    assert not win.b_cut.isHidden()
+    win.shape.setCurrentIndex(win.shape.findData(None))                       # like the start image: not cut
+    assert "like the start image (192×108)" in win.size_info.text() and win.b_cut.isHidden()
 
 
 def test_remove_the_start_image(app, win, tmp_path, image, monkeypatch):
@@ -423,7 +429,8 @@ def test_remove_the_start_image(app, win, tmp_path, image, monkeypatch):
     flush(app, win)
     assert not (win.project / T.START_FILE).is_file() and win.tree.image is None
     assert not list(win.project.glob("start_*x*.png")) and not win.b_start_clear.isEnabled()
-    assert win.aspect.isEnabled() and "(Aspect)" in win.size_info.text() and win.state(ids[0]) == "changed"
+    assert win.shape.isEnabled() and "no start image or video yet" in win.size_info.text()
+    assert win.state(ids[0]) == "changed"
     assert win.status.text().startswith("Start image removed")
 
 
@@ -560,9 +567,18 @@ def test_more_start_pictures_make_rows(app, win, tmp_path, image, monkeypatch):
     monkeypatch.setattr(IP, "pick_images", lambda *a, **k: picked.append((a, k)) or pics[:2])
     asked = []
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: asked.append(a[2]) or QMessageBox.Yes)
+    from PySide6.QtWidgets import QDialog
+    from video_chain.ui.start_crop import StartCropDialog
+    cuts = []                                                                # the cut check before the start
+    monkeypatch.setattr(StartCropDialog, "exec", lambda self: cuts.append(self) or QDialog.DialogCode.Accepted)
     win.node_action("start_rows", first)                                      # (asked "make them now?": yes)
     new = [n.id for n in T.row_members(win.tree, first) if n.id != first]
     assert len(new) == 2 and win.running
+    wait(app, lambda: not win._checking)                                     # (checked: started)
+    assert win.running
+    assert len(cuts) == 1 and cuts[0].view.image.size().toTuple() == (108, 192)   # only the portrait one is cut
+    pic0 = win.project / win.tree.nodes[new[0]].start_image
+    assert T.get_crop(win.tree, win.project, pic0)["seen"] == T.shape_key(*win._canvas)   # looked at: not again
     assert len(picked) == 1 and picked[0][1]["collections"] is not None       # (with the project's pictures)
     assert "2 start images added" in asked[0] and "cut from its centre" in asked[0] and "Make the 3 clips" in asked[0]
     nodes = [win.tree.nodes[n] for n in new]
@@ -681,7 +697,8 @@ def test_exact_video_size_in_the_project_settings(app, win, tmp_path, image):
     assert win.tree.options["size"] == [768, 1152] and win.exact_height.value() == 1152
     base = T.Checker(win.project, win.tree).base()
     assert (base["width"], base["height"]) == (768, 1152)
-    assert "768×1152" in win.size_info.text() and "stretched" in win.size_info.text()
+    assert "Clips: 768×1152 (2:3), the exact size" in win.size_info.text() and "is cut to 2:3" in win.size_info.text()
+    assert not win.shape.isEnabled() and not win.b_cut.isHidden()
     assert not win.resolution.isEnabled()
     folder = win.project
     win.open_project(folder)                                     # shown again when the project is opened

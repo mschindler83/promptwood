@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path
 
 from .. import chain
+from . import crops as C
 from .consts import STARTS_DIR, START_FILE
 from .guard import inside
 from .model import Node, Tree
@@ -52,6 +53,7 @@ def set_node_start(project: Path, tree: Tree, nid: str, image: Path) -> str:
     rel = f"{STARTS_DIR}/{nid}_{uuid.uuid4().hex[:8]}.png"
     chain.to_png(Path(image), Path(project) / rel)
     _drop_start_file(project, node.start_image)
+    C.drop_crop(tree, node.start_image)
     node.start_image = rel
     return rel
 
@@ -60,6 +62,7 @@ def clear_node_start(project: Path, tree: Tree, nid: str) -> None:
     """A first clip starts from the project's start image again (its own picture goes to old/)."""
     node = tree.nodes[nid]
     _drop_start_file(project, node.start_image)
+    C.drop_crop(tree, node.start_image)
     node.start_image = None
 
 
@@ -68,7 +71,7 @@ def copy_node_start(project: Path, tree: Tree, src: str, dst: str) -> None:
     rel = tree.nodes[src].start_image
     target = tree.nodes[dst]
     if rel and (Path(project) / rel).is_file() and target.parent is None and not target.is_video:
-        set_node_start(project, tree, dst, Path(project) / rel)
+        C.copy_crop(tree, rel, set_node_start(project, tree, dst, Path(project) / rel))
         target.row = tree.nodes[src].row
 
 
@@ -120,10 +123,12 @@ def apply_to_row(tree: Tree, nid: str) -> list[str]:
     return changed
 
 
-def prepared_start(project: Path, width: int, height: int, source: Path | None = None) -> Path | None:
+def prepared_start(project: Path, width: int, height: int, source: Path | None = None,
+                   crop: list[float] | None = None) -> Path | None:
     """A start picture prepared for a canvas (chain.prepare_image): the project's start image as
     start_<w>x<h>.png in the project, a first clip's own one (source, in starts/) as <its name>_<w>x<h>.png next
-    to it; made again when the picture changes. None without a start picture."""
+    to it; made again when the picture or its cut changes. crop: the clip's recorded cut ([cx, cy, zoom],
+    crops.crop_value); None: from the centre. None without a start picture."""
     src = Path(source) if source is not None else Path(project) / START_FILE
     if not src.is_file():
         return None
@@ -133,7 +138,8 @@ def prepared_start(project: Path, width: int, height: int, source: Path | None =
     rec = dst.with_suffix(".json")
     sig = chain.file_signature(src)
     try:
-        if dst.is_file() and json.loads(rec.read_text(encoding="utf-8")).get("source") == sig:
+        old = json.loads(rec.read_text(encoding="utf-8"))
+        if dst.is_file() and old.get("source") == sig and old.get("crop") == (list(crop) if crop else None):
             return dst
     except (OSError, ValueError) as e:
         logger.debug("cached record unreadable: %s", e)
@@ -141,9 +147,50 @@ def prepared_start(project: Path, width: int, height: int, source: Path | None =
         if old != dst:
             old.unlink(missing_ok=True)
             old.with_suffix(".json").unlink(missing_ok=True)
-    chain.prepare_image(src, dst, width, height)
-    chain.atomic_write_text(rec, json.dumps({"source": sig}))
+    box = None
+    if crop:
+        pw, ph = chain.image_size(src)
+        box = C.crop_box(pw, ph, width, height, list(crop))
+    chain.prepare_image(src, dst, width, height, box)
+    chain.atomic_write_text(rec, json.dumps({"source": sig, **({"crop": list(crop)} if crop else {})}))
     return dst
+
+
+def picture_shape(picture: Path) -> tuple[int, int] | None:
+    """A start picture's size (it is stored upright as PNG: read from its header, no ffprobe per check); None when
+    it cannot be read."""
+    try:
+        with open(picture, "rb") as f:
+            head = f.read(24)
+        if head[:8] == b"\x89PNG\r\n\x1a\n" and head[12:16] == b"IHDR":
+            return int.from_bytes(head[16:20], "big"), int.from_bytes(head[20:24], "big")
+        return chain.image_size(Path(picture))
+    except Exception:  # noqa: BLE001  (an unreadable picture: no cut to show)
+        logger.debug("size of %s", picture, exc_info=True)
+        return None
+
+
+def starts_to_confirm(project: Path, tree: Tree, nids: list[str], width: int, height: int) -> list[tuple[str, Path]]:
+    """The first clips among nids whose start picture has another shape than the clips (width x height) and whose
+    cut was not looked at for this shape yet: (clip id, picture), one entry per picture."""
+    out: list[tuple[str, Path]] = []
+    seen: set[Path] = set()
+    want = C.shape_key(width, height)
+    for nid in nids:
+        node = tree.nodes.get(nid)
+        if node is None or node.is_video or node.parent is not None:
+            continue
+        pic = start_source(project, node)
+        if pic is None or pic in seen or not pic.is_file():
+            continue
+        size = picture_shape(pic)
+        if size is None or not C.mismatched(*size, width, height):
+            continue
+        if (C.get_crop(tree, project, pic) or {}).get("seen") == want:
+            continue
+        seen.add(pic)
+        out.append((nid, pic))
+    return out
 
 
 def clear_start_image(project: Path, tree: Tree) -> None:
@@ -153,6 +200,7 @@ def clear_start_image(project: Path, tree: Tree) -> None:
     for f in Path(project).glob("start_*x*.png"):
         _unlink(f)
         _unlink(f.with_suffix(".json"))
+    C.drop_crop(tree, START_FILE)
     tree.image = None
 
 
@@ -169,4 +217,5 @@ def set_start_image(project: Path, image: Path, tree: Tree) -> None:
             new.unlink(missing_ok=True)
     else:
         chain.to_png(Path(image), start)
+    C.drop_crop(tree, START_FILE)                   # (another picture: its cut starts at the centre)
     tree.image = str(Path(image).resolve())

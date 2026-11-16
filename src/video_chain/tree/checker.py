@@ -15,6 +15,7 @@ from .cast import audio_refs
 from .clipcast import mix_level, sound_mixed
 from .keyframes import end_image_used, keyframe_frame
 from .freezing import _revert_fields, changed_inputs, freeze_set, revert
+from .crops import crop_value, get_crop
 from .starts import start_source
 from .sources import size_source, source_rotation, video_size
 from .audio_tracks import source_sound_span
@@ -166,9 +167,15 @@ class Checker:
             span = {**span, "overlay": True}       # laid over the clip afterwards: the plain model, no lip sync
             if base is not None and sound_mixed(node, base.get("audio", True)):   # and mixed with the model's sound
                 span.update({"mix": True}, **({"mix_level": mix_level(node)} if mix_level(node) else {}))
-        return None if base is None else node_settings(base, self.tree.options, node, self.audio_pool(),
-                                                       self.picture_sha, source_sound=span,
-                                                       frames_given=plain_frames(self.project, self.tree, node))
+        if base is None:
+            return None
+        s = node_settings(base, self.tree.options, node, self.audio_pool(), self.picture_sha, source_sound=span,
+                          frames_given=plain_frames(self.project, self.tree, node))
+        if node.parent is None and not node.is_video:     # the cut of its start picture (not the centre one)
+            cut = crop_value(get_crop(self.tree, self.project, start_source(self.project, node)))
+            if cut:
+                s["start_crop"] = cut
+        return s
 
     def start_frame(self, node: Node) -> Path | None:
         """The frame a generated clip starts from: the parent's last frame, a first clip's start picture (its

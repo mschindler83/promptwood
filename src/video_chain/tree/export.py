@@ -77,7 +77,7 @@ def _pin_frames(project: Path, tree: Tree, path: list[Node], node: Node, size: s
     if i == 0:
         s0 = node.made_dict().get("settings") or {}
         first = prepared_start(project, *refine_size(int(s0["width"]), int(s0["height"]), size),
-                               source=start_source(project, node)) \
+                               source=start_source(project, node), crop=s0.get("start_crop")) \
             if s0.get("width") and s0.get("height") else None
     else:
         before = path[i - 1]

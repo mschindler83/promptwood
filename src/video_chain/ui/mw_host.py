@@ -128,7 +128,8 @@ if TYPE_CHECKING:
         _copy_cancel: Event | None
         _copy_dialog: QProgressDialog | None
         adv_note: AdvancedNote
-        aspect: QComboBox
+        shape: QComboBox
+        b_cut: QPushButton
         audio: QCheckBox
         b_add_video: QToolButton
         b_advanced: QPushButton

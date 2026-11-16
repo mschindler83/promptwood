@@ -381,7 +381,8 @@ class PathMixin(MainWindowHost):
             widget.setEnabled(idle)
         self.exact_size.setEnabled(idle)
         self._exact_widgets(idle)                     # (Size is off while an exact size is set)
-        self.aspect.setEnabled(idle and self.project is not None and T.size_origin(self.project, self.tree) == "aspect")
+        self.shape.setEnabled(idle and self.project is not None and not self.exact_size.isChecked())
+        self.b_cut.setEnabled(idle)
         self.b_start_clear.setEnabled(idle and self.project is not None and (self.project / T.START_FILE).is_file())
         busy = bool(self._copying or self._joins or self._converts)
         self.storyboard.setEnabled(idle and not busy)  # a scene switch would pull the files from under them

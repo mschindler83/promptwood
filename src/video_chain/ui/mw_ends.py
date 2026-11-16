@@ -573,8 +573,9 @@ class EndsMixin(MainWindowHost):
         try:
             base = T.Checker(self.project, self.tree).base() or {}
             if base.get("width") and base.get("height"):
-                size = (f" Each picture is cut from its centre to the project's {base['width']}×{base['height']} "
-                        "shape (nothing is stretched).")
+                size = (f" A picture of another shape is cut from its centre to the project's "
+                        f"{base['width']}×{base['height']} shape (nothing is stretched); you see the cut before its "
+                        "clip is made, and can move it (the clip's menu: Cut of its start image…).")
         except Exception:  # noqa: BLE001  (only the size note is left out)
             log.warning("the project's video size could not be read", exc_info=True)
         self.status.setText(f"{plural(len(ids), 'start image')} added: clip #{T.short_id(nid)} "
