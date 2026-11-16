@@ -189,6 +189,7 @@ class AudioMixin(MainWindowHost):
             self.status.setText("Open or create a project folder first.")
             return None
         dlg = VoiceLibraryDialog(cast("MainWindow", self))
+        self._keep_library_window(dlg)
         if not self.modal_dialogs:
             dlg.show()
             return dlg
@@ -203,10 +204,15 @@ class AudioMixin(MainWindowHost):
         if c is None or not self._cast_edit_ok():
             return False
         before = self._done_clips()
+        assert self.tree is not None and self.project is not None
+        was = copy.deepcopy(T.character(self.tree, c["name"]))
         try:
-            assert self.tree is not None and self.project is not None
             entry = (lib or VL.library()).use(vid, self.project, self.tree, c["name"])
         except (ValueError, OSError, RuntimeError) as e:
+            if T.character(self.tree, c["name"]) != was:       # (the voice is in, its ElevenLabs part failed)
+                self._show_references(select=c["name"])
+                self._write_tree()
+                self._changed()
             self._report_error(f"Could not use the voice: {e}")
             return False
         self._show_references(select=c["name"])
@@ -218,6 +224,18 @@ class AudioMixin(MainWindowHost):
             self.status.setText(msg + " " + self.status.text())
         return True
 
+    _library_windows: tuple = ()
+
+    def _keep_library_window(self, dlg) -> None:
+        """An open library window follows the selected character, the project and runs (_update_cast_buttons)."""
+        self._library_windows = (*self._library_windows, dlg)
+        dlg.finished.connect(lambda _r: setattr(self, "_library_windows",
+                                                tuple(d for d in self._library_windows if d is not dlg)))
+
+    def _update_library_windows(self) -> None:
+        for d in self._library_windows:
+            d._update_buttons()
+
     def open_cast_library(self):
         """The cast library window. Without modal dialogs it is shown and handed back."""
         from .cast_library import CastLibraryDialog
@@ -225,6 +243,7 @@ class AudioMixin(MainWindowHost):
             self.status.setText("Open or create a project folder first.")
             return None
         dlg = CastLibraryDialog(cast("MainWindow", self))
+        self._keep_library_window(dlg)
         if not self.modal_dialogs:
             dlg.show()
             return dlg
@@ -238,11 +257,23 @@ class AudioMixin(MainWindowHost):
         if not self._cast_edit_ok():
             return False
         before = self._done_clips()
+        assert self.tree is not None and self.project is not None
+        was = copy.deepcopy(T.cast_of(self.tree))
         try:
-            assert self.tree is not None and self.project is not None
             names = (lib or CL.library()).bring_in(cid, self.project, self.tree, choices)
         except (ValueError, OSError, RuntimeError) as e:
-            self._report_error(f"Could not bring the cast in: {e}")
+            if T.cast_of(self.tree) == was:
+                self._report_error(f"Could not bring the cast in: {e}")
+                return False
+            # (a copy failed after the first people: what is in is shown and saved, with what failed)
+            old = {c["name"] for c in was}
+            done = [c["name"] for c in T.cast_of(self.tree) if c["name"] not in old or c not in was]
+            self._pix.clear()
+            self._show_references(select=done[0] if done else None)
+            self._write_tree()
+            self._changed()
+            self._report_error(f"Could not bring all of the cast in: {e}. Brought in: "
+                               + ", ".join("@" + n for n in done) + ".")
             return False
         self._pix.clear()                           # (a replaced person's pictures have new files)
         self._show_references(select=names[0] if names else None)

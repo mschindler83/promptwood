@@ -121,6 +121,14 @@ class CastLibrary(FolderStore):
             if pictures > T.MAX_CAST_PICTURES:
                 raise ValueError(f"at most {T.MAX_CAST_PICTURES} face pictures in a project ({pictures} with "
                                  f"@{name})")
+            k = index[ch.person]
+            need = [f for f, _full in self.faces(cid, k, saved["people"][k])]
+            if saved["people"][k].get("voice"):
+                need.append(self.person_dir(cid, k) / "voice.wav")
+            gone = [f for f in need if not f.is_file()]
+            if gone:
+                raise ValueError(f"files of @{ch.person} are missing in the cast library ({gone[0].name}): bring "
+                                 "in the others, or save the cast again")
             probe.options["cast"] = rest + [T.CastEntry(name=name, images=["-"] * faces, desc="", lead=False)]
         names, had_lead, lead = [], T.lead_of(tree) is not None, None
         for ch in choices:

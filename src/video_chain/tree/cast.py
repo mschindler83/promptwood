@@ -240,7 +240,8 @@ def put_person(project: Path, tree: Tree, name: str, faces: Sequence[tuple[Path,
     k = 1
     try:
         for face, full in faces:
-            while (d / f"ref{k}.png").exists() or f"{REFS_DIR}/ref{k}.png" in used:
+            while ((d / f"ref{k}.png").exists() or (d / f"ref{k}_full.png").exists()
+                   or f"{REFS_DIR}/ref{k}.png" in used):
                 k += 1
             rel = f"{REFS_DIR}/ref{k}.png"
             made.append(Path(project) / rel)
@@ -254,9 +255,9 @@ def put_person(project: Path, tree: Tree, name: str, faces: Sequence[tuple[Path,
         for f in made:
             f.unlink(missing_ok=True)
         raise
+    no_person = not any(kind_of(c) == "person" for c in cast_of(tree) if c is not old)
     entry: CastEntry = {"name": name, "images": images, "desc": (desc or "").strip(),
-                        "lead": bool(old.get("lead")) if old else not any(kind_of(c) == "person"
-                                                                          for c in cast_of(tree))}
+                        "lead": bool(old and old.get("lead")) or no_person}
     if old is None:
         _set_cast(tree, cast_of(tree) + [entry])
         return entry

@@ -89,7 +89,7 @@ class FolderStore:
         name = squash(name)
         if not name:
             raise ValueError("a name is needed")
-        if any(v.get("name") == name and v.get("id") != keep for v in items):
+        if any(str(v.get("name") or "").lower() == name.lower() and v.get("id") != keep for v in items):
             raise ValueError(f"there is already “{name}” in the library")
         return name
 
@@ -197,7 +197,8 @@ def put_kept_voice(project: Path, tree: T.Tree, name: str, folder: Path, kept: d
     ref = folder / "ref.wav"
     entry = T.put_voice(project, tree, name, folder / "voice.wav", ref if ref.is_file() else None, label=label,
                         text=str(kept.get("text") or ""))
-    TTS.set_voice_fields(tree, name, eleven=kept.get("eleven") or None)
+    c = T.character(tree, name)                    # (set_voice_fields wants the name as the cast writes it)
+    TTS.set_voice_fields(tree, c["name"] if c else name, eleven=kept.get("eleven") or None)
     return dict(entry)
 
 

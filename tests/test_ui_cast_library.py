@@ -61,3 +61,36 @@ def test_the_cast_library_window(app, win, tmp_path, image):
     assert not dlg.bring_in([CL.Choice("Ben", "Ben")]) and "already" in win.status.text()
     assert [c["name"] for c in T.cast_of(win.tree)] == ["Anna", "Ben"]
     assert dlg.delete(confirm=False) and dlg.list.count() == 0
+
+
+def test_proposed_names_never_meet_another_saved_persons_name(app, win, tmp_path, image):
+    """The project has @Anna; the saved cast has Anna and Anna_2: Anna is proposed as Anna_3, not Anna_2."""
+    from video_chain.ui.cast_library import BringInDialog
+    new_project(win, tmp_path, image, ("one",))
+    T.add_character(win.project, win.tree, "Anna", _face(tmp_path / "a.png", (1, 2, 3)))
+    saved = {"name": "S", "people": [{"name": "Anna", "faces": 1}, {"name": "Anna_2", "faces": 1}]}
+    pick = BringInDialog(win, saved, win.tree)
+    rows = {p["name"]: (box, how, edit) for p, box, how, edit in pick.rows}
+    assert rows["Anna"][2].text() == "Anna_3" and rows["Anna_2"][0].isChecked()
+
+
+def test_a_bring_in_failing_halfway_is_shown_and_saved(app, win, tmp_path, image, monkeypatch):
+    """A copy fails after the first person (a full disk): the people brought in so far are shown and saved, and the
+    status says what failed."""
+    new_project(win, tmp_path, image, ("one",))
+    T.add_character(win.project, win.tree, "Anna", _face(tmp_path / "a.png", (200, 150, 120)))
+    T.add_character(win.project, win.tree, "Ben", _face(tmp_path / "b.png", (90, 90, 200)))
+    lib = CL.CastLibrary(tmp_path / "lib")
+    saved = lib.save(win.project, win.tree, "Two")
+    new_project(win, tmp_path / "second", image, ("one",))
+    real, calls = T.put_person, []
+
+    def second_fails(*a, **k):
+        calls.append(1)
+        if len(calls) == 2:
+            raise OSError("No space left on device")
+        return real(*a, **k)
+    monkeypatch.setattr(T, "put_person", second_fails)
+    assert not win.bring_in_cast(saved["id"], [CL.Choice("Anna", "Anna"), CL.Choice("Ben", "Ben")], lib)
+    assert "No space left" in win.status.text() and "@Anna" in win.status.text()
+    assert [c["name"] for c in T.cast_of(T.load(win.project))] == ["Anna"] and win.cast_list.count() == 1

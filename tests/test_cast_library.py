@@ -112,3 +112,59 @@ def test_limits_are_checked_before_anything_is_copied(tmp_path):
     T.add_character(b, empty, "Kitchen2", kind="place")
     with pytest.raises(ValueError, match="no people"):
         lib.save(b, empty, "Places")
+
+
+def test_a_missing_saved_file_changes_nothing(tmp_path):
+    a, ta = _saved_project(tmp_path)
+    lib = CL.CastLibrary(tmp_path / "lib")
+    saved = lib.save(a, ta, "Family")
+    (lib.person_dir(saved["id"], 0) / "voice.wav").unlink()                  # Anna's voice is gone
+    b = tmp_path / "b"
+    b.mkdir()
+    tb = T.Tree()
+    T.add_character(b, tb, "Zed")
+    with pytest.raises(ValueError, match="missing"):
+        lib.bring_in(saved["id"], b, tb, [CL.Choice("Ben", "Ben"), CL.Choice("Anna", "Anna")])
+    assert [c["name"] for c in T.cast_of(tb)] == ["Zed"] and not list((b / "refs").glob("*.png"))
+
+
+def test_a_person_replacing_a_place_is_the_lead_when_there_is_no_other_person(tmp_path):
+    a, ta = _saved_project(tmp_path)
+    lib = CL.CastLibrary(tmp_path / "lib")
+    saved = lib.save(a, ta, "Family")
+    b = tmp_path / "b"
+    b.mkdir()
+    tb = T.Tree()
+    T.add_character(b, tb, "Ben", kind="place")
+    lib.bring_in(saved["id"], b, tb, [CL.Choice("Ben", "Ben", replace=True)])
+    assert T.lead_of(tb)["name"] == "Ben"
+
+
+def test_a_left_over_full_picture_is_not_taken_for_a_new_face(tmp_path):
+    a, ta = _saved_project(tmp_path)
+    lib = CL.CastLibrary(tmp_path / "lib")
+    saved = lib.save(a, ta, "Family")                                       # Ben's face has no full picture
+    b = tmp_path / "b"
+    (b / "refs").mkdir(parents=True)
+    _picture(b / "refs" / "ref1_full.png", (7, 7, 7))                        # an orphan
+    tb = T.Tree()
+    lib.bring_in(saved["id"], b, tb, [CL.Choice("Ben", "Ben")])
+    rel = T.character(tb, "Ben")["images"][0]
+    assert rel != "refs/ref1.png" and not (b / T.source_of(rel)).exists()
+
+
+def test_library_names_ignore_case_and_a_voice_keeps_its_elevenlabs_voice_by_any_case(tmp_path):
+    from video_chain import voice_library as VL
+    a, ta = _saved_project(tmp_path)
+    lib = CL.CastLibrary(tmp_path / "lib")
+    lib.save(a, ta, "Family")
+    with pytest.raises(ValueError, match="already"):
+        lib.save(a, ta, "family")
+    voices = VL.VoiceLibrary(tmp_path / "voices")
+    v = voices.save(a, T.character(ta, "Anna"), "Anna")
+    b = tmp_path / "b"
+    b.mkdir()
+    tb = T.Tree()
+    T.add_character(b, tb, "Cleo")
+    voices.use(v["id"], b, tb, "cleo")
+    assert T.character(tb, "Cleo")["tts"]["eleven"]["id"] == "el1"

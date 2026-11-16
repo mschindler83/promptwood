@@ -56,3 +56,23 @@ def test_the_voice_library_window(app, win, tmp_path, image, monkeypatch):
     dlg.list.setCurrentRow(0)
     assert dlg.delete(confirm=False) and dlg.list.count() == 0
     assert (win.project / T.character(win.tree, "Cleo")["voice"]["file"]).is_file()   # the project keeps its copy
+
+
+def test_an_open_library_window_follows_the_selected_character_and_runs(app, win, tmp_path, image):
+    new_project(win, tmp_path, image, ("one",))
+    T.add_character(win.project, win.tree, "Anna")
+    T.add_character(win.project, win.tree, "Ben")
+    win._show_references(select="Anna")
+    win.modal_dialogs = False
+    dlg = win.open_voice_library()
+    cast_dlg = win.open_cast_library()
+    assert dlg.b_use.text() == "Use for @Anna"
+    win._show_references(select="Ben")
+    assert dlg.b_use.text() == "Use for @Ben"
+    win._checking = True                                                     # a run starts: nothing is used
+    win._update_cast_buttons()
+    assert not cast_dlg.b_bring.isEnabled() or cast_dlg.selected_id() is None
+    assert "Ben" in dlg.b_use.text() and not dlg.b_use.isEnabled()
+    win._checking = False
+    dlg.close()
+    cast_dlg.close()

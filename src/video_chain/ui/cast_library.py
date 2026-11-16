@@ -64,8 +64,9 @@ class BringInDialog(QDialog):
         grid = QGridLayout(body)
         grid.setColumnStretch(0, 1)
         self.rows: list[tuple[dict, QCheckBox, QComboBox | None, QLineEdit | None]] = []
-        taken: set[str] = set()
-        for r, p in enumerate(saved.get("people") or []):
+        people = saved.get("people") or []
+        taken = {p["name"].lower() for p in people if T.character(tree, p["name"]) is None}   # (kept as they are)
+        for r, p in enumerate(people):
             mine = T.character(tree, p["name"])
             box = QCheckBox(person_text(p))
             box.setChecked(mine is None)

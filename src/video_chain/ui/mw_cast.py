@@ -567,6 +567,7 @@ class CastMixin(MainWindowHost):
         self.b_voice_play.setEnabled(v)
         self.b_voice_lib.setEnabled(self.project is not None)
         self.b_cast_lib.setEnabled(self.project is not None)
+        self._update_library_windows()
         pic = self.refs.currentItem() is not None
         self.b_ref_crop.setEnabled(idle and pic)
         self.b_ref_del.setEnabled(idle and pic)
