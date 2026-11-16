@@ -319,12 +319,7 @@ def set_voice(project: Path, tree: Tree, name: str, source: Path, start: float =
         raise ValueError(f"a voice needs at least {AUDIO_REF_MIN:.0f} s of speech ({Path(source).name} has "
                          f"{max(have, 0):.1f} s" + (" in the chosen part)" if cut_end or start else ")"))
     secs = min(have, VOICE_MAX_SECS)
-    d = Path(project) / REFS_DIR
-    d.mkdir(parents=True, exist_ok=True)
-    used = set(voices_in_use(tree))
-    k = 1
-    while (d / f"voice{k}.wav").exists() or f"{REFS_DIR}/voice{k}.wav" in used:
-        k += 1
+    k = _free_voice_slot(project, tree)
     rel = f"{REFS_DIR}/voice{k}.wav"
     made_files = [Path(project) / rel]           # (a failure after the first file takes the new files with it)
     try:
@@ -346,6 +341,52 @@ def set_voice(project: Path, tree: Tree, name: str, source: Path, start: float =
     if old:
         _drop_voice(project, old, tree)
     return {**entry, "cut": have > secs + 0.01}
+
+
+def _free_voice_slot(project: Path, tree: Tree) -> int:
+    """The first k with refs/voice{k}.wav neither on disk nor in use (refs/ is made)."""
+    d = Path(project) / REFS_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    used = set(voices_in_use(tree))
+    k = 1
+    while (d / f"voice{k}.wav").exists() or f"{REFS_DIR}/voice{k}.wav" in used:
+        k += 1
+    return k
+
+
+def put_voice(project: Path, tree: Tree, name: str, voice: Path, ref: Path | None = None, label: str = "",
+              text: str = "") -> Voice:
+    """A ready voice (e.g. one of the voice library) becomes a character's voice as it is: voice (the short sample
+    the clip model hears) and ref (its longer clone reference, if any) are copied into refs/, text is what the
+    clone file says (no new transcript then). It replaces the character's old voice. Returns the entry."""
+    c = character(tree, name)
+    if c is None:
+        raise ValueError(f"no character called {name}")
+    if kind_of(c) != "person":
+        raise ValueError(f"@{c['name']} is a {kind_of(c)}; only a person can have a voice")
+    k = _free_voice_slot(project, tree)
+    rel = f"{REFS_DIR}/voice{k}.wav"
+    made_files = [Path(project) / rel]
+    try:
+        shutil.copyfile(voice, Path(project) / rel)
+        entry: Voice = {"file": rel, "name": label or Path(voice).name,
+                        "secs": round(chain.audio_seconds(Path(project) / rel) or 0.0, 2)}
+        if ref is not None:
+            ref_rel = f"{REFS_DIR}/voice{k}_ref.wav"
+            made_files.append(Path(project) / ref_rel)
+            shutil.copyfile(ref, Path(project) / ref_rel)
+            entry["ref"] = {"file": ref_rel, "secs": round(chain.audio_seconds(Path(project) / ref_rel) or 0.0, 2)}
+        if text.strip():
+            entry["text"] = text.strip()
+    except BaseException:
+        for f in made_files:
+            f.unlink(missing_ok=True)
+        raise
+    old = c.get("voice")
+    _set_cast(tree, [{**x, "voice": entry} if x is c else x for x in cast_of(tree)])
+    if old:
+        _drop_voice(project, old, tree)
+    return entry
 
 
 def remove_voice(project: Path, tree: Tree, name: str) -> None:

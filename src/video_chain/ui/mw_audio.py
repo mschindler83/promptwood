@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import copy
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDialog, QListWidgetItem
@@ -13,6 +14,9 @@ from .. import chain, tree as T, tts as TTS
 from . import dialogs as D, image_picker as IP
 from .ui_logic import AUDIO_REF_RANGE, plural
 from .mw_host import MainWindowHost
+
+if TYPE_CHECKING:
+    from .main_window import MainWindow
 
 log = logging.getLogger(__name__)
 
@@ -176,6 +180,43 @@ class AudioMixin(MainWindowHost):
         self._changed()
         if not self._report_remade(before, f"Voice of @{c['name']} removed"):
             self._say(f"Voice of @{c['name']} removed.")
+
+    def open_voice_library(self):
+        """The voice library window (for the selected character). Without modal dialogs it is shown and handed
+        back."""
+        from .voice_library import VoiceLibraryDialog
+        if self.project is None:
+            self.status.setText("Open or create a project folder first.")
+            return None
+        dlg = VoiceLibraryDialog(cast("MainWindow", self))
+        if not self.modal_dialogs:
+            dlg.show()
+            return dlg
+        dlg.exec()
+        dlg.deleteLater()
+        return None
+
+    def use_library_voice(self, vid: str, lib=None) -> bool:
+        """A voice of the voice library becomes the selected character's voice (copied into the project)."""
+        from .. import voice_library as VL
+        c = self._selected_character()
+        if c is None or not self._cast_edit_ok():
+            return False
+        before = self._done_clips()
+        try:
+            assert self.tree is not None and self.project is not None
+            entry = (lib or VL.library()).use(vid, self.project, self.tree, c["name"])
+        except (ValueError, OSError, RuntimeError) as e:
+            self._report_error(f"Could not use the voice: {e}")
+            return False
+        self._show_references(select=c["name"])
+        self._write_tree()
+        self._changed()
+        msg = f"@{c['name']} has the voice “{entry['name']}” from the voice library now ({entry['secs']:.1f} s)."
+        self._say(msg)
+        if self._report_remade(before, f"Voice of @{c['name']} set"):
+            self.status.setText(msg + " " + self.status.text())
+        return True
 
     def _play_voice(self):
         c = self._selected_character()

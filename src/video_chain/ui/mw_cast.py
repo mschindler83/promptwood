@@ -565,6 +565,7 @@ class CastMixin(MainWindowHost):
             w.setToolTip(SPEECH_BUSY if speaking else tip)
         self.b_voice_del.setEnabled(idle and v)
         self.b_voice_play.setEnabled(v)
+        self.b_voice_lib.setEnabled(self.project is not None)
         pic = self.refs.currentItem() is not None
         self.b_ref_crop.setEnabled(idle and pic)
         self.b_ref_del.setEnabled(idle and pic)

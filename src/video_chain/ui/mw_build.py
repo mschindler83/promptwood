@@ -281,9 +281,14 @@ class BuildMixin(MainWindowHost):
         self.b_voice_play.clicked.connect(self._play_voice)
         self.b_voice_del = icon_button("x", "Remove the voice")
         self.b_voice_del.clicked.connect(self._remove_voice)
+        self.b_voice_lib = QPushButton("Library…")
+        self.b_voice_lib.setToolTip("The voice library: voices kept for all your projects. Save this character's "
+                                    "voice there, or give it a saved one (copied into this project, with its "
+                                    "transcript and ElevenLabs voice)")
+        self.b_voice_lib.clicked.connect(self.open_voice_library)
         vrow.addWidget(self.char_voice, 1)
-        for b in (self.b_voice_file, self.b_voice_clip, self.b_voice_tts, self.b_voice_clone, self.b_voice_play,
-                  self.b_voice_del):
+        for b in (self.b_voice_file, self.b_voice_clip, self.b_voice_tts, self.b_voice_clone, self.b_voice_lib,
+                  self.b_voice_play, self.b_voice_del):
             vrow.addWidget(b)
         iv.addWidget(self._voice_row)
         self.refs = QListWidget()
