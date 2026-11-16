@@ -1,4 +1,5 @@
-"""The cast library: the people of a cast (faces with their full pictures, descriptions, the lead, voices) kept for
+"""The cast library: a whole cast (people with faces and their full pictures, the lead, voices; places, objects and
+styles with their pictures; descriptions) kept for
 the app and brought into another project, added or replacing a character of the same name."""
 import shutil
 import subprocess
@@ -41,9 +42,10 @@ def test_a_saved_cast_is_brought_into_another_project(tmp_path):
     lib = CL.library()
     assert lib.dir == config.data_dir() / "casts"
     saved = lib.save(a, ta, "Family")
-    assert [p["name"] for p in saved["people"]] == ["Anna", "Ben"]            # people only
-    anna = saved["people"][0]
-    assert anna["faces"] == 2 and anna["lead"] and anna["voice"]["text"] == "Hello." and "voice" not in saved["people"][1]
+    assert [p["name"] for p in saved["entries"]] == ["Anna", "Ben", "Kitchen"]
+    assert saved["entries"][2]["kind"] == "place" and "kind" not in saved["entries"][0]
+    anna = saved["entries"][0]
+    assert anna["faces"] == 2 and anna["lead"] and anna["voice"]["text"] == "Hello." and "voice" not in saved["entries"][1]
     faces = lib.faces(saved["id"], 0, anna)
     assert faces[0][1] is not None and faces[0][1].is_file()                 # cropped: its full picture kept
 
@@ -101,24 +103,22 @@ def test_limits_are_checked_before_anything_is_copied(tmp_path):
     for k in range(T.MAX_CAST_PICTURES - 2):
         T.add_character(b, tb, f"P{k}", _picture(tmp_path / f"p{k}.png", (k, k, k)))
     before = sorted(p.name for p in (b / "refs").iterdir())
-    with pytest.raises(ValueError, match="face pictures"):                   # Ben fits, Anna (2 more) does not
+    with pytest.raises(ValueError, match="pictures in a project"):           # Ben fits, Anna (2 more) does not
         lib.bring_in(saved["id"], b, tb, [CL.Choice("Ben", "Ben"), CL.Choice("Anna", "Anna")])
     assert sorted(p.name for p in (b / "refs").iterdir()) == before and not T.character(tb, "Ben")
     with pytest.raises(ValueError, match="letter"):
         lib.bring_in(saved["id"], b, tb, [CL.Choice("Ben", "Ben Two")])
     lib.delete(saved["id"])
     assert lib.list() == [] and not (lib.dir / saved["id"]).exists()
-    empty = T.Tree()
-    T.add_character(b, empty, "Kitchen2", kind="place")
-    with pytest.raises(ValueError, match="no people"):
-        lib.save(b, empty, "Places")
+    with pytest.raises(ValueError, match="empty"):
+        lib.save(b, T.Tree(), "Nothing")
 
 
 def test_a_missing_saved_file_changes_nothing(tmp_path):
     a, ta = _saved_project(tmp_path)
     lib = CL.CastLibrary(tmp_path / "lib")
     saved = lib.save(a, ta, "Family")
-    (lib.person_dir(saved["id"], 0) / "voice.wav").unlink()                  # Anna's voice is gone
+    (lib.entry_dir(saved["id"], 0) / "voice.wav").unlink()                  # Anna's voice is gone
     b = tmp_path / "b"
     b.mkdir()
     tb = T.Tree()
@@ -168,3 +168,43 @@ def test_library_names_ignore_case_and_a_voice_keeps_its_elevenlabs_voice_by_any
     T.add_character(b, tb, "Cleo")
     voices.use(v["id"], b, tb, "cleo")
     assert T.character(tb, "Cleo")["tts"]["eleven"]["id"] == "el1"
+
+
+def test_places_objects_and_styles_are_kept_and_brought_in(tmp_path):
+    a, ta = _saved_project(tmp_path)
+    T.add_character(a, ta, "Bike", _picture(tmp_path / "bike.png", (200, 0, 0)), desc="a red bicycle", kind="object")
+    T.add_character(a, ta, "Ink", _picture(tmp_path / "ink.png", (0, 0, 0)), kind="style")
+    T.add_picture(a, ta, "Kitchen", _picture(tmp_path / "k2.png", (240, 240, 10)))
+    lib = CL.CastLibrary(tmp_path / "lib")
+    saved = lib.save(a, ta, "World")
+    b = tmp_path / "b"
+    b.mkdir()
+    tb = T.Tree()
+    T.add_character(b, tb, "Bike", kind="place")                             # a name it has: replaced, as an object
+    lib.bring_in(saved["id"], b, tb, [CL.Choice("Kitchen", "Kitchen"), CL.Choice("Bike", "Bike", replace=True),
+                                      CL.Choice("Ink", "Ink")])
+    k = T.character(tb, "Kitchen")
+    assert T.kind_of(k) == "place" and len(k["images"]) == 2 and not k["lead"] and "voice" not in k
+    assert (b / k["images"][1]).read_bytes() == (a / T.character(ta, "Kitchen")["images"][1]).read_bytes()
+    bike = T.character(tb, "Bike")
+    assert T.kind_of(bike) == "object" and bike["desc"] == "a red bicycle" and not bike["lead"]
+    assert T.kind_of(T.character(tb, "Ink")) == "style" and T.lead_of(tb) is None      # (no person: no lead)
+    lib.bring_in(saved["id"], b, tb, [CL.Choice("Ben", "Ben")])
+    assert T.lead_of(tb)["name"] == "Ben"                                    # the first person is the lead
+
+
+def test_a_cast_saved_with_people_only_is_still_read(tmp_path):
+    """Casts saved before places were kept list their people under "people"."""
+    a, ta = _saved_project(tmp_path)
+    lib = CL.CastLibrary(tmp_path / "lib")
+    saved = lib.save(a, ta, "Old")
+    import json
+    data = json.loads(lib.path.read_text())
+    data["casts"][0]["people"] = [p for p in data["casts"][0].pop("entries") if "kind" not in p]
+    lib.path.write_text(json.dumps(data))
+    assert [p["name"] for p in lib.get(saved["id"])["entries"]] == ["Anna", "Ben"]
+    b = tmp_path / "b"
+    b.mkdir()
+    tb = T.Tree()
+    lib.bring_in(saved["id"], b, tb, [CL.Choice("Ben", "Ben")])
+    assert T.kind_of(T.character(tb, "Ben")) == "person"

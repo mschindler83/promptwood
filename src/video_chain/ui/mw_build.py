@@ -238,8 +238,9 @@ class BuildMixin(MainWindowHost):
         self.b_char_del.setToolTip("Remove the selected entry and its pictures")
         self.b_char_del.clicked.connect(self._remove_character)
         self.b_cast_lib = QPushButton("Cast library…")
-        self.b_cast_lib.setToolTip("Casts kept for all your projects: save the people of this cast (faces, "
-                                   "descriptions, voices), or bring the people of a saved cast into this project")
+        self.b_cast_lib.setToolTip("Casts kept for all your projects: save this whole cast (people with their faces "
+                                   "and voices, places, objects, styles), or bring entries of a saved cast into "
+                                   "this project")
         self.b_cast_lib.clicked.connect(self.open_cast_library)
         crow.addWidget(self.b_char_new)
         crow.addWidget(self.b_char_rename)

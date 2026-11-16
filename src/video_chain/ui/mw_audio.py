@@ -252,7 +252,7 @@ class AudioMixin(MainWindowHost):
         return None
 
     def bring_in_cast(self, cid: str, choices, lib=None) -> bool:
-        """People of a saved cast join this project's cast (copied in; cast_library.Choice says how)."""
+        """Entries of a saved cast join this project's cast (copied in; cast_library.Choice says how)."""
         from .. import cast_library as CL
         if not self._cast_edit_ok():
             return False
@@ -265,7 +265,7 @@ class AudioMixin(MainWindowHost):
             if T.cast_of(self.tree) == was:
                 self._report_error(f"Could not bring the cast in: {e}")
                 return False
-            # (a copy failed after the first people: what is in is shown and saved, with what failed)
+            # (a copy failed after the first entries: what is in is shown and saved, with what failed)
             old = {c["name"] for c in was}
             done = [c["name"] for c in T.cast_of(self.tree) if c["name"] not in old or c not in was]
             self._pix.clear()
@@ -275,7 +275,7 @@ class AudioMixin(MainWindowHost):
             self._report_error(f"Could not bring all of the cast in: {e}. Brought in: "
                                + ", ".join("@" + n for n in done) + ".")
             return False
-        self._pix.clear()                           # (a replaced person's pictures have new files)
+        self._pix.clear()                           # (a replaced entry's pictures have new files)
         self._show_references(select=names[0] if names else None)
         self._write_tree()
         self._changed()

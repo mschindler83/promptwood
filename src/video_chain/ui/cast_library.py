@@ -1,6 +1,6 @@
-"""The cast library windows (Cast → Cast library…): the people of a cast kept for every project
-(video_chain.cast_library). The project's people are saved as one cast; a saved cast is brought into the project
-(BringInDialog: which people, and for a name the project already has: replace it or add under another name)."""
+"""The cast library windows (Cast → Cast library…): whole casts (people, places, objects, styles) kept for every
+project (video_chain.cast_library). The project's cast is saved as one; a saved cast is brought into the project
+(BringInDialog: which entries, and for a name the project already has: replace it or add under another name)."""
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -21,17 +21,19 @@ if TYPE_CHECKING:
 ADD, REPLACE = "add", "replace"
 
 
-def person_text(p: dict) -> str:
-    """@Anna   2 faces · voice · lead"""
+def entry_text(p: dict) -> str:
+    """@Anna   2 faces · voice · lead   /   @Kitchen   1 picture · place"""
     n = int(p.get("faces") or 0)
+    if CL.kind_of(p) != "person":
+        return f"@{p['name']}   " + (plural(n, "picture") if n else "no picture") + f"   · {CL.kind_of(p)}"
     return (f"@{p['name']}   " + (plural(n, "face") if n else "no face") + ("   · voice" if p.get("voice") else "")
             + ("   · lead" if p.get("lead") else ""))
 
 
 def cast_text(c: dict) -> str:
-    people = c.get("people") or []
-    voices = sum(1 for p in people if p.get("voice"))
-    names = ", ".join("@" + p["name"] for p in people)
+    entries = c.get("entries") or []
+    voices = sum(1 for p in entries if p.get("voice"))
+    names = ", ".join("@" + p["name"] for p in entries)
     return f"{c['name']}   ({names}" + (f"; {plural(voices, 'voice')}" if voices else "") + ")"
 
 
@@ -45,7 +47,7 @@ def free_name(tree: T.Tree, name: str, taken: set[str] | None = None) -> str:
 
 
 class BringInDialog(QDialog):
-    """Which people of a saved cast come into the project. A person whose name the project has is not ticked:
+    """Which entries of a saved cast come into the project. One whose name the project has is not ticked:
     ticked, it replaces the project's one or is added under the name in its field."""
 
     def __init__(self, parent, saved: dict, tree: T.Tree, settings=None):
@@ -55,31 +57,32 @@ class BringInDialog(QDialog):
         fit_size(self, 640, 420)
         remember_geometry(self, settings, "castBringIn")
         v = QVBoxLayout(self)
-        info = label("Tick the people to bring into this project; their face pictures, descriptions and voices "
-                     "are copied into it. For a name the project already has, choose: replace yours (its pictures "
-                     "and voice go to old/) or add the saved one under another name.", level="secondary")
+        info = label("Tick what to bring into this project: people, places, objects and styles are copied into it "
+                     "with their pictures, descriptions and voices. For a name the project already has, choose: "
+                     "replace yours (its pictures and voice go to old/) or add the saved one under another name.",
+                     level="secondary")
         info.setWordWrap(True)
         v.addWidget(info)
         body = QWidget()
         grid = QGridLayout(body)
         grid.setColumnStretch(0, 1)
         self.rows: list[tuple[dict, QCheckBox, QComboBox | None, QLineEdit | None]] = []
-        people = saved.get("people") or []
-        taken = {p["name"].lower() for p in people if T.character(tree, p["name"]) is None}   # (kept as they are)
-        for r, p in enumerate(people):
+        entries = saved.get("entries") or []
+        taken = {p["name"].lower() for p in entries if T.character(tree, p["name"]) is None}  # (kept as they are)
+        for r, p in enumerate(entries):
             mine = T.character(tree, p["name"])
-            box = QCheckBox(person_text(p))
+            box = QCheckBox(entry_text(p))
             box.setChecked(mine is None)
             grid.addWidget(box, r, 0)
             how = edit = None
             if mine is not None:
-                box.setText(person_text(p) + f"   · @{mine['name']} is already in this project")
+                box.setText(entry_text(p) + f"   · @{mine['name']} is already in this project")
                 how = QComboBox()
                 how.addItem("Add as", ADD)
                 how.addItem(f"Replace @{mine['name']}", REPLACE)
                 edit = QLineEdit(free_name(tree, p["name"], taken))
                 taken.add(edit.text().lower())
-                edit.setToolTip("The name the saved person gets in this project (@Name in the prompts)")
+                edit.setToolTip("The name the saved entry gets in this project (@Name in the prompts)")
                 how.currentIndexChanged.connect(lambda _i, h=how, e=edit: e.setVisible(h.currentData() == ADD))
                 grid.addWidget(how, r, 1)
                 grid.addWidget(edit, r, 2)
@@ -121,8 +124,8 @@ class CastLibraryDialog(QDialog):
         fit_size(self, 640, 420)
         remember_geometry(self, win.qs, "castLibrary")
         v = QVBoxLayout(self)
-        info = label("Casts kept for all your projects: their people with face pictures, descriptions and voices "
-                     "(places, objects and styles are not kept). Bringing one in copies the people into the "
+        info = label("Casts kept for all your projects: their people (face pictures, voices), places, objects and "
+                     "styles (pictures), with their descriptions. Bringing one in copies what you tick into the "
                      f"project; deleting or renaming a cast here changes no project. They are kept in {self.lib.dir}.",
                      level="secondary")
         info.setWordWrap(True)
@@ -131,23 +134,23 @@ class CastLibraryDialog(QDialog):
         self.list.itemSelectionChanged.connect(self._update_buttons)
         self.list.itemDoubleClicked.connect(lambda _i: self.bring_in())
         v.addWidget(self.list, 1)
-        self.empty = label("No casts saved yet: Save this cast keeps the people of this project.", level="tertiary")
+        self.empty = label("No casts saved yet: Save this cast keeps the cast of this project.", level="tertiary")
         v.addWidget(self.empty)
         row = QHBoxLayout()
         self.b_save = QPushButton("Save this cast…")
-        self.b_save.setToolTip("Keep the people of this project's cast in the library")
+        self.b_save.setToolTip("Keep this project's whole cast in the library")
         self.b_save.clicked.connect(lambda: self.save())
         self.b_rename = QPushButton("Rename…")
         self.b_rename.clicked.connect(lambda: self.rename())
         self.b_delete = QPushButton("Delete")
-        self.b_delete.setToolTip("Take the cast out of the library (projects that use its people keep their copy)")
+        self.b_delete.setToolTip("Take the cast out of the library (projects that use its entries keep their copy)")
         self.b_delete.clicked.connect(lambda: self.delete())
         for b in (self.b_save, self.b_rename, self.b_delete):
             row.addWidget(b)
         row.addStretch(1)
         self.b_bring = QPushButton("Bring in…")
         self.b_bring.setDefault(True)
-        self.b_bring.setToolTip("Choose people of the selected cast to bring into this project")
+        self.b_bring.setToolTip("Choose entries of the selected cast to bring into this project")
         self.b_bring.clicked.connect(lambda: self.bring_in())
         self.b_close = QPushButton("Close")
         self.b_close.clicked.connect(self.reject)
@@ -175,8 +178,7 @@ class CastLibraryDialog(QDialog):
 
     def _update_buttons(self) -> None:
         picked = self.selected_id() is not None
-        has_people = self.win.tree is not None and bool(CL.people_of(self.win.tree))
-        self.b_save.setEnabled(has_people)
+        self.b_save.setEnabled(self.win.tree is not None and bool(T.cast_of(self.win.tree)))
         self.b_bring.setEnabled(picked and self.win.project is not None and not self.win.running)
         self.b_rename.setEnabled(picked)
         self.b_delete.setEnabled(picked)
@@ -197,11 +199,11 @@ class CastLibraryDialog(QDialog):
             return None
         self.fill(select=entry["id"])
         self.win.status.setText(f"The cast is in the cast library as “{entry['name']}” "
-                                f"({plural(len(entry['people']), 'person', 'people')}).")
+                                f"({plural(len(entry['entries']), 'entry', 'entries')}).")
         return entry
 
     def bring_in(self, choices: list[CL.Choice] | None = None) -> BringInDialog | bool:
-        """Bring people of the selected cast in: choose them in BringInDialog (choices: given instead). Without
+        """Bring entries of the selected cast in: choose them in BringInDialog (choices: given instead). Without
         modal dialogs the BringInDialog is made and handed back (its accept brings them in)."""
         cid = self.selected_id()
         saved = self.lib.get(cid) if cid else None
@@ -247,7 +249,7 @@ class CastLibraryDialog(QDialog):
         if c is None:
             return False
         if confirm and not D.confirm(self, "Delete the cast", f"Delete “{c['name']}” from the cast library? "
-                                     "Projects that use its people keep their own copy."):
+                                     "Projects that use its entries keep their own copy."):
             return False
         try:
             self.lib.delete(c["id"])

@@ -217,20 +217,21 @@ def add_character(project: Path, tree: Tree, name: str, image: Path | None = Non
     return entry
 
 
-def put_person(project: Path, tree: Tree, name: str, faces: Sequence[tuple[Path, Path | None]], desc: str = "",
-               replace: bool = False) -> CastEntry:
-    """A ready person (e.g. of the cast library) joins the cast as it is: faces are its face pictures with the full
-    pictures they were cropped from (None: the face picture is its own), copied into refs/. replace: a character of
-    that name is replaced in its place (it stays the lead if it was; its pictures and voice go to old/); else the
-    name must be free and the person is the lead when the cast has no person yet. Nothing is changed on an
-    error. Returns the entry (without a voice: put_voice gives it one)."""
+def put_entry(project: Path, tree: Tree, name: str, faces: Sequence[tuple[Path, Path | None]], desc: str = "",
+              replace: bool = False, kind: str = "person") -> CastEntry:
+    """A ready cast entry (e.g. of the cast library) joins the cast as it is: faces are its pictures (a person's
+    face pictures) with the full pictures they were cropped from (None: the picture is its own), copied into
+    refs/. replace: an entry of that name is replaced in its place (a person stays the lead if it was; the old
+    pictures and voice go to old/); else the name must be free. A person is the lead when the cast has no other
+    person. Nothing is changed on an error. Returns the entry (a person without a voice: put_voice gives it one)."""
+    kind = _check_kind(kind)
     old = character(tree, name) if replace else None
     name = check_name(tree, name, keep=old["name"] if old else None)
     if len(faces) > MAX_PICTURES_PER_CHARACTER:
         raise ValueError(f"at most {MAX_PICTURES_PER_CHARACTER} pictures per character")
     others = [r for c in cast_of(tree) if c is not old for r in c["images"]]
     if len(others) + len(faces) > MAX_CAST_PICTURES:
-        raise ValueError(f"at most {MAX_CAST_PICTURES} face pictures in a project (@{name} would make "
+        raise ValueError(f"at most {MAX_CAST_PICTURES} pictures in a project (@{name} would make "
                          f"{len(others) + len(faces)})")
     d = Path(project) / REFS_DIR
     d.mkdir(parents=True, exist_ok=True)
@@ -256,8 +257,11 @@ def put_person(project: Path, tree: Tree, name: str, faces: Sequence[tuple[Path,
             f.unlink(missing_ok=True)
         raise
     no_person = not any(kind_of(c) == "person" for c in cast_of(tree) if c is not old)
+    person = kind == "person"
     entry: CastEntry = {"name": name, "images": images, "desc": (desc or "").strip(),
-                        "lead": bool(old and old.get("lead")) or no_person}
+                        "lead": person and (bool(old and old.get("lead")) or no_person)}
+    if not person:
+        entry["kind"] = kind
     if old is None:
         _set_cast(tree, cast_of(tree) + [entry])
         return entry

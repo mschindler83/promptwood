@@ -171,7 +171,7 @@ from .cast import (  # noqa: F401
     _drop_voice,
     set_voice,
     put_voice,
-    put_person,
+    put_entry,
     remove_voice,
     update_character,
     set_kind,
