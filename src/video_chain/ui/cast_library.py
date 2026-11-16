@@ -30,6 +30,11 @@ def entry_text(p: dict) -> str:
             + ("   · lead" if p.get("lead") else ""))
 
 
+def _a(kind: str) -> str:
+    """'a place', 'an object'."""
+    return ("an " if kind[:1] in "aeiou" else "a ") + kind
+
+
 def cast_text(c: dict) -> str:
     entries = c.get("entries") or []
     voices = sum(1 for p in entries if p.get("voice"))
@@ -79,7 +84,14 @@ class BringInDialog(QDialog):
                 box.setText(entry_text(p) + f"   · @{mine['name']} is already in this project")
                 how = QComboBox()
                 how.addItem("Add as", ADD)
-                how.addItem(f"Replace @{mine['name']}", REPLACE)
+                was, new = T.kind_of(mine), CL.kind_of(p)
+                if was == new:
+                    how.addItem(f"Replace @{mine['name']}", REPLACE)
+                else:
+                    how.addItem(f"Replace @{mine['name']} ({_a(was)} now: it becomes {_a(new)})", REPLACE)
+                    if was == "person":
+                        how.setToolTip(f"@{mine['name']} is a person in this project: replaced by {_a(new)}, "
+                                       "it has no voice and is not the lead any more")
                 edit = QLineEdit(free_name(tree, p["name"], taken))
                 taken.add(edit.text().lower())
                 edit.setToolTip("The name the saved entry gets in this project (@Name in the prompts)")

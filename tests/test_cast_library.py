@@ -208,3 +208,21 @@ def test_a_cast_saved_with_people_only_is_still_read(tmp_path):
     tb = T.Tree()
     lib.bring_in(saved["id"], b, tb, [CL.Choice("Ben", "Ben")])
     assert T.kind_of(T.character(tb, "Ben")) == "person"
+
+
+def test_replacing_the_lead_with_a_place_keeps_a_lead(tmp_path):
+    """Ann is the lead, Bob a person; the saved place Kitchen replaces Ann: Bob becomes the lead (the saved lead
+    when one comes in too)."""
+    a, ta = _saved_project(tmp_path)
+    lib = CL.CastLibrary(tmp_path / "lib")
+    saved = lib.save(a, ta, "Family")
+    b = tmp_path / "b"
+    b.mkdir()
+    tb = T.Tree()
+    T.add_character(b, tb, "Ann")
+    T.add_character(b, tb, "Bob")
+    lib.bring_in(saved["id"], b, tb, [CL.Choice("Kitchen", "Ann", replace=True)])
+    assert T.kind_of(T.character(tb, "Ann")) == "place" and T.lead_of(tb)["name"] == "Bob"
+    T.update_character(tb, "Bob", lead=True)
+    lib.bring_in(saved["id"], b, tb, [CL.Choice("Ben", "Bob", replace=True), CL.Choice("Anna", "Anna")])
+    assert T.lead_of(tb)["name"] == "Bob"                                    # (Bob's place, a person again: lead)

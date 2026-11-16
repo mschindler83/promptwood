@@ -158,6 +158,10 @@ class CastLibrary(FolderStore):
                 lead = entry["name"]
         if lead and not had_lead:                     # (the saved lead, when the project had none)
             T.update_character(tree, lead, lead=True)
+        elif had_lead and T.lead_of(tree) is None:    # (the lead was replaced by a place, object or style)
+            first = next((c["name"] for c in T.cast_of(tree) if T.kind_of(c) == "person"), None)
+            if first:
+                T.update_character(tree, lead or first, lead=True)
         return names
 
 

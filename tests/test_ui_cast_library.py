@@ -96,3 +96,17 @@ def test_a_bring_in_failing_halfway_is_shown_and_saved(app, win, tmp_path, image
     assert not win.bring_in_cast(saved["id"], [CL.Choice("Anna", "Anna"), CL.Choice("Ben", "Ben")], lib)
     assert "No space left" in win.status.text() and "@Anna" in win.status.text()
     assert [c["name"] for c in T.cast_of(T.load(win.project))] == ["Anna"] and win.cast_list.count() == 1
+
+
+def test_replacing_with_another_kind_says_so(app, win, tmp_path, image):
+    from video_chain.ui.cast_library import BringInDialog
+    new_project(win, tmp_path, image, ("one",))
+    T.add_character(win.project, win.tree, "Anna")
+    T.add_character(win.project, win.tree, "Home", kind="place")
+    saved = {"name": "S", "entries": [{"name": "Anna", "kind": "place", "faces": 0},
+                                      {"name": "Home", "kind": "place", "faces": 0}]}
+    pick = BringInDialog(win, saved, win.tree)
+    rows = {p["name"]: how for p, _box, how, _edit in pick.rows}
+    assert rows["Anna"].itemText(1) == "Replace @Anna (a person now: it becomes a place)"
+    assert "voice" in rows["Anna"].toolTip() and "lead" in rows["Anna"].toolTip()
+    assert rows["Home"].itemText(1) == "Replace @Home"
