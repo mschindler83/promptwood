@@ -218,6 +218,42 @@ class AudioMixin(MainWindowHost):
             self.status.setText(msg + " " + self.status.text())
         return True
 
+    def open_cast_library(self):
+        """The cast library window. Without modal dialogs it is shown and handed back."""
+        from .cast_library import CastLibraryDialog
+        if self.project is None:
+            self.status.setText("Open or create a project folder first.")
+            return None
+        dlg = CastLibraryDialog(cast("MainWindow", self))
+        if not self.modal_dialogs:
+            dlg.show()
+            return dlg
+        dlg.exec()
+        dlg.deleteLater()
+        return None
+
+    def bring_in_cast(self, cid: str, choices, lib=None) -> bool:
+        """People of a saved cast join this project's cast (copied in; cast_library.Choice says how)."""
+        from .. import cast_library as CL
+        if not self._cast_edit_ok():
+            return False
+        before = self._done_clips()
+        try:
+            assert self.tree is not None and self.project is not None
+            names = (lib or CL.library()).bring_in(cid, self.project, self.tree, choices)
+        except (ValueError, OSError, RuntimeError) as e:
+            self._report_error(f"Could not bring the cast in: {e}")
+            return False
+        self._pix.clear()                           # (a replaced person's pictures have new files)
+        self._show_references(select=names[0] if names else None)
+        self._write_tree()
+        self._changed()
+        msg = "From the cast library: " + ", ".join("@" + n for n in names) + "."
+        self._say(msg)
+        if self._report_remade(before, "Cast brought in"):
+            self.status.setText(msg + " " + self.status.text())
+        return True
+
     def _play_voice(self):
         c = self._selected_character()
         if c is not None and c.get("voice") and self.project is not None:

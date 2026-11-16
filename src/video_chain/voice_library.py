@@ -31,9 +31,13 @@ def default_dir() -> Path:
     return Path(env) if env else config.data_dir() / "voices"
 
 
-class VoiceLibrary:
-    def __init__(self, folder: Path | None = None):
-        self.dir = Path(folder) if folder else default_dir()
+class FolderStore:
+    """A list of named entries in <folder>/library.json (under KEY), each with its files in <folder>/<id>/; one
+    writer at a time (threads and processes), a damaged list is kept as a .bak file."""
+    KEY = "items"
+
+    def __init__(self, folder: Path):
+        self.dir = Path(folder)
         self.path = self.dir / LIBRARY_FILE
         self._lock = threading.RLock()
 
@@ -52,7 +56,7 @@ class VoiceLibrary:
     def _read(self, update: bool = False) -> dict:
         """The file's content. update=True (before a write): an unreadable file raises OSError, so nothing is
         written over it; a damaged one (not JSON) is moved to a .bak file first and a new one is started."""
-        empty: dict = {"version": 1, "voices": []}
+        empty: dict = {"version": 1, self.KEY: []}
         try:
             text = self.path.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -63,7 +67,7 @@ class VoiceLibrary:
             return empty
         try:
             d = json.loads(text)
-            if isinstance(d, dict) and isinstance(d.get("voices"), list):
+            if isinstance(d, dict) and isinstance(d.get(self.KEY), list):
                 return d
         except ValueError:
             pass
@@ -74,14 +78,59 @@ class VoiceLibrary:
     def _write(self, data: dict) -> None:
         media.atomic_write_json(self.path, data, indent=1)
 
+    def _entries(self) -> list[dict]:
+        """The entries with an id and a name, by name."""
+        with self._lock:
+            items = [dict(v) for v in self._read()[self.KEY]
+                     if isinstance(v, dict) and isinstance(v.get("id"), str) and v.get("name")]
+        return sorted(items, key=lambda v: str(v["name"]).lower())
+
+    def _name(self, items: Sequence[dict], name: str, keep: str | None = None) -> str:
+        name = squash(name)
+        if not name:
+            raise ValueError("a name is needed")
+        if any(v.get("name") == name and v.get("id") != keep for v in items):
+            raise ValueError(f"there is already “{name}” in the library")
+        return name
+
+    def _new_folder(self) -> tuple[str, Path]:
+        vid = uuid.uuid4().hex[:12]
+        return vid, self.dir / vid
+
+    def rename(self, vid: str, new: str) -> None:
+        with self._exclusive():
+            data = self._read(update=True)
+            new = self._name(data[self.KEY], new, keep=vid)
+            for v in data[self.KEY]:
+                if v.get("id") == vid:
+                    v["name"] = new
+                    break
+            else:
+                raise ValueError("that is not in the library any more")
+            self._write(data)
+
+    def delete(self, vid: str) -> None:
+        """Take an entry out of the library (projects that use it keep their own copy)."""
+        with self._exclusive():
+            data = self._read(update=True)
+            left = [v for v in data[self.KEY] if v.get("id") != vid]
+            if len(left) != len(data[self.KEY]):
+                data[self.KEY] = left
+                self._write(data)
+            if vid and "/" not in vid and vid not in (".", ".."):
+                shutil.rmtree(self.dir / vid, ignore_errors=True)
+
+
+class VoiceLibrary(FolderStore):
+    KEY = "voices"
+
+    def __init__(self, folder: Path | None = None):
+        super().__init__(Path(folder) if folder else default_dir())
+
     # ---- reading
     def list(self) -> list[dict]:
         """The saved voices whose sample is there, by name."""
-        with self._lock:
-            items = [dict(v) for v in self._read()["voices"]
-                     if isinstance(v, dict) and isinstance(v.get("id"), str) and v.get("name")
-                     and self.voice_file(v["id"]).is_file()]
-        return sorted(items, key=lambda v: str(v["name"]).lower())
+        return [v for v in self._entries() if self.voice_file(v["id"]).is_file()]
 
     def get(self, vid: str) -> dict | None:
         return next((v for v in self.list() if v["id"] == vid), None)
@@ -94,37 +143,17 @@ class VoiceLibrary:
         return f if f.is_file() else None
 
     # ---- writing
-    def _name(self, voices: Sequence[dict], name: str, keep: str | None = None) -> str:
-        name = squash(name)
-        if not name:
-            raise ValueError("a voice needs a name")
-        if any(v.get("name") == name and v.get("id") != keep for v in voices):
-            raise ValueError(f"there is already a voice “{name}” in the library")
-        return name
-
     def save(self, project: Path, character: T.CastEntry, name: str) -> dict:
         """Keep a character's voice (its sample, clone reference, transcript and ElevenLabs voice) under name."""
-        v = character.get("voice")
-        if not v:
+        if not character.get("voice"):
             raise ValueError(f"@{character.get('name')} has no voice to save")
-        vid = uuid.uuid4().hex[:12]
-        folder = self.dir / vid
+        vid, folder = self._new_folder()
         with self._exclusive():
             data = self._read(update=True)
             name = self._name(data["voices"], name)
             folder.mkdir(parents=True)
             try:
-                shutil.copyfile(Path(project) / v["file"], folder / "voice.wav")
-                entry: dict = {"id": vid, "name": name, "secs": float(v.get("secs") or 0), "saved": time.time()}
-                ref = v.get("ref")
-                if ref:
-                    shutil.copyfile(Path(project) / ref["file"], folder / "ref.wav")
-                    entry["ref_secs"] = float(ref.get("secs") or 0)
-                if v.get("text"):
-                    entry["text"] = v["text"]
-                el = (character.get("tts") or {}).get("eleven")
-                if el:
-                    entry["eleven"] = {"id": el["id"], "name": el.get("name") or el["id"]}
+                entry = {"id": vid, "name": name, **keep_voice(project, character, folder), "saved": time.time()}
                 data["voices"].append(entry)
                 self._write(data)
             except BaseException:
@@ -132,41 +161,44 @@ class VoiceLibrary:
                 raise
         return entry
 
-    def rename(self, vid: str, new: str) -> None:
-        with self._exclusive():
-            data = self._read(update=True)
-            new = self._name(data["voices"], new, keep=vid)
-            for v in data["voices"]:
-                if v.get("id") == vid:
-                    v["name"] = new
-                    break
-            else:
-                raise ValueError("that voice is not in the library any more")
-            self._write(data)
-
-    def delete(self, vid: str) -> None:
-        """Take a voice out of the library (projects that use it keep their own copy)."""
-        with self._exclusive():
-            data = self._read(update=True)
-            left = [v for v in data["voices"] if v.get("id") != vid]
-            if len(left) != len(data["voices"]):
-                data["voices"] = left
-                self._write(data)
-            if vid and "/" not in vid and vid not in (".", ".."):
-                shutil.rmtree(self.dir / vid, ignore_errors=True)
-
     def use(self, vid: str, project: Path, tree: T.Tree, name: str) -> dict:
         """A saved voice becomes the voice of the character name in a project (copied in, with its transcript and
         ElevenLabs voice; a character with an ElevenLabs voice of its own and none saved keeps none: the voice
         is replaced as a whole). Returns the project's voice entry."""
-        from . import tts as TTS                       # (tts imports a lot; only needed here)
         v = self.get(vid)
         if v is None:
             raise ValueError("that voice is not in the library any more")
-        entry = T.put_voice(project, tree, name, self.voice_file(vid), self.ref_file(vid), label=v["name"],
-                            text=str(v.get("text") or ""))
-        TTS.set_voice_fields(tree, name, eleven=v.get("eleven") or None)
-        return dict(entry)
+        return put_kept_voice(project, tree, name, self.dir / vid, v, v["name"])
+
+
+def keep_voice(project: Path, character: T.CastEntry, folder: Path) -> dict:
+    """A character's voice copied into folder (voice.wav, ref.wav); returns what is kept of it ("secs",
+    "ref_secs", "text", "eleven")."""
+    v = character.get("voice")
+    assert v
+    shutil.copyfile(Path(project) / v["file"], folder / "voice.wav")
+    out: dict = {"secs": float(v.get("secs") or 0)}
+    ref = v.get("ref")
+    if ref:
+        shutil.copyfile(Path(project) / ref["file"], folder / "ref.wav")
+        out["ref_secs"] = float(ref.get("secs") or 0)
+    if v.get("text"):
+        out["text"] = v["text"]
+    el = (character.get("tts") or {}).get("eleven")
+    if el:
+        out["eleven"] = {"id": el["id"], "name": el.get("name") or el["id"]}
+    return out
+
+
+def put_kept_voice(project: Path, tree: T.Tree, name: str, folder: Path, kept: dict, label: str) -> dict:
+    """A voice kept in folder (keep_voice) becomes the voice of the character name (with its ElevenLabs voice, or
+    none). Returns the project's voice entry."""
+    from . import tts as TTS                       # (tts imports a lot; only needed here)
+    ref = folder / "ref.wav"
+    entry = T.put_voice(project, tree, name, folder / "voice.wav", ref if ref.is_file() else None, label=label,
+                        text=str(kept.get("text") or ""))
+    TTS.set_voice_fields(tree, name, eleven=kept.get("eleven") or None)
+    return dict(entry)
 
 
 def library() -> VoiceLibrary:

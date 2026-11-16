@@ -85,7 +85,7 @@ def test_names_rename_and_a_damaged_file(tmp_path):
     two = lib.save(a, T.character(ta, "Anna"), "two")
     with pytest.raises(ValueError, match="already"):
         lib.save(a, T.character(ta, "Anna"), "One")
-    with pytest.raises(ValueError, match="needs a name"):
+    with pytest.raises(ValueError, match="name is needed"):
         lib.save(a, T.character(ta, "Anna"), "   ")
     assert len(list(lib.dir.iterdir())) == 4                                # two voices, the list and its lock
     with pytest.raises(ValueError, match="already"):

@@ -185,6 +185,7 @@ if TYPE_CHECKING:
         b_voice_file: QPushButton
         b_voice_play: QToolButton
         b_voice_lib: QPushButton
+        b_cast_lib: QPushButton
         b_voice_tts: QPushButton
         card_stack: _CurrentStack
         cards: list[PromptCard | VideoCard]

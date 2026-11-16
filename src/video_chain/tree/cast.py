@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import shutil
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from typing import cast as _cast
@@ -213,6 +214,57 @@ def add_character(project: Path, tree: Tree, name: str, image: Path | None = Non
     if image is not None:
         images.append(_copy_picture(project, image, tree, crop))
     _set_cast(tree, cast_of(tree) + [entry])
+    return entry
+
+
+def put_person(project: Path, tree: Tree, name: str, faces: Sequence[tuple[Path, Path | None]], desc: str = "",
+               replace: bool = False) -> CastEntry:
+    """A ready person (e.g. of the cast library) joins the cast as it is: faces are its face pictures with the full
+    pictures they were cropped from (None: the face picture is its own), copied into refs/. replace: a character of
+    that name is replaced in its place (it stays the lead if it was; its pictures and voice go to old/); else the
+    name must be free and the person is the lead when the cast has no person yet. Nothing is changed on an
+    error. Returns the entry (without a voice: put_voice gives it one)."""
+    old = character(tree, name) if replace else None
+    name = check_name(tree, name, keep=old["name"] if old else None)
+    if len(faces) > MAX_PICTURES_PER_CHARACTER:
+        raise ValueError(f"at most {MAX_PICTURES_PER_CHARACTER} pictures per character")
+    others = [r for c in cast_of(tree) if c is not old for r in c["images"]]
+    if len(others) + len(faces) > MAX_CAST_PICTURES:
+        raise ValueError(f"at most {MAX_CAST_PICTURES} face pictures in a project (@{name} would make "
+                         f"{len(others) + len(faces)})")
+    d = Path(project) / REFS_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    used = set(all_pictures(tree))
+    images: list[str] = []
+    made: list[Path] = []
+    k = 1
+    try:
+        for face, full in faces:
+            while (d / f"ref{k}.png").exists() or f"{REFS_DIR}/ref{k}.png" in used:
+                k += 1
+            rel = f"{REFS_DIR}/ref{k}.png"
+            made.append(Path(project) / rel)
+            shutil.copyfile(face, Path(project) / rel)
+            if full is not None:
+                made.append(Path(project) / source_of(rel))
+                shutil.copyfile(full, Path(project) / source_of(rel))
+            images.append(rel)
+            k += 1
+    except BaseException:
+        for f in made:
+            f.unlink(missing_ok=True)
+        raise
+    entry: CastEntry = {"name": name, "images": images, "desc": (desc or "").strip(),
+                        "lead": bool(old.get("lead")) if old else not any(kind_of(c) == "person"
+                                                                          for c in cast_of(tree))}
+    if old is None:
+        _set_cast(tree, cast_of(tree) + [entry])
+        return entry
+    _set_cast(tree, [entry if x is old else x for x in cast_of(tree)])
+    for rel in old["images"]:
+        _drop_file(project, rel, tree)
+    if old.get("voice"):
+        _drop_voice(project, old["voice"], tree)
     return entry
 
 
