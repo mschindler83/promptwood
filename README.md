@@ -30,13 +30,13 @@ Windows computer yet. On Linux none of that code runs.
 ## Install
 
 ```bash
-git clone https://gitlab.com/mschindler/video-chain.git
+git clone https://github.com/mschindler83/video-chain.git
 cd video-chain
 ./install.sh
 ```
 
-Without git: on https://gitlab.com/mschindler/video-chain choose **Code → Download source code (tar.gz)**, unpack it,
-and run `./install.sh` in that folder.
+Without git: download **Source code (tar.gz)** of the latest release from https://github.com/mschindler83/video-chain/releases, unpack
+it, and run `./install.sh` in that folder.
 
 That is the whole installation. The script
 
@@ -161,7 +161,7 @@ Promptwood is free for **non-commercial use** under the [PolyForm Noncommercial 
 personal projects, hobby, study and research, and non-profit, educational and public organisations may use, change
 and share it. Its source is public, but it is not "open source" in the OSI sense: **commercial use** (in a business,
 for clients, for monetised content) needs a separate licence from the author: ask through the project page,
-https://gitlab.com/mschindler/video-chain.
+https://github.com/mschindler83/video-chain.
 
 The ComfyUI nodes in `comfy_nodes/video_chain_nodes/` run inside ComfyUI and use its code, so they are licensed under
 the [GNU GPL 3.0](comfy_nodes/video_chain_nodes/LICENSE), as ComfyUI is.
