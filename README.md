@@ -9,11 +9,13 @@ lines, pictures, music and an upscaled export.
 [![Licence: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/licence-PolyForm%20Noncommercial%201.0.0-blue)](LICENSE.md)
 ![Platform: Linux](https://img.shields.io/badge/platform-Linux%20x86--64-lightgrey)
 ![GPU: NVIDIA 24 GB](https://img.shields.io/badge/GPU-NVIDIA%2024%20GB-76b900)
-![Python 3.12](https://img.shields.io/badge/python-3.12-3776ab)
+![Python 3.12, bundled](https://img.shields.io/badge/python-3.12%20(bundled)-3776ab)
 ![Version 0.2.0](https://img.shields.io/badge/version-0.2.0-orange)
 
 Everything runs on your own computer. Nothing is uploaded unless you choose one of the optional online services
 (see [Privacy](#privacy)).
+
+<!-- A screenshot of the main window goes here, e.g. ![The storyboard](docs/images/storyboard.png) -->
 
 ## Contents
 
@@ -29,6 +31,7 @@ Everything runs on your own computer. Nothing is uploaded unless you choose one 
 - [Getting started](#getting-started)
 - [Command line](#command-line)
 - [Configuration](#configuration)
+- [FAQ](#faq)
 - [Troubleshooting](#troubleshooting)
 - [Privacy](#privacy)
 - [Responsible use](#responsible-use)
@@ -87,7 +90,8 @@ Everything runs on your own computer. Nothing is uploaded unless you choose one 
 
 **The app itself**
 - A simple and an advanced view, keyboard shortcuts for everything, a setup check under **Help → Setup check**.
-- Projects are plain folders; nothing is ever deleted silently (replaced files go to `old/`).
+- Projects are plain folders. The app never deletes a video, picture or sound of yours: files it no longer uses are
+  moved to `old/` in the project.
 - Plugins can add features without changing the app.
 
 ## How it works
@@ -108,8 +112,8 @@ you choose into one video. ComfyUI runs the models; Promptwood starts it for you
 | | |
 |---|---|
 | **System** | Linux, x86-64 (tested on Fedora 44; Ubuntu and Arch should work the same) |
-| **Graphics card** | NVIDIA with 24 GB of memory (16 GB works, slower); a current driver (580 or newer for CUDA 13) |
-| **Main memory** | 64 GB recommended |
+| **Graphics card** | NVIDIA with 24 GB of memory (tested; 16 GB is the least the installer accepts, untested); driver 580 or newer for the CUDA 13 builds (older drivers get the CUDA 12 builds) |
+| **Main memory** | 64 GB recommended (large models pass through main memory while they load) |
 | **Disk** | 145 GB free for the standard set, 55 GB for video clips only, 270 GB for everything |
 | **Internet** | for the installation (about 126 GB of models for the standard set) |
 
@@ -133,8 +137,8 @@ cd promptwood
 Without git: download **Source code (tar.gz)** of the latest release from
 https://github.com/mschindler83/promptwood/releases, unpack it, and run `./install.sh` in that folder.
 
-When it ends with `Promptwood is ready`, every part of the app works. Start it from the applications menu or with
-`promptwood-gui`.
+When it ends with `Promptwood is ready`, every part you installed works. Start it from the applications menu, or with
+`promptwood-gui` (if `~/.local/bin` is on your PATH) or `~/.local/share/video-chain/bin/promptwood-gui`.
 
 ### What the installer does
 
@@ -150,9 +154,11 @@ When it ends with `Promptwood is ready`, every part of the app works. Start it f
 5. **Tests the result with the real models:** it starts ComfyUI, asks it for every node and model the app uses,
    renders a short clip with sound, speaks a test line and asks the language model a question.
 
-Nothing needs root, and nothing is written outside two folders: the app's own folder and its *home*
-(`~/.local/share/video-chain`, or `$VIDEO_CHAIN_HOME`), which holds ComfyUI, the models and the tools. Everything the
-tools print goes to a log in `<home>/logs/`; when a step fails, its last lines and the log's path are shown.
+Nothing needs root. The installer writes into the app's own folder and its *home* (`~/.local/share/video-chain`, or
+`$VIDEO_CHAIN_HOME`), which holds ComfyUI, the models and the tools, plus a menu entry
+(`~/.local/share/applications/promptwood.desktop`) and, if `~/.local/bin` is on your PATH, two links there
+(`--no-desktop` skips both). Everything the tools print goes to a log in `<home>/logs/`; when a step fails, its last
+lines and the log's path are shown.
 
 ### Choosing what to install
 
@@ -160,7 +166,7 @@ tools print goes to a log in `<home>/logs/`; when a step fails, its last lines a
 |---|---|---|
 | `core` | video clips only | about 40 GB |
 | `standard` (recommended) | every part of the app with one model each | about 126 GB |
-| `full` | also the extra speed modes, Krea-2, Qwen-Image-Edit 2511, MOSS-Image, Fish S2 Pro voices and both head swaps | about 235 GB |
+| `full` | also the extra speed modes, Krea-2, Qwen-Image-Edit 2511, MOSS-Image, Fish S2 Pro voices, both head swaps and the smaller upscaler | about 235 GB |
 
 <details>
 <summary>All installer options</summary>
@@ -169,7 +175,7 @@ tools print goes to a log in `<home>/logs/`; when a step fails, its last lines a
 ./install.sh --dry-run                # only show what would be installed and downloaded
 ./install.sh --profile core           # video clips only
 ./install.sh --profile full           # everything
-./install.sh --with image-krea2       # the standard set plus one part (also: image-edit, image-moss, tts-fish)
+./install.sh --with image-krea2       # the standard set plus one part (--help lists all parts)
 ./install.sh --without tts,llm        # the standard set minus parts
 ./install.sh --models-from ~/ComfyUI  # a new ComfyUI that reads the models of the one you have, in place
 ./install.sh --hf-cache ~/.cache/huggingface/hub       # text to speech / language models you already have
@@ -198,23 +204,32 @@ only, and never stores or prints it.
 ### Updating, checking and removing
 
 ```bash
-git pull && promptwood setup          # update: installs whatever the new version needs (safe to run again)
+git pull && ./install.sh              # update: the app's packages and whatever the new version needs (safe to run again)
 promptwood doctor                     # what is installed, what is missing, and the command that fixes it
 promptwood doctor --render            # also render a real test clip (--speech, --llm: test those too)
 promptwood setup --with headswap-wan  # add a part later
 promptwood setup --steps comfyui      # repeat one install step (system, comfyui, nodes)
 ```
 
-To remove Promptwood, delete its folder, its home (`~/.local/share/video-chain`) and
-`~/.local/share/applications/promptwood.desktop`. Your projects are wherever you saved them and are not touched.
+To remove Promptwood, delete its folder and its home (`~/.local/share/video-chain`).
+
+> [!IMPORTANT]
+> The home also holds your **libraries of voices, casts and prompts** and your LoRA presets (`voices/`, `casts/`,
+> `prompts/`, `lora_presets.json`). Copy them out first if you want to keep them.
+
+Then remove `~/.local/share/applications/promptwood.desktop`, the links `~/.local/bin/promptwood` and
+`promptwood-gui`, and, if you want, the settings (`~/.config/video-chain`), the log (`~/.local/state/video-chain`)
+and the cache (`~/.cache/video-chain`). API keys stay in your system's keyring until you remove them there. Your
+projects are wherever you saved them and are not touched.
 
 ## Getting started
 
 1. Start Promptwood (applications menu, or `promptwood-gui`). A short guide on the Clips tab walks you through the
    first clip; **Help → Getting started** shows it again.
 2. **Choose a start image** (or make one with **Create a new image…**) and write what happens in the first clip.
-3. Click **Generate path**. Promptwood starts ComfyUI if it is not running (the Start button next to the ComfyUI
-   status does the same), and the clip appears on its card when it is made.
+3. Click **Generate path**. Promptwood starts ComfyUI, the *video engine*, if it is not running (the setting **Start
+   ComfyUI when generating**; the status bar shows "Video engine: …"), and the clip appears on its card when it is
+   made.
 4. **Continue from here** adds the next clip; **Branch** tries another way the story could go.
 5. Add people and places under **Cast**, give them voices, and write spoken lines in quotes:
    `@Anna turns to the window and says "It's starting to rain."`
@@ -246,6 +261,26 @@ The installer records where things are in `<home>/config.json`; the app's own se
 | `VIDEO_CHAIN_TTS_PYTHON` | Qwen3-TTS's Python | `<home>/tts-venv/bin/python` |
 | `VIDEO_CHAIN_FISH_DIR` | Fish S2 Pro's code and environment | `<home>/fish-speech` |
 
+## FAQ
+
+**Does it work without internet after the installation?** Yes. The models are loaded from your disk; only the
+optional services in [Privacy](#privacy) go online.
+
+**How long and how big are the clips?** Each clip is 3 to 15 seconds at 24 frames per second. The size is set per
+project, from 384 (a fast draft) to the model's native 768p (1344×768 at 16:9); the export can refine to 2K or
+upscale further. A film is as long as its clips together.
+
+**Where are my projects?** In the folder you choose when you make one. A project is a plain folder with its clips,
+pictures and sounds; copy it like any other folder.
+
+**Can I use the ComfyUI I already have?** Yes: `./install.sh --comfy-dir ~/ComfyUI`, or keep your ComfyUI and let the
+installer reuse its models with `--models-from`.
+
+**Does it work with an AMD or Intel graphics card, or on a Mac?** Not yet: it needs an NVIDIA card (see
+[Project status](#project-status)).
+
+**Can I use it commercially?** Not under the free licence; see [Licence](#licence) for a commercial one.
+
 ## Troubleshooting
 
 Start with **Help → Setup check** (or `promptwood doctor`): it lists what works, what is missing and the command that
@@ -254,8 +289,8 @@ fixes it. The app's log is under **Help → Show the log** (`~/.local/state/vide
 <details>
 <summary><b>"ComfyUI is not reachable"</b></summary>
 
-Click **Start** next to the ComfyUI status, or start it with `<home>/bin/comfyui`. If you use your own ComfyUI, set
-its address and launcher under **Settings → Preferences…**. If another program already uses port 8188, the
+Click **Start the video engine** in the banner on the Clips tab, or **Start ComfyUI** under **Settings →
+Preferences…**, or run `<home>/bin/comfyui`. If you use your own ComfyUI, set its address and start command there too. If another program already uses port 8188, the
 installer gives Promptwood's ComfyUI another port (`--comfy-port`), and the app reads it from `config.json`.
 </details>
 
@@ -263,8 +298,8 @@ installer gives Promptwood's ComfyUI another port (`--comfy-port`), and the app 
 <summary><b>Out of graphics memory</b></summary>
 
 Close other programs that use the GPU (`nvidia-smi` shows them). Promptwood unloads ComfyUI's models before it starts
-text to speech or the language model, and stops those again for the clips. On 16 GB cards use a speed mode and a
-lower resolution. Fish S2 Pro needs a 24 GB card with nothing else on it.
+text to speech or the language model, and stops those again for the clips. A smaller card may need a speed mode and
+a lower resolution. Fish S2 Pro needs a 24 GB card with nothing else on it.
 </details>
 
 <details>
@@ -303,12 +338,13 @@ Promptwood works offline. Something leaves your computer only when you choose it
 
 | Service | When | What is sent |
 |---|---|---|
-| Hugging Face, GitHub, PyPI | installation and updates | download requests (and your Hugging Face token, if you give one) |
+| Hugging Face, GitHub, PyPI, astral.sh (uv), download.pytorch.org | installation and updates | download requests (and your Hugging Face token, if you give one) |
 | CivitAI | you look up LoRA trigger words (optional, your own key) | the LoRAs' file hashes |
 | ElevenLabs | you choose ElevenLabs voices (optional, your own key) | the lines to speak and voice samples you clone there |
 | RunPod | you upscale an export on a cloud GPU (optional, your own key) | the clips it upscales |
 
-API keys are kept in your system's keyring, never in the project files.
+API keys are kept in your system's keyring (or read from `CIVITAI_API_KEY`, `ELEVENLABS_API_KEY`, `RUNPOD_API_KEY`),
+never in project files. RunPod also uses an SSH key the app makes, in `~/.config/video-chain/runpod/`.
 
 ## Responsible use
 
@@ -374,8 +410,9 @@ python tools/build_manifest.py                             # after changing the 
 Bug reports and ideas are welcome as [issues](https://github.com/mschindler83/promptwood/issues). A good bug report
 has the output of `promptwood doctor`, the end of the log (**Help → Show the log**), what you did and what happened.
 
-Code contributions can only be taken with a contributor agreement that lets the author also offer them under the
-commercial licence (see [Licence](#licence)); please ask in an issue before you start on one.
+Code contributions are welcome after a short contributor agreement that lets the author also offer them under the
+commercial licence (see [Licence](#licence)). Please open an issue before you start on one; the agreement is sent
+there. Pull requests without it cannot be merged.
 
 ## Security
 
@@ -387,9 +424,9 @@ issue.
 
 Promptwood is free for **non-commercial use** under the [PolyForm Noncommercial License 1.0.0](LICENSE.md): personal
 projects, hobby, study and research, and non-profit, educational and public organisations may use, change and share
-it. Its source is public, but it is not "open source" in the OSI sense: **commercial use** (in a business, for
-clients, for monetised content) needs a separate licence from the author. Ask through
-[an issue](https://github.com/mschindler83/promptwood/issues) or the project page.
+it. Its source is public (source-available), but this is not an OSI open-source licence: **commercial use** (in a
+business, for clients, for monetised content) needs a separate licence from the author. Ask through
+[an issue](https://github.com/mschindler83/promptwood/issues) titled "Commercial licence".
 
 The ComfyUI nodes in `comfy_nodes/video_chain_nodes/` run inside ComfyUI and use its code, so they are licensed under
 the [GNU GPL 3.0](comfy_nodes/video_chain_nodes/LICENSE), as ComfyUI is.

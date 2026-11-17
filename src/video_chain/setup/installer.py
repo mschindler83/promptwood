@@ -964,7 +964,8 @@ class Installer:
         if ok:
             say(f"\nPromptwood is ready. Start it from your applications menu, or with:\n"
                 f"    {short(self.home / 'bin' / ('promptwood-gui.cmd' if paths.WINDOWS else 'promptwood-gui'))}\n"
-                "ComfyUI is started by the app when it is needed (the Start button next to its status).")
+                "ComfyUI is started by the app when it is needed (Settings > Preferences: Start ComfyUI when "
+                "generating).")
         else:
             say(f"\nThe full output of this run is in {short(log)}")
         return 0 if ok else 1
