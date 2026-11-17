@@ -1,4 +1,4 @@
-"""Small themed widgets shared by the windows (same conventions as another app / the design)."""
+"""Small themed widgets shared by the windows."""
 from __future__ import annotations
 
 from collections import OrderedDict

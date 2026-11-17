@@ -360,8 +360,8 @@ def test_a_second_signal_cannot_cut_the_pod_termination_short():
 
 
 def test_the_launcher_says_what_to_do_without_a_venv(tmp_path):
-    shutil.copy(ROOT / "video-chain", tmp_path / "video-chain")
-    r = subprocess.run(["bash", str(tmp_path / "video-chain"), "--help"], capture_output=True, text=True)
+    shutil.copy(ROOT / "promptwood", tmp_path / "promptwood")
+    r = subprocess.run(["bash", str(tmp_path / "promptwood"), "--help"], capture_output=True, text=True)
     assert r.returncode == 1 and "uv sync" in r.stderr
 
 

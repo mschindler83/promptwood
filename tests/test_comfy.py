@@ -56,9 +56,9 @@ def test_workflow_follows_the_blueprint():
 
 
 def test_lora_names():
-    names = ["MiniMax H3/glow.safetensors", "nose.safetensors", "other/x.safetensors"]
+    names = ["MiniMax H3/glow.safetensors", "glow.safetensors", "other/x.safetensors"]
     assert C.lora_name_for("/m/my_models/loras/MiniMax H3/glow.safetensors", names) == "MiniMax H3/glow.safetensors"
-    assert C.lora_name_for("/elsewhere/glow.safetensors", names) == "nose.safetensors"
+    assert C.lora_name_for("/elsewhere/glow.safetensors", names) == "glow.safetensors"
     assert C.lora_name_for("/elsewhere/unknown.safetensors", names) is None
 
 
@@ -212,7 +212,7 @@ def test_lora_found_through_a_link(tmp_path):
     (models / "loras" / "MiniMax H3").mkdir(parents=True)
     (comfy / "extra_model_paths.yaml").write_text(
         f"my_models:\n    base_path: {models}/\n    loras: loras/\n    vae: vae/\n")
-    trained = tmp_path / "training" / "glow_h3_lora.safetensors"
+    trained = tmp_path / "training" / "glow_exhale_h3_lora.safetensors"
     trained.parent.mkdir()
     trained.write_bytes(b"weights")
     (models / "loras" / "MiniMax H3" / "glow_step500.safetensors").symlink_to(trained)
@@ -622,7 +622,7 @@ def test_qwen_loras_found_and_chained_before_lightning(server, start, tmp_path):
     _write_lora(root / "qwen-image-edit" / "style.safetensors", qwen)
     _write_lora(root / "qwen-image-edit" / "Qwen-Image-Edit-2511-Lightning-4steps.safetensors", qwen)
     _write_lora(root / "flux" / "flux.safetensors", flux)
-    _write_lora(root / "h3" / "nose.safetensors", ["blocks.0.attn.qkv_proj.lora_A.weight",
+    _write_lora(root / "h3" / "glow.safetensors", ["blocks.0.attn.qkv_proj.lora_A.weight",
                                                    "blocks.0.mlp.fc1.lora_A.weight"])
     assert [n for _p, n in C.find_qwen_loras([root])] == ["qwen-image-edit/style.safetensors"]
     assert [n for _p, n in C.find_h3_loras([root])] == ["h3/glow.safetensors"]
@@ -1600,7 +1600,7 @@ def test_loras_that_train_adaln_go_through_video_chains_h3_lora_node(server, sta
     VideoChainH3LoRA, which also applies that part on the pruned H3 files; other LoRAs as before; a ComfyUI without
     the node gets the plain loader and a log line; the 2K refine does the same."""
     from ui_helpers import H3_KEYS, write_lora
-    full = tmp_path / "loras" / "MiniMax H3" / "nose.safetensors"
+    full = tmp_path / "loras" / "MiniMax H3" / "glow.safetensors"
     plain = tmp_path / "loras" / "MiniMax H3" / "plain.safetensors"
     write_lora(full, ADALN_KEYS)
     write_lora(plain, H3_KEYS)
@@ -1632,7 +1632,7 @@ def test_loras_that_train_adaln_go_through_video_chains_h3_lora_node(server, sta
     gen = C.ComfyGenerator(server.url, log=logs.append)
     gen.generate("x", start, out, frame, 1, settings(lora=str(full), strength=0.7))
     assert server.prompts[-1]["lora0"]["class_type"] == "LoraLoaderModelOnly"
-    assert any(C.H3_LORA_NODE in m and "nose.safetensors" in m for m in logs)
+    assert any(C.H3_LORA_NODE in m and "glow.safetensors" in m for m in logs)
 
 
 def test_two_pass_workflow():

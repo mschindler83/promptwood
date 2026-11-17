@@ -165,7 +165,7 @@ def test_ai_image_edit_for_start_and_end_images(app, tmp_path, image, monkeypatc
         assert dlg.b_use_end.text() == f"Use as end image of clip #{ids[1][1:]}"
         dlg.prompt.setPlainText("she smiles at the camera")
         dlg.tries.setValue(2)
-        lora = tmp_path / "loras" / "MiniMax H3" / "nose.safetensors"     # ComfyUI (fake) lists it by this name
+        lora = tmp_path / "loras" / "MiniMax H3" / "glow.safetensors"     # ComfyUI (fake) lists it by this name
         lora.parent.mkdir(parents=True)
         lora.write_bytes(b"x")
         dlg.add_lora_file(str(lora), 0.7)
@@ -174,7 +174,7 @@ def test_ai_image_edit_for_start_and_end_images(app, tmp_path, image, monkeypatc
         wait(app, lambda: not dlg._busy, timeout=60)
         assert dlg.state.text().startswith("Done") and dlg.results.count() == 2
         png, meta = dlg.selected()
-        assert meta["loras"] == [{"path": str(lora), "strength": 0.7}] and "nose ×0.7" in dlg.res_info.text()
+        assert meta["loras"] == [{"path": str(lora), "strength": 0.7}] and "glow ×0.7" in dlg.res_info.text()
         assert server.prompts[-1]["lora0"]["inputs"]["lora_name"] == "MiniMax H3/glow.safetensors"
         size = QImage_size(meta["source"])
         assert QImage_size(png) == size and meta["prompt"] == "she smiles at the camera"   # back to the source size
@@ -346,7 +346,7 @@ def test_create_a_new_image_in_the_window(app, tmp_path, image, monkeypatch):
         q.setValue("comfyUrl", server.url)
         w = MainWindow(q, command=FAKE)
         new_project(w, tmp_path, image, ("a",))
-        sdxl_lora = tmp_path / "loras" / "MiniMax H3" / "nose.safetensors"     # the fake lists it by this name
+        sdxl_lora = tmp_path / "loras" / "MiniMax H3" / "glow.safetensors"     # the fake lists it by this name
         sdxl_lora.parent.mkdir(parents=True)
         sdxl_lora.write_bytes(b"x")
         w.image_loras = {"sdxl": [(str(sdxl_lora), "anime/style.safetensors")], "flux1": [], "krea2": []}
@@ -582,9 +582,9 @@ def test_edit_every_image_of_a_folder(app, tmp_path, image, monkeypatch):
         metas = [json.loads(f.read_text()) for f in (w.project / "edits").glob("edit_*.json")]
         got = sorted((Path(m["source"]).name, Path(m["loras"][0]["path"]).stem, m["seed"], tuple(m["size"]))
                      for m in metas)
-        assert got == [("img1.png", "rain", 77, (256, 256)), ("img1.png", "glow", 77, (256, 256)),
-                       ("img10.png", "rain", 77, (320, 240)), ("img10.png", "glow", 77, (320, 240)),
-                       ("img2.jpg", "rain", 77, (240, 320)), ("img2.jpg", "glow", 77, (240, 320))]
+        assert got == [("img1.png", "glow", 77, (256, 256)), ("img1.png", "rain", 77, (256, 256)),
+                       ("img10.png", "glow", 77, (320, 240)), ("img10.png", "rain", 77, (320, 240)),
+                       ("img2.jpg", "glow", 77, (240, 320)), ("img2.jpg", "rain", 77, (240, 320))]
         for m in metas:                                                # each result: its own original, its size
             assert Path(m["source_copy"]).is_file() and m["folder"] == str(folder)
         pngs = sorted((w.project / "edits").glob("edit_*.png"))

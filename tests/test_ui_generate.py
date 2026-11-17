@@ -108,7 +108,7 @@ def test_start_explains_what_is_missing(app, win, tmp_path, image):
 
 
 def test_clip_settings_per_node(app, win, tmp_path, image):
-    lora = tmp_path / "nose.safetensors"
+    lora = tmp_path / "glow.safetensors"
     lora.write_bytes(b"x")
     other = tmp_path / "smile.safetensors"
     other.write_bytes(b"y")
@@ -127,7 +127,7 @@ def test_clip_settings_per_node(app, win, tmp_path, image):
     assert win.tree.nodes[ids[1]].overrides == {"loras": [{"path": str(lora.resolve()), "strength": 0.8},
                                                           {"path": str(other.resolve()), "strength": 0.4}],
                                                 "frames": 124, "steps": 20}
-    assert win.badge(win.tree.nodes[ids[1]]) == "nose ×0.8 · smile ×0.4 · 5.2 s · 20 steps"
+    assert win.badge(win.tree.nodes[ids[1]]) == "glow ×0.8 · smile ×0.4 · 5.2 s · 20 steps"
     assert win.graph.items_by_id[ids[1]].info.badge.startswith("glow")
     assert win.graph.items_by_id[ids[0]].info.badge == ""
     # time spans follow the clip's own length: clip 2 is 124 frames (minus the repeated one)

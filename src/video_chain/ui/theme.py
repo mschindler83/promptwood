@@ -1,7 +1,5 @@
-"""Graphite / Cobalt theme, shared with the other pipeline apps (from the design).
-
-The tokens (tokens.json), the stylesheet template (theme.qss.in), the fonts and the icons are copies of the design's, so the
-designer looks like the main app. ${...} placeholders are filled exactly like the C++ fillTemplate().
+"""Graphite / Cobalt theme: the tokens (tokens.json), the stylesheet template (theme.qss.in), the fonts and the icons.
+${...} placeholders in the template are filled from the tokens.
 """
 from __future__ import annotations
 
@@ -130,7 +128,7 @@ def tinted_svg(name: str, tint: QColor, px: int = 16) -> bytes:
         return b""
     c = tint.name().upper()
     s = re.sub("#000000", c, s, flags=re.IGNORECASE).replace("currentColor", c)
-    # authored at 16 px with stroke 1.25; at other sizes the stroke is specified in output px (the design IconEngine)
+    # authored at 16 px with stroke 1.25; at other sizes the stroke is specified in output px
     w = _stroke_for(px) * 16.0 / px
     s = re.sub(r'stroke-width="[0-9.]+"', f'stroke-width="{w:.3f}"', s)
     if tint.alpha() < 255:
@@ -158,7 +156,7 @@ def _icon_pixmap(name: str, px: int, rgba: int, dpr: float) -> QPixmap:
 
 
 class _TintedIconEngine(QIconEngine):
-    """Renders the design icon in the theme tint for the requested mode / state (the design TintedIconEngine)."""
+    """Renders the design icon in the theme tint for the requested mode / state."""
 
     def __init__(self, name: str, normal: QColor | None):
         super().__init__()

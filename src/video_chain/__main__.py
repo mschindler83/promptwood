@@ -380,7 +380,7 @@ def _speed_problem(gen, settings: dict, ref_kinds=(None,)) -> str | None:
 
 def _missing_msg(lora: str) -> str:
     return (f"{Path(lora).name} is not in ComfyUI's LoRA folders; copy or link it there "
-            "(e.g. into my_models/loras)")
+            "(e.g. into ComfyUI/models/loras)")
 
 
 def _free_quietly(gen) -> None:

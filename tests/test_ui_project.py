@@ -116,7 +116,7 @@ def test_turbo_in_the_window(app, tmp_path, image, monkeypatch):
     (comfy / "models" / "loras").mkdir(parents=True)
     (comfy / "main.py").write_text("")
     d = comfy / "models" / "loras" / "MiniMax H3"
-    write_lora(d / "nose.safetensors", H3_KEYS)
+    write_lora(d / "glow.safetensors", H3_KEYS)
     write_lora(d / "minimax_h3_turbo_v4_step600.safetensors", H3_KEYS)
     write_lora(d / "minimax_h3_turbo_v4_step600_ema.safetensors", H3_KEYS)
     q = settings(tmp_path, "tu.ini")
@@ -124,7 +124,7 @@ def test_turbo_in_the_window(app, tmp_path, image, monkeypatch):
     w = MainWindow(q, command=FAKE)
     ids = new_project(w, tmp_path, image, ("a",))
     wait(app, lambda: w.turbo_loras, timeout=10)
-    assert [Path(p).name for p, _n in w.h3_loras] == ["nose.safetensors"]          # turbo kept out of the lists
+    assert [Path(p).name for p, _n in w.h3_loras] == ["glow.safetensors"]          # turbo kept out of the lists
     assert [t for _p, t in w.cards[0].loras.known] == ["glow"]
     assert w.turbo_lora.currentText() == "minimax_h3_turbo_v4_step600_ema"         # the recommended one
     run_and_wait(app, w, w.generate_path)

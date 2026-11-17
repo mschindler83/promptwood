@@ -1,4 +1,4 @@
-/* the design app-wide stylesheet (Graphite / Cobalt v1). ThemeManager fills the ${...} placeholders from Theme:
+/* App-wide stylesheet (Graphite / Cobalt v1). ThemeManager fills the ${...} placeholders from Theme:
    ${token} colour, ${token@a} colour with alpha a, ${rowHeight}, ${rowHeight-N}, ${radius.rN}, ${space.sN},
    ${font.X} px, ${uiFamily}, ${monoFamily}, the icon placeholder (the word icon, the icon name and a colour token, joined by colons) = file of the icon tinted with that token.
    One sheet for the whole app: never setStyleSheet per widget; after a dynamic-property change call imt::repolish(w). */
@@ -402,12 +402,12 @@ QLineEdit[type="mono"] { font-family: "${monoFamily}"; font-size: ${font.mono}px
 QListWidget[variant="flat"] { background: transparent; }
 QPushButton[align="left"] { text-align: left; }
 
-/* ---- another app additions ---- */
+/* ---- tiles, file rows and group lists ---- */
 QLabel#frameTile { background: ${bgSunken}; color: ${textTertiary}; border-radius: ${radius.r2}px; font-size: ${font.small}px; }
 QFrame#fileRow, QFrame#compareCard { background: ${bgDock}; border-radius: ${radius.r3}px; }
 QListWidget#groupList::item { border-bottom: 1px solid ${lineSubtle}; padding: 0; }
 
-/* ---- another app additions ---- */
+/* ---- shot cards ---- */
 QFrame#shotCard { background: ${bgDock}; border-radius: ${radius.r3}px; border: 1px solid transparent; }
 QFrame#shotCard[current="true"] { border: 1px solid ${accentLine}; }
 QFrame#shotCard[excluded="true"] { background: ${bgApp}; }

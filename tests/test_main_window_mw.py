@@ -131,7 +131,7 @@ def test_make_room_and_closing_use_free_models_too(app, win, monkeypatch):
 def test_no_hand_built_free_requests_are_left():
     src = (Path(__file__).parent.parent / "src/video_chain/ui/main_window.py").read_text()
     assert '"/free"' not in src and "/free\"" not in src
-    assert 'Path("/' + 'run/media' not in src
+    assert 'Path("/' + 'run/media' not in src                   # (no machine path written into the code)
 
 
 # ---------------------------------------------------------------- settings are passed, never defaulted

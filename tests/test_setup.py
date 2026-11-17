@@ -30,14 +30,33 @@ def home(tmp_path, monkeypatch):
 
 
 # ----------------------------------------------------------------------------- no machine assumptions
-def test_no_personal_paths_in_the_code():
-    bad = re.compile(r"/home/[a-z]|192\.168\.")
-    hits = []
-    for f in [*SRC.joinpath("src").rglob("*.py"), *SRC.joinpath("comfy_nodes").rglob("*.py"),
-              *SRC.joinpath("src").rglob("*.json"), SRC / "install.sh", SRC / "promptwood", SRC / "pyproject.toml"]:
-        for n, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
-            if bad.search(line):
-                hits.append(f"{f.relative_to(SRC)}:{n}: {line.strip()[:80]}")
+def _tracked_text_files():
+    import subprocess
+    out = subprocess.run(["git", "ls-files"], cwd=SRC, capture_output=True, text=True).stdout.split()
+    for rel in out:
+        f = SRC / rel
+        if f.suffix.lower() in (".ttf", ".otf", ".png", ".lock") or not f.is_file():
+            continue
+        try:
+            yield rel, f.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+
+
+def test_nothing_of_the_developers_machine_is_in_the_repository():
+    """No tracked file names the machine it was made on: the running user's name and home folder, mount points, local
+    network addresses, or the words in $PROMPTWOOD_PRIVATE_WORDS (a comma list a developer keeps for their own LoRA,
+    project and host names; never written into the repository). The licence's copyright line is the one place the
+    author is named."""
+    import getpass
+    words = [w.strip() for w in os.environ.get("PROMPTWOOD_PRIVATE_WORDS", "").split(",") if len(w.strip()) >= 3]
+    words += [getpass.getuser(), str(Path.home())]
+    pats = [rf"(?<![\w]){re.escape(w)}(?![\w])" for w in words if w and w not in ("root", "/root", "user", "runner")]
+    pats += ["/run" + "/media/", r"/media/[a-z]", r"192\.168\.", r"\b10\.\d+\.\d+\.\d+\b"]   # (split: not itself a hit)
+    bad = re.compile("|".join(pats), re.I)
+    hits = [f"{rel}:{n}: {line.strip()[:90]}" for rel, text in _tracked_text_files()
+            for n, line in enumerate(text.splitlines(), 1)
+            if bad.search(line) and not (rel == "LICENSE.md" and line.startswith("Required Notice:"))]
     assert not hits, "\n".join(hits)
 
 

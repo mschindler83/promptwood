@@ -77,7 +77,7 @@ def test_stacked_loras_in_the_window(app, tmp_path, image, monkeypatch):
     ids = new_project(w, tmp_path, image, ("a", "b"))
     wait(app, lambda: len(w.h3_loras) == 3, timeout=10)
     path = {Path(p).stem: p for p, _n in w.h3_loras}
-    # clip 2: nose, motion and style stacked on the card, each with its strength
+    # clip 2: glow, motion and style stacked on the card, each with its strength
     card = next(c for c in w.cards if c.nid == ids[1])
     for name, st in (("glow", 1.0), ("motion", 0.5), ("style", 0.3)):
         card.loras._add_row(path[name], st)
@@ -86,7 +86,7 @@ def test_stacked_loras_in_the_window(app, tmp_path, image, monkeypatch):
     assert w.tree.nodes[ids[1]].overrides["loras"] == [{"path": path["glow"], "strength": 1.0},
                                                        {"path": path["motion"], "strength": 0.5},
                                                        {"path": path["style"], "strength": 0.3}]
-    assert w.badge(w.tree.nodes[ids[1]]) == "nose ×1 · motion ×0.5 · style ×0.3"
+    assert w.badge(w.tree.nodes[ids[1]]) == "glow ×1 · motion ×0.5 · style ×0.3"
     ch = T.Checker(w.project, w.tree)
     s2 = ch.settings(ids[1])
     assert s2["lora"] == path["glow"] and [e["lora"] for e in s2["extra_loras"]] == [path["motion"], path["style"]]
@@ -151,12 +151,12 @@ def test_variants_with_stepped_lora_strengths(app, win, tmp_path, image):
 
 def test_lora_stack_keeps_paths_and_picks_from_the_picker(app, win, tmp_path, image, monkeypatch):
     ids = new_project(win, tmp_path, image, ("a", "b"))
-    real = tmp_path / "loras" / "nose.safetensors"
+    real = tmp_path / "loras" / "glow.safetensors"
     write_lora(real, H3_KEYS)
-    link = tmp_path / "comfy-loras" / "nose.safetensors"
+    link = tmp_path / "comfy-loras" / "glow.safetensors"
     link.parent.mkdir()
     link.symlink_to(real)
-    win.h3_loras = [(str(link), "nose.safetensors")]               # ComfyUI lists the link
+    win.h3_loras = [(str(link), "glow.safetensors")]               # ComfyUI lists the link
     node = win.tree.nodes[ids[1]]
     node.overrides = {"loras": [{"path": str(real), "strength": 0.8}]}   # the clip stores the file itself
     win.refresh(rebuild_path=True)
@@ -289,7 +289,7 @@ def test_lora_trigger_words_in_the_image_window(app, tmp_path, image, monkeypatc
         q.setValue("comfyUrl", server.url)
         w = MainWindow(q, command=FAKE)
         new_project(w, tmp_path, image, ("a",))
-        lora = tmp_path / "loras" / "MiniMax H3" / "nose.safetensors"           # ComfyUI (fake) lists this name
+        lora = tmp_path / "loras" / "MiniMax H3" / "glow.safetensors"           # ComfyUI (fake) lists this name
         lora.parent.mkdir(parents=True)
         save_file({"a.lora_A.weight": np.zeros((2, 2), np.float16)}, str(lora),
                   metadata={"modelspec.trigger_phrase": "glowx"})
@@ -368,8 +368,8 @@ def test_one_image_per_lora_in_the_image_window(app, tmp_path, image, monkeypatc
         assert len(metas) == 4
         got = [(m["seed"], Path(m["loras"][0]["path"]).stem, m["loras"][0]["strength"], len(m["loras"]),
                 m["trigger_words"], m["prompt"]) for m in metas]
-        assert got == [(500, "rain", 1.2, 1, ["rainx"], "she smiles"), (500, "glow", 0.7, 1, ["glowx"], "she smiles"),
-                       (501, "rain", 1.2, 1, ["rainx"], "she smiles"), (501, "glow", 0.7, 1, ["glowx"], "she smiles")]
+        assert got == [(500, "glow", 0.7, 1, ["glowx"], "she smiles"), (500, "rain", 1.2, 1, ["rainx"], "she smiles"),
+                       (501, "glow", 0.7, 1, ["glowx"], "she smiles"), (501, "rain", 1.2, 1, ["rainx"], "she smiles")]
         dlg.done(0)
         w.modal_dialogs = False
         dlg = w.edit_image(start=True)                   # remembered

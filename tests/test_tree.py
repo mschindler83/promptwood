@@ -243,7 +243,7 @@ def test_missing_lora_file_is_refused(project, tmp_path):
 
 
 def test_retrained_lora_in_the_same_file_changes_its_clips(project, tmp_path):
-    lora = tmp_path / "nose.safetensors"
+    lora = tmp_path / "glow.safetensors"
     lora.write_bytes(b"weights v1")
     t, a, b1, b2, c = build(project)
     t = T.load(project)
@@ -1027,7 +1027,8 @@ def test_face_crop(project, tmp_path):
 @pytest.mark.models
 def test_face_detector_finds_no_face_in_a_plain_picture(tmp_path):
     from video_chain import faces as F
-    model = F.find_detector(Path.home() / "ComfyUI")
+    from video_chain import paths
+    model = F.find_detector(paths.comfy_dir())
     if F.available(model):
         pytest.skip(F.available(model))
     p = tmp_path / "grey.png"
