@@ -267,22 +267,24 @@ def extract(archive: Path, dest: Path, strip: int = 0, members: list[str] | None
                     out.chmod(0o755)
         return
     with tarfile.open(archive) as t:
-        for info in t:
-            out = target(info.name)
+        for member in t:
+            out = target(member.name)
             if out is None:
                 continue
-            if info.isdir():
+            if member.isdir():
                 out.mkdir(parents=True, exist_ok=True)
-            elif info.issym():
-                link = info.linkname
+            elif member.issym():
+                link = member.linkname
                 if os.path.isabs(link) or ".." in Path(link).parts:
                     continue
                 out.parent.mkdir(parents=True, exist_ok=True)
                 if out.is_symlink() or out.exists():
                     out.unlink()
                 os.symlink(link, out)
-            elif info.isfile():
+            elif member.isfile():
                 out.parent.mkdir(parents=True, exist_ok=True)
-                with t.extractfile(info) as src, open(out, "wb") as dst:
+                data = t.extractfile(member)
+                assert data is not None                 # (a regular file always has its data)
+                with data as src, open(out, "wb") as dst:
                     shutil.copyfileobj(src, dst, CHUNK)
-                out.chmod(0o755 if info.mode & 0o111 else 0o644)
+                out.chmod(0o755 if member.mode & 0o111 else 0o644)

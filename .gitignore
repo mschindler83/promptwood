@@ -2,5 +2,6 @@
 __pycache__/
 *.egg-info/
 .venv-tts/
+.mypy_cache/
 .pytest_cache/
 .ruff_cache/

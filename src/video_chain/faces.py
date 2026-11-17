@@ -5,9 +5,16 @@ buffalo_l), run on the CPU with onnxruntime. Both are optional: without them the
 The picture is read with ffmpeg (scaled to fit the detector's 640 x 640), so no image library is needed."""
 from __future__ import annotations
 
-import json
-import subprocess
+import logging
+import threading
 from pathlib import Path
+
+from . import media
+
+
+logger = logging.getLogger(__name__)
+
+Box5 = tuple[float, float, float, float, float]    # x1, y1, x2, y2, score
 
 DETECTOR_FILES = ("models/buffalo_l/det_10g.onnx", "models/antelopev2/scrfd_10g_bnkps.onnx")
 SIZE = 640
@@ -16,6 +23,8 @@ FACE_MARGIN = 1.5          # the square crop is this many times the face box (fo
 MIN_SCORE = 0.5
 
 _SESSIONS: dict[str, object] = {}
+_SESSION_LOCK = threading.Lock()
+OUTPUTS = 9                # det_10g: scores, boxes and landmarks for the strides 8, 16, 32
 
 
 def find_detector(comfy_dir: Path | None) -> Path | None:
@@ -39,28 +48,29 @@ def available(model: Path | None) -> str | None:
         import numpy  # noqa: F401
         import onnxruntime  # noqa: F401
     except ImportError:
-        return "onnxruntime is not installed (uv pip install onnxruntime numpy)"
+        return "onnxruntime is not installed (run: video-chain setup --only faces)"
     return None
 
 
 def image_size(path: Path) -> tuple[int, int]:
-    out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
-                          "-print_format", "json", str(path)], capture_output=True, text=True, check=True).stdout
-    s = (json.loads(out).get("streams") or [{}])[0]
-    return int(s["width"]), int(s["height"])
+    """(width, height) of a picture as stored. RuntimeError (MediaError) with a plain message when it cannot be read."""
+    return media.image_size(path)
 
 
 def _session(model: Path):
     key = str(model)
-    if key not in _SESSIONS:
-        import onnxruntime as ort
-        opts = ort.SessionOptions()
-        opts.log_severity_level = 3
-        _SESSIONS[key] = ort.InferenceSession(key, opts, providers=["CPUExecutionProvider"])
-    return _SESSIONS[key]
+    with _SESSION_LOCK:                          # (two threads must not both load the model)
+        if key not in _SESSIONS:
+            import onnxruntime as ort
+            opts = ort.SessionOptions()
+            opts.log_severity_level = 3
+            _SESSIONS[key] = ort.InferenceSession(key, opts, providers=["CPUExecutionProvider"])
+        return _SESSIONS[key]
 
 
-def _nms(boxes, scores, thresh=0.4):
+# (a copy of comfy_nodes/video_chain_nodes/faceswap.py:_nms: that package runs inside ComfyUI and cannot import this one)
+def _nms(boxes, scores, thresh: float = 0.4) -> list[int]:
+    """Indices of the boxes kept: the best score first, others overlapping it by more than thresh dropped."""
     import numpy as np
     order, keep = scores.argsort()[::-1], []
     while order.size:
@@ -77,16 +87,14 @@ def _nms(boxes, scores, thresh=0.4):
     return keep
 
 
-def detect(path: Path, model: Path) -> list[tuple[float, float, float, float, float]]:
+def detect(path: Path, model: Path) -> list[Box5]:
     """The faces in a picture, [(x1, y1, x2, y2, score)] in its pixels, largest first. The picture should be a
     PNG (no EXIF rotation): ffprobe gives the stored size, ffmpeg would turn a rotated photo first."""
     import numpy as np
     w, h = image_size(path)
-    scale = SIZE / max(w, h)
-    sw, sh = max(1, round(w * scale)), max(1, round(h * scale))
-    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-frames:v", "1", "-vf",
-                          f"scale={sw}:{sh}:flags=bilinear", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"],
-                         capture_output=True, check=True).stdout
+    sw, sh = fit_size(w, h)
+    raw = media.ffmpeg(["-i", path, "-frames:v", "1", "-vf", f"scale={sw}:{sh}:flags=bilinear", "-pix_fmt", "rgb24",
+                        "-f", "rawvideo", "-"], timeout=120, text=False)
     img = np.frombuffer(raw, np.uint8)[: sw * sh * 3].reshape(sh, sw, 3)
     return detect_rgb(img, w, h, model)
 
@@ -97,7 +105,7 @@ def fit_size(w: int, h: int) -> tuple[int, int]:
     return max(1, round(w * scale)), max(1, round(h * scale))
 
 
-def detect_rgb(img, w: int, h: int, model: Path) -> list[tuple[float, float, float, float, float]]:
+def detect_rgb(img, w: int, h: int, model: Path) -> list[Box5]:
     """detect() for a picture already scaled to fit_size(w, h) (an RGB uint8 array): faces in w x h pixels."""
     import numpy as np
     sh, sw = img.shape[:2]
@@ -106,6 +114,9 @@ def detect_rgb(img, w: int, h: int, model: Path) -> list[tuple[float, float, flo
     blob = ((canvas - 127.5) / 128.0).transpose(2, 0, 1)[None].astype(np.float32)
     sess = _session(Path(model))
     outs = sess.run(None, {sess.get_inputs()[0].name: blob})
+    if len(outs) != OUTPUTS:
+        raise RuntimeError(f"the face detector model gives {len(outs)} outputs, not {OUTPUTS}: "
+                           "use insightface's det_10g.onnx (buffalo_l)")
     boxes, scores = [], []
     for k, stride in enumerate((8, 16, 32)):
         sc, bb = outs[k].reshape(-1), outs[k + 3].reshape(-1, 4) * stride
@@ -120,8 +131,9 @@ def detect_rgb(img, w: int, h: int, model: Path) -> list[tuple[float, float, flo
         return []
     b, s = np.concatenate(boxes), np.concatenate(scores)
     b = b / np.array([sw / w, sh / h, sw / w, sh / h])          # the exact factors of the scaled picture
-    found = [(*map(float, b[i]), float(s[i])) for i in _nms(b, s)]
-    found = [(max(0.0, x1), max(0.0, y1), min(float(w), x2), min(float(h), y2), sc) for x1, y1, x2, y2, sc in found]
+    raw_found = [(*map(float, b[i]), float(s[i])) for i in _nms(b, s)]
+    found: list[Box5] = [(max(0.0, x1), max(0.0, y1), min(float(w), x2), min(float(h), y2), sc)
+                         for x1, y1, x2, y2, sc in raw_found]
     found = [f for f in found if f[2] - f[0] >= 1 and f[3] - f[1] >= 1]   # e.g. a hit in the padding
     return sorted(found, key=lambda f: -(f[2] - f[0]) * (f[3] - f[1]))
 
@@ -137,5 +149,6 @@ def face_square(face, width: int, height: int, margin: float = FACE_MARGIN) -> t
 
 
 def centre_square(width: int, height: int) -> tuple[int, int, int]:
+    """The largest centred square (x, y, side) of a picture."""
     side = min(width, height)
     return (width - side) // 2, (height - side) // 2, side

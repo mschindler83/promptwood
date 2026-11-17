@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -28,7 +29,8 @@ from .download import AGENT, DownloadError, extract, fetch, fetch_all, hf_token,
 
 STEPS = ("system", "comfyui", "nodes")          # what --steps accepts
 # what the programs take on disk (measured on a fresh install; mostly PyTorch with NVIDIA's libraries)
-PROGRAM_BYTES = {"app": 0.8 * 2**30, "comfyui": 7.5 * 2**30, "tts": 6 * 2**30, "llama": 0.6 * 2**30}
+PROGRAM_BYTES = {"app": 0.8 * 2**30, "comfyui": 7.5 * 2**30, "tts": 6 * 2**30, "llama": 0.6 * 2**30,
+                 "fish": 7 * 2**30}
 PIP_TRIES = 4
 NETWORK_ERRORS = ("failed to download", "failed to fetch", "timed out", "error sending request", "connection reset",
                   "temporary failure in name resolution", "connection refused", "readtimeout", "connectionerror")
@@ -256,8 +258,8 @@ class Installer:
         if target.is_file() and "written by video-chain setup" not in target.read_text(encoding="utf-8"):
             raise SetupError(f"{target} exists and was not written by setup: add your model folders there yourself")
         sections: dict = {}
-        for i, src in enumerate(self.o.models_from):
-            src = Path(src).expanduser().resolve()
+        for i, given in enumerate(self.o.models_from):
+            src = Path(given).expanduser().resolve()
             models = src / "models" if (src / "models").is_dir() else src
             if not models.is_dir():
                 raise SetupError(f"--models-from: {src} is not a folder")
@@ -297,6 +299,7 @@ class Installer:
         need = 0 if (self.comfy_dir / "main.py").is_file() else PROGRAM_BYTES["comfyui"]
         need += PROGRAM_BYTES["tts"] if "tts" in soft and not paths.tts_python().is_file() else 0
         need += PROGRAM_BYTES["llama"] if "llama" in soft and not Path(paths.llama_server()).is_file() else 0
+        need += PROGRAM_BYTES["fish"] if "fish" in soft and not paths.fish_python().is_file() else 0
         need += PROGRAM_BYTES["app"] if self.o.phase == "ask" else 0
         return int(need)
 
@@ -312,7 +315,7 @@ class Installer:
         elif self.o.only:
             say(f"    Only          {', '.join(self.o.only)}")
         else:
-            say(f"    Profile       {self.o.profile}: {M.PROFILE_TEXT[self.o.profile]}")
+            say(f"    Profile       {self.o.profile}: {M.PROFILE_TEXT[self.o.profile or 'standard']}")
         jobs = self.downloads() if self.models else []
         todo: dict[str, int] = {}
         for j in jobs:
@@ -465,7 +468,7 @@ class Installer:
                              + S.install_hint("ffmpeg"))
 
     # ---- Python packages
-    def pip(self, py: Path, args: list[str], what: str, expect: str = "") -> None:
+    def pip(self, py: Path, args: list[str | Path], what: str, expect: str = "") -> None:
         """Install Python packages; a download that fails on the network is tried again (what arrived is kept in
         uv's cache, so a retry only fetches the rest)."""
         if (Path(py).parent.parent / "pyvenv.cfg").is_file():
@@ -662,6 +665,49 @@ class Installer:
         return done.is_file() and done.read_text().strip() == self.man["software"]["llama"]["tag"] \
             and Path(paths.llama_server()).is_file()
 
+    def fish_done(self) -> bool:
+        done = paths.fish_dir() / ".video-chain-version"
+        return paths.fish_python().is_file() and done.is_file() and \
+            done.read_text().strip() == self.man["software"]["fish"]["rev"]
+
+    def fish_extra(self) -> str:
+        """fish-speech's PyTorch build for this computer (its extras: cpu, cu126, cu128, cu129)."""
+        gpu = S.gpu()
+        if gpu is None:
+            return "cpu"
+        drv = S.driver_major(gpu)
+        return "cu129" if drv >= 575 else "cu128" if drv >= 570 else "cu126"
+
+    def fish(self) -> None:
+        """Fish S2 Pro's code at the commit the app was made for, with its own environment (uv sync of its project;
+        pyaudio left out: it needs system headers and the app does not play sound through it)."""
+        spec = self.man["software"]["fish"]
+        d = paths.fish_dir()
+        done = d / ".video-chain-version"
+        step("Expressive voices (Fish S2 Pro's code and environment)")
+        if not (done.is_file() and done.read_text().strip() == spec["rev"]):
+            if d.is_dir():
+                shutil.rmtree(d)
+            archive = self.home / "downloads" / "fish-speech.tar.gz"
+            say(f"    fish-speech's code (revision {spec['rev'][:7]})")
+            fetch(f"{spec['git']}/archive/{spec['rev']}.tar.gz", archive)
+            extract(archive, d, strip=1)
+            archive.unlink(missing_ok=True)
+            extra = self.fish_extra()
+            for attempt in range(1, PIP_TRIES + 1):
+                try:
+                    run([self.uv, "sync", "--project", d, "--python", spec["python"], "--extra", extra,
+                         "--no-install-package", "pyaudio"], f"Installing fish-speech with PyTorch ({extra})",
+                        expect="about 5 GB")
+                    break
+                except CommandFailed:
+                    if attempt == PIP_TRIES:
+                        raise
+                    say(f"    The download did not get through. Trying again ({attempt + 1} of {PIP_TRIES}).")
+                    time.sleep(10 * attempt)
+            done.write_text(spec["rev"] + "\n")
+        paths.save_config(fish_dir=d)
+
     def tts(self) -> None:
         spec = self.man["software"]["tts"]
         py = paths.tts_python()
@@ -839,7 +885,7 @@ class Installer:
         busy = gpu is not None and gpu["free_mb"] < TEST_FREE_MB
         if self.o.test and busy and not D.failed(checks):
             checks.append(D.Check(D.TESTS, "Test clip, test line, language model", D.WARN,
-                                  f"skipped: other programs use the graphics card ({gpu['free_mb'] / 1024:.0f} GB "
+                                  f"skipped: other programs use the graphics card ({(gpu or {})['free_mb'] / 1024:.0f} GB "
                                   "free)", "close them, then: video-chain doctor --render --speech --llm"))
         if self.o.test and not busy and not D.failed(checks):
             checks += run_tests(self.man, installed)
@@ -849,11 +895,11 @@ class Installer:
         say(D.summary(checks))
         return not D.failed(checks)
 
-    def pending(self) -> list[tuple[str, object]]:
+    def pending(self) -> list[tuple[str, Callable[[], object] | None]]:
         """The steps this run will do, in order (so they can be counted before the first one starts)."""
         soft = M.software_for(self.man, self.components) if self.models else []
         there = (self.comfy_dir / "main.py").is_file()
-        todo: list[tuple[str, object]] = []
+        todo: list[tuple[str, Callable[[], object] | None]] = []
         if self.wants("system") and not S.ffmpeg_ok():
             todo.append(("ffmpeg", self.ffmpeg))
         todo.append(("comfyui", self.comfyui))
@@ -865,10 +911,12 @@ class Installer:
                 todo.append(("tts", self.tts))
             if "llama" in soft and not self.llama_done():
                 todo.append(("llama", self.llama))
+            if "fish" in soft and not self.fish_done():
+                todo.append(("fish", self.fish))
         todo.append(("desktop", self.desktop))
         todo.append(("verify", None))
         # the ones that print a heading
-        self._headed = sum(1 for name, _ in todo if name in ("ffmpeg", "nodes", "tts", "llama", "verify")
+        self._headed = sum(1 for name, _ in todo if name in ("ffmpeg", "nodes", "tts", "llama", "fish", "verify")
                            or (name == "comfyui" and (self.wants("comfyui") or not there))
                            or (name == "models" and self.downloads()))
         return todo
@@ -906,7 +954,7 @@ class Installer:
         for name, fn in todo:
             if name == "verify":
                 ok = self.verify()
-            else:
+            elif fn is not None:
                 fn()
         shutil.rmtree(self.home / "downloads", ignore_errors=True)
         if ok:

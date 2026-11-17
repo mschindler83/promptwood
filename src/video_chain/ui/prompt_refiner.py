@@ -4,41 +4,67 @@ seed, a hint like "more cinematic"), and taken over. Which model refines is chos
 from __future__ import annotations
 
 import html
+import logging
 import random
-import threading
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QIcon, QImage, QKeySequence, QPixmap, QShortcut, QTextCursor
-from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLineEdit, QPlainTextEdit,
-                               QPushButton, QSpinBox, QTextBrowser, QToolButton, QVBoxLayout)
+from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtGui import QIcon, QImage, QPixmap
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLineEdit, QPlainTextEdit,
+                               QPushButton, QSpinBox, QTextBrowser, QToolButton, QVBoxLayout, QWidget)
 
+from . import shortcuts as S
+from . import settings_keys as SK
+from .workers import post, run_in_background
 from ..tree import refine_problems
-from .theme import repolish
-from .widgets import guard_wheel, icon_button, label
+from .lora_details import themed
+from .theme import repolish, theme
+from .dialogs import add_action, button_row
+from .text_edit import replace_text  # noqa: F401  (main_window and image_edit import it from here)
+from .widgets import fit_size, guard_wheel, label, remember_geometry, shortcut
+from .qsvalue import qs_value
 
-KIND_TEXT = {"video": "video clip prompt", "image": "image prompt", "edit": "edit instruction"}
+log = logging.getLogger(__name__)
 
-
-def refine_button(tip: str = "Refine this prompt with a language model (ComfyUI)") -> "QPushButton":
-    b = icon_button("gen", tip)
-    return b
-
-
-def replace_text(edit: QPlainTextEdit, text: str) -> None:
-    """Replace a text field's content as one step Ctrl+Z takes back."""
-    cur = edit.textCursor()
-    cur.beginEditBlock()
-    cur.select(QTextCursor.Document)
-    cur.insertText(text)
-    cur.endEditBlock()
-    edit.setTextCursor(cur)
+LIKE_EXAMPLE = ("Rewrite my prompt in the manner of this example prompt, which is known to work with the LoRA: take "
+                "its wording, its structure and its level of detail. Keep what my prompt is about (my subjects, my "
+                "cast, the place and what happens) and take nothing of the example's content. The example: "
+                "\"{example}\"")
+LIKE_EXAMPLE_LABEL = "like an example prompt of the LoRA"
 
 
-class _Sig(QObject):
-    models = Signal(object, str)          # [model dicts], error
-    result = Signal(str, str)             # text, error
-    ideas = Signal(object, str)           # [idea dicts], error
+def shown_ask(ask: str) -> str:
+    """What the conversation shows for a message: the long fixed instruction for "write like this example" as a short label."""
+    return LIKE_EXAMPLE_LABEL if ask.startswith(LIKE_EXAMPLE.split("{example}")[0]) else ask
+
+
+def guidance_or_empty(loras: list, prompt: str) -> str:
+    """What the language model is told about the LoRAs (nothing when their data cannot be read: a plain refine)."""
+    from .. import lora_notes
+    try:
+        return lora_notes.guidance(loras, prompt=prompt)
+    except Exception:  # noqa: BLE001
+        log.warning("what the LoRAs' notes say could not be read", exc_info=True)
+        return ""
+
+
+KIND_TEXT = {"video": "video clip prompt", "video_h3": "video clip prompt", "image": "image prompt",
+             "edit": "edit instruction"}
+
+
+SETUP_HINT = ("More models: set up a local language model (llama.cpp, GGUF files) in the main window under "
+              "Preferences, Prompt refiner.")
+
+
+@dataclass(frozen=True)
+class RefineResult:
+    """What the refiner window gave back: one text for the prompt, or all ideas (Generate all, for the image
+    window's variations). Never both."""
+    text: str = ""
+    ideas: list[str] = field(default_factory=list)
 
 
 class RefineDialog(QDialog):
@@ -46,16 +72,25 @@ class RefineDialog(QDialog):
     ComfyUI's models refine once per press (with an optional hint). llama.cpp models hold a conversation: each
     message changes the current version, every version stays and can be continued from, and pictures (the clip's
     start frame, the image to edit, …) can be shown to a model that sees. chosen() -> the text to use, or None.
-    pictures: [(title, path, on)] offered at the start."""
+    pictures: [(title, path, on)] offered at the start. seconds, start_image: the clip's length and the frame it
+    starts from (kind "video_h3": the refiner fits the action to the length and anchors on that frame).
+    loras: the paths of the LoRAs the result is made with; the model is told what is known of them (lora_notes:
+    their creators' words and prompts that work with them), and writes a note on each once."""
+    connect: Callable   # (shadows QObject.connect, which this dialog never uses)
 
     def __init__(self, parent, text: str, kind: str, connect, settings=None, start_comfy=None, cast=None,
-                 pictures=None):
+                 pictures=None, seconds: float | None = None, start_image=None, loras=None):
         super().__init__(parent)
+        self.loras = [str(p) for p in (loras or []) if p]
         self.cast = cast or []                    # the project's characters: the refiner keeps @Name, writes lines
+        self.seconds, self.start_image = seconds, (str(start_image) if start_image else None)
         self.setWindowTitle(f"Refine the {KIND_TEXT.get(kind, 'prompt')}")
-        self.resize(1100, 680)
+        fit_size(self, 1100, 680)
         self.kind, self.connect, self.qs, self.start_comfy = kind, connect, settings, start_comfy
-        self.refiner = None
+        remember_geometry(self, settings, "promptRefiner")
+        self.refiner: Any = None                  # (the connected refiner)
+        self._connecting = False
+        self._retries = 0                         # (more tries to connect: ComfyUI is starting)
         self.refined_any = False                  # a refine ran (its model is loaded in ComfyUI now)
         self._busy = False
         self._chosen: str | None = None
@@ -66,16 +101,15 @@ class RefineDialog(QDialog):
         self._edited: dict[int, bool] = {}       # versions the user edited by hand
         self.pictures = [{"title": t, "path": str(p), "on": bool(on)} for t, p, on in (pictures or [])
                          if p and Path(p).is_file()]
-        self._sig = _Sig()
-        self._sig.models.connect(self._models)
-        self._sig.result.connect(self._result)
-        self._sig.ideas.connect(self._ideas_ready)
         self.ideas: list[dict] = []
         self._chosen_ideas: list[str] | None = None
         v = QVBoxLayout(self)
         top = QHBoxLayout()
-        top.addWidget(label("Model", level="tertiary"))
+        model_label = label("Model", level="tertiary")
+        top.addWidget(model_label)
         self.model = QComboBox()
+        model_label.setBuddy(self.model)
+        self.model.setAccessibleName("Model")
         self.model.addItem("looking for language models …", None)
         self.model.setEnabled(False)
         self.model.setToolTip("The language model that rewrites the prompt. Uncensored ones follow your wording "
@@ -98,6 +132,28 @@ class RefineDialog(QDialog):
         self.b_mode_refine.clicked.connect(lambda: self.set_ideas_mode(False))
         self.b_mode_ideas.clicked.connect(lambda: self.set_ideas_mode(True))
         v.addLayout(top)
+        self.use_loras = QCheckBox("Write for the LoRAs")
+        self.use_loras.setChecked(qs_value(self.qs, SK.REFINER_LORA_KNOWLEDGE, True, bool) if self.qs is not None
+                                  else True)
+        self.use_loras.toggled.connect(self._remember_loras)
+        self.b_loras = QToolButton()
+        self.b_loras.setProperty("role", "textButton")
+        self.b_loras.setText("What the model is told…")
+        self.b_loras.setToolTip("Open the LoRA window: word for word what the language model is told about these "
+                                "LoRAs, their example prompts with the pictures they made, and everything else "
+                                "that is known of them")
+        self.b_loras.setAutoRaise(True)
+        self.b_loras.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.b_loras.clicked.connect(lambda: self.show_loras())
+        self._lora_row = QWidget()
+        lrow = QHBoxLayout(self._lora_row)
+        lrow.setContentsMargins(0, 0, 0, 0)
+        lrow.addWidget(self.use_loras)
+        lrow.addWidget(self.b_loras)
+        lrow.addStretch(1)
+        self._lora_row.hide()                     # (shown when the prompt has LoRAs)
+        self._told = ""                           # the LoRA part of the last instruction, word for word
+        v.addWidget(self._lora_row)
         row = QHBoxLayout()
         left, right = QVBoxLayout(), QVBoxLayout()
         self.original_title = label("Your prompt", level="tertiary")
@@ -141,7 +197,7 @@ class RefineDialog(QDialog):
         self.count.setValue(5)
         self.count.setSuffix(" ideas")
         self.count.setToolTip("How many different ideas (one answer: the model keeps them apart)")
-        self.count.valueChanged.connect(lambda v: self.ideas_mode() and self.b_refine.setText(f"Make {v} ideas"))
+        self.count.valueChanged.connect(self._ideas_count_changed)
         hrow.addWidget(self.count)
         self.b_all = QPushButton("Generate all")
         self.b_all.setToolTip("Put all ideas into the image window's Variations as {idea}: one Generate makes one "
@@ -157,22 +213,23 @@ class RefineDialog(QDialog):
         self.b_refine.clicked.connect(lambda: self.refine())     # (clicked would pass checked=False as ask)
         self.b_refine.setEnabled(False)
         hrow.addWidget(self.b_refine)
+        self.b_stop = QPushButton("Stop")
+        self.b_stop.setToolTip("Stop the model's answer that is being made")
+        self.b_stop.clicked.connect(lambda: self.stop())
+        self.b_stop.hide()
+        hrow.addWidget(self.b_stop)
         v.addLayout(hrow)
         self.state = label("", level="secondary")
         self.state.setWordWrap(True)
         v.addWidget(self.state)
-        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        self.buttons.button(QDialogButtonBox.Ok).setText("Use this")
-        self.buttons.button(QDialogButtonBox.Ok).setEnabled(False)
-        self.b_start = self.buttons.addButton("Start ComfyUI", QDialogButtonBox.ResetRole)
+        self.buttons, _ok = button_row(self, "Use this", enabled=False, accept=self._use)
+        self.b_start = add_action(self.buttons, "Start ComfyUI")
         self.b_start.hide()
         self.b_start.clicked.connect(self._start_comfy)
-        self.buttons.accepted.connect(self._use)
-        self.buttons.rejected.connect(self.reject)
         v.addWidget(self.buttons)
-        self.out.textChanged.connect(lambda: self.buttons.button(QDialogButtonBox.Ok).setEnabled(
+        self.out.textChanged.connect(lambda: self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(
             bool(self.out.toPlainText().strip()) and not self._busy))
-        QShortcut(QKeySequence("Ctrl+Return"), self, activated=lambda: self.refine())
+        shortcut(S.sequence("refine"), self, lambda: self.refine())
         guard_wheel(self)
         self._show_pictures()
         self._mode_changed()
@@ -180,7 +237,8 @@ class RefineDialog(QDialog):
 
     # ---- what the chosen model can do
     def current_model(self) -> dict:
-        return next((m for m in (self.refiner.models if self.refiner else [])
+        models: list[dict] = self.refiner.models if self.refiner else []
+        return next((m for m in models
                      if m["file"] == self.model.currentData()), {})
 
     def chatting(self) -> bool:
@@ -188,6 +246,10 @@ class RefineDialog(QDialog):
 
     def seeing(self) -> bool:
         return bool(self.current_model().get("vision"))
+
+    def _ideas_count_changed(self, v: int) -> None:
+        if self.ideas_mode():
+            self.b_refine.setText(f"Make {v} ideas")
 
     def ideas_mode(self) -> bool:
         return self.b_mode_ideas.isChecked() and self.ideas_possible()
@@ -224,9 +286,9 @@ class RefineDialog(QDialog):
             w.setVisible(ideas)
         self.b_all.setVisible(ideas)
         self.b_all.setEnabled(ideas and bool(self.ideas) and not self._busy)
-        self.buttons.button(QDialogButtonBox.Ok).setEnabled(not ideas and not self._busy
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(not ideas and not self._busy
                                                             and bool(self.out.toPlainText().strip()))
-        self.buttons.button(QDialogButtonBox.Ok).setToolTip("In Ideas mode: Use this on an idea, or Generate all"
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setToolTip("In Ideas mode: Use this on an idea, or Generate all"
                                                             if ideas else "")
         self._render_ideas()
         self.caps.setText(" · ".join(x for x in ("conversation" if chat else "", "sees pictures" if see else "") if x)
@@ -250,10 +312,11 @@ class RefineDialog(QDialog):
         show_pics = chat                              # (only a conversation model can be shown pictures)
         self.pics_title.setVisible(show_pics)
         for i in range(self.pics_row.count()):
-            w = self.pics_row.itemAt(i).widget()
-            if w is not None:
-                w.setVisible(show_pics)
-                w.setEnabled(see)
+            item = self.pics_row.itemAt(i)
+            pic = item.widget() if item is not None else None
+            if pic is not None:
+                pic.setVisible(show_pics)
+                pic.setEnabled(see)
         self.pics_title.setText("Pictures the model sees (click to switch on / off)" if see else
                                 "Pictures (this model cannot see them)")
         self._update_buttons()
@@ -262,7 +325,8 @@ class RefineDialog(QDialog):
     def _show_pictures(self):
         while self.pics_row.count():
             it = self.pics_row.takeAt(0)
-            w = it.widget()                        # (after setParent(None) the item no longer knows it)
+            # (after setParent(None) the item no longer knows it)
+            w = it.widget() if it is not None else None
             if w is not None:
                 w.setParent(None)
                 w.deleteLater()
@@ -270,16 +334,17 @@ class RefineDialog(QDialog):
             b = QToolButton()
             b.setCheckable(True)
             b.setChecked(pic["on"])
-            b.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+            b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
             img = QImage(pic["path"])
             if not img.isNull():
-                b.setIcon(QIcon(QPixmap.fromImage(img.scaled(96, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation))))
+                b.setIcon(QIcon(QPixmap.fromImage(img.scaled(96, 64, Qt.AspectRatioMode.KeepAspectRatio,
+                                                             Qt.TransformationMode.SmoothTransformation))))
                 b.setIconSize(QSize(96, 64))
             b.setText(pic["title"] if len(pic["title"]) <= 22 else pic["title"][:20] + "…")
             b.setToolTip(f"{pic['title']}\n{pic['path']}\nClick: the model sees it (on) or not (off); right-click: "
                          "remove")
             b.toggled.connect(lambda on, i=i: self.pictures[i].update(on=on))
-            b.setContextMenuPolicy(Qt.CustomContextMenu)
+            b.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
             b.customContextMenuRequested.connect(lambda _p, i=i: self._remove_picture(i))
             self.pics_row.addWidget(b)
         add = QToolButton()
@@ -307,38 +372,54 @@ class RefineDialog(QDialog):
         return [(p["title"], p["path"]) for p in self.pictures if p["on"]] if self.seeing() else []
 
     # ---- models
+    def _connected(self, refiner):
+        self.refiner = refiner
+
     def _load_models(self):
+        if self._connecting:
+            return
+        self._connecting = True
         self.state.setText("Connecting …")
-        sig, connect = self._sig, self.connect
+        connect, loras = self.connect, list(self.loras)
 
         def work():
-            try:
-                self.refiner = connect()
-                sig.models.emit(self.refiner.models, "")
-            except Exception as e:  # noqa: BLE001
-                try:
-                    sig.models.emit([], str(e))
-                except RuntimeError:
-                    pass
-        threading.Thread(target=work, daemon=True).start()
+            if loras:
+                self._tell_loras(loras)
+            refiner = connect()
+            post(self, lambda: self._connected(refiner))        # (queued before the list: set in the GUI thread)
+            return refiner.models
+        run_in_background(work, on_done=lambda models: self._models(models, ""),
+                          on_error=lambda e: self._models([], str(e)), owner=self)
+
+    def _tell_loras(self, loras: list) -> None:
+        """(a worker thread) What is known of the LoRAs, to the dialog; nothing known: a plain refine."""
+        try:
+            from .. import lora_notes
+            summary = lora_notes.summary(loras)
+        except Exception:  # noqa: BLE001  (a LoRA's data cannot be read)
+            log.warning("what is known of the LoRAs could not be read", exc_info=True)
+            return
+        post(self, lambda: self._loras_known(summary))
 
     def _models(self, models: list, error: str):
-        if error and getattr(self, "_retries", 0) > 0:        # ComfyUI is starting: ask again
+        self._connecting = False
+        if error and self._retries > 0:        # ComfyUI is starting: ask again
             self._retries -= 1
             QTimer.singleShot(5000, self._load_models)
             return
         if error:
             down = "not reachable" in error
-            self.state.setText(("ComfyUI is not running. " if down else "") + f"Cannot refine: {error}")
+            self._say(("ComfyUI is not running. " if down else "") + f"Cannot refine: {error}", "error")
             self.b_start.setVisible(down and self.start_comfy is not None)
             self.model.setItemText(0, "no language model")
             return
+        has_local = any(str(m.get("file", "")).startswith("llama:") for m in models)
         self.model.blockSignals(True)
         self.model.clear()
         for m in models:
             self.model.addItem(m["label"] + f"  —  {Path(m['file'].split(':', 1)[-1]).name}", m["file"])
-            self.model.setItemData(self.model.count() - 1, m["file"], Qt.ToolTipRole)
-        saved = self.qs.value("refinerModel", "", type=str) if self.qs is not None else ""
+            self.model.setItemData(self.model.count() - 1, m["file"], Qt.ItemDataRole.ToolTipRole)
+        saved = qs_value(self.qs, SK.REFINER_MODEL, "", str) if self.qs is not None else ""
         i = self.model.findData(saved)
         self.model.setCurrentIndex(i if i >= 0 else 0)
         self.model.blockSignals(False)
@@ -347,12 +428,137 @@ class RefineDialog(QDialog):
         self._mode_changed()
         self.state.setText(("Write what should change and press Send (Ctrl+Enter), or just Send to improve it. "
                             if self.chatting() else "Choose a model and press Refine (Ctrl+Enter). ")
-                           + "The first answer loads the model, which takes a moment.")
+                           + "The first answer loads the model, which takes a moment."
+                           + ("" if has_local else " " + SETUP_HINT))
+        self.model.setToolTip(self.model.toolTip().split("\n\n" + SETUP_HINT)[0]
+                              + ("" if has_local else "\n\n" + SETUP_HINT))
         self.b_refine.setFocus()
+
+    # ---- the LoRAs the result is made with
+    def _loras_known(self, info: dict):
+        """Say what is known of the stack's LoRAs (lora_notes.summary; called once their files are read): each
+        with its number of example prompts and whether it has a note. Writing for them is offered when something
+        is known of one."""
+        each = info.get("loras") or []
+        if not each:
+            return
+        from ..lora_notes import known_text
+        names = info.get("known") or []
+        parts = [f"{k['name']} ({known_text(k)})" for k in each[:3]]
+        shown = ", ".join(parts) + (f" and {len(each) - 3} more" if len(each) > 3 else "")
+        self.use_loras.setEnabled(bool(names))
+        if names:
+            self.use_loras.setText(f"Write for the LoRA{'s' if len(each) > 1 else ''}: {shown}")
+            tip = ("The model is told what is known of these LoRAs: their trigger words, what their creators say "
+                   "and prompts that work with them (from their CivitAI galleries; the most liked one and those "
+                   "nearest to your prompt), and takes their wording where it fits your prompt. It never takes "
+                   "the content of those prompts. “What the model is told…” shows it word for word.")
+            if info.get("missing"):
+                tip += (f"\n\nThe first answer takes longer: the model reads up on {info['missing']} LoRA"
+                        f"{'s' if info['missing'] > 1 else ''} first and keeps a note on each (once per LoRA).")
+            if info.get("settings"):
+                tip += "\n\nSettings its example pictures were made with:\n" + "\n".join(
+                    f"{n}: {t}" for n, t in info["settings"])
+        else:
+            self.use_loras.setText(f"LoRA{'s' if len(each) > 1 else ''}: {shown}")
+            tip = ("Nothing is known of this prompt's LoRAs that helps writing for them (no trigger words, no "
+                   "description, no example prompts), so the model is told nothing about them. They are looked "
+                   "up on CivitAI in the background when that is on in the settings.")
+        self.use_loras.setToolTip(tip)
+        self._lora_row.show()
+
+    def _was_told(self, text: str):
+        self._told = text
+
+    def show_loras(self):
+        """The LoRA window for this prompt's LoRAs: what the model was told at the last refine (before the first
+        one: what it will be told, without the notes still to write), and the examples behind it."""
+        from .lora_window import LoraWindow
+        on = self.use_loras.isEnabled() and self.use_loras.isChecked()
+        told, title = self._told, "What the language model was told"
+        if not told and on:
+            told = guidance_or_empty(self.loras, self.original.toPlainText())
+            title = "What the language model will be told"
+        wanted: list[str] = []                     # (an example to rewrite like: asked once the window is closed)
+        idle = not self._busy and self.refiner is not None and not self.ideas_mode()
+        LoraWindow(self, self.loras, current=self.loras[0] if self.loras else None, settings=self.qs,
+                   prompt=self.original.toPlainText(), told=told if on or self._told else "",
+                   told_title=title, use_prompt=self._use_example if idle else None,
+                   adapt=wanted.append if idle else None).exec()
+        self._refresh_loras()
+        if wanted:
+            self.refine(LIKE_EXAMPLE.format(example=wanted[0]))
+
+    def _use_example(self, text: str):
+        """An example prompt from the LoRA window as the version to go on from (it can be edited, changed further
+        by the model, or taken with Use this)."""
+        if self.chatting():                        # a version of the conversation: the next message goes on from it
+            self._capture_edit()
+            self.turns = self.turns[:self.base + 1] + [("start from an example prompt of the LoRA", text)]
+            self.base = len(self.turns) - 1
+            self._edited = {k: v for k, v in self._edited.items() if k < self.base}
+            self._render()
+        self.out.setPlainText(text)
+        self._mode_changed()
+        self.state.setText("The example is in the field on the right: edit it, have it changed further, or press "
+                           "Use this.")
+        self.state.setProperty("severity", "")
+        repolish(self.state)
+
+    def _refresh_loras(self):
+        """Read again what is known of the LoRAs (a note was written or forgotten)."""
+        loras = list(self.loras)
+        if not loras:
+            return
+        run_in_background(lambda: self._tell_loras(loras), on_done=lambda _r: None, owner=self)
+
+    def _remember_loras(self, on: bool):
+        if self.qs is not None:
+            self.qs.setValue(SK.REFINER_LORA_KNOWLEDGE, bool(on))
+
+    def _lora_guide(self, text: str = ""):
+        """-> a function for the worker thread: the LoRA part of the instruction ("" when off or nothing is
+        known), with the example prompts nearest to `text`. The model first writes the notes that are missing
+        (lora_notes.make_notes). What it is told is kept for "What the model is told…"."""
+        paths = list(self.loras) if (not self._lora_row.isHidden() and self.use_loras.isEnabled()
+                                     and self.use_loras.isChecked()) else []
+        refiner, model = self.refiner, self.model.currentData()
+
+        def guide() -> str:
+            if not paths:
+                post(self, lambda: self._was_told(""))
+                return ""
+            from .. import lora_notes
+            try:
+                if hasattr(refiner, "complete"):
+                    def said(name, i, n):
+                        post(self, lambda: self._progress(f"Reading up on the LoRA {name} ({i} of {n}; once per LoRA) …"))
+                    lora_notes.make_notes(paths, lambda system, user, n: refiner.complete(
+                        system, user, n, model_file=model), progress=said)
+                    post(self, lambda: self._progress(""))
+                told = lora_notes.guidance(paths, prompt=text)
+            except Exception:  # noqa: BLE001  (the LoRAs' data cannot be read: a plain refine)
+                log.warning("the LoRAs' notes could not be read", exc_info=True)
+                told = ""
+            post(self, lambda: self._was_told(told))
+            if told:
+                self._tell_loras(paths)                                # (a note may be new: the counts say so)
+            return told
+        return guide
+
+    def _say(self, text: str, severity: str = ""):
+        """The line under the buttons; severity "" (plain), "warning" or "error" (the previous one is cleared)."""
+        self.state.setText(text)
+        self.state.setProperty("severity", severity)
+        repolish(self.state)
+
+    def _progress(self, text: str):
+        if self._busy:
+            self.state.setText(text or ("Thinking …" if self.chatting() else "Refining …"))
 
     def _remember(self, *_):
         if self.qs is not None and self.model.currentData():
-            self.qs.setValue("refinerModel", self.model.currentData())
+            self.qs.setValue(SK.REFINER_MODEL, self.model.currentData())
 
     def _start_comfy(self):
         if self.start_comfy and self.start_comfy():
@@ -388,19 +594,19 @@ class RefineDialog(QDialog):
 
     def _render(self):
         if not self.turns:
-            self.talk.setHtml("<p style='color:gray'>Your prompt is the start. Each message changes the current "
-                              "version; every version stays here.</p>")
+            self.talk.setHtml(themed("<p style='color:gray'>Your prompt is the start. Each message changes the current "
+                              "version; every version stays here.</p>"))
             return
         rows = []
         for k, (ask, version) in enumerate(self.turns):
             cur = k == self.base
             short = html.escape(version if len(version) <= 220 else version[:218] + "…")
-            rows.append(f"<p style='margin:4px 0 0 0'><b>You:</b> {html.escape(ask) if ask else '<i>improve it</i>'}</p>"
+            rows.append(f"<p style='margin:4px 0 0 0'><b>You:</b> {html.escape(shown_ask(ask)) if ask else '<i>improve it</i>'}</p>"
                         f"<p style='margin:0 0 6px 12px'><a href='v:{k}' style='text-decoration:none'>"
                         f"<b>{'▶ ' if cur else ''}Version {k + 1}</b></a>"
                         f"{' <i>(edited by you)</i>' if self._edited.get(k) else ''}<br>"
-                        f"<span style='color:{'#ddd' if cur else 'gray'}'>{short}</span></p>")
-        self.talk.setHtml("".join(rows))
+                        f"<span style='color:{theme().textPrimary.name() if cur else theme().textTertiary.name()}'>{short}</span></p>")
+        self.talk.setHtml(themed("".join(rows)))
         self.talk.verticalScrollBar().setValue(self.talk.verticalScrollBar().maximum())
 
     def _update_buttons(self):
@@ -408,6 +614,15 @@ class RefineDialog(QDialog):
         self.b_all.setEnabled(idle and bool(self.ideas))
         self.b_refine.setEnabled(idle)
         self.b_again.setEnabled(idle and self.chatting() and bool(self.turns) and self.base >= 0)
+        self.b_stop.setVisible(self._busy and hasattr(self.refiner, "interrupt"))
+        if not self._busy:
+            self.b_stop.setEnabled(True)
+
+    def stop(self):
+        """Ask the refiner to give up the answer being made (the dialog then shows the error that follows)."""
+        if self._busy and hasattr(self.refiner, "interrupt"):
+            self.b_stop.setEnabled(False)
+            run_in_background(self.refiner.interrupt, on_done=lambda _r: None)
 
     def again(self):
         """The message that led to the current version, asked again (another answer replaces it; the version
@@ -424,6 +639,8 @@ class RefineDialog(QDialog):
             if self._base_before is not None:          # (Another try that could not start: back where it was)
                 self.base = self._base_before
             self._base_before = None
+            if not self._busy and self.refiner is not None:
+                self._say("There is no prompt to refine: write it on the left first.")
             return
         if self.ideas_mode():
             return self.make_ideas()
@@ -432,31 +649,31 @@ class RefineDialog(QDialog):
             self._capture_edit()
         self._busy = True
         self._update_buttons()
-        self.buttons.button(QDialogButtonBox.Ok).setEnabled(False)
-        self.state.setText("Thinking …" if chat else "Refining …")
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
+        self._say("Thinking …" if chat else "Refining …")
         if not str(self.model.currentData() or "").startswith("llama:"):
             self.refined_any = True                # a ComfyUI model is being loaded (unloaded before clips)
-        self.state.setProperty("severity", "")
-        repolish(self.state)
         text, kind, model = self.original.toPlainText(), self.kind, self.model.currentData()
         ask = self.hint.text().strip() if ask is None else ask
         self._pending = ask
-        sig, refiner, seed, cast = self._sig, self.refiner, random.randint(0, 2**31 - 1), self.cast
+        refiner, seed, cast = self.refiner, random.randint(0, 2**31 - 1), self.cast
         turns, pics = list(self.turns[:self.base + 1]), self.chosen_pictures()
+        clip, guide = self._clip(), self._lora_guide(text)
 
         def work():
-            try:
-                if chat:
-                    out = refiner.chat(text, kind, turns, ask, pictures=pics, cast=cast or None, seed=seed)
-                else:
-                    out = refiner.refine_prompt(text, kind, model, seed, ask, **({"cast": cast} if cast else {}))
-                sig.result.emit(out, "")
-            except Exception as e:  # noqa: BLE001
-                try:
-                    sig.result.emit("", str(e))
-                except RuntimeError:
-                    pass
-        threading.Thread(target=work, daemon=True).start()
+            loras = guide()
+            more = {**clip, **({"loras": loras} if loras else {})}
+            if chat:
+                return refiner.chat(text, kind, turns, ask, pictures=pics, cast=cast or None, seed=seed, **more)
+            return refiner.refine_prompt(text, kind, model, seed, ask, **({"cast": cast} if cast else {}), **more)
+        run_in_background(work, on_done=lambda out: self._result(out, ""),
+                          on_error=lambda e: self._result("", str(e)), owner=self)
+
+    def _clip(self) -> dict:
+        """What a "video_h3" refine is told about the clip (nothing for the other kinds). A conversation shows the
+        start frame only when it is among the chosen pictures (else the model is told it cannot see it); ComfyUI's
+        refiner shows it to its vision models."""
+        return {"seconds": self.seconds, "start_image": self.start_image} if self.kind == "video_h3" else {}
 
     def _result(self, text: str, error: str):
         self._busy = False
@@ -465,9 +682,7 @@ class RefineDialog(QDialog):
                 self.base = self._base_before
                 self._render()
             self._base_before = None
-            self.state.setText(f"Could not refine: {error}")
-            self.state.setProperty("severity", "")
-            repolish(self.state)
+            self._say(f"Could not refine: {error}", "error")
         else:
             self._base_before = None
             if not str(self.model.currentData() or "").startswith("llama:"):
@@ -483,15 +698,12 @@ class RefineDialog(QDialog):
                 " ".join(self.original.toPlainText().lower().strip(" .").split())
             lost = [] if same else refine_problems(self.original.toPlainText(), text)
             nxt = "Send another message to change it further, " if self.chatting() else "Refine for another try, "
-            self.state.setText("The model gave the prompt back unchanged. " + nxt + "or choose another model."
-                               if same else
-                               ("Check this: " + "; ".join(lost) + ". " + nxt + "or edit it." if lost
-                                else f"{len(text.split())} words. Edit it if you like, " + nxt.lower()
-                                + "or Use this."))
-            self.state.setProperty("severity", "warning" if lost else "")
-            repolish(self.state)
+            self._say("The model gave the prompt back unchanged. " + nxt + "or choose another model." if same else
+                      ("Check this: " + "; ".join(lost) + ". " + nxt + "or edit it." if lost
+                       else f"{len(text.split())} words. Edit it if you like, " + nxt.lower() + "or Use this."),
+                      "warning" if lost else "")
         self._mode_changed()
-        self.buttons.button(QDialogButtonBox.Ok).setEnabled(bool(self.out.toPlainText().strip())
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(bool(self.out.toPlainText().strip())
                                                             and not self.ideas_mode())
 
     # ---- ideas from bullet points (image prompts)
@@ -503,26 +715,21 @@ class RefineDialog(QDialog):
         self._mode_changed()
         n, wish, bullets = self.count.value(), self.hint.text().strip(), self.original.toPlainText()
         self._asked_bullets = bullets
-        self.state.setText(f"Making {n} ideas … (about {4 * n} s)")
-        self.state.setProperty("severity", "")
-        repolish(self.state)
-        sig, refiner, seed, cast, pics = self._sig, self.refiner, random.randint(0, 2**31 - 1), self.cast, \
-            self.chosen_pictures()
+        self._say(f"Making {n} ideas … (about {4 * n} s)")
+        refiner, seed, cast, pics = self.refiner, random.randint(0, 2**31 - 1), self.cast, self.chosen_pictures()
+        guide = self._lora_guide(bullets)
 
         def work():
-            try:
-                sig.ideas.emit(refiner.ideas(bullets, n, wish, pictures=pics, cast=cast or None, seed=seed), "")
-            except Exception as e:  # noqa: BLE001
-                try:
-                    sig.ideas.emit([], str(e))
-                except RuntimeError:
-                    pass
-        threading.Thread(target=work, daemon=True).start()
+            loras = guide()
+            return refiner.ideas(bullets, n, wish, pictures=pics, cast=cast or None, seed=seed,
+                                 **({"loras": loras} if loras else {}))
+        run_in_background(work, on_done=lambda ideas: self._ideas_ready(ideas, ""),
+                          on_error=lambda e: self._ideas_ready([], str(e)), owner=self)
 
     def _ideas_ready(self, ideas: list, error: str):
         self._busy = False
         if error:
-            self.state.setText(f"Could not make ideas: {error}")
+            self._say(f"Could not make ideas: {error}", "error")
         else:
             from ..llm_server import missing_bullets
             bullets = getattr(self, "_asked_bullets", self.original.toPlainText())   # (what was asked)
@@ -530,10 +737,9 @@ class RefineDialog(QDialog):
                 d["missing"] = missing_bullets(bullets, d["prompt"])
             self.ideas = ideas
             short = sum(1 for d in ideas if d["missing"])
-            self.state.setText(f"{len(ideas)} ideas. Use one, refine one further, or Generate all (one image each)."
-                               + (f" {short} may leave a bullet point out (marked)." if short else ""))
-            self.state.setProperty("severity", "warning" if short else "")
-            repolish(self.state)
+            self._say(f"{len(ideas)} ideas. Use one, refine one further, or Generate all (one image each)."
+                      + (f" {short} may leave a bullet point out (marked)." if short else ""),
+                      "warning" if short else "")
         self._update_buttons()
         self._mode_changed()
 
@@ -541,19 +747,19 @@ class RefineDialog(QDialog):
         if not self.ideas_view.isVisibleTo(self):
             return
         if not self.ideas:
-            self.ideas_view.setHtml("<p style='color:gray'>Write bullet points on the left, e.g.<br>"
-                                    "- @Anna in a red coat<br>- an old lighthouse<br>- heavy rain<br>"
-                                    f"then press Make {self.count.value()} ideas.</p>")
+            self.ideas_view.setHtml(themed("<p style='color:gray'>Write bullet points on the left, e.g.<br>"
+                                           "- @Anna in a red coat<br>- an old lighthouse<br>- heavy rain<br>"
+                                           f"then press Make {self.count.value()} ideas.</p>"))
             return
         rows = []
         for k, d in enumerate(self.ideas):
-            miss = ("<br><span style='color:#e0a040'>may leave out: "
+            miss = ("<br><span style='color:" + (theme().colour("warning") or theme().accent).name() + "'>may leave out: "
                     + html.escape("; ".join(d["missing"])) + "</span>") if d.get("missing") else ""
             rows.append(f"<p style='margin:0 0 10px 0'><b>{k + 1}. {html.escape(d['title'])}</b>"
                         f" <span style='color:gray'>— {html.escape(d['angle'])}</span><br>"
                         f"{html.escape(d['prompt'])}{miss}<br>"
                         f"<a href='use:{k}'>Use this</a> &nbsp; <a href='more:{k}'>Refine further</a></p>")
-        self.ideas_view.setHtml("".join(rows))
+        self.ideas_view.setHtml(themed("".join(rows)))
 
     def _idea_link(self, url):
         if self._busy:
@@ -586,7 +792,8 @@ class RefineDialog(QDialog):
         return self._chosen_ideas
 
     def _use(self):
-        text = " ".join(self.out.toPlainText().split())
+        # (line breaks are kept: only runs of spaces inside a line and the blank ends are tidied)
+        text = "\n".join(" ".join(line.split()) for line in self.out.toPlainText().strip().splitlines()).strip()
         if text:
             self._chosen = text
             self.accept()
@@ -596,5 +803,5 @@ class RefineDialog(QDialog):
 
     def done(self, r):
         if self._busy and self.refiner is not None and hasattr(self.refiner, "interrupt"):
-            threading.Thread(target=self.refiner.interrupt, daemon=True).start()
+            run_in_background(self.refiner.interrupt, on_done=lambda _r: None)
         super().done(r)

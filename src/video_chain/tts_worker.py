@@ -1,4 +1,4 @@
-"""Qwen3-TTS worker: runs in its own environment (.venv-tts, started by tts.LocalTTS) and answers one JSON request per
+"""Qwen3-TTS worker: runs in its own environment (paths.tts_python, started by tts.LocalTTS) and answers one JSON request per
 line on stdin with one line "@@TTS {json}" on stdout. Everything else the libraries print goes to stderr.
 
 Requests ({"cmd": ...}):
@@ -21,7 +21,7 @@ sys.stdout = sys.stderr
 
 import torch  # noqa: E402
 
-_loaded = {"path": None, "model": None}
+_loaded: dict = {"path": None, "model": None}
 _prompts: dict = {}                                   # voice clone prompts by (file, size, mtime, text)
 
 
@@ -36,8 +36,14 @@ def _model(path: str, kind: str):
     if _loaded["path"] != path:
         _free()
         if kind == "whisper":
+            import transformers
             from transformers import pipeline
-            m = pipeline("automatic-speech-recognition", model=path, torch_dtype=torch.float16, device="cuda:0")
+            try:                                   # (transformers 4.56 renamed torch_dtype to dtype)
+                new = tuple(int(x) for x in getattr(transformers, "__version__", "99.0").split(".")[:2]) >= (4, 56)
+            except ValueError:
+                new = True
+            m = pipeline("automatic-speech-recognition", model=path, device="cuda:0",
+                         **{"dtype" if new else "torch_dtype": torch.float16})
         else:
             from qwen_tts import Qwen3TTSModel
             m = Qwen3TTSModel.from_pretrained(path, device_map="cuda:0", dtype=torch.bfloat16)
@@ -77,7 +83,7 @@ def handle(r: dict) -> dict:
             _prompts[key] = m.create_voice_clone_prompt(ref_audio=r["ref_audio"], ref_text=text,
                                                         x_vector_only_mode=text is None)
         _seed(r.get("seed"))
-        kw = {"temperature": float(r["temperature"])} if r.get("temperature") else {}     # (else the model's own)
+        kw: dict[str, float] = {"temperature": float(r["temperature"])} if r.get("temperature") else {}      # (else the model's own)
         # " ..." after the line: the model stops speaking where its text ends, and without it that is often before
         # the last consonant is out (German most of all: "Par" for "Park."). Measured with a designed voice, 30
         # German lines: 17 without their last consonant as they are, 2 with " ..."; the same words are heard, the
@@ -94,13 +100,17 @@ def handle(r: dict) -> dict:
         p = _model(r["model"], "whisper")
         with tempfile.TemporaryDirectory() as tmp:      # Whisper's own rate, mono (48 kHz stereo is misheard)
             wav16 = os.path.join(tmp, "a.wav")
-            subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", r["audio"], "-ar", "16000", "-ac", "1",
-                            wav16], check=True, capture_output=True)
+            try:
+                subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", r["audio"], "-ar", "16000",
+                                "-ac", "1", wav16], check=True, capture_output=True)
+            except subprocess.CalledProcessError as e:     # (say why: the bad file, a missing codec ...)
+                why = (e.stderr or b"").decode("utf-8", "replace").strip()[-300:]
+                raise RuntimeError(f"ffmpeg could not read the voice sample: {why or e}") from None
             audio, sr = sf.read(wav16, dtype="float32")
-        kw = {"generate_kwargs": {"language": r["language"].lower()}} if r.get("language") else {}
+        asr_kw: dict = {"generate_kwargs": {"language": r["language"].lower()}} if r.get("language") else {}
         if len(audio) > 30 * sr:                      # (more than Whisper's 30 s window: its long-form mode)
-            kw["return_timestamps"] = True
-        text = p({"raw": audio, "sampling_rate": sr}, **kw)["text"].strip()
+            asr_kw["return_timestamps"] = True
+        text = p({"raw": audio, "sampling_rate": sr}, **asr_kw)["text"].strip()
         _free()                                       # (only needed once per voice sample)
         return {"ok": True, "text": text}
     if cmd == "isolate":
@@ -116,21 +126,24 @@ def handle(r: dict) -> dict:
                 return {"ok": False, "error": f"the model file {f} is not in {r['dir']}"}
         _free()
         from audio_separator.separator import Separator
-        with tempfile.TemporaryDirectory() as tmp:
-            sep = Separator(model_file_dir=r["dir"], output_dir=tmp, output_format="WAV",
-                            output_single_stem="Vocals", log_level=logging.WARNING)
-            sep.load_model(r["model"])
-            made = sep.separate(r["audio"], {"Vocals": "vocals"})
-            if not made:
-                return {"ok": False, "error": "the separation made no file"}
-            src = made[0] if os.path.isabs(made[0]) else os.path.join(tmp, made[0])
-            info = sf.info(src)
-            part = r["out"] + ".part.wav"
-            shutil.move(src, part)
-            os.replace(part, r["out"])
-        del sep
-        gc.collect()
-        _free()                                       # (only needed once per voice)
+        sep = None
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                sep = Separator(model_file_dir=r["dir"], output_dir=tmp, output_format="WAV",
+                                output_single_stem="Vocals", log_level=logging.WARNING)
+                sep.load_model(r["model"])
+                made = sep.separate(r["audio"], {"Vocals": "vocals"})
+                if not made:
+                    return {"ok": False, "error": "the separation made no file"}
+                src = made[0] if os.path.isabs(made[0]) else os.path.join(tmp, made[0])
+                info = sf.info(src)
+                part = r["out"] + ".part.wav"
+                shutil.move(src, part)
+                os.replace(part, r["out"])
+        finally:
+            del sep                                   # (also after a failure: its ~2 GB of VRAM are given back)
+            gc.collect()
+            _free()                                   # (only needed once per voice)
         return {"ok": True, "secs": round(info.frames / info.samplerate, 3), "sr": info.samplerate}
     return {"ok": False, "error": f"unknown request {cmd!r}"}
 
@@ -153,6 +166,8 @@ def main():
         except Exception as e:  # noqa: BLE001
             traceback.print_exc()
             a = {"ok": False, "error": f"{type(e).__name__}: {e}"[:600]}
+        if "id" in r:
+            a["id"] = r["id"]                         # (the client matches an answer to its request)
         _answer.write("@@TTS " + json.dumps(a) + "\n")
     _free()
 

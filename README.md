@@ -15,7 +15,7 @@ trigger words at CivitAI (both optional, both with your own key).
 |---|---|
 | System | Linux, x86-64 (tested on Fedora 44; Ubuntu and Arch should work the same) |
 | Graphics card | NVIDIA with 24 GB of memory (16 GB works, slower); a current driver (580 or newer for CUDA 13) |
-| Disk | 145 GB free for the standard set, 55 GB for video clips only |
+| Disk | 145 GB free for the standard set, 55 GB for video clips only, 270 GB for everything |
 | Main memory | 64 GB recommended |
 | Internet | for the installation only (about 126 GB of models) |
 
@@ -63,8 +63,9 @@ To remove everything, delete these two folders (and `~/.local/share/applications
 ```bash
 ./install.sh --dry-run                # only show what would be installed and downloaded
 ./install.sh --profile core           # video clips only (40 GB)
-./install.sh --profile full           # also extra speed modes, Krea-2 and both head swaps (184 GB)
-./install.sh --with image-krea2       # the standard set plus one part
+./install.sh --profile full           # also extra speed modes, Krea-2, Qwen-Image-Edit 2511, MOSS-Image,
+                                      # Fish S2 Pro voices and both head swaps (235 GB)
+./install.sh --with image-krea2       # the standard set plus one part (also: image-edit, image-moss, tts-fish)
 ./install.sh --without tts,llm        # the standard set minus parts
 ./install.sh --models-from ~/ComfyUI  # a new ComfyUI that reads the models of the one you have, in place
 ./install.sh --hf-cache ~/.cache/huggingface/hub       # text to speech / language models you already have
@@ -123,7 +124,8 @@ The installer lives in `src/video_chain/setup/` (standard library only): `manife
 
 Promptwood installs programs and models made by others, and each keeps its own licence. **Many of the models are
 not free for every use:** the MiniMax H3 video models come under MiniMax's community licence, Qwen-Image 2.1 under
-a research licence, the InsightFace face models are for non-commercial research only, and for some files (the
-HyperSwap and GPEN face models) the publisher states no licence at all. The installer shows, per part, what each
+a research licence, the InsightFace face models are for non-commercial research only, Fish S2 Pro (part
+`tts-fish`, not in the standard set) under the Fish Audio Research License (research and non-commercial use only),
+and for some files (the HyperSwap and GPEN face models) the publisher states no licence at all. The installer shows, per part, what each
 publisher states and asks before it downloads; [docs/MODELS.md](docs/MODELS.md) has the full list with links.
 Whether your use is allowed is yours to check; parts you do not want can be left out (`--without faces`).

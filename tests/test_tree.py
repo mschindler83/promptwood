@@ -279,6 +279,7 @@ def test_damaged_tree_files_are_refused(project):
     t, a, b1, b2, c = build(project)
     good = (project / T.TREE_FILE).read_text()
     (project / T.TREE_FILE).write_text("{ not json")
+    (project / (T.TREE_FILE + ".bak")).unlink(missing_ok=True)         # (with a backup it opens: test_tree_store)
     with pytest.raises(ValueError, match="damaged"):
         T.load(project)
     d = json.loads(good)
@@ -338,7 +339,7 @@ def test_identity_references(project, tmp_path):
     assert statuses(project)["c"] == "done"
     face(project / rel, (10, 10, 10))                                          # another reference image
     assert statuses(project)["a"] == "changed"
-    T.remove_reference(project, rel, t)
+    T.remove_picture(project, t, rel)
     assert not (project / rel).exists() and T.cast_of(t)[0]["images"] == []
     assert T.Tree().options["cast"] is not T.Tree().options["cast"]             # defaults are not shared
 
@@ -727,6 +728,8 @@ def test_undo_changes_of_a_made_clip(project, tmp_path):
 def test_clip_states_do_not_read_every_frame_again(project, monkeypatch):
     """The states are checked after every edit: the frames are hashed and the start image probed once per version
     of the file, not on every check (slow on a network share)."""
+    T._IMG_SIZE.clear()                       # (caches of earlier tests must not decide the counts)
+    chain._SHA_CACHE.clear()
     t, a, b1, b2, c = build(project)
     run(project, [c.id, b2.id])
     assert set(statuses(project).values()) == {"done"}
@@ -795,7 +798,7 @@ def test_hand_over_with_a_motion_guide(project):
     assert ch.guide_from(t.nodes[b1.id]).endswith("@8")
     assert T.guide_problem(t, ch, [b1.id]) is None
     t.nodes[a.id].end_at = 3                                        # 4 frames < the 5-frame guide
-    assert "shorter than the 5-frame motion guide" in T.guide_problem(t, T.Checker(project, t), [b1.id])
+    assert "shorter than the 5-frame carry-over" in T.guide_problem(t, T.Checker(project, t), [b1.id])
 
 
 def test_style_text_around_every_prompt(project):
@@ -1124,6 +1127,27 @@ def test_refined_export_can_refine_a_video_with_a_replaced_person(project, tmp_p
     T.refine_path(gen, project, a.id, "2k", tmp_path / "plain.mp4", log=lambda _m: None)
     assert json.loads(refined.with_suffix(".json").read_text())["video"] == "converted"   # only scaled up now
     assert len(gen.refines) == 3 and gen.refines[2]["prompt"] == "a"   # (pinned to the other first frame)
+    assert all(r["checkpoint"] is None for r in gen.refines)
+
+
+def test_a_video_with_a_replaced_person_is_refined_with_the_projects_checkpoint(project, tmp_path):
+    """Such a video has no checkpoint of its own: its refine loads the project's choice, recorded with the copy."""
+    from video_chain import swap
+    clip = tmp_path / "swapped.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=96x54:r=24:d=1", "-f", "lavfi",
+                    "-i", "sine=frequency=440:duration=1", "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", str(clip)], check=True)
+    t = T.load(project)
+    v = t.add_video(None, str(clip), 0.0, 1.0)
+    a = t.add(v.id, "a")
+    swap.apply(v, clip, 24, {"method": "h3", "details": "Male, short black hair", "seed": 7})
+    t.options["checkpoint"] = {"name": "h3/fine.safetensors", "distilled": False}
+    T.save(project, t)
+    gen = run(project, [a.id])
+    T.refine_path(gen, project, a.id, "2k", tmp_path / "out.mp4", log=lambda _m: None, refine_swapped=True)
+    assert [r["checkpoint"] for r in gen.refines] == ["h3/fine.safetensors"] * 2
+    refined = T.refined_file(project, T.load(project).nodes[v.id], "2k")
+    assert json.loads(refined.with_suffix(".json").read_text())["checkpoint"] == "h3/fine.safetensors"
 
 
 def test_new_clips_get_random_unused_seeds():
@@ -1372,7 +1396,7 @@ def test_middle_keyframes(project, tmp_path):
     assert "past its end" in T.keyframe_problem(t, ch, [b1.id])
     t.nodes[b1.id].keyframes[0]["at"] = 0.1                                       # frame 2
     t.nodes[b1.id].overrides["guide"] = 5                                         # frames 0-4 are the guide
-    assert "inside its motion guide" in T.keyframe_problem(t, T.Checker(project, t), [b1.id])
+    assert "inside its carry-over" in T.keyframe_problem(t, T.Checker(project, t), [b1.id])
     t.nodes[b1.id].keyframes[0]["at"] = 5 / 24                                    # the first frame after it
     assert T.keyframe_problem(t, T.Checker(project, t), [b1.id]) is None
     t.nodes[b1.id].overrides.pop("guide")
@@ -1469,3 +1493,796 @@ def test_frozen_clips_stay_consistent(project):
     a.made, a.frozen = None, True                           # never made: not frozen
     T.save(project, t)
     assert not T.load(project).nodes[a.id].frozen
+
+
+def test_seedvr2_cloud_variant_is_recorded(project, tmp_path):
+    """Copies upscaled on a big RunPod GPU (fp16, whole frames) record that: a copy made otherwise (int8, tiles)
+    is made again there instead of reused, and the other way round; the same variant is reused."""
+    t, a, b1, b2, c = build(project)
+    gen = run(project, [b1.id])
+    T.refine_path(gen, project, b1.id, "2k", tmp_path / "s.mp4", log=lambda _m: None, method="seedvr2_7b")
+    gen.seedvr_variant = "fp16, whole frames"
+    T.refine_path(gen, project, b1.id, "2k", tmp_path / "c.mp4", log=lambda _m: None, method="seedvr2_7b")
+    assert len(gen.seedvrs) == 4                                                     # made again
+    t = T.load(project)
+    assert T.refine_record(T.refined_file(project, t.nodes[a.id], "2k"))["variant"] == "fp16, whole frames"
+    T.refine_path(gen, project, b1.id, "2k", tmp_path / "c2.mp4", log=lambda _m: None, method="seedvr2_7b")
+    assert len(gen.seedvrs) == 4                                                     # then reused
+    gen.seedvr_variant = None
+    T.refine_path(gen, project, b1.id, "2k", tmp_path / "s2.mp4", log=lambda _m: None, method="seedvr2_7b")
+    assert len(gen.seedvrs) == 6                                                     # back home: made again
+
+
+# ---------------------------------------------------------------------------- the official H3 prompt format
+
+from video_chain import h3_prompt as H  # noqa: E402
+
+ANNA = "woman, 30s, grey sweater"
+
+
+def h3_project(tmp_path, start=True, name="h3"):
+    """A project in the h3 format (the tests' default is classic), with a start image unless start=False."""
+    p = tmp_path / name
+    p.mkdir()
+    t = T.Tree()
+    t.options["prompt_format"] = "h3"
+    if start:
+        img = tmp_path / f"{name}_in.jpg"
+        Image.new("RGB", (96, 54), (250, 250, 250)).save(img)
+        T.set_start_image(p, img, t)
+    T.save(p, t)
+    return p, t
+
+
+def anna_and_kitchen(p, t, tmp_path):
+    T.add_character(p, t, "Anna", face(tmp_path / "a1.jpg", (200, 150, 130)), desc=ANNA)
+    T.add_picture(p, t, "Anna", face(tmp_path / "a2.jpg", (190, 140, 120)))
+    T.add_character(p, t, "Kitchen", face(tmp_path / "k.jpg", (90, 90, 200)), desc="a small sunny kitchen",
+                    kind="place")
+
+
+@pytest.mark.h3_default
+def test_prompt_format_of_new_and_loaded_projects(tmp_path):
+    """New projects write H3's official formats; a file from before the setting loads (and stays) classic."""
+    assert T.Tree().options["prompt_format"] == "h3" and T.is_h3(T.Tree())
+    empty = tmp_path / "new"
+    empty.mkdir()
+    assert T.load(empty).options["prompt_format"] == "h3"                       # a new project folder
+    d = T.Tree().to_json()
+    del d["options"]["prompt_format"]
+    assert T.Tree.from_json(d).options["prompt_format"] == "classic"
+    d["options"]["prompt_format"] = "fancy"
+    assert T.Tree.from_json(d).options["prompt_format"] == "classic"
+    for fmt in T.PROMPT_FORMATS:                                                 # saved once: stays as it is
+        t = T.Tree()
+        T.set_prompt_format(t, fmt)
+        T.save(empty, t)
+        assert T.load(empty).options["prompt_format"] == fmt
+    with pytest.raises(ValueError):
+        T.set_prompt_format(t, "fancy")
+    old = tmp_path / "linear"                                                    # a linear chain.json
+    old.mkdir()
+    (old / "chain.json").write_text(json.dumps({"tool": "video-chain", "settings": {}, "clips": []}))
+    assert T.load(old).options["prompt_format"] == "classic"
+
+
+def test_a_project_from_before_the_format_stays_done(project, tmp_path):
+    """Made clips of a project file without the setting stay done (classic, recorded as before); switching to h3
+    marks them changed."""
+    t = T.load(project)
+    T.add_character(project, t, "Anna", face(tmp_path / "a.jpg", (200, 150, 130)), desc=ANNA)
+    a = t.add(None, "@Anna waves.")
+    b = t.add(a.id, "She smiles.")
+    T.save(project, t)
+    run(project, [b.id])
+    d = json.loads((project / T.TREE_FILE).read_text())
+    del d["options"]["prompt_format"]
+    (project / T.TREE_FILE).write_text(json.dumps(d))
+    t = T.load(project)
+    assert t.options["prompt_format"] == "classic" and set(statuses(project).values()) == {"done"}
+    s = t.nodes[a.id].made["settings"]
+    assert "prompt_format" not in s and "frame_pictures" not in s and s["cast"] == [{"name": "Anna", "desc": ANNA}]
+    T.set_prompt_format(t, "h3")
+    T.save(project, t)
+    assert set(statuses(project).values()) == {"changed"}
+
+
+def test_h3_base_formats(tmp_path):
+    """Without references: three fields, with the header of what the clip has (nothing, start, start + end, end)."""
+    fields = ("integrated_multimodal_description: [Shot 1] A lighthouse at dusk.\n\noverall_soundscape: Natural "
+              "ambient sound that fits the scene.\n\nnon_diegetic_music: N/A")
+    p, t = h3_project(tmp_path, start=False, name="text")
+    a = t.add(None, "A lighthouse at dusk.")
+    T.save(p, t)
+    gen = run(p, [a.id])
+    assert gen.calls[0]["start"] is None and gen.calls[0]["prompt"] == fields
+    s = T.load(p).nodes[a.id].made["settings"]
+    assert s["prompt_format"] == "h3" and "frame_pictures" not in s and "refs" not in s
+    end = face(tmp_path / "end.png", (0, 0, 250))
+    T.set_end_image(p, t, a.id, end)                                            # end only: L2VA
+    T.save(p, t)
+    gen = run(p, [a.id])
+    assert gen.calls[0]["prompt"] == H.L2VA_HEADER.format(n=1, s="3.04") + "\n\n" + fields
+    assert gen.calls[0]["end_rgb"] is not None
+
+    p, t = h3_project(tmp_path, name="start")
+    a = t.add(None, "A lighthouse at dusk.")
+    T.save(p, t)
+    gen = run(p, [a.id])
+    assert gen.calls[0]["prompt"] == H.I2VA_HEADER + "\n\n" + fields                 # start frame: I2VA
+    t = T.load(p)
+    t.options["frames"] = 49
+    T.set_end_image(p, t, a.id, end)
+    b = t.add(a.id, "A lighthouse at dusk.")
+    b.overrides = {"guide": 5}                                                  # its start is a motion guide
+    T.save(p, t)
+    gen = run(p, [b.id])
+    assert gen.calls[0]["prompt"] == H.FL2VA_HEADER.format(n=1, s="2.04") + "\n\n" + fields   # 49 / 24 s
+    assert gen.calls[1]["guides"] and gen.calls[1]["prompt"] == fields          # no plain start frame: no header
+
+
+def test_h3_reference_format_numbers_the_start_frame(tmp_path):
+    """A person with 2 pictures and a place, from the start image: the start frame is <Picture 4> (after the
+    subject pictures), recorded as frame_pictures, sent after them; the end frame is <Picture 5>."""
+    p, t = h3_project(tmp_path)
+    anna_and_kitchen(p, t, tmp_path)
+    a = t.add(None, "@Anna walks into @Kitchen and looks around, smiling.")
+    T.save(p, t)
+    gen = run(p, [a.id])
+    call = gen.calls[0]
+    assert call["prompt"] == (
+        "subject_definitions:\n"
+        f"<Subject 1> is Anna ({ANNA}), the person in <Picture 1> and <Picture 2>.\n"
+        "<Subject 2> is Kitchen (a small sunny kitchen), the environment in <Picture 3>.\n"
+        "<Picture 4> is the first frame of [Shot 1].\n\n"
+        "summary:\n[keyframe completion + reference generation] The target video shows <Subject 1> and "
+        "<Subject 2>. It begins from <Picture 4>.\n\n"
+        "retention_analysis:\n"
+        "<Subject 1> (appears in [Shot 1]): fully_preserved - Anna's face and identity are retained.\n"
+        "<Subject 2> (appears in [Shot 1]): fully_preserved - the layout and look of Kitchen are retained.\n"
+        "<Picture 4> ([Shot 1] first frame): fully_preserved - the target video begins exactly from this picture."
+        "\n\ndetailed_description:\n[Shot 1] The shot begins from <Picture 4>. <Subject 1>, woman, 30s, grey "
+        "sweater, walks into <Subject 2>, a small sunny kitchen, and looks around, smiling.\n\n"
+        "overall_soundscape:\nNatural ambient sound that fits the scene.\n\nnon_diegetic_music:\nN/A")
+    s = call["settings"]
+    assert s["frame_pictures"] == ["start"] and s["prompt_format"] == "h3" and s["ref_hint"] is True
+    assert s["ref_paths"] == [str(p / r) for r in ("refs/ref1.png", "refs/ref2.png", "refs/ref3.png")]
+    assert s["cast"] == [{"name": "Anna", "desc": ANNA},
+                         {"name": "Kitchen", "desc": "a small sunny kitchen", "kind": "place"}]
+    made = T.load(p).nodes[a.id].made["settings"]
+    assert made["frame_pictures"] == ["start"] and "ref_paths" not in made
+    assert statuses(p)[a.prompt] == "done"
+    t = T.load(p)
+    T.set_end_image(p, t, a.id, face(tmp_path / "end.png", (0, 0, 250)))
+    T.save(p, t)
+    info = T.clip_inputs(p, t, a.id)
+    assert info["settings"]["frame_pictures"] == ["start", "end"] and info["model"] == "ref2va"
+    assert [(x["n"], x["what"]) for x in info["pictures"]] == [(1, "@Anna"), (2, "@Anna"), (3, "@Kitchen"),
+                                                               (4, "start frame"), (5, "end frame")]
+    assert info["end"] == {"given": "frame", "file": p / t.nodes[a.id].end_image, "picture": 5}
+    assert "<Picture 5> is the last frame of [Shot 1]." in info["prompt"]
+    assert info["prompt"].split("detailed_description:\n")[1].split("\n\n")[0].endswith(
+        "smiling. The shot ends on <Picture 5>.")
+    gen = run(p, [a.id])
+    assert gen.calls[0]["prompt"] == info["prompt"] and gen.calls[0]["settings"]["frame_pictures"] == ["start", "end"]
+
+
+def test_h3_frame_pictures_fit_in_nine(tmp_path):
+    """At most 9 pictures: the end frame loses its number first, then the start frame (both then in words)."""
+    p, t = h3_project(tmp_path)
+    for k, name in enumerate(("Ann", "Bea", "Cid")):
+        T.add_character(p, t, name, face(tmp_path / f"{name}0.jpg", (10 * k, 0, 0)))
+        for i in (1, 2):
+            if k < 2 or i < 2:                                                  # 3 + 3 + 2 = 8 pictures
+                T.add_picture(p, t, name, face(tmp_path / f"{name}{i}.jpg", (10 * k, 10 * i, 0)))
+    a = t.add(None, "@Ann, @Bea and @Cid dance.")
+    T.save(p, t)
+    T.set_end_image(p, t, a.id, face(tmp_path / "end.png", (0, 0, 250)))
+    info = T.clip_inputs(p, t, a.id)
+    assert info["settings"]["frame_pictures"] == ["start"] and info["start"]["picture"] == 9
+    assert info["end"]["picture"] is None and "The video ends exactly on the given end frame." in info["prompt"]
+    assert "[keyframe completion + reference generation]" in info["prompt"]
+    T.add_picture(p, t, "Cid", face(tmp_path / "Cid2.jpg", (20, 20, 0)))       # 9: no frame gets a number
+    info = T.clip_inputs(p, t, a.id)
+    assert "frame_pictures" not in info["settings"] and info["start"]["picture"] is None
+    assert "The video begins exactly from the given start frame." in info["prompt"]
+    assert "[reference generation]" in info["prompt"] and "<Picture 10>" not in info["prompt"]
+
+
+def test_h3_lead_and_the_lead_switch(project, tmp_path):
+    """A clip that mentions nobody gets the lead (h3: Subject 1, said so before [Shot 1]); switched off, it gets no
+    pictures in either format; switched on again, it is recorded exactly as before."""
+    t = T.load(project)
+    T.add_character(project, t, "Anna", face(tmp_path / "a.jpg", (200, 150, 130)), desc=ANNA)
+    a = t.add(None, 'She waves. "Hi."')
+    T.save(project, t)
+    ch = T.Checker(project, t)
+    classic = ch.settings(a.id)
+    assert classic["refs"] and T.node_cast(t.options, a)["mode"] == "lead"
+    T.set_lead_on(a, False)
+    assert a.overrides == {"lead": False}
+    ch = T.Checker(project, t)
+    assert "refs" not in ch.settings(a.id) and T.node_cast(t.options, a)["mode"] is None
+    assert T.model_prompt(t.options, a, ch.settings(a.id)) == 'She waves. "Hi."'
+    T.set_lead_on(a, True)
+    assert a.overrides == {} and T.Checker(project, t).settings(a.id) == classic
+    T.set_prompt_format(t, "h3")
+    info = T.clip_inputs(project, t, a.id)
+    assert info["subjects"] == [{"name": "Anna", "kind": "person", "pictures": [1], "files": ["refs/ref1.png"],
+                                 "lead": True, "voice": None}]
+    assert ("detailed_description:\nThe person in the video is <Subject 1>.\n[Shot 1] The shot begins from "
+            "<Picture 2>. She waves. <Subject 1> (S1), woman, 30s, grey sweater, says, <d>[English] Hi.</d>") \
+        in info["prompt"]
+    T.set_lead_on(a, False)
+    info = T.clip_inputs(project, t, a.id)
+    assert info["subjects"] == [] and info["model"] == "fl2va" and "refs" not in info["settings"]
+    assert info["prompt"] == (H.I2VA_HEADER + "\n\nintegrated_multimodal_description: [Shot 1] She waves. "
+                              "<d>[English] Hi.</d>\n\noverall_soundscape: Natural ambient sound that fits the scene."
+                              "\n\nnon_diegetic_music: N/A")
+    T.save(project, t)
+    assert T.load(project).nodes[a.id].overrides == {"lead": False}              # kept in tree.json
+
+
+def test_references_of_any_kind(project, tmp_path):
+    """Places, objects and styles: whole pictures, never the lead, no voice; named as what they are."""
+    t = T.load(project)
+    big = tmp_path / "room.png"
+    Image.new("RGB", (120, 90), (90, 90, 200)).save(big)
+    k = T.add_character(project, t, "Kitchen", big, desc="a small sunny kitchen", kind="place", crop=(0, 0, 40))
+    assert k["kind"] == "place" and k["lead"] is False
+    assert Image.open(project / k["images"][0]).size == (120, 90)               # not cropped
+    T.add_picture(project, t, "Kitchen", big, crop=(0, 0, 40))
+    assert Image.open(project / T.character(t, "Kitchen")["images"][1]).size == (120, 90)
+    anna = T.add_character(project, t, "Anna", face(tmp_path / "a.jpg", (200, 150, 130)), crop=(0, 0, 40))
+    assert anna["lead"] is True and "kind" not in anna and T.kind_of(anna) == "person"   # the first person
+    assert Image.open(project / anna["images"][0]).size == (40, 40)
+    with pytest.raises(ValueError, match="only a person can have a voice"):
+        T.set_voice(project, t, "Kitchen", sound(tmp_path / "v.wav", 3))
+    with pytest.raises(ValueError, match="only a person can be the lead"):
+        T.update_character(t, "Kitchen", lead=True)
+    with pytest.raises(ValueError, match="unknown kind"):
+        T.set_kind(t, "Kitchen", "animal")
+    T.add_character(project, t, "Cup", kind="object")
+    T.save(project, t)
+    t = T.load(project)
+    assert [T.kind_of(c) for c in T.cast_of(t)] == ["place", "person", "object"]
+    assert "kind" not in T.character(t, "Anna")                                  # persons are stored as before
+    # classic: the tying sentence names the kind; a person's stays as it was
+    use = T.clip_cast(t.options, "@Anna cooks in @Kitchen.")
+    assert use["prompt"] == ("Anna (the person in <Picture 1>) cooks in Kitchen (the place in <Picture 2> and "
+                             "<Picture 3>). Anna has exactly the face of the person in <Picture 1>. Kitchen is the "
+                             "place shown in <Picture 2> and <Picture 3>. Kitchen: a small sunny kitchen. The face "
+                             "pictures only show who the people are; their pose and framing come from the video.")
+    assert use["record"] == [{"name": "Anna", "desc": ""},
+                             {"name": "Kitchen", "desc": "a small sunny kitchen", "kind": "place"}]
+    assert T.clip_cast(t.options, "A view of @Kitchen.")["prompt"] == (
+        "A view of Kitchen (the place in <Picture 1> and <Picture 2>). Kitchen is the place shown in <Picture 1> and "
+        "<Picture 2>. Kitchen: a small sunny kitchen.")
+    assert T.dialogue(t.options, 'In @Kitchen, @Anna says "Hi."')[0]["speaker"]["name"] == "Anna"   # a place never speaks
+    a = t.add(None, "@Cup falls.")
+    assert T.cast_problems(project, t, [a.id]) == [f"@Cup (clip #{a.id[1:]}) has no picture yet"]
+    T.set_voice(project, t, "Anna", sound(tmp_path / "v.wav", 3))
+    with pytest.raises(ValueError, match="has a voice"):
+        T.set_kind(t, "Anna", "object")
+    T.remove_voice(project, t, "Anna")
+    T.set_kind(t, "Anna", "object")                                              # no longer the lead
+    assert T.lead_of(t) is None and T.character(t, "Anna")["lead"] is False
+    T.set_kind(t, "Anna", "person")
+    assert "kind" not in T.character(t, "Anna")
+    assert T.add_reference(project, face(tmp_path / "b.jpg", (1, 2, 3)), t) in T.character(t, "Anna")["images"]
+
+
+def test_h3_voices_sounds_and_a_given_soundtrack(tmp_path):
+    """Voices come after the sounds the prompt names (and are sent in that order); with the clip's whole sound
+    given, no voice is sent and the soundtrack is the last <Audio N>, reused 1:1."""
+    p, t = h3_project(tmp_path)
+    t.options["frames"] = 48
+    T.add_character(p, t, "Anna", face(tmp_path / "a.jpg", (200, 150, 130)), desc=ANNA)
+    T.set_voice(p, t, "Anna", sound(tmp_path / "anna.wav", 4))
+    T.add_audio_reference(p, sound(tmp_path / "rain.wav", 3), t)
+    a = t.add(None, '<Audio 1> rains outside. @Anna looks up and says "Good morning."\n'
+                    "overall_soundscape: Rain on the window.\nnon_diegetic_music: N/A")
+    T.save(p, t)
+    gen = run(p, [a.id])
+    call = gen.calls[0]
+    pr, s = call["prompt"], call["settings"]
+    assert s["audio_paths"] == [str(p / "refs/audio1.wav"), str(p / "refs/voice1.wav")]
+    assert s["voice_language"] == "English" and s["frame_pictures"] == ["start"]
+    assert "<Audio 2> is the voice-timbre reference for <Subject 1> (S1), the voice of one speaker." in pr
+    assert ("[Shot 1] The shot begins from <Picture 2>. <Audio 1> rains outside. <Subject 1> (S1), woman, 30s, grey "
+            "sweater, looks up and says, using the voice timbre referenced from <Audio 2>, <d>[English] Good "
+            "morning.</d>\n\noverall_soundscape:\nRain on the window.\n\nnon_diegetic_music:\nN/A") in pr
+    assert "[keyframe completion + reference generation + audio reference]" in pr
+    info = T.clip_inputs(p, T.load(p), a.id)
+    assert [(x["n"], x["what"]) for x in info["sounds"]] == [(1, "sound"), (2, "voice of @Anna")]
+    assert info["subjects"][0]["voice"] == 2
+
+    src = sound(tmp_path / "song.wav", 6)
+    t = T.load(p)
+    tid = T.add_track(p, t, src, 0.0, 5.0, "Song")["id"]
+    t.nodes[a.id].overrides = {"source_sound": f"track:{tid}"}
+    T.save(p, t)
+    gen = run(p, [a.id])
+    call = gen.calls[0]
+    pr, s = call["prompt"], call["settings"]
+    assert len(s["audio_paths"]) == 2 and s["audio_paths"][0] == str(p / "refs/audio1.wav")   # sound + soundtrack
+    assert "voice_language" not in s and s["frame_pictures"] == ["start"]
+    assert "<Audio 2> is the complete audio track of the target video, reused 1:1." in pr
+    assert "[keyframe completion + reference generation + audio reuse + audio reference]" in pr
+    assert T.TRACK_SOUND_TEXT.format(k=2) in pr and "voice timbre" not in pr
+    info = T.clip_inputs(p, T.load(p), a.id)
+    assert [x["what"] for x in info["sounds"]] == ["sound", "soundtrack"] and info["sounds"][1]["n"] == 2
+
+
+def test_h3_style_triggers_camera_and_notes_inside_the_description(tmp_path):
+    """The style text, trigger words, camera move and keyframe notes end up in the description; the user's own
+    sound lines are cut off before the style suffix; a structured prompt of the user's goes as written."""
+    p, t = h3_project(tmp_path, start=False)
+    t.options["style"] = {"prefix": "Cinematic, warm light.", "suffix": "Film grain."}
+    a = t.add(None, "A cat jumps. #push-in-slow.\noverall_soundscape: Soft thud.")
+    a.overrides = {"camera": {"move": "pan-left"}}
+    T.set_keyframe(p, t, a.id, face(tmp_path / "k.png", (1, 2, 3)), 1.0, "it lands")
+    T.save(p, t)
+    s = T.Checker(p, t).settings(a.id)
+    s["lora_triggers"] = ["mycat"]
+    pr = T.model_prompt(t.options, a, s)
+    assert pr == ("integrated_multimodal_description: [Shot 1] mycat. Cinematic, warm light. A cat jumps. The camera "
+                  "pushes in at slow speed. Film grain. The camera pans left. At 1.0 s: it lands.\n\n"
+                  "overall_soundscape: Soft thud.\n\nnon_diegetic_music: N/A")
+    own = "integrated_multimodal_description: [Shot 1] A dog.\n\noverall_soundscape: Barks.\n\nnon_diegetic_music: N/A"
+    a.prompt = own
+    assert T.model_prompt(t.options, a, s) == own
+
+
+def test_multi_line_prompts_survive(tmp_path):
+    """A refined h3 prompt has line breaks (shots, then the sound lines): kept by save / load and the checks; the
+    2K refine gets the description without the sound lines (its camera sentence after the shots)."""
+    p, t = h3_project(tmp_path)
+    text = ('A man says "Hi."\n[Shot 2] At 00:00.500, he leaves.\noverall_soundscape: Steps.\n'
+            "non_diegetic_music: N/A")
+    a = t.add(None, text)
+    a.overrides = {"camera": {"move": "static"}}
+    T.save(p, t)
+    assert T.load(p).nodes[a.id].prompt == text
+    assert T.refine_problems('A man says "Hi."', text) == [] and T.spoken_lines(text) == ["Hi."]
+    gen = run(p, [a.id])
+    assert gen.calls[0]["prompt"].endswith('[Shot 1] A man says <d>[English] Hi.</d>\n[Shot 2] At 00:00.500, he '
+                                           "leaves. The camera holds a static shot.\n\noverall_soundscape: Steps."
+                                           "\n\nnon_diegetic_music: N/A")
+    T.refine_path(gen, p, a.id, "2k", tmp_path / "out.mp4", log=lambda _m: None)
+    assert gen.refines[0]["prompt"] == ('A man says "Hi."\n[Shot 2] At 00:00.500, he leaves. The camera holds a '
+                                        "static shot.")
+
+
+def test_the_same_first_clip_for_more_start_pictures(project, tmp_path):
+    """A first clip can have a start picture of its own; add_start_rows makes the same clip once per picture
+    (a set): each starts from its picture, fitted to the project's size, and can then go its own way."""
+    t = T.load(project)
+    a = t.add(None, "she waves", seed=7)
+    a.overrides = {"frames": 49, "steps": 30}
+    pics = []
+    for k, (size, colour) in enumerate((((54, 96), (200, 10, 10)), ((96, 54), (10, 10, 200)))):   # a tall one too
+        f = tmp_path / f"p{k}.jpg"
+        Image.new("RGB", size, colour).save(f)
+        pics.append(f)
+    with pytest.raises(ValueError):
+        T.add_start_rows(project, t, t.add(a.id, "later").id, pics)          # only a first clip
+    new = T.add_start_rows(project, t, a.id, pics + [tmp_path / "missing.jpg"])
+    assert len(new) == 2 and all(n.parent is None and n.prompt == "she waves" and n.seed == 7 for n in new)
+    assert all(n.overrides == a.overrides and n.overrides is not a.overrides for n in new)
+    assert a.row == a.id and {n.row for n in new} == {a.id} and a.start_image is None
+    assert [n.id for n in T.row_members(t, new[0].id)] == [a.id, new[0].id, new[1].id]
+    assert all(n.start_image.startswith("starts/") and (project / n.start_image).is_file() for n in new)
+    ck = T.Checker(project, t)
+    assert ck.start_frame(a) == project / T.START_FILE and ck.start_frame(new[0]) == project / new[0].start_image
+    T.save(project, t)
+    t2 = T.load(project)                                                      # kept in tree.json
+    assert t2.nodes[new[0].id].start_image == new[0].start_image and t2.nodes[new[1].id].row == a.id
+    assert t2.to_json() == t.to_json()
+    # each row is made from its own picture, cut to the project's shape (the tall one is not stretched)
+    gen = run(project, [a.id, new[0].id, new[1].id])
+    starts = {c["start"] for c in gen.calls}
+    stem0, stem1 = Path(new[0].start_image).stem, Path(new[1].start_image).stem
+    assert starts == {"start_672x384.png", f"{stem0}_672x384.png", f"{stem1}_672x384.png"}
+    with Image.open(project / "starts" / f"{stem0}_672x384.png") as im:
+        assert im.size == (672, 384) and im.getpixel((5, 5))[0] > 150 and im.getpixel((660, 380))[0] > 150
+    assert set(statuses(project).values()) == {"done"} | ({"new"} if "later" in statuses(project) else set())
+    # a changed prompt goes to the other rows on request; seeds, pictures and frozen clips stay
+    t = T.load(project)
+    a, r0, r1 = (t.nodes[i] for i in (a.id, new[0].id, new[1].id))
+    r0.seed = 99
+    r1.frozen = True
+    a.prompt, a.overrides = "she waves and smiles", {"frames": 73}
+    assert T.apply_to_row(t, a.id) == [r0.id]
+    assert r0.prompt == "she waves and smiles" and r0.overrides == {"frames": 73} and r0.seed == 99
+    assert r1.prompt == "she waves" and r0.start_image == new[0].start_image
+    assert T.apply_to_row(t, a.id) == [] and T.row_members(t, t.add(None, "alone").id) == []
+    # another picture for one row: its clip counts as changed; back to the project's start image; removing
+    T.save(project, t)
+    old = r0.start_image
+    T.set_node_start(project, t, r0.id, pics[1])
+    assert r0.start_image != old and not (project / old).exists() and not list((project / "starts").glob(f"{stem0}_*"))
+    T.save(project, t)
+    assert T.Checker(project, T.load(project)).status(r0.id) == "changed"
+    T.clear_node_start(project, t, r0.id)
+    assert r0.start_image is None and T.Checker(project, t).start_frame(r0) == project / T.START_FILE
+    kept = project / r1.start_image
+    t.remove(r1.id, project)
+    assert not kept.exists() and (project / "old" / "starts" / kept.name).is_file()
+    # a damaged record never points outside starts/
+    d = t.to_json()
+    d["nodes"][0]["start_image"] = "../elsewhere.png"
+    assert T.Tree.from_json(d).nodes[d["nodes"][0]["id"]].start_image is None
+
+
+# ----------------------------------------------------------------------------- continue the clip before (<Video 1>)
+
+class TailGenerator(FakeGenerator):
+    """FakeGenerator that also looks at the reference video it gets (cut in a temp folder that is gone after the
+    clip): its frame count and the colour of its last frame."""
+
+    def generate(self, prompt, start_image, out_video, out_last_frame, seed, settings=None):
+        vids = []
+        for v in (settings or {}).get("ref_videos") or []:
+            last = Path(v).with_suffix(".last.png")
+            chain.last_frame(Path(v), last)
+            vids.append({"frames": chain.probe(Path(v))["frames"],
+                         "last_rgb": Image.open(last).convert("RGB").getpixel((5, 5))})
+        super().generate(prompt, start_image, out_video, out_last_frame, seed, settings)
+        self.calls[-1]["ref_videos"] = vids
+
+
+CONT_DEF = ("<Video 1> is the source video for the target video continuation; the target video continues directly "
+            "from its end.")
+CONT_KEEP = ("<Video 1> (continuation source, its end): fully_preserved - the subjects, scene, motion and camera "
+             "movement at its end carry on directly into [Shot 1].")
+
+
+def test_h3_continue_the_clip_before(tmp_path):
+    """Override "continue": the clip before's last n frames (up to its hand-over frame) go as the reference video,
+    recorded as settings["continue"] in h3 only; the prompt says so; the lengths offered fit both clips; the clip
+    becomes changed when the clip before is made again or hands over elsewhere."""
+    p, t = h3_project(tmp_path)
+    t.options["frames"] = 49
+    a = t.add(None, "A red car drives along a coast road.")
+    b = t.add(a.id, "The car drives on.")
+    assert T.continue_choices(t, a) == [] and T.continue_choices(t, b) == [22, 39]     # 49 frames each
+    b.overrides = {"frames": 25}
+    assert T.continue_choices(t, b) == [22]                     # (no longer than the clip itself)
+    b.overrides = {"continue": 39}
+    a.overrides = {"continue": 22}                              # a first clip: nothing to continue, not recorded
+    T.save(p, t)
+    ch = T.Checker(p, t)
+    assert ch.settings(b.id)["continue"] == {"frames": 39} and "continue" not in ch.settings(a.id)
+    assert ch.settings(b.id)["frame_pictures"] == ["start"]     # the reference model: the start frame is numbered
+    assert T.uses_ref_model(ch.settings(b.id)) and not T.uses_ref_model(ch.settings(a.id))
+    classic = T.Tree.from_json(t.to_json())
+    T.set_prompt_format(classic, "classic")
+    s = T.Checker(p, classic).settings(b.id)
+    assert "continue" not in s and not T.uses_ref_model(s)      # classic: no effect
+    gen = run(p, [b.id], TailGenerator(frames=49))
+    call = gen.calls[1]
+    assert call["ref_videos"][0]["frames"] == 39
+    a_last = Image.open(p / T.load(p).nodes[a.id].made["frame"]).convert("RGB").getpixel((5, 5))
+    assert call["ref_videos"][0]["last_rgb"] == a_last == call["start_rgb"]   # it ends where this clip starts
+    assert call["prompt"] == (
+        "subject_definitions:\n<Picture 1> is the first frame of [Shot 1] and the last frame of <Video 1>.\n"
+        f"{CONT_DEF}\n\n"
+        "summary:\n[keyframe completion + video continuation] The target video continues directly from the end of "
+        "<Video 1>. It follows the detailed description. It begins from <Picture 1>, the last frame of <Video 1>."
+        "\n\nretention_analysis:\n<Picture 1> ([Shot 1] first frame): fully_preserved - the target video begins "
+        f"exactly from this picture.\n{CONT_KEEP}\n\n"
+        "detailed_description:\n[Shot 1] The shot continues directly from the end of <Video 1>. It begins from "
+        "<Picture 1>, the last frame of <Video 1>. The car drives on.\n\n"
+        "overall_soundscape:\nNatural ambient sound that fits the scene.\n\nnon_diegetic_music:\nN/A")
+    assert "continue" not in gen.calls[0]["settings"] and not gen.calls[0]["ref_videos"]
+    t = T.load(p)
+    assert t.nodes[b.id].made["settings"]["continue"] == {"frames": 39} and "ref_videos" not in t.nodes[b.id].made["settings"]
+    assert t.nodes[b.id].made["continue_from"] == t.nodes[a.id].made["video"]
+    info = T.clip_inputs(p, t, b.id)
+    assert info["videos"] == [{"n": 1, "what": f"end of clip #{a.id[1:]}", "frames": 39, "node": a.id}]
+    assert info["model"] == "ref2va" and info["prompt"] == call["prompt"]
+    assert statuses(p) == {a.prompt: "done", b.prompt: "done"}
+    # the clip before as another file (same frame, so only the continuation sees it): changed
+    old = p / t.nodes[a.id].made["video"]
+    new = old.with_name(old.stem + "x.mp4")
+    shutil.copy(old, new)
+    t.nodes[a.id].made["video"] = f"nodes/{new.name}"
+    ch = T.Checker(p, t)
+    assert ch.status(a.id) == "done" and ch.status(b.id) == "changed" and ch.why(b.id) == "the clip it continues changed"
+    t.nodes[a.id].made["video"] = f"nodes/{old.name}"
+    t.nodes[a.id].end_at = 30                                  # it hands over earlier: the tail ends there
+    ch = T.Checker(p, t)
+    assert ch.continue_from(t.nodes[b.id]).endswith("@30") and ch.status(b.id) == "changed"
+    assert T.continue_choices(t, t.nodes[b.id]) == [22]        # 31 frames up to the hand-over
+    assert T.guide_problem(t, ch, [b.id]) == f"clip #{a.id[1:]} (31 frames) is shorter than the 39-frame " \
+                                              f"continuation of clip #{b.id[1:]}"
+    t.nodes[b.id].overrides["frames"] = 25
+    t.nodes[a.id].end_at = None
+    assert T.guide_problem(t, T.Checker(p, t), [b.id]) == (f"clip #{b.id[1:]} (25 frames) is shorter than its "
+                                                           "39-frame continuation; make it longer or the "
+                                                           "continuation shorter")
+
+
+def test_h3_continue_with_carry_over_and_a_remade_clip_before(tmp_path):
+    """With Carry-over at the start there is no plain start frame: the continuation sentence alone, no picture; the
+    clip still becomes changed when the clip before is made again (its frames and its video change)."""
+    p, t = h3_project(tmp_path)
+    t.options["frames"] = 49
+    a = t.add(None, "A red car drives along a coast road.")
+    b = t.add(a.id, "The car drives on.")
+    b.overrides = {"guide": 5, "continue": 22}
+    T.save(p, t)
+    gen = run(p, [b.id], TailGenerator(frames=49))
+    call = gen.calls[1]
+    assert call["guides"] and call["ref_videos"][0]["frames"] == 22
+    assert call["prompt"] == (
+        f"subject_definitions:\n{CONT_DEF}\n\n"
+        "summary:\n[video continuation] The target video continues directly from the end of <Video 1>. It follows "
+        f"the detailed description.\n\nretention_analysis:\n{CONT_KEEP}\n\n"
+        "detailed_description:\n[Shot 1] The shot continues directly from the end of <Video 1>. The car drives "
+        "on.\n\noverall_soundscape:\nNatural ambient sound that fits the scene.\n\nnon_diegetic_music:\nN/A")
+    assert "frame_pictures" not in call["settings"] and "Picture" not in call["prompt"]
+    assert statuses(p) == {a.prompt: "done", b.prompt: "done"}
+    t = T.load(p)
+    t.nodes[a.id].seed += 1                                   # the clip before is made again
+    T.save(p, t)
+    run(p, [a.id], gen)                                       # (the same fake: another last-frame colour)
+    t = T.load(p)
+    ch = T.Checker(p, t)
+    assert ch.status(a.id) == "done" and ch.status(b.id) == "changed"
+    m = t.nodes[b.id].made
+    assert m["continue_from"] != ch.continue_from(t.nodes[b.id]) and m["guide_from"] != ch.guide_from(t.nodes[b.id])
+    assert m["start_sha1"] != ch.sha(ch.start_frame(t.nodes[b.id]))   # (the start frame is checked with carry-over too)
+
+
+def test_joined_sound_start_is_where_the_joined_path_hears_the_clip(tmp_path):
+    """The sound the joined path has in a clip starts after the clip's repeated first frame(s), whatever its Sound
+    setting; the clip's own sound span starts that much earlier."""
+    t = T.Tree()
+    f = str(tmp_path / "talk.mp4")
+    v = t.add_video(None, f, 2.0, 3.0)
+    a = t.add(v.id, "she keeps talking")
+    b = t.add(a.id, "and talking")
+    b.overrides = {"source_sound": True, "guide": 5}
+    lone = t.add(None, "no video before")
+    before = dict(a.overrides or {})
+    assert T.joined_sound_start(t, a) == {"video": v, "file": f, "at": 3.0}
+    assert (a.overrides or {}) == before                              # (the node is not changed)
+    a.overrides = {"source_sound": True}
+    assert T.source_sound_span(t, a)["start"] == round(3.0 - 1 / chain.FPS, 3)
+    assert T.joined_sound_start(t, a)["at"] == 3.0
+    assert T.joined_sound_start(t, b)["at"] == round(T.source_sound_span(t, b)["start"] + 5 / chain.FPS, 3)
+    assert T.joined_sound_start(t, v) is None and T.joined_sound_start(t, lone) is None
+
+
+def test_seam_problem_names_a_continuation_cut_from_another_clip(tmp_path, monkeypatch):
+    """status and why count a changed continue_from; the seam check says it too (as it does for guide_from)."""
+    p, t = h3_project(tmp_path)
+    a = t.add(None, "A red car.")
+    b = t.add(a.id, "It drives on.")
+    ch = T.Checker(p, t)
+    b.made = {"video": "b.mp4", "start_sha1": "s", "guide_from": None, "end_key": None, "continue_from": "a1.mp4@3"}
+    monkeypatch.setattr(ch, "sha", lambda _f: "s")
+    monkeypatch.setattr(ch, "start_frame", lambda _n: "frame")
+    monkeypatch.setattr(ch, "guide_from", lambda _n: None)
+    monkeypatch.setattr(ch, "end_key", lambda _n: None)
+    monkeypatch.setattr(ch, "continue_from", lambda _n: "a2.mp4@3")       # the clip before was made again
+    assert ch.seam_problem(b) and "continu" in ch.seam_problem(b)
+    monkeypatch.setattr(ch, "continue_from", lambda _n: "a1.mp4@3")
+    assert ch.seam_problem(b) is None
+
+
+def test_another_h3_checkpoint(project):
+    """A chosen H3 checkpoint is recorded with every clip (made clips change); a distilled one takes its few steps
+    for every clip and switches the speed modes off; without one the clips are as before."""
+    t, a, b1, b2, c = build(project)
+    run(project, [c.id])
+    t = T.load(project)
+    t.options["checkpoint"] = {"name": "h3/fine.safetensors", "distilled": True}
+    t.options["hyperflow"] = {"on": True, "strength": 1.0}
+    t.nodes[b1.id].overrides = {"steps": 40}
+    T.save(project, t)
+    ch = T.Checker(project, t)
+    s = ch.settings(b1.id)
+    assert s["checkpoint"] == {"name": "h3/fine.safetensors", "distilled": True}
+    assert s["steps"] == T.DISTILLED_STEPS == 8 and "hyperflow" not in s and "turbo" not in s
+    assert ch.base()["checkpoint"] == s["checkpoint"]
+    assert statuses(project) == {"a": "changed", "b1": "changed", "c": "changed", "b2": "new"}
+    t.options["checkpoint"]["distilled"] = False                  # a full fine-tune: its speed mode and steps
+    t.options["hyperflow"]["on"] = False
+    T.save(project, t)
+    s = T.Checker(project, t).settings(b1.id)
+    assert s["checkpoint"]["distilled"] is False and s["steps"] == 40
+    t.options["checkpoint"] = {"name": "", "distilled": False}    # the standard model again
+    t.nodes[b1.id].overrides = {}
+    T.save(project, t)
+    assert "checkpoint" not in T.Checker(project, t).settings(b1.id)
+    assert statuses(project) == {"a": "done", "b1": "done", "c": "done", "b2": "new"}
+
+
+def test_a_clip_can_have_its_own_sampling(project, tmp_path):
+    """A clip's own sampler, scheduler, sigma shift and CFG (overrides["sampling"]): recorded with the clip, so it
+    is made with them and counts as changed when they change; a speed mode has its own sampling, which wins."""
+    turbo = tmp_path / "turbo.safetensors"
+    turbo.write_bytes(b"x")
+    t, a, b1, b2, c = build(project)
+    t = T.load(project)
+    t.nodes[a.id].overrides = {"sampling": {"sampler": "euler", "scheduler": "beta", "shift": [8, 3], "cfg": 2.5,
+                                            "junk": 1}}
+    t.nodes[b1.id].overrides = {"sampling": {"sampler": " ", "cfg": 1}}            # nothing of its own
+    T.save(project, t)
+    t = T.load(project)
+    ch = T.Checker(project, t)
+    sa, sb = ch.settings(a.id), ch.settings(b1.id)
+    assert sa["recipe"] == {"sampler": "euler", "scheduler": "beta", "shift": [8.0, 3.0]} and sa["cfg"] == 2.5
+    assert "recipe" not in sb and "cfg" not in sb and "recipe" not in ch.settings(c.id)
+    gen = run(project, [a.id])
+    assert gen.calls[0]["settings"]["recipe"]["scheduler"] == "beta"
+    t = T.load(project)
+    assert T.Checker(project, t).status(a.id) == "done"
+    t.nodes[a.id].overrides["sampling"]["shift"] = [10, 3]
+    assert T.Checker(project, t).status(a.id) == "changed"
+    t.options["turbo"] = {"on": True, "lora": str(turbo), "steps": 6, "strength": 1.0}
+    st = T.Checker(project, t).settings(a.id)
+    assert "recipe" not in st and "cfg" not in st                                  # Turbo's own sampling
+    # what is kept of a sampling setting: names, a shift of two positive numbers, a CFG in range
+    assert T.clean_sampling({"sampler": "euler", "shift": [8, 3], "cfg": 1}) == {"sampler": "euler", "shift": [8.0, 3.0]}
+    assert T.clean_sampling({"cfg": 1.0}) == {} and T.clean_sampling({"cfg": 4}) == {"cfg": 4.0}
+    for bad in (None, "x", {"shift": [0, 3]}, {"shift": [8]}, {"shift": "8/3"}, {"cfg": 99}, {"cfg": "x"},
+                {"sampler": 5}, {"cfg": True}):
+        assert T.clean_sampling(bad) == {}
+
+
+def test_a_project_can_have_an_exact_video_size(project):
+    """options["size"] = [width, height]: every clip is made at exactly this size instead of the size worked out
+    from the resolution and the start image's ratio; a size the model cannot take does not count."""
+    from video_chain import chain
+    t, a, *_ = build(project)
+    t = T.load(project)
+    usual = T.Checker(project, t).base()
+    assert (usual["width"], usual["height"]) == chain.canvas_size(96, 54, 512)
+    t.options["size"] = [768, 1152]
+    base = T.Checker(project, t).base()
+    assert (base["width"], base["height"]) == (768, 1152) and T.video_size(t.options, 96, 54) == (768, 1152)
+    T.save(project, t)
+    assert T.load(project).options["size"] == [768, 1152]
+    gen = run(project, [a.id])
+    assert (gen.calls[0]["settings"]["width"], gen.calls[0]["settings"]["height"]) == (768, 1152)
+    for bad in ([700, 1152], [768], "768x1152", [768, 4096], [32, 768], [2048, 256], [768.5, 1152], [True, 768], None):
+        t.options["size"] = bad
+        assert chain.exact_size(bad) is None
+        base = T.Checker(project, t).base()
+        assert (base["width"], base["height"]) == (usual["width"], usual["height"]), bad
+    assert chain.exact_size([768, 1152]) == (768, 1152) and chain.exact_size((1344, 768)) == (1344, 768)
+    assert chain.snap_size(700, 1150) == (704, 1152) and chain.snap_size(10, 99999) == (256, 640)
+
+
+def test_refined_copies_with_the_clips_h3_checkpoint(project, tmp_path):
+    """The 2K refine of a clip uses the checkpoint it was made with; its copy records it, so a copy refined with
+    another model is made again; copies of standard clips record nothing new (they stay reused)."""
+    t, a, b1, b2, c = build(project)
+    gen = run(project, [b1.id])
+    T.refine_path(gen, project, b1.id, "2k", tmp_path / "std.mp4", log=lambda _m: None)
+    assert [r["checkpoint"] for r in gen.refines] == [None, None]
+    assert "checkpoint" not in T.refine_record(T.refined_file(project, T.load(project).nodes[a.id], "2k"))
+    T.refine_path(gen, project, b1.id, "2k", tmp_path / "again.mp4", log=lambda _m: None)
+    assert len(gen.refines) == 2                                                # reused as before
+    t = T.load(project)
+    t.options["checkpoint"] = {"name": "h3/fine.safetensors", "distilled": True}
+    T.save(project, t)
+    run(project, [b1.id], gen)                                                  # made again with the checkpoint
+    T.refine_path(gen, project, b1.id, "2k", tmp_path / "tuned.mp4", log=lambda _m: None)
+    assert [r["checkpoint"] for r in gen.refines[2:]] == ["h3/fine.safetensors"] * 2
+    t = T.load(project)
+    assert T.refine_record(T.refined_file(project, t.nodes[a.id], "2k"))["checkpoint"] == "h3/fine.safetensors"
+    T.refine_path(gen, project, b1.id, "2k", tmp_path / "tuned2.mp4", log=lambda _m: None)
+    assert len(gen.refines) == 4                                                # and then reused
+    # a copy refined with the standard model before, of a clip made with the checkpoint: made again
+    f = T.refined_file(project, t.nodes[a.id], "2k").with_suffix(".json")
+    rec = T.refine_record(T.refined_file(project, t.nodes[a.id], "2k"))
+    rec.pop("checkpoint")
+    f.write_text(json.dumps(rec))
+    T.refine_path(gen, project, b1.id, "2k", tmp_path / "tuned3.mp4", log=lambda _m: None)
+    assert len(gen.refines) == 5 and gen.refines[-1]["checkpoint"] == "h3/fine.safetensors"
+
+
+def test_a_damaged_checkpoint_record_is_said_not_crashed(project, tmp_path):
+    """A clip whose recorded checkpoint is not a dict (a hand-edited tree.json): the refined export says so."""
+    t, a, b1, b2, c = build(project)
+    run(project, [a.id])
+    t = T.load(project)
+    t.nodes[a.id].made_dict()["settings"]["checkpoint"] = "h3/fine.safetensors"
+    with pytest.raises(ValueError, match="checkpoint.*damaged"):
+        T.export._refine_checkpoint(t, t.nodes[a.id])
+    assert T.export._refine_checkpoint(t, t.nodes[b1.id]) is None                   # (not made: none recorded)
+
+
+def test_a_distilled_checkpoint_has_no_speed_mode_and_no_veda(project):
+    """With a distilled checkpoint the speed mode in use is Normal (the stored one stays for later) and no clip is
+    made with Veda, also where the window asks (veda_for, speed_mode_used)."""
+    o = dict(T.DEFAULT_OPTIONS)
+    T.set_speed_mode(o, "turbo")
+    assert T.speed_mode_used(o) == "turbo" and T.veda_for(o, 1344, 768, 241)
+    o["checkpoint"] = {"name": "h3/fine.safetensors", "distilled": True}
+    assert T.speed_mode_used(o) == "normal" and T.speed_mode(o) == "turbo" and not T.veda_for(o, 1344, 768, 241)
+    o["checkpoint"]["distilled"] = False                          # a full fine-tune: as the standard model
+    assert T.speed_mode_used(o) == "turbo" and T.veda_for(o, 1344, 768, 241)
+
+
+def test_two_passes_for_every_clip(project):
+    """Clips → Two passes: every clip records it (made clips change), with any H3 model; off: as before."""
+    t, a, b1, b2, c = build(project)
+    run(project, [c.id])
+    t = T.load(project)
+    t.options["two_pass"] = {"on": True}
+    T.save(project, t)
+    s = T.Checker(project, t).settings(b1.id)
+    assert s["two_pass"] == {"scale": 0.5, "denoise": 0.3} and s["steps"] == 28
+    assert statuses(project) == {"a": "changed", "b1": "changed", "c": "changed", "b2": "new"}
+    t.options["checkpoint"] = {"name": "h3/fine.safetensors", "distilled": True}
+    T.save(project, t)
+    s = T.Checker(project, t).settings(b1.id)
+    assert s["two_pass"] and s["steps"] == T.DISTILLED_STEPS
+    t.options["two_pass"] = {"on": False}
+    t.options.pop("checkpoint")
+    T.save(project, t)
+    assert "two_pass" not in T.Checker(project, t).settings(b1.id)
+    assert statuses(project) == {"a": "done", "b1": "done", "c": "done", "b2": "new"}
+
+
+def test_shape_wins_over_the_start_image(project):
+    """A shape chosen for the project gives the clips' size, also with a start image of another shape (then cut);
+    unset, the start image's shape is used as before."""
+    t = T.load(project)                                                   # start image 96x54 (16:9)
+    base = T.Checker(project, t).base()
+    assert base["width"] > base["height"] and T.size_origin(project, t) == "image"
+    t.options["shape"] = "9:16"
+    assert T.size_origin(project, t) == "shape"
+    base = T.Checker(project, t).base()
+    assert base["width"] < base["height"] and abs(base["width"] / base["height"] - 9 / 16) < 0.05
+    t.options["shape"] = "nonsense"                                       # (a damaged value: as unset)
+    assert T.shape_of(t.options) is None and T.size_origin(project, t) == "image"
+
+
+def test_crop_box_and_values():
+    assert T.crop_box(1920, 1080, 768, 1344) == (651, 0, 617, 1080)       # centre, the largest 9:16 cut
+    assert T.crop_box(1920, 1080, 768, 1344, [0.0, 0.5, 1.0])[0] == 0      # kept inside the picture
+    assert T.crop_box(1920, 1080, 768, 1344, [1.0, 0.5, 1.0])[0] == 1920 - 617
+    x, y, w, h = T.crop_box(1920, 1080, 768, 1344, {"cx": 0.5, "cy": 0.5, "zoom": 0.5})
+    assert (w, h) == (309, 540) and (x, y) == (806, 270)
+    assert T.crop_value({"cx": 0.5, "cy": 0.5, "zoom": 1.0, "seen": "0.56"}) is None   # the centre: not recorded
+    assert T.crop_value({"cx": 0.25, "cy": 0.5, "zoom": 1.0}) == [0.25, 0.5, 1.0]
+    assert T.mismatched(1920, 1080, 768, 1344) and not T.mismatched(1920, 1080, 1344, 768)
+
+
+def test_a_start_picture_cut_is_recorded_and_used(project, tmp_path):
+    """A moved cut makes the clip changed and is used when the start picture is prepared; the centre cut is not
+    recorded (clips made before stay done); a new start image starts at the centre again."""
+    t, a, b1, b2, c = build(project)
+    t.options["shape"] = "9:16"
+    T.save(project, t)
+    run(project, [a.id])
+    assert statuses(project)["a"] == "done"
+    t = T.load(project)
+    base = T.Checker(project, t).base()
+    todo = T.starts_to_confirm(project, t, [n.id for n in t.nodes.values()], base["width"], base["height"])
+    assert [(nid, pic.name) for nid, pic in todo] == [(a.id, T.START_FILE)]   # 16:9 picture, 9:16 clips: shown
+    T.set_crop(t, project, project / T.START_FILE, 0.5, 0.5, 1.0, seen=T.shape_key(base["width"], base["height"]))
+    T.save(project, t)
+    t = T.load(project)
+    assert statuses(project)["a"] == "done"                               # looked at, the centre kept: unchanged
+    assert T.starts_to_confirm(project, t, [a.id], base["width"], base["height"]) == []
+    T.set_crop(t, project, project / T.START_FILE, 0.0, 0.5, 1.0, seen=T.shape_key(base["width"], base["height"]))
+    T.save(project, t)
+    assert statuses(project)["a"] == "changed"
+    s = T.Checker(project, T.load(project)).settings(a.id)
+    assert s["start_crop"] == [0.0, 0.5, 1.0]
+    out = T.prepared_start(project, base["width"], base["height"], crop=s["start_crop"])
+    rec = json.loads(out.with_suffix(".json").read_text())
+    assert rec["crop"] == [0.0, 0.5, 1.0]
+    t = T.load(project)
+    img = tmp_path / "next.png"
+    Image.new("RGB", (96, 54), (10, 10, 10)).save(img)
+    T.set_start_image(project, img, t)                                    # another picture: its own cut
+    assert T.get_crop(t, project, project / T.START_FILE) is None

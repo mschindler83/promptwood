@@ -2,56 +2,55 @@
 side to pick one (CompareDialog)."""
 from __future__ import annotations
 
-import subprocess
-import tempfile
-import threading
+import logging
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QImage, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QGridLayout, QHBoxLayout,
-                               QPushButton, QSlider, QStackedWidget, QVBoxLayout, QWidget)
+from PySide6.QtCore import QSettings, Qt, QTimer, QUrl
+from PySide6.QtGui import QImage
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
+                               QGridLayout, QHBoxLayout, QLabel, QPushButton, QSlider, QVBoxLayout, QWidget)
 
-from .. import chain
+from . import shortcuts as S
+from .audio_devices import follow_default_output
+from .workers import run_in_background
+from .. import chain, imagegen, media
+from .. import tree as T
 from .theme import icon
-from .widgets import FrameTile, VideoView, icon_button, label
+from .dialogs import add_action, button_row
+from .widgets import fit_size, FrameStepper, FrameTile, icon_button, label, remember_geometry, VideoView, shortcut
+
+log = logging.getLogger(__name__)
 
 FPS = chain.FPS
 PREVIEW_W = 480                    # frames are decoded once at this width, so scrubbing is instant
 
 
-def fmt_s(frame: int) -> str:
-    return f"{frame / FPS:.2f} s"
-
-
-class _Decoded(QObject):
-    done = Signal(object, str)        # list of QImage, error
-
-
-def decode_frames(video: Path, width: int = PREVIEW_W) -> list[QImage]:
-    """Every frame of a (short) clip as a small QImage, in order."""
+def decode_frames(video: Path, width: int = PREVIEW_W, on_start=None) -> list[QImage]:
+    """Every frame of a (short) clip as a small QImage, in order. on_start(process) is given the ffmpeg process
+    as soon as it runs (so a closing dialog can end it)."""
     info = chain.probe(video)
     w = max(2, min(width, info["width"]) // 2 * 2)
     h = max(2, round(info["height"] * w / info["width"] / 2) * 2)
-    r = subprocess.run(["ffmpeg", "-v", "error", "-i", str(video), "-map", "0:v:0", "-vf", f"scale={w}:{h}",
-                        "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True, timeout=600)
-    if r.returncode != 0:
-        raise RuntimeError(r.stderr.decode(errors="replace").strip()[-300:] or "ffmpeg failed")
-    size = w * h * 3
-    return [QImage(r.stdout[i:i + size], w, h, 3 * w, QImage.Format_RGB888).copy()
-            for i in range(0, len(r.stdout) - size + 1, size)]
+    return [QImage(raw, w, h, 3 * w, QImage.Format.Format_RGB888).copy()
+            for raw in media.iter_frames(video, (w, h), "rgb24", flags=None, on_start=on_start, timeout=600)]
 
 
 class HandoverDialog(QDialog):
     """Pick the frame of a made clip that the clips after it start from. frame() is the choice (None: the last)."""
 
-    def __init__(self, parent, video: Path, title: str, current: int | None = None, min_frame: int = 1):
+    def __init__(self, parent, video: Path, title: str, current: int | None = None, min_frame: int = 1,
+                 settings: QSettings | None = None):
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.resize(760, 640)
+        fit_size(self, 760, 640)
+        remember_geometry(self, settings, "handover")
         self.frames: list[QImage] = []
         self.min_frame = max(1, int(min_frame))
         self._current = current
+        self._proc = None                              # the ffmpeg that reads the frames (ended when closing)
+        self._choice: int | None = None
+        self._decided = False
         v = QVBoxLayout(self)
         info = label("The clips after this one start from the frame you choose here; the frames after it are left "
                      "out when the path is played or exported. This clip stays as it is (nothing is generated again "
@@ -60,49 +59,24 @@ class HandoverDialog(QDialog):
         v.addWidget(info)
         self.tile = FrameTile(720, 405)
         self.tile.clear_frame("reading the frames …")
-        v.addWidget(self.tile, 1, Qt.AlignHCenter)
-        row = QHBoxLayout()
-        self.b_prev = icon_button("skipb", "One frame back (Left)")
-        self.b_next = icon_button("skipf", "One frame on (Right)")
-        self.slider = QSlider(Qt.Horizontal)
-        self.slider.setEnabled(False)
-        self.where = label("", level="secondary", type_="mono")
-        self.b_prev.clicked.connect(lambda: self.slider.setValue(self.slider.value() - 1))
-        self.b_next.clicked.connect(lambda: self.slider.setValue(self.slider.value() + 1))
-        row.addWidget(self.b_prev)
-        row.addWidget(self.slider, 1)
-        row.addWidget(self.b_next)
-        row.addWidget(self.where)
-        v.addLayout(row)
+        v.addWidget(self.tile, 1, Qt.AlignmentFlag.AlignHCenter)
+        self.stepper = FrameStepper(self, FPS)
+        self.slider, self.where = self.stepper.slider, self.stepper.label
+        self.b_prev, self.b_next = self.stepper.b_back1, self.stepper.b_fwd1
+        self.stepper.setEnabled(False)
+        v.addWidget(self.stepper)
         self.summary = label("", level="tertiary")
         self.summary.setWordWrap(True)
         v.addWidget(self.summary)
-        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        self.buttons.button(QDialogButtonBox.Ok).setText("Hand over here")
-        self.b_last = self.buttons.addButton("Use the last frame", QDialogButtonBox.ResetRole)
+        self.buttons, ok = button_row(self, "Hand over here", enabled=False)
+        self.b_last = add_action(self.buttons, "Use the last frame")
         self.b_last.setToolTip("Back to normal: the clips after it start from its last frame")
         self.b_last.clicked.connect(lambda: self.slider.setValue(self.slider.maximum()))
-        self.buttons.accepted.connect(self.accept)
-        self.buttons.rejected.connect(self.reject)
-        self.buttons.button(QDialogButtonBox.Ok).setEnabled(False)
         v.addWidget(self.buttons)
-        for key, k in (("Left", -1), ("Right", 1)):
-            QShortcut(QKeySequence(key), self, activated=lambda k=k: self.slider.setValue(self.slider.value() + k))
         self.slider.valueChanged.connect(self._show)
-        self._sig = _Decoded()
-        self._sig.done.connect(self._decoded)
-        sig = self._sig
-
-        def work():
-            try:
-                frames, err = decode_frames(Path(video)), ""
-            except Exception as e:  # noqa: BLE001
-                frames, err = [], str(e)
-            try:
-                sig.done.emit(frames, err)
-            except RuntimeError:                       # the dialog is gone
-                pass
-        threading.Thread(target=work, daemon=True).start()
+        run_in_background(lambda: decode_frames(Path(video), on_start=lambda pr: setattr(self, "_proc", pr)),
+                          on_done=lambda frames: self._decoded(frames, ""),
+                          on_error=lambda e: self._decoded([], str(e)), owner=self)
 
     def _decoded(self, frames: list, error: str):
         if error or not frames:
@@ -110,9 +84,9 @@ class HandoverDialog(QDialog):
             return
         self.frames = frames
         n = len(frames)
-        self.slider.setRange(min(self.min_frame, n - 1), n - 1)
-        self.slider.setEnabled(True)
-        self.buttons.button(QDialogButtonBox.Ok).setEnabled(True)
+        self.stepper.set_range(min(self.min_frame, n - 1), n - 1)
+        self.stepper.setEnabled(True)
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(True)
         start = n - 1 if self._current is None else min(int(self._current), n - 1)
         self.slider.setValue(start)
         self._show(self.slider.value())
@@ -122,7 +96,6 @@ class HandoverDialog(QDialog):
             return
         n = len(self.frames)
         self.tile.set_image(self.frames[k])
-        self.where.setText(f"frame {k + 1} / {n} · {fmt_s(k)}")
         if k >= n - 1:
             self.summary.setText("Last frame: the clips after it start where the clip ends (as usual).")
         else:
@@ -133,12 +106,14 @@ class HandoverDialog(QDialog):
     def done(self, r):
         choice = self.frame()
         self.frames = []                              # let go of the decoded frames (tens of MB)
-        self._choice = choice
+        self._choice, self._decided = choice, True
+        if self._proc is not None and self._proc.poll() is None:
+            self._proc.terminate()                    # (a long clip is not decoded on for nobody)
         super().done(r)
 
     def frame(self) -> int | None:
         """The chosen frame, None for the last one."""
-        if not self.frames and hasattr(self, "_choice"):
+        if not self.frames and self._decided:
             return self._choice
         if not self.frames or self.slider.value() >= len(self.frames) - 1:
             return None
@@ -150,10 +125,11 @@ class CompareDialog(QDialog):
     items: [(node id, title, detail, video file)]; on_keep(nid) -> bool (True: kept, close)."""
 
     def __init__(self, parent, items: list[tuple[str, str, str, Path]], on_keep, player: bool = True,
-                 title: str = "Compare"):
+                 title: str = "Compare", settings: QSettings | None = None):
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.resize(1280, 820)
+        fit_size(self, 1280, 820)
+        remember_geometry(self, settings, "compare")
         self.items, self.on_keep = items, on_keep
         self.players: list = []
         self.kept: str | None = None
@@ -162,6 +138,7 @@ class CompareDialog(QDialog):
         grid.setSpacing(10)
         cols = 2 if len(items) <= 4 else 3
         self.keep_buttons: dict[str, QPushButton] = {}
+        self.errors: dict[str, QLabel] = {}
         self.audio_outs: list = []
         has_player = False
         if player:
@@ -179,19 +156,19 @@ class CompareDialog(QDialog):
                 view = VideoView()                 # (painted frames: no native GPU window, see VideoView)
                 view.setMinimumSize(360, 220)
                 out = QAudioOutput(self)
+                follow_default_output(out)
                 out.setMuted(k != 0)
                 p = QMediaPlayer(self)
                 p.setAudioOutput(out)
                 p.setVideoOutput(view.sink)
                 p.setSource(QUrl.fromLocalFile(str(video)))
                 p.mediaStatusChanged.connect(lambda st, p=p: self._ended(p, st))
+                p.errorOccurred.connect(lambda _e, msg="", nid=nid: self._player_error(nid, msg))
                 self.players.append(p)
                 self.audio_outs.append(out)
                 bv.addWidget(view, 1)
             else:
-                stack = QStackedWidget()
-                stack.addWidget(label(Path(video).name, level="tertiary"))
-                bv.addWidget(stack, 1)
+                bv.addWidget(label(Path(video).name, level="tertiary"), 1)
             head = QHBoxLayout()
             head.addWidget(label(name, type_="heading"))
             d = label(detail, level="tertiary")
@@ -204,6 +181,11 @@ class CompareDialog(QDialog):
             self.keep_buttons[nid] = keep
             head.addWidget(keep)
             bv.addLayout(head)
+            err = label("", severity="error")             # (why this clip cannot be played: filled by its player)
+            err.setWordWrap(True)
+            err.hide()
+            self.errors[nid] = err
+            bv.addWidget(err)
             grid.addWidget(box, k // cols, k % cols)
         v.addLayout(grid, 1)
         ctl = QHBoxLayout()
@@ -211,8 +193,9 @@ class CompareDialog(QDialog):
         self.b_play.clicked.connect(self.toggle)
         self.b_restart = QPushButton("From the start")
         self.b_restart.clicked.connect(self.restart)
-        self.slider = QSlider(Qt.Horizontal)
-        self.slider.sliderMoved.connect(self.seek)
+        self.slider = QSlider(Qt.Orientation.Horizontal)
+        self._syncing = False                         # (the slider follows the players: that is not a seek)
+        self.slider.valueChanged.connect(self._slider_changed)
         self.loop = QCheckBox("Loop")
         self.loop.setChecked(True)
         self.sound = QComboBox()
@@ -226,30 +209,52 @@ class CompareDialog(QDialog):
         ctl.addWidget(self.loop)
         ctl.addWidget(self.sound)
         v.addLayout(ctl)
-        close = QDialogButtonBox(QDialogButtonBox.Close)
-        close.rejected.connect(self.reject)
+        close, _none = button_row(self)
         v.addWidget(close)
-        QShortcut(QKeySequence("Space"), self, activated=self.toggle)
-        for w in (self.b_play, self.b_restart, self.slider, self.loop, self.sound):
-            w.setEnabled(bool(self.players))
+        shortcut(S.sequence("play"), self, self.toggle)
+        for control in (self.b_play, self.b_restart, self.slider, self.loop, self.sound):
+            control.setEnabled(bool(self.players))
         if self.players:
             for p in self.players:                   # the longest clip sets the slider's range
                 p.durationChanged.connect(lambda _d: self.slider.setRange(
                     0, max(int(q.duration()) for q in self.players)))
             self.players[0].positionChanged.connect(
-                lambda ms: None if self.slider.isSliderDown() else self.slider.setValue(int(ms)))
+                self._follow)
             QTimer.singleShot(200, self.restart)
+
+    def _player_error(self, nid: str, message: str) -> None:
+        """A clip that cannot be played (no codec, unreadable file, no audio device): say so under it."""
+        lab = self.errors.get(nid)
+        if lab is not None:
+            lab.setText(f"Cannot play this clip: {message or 'the player reported an error'}")
+            lab.show()
+
+    def _follow(self, ms: int):
+        if not self.slider.isSliderDown():
+            self._syncing = True
+            try:
+                self.slider.setValue(int(ms))
+            finally:
+                self._syncing = False
+
+    def _slider_changed(self, ms: int):
+        """The user moved the slider (drag, click in the groove, keys): all players go there."""
+        if not self._syncing:
+            self.seek(ms)
 
     def _playing(self) -> bool:
         from PySide6.QtMultimedia import QMediaPlayer
-        return any(p.playbackState() == QMediaPlayer.PlayingState for p in self.players)
+        return any(p.playbackState() == QMediaPlayer.PlaybackState.PlayingState for p in self.players)
 
     def toggle(self):
         if not self.players:
             return
         playing = self._playing()
         for p in self.players:
-            p.pause() if playing else p.play()
+            if playing:
+                p.pause()
+            else:
+                p.play()
         self.b_play.setIcon(icon("play" if playing else "pause"))
 
     def restart(self):
@@ -265,7 +270,8 @@ class CompareDialog(QDialog):
 
     def _ended(self, p, status):
         from PySide6.QtMultimedia import QMediaPlayer
-        over = (QMediaPlayer.EndOfMedia, QMediaPlayer.InvalidMedia, QMediaPlayer.NoMedia)
+        over = (QMediaPlayer.MediaStatus.EndOfMedia, QMediaPlayer.MediaStatus.InvalidMedia,
+                QMediaPlayer.MediaStatus.NoMedia)
         if status not in over[:2] or not self.loop.isChecked():
             return
         # the clips may differ in length: start all again once the longest one has ended (one that cannot be
@@ -282,13 +288,17 @@ class CompareDialog(QDialog):
         for p in self.players:                       # the files of the others are deleted: let go of them
             p.stop()
             p.setSource(QUrl())
-        if self.on_keep(nid):
+        kept = False
+        try:
+            kept = bool(self.on_keep(nid))
+        finally:
+            if not kept:                             # (not kept, or it failed: the clips can be played again)
+                for p, (_n, _t, _d, video) in zip(self.players, self.items):
+                    p.setSource(QUrl.fromLocalFile(str(video)))
+                self.restart()
+        if kept:
             self.kept = nid
             self.accept()
-        else:
-            for p, (_n, _t, _d, video) in zip(self.players, self.items):
-                p.setSource(QUrl.fromLocalFile(str(video)))
-            self.restart()
 
     def done(self, r):
         for p in self.players:
@@ -302,11 +312,12 @@ class SplitDialog(QDialog):
     frame by frame; at() is the moment in the video's file (start + frame / 24 s)."""
 
     def __init__(self, parent, clip: Path, frames: int, size: tuple[int, int], start: float, end: float,
-                 title: str):
+                 title: str, settings: QSettings | None = None):
         from .compare_player import ComparePlayer
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.resize(820, 640)
+        fit_size(self, 820, 640)
+        remember_geometry(self, settings, "split")
         self.start, self.end, self.n = float(start), float(end), int(frames)
         v = QVBoxLayout(self)
         info = label("The video ends at the frame you choose; a new clip follows it (it starts from that frame), "
@@ -321,11 +332,7 @@ class SplitDialog(QDialog):
         self.summary = label("", level="tertiary")
         self.summary.setWordWrap(True)
         v.addWidget(self.summary)
-        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        self.buttons.button(QDialogButtonBox.Ok).setText("Split here and insert a clip")
-        self.buttons.button(QDialogButtonBox.Ok).setEnabled(False)
-        self.buttons.accepted.connect(self.accept)
-        self.buttons.rejected.connect(self.reject)
+        self.buttons, _ok = button_row(self, "Split here and insert a clip", enabled=False)
         v.addWidget(self.buttons)
 
     def at(self) -> float:
@@ -334,7 +341,7 @@ class SplitDialog(QDialog):
 
     def _show(self, k: int):
         ok = 0 < k < self.n - 1
-        self.buttons.button(QDialogButtonBox.Ok).setEnabled(ok)
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(ok)
         t = self.at()
         self.summary.setText(
             f"Part 1: {self.start:.2f}–{t:.2f} s · the new clip · part 2: {t:.2f}–{self.end:.2f} s" if ok else
@@ -350,78 +357,87 @@ def grab_frame(video: Path, at: float, out: Path, width: int | None = None) -> b
     (ffmpeg decodes from the keyframe before it). False if there is none."""
     vf = ["-vf", f"scale={int(width)}:-2:flags=lanczos"] if width else []
     try:
-        r = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-ss", f"{max(0.0, at):.6f}", "-i", str(video),
-                            "-frames:v", "1", *vf, str(out)], capture_output=True, timeout=60)
-    except (OSError, subprocess.TimeoutExpired):
+        media.ffmpeg(["-y", "-ss", f"{max(0.0, at):.6f}", "-i", video, "-frames:v", "1", *vf, out], timeout=60)
+    except (OSError, media.MediaError):
         return False
-    return r.returncode == 0 and Path(out).is_file() and Path(out).stat().st_size > 0
-
-
-class _Grabbed(QObject):
-    ready = Signal(int, QImage)                 # request number, frame
+    return Path(out).is_file() and Path(out).stat().st_size > 0
 
 
 class VideoFrameDialog(QDialog):
     """Choose one frame of any video (any length: only the frame shown is decoded): a slider over the whole
     video, one frame / one second back and on. frame_file() writes the chosen frame at the video's full size."""
 
-    def __init__(self, parent, video: Path, title: str, info: dict | None = None):
+    def __init__(self, parent, video: Path, title: str, info: dict | None = None, settings: QSettings | None = None):
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.resize(860, 640)
+        fit_size(self, 860, 640)
+        remember_geometry(self, settings, "frame")
         self.video = Path(video)
-        info = info or chain.probe_source(self.video)
+        self._req = 0
+        self._closed = False
+        self.ready = False                          # (the video is probed: for a file the user picked that is a worker's job)
+        self._when_ready: list[Callable[[], None]] = []
+        self._grabbing = self._again = False        # one ffmpeg at a time; the newest position after it
+        self._tmp = media.scratch("frame")
+        self.fps, self.duration, self.frames = float(FPS), 0.0, 1
+        self._v = QVBoxLayout(self)
+        self.note = label("Reading the video …", level="tertiary")
+        self.tile = FrameTile(800, 450)
+        self.tile.clear_frame("reading the video …")
+        self._v.addWidget(self.tile, 1, Qt.AlignmentFlag.AlignHCenter)
+        self._v.addWidget(self.note)
+        self.buttons, self._ok = button_row(self, "Use this frame", enabled=False)
+        self._v.addWidget(self.buttons)
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(90)                 # (dragging the slider: only the frame it stops at is read)
+        self._timer.timeout.connect(self._grab)
+        self.slider = QSlider(Qt.Orientation.Horizontal)     # (replaced by the stepper's once the video is known)
+        self.where = QLabel()
+        if info:
+            self._setup(info)
+        else:
+            run_in_background(lambda: chain.probe_source(self.video), on_done=self._probed,
+                              on_error=self._unreadable, owner=self)
+
+    def _probed(self, info: dict) -> None:
+        if not self._closed:
+            self._setup(info)
+
+    def _unreadable(self, error: BaseException) -> None:
+        log.warning("could not read %s: %s", self.video, error)
+        self.tile.clear_frame("no frame here")
+        self.note.setText(f"{self.video.name} could not be read: is it a video?")
+
+    def _setup(self, info: dict) -> None:
+        """The frames of the video, once its frame rate and length are known."""
         self.fps = float(info.get("fps") or FPS)
         self.duration = float(info.get("duration") or 0.0)
         self.frames = max(1, int(round(self.duration * self.fps)))
         if int(info.get("frames") or 0) > 0:           # the video stream's own count (a longer sound track
             self.frames = min(self.frames, int(info["frames"]))   # must not add positions without a frame)
-        self._req = 0
-        self._grabbing = self._again = False        # one ffmpeg at a time; the newest position after it
-        self._sig = _Grabbed()
-        self._sig.ready.connect(self._ready)
-        self._tmp = tempfile.TemporaryDirectory(prefix="video-chain-frame-")
-        v = QVBoxLayout(self)
-        self.tile = FrameTile(800, 450)
         self.tile.clear_frame("reading the frame …")
-        v.addWidget(self.tile, 1, Qt.AlignHCenter)
-        row = QHBoxLayout()
-        self.slider = QSlider(Qt.Horizontal)
-        self.slider.setRange(0, self.frames - 1)
-        buttons = []
-        for text, tip, step in (("«", "One second back (Shift+Left)", -round(self.fps)),
-                                ("‹", "One frame back (Left)", -1), ("›", "One frame on (Right)", 1),
-                                ("»", "One second on (Shift+Right)", round(self.fps))):
-            b = QPushButton(text)
-            b.setToolTip(tip)
-            b.setFixedWidth(34)
-            b.clicked.connect(lambda _c=False, s=step: self.slider.setValue(self.slider.value() + s))
-            buttons.append(b)
-        for b in buttons[:2]:
-            row.addWidget(b)
-        row.addWidget(self.slider, 1)
-        for b in buttons[2:]:
-            row.addWidget(b)
-        self.where = label("", level="secondary", type_="mono")
-        row.addWidget(self.where)
-        v.addLayout(row)
-        self.note = label(f"{self.video.name} · {info.get('width', '?')}×{info.get('height', '?')} · "
-                          f"{self.duration:.1f} s · {self.fps:.3g} fps", level="tertiary")
-        v.addWidget(self.note)
-        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        self.buttons.button(QDialogButtonBox.Ok).setText("Use this frame")
-        self.buttons.accepted.connect(self.accept)
-        self.buttons.rejected.connect(self.reject)
-        v.addWidget(self.buttons)
-        for key, step in (("Left", -1), ("Right", 1), ("Shift+Left", -round(self.fps)),
-                          ("Shift+Right", round(self.fps))):
-            QShortcut(QKeySequence(key), self, activated=lambda s=step: self.slider.setValue(self.slider.value() + s))
-        self._timer = QTimer(self)
-        self._timer.setSingleShot(True)
-        self._timer.setInterval(90)                 # (dragging the slider: only the frame it stops at is read)
-        self._timer.timeout.connect(self._grab)
+        self.stepper = FrameStepper(self, self.fps)
+        self.slider, self.where = self.stepper.slider, self.stepper.label
+        self.stepper.set_range(0, self.frames - 1)
+        self.stepper.setEnabled(True)
+        self._v.insertWidget(1, self.stepper)
+        self.note.setText(f"{self.video.name} · {info.get('width', '?')}×{info.get('height', '?')} · "
+                          f"{self.duration:.1f} s · {self.fps:.3g} fps")
+        self._ok.setEnabled(True)
+        self.ready = True
         self.slider.valueChanged.connect(self._moved)
         self._moved(0)                               # (the first frame: read when the timer fires)
+        waiting, self._when_ready = self._when_ready, []
+        for call in waiting:
+            call()
+
+    def after_ready(self, call: Callable[[], None]) -> None:
+        """Run call once the video is known (at once if it is): `frames` and `slider` are the placeholders before."""
+        if self.ready:
+            call()
+        else:
+            self._when_ready.append(call)
 
     def at(self) -> float:
         """The chosen frame's time in the video (its own frame rate)."""
@@ -433,7 +449,6 @@ class VideoFrameDialog(QDialog):
         return max(0.0, (self.slider.value() - 0.25) / self.fps)
 
     def _moved(self, k: int):
-        self.where.setText(f"frame {k + 1} / {self.frames} · {k / self.fps:.2f} s")
         self._timer.start()
 
     def _grab(self):
@@ -442,24 +457,18 @@ class VideoFrameDialog(QDialog):
             return
         self._grabbing = True
         self._req += 1
-        req, at, sig = self._req, self._seek(), self._sig
+        req, at = self._req, self._seek()
         out = Path(self._tmp.name) / f"p{req}.png"
 
         def work():
-            img = QImage()
-            try:
-                if grab_frame(self.video, at, out, width=960):
-                    img = QImage(str(out))
-            finally:                                # (always answered: a stuck "grabbing" would freeze the dialog)
-                try:
-                    sig.ready.emit(req, img)
-                except RuntimeError:                # (the dialog is gone)
-                    pass
-        threading.Thread(target=work, daemon=True).start()
+            return QImage(str(out)) if grab_frame(self.video, at, out, width=960) else QImage()
+        # (always answered: a stuck "grabbing" would freeze the dialog)
+        run_in_background(work, on_done=lambda img: self._ready(req, img),
+                          on_error=lambda _e: self._ready(req, QImage()), owner=self)
 
     def _ready(self, req: int, img: QImage):
         self._grabbing = False
-        if getattr(self, "_closed", False):
+        if self._closed:
             return
         if self._again:                              # moved on meanwhile: read the position it is at now
             self._again = False
@@ -480,3 +489,85 @@ class VideoFrameDialog(QDialog):
         self._closed = True                         # (no further grabs after it closed)
         self._req += 1
         super().done(r)
+
+
+def sampling_text(sampling: dict) -> str:
+    """A clip's own sampling in a few words ("" when it has none)."""
+    s = T.clean_sampling(sampling)
+    parts = [s[k] for k in ("sampler", "scheduler") if k in s]
+    if "shift" in s:
+        parts.append(f"shift {s['shift'][0]:g} / {s['shift'][1]:g}")
+    if "cfg" in s:
+        parts.append(f"CFG {s['cfg']:g}")
+    return ", ".join(parts)
+
+
+class SamplingDialog(QDialog):
+    """A clip's own sampling: sampler, scheduler, sigma shift (video / audio) and CFG. Every field can stay at the
+    model's own, so a clip changes only what it needs. values(): what is set (tree.clean_sampling's form)."""
+
+    def __init__(self, sampling: dict | None = None, samplers: Sequence[str] | None = None,
+                 schedulers: Sequence[str] | None = None, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("Sampling of this clip")
+        now = T.clean_sampling(sampling)
+        v = QVBoxLayout(self)
+        note = label("How this clip is sampled. An empty field uses the model's own setting. A speed mode (Turbo, "
+                     "HyperFlow, Pika H3 Flex) samples its own way: the clip's sampling is not used with one.",
+                     level="secondary")
+        note.setWordWrap(True)
+        v.addWidget(note)
+        form = QFormLayout()
+        self.sampler, self.scheduler = QComboBox(), QComboBox()
+        for combo, names, key, tip in (
+                (self.sampler, samplers or imagegen.SAMPLERS, "sampler", "The sampler, by ComfyUI's name"),
+                (self.scheduler, schedulers or imagegen.SCHEDULERS, "scheduler",
+                 "The scheduler: how the noise levels are spread over the steps, by ComfyUI's name")):
+            combo.setEditable(True)                      # (a name of this ComfyUI that is not listed can be typed)
+            combo.addItem("")
+            combo.addItems(list(names))
+            combo.setCurrentText(now.get(key, ""))
+            edit = combo.lineEdit()
+            if edit is not None:
+                edit.setPlaceholderText("the model's own")
+            combo.setToolTip(tip)
+        form.addRow("Sampler", self.sampler)
+        form.addRow("Scheduler", self.scheduler)
+        self.shift_video, self.shift_audio, self.cfg = QDoubleSpinBox(), QDoubleSpinBox(), QDoubleSpinBox()
+        for spin, top, step, own in ((self.shift_video, 50.0, 0.5, "model's own"),
+                                     (self.shift_audio, 50.0, 0.5, "model's own"), (self.cfg, T.CFG_MAX, 0.1, "project's")):
+            spin.setRange(0.0, top)
+            spin.setSingleStep(step)
+            spin.setDecimals(2)
+            spin.setSpecialValueText(own)
+        shift = now.get("shift") or [0.0, 0.0]
+        self.shift_video.setValue(shift[0])
+        self.shift_audio.setValue(shift[1])
+        self.cfg.setValue(now.get("cfg", 0.0))
+        row = QHBoxLayout()
+        row.addWidget(self.shift_video)
+        row.addWidget(label("audio", level="tertiary"))
+        row.addWidget(self.shift_audio)
+        self.shift_video.setToolTip("Sigma shift of the picture (higher: more of the steps go into the structure). "
+                                    "Both the video and the audio shift must be set for the clip to have its own")
+        self.shift_audio.setToolTip("Sigma shift of the sound")
+        form.addRow("Shift, video", row)
+        self.cfg.setToolTip("CFG. Above 1 every step runs twice (about twice as slow); the model is made for 1")
+        form.addRow("CFG", self.cfg)
+        v.addLayout(form)
+        box, _ok = button_row(self, "Use for this clip")
+        b_reset = box.addButton("Model's own", QDialogButtonBox.ButtonRole.ResetRole)
+        b_reset.setToolTip("Empty every field: the clip is sampled like the others")
+        b_reset.clicked.connect(self.reset)
+        v.addWidget(box)
+
+    def reset(self) -> None:
+        self.sampler.setCurrentText("")
+        self.scheduler.setCurrentText("")
+        for spin in (self.shift_video, self.shift_audio, self.cfg):
+            spin.setValue(0.0)
+
+    def values(self) -> dict:
+        return T.clean_sampling({"sampler": self.sampler.currentText(), "scheduler": self.scheduler.currentText(),
+                                 "shift": [self.shift_video.value(), self.shift_audio.value()],
+                                 "cfg": self.cfg.value()})

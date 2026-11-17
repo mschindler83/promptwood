@@ -3,11 +3,13 @@ tools/build_manifest.py writes."""
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 
 PROFILES = ("core", "standard", "full")
 PROFILE_TEXT = {"core": "video clips only", "standard": "every part of the app with one model each (recommended)",
-                "full": "also the extra speed modes, Krea-2 and both head swaps"}
+                "full": "also the extra speed modes, more image models (Krea-2, Qwen-Image-Edit 2511, MOSS-Image), "
+                        "Fish S2 Pro voices and both head swaps"}
 
 
 def load() -> dict:
@@ -19,14 +21,14 @@ def profile_components(man: dict, profile: str) -> list[str]:
     return [cid for cid, c in man["components"].items() if PROFILES.index(c["profile"]) <= rank]
 
 
-def select(man: dict, profile: str = "standard", only: list[str] = (), add: list[str] = (),
-           without: list[str] = ()) -> list[str]:
+def select(man: dict, profile: str | None = "standard", only: Sequence[str] = (), add: Sequence[str] = (),
+           without: Sequence[str] = ()) -> list[str]:
     """The component ids to install, in the manifest's order, with what they need (video always)."""
     comps = man["components"]
     for cid in [*only, *add, *without]:
         if cid not in comps:
             raise ValueError(f"unknown component '{cid}' (there are: {', '.join(comps)})")
-    want = set(only) if only else set(profile_components(man, profile)) | set(add)
+    want = set(only) if only else set(profile_components(man, profile or "standard")) | set(add)
     want -= set(without)
     grew = True
     while grew:

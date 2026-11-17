@@ -1,0 +1,126 @@
+"""Leftovers: cast problems carry a kind, the speed mode has a tree accessor, events live outside ui/."""
+from __future__ import annotations
+
+import os
+
+os.environ["QT_QPA_PLATFORM"] = "offscreen"
+
+import pytest
+from PIL import Image
+
+from ui_helpers import app, image, win  # noqa: F401  (fixtures)
+from video_chain import tree as T
+
+
+@pytest.fixture
+def project(tmp_path):
+    img = tmp_path / "in.jpg"
+    Image.new("RGB", (96, 54), (250, 250, 250)).save(img)
+    p = tmp_path / "proj"
+    t = T.Tree()
+    T.set_start_image(p.mkdir() or p, img, t)
+    T.save(p, t)
+    return p
+
+
+def test_cast_issues_carry_a_kind_not_only_text(project, tmp_path):
+    t = T.load(project)
+    face = tmp_path / "b.jpg"
+    Image.new("RGB", (64, 80)).save(face)
+    T.add_character(project, t, "Ben", face)
+    T.add_character(project, t, "Nobody")
+    a, b, c = t.add(None, "@Bem waves."), t.add(None, "@Nobody waves."), t.add(None, "@Ben <Picture 3> x @Ben")
+    T.save(project, t)
+    issues = T.cast_issues(project, t, [a.id, b.id, c.id])
+    assert [(i.kind, i.name, i.suggestion, i.person) for i in issues[:2]] == [
+        (T.CastKind.UNKNOWN, "Bem", "Ben", False), (T.CastKind.NO_PICTURE, "Nobody", "", True)]
+    assert all(i.kind is T.CastKind.OTHER for i in issues[2:])
+    assert [i.text for i in issues] == T.cast_problems(project, t, [a.id, b.id, c.id])
+
+
+def test_speed_mode_is_read_and_set_in_the_tree():
+    o = dict(T.DEFAULT_OPTIONS)
+    assert T.speed_mode(o) == "normal"
+    for mode in ("turbo", "hyperflow", "pika", "normal"):
+        T.set_speed_mode(o, mode)
+        assert T.speed_mode(o) == mode
+        assert [m for m in ("turbo", "hyperflow", "pika") if o[m]["on"]] == ([] if mode == "normal" else [mode])
+    with pytest.raises(ValueError):
+        T.set_speed_mode(o, "warp")
+
+
+def test_tts_has_a_public_set_voice_fields():       # (behaviour: test_final_sweep)
+    from video_chain import tts
+    assert callable(getattr(tts, "set_voice_fields", None))
+
+
+def test_the_worker_builds_its_events_from_the_typed_events_module():     # (behaviour: test_final_sweep)
+    from video_chain import events
+    from video_chain.ui import generator_state as gs
+    assert gs.StartEvent is events.StartEvent and gs.event_problem is events.event_problem
+
+
+def test_event_builders_make_events_the_window_accepts():
+    from video_chain import events as E
+    for ev in (E.loading("comfyui"), E.loaded("runpod"), E.note("n1", "hi"), E.step("n1", 0, 1, 8),
+               E.error("x", comfy_down=True), E.idle(60.0, 1.5), E.bye("idle")):
+        assert E.event_problem(ev) is None
+    assert E.error("x") == {"e": "error", "msg": "x"} and E.idle(None) == {"e": "idle", "timeout": None}
+
+
+# ------------------------------------------------------------------ MWB-19: project copy with progress and Cancel
+def _little_project(root):
+    (root / "clips").mkdir(parents=True)
+    for i in range(5):
+        (root / "clips" / f"c{i}.mp4").write_bytes(b"x" * 10)
+    (root / "clips" / "c0.mp4.part").write_bytes(b"x")      # (never copied)
+    return root
+
+
+def test_copy_reports_progress_and_can_be_cancelled(tmp_path):
+    import threading
+    from video_chain import project_copy as PC
+    src = _little_project(tmp_path / "src")
+    seen = []
+    PC.copy_project(src, tmp_path / "ok", progress=lambda done, total: seen.append((done, total)),
+                    cancel=threading.Event())
+    assert (tmp_path / "ok/clips/c4.mp4").is_file() and not (tmp_path / "ok/clips/c0.mp4.part").exists()
+    assert seen and seen[-1][0] == seen[-1][1] == 5 and [d for d, _ in seen] == sorted(d for d, _ in seen)
+    stop = threading.Event()
+
+    def progress(done, total):
+        if done == 2:
+            stop.set()
+    with pytest.raises(PC.CopyCancelled):
+        PC.copy_project(src, tmp_path / "cut", progress=progress, cancel=stop)
+    assert not (tmp_path / "cut").exists()                  # the partial copy is gone
+    (tmp_path / "empty").mkdir()
+    stop = threading.Event()
+    with pytest.raises(PC.CopyCancelled):
+        PC.copy_project(src, tmp_path / "empty", progress=progress, cancel=stop)
+    assert (tmp_path / "empty").is_dir() and not any((tmp_path / "empty").iterdir())    # a folder that was there stays
+
+
+def test_save_as_can_be_cancelled_and_leaves_no_copy(app, win, tmp_path, image, monkeypatch):
+    import threading
+    import time
+    from video_chain import project_copy as PC
+    from ui_helpers import new_project, wait
+    new_project(win, tmp_path, image, ("a",))
+    gate = threading.Event()
+    real = PC.copy_file
+
+    def slow(s, d):
+        gate.wait(10)
+        return real(s, d)
+    monkeypatch.setattr(PC, "copy_file", slow)
+    target = tmp_path / "projects" / "cancelled-copy"
+    here = win.project
+    win.copy_project_to(target)
+    assert win._copying and win.act_cancel_copy.isEnabled()
+    win.cancel_copy()
+    gate.set()
+    wait(app, lambda: win._copying is None, timeout=20)
+    time.sleep(0.05)
+    assert not target.exists() and win.project == here and "cancel" in win.status.text().lower()
+    assert not win.act_cancel_copy.isEnabled()

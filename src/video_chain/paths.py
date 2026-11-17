@@ -12,6 +12,7 @@ overridden by an environment variable, and the app's own preferences (QSettings)
     hf_cache        VIDEO_CHAIN_HF_CACHE          <home>/hf-models   (Hugging Face cache layout)
     llama_server    VIDEO_CHAIN_LLAMA_SERVER      <home>/tools/llama.cpp/llama-server, else llama-server on PATH
     tts_python      VIDEO_CHAIN_TTS_PYTHON        <home>/tts-venv/bin/python
+    fish_dir        VIDEO_CHAIN_FISH_DIR          <home>/fish-speech   (fish-speech's code with its own .venv)
 
 Standard library only (the installer imports this before anything else is installed).
 """
@@ -93,6 +94,7 @@ def _defaults() -> dict:
         "hf_cache": h / "hf-models",
         "llama_server": h / "tools" / "llama.cpp" / ("llama-server" + _EXE),
         "tts_python": venv_python(h / "tts-venv"),
+        "fish_dir": h / "fish-speech",
     }
 
 
@@ -125,6 +127,14 @@ def hf_cache() -> Path:
 
 def tts_python() -> Path:
     return Path(setting("tts_python"))
+
+
+def fish_dir() -> Path:
+    return Path(setting("fish_dir"))
+
+
+def fish_python() -> Path:
+    return venv_python(fish_dir() / ".venv")
 
 
 def llama_server() -> str:

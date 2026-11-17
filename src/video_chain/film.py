@@ -1,4 +1,4 @@
-"""A film: scenes in an order. Each scene is a project as tree.py knows it (its own tree.json, start image and
+"""A film: scenes in an order. Each scene is a project as tree/ knows it (its own tree.json, start image and
 clips); the film folder is the first scene, further scenes live in scenes/<id>/. film.json (written once there is
 more than one scene) holds their order and titles.
 
@@ -9,21 +9,30 @@ written into the others (sync_shared), so every scene is made with the same peop
 A project from before scenes is a film with one scene: nothing on disk changes until a second scene is added."""
 from __future__ import annotations
 
+import logging
 import json
 import os
 import re
 import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any, cast
 
-from . import chain
+from . import chain, media
 from . import tree as T
+
+logger = logging.getLogger(__name__)
 
 FILM_FILE = "film.json"
 SCENES_DIR = "scenes"
 SHARED_OPTIONS = ("cast", "identity", "audio_refs", "tracks", "resolution", "audio")
 JOINS = {"cut": "Cut", "fade": "Crossfade", "continue": "Continue"}   # how a scene follows the one before
 FADE_SECS = 0.5
+JOIN_VERSION = 1                                     # bumped when how a film is joined changes (the stamp then differs)
+
+
+class SceneNotFound(KeyError, ValueError):
+    """No scene with this id (a KeyError; a ValueError too, as the window's handlers catch those)."""
 
 
 def link_refs(refs: Path, link: Path) -> None:
@@ -82,7 +91,8 @@ class Film:
     def load(root: Path) -> "Film":
         root = root_of(root)
         f = root / FILM_FILE
-        scenes, current, shared, problem = [], None, None, ""
+        scenes: list[Scene] = []
+        current, shared, problem = None, None, ""
         if f.is_file():
             try:
                 d = json.loads(f.read_text(encoding="utf-8"))
@@ -103,7 +113,7 @@ class Film:
                         continue
                     take = e.get("take") if isinstance(e.get("take"), str) and re.fullmatch(r"n\d+", e["take"]) \
                         else None
-                    join = e.get("join") if e.get("join") in JOINS else "cut"
+                    join = str(e["join"]) if e.get("join") in JOINS else "cut"
                     frm = e.get("from_sha") if isinstance(e.get("from_sha"), str) else None
                     notes = str(e.get("notes") or "")
                     scenes.append(Scene(sid, str(e.get("title") or sid), sdir, take, join, frm, notes))
@@ -156,16 +166,14 @@ class Film:
             return
         data = {"version": 1, "scenes": [asdict(s) for s in self.scenes], "current": self.current,
                 "shared": self.shared_state}
-        tmp = f.with_suffix(".part")
-        with open(tmp, "w", encoding="utf-8") as fh:
-            fh.write(json.dumps(data, indent=2, ensure_ascii=False))
-            fh.flush()
-            os.fsync(fh.fileno())
-        tmp.replace(f)
+        media.atomic_write_json(f, data)
 
     # ---- scenes
     def scene(self, sid: str) -> Scene:
-        return next(s for s in self.scenes if s.id == sid)
+        sc = next((s for s in self.scenes if s.id == sid), None)
+        if sc is None:
+            raise SceneNotFound(f"no scene {sid}")
+        return sc
 
     def path(self, sid: str) -> Path:
         return (self.root / self.scene(sid).dir).resolve()
@@ -192,7 +200,8 @@ class Film:
                               "file system with links") from e
             base = T.load(self.path(like)) if like else T.load(self.root)
             t = T.Tree()
-            t.options.update({k: v for k, v in base.options.items() if k in T.DEFAULT_OPTIONS})
+            cast(dict[str, Any], t.options).update(    # (the keys are the project's: those of the defaults)
+                {k: v for k, v in base.options.items() if k in T.DEFAULT_OPTIONS})
             t.options["style"] = {"prefix": "", "suffix": ""}           # a scene's look is its own
             if start_image is not None:
                 T.set_start_image(d, Path(start_image), t)
@@ -287,7 +296,9 @@ class Film:
         self.save()
 
     def before(self, sid: str) -> Scene | None:
-        k = next(i for i, s in enumerate(self.scenes) if s.id == sid)
+        k = next((i for i, s in enumerate(self.scenes) if s.id == sid), None)
+        if k is None:
+            raise SceneNotFound(f"no scene {sid}")
         return self.scenes[k - 1] if k else None
 
     def end_frame(self, sid: str) -> Path | None:
@@ -310,7 +321,6 @@ class Film:
     def update_continues(self) -> list[str]:
         """Scenes that continue the scene before them start from its end frame: their start image is set again when
         that frame changed (their clips then count as changed). Returns the ids of the scenes updated."""
-        from . import chain
         out = []
         for k, sc in enumerate(self.scenes):
             if k == 0 or sc.join != "continue":
@@ -322,9 +332,13 @@ class Film:
             d = self.path(sc.id)
             if sha == sc.from_sha and (d / T.START_FILE).is_file():
                 continue
-            t = T.load(d)
-            T.set_start_image(d, frame, t)
-            T.save(d, t)
+            try:
+                t = T.load(d)
+                T.set_start_image(d, frame, t)
+                T.save(d, t)
+            except (OSError, ValueError) as e:          # (one damaged scene: the others still follow their before)
+                logger.warning("a scene kept its start picture: %s", e)
+                continue
             sc.from_sha = sha
             out.append(sc.id)
         if out:
@@ -357,7 +371,7 @@ class Film:
         d = self.path(sid)
         if (self.root / SCENES_DIR).resolve() not in d.parents:
             raise ValueError("this scene's folder is not inside the film")
-        before = self._befores()
+        before, was_current, at = self._befores(), self.current, self.scenes.index(s)
         self.scenes.remove(s)                      # out of the film first: a failed delete leaves no broken entry
         self._keep_joins(before)
         if self.current == sid:
@@ -366,7 +380,12 @@ class Film:
         link = d / T.REFS_DIR
         if _is_link(link):
             _unlink(link)                          # (only the link to the shared refs)
-        chain.keep_aside(self.root, d)             # the scene's clips are never deleted: its folder goes to old/
+        if not chain.keep_aside(self.root, d):     # the scene's clips are never deleted: its folder goes to old/
+            self.scenes.insert(at, s)              # (still in scenes/: listed again, or it would come back unasked)
+            self.current = was_current
+            self.save()
+            raise OSError(f"the folder of scene {s.title} could not be moved to old/ (open somewhere?): "
+                          "the scene stays")
 
     # ---- shared settings
     def shared(self, options: dict) -> dict:
@@ -415,7 +434,7 @@ def summary(film: Film, sid: str, tree: "T.Tree | None" = None, status_of: dict 
     """What a scene's card shows: {"clips", "secs" (its selected path, joined), "done", "changed", "new",
     "thumb" (a picture of its start, or None)}. tree / status_of: the open scene as the window has it."""
     d = film.path(sid)
-    out = {"clips": 0, "secs": 0.0, "done": 0, "changed": 0, "new": 0, "thumb": None}
+    out: dict[str, Any] = {"clips": 0, "secs": 0.0, "done": 0, "changed": 0, "new": 0, "thumb": None}
     try:
         t = tree if tree is not None else T.load(d)
     except (OSError, ValueError):
@@ -429,15 +448,15 @@ def summary(film: Film, sid: str, tree: "T.Tree | None" = None, status_of: dict 
     out["join"] = film.scene(sid).join if film.scenes[0].id != sid else None
     out["notes"] = film.scene(sid).notes
     try:
-        ch = None if status_of is not None else T.Checker(d, t)
+        ch = T.Checker(d, t) if status_of is None else None
         for n in path:
-            st = status_of.get(n.id, "new") if status_of is not None else ch.status(n.id)
+            st = status_of.get(n.id, "new") if status_of is not None else ch.status(n.id)  # type: ignore[union-attr]  # (ch exists when status_of is None)
             out[st if st in ("done", "changed", "new") else "changed"] += 1
         cuts = T.path_cuts(t, path, bool(t.options.get("keep_repeated")), planned=True)
         frames = sum(max(0, T.clip_length(t, n) - a - b) for n, (a, b) in zip(path, cuts))
-        out["secs"] = round(frames / 24, 1)
-    except Exception:  # noqa: BLE001  (a scene that cannot be checked still gets its card)
-        pass
+        out["secs"] = round(frames / chain.FPS, 1)
+    except (OSError, ValueError, RuntimeError, KeyError) as e:   # (a scene that cannot be checked still gets its card)
+        logger.warning("a scene could not be checked: %s", e)
     if start.is_file():
         out["thumb"] = start
     elif path and path[0].made:
@@ -447,8 +466,9 @@ def summary(film: Film, sid: str, tree: "T.Tree | None" = None, status_of: dict 
     return out
 
 
-def film_problems(film: Film) -> list[str]:
-    """Why the film cannot be played / exported yet (a scene without clips, clips not made)."""
+def film_problems(film: Film, trees: dict | None = None) -> list[str]:
+    """Why the film cannot be played / exported yet (a scene without clips, clips not made). trees: filled with
+    each scene's loaded tree (scene id -> Tree), so the caller does not read them again."""
     out = []
     for k, sc in enumerate(film.scenes, start=1):
         if k > 1 and sc.join == "continue":
@@ -456,7 +476,6 @@ def film_problems(film: Film) -> list[str]:
             if end is None:
                 out.append(f"scene {k} ({sc.title}) continues scene {k - 1}, which is not made yet")
                 continue
-            from . import chain
             if chain.file_signature(end) != sc.from_sha:
                 out.append(f"scene {k} ({sc.title}) continues scene {k - 1}, whose end changed: it has to be "
                            "made again from there (Generate film)")
@@ -467,6 +486,8 @@ def film_problems(film: Film) -> list[str]:
         except (OSError, ValueError) as e:
             out.append(f"scene {k} ({sc.title}) cannot be read: {e}")
             continue
+        if trees is not None:
+            trees[sc.id] = t
         take = film.take_of(sc.id, t)
         if take is None:
             out.append(f"scene {k} ({sc.title}) has no clip yet")
@@ -484,19 +505,19 @@ def join_film(film: Film, out: Path, keep: bool = False) -> Path:
     continuing: its repeated first frame left out). Scenes of another size than the first are fitted into its frame
     (black bars). keep: out is the app's own file of the film (played again and again): it is joined again only
     when something changed, and the join before is then moved to old/ in the film's folder, never deleted."""
-    problems = film_problems(film)
+    trees: dict = {}
+    problems = film_problems(film, trees)
     if problems:
         raise ValueError(problems[0])
     parts = []
     for sc in film.scenes:
         d = film.path(sc.id)
-        t = T.load(d)
+        t = trees.get(sc.id) or T.load(d)
         take = film.take_of(sc.id, t)
         if take is None:
             raise ValueError(f"scene {sc.title} has no clip yet")
         parts.append(T.join_path(d, t, take))
-    from . import chain
-    first = chain.probe(parts[0])
+    first = chain.probe_source(parts[0])                       # (the size from the header: no decoding)
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
     size = (first["width"] // 2 * 2, first["height"] // 2 * 2)     # even (the video codec needs it)
@@ -507,20 +528,23 @@ def join_film(film: Film, out: Path, keep: bool = False) -> Path:
     if not keep:
         write(out)
         return out
-    key = json.dumps([[str(p), p.stat().st_mtime_ns] for p in parts] + [joins, list(size)])
+    key = json.dumps([[str(p), p.stat().st_mtime_ns] for p in parts] + [joins, list(size), FADE_SECS, JOIN_VERSION])
     stamp = out.with_suffix(".json")
-    if out.exists() and stamp.exists() and stamp.read_text() == key:
-        return out
+    try:
+        if out.exists() and stamp.exists() and stamp.read_text(encoding="utf-8") == key:
+            return out
+    except (OSError, ValueError) as e:
+        logger.debug("join stamp unreadable: %s", e)  # (an unreadable stamp: joined again)
     chain.replace_kept(film.root, out, write)
-    stamp.write_text(key)
+    media.atomic_write_text(stamp, key)
     return out
 
 
 def cast_by_scene(film: Film) -> tuple[list[str], list[tuple[str, dict[str, str]]]]:
     """Who appears in which scene (along the path the film plays): (character names, [(scene title,
-    {name: mark})]); mark: "face", "voice" or "face+voice"."""
+    {name: mark})]); mark: "face", "voice", "face+voice" or "picture" (a place, object or style)."""
     names: list[str] = []
-    rows = []
+    rows: list[tuple[str, dict[str, str]]] = []
     for sc in film.scenes:
         d = film.path(sc.id)
         try:
@@ -539,7 +563,7 @@ def cast_by_scene(film: Film) -> tuple[list[str], list[tuple[str, dict[str, str]
             use = T.node_cast(t.options, n)
             for c in use["characters"]:
                 if c["images"]:
-                    marks.setdefault(c["name"], set()).add("face")
+                    marks.setdefault(c["name"], set()).add("face" if T.kind_of(c) == "person" else "picture")
                 if c.get("voice") and c["voice"]["file"] in (use.get("voices") or []):
                     marks.setdefault(c["name"], set()).add("voice")
         rows.append((sc.title, {k: "+".join(sorted(v)) for k, v in marks.items()}))

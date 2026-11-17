@@ -35,6 +35,9 @@ def hf(repo, *patterns, alt=None):
 H3 = "Comfy-Org/MiniMax-H3"
 Q21 = "Comfy-Org/Qwen-Image-2.1"
 KREA = "Comfy-Org/Krea-2"
+QIE = "Comfy-Org/Qwen-Image-Edit"
+QI = "Comfy-Org/Qwen-Image_ComfyUI"
+MOSS = "Comfy-Org/MOSS-Image"
 WAN = "Comfy-Org/Wan-Animate-2"
 
 # profile: the smallest profile a component belongs to (core < standard < full)
@@ -143,6 +146,32 @@ SPEC = {
                   m(WAN, "loras/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors", "loras"),
                   m("Kijai/WanVideo_comfy", "LoRAs/Wan22_relight/WanAnimate_relight_lora_fp16.safetensors", "loras")],
     },
+    "image-edit": {
+        "title": "Image edit with Qwen-Image-Edit 2511 (Lightning, 4 steps)", "profile": "full",
+        "files": [m(QIE, "split_files/diffusion_models/qwen_image_edit_2511_fp8mixed.safetensors", "diffusion_models",
+                    alt=r"qwen_image_edit_2511.*\.safetensors$"),
+                  m(QI, "split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors", "text_encoders",
+                    alt=r"qwen_2\.5_vl_7b.*\.safetensors$"),
+                  m(QI, "split_files/vae/qwen_image_vae.safetensors", "vae", alt=r"qwen_image_vae.*\.safetensors$"),
+                  m("lightx2v/Qwen-Image-Edit-2511-Lightning",
+                    "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors", "loras",
+                    alt=r"qwen.*edit.*2511.*lightning.*\d+steps.*\.safetensors$")],
+    },
+    "image-moss": {
+        "title": "Pictures and edits with MOSS-Image", "profile": "full",
+        "files": [m(MOSS, "diffusion_models/moss_image_sft_int8_convrot.safetensors", "diffusion_models",
+                    alt=r"moss_image_sft.*\.safetensors$"),
+                  m(MOSS, "text_encoders/qwen3.5_9b_w4a8_gptq.safetensors", "text_encoders",
+                    alt=r"qwen3\.5_9b.*\.safetensors$"),
+                  m(MOSS, "vae/flux2-vae_small.safetensors", "vae", alt=r"flux2[_-]vae.*\.safetensors$"),
+                  m(MOSS, "loras/moss_image_edit_lora_rank_64_bf16.safetensors", "loras",
+                    alt=r"moss_image_edit_lora.*\.safetensors$")],
+    },
+    "tts-fish": {
+        "title": "Expressive voices with Fish S2 Pro (needs a 24 GB card)",
+        "profile": "full", "needs": ["tts"], "software": ["fish"],
+        "files": [hf("fishaudio/s2-pro")],
+    },
     "upscale-3b": {
         "title": "Export upscaling, smaller model (SeedVR2 3B)", "profile": "full", "needs": ["upscale"],
         "files": [m("Comfy-Org/SeedVR2", "diffusion_models/seedvr2_3b_int8_convrot.safetensors", "diffusion_models")],
@@ -170,6 +199,10 @@ SOFTWARE = {
     "tts": {"python": "3.12", "pip": ["qwen-tts==0.1.1", "soundfile", "audio-separator==0.48.0", "audioread"],
             "licence": "Apache-2.0"},
     "llama": {"repo": "ggml-org/llama.cpp", "tag": "b12317", "licence": "MIT"},
+    # Fish S2 Pro's code with its own environment (the commit fish_worker.py was made for; its PyTorch build is
+    # chosen from the graphics driver)
+    "fish": {"git": "https://github.com/fishaudio/fish-speech", "rev": "0f8a12e8a651062fdee9c33a894bdccd3a8513f1",
+             "python": "3.12", "licence": "Fish Audio Community License"},
 }
 
 
@@ -305,6 +338,8 @@ def models_doc(comps: dict) -> str:
             "the tool downloads the model itself) | https://github.com/karaokenerds/python-audio-separator | "
             "MIT (the tool, per PyPI); the model's author states MIT at "
             "https://huggingface.co/KimberleyJSN/melbandroformer |",
+            f"| fish-speech at `{SOFTWARE['fish']['rev'][:7]}` (Fish S2 Pro's code, part tts-fish) | "
+            f"{SOFTWARE['fish']['git']} | {SOFTWARE['fish']['licence']} |",
             "| ffmpeg (only when the system has none with libx264) | https://github.com/BtbN/FFmpeg-Builds | "
             "GPL build of ffmpeg |",
             "| uv (only when the system has none) | https://docs.astral.sh/uv/ | Apache-2.0 / MIT |", ""]

@@ -6,26 +6,42 @@ ComfyUI), and stops it before clips are made and when the app closes (it holds t
 Requests go to its OpenAI-compatible /v1/chat/completions, with the same instructions as ComfyUI's refiner."""
 from __future__ import annotations
 
+import atexit
+import base64
+import functools
+import http.client
+import io
 import json
+import logging
 import os
+import re
 import shutil
 import signal
+import socket
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
 import urllib.request
+import weakref
 from pathlib import Path
+from typing import IO, Sequence
 
-from . import paths
+from . import config, net
+
+logger = logging.getLogger(__name__)
+
 from .comfy import clean_refined, refine_messages
+from .media import squash
 
 PREFIX = "llama:"                                # model ids of this backend in the refiner's list
 DEFAULT_PORT = 8091
-DEFAULT_SERVER = paths.llama_server()        # the installed one, else llama-server on PATH
+DEFAULT_SERVER = config.llama_server()
 START_TIMEOUT = 600.0                            # a 25 GB model from a cold disk takes minutes
 CONTEXT = 16384                                  # a conversation with pictures (one ~1 MP picture: ~1-2k tokens)
 MAX_TOKENS = 1024                                # a prompt is a few hundred tokens; more means it rambles
+LONG_TOKENS = {"video_h3": 1536}                 # the official H3 format: up to ~500 words + the sound lines
 IMAGE_SIDE = 1024                                # pictures are sent at most this large (fewer tokens, same gist)
 
 
@@ -33,10 +49,16 @@ class LlmServerError(RuntimeError):
     pass
 
 
+def is_uncensored(path: str) -> bool:
+    """The model's file name says it is abliterated / uncensored (the folder's name does not count)."""
+    name = Path(path).name.lower()
+    return "abliterated" in name or "uncensored" in name
+
+
 def model_label(path: str) -> str:
     name = Path(path).name
     stem = name[:-5] if name.endswith(".gguf") else name
-    free = "abliterated" in stem.lower() or "uncensored" in stem.lower()
+    free = is_uncensored(path)
     return f"{stem}{' (uncensored)' if free else ''}  ·  llama.cpp"
 
 
@@ -44,28 +66,44 @@ def find_mmproj(model: str) -> str | None:
     """The vision projector next to a GGUF model (mmproj-*.gguf; F16 / BF16 before Q8 / F32), or None."""
     files = sorted(Path(model).parent.glob("*mmproj*.gguf"))
     rank = {"f16": 0, "bf16": 1, "q8_0": 2, "f32": 3}
-    files.sort(key=lambda f: next((r for k, r in rank.items() if k in f.name.lower()), 9))
+    quant = re.compile(r"(?<![a-z0-9])(bf16|f16|f32|q8_0)(?![a-z0-9])")
+    own = set(re.findall(r"[a-z0-9]+", Path(model).stem.lower()))
+
+    def key(f: Path):
+        tokens = [t for t in re.findall(r"[a-z0-9]+", f.stem.lower()) if t != "mmproj" and not quant.fullmatch(t)]
+        fits = 0 if tokens and set(tokens) <= own else (1 if not tokens else 2)    # its own / any / another model's
+        q = quant.search(f.name.lower())
+        return fits, rank.get(q.group(1), 9) if q else 9, f.name
+    files.sort(key=key)
     return str(files[0]) if files else None
 
 
 def image_part(path: str | Path) -> dict:
-    """A picture for the chat (OpenAI format, a PNG data URL), at most IMAGE_SIDE large."""
-    import base64
+    """A picture for the chat (OpenAI format, a PNG data URL), at most IMAGE_SIDE large (made once per file state:
+    every turn of a conversation sends its pictures again)."""
+    try:
+        st = os.stat(path)
+        url = _image_url(str(path), st.st_mtime_ns, st.st_size)
+    except OSError:
+        url = _image_url(str(path), 0, 0)               # (the error of opening it comes from there)
+    return {"type": "image_url", "image_url": {"url": url}}
 
+
+@functools.lru_cache(maxsize=24)
+def _image_url(path: str, _mtime_ns: int, _size: int) -> str:
     from PIL import Image, ImageOps
-    import io
-    with Image.open(path) as im:
-        im = ImageOps.exif_transpose(im)
+    with Image.open(path) as opened:
+        im = ImageOps.exif_transpose(opened)
         if im.mode in ("RGBA", "LA", "P"):                # transparent parts on grey, not black
             im = im.convert("RGBA")
             bg = Image.new("RGBA", im.size, (128, 128, 128, 255))
             bg.alpha_composite(im)
             im = bg
         im = im.convert("RGB")
-        im.thumbnail((IMAGE_SIDE, IMAGE_SIDE), Image.LANCZOS)
+        im.thumbnail((IMAGE_SIDE, IMAGE_SIDE), Image.Resampling.LANCZOS)
         buf = io.BytesIO()
         im.save(buf, "PNG")
-    return {"type": "image_url", "image_url": {"url": "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()}}
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
 
 
 CHAT_RULES = ("This is a conversation about one prompt. The user's first message is their prompt; each later "
@@ -75,12 +113,25 @@ CHAT_RULES = ("This is a conversation about one prompt. The user's first message
               "use what you see when the user asks for it.")
 
 
+def _lora_part(loras: str) -> str:
+    """What is known of the LoRAs (lora_notes.guidance), after the rules: the long material comes last."""
+    return "\n\n" + loras.strip() if loras.strip() else ""
+
+
 def chat_messages(*, prompt: str, kind: str, turns: list[tuple[str, str]], instruction: str,
-                  pictures: list[tuple[str, str]] = (), cast: list[dict] | None = None) -> list[dict]:
+                  pictures: Sequence[tuple[str, str]] = (), cast: list[dict] | None = None,
+                  seconds: float | None = None, start_image: str | None = None, loras: str = "") -> list[dict]:
     """The conversation for the model. turns: the earlier [(instruction, version)]; the last version is the current
     prompt (also when the user edited it). The first user message holds the user's prompt, the pictures (labelled)
-    and the first instruction; then the turns alternate; the new instruction comes last."""
-    system, first = refine_messages(prompt=prompt, kind=kind, cast=cast)
+    and the first instruction; then the turns alternate; the new instruction comes last.
+    seconds, start_image ("video_h3"): the clip's length and first frame; the model is told it sees that frame
+    when it is among the pictures (else not to invent its look). loras: lora_notes.guidance."""
+    start = None
+    if kind == "video_h3" and start_image:
+        start = "seen" if str(start_image) in [str(p) for _t, p in pictures] else "unseen"
+    system, first = refine_messages(prompt=prompt, kind=kind, cast=cast,
+                                    seconds=seconds if kind == "video_h3" else None, start=start)
+    system += " " + CHAT_RULES + _lora_part(loras)
     asks = [a for a, _v in turns] + [instruction]
 
     def ask_text(a: str) -> str:
@@ -89,12 +140,54 @@ def chat_messages(*, prompt: str, kind: str, turns: list[tuple[str, str]], instr
     content: list[dict] = [{"type": "text", "text": opening}]
     for title, path in pictures:
         content += [{"type": "text", "text": f"\n[{title}]"}, image_part(path)]
-    msgs = [{"role": "system", "content": system + " " + CHAT_RULES},
+    msgs: list[dict] = [{"role": "system", "content": system},
             {"role": "user", "content": content if pictures else opening}]
     for i, (_ask, version) in enumerate(turns):
         msgs.append({"role": "assistant", "content": version})
         msgs.append({"role": "user", "content": ask_text(asks[i + 1])})
     return msgs
+
+
+# Describe (Cast → Describe): what a place, object or style looks like, from its pictures, for its description.
+# The description goes into every clip that mentions it ("Kitchen (…), the environment in <Picture 2>"), so it is
+# short and says only what stays the same in every clip.
+DESCRIBE_FOCUS = {
+    "place": "the kind of place, its main furniture or features and where they are, the materials and colours, "
+             "and the light",
+    "object": "what the object is, its shape, size, materials, colours and the details that make it recognisable",
+    "style": "the visual style: the medium or technique, the colour palette, the lines and textures, the lighting "
+             "and the mood; not what is shown",
+}
+DESCRIBE_RULES = ("You write the description of a {kind} that a video model is given together with its "
+                  "picture{s}. Look at the picture{s} and describe {focus}. Leave out people, animals, actions, "
+                  "the time of day unless it is part of the look, the camera and anything that only happens in "
+                  "this picture. Write one noun phrase or one short sentence in English, at most {words} words, "
+                  "with no preface (never 'The image shows'), no quotes, no list and no markdown.")
+DESCRIBE_WORDS = 40
+
+
+def describe_messages(*, kind: str, name: str, pictures: Sequence[str], desc: str = "") -> list[dict]:
+    """The request for the description of a place, object or style (kind) from its pictures. desc: the one it has
+    (kept in mind: what the user wrote there is meant)."""
+    if kind not in DESCRIBE_FOCUS:
+        raise ValueError(f"only a place, object or style is described from its pictures (not a {kind})")
+    system = DESCRIBE_RULES.format(kind=kind, s="s" if len(pictures) > 1 else "", focus=DESCRIBE_FOCUS[kind],
+                                   words=DESCRIBE_WORDS)
+    text = f"Describe @{name}, a {kind}." + (f" Its description so far: {desc.strip()}" if desc.strip() else "")
+    content: list[dict] = [{"type": "text", "text": text}]
+    for k, path in enumerate(pictures, start=1):
+        content += [{"type": "text", "text": f"\n[Picture {k} of @{name}]"}, image_part(path)]
+    return [{"role": "system", "content": system}, {"role": "user", "content": content}]
+
+
+def clean_description(text: str) -> str:
+    """A description as the cast keeps it: one line, without a preface the model wrote anyway."""
+    lines = [re.sub(r"^\s*(?:[-*•]|\d+[.)])\s+", "", ln) for ln in (text or "").splitlines()]   # list marks
+    text = " ".join(" ".join(lines).split()).replace("**", "").replace("__", "")
+    text = text.strip().strip("\"“”'‘’`").strip()
+    text = re.sub(r"^(the|this) (image|picture|photo|photograph)s? (shows?|depicts?|features?|is of|is)\s*:?\s*",
+                  "", text, flags=re.I)
+    return text.strip()
 
 
 IDEA_RULES = ("Now the user gives bullet points instead of a prompt. Make {n} creative, interesting and clearly "
@@ -106,24 +199,24 @@ IDEA_RULES = ("Now the user gives bullet points instead of a prompt. Make {n} cr
               "it different (e.g. \"low angle, dusk, film noir\"), \"prompt\": the complete prompt as one paragraph}}.")
 
 
-def idea_messages(*, bullets: str, n: int, wish: str = "", pictures: list[tuple[str, str]] = (),
-                  cast: list[dict] | None = None) -> list[dict]:
+def idea_messages(*, bullets: str, n: int, wish: str = "", pictures: Sequence[tuple[str, str]] = (),
+                  cast: list[dict] | None = None, loras: str = "") -> list[dict]:
     """The request for n image ideas from bullet points (kind 'image': the refiner's image rules apply)."""
     system, _first = refine_messages(prompt=bullets, kind="image", cast=cast)
     text = (f"My bullet points:\n{bullets.strip()}" + (f"\n\nAlso: {wish.strip()}" if wish.strip() else ""))
     content: list[dict] = [{"type": "text", "text": text}]
     for title, path in pictures:
         content += [{"type": "text", "text": f"\n[{title}]"}, image_part(path)]
-    return [{"role": "system", "content": system + " " + IDEA_RULES.format(n=int(n))},
+    system += " " + IDEA_RULES.format(n=int(n)) + _lora_part(loras)
+    return [{"role": "system", "content": system},
             {"role": "user", "content": content if pictures else text}]
 
 
 def parse_ideas(text: str) -> list[dict]:
     """The ideas in a model's answer: [{"title", "angle", "prompt"}] (JSON, also inside code fences or with
     text around it; a missing title / angle is filled in)."""
-    import re
     text = re.sub(r"<think>.*?(</think>|$)", "", text or "", flags=re.S | re.I)
-    dec, data, err = json.JSONDecoder(), None, None
+    data, err = None, None
     dec = json.JSONDecoder(strict=False)                # (a line break inside a prompt is no error)
     for m in re.finditer(r"\[", text):                 # the first JSON list of ideas (text around it, "[Note]" …)
         try:
@@ -155,9 +248,9 @@ def parse_ideas(text: str) -> list[dict]:
             d = {"prompt": d}
         if not isinstance(d, dict) or not str(d.get("prompt") or "").strip():
             continue
-        out.append({"title": " ".join(str(d.get("title") or f"Idea {k + 1}").split()),
-                    "angle": " ".join(str(d.get("angle") or "").split()),
-                    "prompt": " ".join(str(d["prompt"]).split())})
+        out.append({"title": squash(d.get("title") or f"Idea {k + 1}"),
+                    "angle": squash(d.get("angle")),
+                    "prompt": squash(d["prompt"])})
     if not out:
         raise LlmServerError("the model gave no usable ideas")
     return out
@@ -167,7 +260,6 @@ def missing_bullets(bullets: str, prompt: str) -> list[str]:
     """The bullet points a prompt seems to leave out: fewer than half of a bullet's words (3+ letters, compared by
     their first 4 letters, so "rain" finds "raining") appear in it, or an @Name is not there as a whole word.
     A bullet without such words is not judged."""
-    import re
     low = prompt.lower()
     stems = {w[:4] for w in re.findall(r"[^\W\d_]{3,}", low)}
     out = []
@@ -183,17 +275,14 @@ def missing_bullets(bullets: str, prompt: str) -> list[str]:
     return out
 
 
-def server_command(server: str, model: str, port: int, cpu_moe: bool = True, mmproj: str | None = None,
-                   threads: int | None = None) -> list[str]:
+def server_command(server: str, model: str, port: int, cpu_moe: bool = True, mmproj: str | None = None) -> list[str]:
     """llama-server's command: all layers on the GPU except (cpu_moe) the experts, which stay in RAM."""
     cmd = [server, "-m", model, "--host", "127.0.0.1", "--port", str(int(port)), "-c", str(CONTEXT),
-           "-ngl", "999", "--jinja", "--no-webui"]
+           "-ngl", "999", "-np", "1", "--jinja", "--no-webui"]       # (-np 1: one slot gets the whole context)
     if cpu_moe:
         cmd.append("--cpu-moe")
     if mmproj:
         cmd += ["--mmproj", mmproj]
-    if threads:
-        cmd += ["-t", str(int(threads))]
     return cmd
 
 
@@ -241,6 +330,155 @@ def free_vram_mb(url: str | None = None) -> int | None:
         return None
 
 
+_LOOPBACK = net._DIRECT     # (a proxy setting must not catch 127.0.0.1)
+LOG_LIMIT = 5 * 1024 * 1024
+
+
+def rotate_log(path: Path, limit: int = LOG_LIMIT) -> None:
+    """A log over `limit` bytes becomes <name>.1 (the older one is dropped), so logs do not grow for ever."""
+    try:
+        if path.stat().st_size > limit:
+            os.replace(path, path.with_name(path.name + ".1"))
+    except OSError as e:
+        logger.debug("log not rotated: %s", e)
+
+
+def _proc_stat(pid: int) -> tuple[str, str] | None:
+    """(state, start time) of a process from /proc, None when there is none."""
+    try:
+        rest = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        return rest[0], rest[19]
+    except (OSError, IndexError):
+        return None
+
+
+class _Adopted:
+    """A server of an earlier run of the app (found by its pid file) in the place of a Popen: only what stopping
+    it needs. It is no child of this process, so its end is seen in /proc."""
+
+    def __init__(self, pid: int, started: str):
+        self.pid, self.started = pid, started
+        self.returncode: int | None = None
+
+    def poll(self):
+        st = _proc_stat(self.pid)
+        if st is None or st[0] == "Z" or st[1] != self.started:
+            self.returncode = 0
+            return 0
+        return None
+
+    def wait(self, timeout: float | None = None):
+        end = None if timeout is None else time.time() + timeout
+        while self.poll() is None:
+            if end is not None and time.time() > end:
+                raise subprocess.TimeoutExpired(str(self.pid), timeout or 0.0)
+            time.sleep(0.1)
+        return self.returncode
+
+
+_LIVE: "weakref.WeakSet[LlamaServer]" = weakref.WeakSet()
+
+
+def _libc_prctl():
+    """libc's prctl, looked up once in the parent (None where there is none)."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        import ctypes
+        return ctypes.CDLL(None, use_errno=True).prctl
+    except (OSError, AttributeError):
+        return None
+
+
+_PRCTL = _libc_prctl()
+
+
+def _die_with_parent() -> None:
+    """In the child, before exec: the kernel sends SIGTERM when the parent thread ends (Linux prctl). Only the call
+    itself happens here: loading a library between fork and exec can deadlock a child of a threaded app."""
+    if _PRCTL is not None:
+        _PRCTL(1, signal.SIGTERM, 0, 0, 0)                     # 1 = PR_SET_PDEATHSIG
+
+
+class _Spawner:
+    """Starts child processes from ONE long-lived daemon thread. PR_SET_PDEATHSIG fires when the *thread* that forked
+    ends, not the process: a worker thread that asked for the server and then finished (a refine) must not take it
+    down. This thread ends only with the app (also a crash or SIGKILL of it), so llama-server cannot outlive it."""
+
+    def __init__(self):
+        import queue
+        self._q: "queue.Queue" = queue.Queue()
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+
+    def _loop(self) -> None:
+        while True:
+            argv, kw, box, done = self._q.get()
+            try:
+                box.append(subprocess.Popen(argv, preexec_fn=_die_with_parent, **kw))    # noqa: PLW1509
+            except BaseException as e:  # noqa: BLE001  (handed to the caller)
+                box.append(e)
+            done.set()
+
+    def spawn(self, argv, **kw) -> subprocess.Popen:
+        with self._lock:
+            if self._thread is None:
+                self._thread = threading.Thread(target=self._loop, name="spawner", daemon=True)
+                self._thread.start()
+        box: list = []
+        done = threading.Event()
+        self._q.put((argv, kw, box, done))
+        done.wait()
+        if isinstance(box[0], BaseException):
+            raise box[0]
+        return box[0]
+
+
+_SPAWNER = _Spawner()
+
+
+def spawn(argv, **kw) -> subprocess.Popen:
+    """subprocess.Popen that dies with the app where Linux can do that (PR_SET_PDEATHSIG; elsewhere a plain Popen)."""
+    if sys.platform.startswith("linux"):
+        return _SPAWNER.spawn(argv, **kw)
+    return subprocess.Popen(argv, **kw)
+
+
+_DYING: list = []          # servers sent SIGTERM without waiting for them
+
+
+def _reap(p, grace: float) -> None:
+    """Wait for a server that was sent SIGTERM; SIGKILL for its process group after `grace` s."""
+    try:
+        p.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        try:
+            if os.name == "nt":
+                p.kill()
+            else:
+                os.killpg(p.pid, signal.SIGKILL)
+            p.wait(timeout=10)                         # (the port is free before a restart)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            logger.warning("SIGKILL of the llama-server failed: %s", e)
+
+
+@atexit.register
+def _stop_all() -> None:
+    """The app ends: no server it started is left holding the RAM (a short grace, then SIGKILL). A server stopped
+    with wait=False is waited for here: the background thread would die with the interpreter before its SIGKILL."""
+    for srv in list(_LIVE):
+        try:
+            srv._kill(srv._take(), grace=5)
+        except Exception as e:  # noqa: BLE001  (exiting: nothing more to do about it)
+            logger.warning("stopping a llama-server at exit failed: %s", e)
+    for p in list(_DYING):
+        try:
+            if p.poll() is None:
+                _reap(p, 5)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("reaping a llama-server at exit failed: %s", e)
+
+
 class LlamaServer:
     """Starts / stops one llama-server for one model file and asks it to refine prompts. before_launch (optional,
     called in start()'s thread just before a new server process starts) can make room for it, or raise
@@ -250,7 +488,7 @@ class LlamaServer:
                  mmproj: str | None = None, log_dir: Path | None = None):
         self.server, self.model, self.port, self.cpu_moe, self.mmproj = server, model, int(port), cpu_moe, mmproj
         self.log_dir = log_dir
-        self.proc: subprocess.Popen | None = None
+        self.proc: subprocess.Popen | _Adopted | None = None
         self._lock = threading.Lock()                # around self.proc
         self._start_lock = threading.Lock()          # one start() at a time
         self._gen = 0                                # stop() / interrupt() count it up: a running start() ends
@@ -263,7 +501,7 @@ class LlamaServer:
     @property
     def models(self) -> list[dict]:
         return [{"file": PREFIX + self.model, "type": "llama", "label": model_label(self.model),
-                 "uncensored": "abliterated" in self.model.lower(), "chat": True, "vision": bool(self.mmproj)}]
+                 "uncensored": is_uncensored(self.model), "chat": True, "vision": bool(self.mmproj)}]
 
     def problems(self) -> list[str]:
         out = []
@@ -274,13 +512,14 @@ class LlamaServer:
         return out
 
     def _get(self, path: str, timeout: float = 5.0) -> dict:
-        with urllib.request.urlopen(self.url + path, timeout=timeout) as r:
-            return json.loads(r.read().decode("utf-8", "replace") or "{}")
+        with _LOOPBACK.open(self.url + path, timeout=timeout) as r:
+            data = json.loads(r.read().decode("utf-8", "replace") or "{}")
+        return data if isinstance(data, dict) else {}          # (a foreign service may answer a list)
 
     def ready(self) -> bool:
         try:
             return self._get("/health", 3.0).get("status") == "ok"
-        except (OSError, ValueError):
+        except (OSError, ValueError, http.client.HTTPException):
             return False
 
     def running(self) -> bool:
@@ -291,7 +530,7 @@ class LlamaServer:
         part when there is one)."""
         try:
             props = self._get("/props", 3.0)
-        except (OSError, ValueError):
+        except (OSError, ValueError, http.client.HTTPException):
             return ""                                  # (an older server without /props: trusted)
         path = props.get("model_path") or ""
         if path and os.path.realpath(path) != os.path.realpath(self.model):
@@ -300,6 +539,72 @@ class LlamaServer:
             return "it runs this model without its vision part"
         return ""
 
+    def _command(self) -> list[str]:
+        return server_command(self.server, self.model, self.port, self.cpu_moe, self.mmproj)
+
+    def _pidfile(self) -> Path | None:
+        return self.log_dir / "llama-server.pid" if self.log_dir is not None else None
+
+    def _remember(self, proc) -> None:
+        """Write the pid file: what a later run needs to find this server again (and to know it is ours)."""
+        path = self._pidfile()
+        st = _proc_stat(proc.pid)
+        if path is None or st is None:
+            return
+        try:
+            me = _proc_stat(os.getpid())
+            path.write_text(json.dumps({"pid": proc.pid, "started": st[1], "cmd": self._command(), "port": self.port,
+                                        "owner": os.getpid(), "owner_started": me[1] if me else None}))
+        except OSError as e:
+            logger.warning("could not write the server record: %s", e)
+
+    def _forget(self) -> None:
+        path = self._pidfile()
+        if path is not None:
+            path.unlink(missing_ok=True)
+
+    def _leftover(self) -> tuple[_Adopted, list[str]] | None:
+        """The server of an earlier run (pid file), when it still runs and really is that server: the same
+        process (start time), its command line is the recorded one, and it leads its own process group. Else the
+        stale file is dropped and nothing is touched."""
+        path = self._pidfile()
+        if path is None or not path.is_file():
+            return None
+        try:
+            d = json.loads(path.read_text())
+            pid, started, cmd = int(d["pid"]), str(d["started"]), [str(x) for x in d["cmd"]]
+            owner = d.get("owner")
+            if owner is not None and int(owner) != os.getpid():
+                o = _proc_stat(int(owner))
+                if o is not None and o[0] != "Z" and o[1] == str(d.get("owner_started")):
+                    return None                     # another running app's server: not a leftover, never touched
+            st = _proc_stat(pid)
+            argv = Path(f"/proc/{pid}/cmdline").read_bytes().decode("utf-8", "replace").split("\0")[:-1]
+            if st is not None and st[0] != "Z" and st[1] == started and cmd and argv[-len(cmd):] == cmd \
+                    and os.getpgid(pid) == pid:
+                return _Adopted(pid, started), cmd
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            logger.debug("no adoptable server: %s", e)
+        self._forget()
+        return None
+
+    def _take_over_leftover(self, keep: bool, wait: bool = True) -> bool:
+        """A server of an earlier run (the app crashed or was killed): taken over when it is the one wanted (keep),
+        else ended (True: one was). Never while this object has a server of its own."""
+        with self._lock:
+            if self.proc is not None:
+                return False
+            found = self._leftover()
+            if found is None:
+                return False
+            old, cmd = found
+            if keep and cmd == self._command():
+                self.proc = old
+                return False
+        ended = self._kill(old, wait)
+        self._forget()
+        return ended
+
     def start(self, stop=lambda: False, timeout: float = START_TIMEOUT) -> None:
         """Start the server (if it is not answering yet) and wait until the model is loaded. A server already on
         the port must run this model (with its vision part when there is one): one this object started is
@@ -307,67 +612,90 @@ class LlamaServer:
         interrupt() never wait for a load: they cancel it (a generation counter, so a cancel just before the
         start is not lost), and a cancelled start ends the server it started."""
         gen = self._gen
-        with self._start_lock:
+        while not self._start_lock.acquire(timeout=0.5):        # (a cancel ends the wait behind another start)
+            if stop() or gen != self._gen:
+                raise LlmServerError("cancelled")
+        try:
+            self._start_locked(gen, stop, timeout)
+        finally:
+            self._start_lock.release()
+
+    def _start_locked(self, gen: int, stop, timeout: float) -> None:
+        if gen != self._gen:
+            raise LlmServerError("cancelled")
+        self._take_over_leftover(keep=True)
+        if self.ready():
+            why = self.mismatch()
+            if not why:
+                return
+            if not self.running():
+                raise LlmServerError(f"port {self.port} is used by another llama.cpp server ({why}). Close "
+                                     "the program that started it, or choose another port in the settings")
+            self._kill(self._take())
+        bad = self.problems()
+        if bad:
+            raise LlmServerError("; ".join(bad))
+        if not self.running() and self._port_taken():
+            raise LlmServerError(f"port {self.port} is used by another program. Close it, or choose another "
+                                 "port in the settings")
+        if self.before_launch is not None and not self.running():
+            self.before_launch()
+        with self._lock:
             if gen != self._gen:
                 raise LlmServerError("cancelled")
+            if not self.running():
+                log: int | IO[bytes] = subprocess.DEVNULL
+                if self.log_dir is not None:
+                    self.log_dir.mkdir(parents=True, exist_ok=True)
+                    rotate_log(self.log_dir / "llama-server.log")
+                    log = open(self.log_dir / "llama-server.log", "ab")    # noqa: SIM115
+                try:
+                    self.proc = spawn(self._command(), stdout=log, stderr=subprocess.STDOUT,
+                                      stdin=subprocess.DEVNULL, start_new_session=True, **_group())
+                except OSError as e:
+                    raise LlmServerError(f"the llama.cpp server could not be started: {e}") from e
+                finally:
+                    if not isinstance(log, int):
+                        log.close()                    # (the process has its own copy)
+                _LIVE.add(self)
+                self._remember(self.proc)
+            proc = self.proc
+        assert proc is not None                    # (just started, or running)
+        log_hint = f"; see {self.log_dir / 'llama-server.log'}" if self.log_dir else ""
+        end = time.time() + timeout
+        while time.time() < end:
+            if stop() or gen != self._gen:
+                if self.proc is proc:              # (cancelled: not left loading in the background)
+                    self._kill(self._take())
+                raise LlmServerError("cancelled")
+            if proc is not self.proc:
+                raise LlmServerError("the llama.cpp server was stopped while loading")
+            if proc.poll() is not None:
+                raise LlmServerError(f"the llama.cpp server stopped while loading (exit {proc.returncode}, "
+                                     f"port {self.port}{log_hint})")
             if self.ready():
-                why = self.mismatch()
-                if not why:
-                    return
-                if not self.running():
-                    raise LlmServerError(f"port {self.port} is used by another llama.cpp server ({why}). Close "
-                                         "the program that started it, or choose another port in the settings")
-                self._kill(self._take())
-            bad = self.problems()
-            if bad:
-                raise LlmServerError("; ".join(bad))
-            if self.before_launch is not None and not self.running():
-                self.before_launch()
-            with self._lock:
-                if gen != self._gen:
-                    raise LlmServerError("cancelled")
-                if not self.running():
-                    log = subprocess.DEVNULL
-                    if self.log_dir is not None:
-                        self.log_dir.mkdir(parents=True, exist_ok=True)
-                        log = open(self.log_dir / "llama-server.log", "ab")    # noqa: SIM115
-                    try:
-                        self.proc = subprocess.Popen(server_command(self.server, self.model, self.port,
-                                                                    self.cpu_moe, self.mmproj),
-                                                     stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                                     start_new_session=True, **_group())
-                    except OSError as e:
-                        raise LlmServerError(f"the llama.cpp server could not be started: {e}") from e
-                    finally:
-                        if log is not subprocess.DEVNULL:
-                            log.close()                    # (the process has its own copy)
-                proc = self.proc
-            log_hint = f"; see {self.log_dir / 'llama-server.log'}" if self.log_dir else ""
-            end = time.time() + timeout
-            while time.time() < end:
-                if stop() or gen != self._gen:
-                    if self.proc is proc:              # (cancelled: not left loading in the background)
-                        self._kill(self._take())
-                    raise LlmServerError("cancelled")
-                if proc is not self.proc:
-                    raise LlmServerError("the llama.cpp server was stopped while loading")
-                if proc.poll() is not None:
-                    raise LlmServerError(f"the llama.cpp server stopped while loading (exit {proc.returncode}"
-                                         f"{log_hint})")
-                if self.ready():
-                    return
-                time.sleep(0.5)
-            self._kill(self._take())                   # (not left holding the RAM)
-            raise LlmServerError(f"the llama.cpp server did not load the model within {int(timeout)} s{log_hint}")
+                return
+            time.sleep(0.5)
+        self._kill(self._take())                   # (not left holding the RAM)
+        raise LlmServerError(f"the llama.cpp server did not load the model within {int(timeout)} s{log_hint}")
 
-    def _take(self) -> subprocess.Popen | None:
+    def _port_taken(self) -> bool:
+        try:
+            socket.create_connection(("127.0.0.1", self.port), 0.3).close()
+            return True
+        except OSError:
+            return False
+
+    def _take(self):
         with self._lock:
             p, self.proc = self.proc, None
+        if p is not None:
+            self._forget()
         return p
 
     @staticmethod
-    def _kill(p: subprocess.Popen | None, wait: bool = True) -> bool:
-        """SIGTERM to the server's process group; wait for it (SIGKILL after 20 s), in the background when
+    def _kill(p, wait: bool = True, grace: float = 20) -> bool:
+        """SIGTERM to the server's process group; wait for it (SIGKILL after `grace` s), in the background when
         wait is False (the GUI does not wait)."""
         if p is None or p.poll() is not None:
             return False
@@ -380,65 +708,94 @@ class LlamaServer:
             except OSError:
                 return False
 
-        def reap():
-            try:
-                p.wait(timeout=20)
-            except subprocess.TimeoutExpired:
-                try:
-                    if os.name == "nt":
-                        p.kill()
-                    else:
-                        os.killpg(p.pid, signal.SIGKILL)
-                    p.wait(timeout=10)                 # (the port is free before a restart)
-                except (OSError, subprocess.TimeoutExpired):
-                    pass
         if wait:
-            reap()
+            _reap(p, grace)
         else:
-            threading.Thread(target=reap, daemon=True).start()
+            _DYING[:] = [q for q in _DYING if q.poll() is None]
+            _DYING.append(p)                           # (at exit: _stop_all sees it through, see LLM-3)
+            threading.Thread(target=_reap, args=(p, grace), daemon=True).start()
         return True
 
-    def stop(self, wait: bool = True) -> bool:
+    def stop(self, wait: bool = True, grace: float = 20) -> bool:
         """Stop the server this object started (frees its RAM and VRAM); a load in progress is cancelled. True if
-        one was running. wait=False: the signal is sent now, the waiting happens in the background."""
-        self._gen += 1
-        return self._kill(self._take(), wait)
+        one was running. wait=False: the signal is sent now, the waiting happens in the background. grace: seconds
+        the server gets to end after SIGTERM before SIGKILL (a closing window passes a short one)."""
+        self._bump()
+        left = self._take_over_leftover(keep=False, wait=wait)    # (a server a crashed run left behind, too)
+        return self._kill(self._take(), wait, grace) or left
+
+    def _bump(self) -> None:
+        with self._lock:
+            self._gen += 1
 
     def refine_prompt(self, prompt: str, kind: str, model_file: str | None = None, seed: int = 0,
                       hint: str = "", cast: list[dict] | None = None, temperature: float = 0.5,
-                      timeout: float = 300.0) -> str:
-        system, user = refine_messages(prompt=prompt, kind=kind, hint=hint, cast=cast)
+                      timeout: float = 300.0, seconds: float | None = None,
+                      start_image: str | None = None, loras: str = "") -> str:
+        """One refine (text only; the refine window holds a conversation with llama.cpp models, see chat, where
+        pictures are shown). start_image ("video_h3"): the model is told the clip starts from a frame it cannot see."""
+        system, user = refine_messages(prompt=prompt, kind=kind, hint=hint, cast=cast,
+                                       seconds=seconds if kind == "video_h3" else None,
+                                       start="unseen" if kind == "video_h3" and start_image else None,
+                                       loras=loras)
         return self._complete([{"role": "system", "content": system}, {"role": "user", "content": user}], seed,
-                              temperature, timeout)
+                              temperature, timeout, max_tokens=LONG_TOKENS.get(kind, MAX_TOKENS),
+                              lines=kind == "video_h3")
 
     def chat(self, prompt: str, kind: str, turns: list[tuple[str, str]], instruction: str,
-             pictures: list[tuple[str, str]] = (), cast: list[dict] | None = None, seed: int = 0,
-             temperature: float = 0.5, timeout: float = 300.0) -> str:
+             pictures: Sequence[tuple[str, str]] = (), cast: list[dict] | None = None, seed: int = 0,
+             temperature: float = 0.5, timeout: float = 300.0, seconds: float | None = None,
+             start_image: str | None = None, loras: str = "") -> str:
         """The next version in a refine conversation (see chat_messages); pictures need the vision projector."""
         if pictures and not self.mmproj:
             raise LlmServerError("this model has no vision part (mmproj file) next to it: it cannot see pictures")
         return self._complete(chat_messages(prompt=prompt, kind=kind, turns=turns, instruction=instruction,
-                                            pictures=pictures, cast=cast), seed, temperature, timeout)
+                                            pictures=pictures, cast=cast, seconds=seconds, start_image=start_image,
+                                            loras=loras),
+                              seed, temperature, timeout, max_tokens=LONG_TOKENS.get(kind, MAX_TOKENS),
+                              lines=kind == "video_h3")
 
-    def ideas(self, bullets: str, n: int = 5, wish: str = "", pictures: list[tuple[str, str]] = (),
+    def ideas(self, bullets: str, n: int = 5, wish: str = "", pictures: Sequence[tuple[str, str]] = (),
               cast: list[dict] | None = None, seed: int = 0, temperature: float = 0.9,
-              timeout: float = 600.0) -> list[dict]:
+              timeout: float = 600.0, loras: str = "") -> list[dict]:
         """n distinct image ideas from bullet points (see IDEA_RULES): [{"title", "angle", "prompt"}]."""
         if pictures and not self.mmproj:
             raise LlmServerError("this model has no vision part (mmproj file) next to it: it cannot see pictures")
         item = {"type": "object", "properties": {k: {"type": "string"} for k in ("title", "angle", "prompt")},
                 "required": ["title", "angle", "prompt"]}
         shape = {"type": "array", "items": item, "minItems": int(n), "maxItems": int(n)}   # the answer's form
-        raw = self._complete(idea_messages(bullets=bullets, n=n, wish=wish, pictures=pictures, cast=cast), seed,
+        raw = self._complete(idea_messages(bullets=bullets, n=n, wish=wish, pictures=pictures, cast=cast,
+                                           loras=loras), seed,
                              temperature, timeout, max_tokens=300 * int(n) + 300, clean=False, schema=shape)
         return parse_ideas(raw)
 
+    def describe(self, kind: str, name: str, pictures: Sequence[str], desc: str = "", seed: int = 0,
+                 temperature: float = 0.3, timeout: float = 300.0) -> str:
+        """The description of a place, object or style from its pictures (see describe_messages); needs the
+        vision projector."""
+        if not self.mmproj:
+            raise LlmServerError("this model has no vision part (mmproj file) next to it: it cannot see pictures")
+        if not pictures:
+            raise LlmServerError(f"@{name} has no picture to describe")
+        out = clean_description(self._complete(describe_messages(kind=kind, name=name, pictures=pictures, desc=desc),
+                                               seed, temperature, timeout, max_tokens=200))
+        if not out:
+            raise LlmServerError("the language model gave no description")
+        return out
+
+    def complete(self, system: str, user: str, max_tokens: int = 512, model_file: str | None = None,
+                 seed: int = 0, temperature: float = 0.2, timeout: float = 300.0) -> str:
+        """The model's raw answer to one question (text only; e.g. a LoRA's note, lora_notes)."""
+        return self._complete([{"role": "system", "content": system}, {"role": "user", "content": user}], seed,
+                              temperature, timeout, max_tokens=max_tokens, clean=False)
+
     def interrupt(self):
         """A load in progress is cancelled (the request of a closed window is not awaited)."""
-        self._gen += 1
+        self._bump()
 
     def _complete(self, messages: list[dict], seed: int, temperature: float, timeout: float,
-                  max_tokens: int = MAX_TOKENS, clean: bool = True, schema: dict | None = None) -> str:
+                  max_tokens: int = MAX_TOKENS, clean: bool = True, schema: dict | None = None,
+                  lines: bool = False) -> str:
         self.start()
         body = {"messages": messages,
                 "max_tokens": int(max_tokens), "temperature": float(temperature), "top_k": 64, "top_p": 0.95,
@@ -449,18 +806,18 @@ class LlamaServer:
         req = urllib.request.Request(self.url + "/v1/chat/completions", data=json.dumps(body).encode(),
                                      headers={"Content-Type": "application/json"})
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            with _LOOPBACK.open(req, timeout=timeout) as r:
                 data = json.loads(r.read().decode("utf-8", "replace"))
         except urllib.error.HTTPError as e:
-            body = e.read()[:2000].decode("utf-8", "replace")
+            why = e.read()[:2000].decode("utf-8", "replace")
             try:
-                body = (json.loads(body).get("error") or {}).get("message") or body
+                why = (json.loads(why).get("error") or {}).get("message") or why
             except (ValueError, AttributeError):
                 pass
-            raise LlmServerError(f"the llama.cpp server answered {e.code}: {body[:300]}") from e
+            raise LlmServerError(f"the llama.cpp server answered {e.code}: {why[:300]}") from e
         except ValueError as e:
             raise LlmServerError(f"unreadable answer from the llama.cpp server: {e}") from e
-        except OSError as e:
+        except (OSError, http.client.HTTPException) as e:
             raise LlmServerError(f"the llama.cpp server could not be asked: {e}") from e
         try:
             choice = data["choices"][0]
@@ -472,7 +829,7 @@ class LlamaServer:
                                  "try again, or ask for a shorter prompt or fewer ideas")
         if not clean:
             return text
-        text = clean_refined(text)
+        text = clean_refined(text, lines=lines)
         if not text:
             raise LlmServerError("the language model gave no answer")
         return text
@@ -488,12 +845,21 @@ class CombinedRefiner:
         if not self.models:
             raise LlmServerError(comfy_error or "no language model")
 
-    def refine_prompt(self, prompt, kind, model_file=None, seed=0, hint="", cast=None):
+    def refine_prompt(self, prompt, kind, model_file=None, seed=0, hint="", cast=None, **clip):
+        """clip: seconds / start_image of a "video_h3" refine, to either backend."""
         if (model_file or "").startswith(PREFIX) or self.comfy is None:
             if self.llama is None:
                 raise LlmServerError("the llama.cpp server is not set up")
-            return self.llama.refine_prompt(prompt, kind, model_file, seed, hint, cast)
-        return self.comfy.refine_prompt(prompt, kind, model_file, seed, hint, cast)
+            return self.llama.refine_prompt(prompt, kind, model_file, seed, hint, cast, **clip)
+        return self.comfy.refine_prompt(prompt, kind, model_file, seed, hint, cast, **clip)
+
+    def complete(self, system, user, max_tokens=512, model_file=None, seed=0, **k):
+        """One plain question, to the backend of the model (a LoRA's note is written by the model that refines)."""
+        if (model_file or "").startswith(PREFIX) or self.comfy is None:
+            if self.llama is None:
+                raise LlmServerError("the llama.cpp server is not set up")
+            return self.llama.complete(system, user, max_tokens, model_file, seed, **k)
+        return self.comfy.complete(system, user, max_tokens, model_file, seed, **k)
 
     def ideas(self, *a, **k):
         if self.llama is None:
@@ -508,3 +874,5 @@ class CombinedRefiner:
     def interrupt(self):
         if self.comfy is not None:
             self.comfy.interrupt()
+        if self.llama is not None:                  # (a model load in progress is cancelled too)
+            self.llama.interrupt()

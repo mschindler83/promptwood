@@ -1,17 +1,150 @@
 """Small themed widgets shared by the windows (same conventions as another app / the design)."""
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QObject, QRect, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
-from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QHBoxLayout, QLabel, QSizePolicy,
-                               QToolButton, QVBoxLayout, QWidget)
+from collections import OrderedDict
 
+from typing import Any, cast
+
+from PySide6.QtCore import QByteArray, QEvent, QObject, QRect, QSettings, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import (QColor, QFont, QFontInfo, QImage, QPainter, QPixmap, QShortcut, QValidator,
+                           QStandardItem, QStandardItemModel, QTransform)
+from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QHBoxLayout, QLabel, QSizePolicy,
+                               QSlider, QToolButton, QVBoxLayout, QWidget)
+
+from .. import chain
+from . import shortcuts as S
 from .theme import icon, theme
+
+# The words of the interface, one per thing (counted over the app's own texts; main_window follows, see the notes).
+# A test scans the ui files for the rejected words.
+TERMS = {
+    "start image": "the picture a path starts from (never 'start picture'); likewise 'end image'",
+    "image": "a picture made or edited by the AI (Edit an image, Variations of images); 'picture' only inside plain "
+             "sentences about files the user chose",
+    "clip": "one made piece of video in the tree; 'video' is a real recording the user added (a 'real video')",
+    "variant": "another take of a clip (same prompt, other seed): a branch of the tree",
+    "variations": "prompt variations: {placeholders} with values (the Variations panel); never for clips",
+    "range": "the start-to-end part of a video or sound that is used (never 'part' or 'track' for it); a 'track' "
+             "is a whole sound of the project",
+    "hand over": "the frame where the next clip takes over (verb 'hand over', noun 'hand-over'); never the model's "
+                 "internal name",
+    "Remove / Delete": "Remove takes something out of a list (cast, track, picture); Delete throws a file or a "
+                       "clip away",
+    "dialog buttons": "the action says what it does ('Use this range', 'Save'); Cancel when closing discards "
+                      "something, Close when nothing is held back; 'Hide' dismisses a hint",
+}
+
+
+def timer(parent: QObject, fn, interval: int | None = None, single: bool = False) -> QTimer:
+    """A QTimer that calls fn when it fires (the PySide6 stubs know the signal, not its use as a keyword argument)."""
+    t = QTimer(parent, singleShot=single)
+    if interval is not None:
+        t.setInterval(interval)
+    t.timeout.connect(fn)
+    return t
+
+
+def combo_item(combo: QComboBox, index: int) -> QStandardItem:
+    """The item of a combo box entry (its model is a QStandardItemModel; the stubs say QAbstractItemModel)."""
+    return cast(QStandardItemModel, combo.model()).item(index)
+
+
+def shortcut(key, parent: QWidget, fn, context=None) -> QShortcut:
+    """A keyboard shortcut that calls fn (the PySide6 stubs know the signal, not its use as a keyword argument)."""
+    sc = QShortcut(key, parent)
+    if context is not None:
+        sc.setContext(context)
+    sc.activated.connect(fn)
+    return sc
+
+
+def safe_emit(signal, *args) -> bool:
+    """Emit a signal from a worker thread. A window that is already closed has no receiver any more (PySide then
+    raises RuntimeError): there is nobody to tell. True when it was emitted."""
+    try:
+        signal.emit(*args)
+        return True
+    except RuntimeError:
+        return False
+
+
+def capped_size(width: int, height: int, avail: QSize | None = None, share: float = 0.9) -> QSize:
+    """A wished window size kept within share of the available screen (a 1366x768 screen cannot show 1240x820)."""
+    if avail is None:
+        screen = QApplication.primaryScreen()
+        avail = screen.availableGeometry().size() if screen is not None else QSize(width, height)
+    return QSize(min(width, int(avail.width() * share)), min(height, int(avail.height() * share)))
+
+
+def fit_size(widget: QWidget, width: int, height: int) -> None:
+    """widget.resize(width, height), capped to the screen the widget is on."""
+    screen = widget.screen() if widget.window() is not None else None
+    avail = screen.availableGeometry().size() if screen is not None else None
+    widget.resize(capped_size(width, height, avail))
+
+
+def remember_geometry(dialog: QWidget, qs: QSettings | None, key: str) -> None:
+    """Give the dialog the size and place it had when it was closed last time (kept in the settings it is given, under
+    "geometry/<key>"), and keep them again when it closes. Without settings nothing is remembered. A saved size
+    that no longer fits the screen is cut to it."""
+    if qs is None:
+        return
+    name = f"geometry/{key}"
+    saved = qs.value(name)
+    if isinstance(saved, (QByteArray, bytes)) and dialog.restoreGeometry(saved):
+        fitted = capped_size(dialog.width(), dialog.height(),
+                             dialog.screen().availableGeometry().size() if dialog.screen() is not None else None, 1.0)
+        if fitted != dialog.size():
+            dialog.resize(fitted)
+    finished = getattr(dialog, "finished", None)
+    if finished is not None:
+        finished.connect(lambda _r: qs.setValue(name, dialog.saveGeometry()))
+
+
+def small_font(base: QFont, scale: float = 0.8) -> QFont:
+    """base made smaller by scale, but never below the theme's small text size (labels at 6.5 pt were unreadable)."""
+    f = QFont(base)
+    px = base.pixelSize() if base.pixelSize() > 0 else QFontInfo(base).pixelSize()
+    f.setPixelSize(max(round(px * scale), theme().font.small))
+    return f
+
+
+_SCALED: OrderedDict = OrderedDict()
+
+
+def smooth_scaled(img: QImage, size: QSize, mode=Qt.AspectRatioMode.KeepAspectRatio) -> QImage:
+    """img scaled with Qt's smooth (area-averaging) scaling, remembered per picture, size and mode (the last few):
+    the same picture asked for again at the same size (repaints, scrubbing) is not scaled again. The very image
+    when it already has that size."""
+    target = img.size().scaled(size, mode) if mode != Qt.AspectRatioMode.IgnoreAspectRatio else size
+    if target == img.size():
+        return img
+    key = (img.cacheKey(), target.width(), target.height())
+    hit = _SCALED.get(key)
+    if hit is not None:
+        _SCALED.move_to_end(key)
+        return hit[1]
+    out = img.scaled(target, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+    _SCALED[key] = (img, out)                  # (the source is kept so its cache key cannot be given to another image)
+    while len(_SCALED) > 16:
+        _SCALED.popitem(last=False)
+    return out
+
+
+def format_time(seconds: float, precision: int = 0) -> str:
+    """m:ss with `precision` decimals (0: m:ss, 1: m:ss.s as the main window shows times, 3: m:ss.mmm for
+    frame-exact editors). Rounded first, then split: 59.96 s at precision 1 is 1:00.0, never 0:60.0."""
+    q = 10 ** precision
+    total = round(max(0.0, float(seconds)) * q)
+    whole, frac = divmod(total, q)
+    m, s = divmod(whole, 60)
+    return f"{m}:{s:02d}" + (f".{frac:0{precision}d}" if precision else "")
 
 
 def frame_image(frame) -> QImage:
     """A decoded video frame as an RGB image, converted on the CPU (YUV420P / NV12, limited or full range, BT.709
     when the frame says so, else BT.601 as Qt does): QVideoFrame.toImage() may use a GPU (OpenGL through the EGL driver that crashed).
+    Turned by the stream's rotation (a phone video's flag, in the frame's format), as toImage() and ffmpeg turn it.
     Other formats fall back to toImage()."""
     from PySide6.QtMultimedia import QVideoFrame, QVideoFrameFormat
     try:
@@ -19,8 +152,8 @@ def frame_image(frame) -> QImage:
     except ImportError:                            # (numpy is optional for the app)
         return frame.toImage()
     fmt = frame.pixelFormat()
-    if fmt not in (QVideoFrameFormat.Format_YUV420P, QVideoFrameFormat.Format_NV12) or \
-            not frame.map(QVideoFrame.ReadOnly):
+    if fmt not in (QVideoFrameFormat.PixelFormat.Format_YUV420P, QVideoFrameFormat.PixelFormat.Format_NV12) or \
+            not frame.map(QVideoFrame.MapMode.ReadOnly):
         return frame.toImage()
     try:
         w, h = frame.width(), frame.height()
@@ -31,7 +164,7 @@ def frame_image(frame) -> QImage:
             return a[:, :cols * ch].reshape(rows, cols, ch) if ch > 1 else a[:, :cols]
         hw, hh = (w + 1) // 2, (h + 1) // 2
         y = plane(0, h, w).astype(np.float32)
-        if fmt == QVideoFrameFormat.Format_NV12:
+        if fmt == QVideoFrameFormat.PixelFormat.Format_NV12:
             uv = plane(1, hh, hw, 2).astype(np.float32)
             u, v = uv[..., 0], uv[..., 1]
         else:
@@ -41,11 +174,11 @@ def frame_image(frame) -> QImage:
     u = np.repeat(np.repeat(u, 2, axis=0), 2, axis=1)[:h, :w] - 128.0
     v = np.repeat(np.repeat(v, 2, axis=0), 2, axis=1)[:h, :w] - 128.0
     sf = frame.surfaceFormat()
-    if sf.colorRange() == QVideoFrameFormat.ColorRange_Full:
+    if sf.colorRange() == QVideoFrameFormat.ColorRange.ColorRange_Full:
         k, cs = 1.0, 1.0
     else:                                          # limited (video) range: 16-235, chroma 16-240
         y, k, cs = y - 16.0, 255.0 / 219.0, 255.0 / 224.0
-    if sf.colorSpace() == QVideoFrameFormat.ColorSpace_BT709:
+    if sf.colorSpace() == QVideoFrameFormat.ColorSpace.ColorSpace_BT709:
         cr, cgu, cgv, cb = 1.5748, 0.187324, 0.468124, 1.8556
     else:                                          # BT.601: also when the clip does not say (as Qt converts it)
         cr, cgu, cgv, cb = 1.402, 0.344136, 0.714136, 1.772
@@ -55,7 +188,9 @@ def frame_image(frame) -> QImage:
     rgb[..., 1] = y - cgu * u - cgv * v
     rgb[..., 2] = y + cb * u
     out = np.ascontiguousarray(rgb.clip(0, 255).astype(np.uint8))
-    return QImage(out.data, w, h, w * 3, QImage.Format_RGB888).copy()
+    img = QImage(out.data, w, h, w * 3, QImage.Format.Format_RGB888).copy()
+    turn = sf.rotation().value if hasattr(sf, "rotation") else 0
+    return img.transformed(QTransform().rotate(turn)) if turn else img
 
 
 GPU_VIDEO = False          # set at start-up from the setting (app.py): players draw through Qt's GPU video surface
@@ -73,34 +208,87 @@ class VideoView(QWidget):
     clips, but it renders through its own EGL/OpenGL window, and NVIDIA's EGL driver crashed there once (segfault
     in libnvidia-eglcore while the first frame was drawn) when ComfyUI held nearly all GPU memory after a long clip.
     CPU: frames come through a QVideoSink and are painted like an image (kept in proportion, black around): never
-    crashes, but decoding, colour conversion and smooth scaling of every frame on the CPU lag with large clips."""
+    crashes, but decoding, colour conversion and smooth scaling of every frame on the CPU lag with large clips.
 
-    def __init__(self, parent=None, gpu: bool | None = None):
+    turnable: set_rotation turns the picture clockwise on top of what the player shows. CPU: the painted image is
+    turned. GPU: Qt Quick's VideoOutput (in a QQuickWidget) instead of the QVideoWidget, turned with its own
+    orientation property; the frames stay on the GPU (never converted here: converting hardware-decoded frames is
+    what crashed). (Not the frames' own rotation setting: QVideoWidget then turns the picture's shape, but not the
+    picture, which comes out stretched.)"""
+
+    QML = (b"import QtQuick\nimport QtMultimedia\n"
+           b"Rectangle { color: 'black'\n"
+           b"  VideoOutput { objectName: 'out'; anchors.fill: parent; fillMode: VideoOutput.PreserveAspectFit } }\n")
+
+    def __init__(self, parent=None, gpu: bool | None = None, turnable: bool = False):
         super().__init__(parent)
         self.gpu = GPU_VIDEO if gpu is None else bool(gpu)
+        self.turnable = bool(turnable)
         self._img = QImage()
+        self._raw = QImage()                       # (CPU: the frame before the turn)
+        self.rotation = 0
+        self._out: QObject | None = None           # (GPU, turnable: the VideoOutput item)
+        self.sink: Any                             # (what a QMediaPlayer paints into)
         self._shown: tuple | None = None           # (the frame, the size) -> the frame scaled to fit, for painting
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         if self.gpu:
-            from PySide6.QtMultimediaWidgets import QVideoWidget
             lay = QVBoxLayout(self)
             lay.setContentsMargins(0, 0, 0, 0)
-            self.widget = QVideoWidget(self)
-            self.widget.setAspectRatioMode(Qt.KeepAspectRatio)
+            if self.turnable:
+                self.widget = self._quick_output()
+                assert self._out is not None               # (_quick_output)
+                self.sink = self._out.property("videoSink")
+            else:
+                from PySide6.QtMultimediaWidgets import QVideoWidget
+                self.widget = QVideoWidget(self)
+                self.widget.setAspectRatioMode(Qt.AspectRatioMode.KeepAspectRatio)
+                self.sink = self.widget.videoSink()
             lay.addWidget(self.widget)
-            self.sink = self.widget.videoSink()
             return
         from PySide6.QtMultimedia import QVideoSink
         self.widget = None
         self.sink = QVideoSink(self)
         self.sink.videoFrameChanged.connect(self._frame)
-        self.setAttribute(Qt.WA_OpaquePaintEvent)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
 
     def _frame(self, frame):
         if not frame.isValid():                    # (the end of a clip: its last frame stays, as in QVideoWidget)
             return
-        self._img = frame_image(frame)
+        self._raw = frame_image(frame)
+        self._turn()
+
+    def _turn(self):
+        self._img = self._raw.transformed(QTransform().rotate(self.rotation)) if self.rotation and \
+            not self._raw.isNull() else self._raw
         self.update()
+
+    def _quick_output(self):
+        from PySide6.QtCore import QUrl
+        from PySide6.QtQml import QQmlComponent
+        from PySide6.QtQuickWidgets import QQuickWidget
+        view = QQuickWidget(self)
+        view.setResizeMode(QQuickWidget.ResizeMode.SizeRootObjectToView)
+        view.setClearColor(QColor(0, 0, 0))
+        comp = QQmlComponent(view.engine())
+        comp.setData(self.QML, QUrl())
+        root = comp.create()
+        if root is None:
+            raise RuntimeError("Qt Quick video output: " + "; ".join(e.toString() for e in comp.errors()))
+        view.setContent(QUrl(), comp, root)
+        self._root, self._comp = root, comp        # (kept alive with the view)
+        self._out = root.findChild(QObject, "out")
+        return view
+
+    def set_rotation(self, degrees: int) -> None:
+        """Turn the picture clockwise by 0, 90, 180 or 270 degrees (a view made with turnable=True)."""
+        if not self.turnable:
+            raise RuntimeError("this video view was not made turnable")
+        self.rotation = int(degrees) % 360
+        if self.gpu:
+            assert self._out is not None
+            self._out.setProperty("orientation", self.rotation)      # (clockwise, as Qt's documentation says)
+        else:
+            self._turn()
 
     def image(self) -> QImage:
         """The frame shown (GPU: converted only when asked)."""
@@ -110,7 +298,7 @@ class VideoView(QWidget):
         return self._img
 
     def clear(self):
-        self._img = QImage()
+        self._img = self._raw = QImage()
         if self.gpu:
             from PySide6.QtMultimedia import QVideoFrame
             self.sink.setVideoFrame(QVideoFrame())
@@ -124,11 +312,10 @@ class VideoView(QWidget):
         a painter's bilinear scaling skips most source pixels when it shrinks a lot (a 2K portrait into a small
         preview), and fine detail then shimmers as grain and moving artifacts."""
         dpr = self.devicePixelRatioF()
-        target = self._img.size().scaled(self.size() * dpr, Qt.KeepAspectRatio)
+        target = self._img.size().scaled(self.size() * dpr, Qt.AspectRatioMode.KeepAspectRatio)
         key = (self._img.cacheKey(), target.width(), target.height())
         if self._shown is None or self._shown[0] != key:
-            img = self._img if target == self._img.size() else \
-                self._img.scaled(target, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            img = QImage(smooth_scaled(self._img, target))
             img.setDevicePixelRatio(dpr)
             self._shown = (key, img)
         return self._shown[1]
@@ -158,8 +345,14 @@ class _WheelGuard(QObject):
     """The mouse wheel over a list or number field that does not have the keyboard focus scrolls the panel
     around it instead of changing the value (scrolling through the settings must not change them)."""
 
+    @staticmethod
+    def has_focus(w: QWidget) -> bool:
+        """The field or a child of it (an editable combo's line edit) has the keyboard focus."""
+        f = QApplication.focusWidget()
+        return w.hasFocus() or (f is not None and w.isAncestorOf(f))
+
     def eventFilter(self, obj, e):                # noqa: N802  (Qt naming)
-        if e.type() == QEvent.Wheel and isinstance(obj, QWidget) and not obj.hasFocus():
+        if e.type() == QEvent.Type.Wheel and isinstance(obj, QWidget) and not self.has_focus(obj):
             parent = obj.parentWidget()
             if parent is not None:
                 QApplication.sendEvent(parent, e)       # Qt passes it on up to the scroll area
@@ -183,13 +376,68 @@ def guard_wheel(*roots: QWidget) -> None:
         for w in found:
             if isinstance(w, (QComboBox, QAbstractSpinBox)) and not w.property("wheelGuard"):
                 w.setProperty("wheelGuard", True)
-                w.setFocusPolicy(Qt.StrongFocus)
+                w.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
                 w.installEventFilter(_GUARD)
+
+
+class SeedBox(QAbstractSpinBox):
+    """A spin box for seeds: whole numbers from 0 to limit, which may be more than a QSpinBox holds (ComfyUI's
+    noise takes 64 bit). value(), setValue() and valueChanged as a QSpinBox has them; valueChanged carries a
+    Python int (connect it to slots that take an object)."""
+    valueChanged = Signal(object)
+
+    def __init__(self, limit: int, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._limit, self._value = int(limit), 0
+        edit = self.lineEdit()
+        edit.setText("0")
+        edit.textEdited.connect(self._typed)
+        self.editingFinished.connect(self._show)
+        self.setMinimumWidth(self.fontMetrics().horizontalAdvance("0" * 11) + 34)   # (longer seeds scroll)
+
+    def value(self) -> int:
+        return self._value
+
+    def setValue(self, value: int) -> None:
+        v = min(max(int(value), 0), self._limit)
+        changed, self._value = v != self._value, v
+        self._show()
+        if changed:
+            self.valueChanged.emit(v)
+
+    def _show(self) -> None:
+        if self.lineEdit().text() != str(self._value):
+            self.lineEdit().setText(str(self._value))
+
+    def _typed(self, text: str) -> None:
+        if text.isascii() and text.isdigit() and int(text) <= self._limit and int(text) != self._value:
+            self._value = int(text)
+            self.valueChanged.emit(self._value)
+
+    def validate(self, text: str, pos: int):         # noqa: D102  (Qt's: what may be typed)
+        if not text:
+            return QValidator.State.Intermediate, text, pos
+        ok = text.isascii() and text.isdigit() and int(text) <= self._limit
+        return (QValidator.State.Acceptable if ok else QValidator.State.Invalid), text, pos
+
+    def fixup(self, text: str) -> str:               # (an emptied field: back to the value)
+        return str(self._value)
+
+    def stepBy(self, steps: int) -> None:
+        self.setValue(self._value + int(steps))
+
+    def stepEnabled(self):
+        flags = QAbstractSpinBox.StepEnabledFlag.StepNone
+        if self._value > 0:
+            flags |= QAbstractSpinBox.StepEnabledFlag.StepDownEnabled
+        if self._value < self._limit:
+            flags |= QAbstractSpinBox.StepEnabledFlag.StepUpEnabled
+        return flags
 
 
 def badge(text: str, severity: str | None = None) -> QLabel:
     b = label(text, role="badge", severity=severity)
-    b.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+    b.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
     return b
 
 
@@ -199,15 +447,25 @@ def icon_button(name: str, tip: str, parent=None, checkable: bool = False) -> QT
     b.setIcon(icon(name))
     b.setIconSize(QSize(16, 16))
     b.setToolTip(tip)
+    b.setAccessibleName(tip.split(":")[0].split(" (")[0].strip())     # (an icon says nothing to a screen reader)
     b.setAutoRaise(True)
     b.setCheckable(checkable)
     return b
 
 
+def label_for(text: str, field: QWidget, **kw) -> QLabel:
+    """A label that belongs to a field: the label is its buddy (a screen reader reads it with the field)."""
+    lab = label(text, **kw)
+    lab.setBuddy(field)
+    if not field.accessibleName():
+        field.setAccessibleName(text.rstrip(":… ").strip())
+    return lab
+
+
 def section_bar(title: str, parent=None) -> tuple[QWidget, QHBoxLayout]:
     w = QWidget(parent)
     w.setProperty("role", "sectionBar")
-    w.setAttribute(Qt.WA_StyledBackground)
+    w.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
     w.setFixedHeight(theme().sectionHeader)
     h = QHBoxLayout(w)
     h.setContentsMargins(8, 0, 4, 0)
@@ -225,7 +483,7 @@ class FrameTile(QLabel):
     def __init__(self, w: int, h: int, parent=None):
         super().__init__(parent)
         self.setFixedSize(w, h)
-        self.setAlignment(Qt.AlignCenter)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setObjectName("frameTile")
         self.key = ""
         self.t = 0.0
@@ -246,12 +504,179 @@ class FrameTile(QLabel):
             return
         self._img = img
         dpr = self.devicePixelRatioF()
-        pm = QPixmap.fromImage(img).scaled(self.size() * dpr, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        pm = QPixmap.fromImage(img).scaled(self.size() * dpr, Qt.AspectRatioMode.KeepAspectRatio,
+                                           Qt.TransformationMode.SmoothTransformation)
         pm.setDevicePixelRatio(dpr)
         self.setText("")
         self.setPixmap(pm)
 
     def mousePressEvent(self, e):
-        if e.button() == Qt.LeftButton:
+        if e.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit(self.t)
         super().mousePressEvent(e)
+
+
+class FlowBox(QWidget):
+    """Places its child widgets left to right and wraps them into rows; its height follows its width. (A widget
+    that places its children itself: a Python QLayout subclass crashed in PySide when items were taken out.)"""
+
+    def __init__(self, parent=None, spacing: int = 8):
+        super().__init__(parent)
+        self.items: list[QWidget] = []
+        self.spacing = spacing
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def add(self, w: QWidget):
+        w.setParent(self)
+        w.show()
+        self.items.append(w)
+        self._place()
+
+    def clear(self):
+        for w in self.items:
+            w.hide()
+            w.setParent(None)
+            w.deleteLater()
+        self.items = []
+        self._place()
+
+    def _place(self):
+        width = max(1, self.width())
+        x = y = row = 0
+        for w in self.items:
+            hint = w.sizeHint().expandedTo(w.minimumSize())
+            if w.maximumWidth() < hint.width():
+                hint.setWidth(w.maximumWidth())
+            if x + hint.width() > width and row > 0:
+                x, y, row = 0, y + row + self.spacing, 0
+            w.setGeometry(x, y, hint.width(), hint.height())
+            x += hint.width() + self.spacing
+            row = max(row, hint.height())
+        h = y + row
+        if self.minimumHeight() != h:
+            self.setFixedHeight(h)
+
+    def resizeEvent(self, e):                    # noqa: N802  (Qt naming)
+        super().resizeEvent(e)
+        self._place()
+
+    def sizeHint(self):                          # noqa: N802
+        return QSize(200, self.minimumHeight())
+
+
+class FrameStepper(QWidget):
+    """A slider over frames with a second back / frame back / frame on / second on button on each side, the frame
+    label ("frame 3 / 120 · 0.08 s"), and the keys Left / Right (one frame) and Shift+Left / Shift+Right (one
+    second) on the host window. HandoverDialog and VideoFrameDialog share it."""
+    valueChanged = Signal(int)
+    stepped = Signal()                          # a button or key moved it by hand (a player stops playing then)
+
+    def __init__(self, host: QWidget, fps: float = chain.FPS, parent=None, context=None):
+        super().__init__(parent or host)
+        self.fps = float(fps)
+        sec = max(1, round(self.fps))
+        self.slider = QSlider(Qt.Orientation.Horizontal)
+        self.slider.setEnabled(False)
+        self.label = label("", level="secondary", type_="mono")
+        self.b_back_s = self._button("«", "One second back (Shift+Left)", -sec)
+        self.b_back1 = self._button("‹", "One frame back (Left)", -1)
+        self.b_fwd1 = self._button("›", "One frame on (Right)", 1)
+        self.b_fwd_s = self._button("»", "One second on (Shift+Right)", sec)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        for b in (self.b_back_s, self.b_back1):
+            row.addWidget(b)
+        row.addWidget(self.slider, 1)
+        for b in (self.b_fwd1, self.b_fwd_s):
+            row.addWidget(b)
+        row.addWidget(self.label)
+        for key, step in (("frame_back", -1), ("frame_on", 1), ("second_back", -sec), ("second_on", sec)):
+            shortcut(S.sequence(key), host, lambda s=step: self.step(s), context=context)
+        self.slider.valueChanged.connect(self._moved)
+        self.slider.valueChanged.connect(self.valueChanged)
+
+    def _button(self, text: str, tip: str, step: int) -> QToolButton:
+        b = QToolButton()
+        b.setProperty("role", "iconButton")
+        b.setText(text)
+        b.setToolTip(tip)
+        b.setAccessibleName(tip.split(" (")[0])
+        b.setFixedWidth(34)
+        b.clicked.connect(lambda _c=False, s=step: self.step(s))
+        return b
+
+    def step(self, n: int) -> None:
+        self.stepped.emit()
+        self.slider.setValue(self.slider.value() + n)       # (the slider keeps it inside its range)
+
+    def set_range(self, lo: int, hi: int) -> None:
+        self.slider.setRange(int(lo), int(hi))
+        self._moved(self.slider.value())
+
+    def setValue(self, k: int) -> None:         # noqa: N802  (as QSlider)
+        self.slider.setValue(int(k))
+
+    def value(self) -> int:
+        return self.slider.value()
+
+    def maximum(self) -> int:
+        return self.slider.maximum()
+
+    def setEnabled(self, on: bool) -> None:     # noqa: N802
+        self.slider.setEnabled(on)
+        for b in (self.b_back_s, self.b_back1, self.b_fwd1, self.b_fwd_s):
+            b.setEnabled(on)
+
+    def _moved(self, k: int) -> None:
+        self.label.setText(f"frame {k + 1} / {self.slider.maximum() + 1} · {k / self.fps:.2f} s")
+
+
+ELIDED_MIN_CHARS = 12          # what an ElidedToolButton shows at least before it is cut ("Own settin…")
+
+
+class ElidedToolButton(QToolButton):
+    """A tool button whose text is cut to the width it gets, with "…" (the whole text then in its tooltip): a
+    long text never makes its layout, and so a panel, wider. text() is the whole text; it is never wider than it
+    needs (QSizePolicy.Maximum) and at least about ELIDED_MIN_CHARS characters wide."""
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._full, self._tip, self._overhead = "", "", 0
+        self._hint = super().sizeHint()
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, self.sizePolicy().verticalPolicy())
+
+    def setText(self, text: str) -> None:  # noqa: N802
+        self._full = text
+        super().setText(text)
+        self._hint = super().sizeHint()          # (the whole text: what the button would like)
+        self._overhead = self._hint.width() - self.fontMetrics().horizontalAdvance(text)
+        self.setAccessibleName(text)
+        self.updateGeometry()
+        self._elide()
+
+    def text(self) -> str:
+        return self._full
+
+    def setToolTip(self, tip: str) -> None:  # noqa: N802
+        self._tip = tip
+        self._elide()
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return QSize(self._hint)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        least = self._overhead + self.fontMetrics().horizontalAdvance("M" * ELIDED_MIN_CHARS)
+        return QSize(min(self._hint.width(), least), super().minimumSizeHint().height())
+
+    def resizeEvent(self, e) -> None:  # noqa: N802
+        super().resizeEvent(e)
+        self._elide()
+
+    def _elide(self) -> None:
+        shown = self.fontMetrics().elidedText(self._full, Qt.TextElideMode.ElideRight,
+                                              max(0, self.width() - self._overhead))
+        if super().text() != shown:
+            super().setText(shown)
+        tip = self._tip if shown == self._full else "\n\n".join(x for x in (self._tip, self._full) if x)
+        if super().toolTip() != tip:
+            super().setToolTip(tip)

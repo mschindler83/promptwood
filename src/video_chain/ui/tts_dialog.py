@@ -2,21 +2,15 @@
 account's ElevenLabs voices. A sample sentence is made to listen to; "Use this voice" makes it the character's voice."""
 from __future__ import annotations
 
-import tempfile
-import threading
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLineEdit,
                                QPlainTextEdit, QPushButton, QSpinBox, QStackedWidget, QVBoxLayout, QWidget)
 
-from .. import tts
-from .widgets import label
-
-
-class _Signals(QObject):
-    sample = Signal(object, str)               # secs or None, error
-    voices = Signal(object, str)               # [voice] or None, error
+from .workers import run_in_background
+from .. import media, tts
+from .dialogs import button_row
+from .widgets import fit_size, label
 
 
 class VoiceTtsDialog(QDialog):
@@ -29,13 +23,11 @@ class VoiceTtsDialog(QDialog):
         self.setWindowTitle(f"Voice of @{name} with text to speech")
         self.name, self.lang, self.model = name, lang, model
         self._play, self._local, self._eleven = play, local, eleven
-        self._sig = _Signals(self)
-        self._sig.sample.connect(self._sample_done)
-        self._sig.voices.connect(self._voices_done)
-        self._tmp = tempfile.TemporaryDirectory(prefix="video-chain-voice-")
+        self._tmp = media.scratch("voice")
         self.wav = Path(self._tmp.name) / "sample.wav"
         self.made: dict | None = None            # what the sample was made with (use_sample's label / text / eleven)
         self._pending: dict | None = None
+        self.voices: list = []                   # the account's ElevenLabs voices (once loaded)
         self.busy = False
         v = QVBoxLayout(self)
         form = QFormLayout()
@@ -93,17 +85,13 @@ class VoiceTtsDialog(QDialog):
         self.info = label("", level="tertiary")
         self.info.setWordWrap(True)
         v.addWidget(self.info)
-        self.buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
-        self.b_use = self.buttons.addButton("Use this voice", QDialogButtonBox.AcceptRole)
-        self.b_use.setEnabled(False)
-        self.buttons.accepted.connect(self.accept)
-        self.buttons.rejected.connect(self.reject)
+        self.buttons, self.b_use = button_row(self, "Use this voice", enabled=False)
         v.addWidget(self.buttons)
         self.kind.currentIndexChanged.connect(self._kind_changed)
         if voices_cache:
             self._fill_voices(voices_cache)
         self._kind_changed()
-        self.resize(560, self.sizeHint().height())
+        fit_size(self, 560, self.sizeHint().height())
 
     def provider(self) -> str:
         return self.kind.currentData()
@@ -121,6 +109,8 @@ class VoiceTtsDialog(QDialog):
         self.b_make.setEnabled(ok and bool(self.text.text().strip()))
         self.b_voices.setEnabled(not self.busy)
         self.kind.setEnabled(not self.busy)
+        # (a thread is working for it)
+        self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setEnabled(not self.busy)
 
     # ---- ElevenLabs voices
     def _load_voices(self):
@@ -128,12 +118,8 @@ class VoiceTtsDialog(QDialog):
         self._enable()
         self.info.setText("Asking ElevenLabs for your voices…")
 
-        def work():
-            try:
-                self._sig.voices.emit(self._eleven().voices(), "")
-            except Exception as e:  # noqa: BLE001
-                self._sig.voices.emit(None, str(e))
-        threading.Thread(target=work, daemon=True).start()
+        run_in_background(lambda: self._eleven().voices(), on_done=lambda v: self._voices_done(v, ""),
+                          on_error=lambda e: self._voices_done(None, str(e)), owner=self)
 
     def _voices_done(self, voices, err: str):
         self.busy = False
@@ -165,20 +151,19 @@ class VoiceTtsDialog(QDialog):
         self.b_use.setEnabled(False)
         self._enable()
         self.info.setText("Making the sample…" + (" (the model loads first: about 15 s)" if kind == "local" else ""))
+        voice_id = voice["id"] if kind == "elevenlabs" and voice else None      # (the local engine has no voice ids)
         made = ({"label": f"designed: {desc[:40]}", "text": text, "eleven": None} if kind == "local" else
                 {"label": f"ElevenLabs: {voice['name']}", "text": text,
                  "eleven": {"id": voice["id"], "name": voice["name"]}})
 
         def work():
-            try:
-                eng = self._local() if kind == "local" else self._eleven()
-                secs = tts.make_sample(eng, text, self.lang, self.wav, description=desc, voice_id=voice and
-                                       voice["id"], model=self.model, seed=seed)
-                self._pending = made
-                self._sig.sample.emit(secs, "")
-            except Exception as e:  # noqa: BLE001
-                self._sig.sample.emit(None, str(e))
-        threading.Thread(target=work, daemon=True).start()
+            eng = self._local() if kind == "local" else self._eleven()
+            secs = tts.make_sample(eng, text, self.lang, self.wav, description=desc, voice_id=voice_id,
+                                   model=self.model, seed=seed)
+            self._pending = made
+            return secs
+        run_in_background(work, on_done=lambda secs: self._sample_done(secs, ""),
+                          on_error=lambda e: self._sample_done(None, str(e)), owner=self)
 
     def _sample_done(self, secs, err: str):
         self.busy = False
@@ -193,8 +178,10 @@ class VoiceTtsDialog(QDialog):
         self._play(self.wav, f"Voice sample for @{self.name}")
 
     def reject(self):
-        if not self.busy:
-            super().reject()
+        if self.busy:                            # (Cancel is off while busy; Esc still comes here)
+            self.info.setText("Wait until the voice is made, then close.")
+            return
+        super().reject()
 
     def accept(self):
         if not self.busy and self.made is not None:
@@ -205,5 +192,5 @@ class VoiceTtsDialog(QDialog):
 
 
 def run_dialog(dlg: VoiceTtsDialog) -> bool:
-    return dlg.exec() == QDialog.Accepted
+    return dlg.exec() == QDialog.DialogCode.Accepted
 

@@ -1,12 +1,14 @@
 """ComfyGenerator against a fake ComfyUI server (synthetic clips; no ComfyUI, no GPU)."""
 import shutil
+import time
 
 import pytest
-from fake_comfy import FakeComfy
+from fake_comfy import UPSCALER, FakeComfy
 from PIL import Image
 
 from video_chain import chain
 from video_chain import comfy as C
+from video_chain.comfy import seedvr
 
 if not shutil.which("ffmpeg"):
     pytest.skip("ffmpeg not installed", allow_module_level=True)
@@ -223,7 +225,7 @@ def test_lora_found_through_a_link(tmp_path):
 
 
 def test_h3_lora_detection(tmp_path):
-    from test_ui import H3_KEYS, write_lora
+    from ui_helpers import H3_KEYS, write_lora
     write_lora(tmp_path / "peft.safetensors", H3_KEYS)
     write_lora(tmp_path / "kohya.safetensors", ["lora_unet_blocks_3_attn_qkv_proj.lora_down.weight",
                                                 "lora_unet_blocks_3_mlp_fc1.lora_down.weight"])
@@ -239,7 +241,7 @@ def test_h3_lora_detection(tmp_path):
 
 
 def test_find_h3_loras_in_folders_and_links(tmp_path):
-    from test_ui import H3_KEYS, write_lora
+    from ui_helpers import H3_KEYS, write_lora
     root = tmp_path / "loras"
     write_lora(root / "MiniMax H3" / "b.safetensors", H3_KEYS)
     write_lora(root / "a.safetensors", H3_KEYS)
@@ -351,7 +353,7 @@ def test_turbo_workflow_and_generation(server, start, tmp_path):
 
 
 def test_turbo_lora_detection(tmp_path):
-    from test_ui import H3_KEYS, write_lora
+    from ui_helpers import H3_KEYS, write_lora
     write_lora(tmp_path / "minimax_h3_turbo_v9.safetensors", H3_KEYS)
     write_lora(tmp_path / "fast.safetensors", H3_KEYS + ["final_layer.linear.lora_A.weight"])
     write_lora(tmp_path / "normal.safetensors", H3_KEYS)
@@ -587,6 +589,23 @@ def test_refine_with_sol_attn(server, start, tmp_path):
     assert sp["model"] == ["lora0", 0]                                          # after the refiner LoRA
 
 
+def test_refine_with_a_chosen_h3_checkpoint(server, start, tmp_path):
+    """The 2K refine loads the clip's H3 checkpoint instead of the standard file (the refiner LoRA on top); one
+    ComfyUI does not list is refused with its name."""
+    server.extra_unets = ["h3/fine_8step.safetensors"]
+    gen = C.ComfyGenerator(server.url)
+    draft = tmp_path / "d.mp4"
+    gen.generate("x", start, draft, tmp_path / "d.png", 1, settings())
+    gen.refine(draft, "x", tmp_path / "r.mp4", 5, (1888, 1088), 39, [], checkpoint="h3/fine_8step.safetensors")
+    wf = server.prompts[-1]
+    assert wf["unet"]["inputs"]["unet_name"] == "h3/fine_8step.safetensors"
+    assert wf["lora0"]["inputs"]["model"] == ["unet", 0] and "regenerate_2k" in wf["lora0"]["inputs"]["lora_name"]
+    gen.refine(draft, "x", tmp_path / "r.mp4", 5, (1888, 1088), 39, [])
+    assert server.prompts[-1]["unet"]["inputs"]["unet_name"] == C.UNET                  # (none: the standard file)
+    with pytest.raises(C.ComfyError, match="gone.safetensors"):
+        gen.refine(draft, "x", tmp_path / "r.mp4", 5, (1888, 1088), 39, [], checkpoint="gone.safetensors")
+
+
 def _write_lora(path, keys):
     import json as _json
     import struct
@@ -640,6 +659,92 @@ def test_prompt_refiner(server):
     r.refine_prompt("a red car", "image", None, cast=[{"name": "Anna", "desc": "", "voice": False}])
     assert "The cast" not in server.refined["system_prompt"]                  # images: no cast rules
     assert C.clean_refined("**“A calm sea.”**") == "A calm sea."
+
+
+def test_classic_video_refine_is_unchanged():
+    """The classic format keeps its instruction, its length limit and its one-line answer; clip facts given for
+    it are not used."""
+    assert C.REFINE_INSTRUCTIONS["video"].startswith("You improve prompts for an image-to-video model (MiniMax H3)")
+    assert C.REFINE_INSTRUCTIONS["video"].endswith("At most 120 words. Answer with the prompt only, no preface, no "
+                                                   "quotes around it, no markdown.")
+    model = {"file": "qwen3vl_4b_fp8_scaled.safetensors", "type": "krea2"}
+    plain = C.build_refine_prompt_workflow(prompt="a man walks", kind="video", model=model, seed=1)
+    given = C.build_refine_prompt_workflow(prompt="a man walks", kind="video", model=model, seed=1, seconds=3.0,
+                                           start="seen")
+    assert plain == given and plain["gen"]["inputs"]["max_length"] == 512 and "pic" not in plain
+    assert "seconds" not in plain["gen"]["inputs"]["system_prompt"]
+    assert C.clean_refined("a\n\nb\noverall_soundscape: x") == "a b overall_soundscape: x"     # one line
+
+
+def test_h3_refine_instruction_and_clip():
+    """The official format: its own instruction (style and composition first, onset -> development -> result,
+    camera as type + amplitude + speed, two sound lines, no tags), the clip's seconds and its start frame."""
+    text = C.REFINE_INSTRUCTIONS["video_h3"]
+    for part in ("present tense", "overall style", "initial composition", "how the action begins, how it develops",
+                 "amplitude and speed", "Keep every subject, action, detail and spoken line", "350-500 words",
+                 "[Shot 2] At 00:03.500", "\"overall_soundscape: \"", "\"non_diegetic_music: \"", "N/A",
+                 "Do not write a header line", "speaker ids like (S1)"):
+        assert part in text, part
+    system, user = C.refine_messages(prompt="@Anna waves", kind="video_h3", seconds=73 / 24, start="seen",
+                                     cast=[{"name": "Anna", "desc": "", "voice": True}])
+    assert user == "@Anna waves" and system.startswith(text) and "minors" in system
+    assert "The cast, written as @Name: @Anna, has a voice." in system                 # cast rules apply too
+    assert "The clip is 3.04 seconds long" in system and "every cut time is before 00:03.042" in system
+    assert "is the video's first frame" in system and "Anchor the first sentences" in system
+    unseen, _u = C.refine_messages(prompt="x", kind="video_h3", seconds=10, start="unseen")
+    assert "The clip is 10.00 seconds long" in unseen and "Do not invent how it looks" in unseen
+    assert "first frame (at 0.00" not in unseen
+    nothing, _u = C.refine_messages(prompt="x", kind="video_h3")
+    assert nothing == text + " " + C._SAFETY                                           # no clip facts: none told
+    wf = C.build_refine_prompt_workflow(prompt="x", kind="video_h3", model={"file": "q", "type": "krea2"}, seed=2,
+                                        seconds=5, start="seen", image="video-chain/start.png")
+    assert wf["gen"]["inputs"]["max_length"] == 1024 and wf["gen"]["inputs"]["image"] == ["pic", 0]
+    assert wf["pic"] == {"class_type": "LoadImage", "inputs": {"image": "video-chain/start.png"}}
+
+
+def test_clean_refined_keeps_the_h3_lines():
+    raw = ("<think>plan</think>Here is the refined prompt:\n\n```\n**integrated_multimodal_description:** [Shot 1] "
+           "Live-action, cinematic, a wide shot frames @Anna on a pier.\nThe camera pushes in as @Anna (S1) says: "
+           "<d>[English] Come on.</d>\n\n[Shot 2] At 00:03.000, the camera cuts to the sea.\n\n"
+           "**overall_soundscape:** Waves break on the pilings.\nnon_diegetic_music: N/A\n```")
+    assert C.clean_refined(raw, lines=True) == (
+        "[Shot 1] Live-action, cinematic, a wide shot frames @Anna on a pier. The camera pushes in as @Anna says: "
+        "\"Come on.\"\n[Shot 2] At 00:03.000, the camera cuts to the sea.\n"
+        "overall_soundscape: Waves break on the pilings.\nnon_diegetic_music: N/A")
+    header = ("For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully "
+              "referenced.\n\nintegrated_multimodal_description: She smiles.\n\noverall_soundscape: Wind.")
+    assert C.clean_refined(header, lines=True) == "She smiles.\noverall_soundscape: Wind."   # music left out
+    assert C.clean_refined("“She smiles. Birds sing.”", lines=True) == "She smiles. Birds sing."   # no sound lines
+    inline = "She smiles. overall_soundscape: Wind.  non_diegetic_music:   "                # on one line, music empty
+    assert C.clean_refined(inline, lines=True) == "She smiles.\noverall_soundscape: Wind."
+    assert C.clean_refined("<think>cut off", lines=True) == ""
+
+
+def test_h3_refine_sees_the_start_frame_only_with_a_vision_model(server, start):
+    r = C.ComfyPromptRefiner(server.url)
+    gemma = r.models[0]["file"]
+    qwen = next(m["file"] for m in r.vision_models())
+    assert "gemma" in gemma and "qwen3vl" in qwen
+    server.refine_answer = "She waves.\n\noverall_soundscape: Wind.\n\nnon_diegetic_music: N/A"
+    out = r.refine_prompt("she waves", "video_h3", qwen, 1, seconds=73 / 24, start_image=start)
+    assert out == "She waves.\noverall_soundscape: Wind.\nnon_diegetic_music: N/A"           # lines kept
+    wf = server.prompts[-1]
+    assert wf["gen"]["inputs"]["image"] == ["pic", 0] and wf["pic"]["class_type"] == "LoadImage"
+    assert "Anchor the first sentences" in wf["gen"]["inputs"]["system_prompt"]
+    assert "3.04 seconds" in wf["gen"]["inputs"]["system_prompt"] and wf["gen"]["inputs"]["max_length"] == 1024
+    r.refine_prompt("she waves", "video_h3", gemma, 1, seconds=2, start_image=start)           # cannot see
+    wf = server.prompts[-1]
+    assert "pic" not in wf and "image" not in wf["gen"]["inputs"]
+    assert "Do not invent how it looks" in wf["gen"]["inputs"]["system_prompt"]
+    r.refine_prompt("she waves", "video_h3", qwen, 1, seconds=2, start_image=start.with_name("later.png"))
+    assert "pic" not in server.prompts[-1] and "cannot see" in server.prompts[-1]["gen"]["inputs"]["system_prompt"]
+    r.refine_prompt("she waves", "video_h3", qwen, 1, seconds=2)                               # no start frame
+    sp = server.prompts[-1]["gen"]["inputs"]["system_prompt"]
+    assert "pic" not in server.prompts[-1] and "first frame" not in sp and "2.00 seconds" in sp
+    server.refine_answer = "A man walks.\n\noverall_soundscape: Steps."
+    assert r.refine_prompt("a man walks", "video", qwen, 1, seconds=2, start_image=start) == \
+        "A man walks. overall_soundscape: Steps."                                              # classic: one line
+    assert "pic" not in server.prompts[-1] and server.prompts[-1]["gen"]["inputs"]["max_length"] == 512
 
 
 def test_long_clips_are_refined_in_context_windows():
@@ -860,9 +965,8 @@ def test_qwen21_inpaint_with_a_painted_mask(server, start, tmp_path):
     assert ip["mask"] == ["imask", 0] and ip["model"] == ["unet", 0] and "cache" not in wf   # (no prefix cache)
     assert wf["guider"]["inputs"]["model"] == ["inpaint", 0]
     assert wf["ipatch"]["inputs"]["name"] == ed.inpaint_patch and wf["imask"]["inputs"]["channel"] == "red"
-    # the edit's picture: the source with the masked part grey (the model cannot copy what was there)
-    assert wf["text"]["inputs"]["images.image_1"] == ["ihole", 0] and wf["ihole"]["inputs"]["mask"] == ["imask", 0]
-    assert wf["ihole"]["inputs"]["destination"] == ["pic0", 0] and wf["igrey"]["inputs"]["color"] == 0x808080
+    # the edit's picture: the source as it is (a grey hole there is copied as a grey disc: measured, Turbo)
+    assert wf["text"]["inputs"]["images.image_1"] == ["pic0", 0] and "ihole" not in wf and "igrey" not in wf
     comp = wf["icompose"]["inputs"]
     assert comp["destination"] == ["pic0", 0] and comp["source"] == ["decode", 0] and comp["resize_source"] is True
     assert comp["mask"] == ["isoft", 0] and meta["inpaint"]["feather"] == C.inpaint_feather(192, 108) == 4
@@ -987,7 +1091,7 @@ def test_seedvr2_long_clip_in_pieces_within_ram(server, tmp_path, monkeypatch):
                     "-i", "color=white:s=64x36:r=24:d=2", "-f", "lavfi", "-i", "sine=frequency=440:duration=4",
                     "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]", "-map", "[v]", "-map", "2:a",
                     "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(draft)], check=True)
-    monkeypatch.setattr(C, "SEEDVR_RAM_BUDGET", C.SEEDVR_FRAME_COPIES * 128 * 72 * 3 * 4 * 33)   # 33 at 128x72
+    monkeypatch.setattr(seedvr, "SEEDVR_RAM_BUDGET", C.SEEDVR_FRAME_COPIES * 128 * 72 * 3 * 4 * 33)   # 33 at 128x72
     gen = C.ComfyGenerator(server.url)
     gen.generate("x", None, tmp_path / "c.mp4", tmp_path / "c.png", 1, settings())    # an H3 clip before
     server.calls.clear()
@@ -1002,7 +1106,7 @@ def test_seedvr2_long_clip_in_pieces_within_ram(server, tmp_path, monkeypatch):
     r = subprocess.run(["ffmpeg", "-v", "error", "-i", str(out), "-vf", "scale=1:1", "-f", "rawvideo", "-pix_fmt",
                         "gray", "-"], capture_output=True, check=True).stdout
     assert r[0] < 160 and r[-1] > 230 and all(b >= a - 3 for a, b in zip(r, r[1:]))  # gray -> white, no jumps back
-    monkeypatch.setattr(C, "SEEDVR_RAM_MIN", 0)
+    monkeypatch.setattr(seedvr, "SEEDVR_RAM_MIN", 0)
     server.ram_free = C.SEEDVR_RAM_RESERVE + C.SEEDVR_FRAME_COPIES * 128 * 72 * 3 * 4 * 65   # measured: 65 frames
     server.seedvr_jobs.clear()
     gen.seedvr(draft, out, (128, 72))
@@ -1153,3 +1257,436 @@ def test_middle_keyframes_in_the_workflow(server, start, tmp_path):
     wf = server.prompts[-1]
     assert wf["key_guide0"]["inputs"]["frame_idx"] == 12 and wf["key0"]["inputs"]["image"].endswith(".png")
     assert not list((server.root / "input" / "video-chain").glob("*"))      # the upload is cleaned up
+
+
+def test_seedvr2_timing_per_node_and_transfer(server, tmp_path, monkeypatch):
+    """Each SeedVR2 job logs where its time went: upload and download (MB, s, MB/s) and ComfyUI's time by node type,
+    from its "executing" messages (a node runs until the next starts; cached nodes are not counted)."""
+    import subprocess
+    gen = C.ComfyGenerator(server.url)
+    clock = iter([0.0, 2.0, 2.5])
+    monkeypatch.setattr(time, "monotonic", lambda: next(clock))
+    gen.node_times, gen._running_node = {}, None
+    for node in ("enc", "sample", None):
+        gen.handle_message({"type": "executing", "data": {"node": node, "prompt_id": "p"}}, "p")
+    gen.handle_message({"type": "executing", "data": {"node": "x", "prompt_id": "other"}}, "p")   # not ours
+    monkeypatch.undo()
+    assert gen.node_times == {"enc": 2.0, "sample": 0.5}
+    wf = {"enc": {"class_type": "VAEEncodeTiled"}, "dec": {"class_type": "VAEDecodeTiled"},
+          "sample": {"class_type": "KSampler"}}
+    line = C.seedvr_timing((1920, 1088), "seedvr2_7b_int8_convrot.safetensors", 25e6, 5.0, 40.0, 80e6, 4.0,
+                           {"enc": 12.0, "dec": 20.0, "sample": 6.0, "x": 0.01}, wf)
+    assert line == ("SeedVR2 1920x1088 (seedvr2_7b_int8_convrot.safetensors): upload 25.0 MB in 5.0 s (5.0 MB/s); "
+                    "ComfyUI 40.0 s [VAEDecodeTiled 20.0 s, VAEEncodeTiled 12.0 s, KSampler 6.0 s]; "
+                    "download 80.0 MB in 4.0 s (20.0 MB/s)")
+    logs = []
+    gen = C.ComfyGenerator(server.url, log=logs.append)
+    draft = tmp_path / "d.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=64x36:r=24:d=1",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", str(draft)], check=True)
+    gen.seedvr(draft, tmp_path / "up.mp4", (128, 72))
+    assert any(x.startswith("SeedVR2 128x72 (seedvr2_7b_int8_convrot.safetensors): upload ") for x in logs)
+
+
+def test_seedvr2_full_precision_and_whole_frames_when_asked():
+    """The model order for big GPUs (fp16 first) and the untiled workflow; never the mxfp8 / nvfp4 files."""
+    unets = ["seedvr2_7b_int8_convrot.safetensors", "seedvr2_7b_fp16.safetensors", "seedvr2_7b_mxfp8.safetensors",
+             "seedvr2_7b_nvfp4.safetensors", "seedvr2_7b_sharp_fp16.safetensors"]
+    assert C.pick_seedvr_files(unets, [], "7b")["unet"] == "seedvr2_7b_int8_convrot.safetensors"     # as at home
+    assert C.pick_seedvr_files(unets, [], "7b", C.SEEDVR_PRECISION_FULL)["unet"] == "seedvr2_7b_fp16.safetensors"
+    assert C.pick_seedvr_files(unets[2:4], [], "7b")["unet"] is None
+    wf = C.build_seedvr_workflow(draft="d.mp4", width=1920, height=1088, unet="u", vae="v", prefix="p", tiled=False)
+    assert wf["enc"] == {"class_type": "VAEEncode", "inputs": {"pixels": ["pre", 0], "vae": ["vae", 0]}}
+    assert wf["dec"] == {"class_type": "VAEDecode", "inputs": {"samples": ["merge", 0], "vae": ["vae", 0]}}
+    assert C.build_seedvr_workflow(draft="d.mp4", width=1920, height=1088, unet="u", vae="v",
+                                   prefix="p")["enc"]["class_type"] == "VAEEncodeTiled"
+
+
+def test_seedvr2_lanczos_on_all_cores_when_comfyui_has_the_node(server, tmp_path):
+    """With video-chain's VideoChainLanczosScale in ComfyUI (the same frames as ImageScale's lanczos, see
+    tests/test_scale_node.py) the resize uses it; without, ImageScale as before."""
+    import subprocess
+    draft = tmp_path / "d.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=64x36:r=24:d=1",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", str(draft)], check=True)
+    gen = C.ComfyGenerator(server.url)
+    gen.seedvr(draft, tmp_path / "a.mp4", (128, 72))
+    assert server.prompts[-1]["resize"]["class_type"] == "ImageScale"
+    server.scale_node = True
+    gen.seedvr(draft, tmp_path / "b.mp4", (128, 72))
+    r = server.prompts[-1]["resize"]
+    assert r == {"class_type": "VideoChainLanczosScale", "inputs": {"image": ["parts", 0], "width": 128, "height": 72}}
+
+
+def test_frames_as_numbered_reference_pictures():
+    """h3: the plain start / end frame also goes in as a reference picture after the subject pictures (start
+    first), the pinning stays; a frame that is not there, or the plain model, refuses it."""
+    kw = dict(seed=1, width=512, height=512, frames=39, steps=20, loras=[], audio=False, prefix="p")
+    wf = C.build_workflow(prompt="x", image="s.png", end_image="e.png", refs=["r1.png", "r2.png"],
+                          frame_refs=["end", "start"], **kw)
+    ref = wf["refcond"]["inputs"]
+    assert [ref[f"ref_images.ref_image_{i}"] for i in range(4)] == [["ref0", 0], ["ref1", 0], ["start", 0],
+                                                                    ["end", 0]]
+    assert wf["cond"]["inputs"]["image"] == ["start", 0] and wf["end_guide"]["inputs"]["image"] == ["end", 0]
+    assert ref["ref_image_size"] == "match"                    # (the node scales a picture down, never crops it)
+    wf = C.build_workflow(prompt="x", image="s.png", audio_refs=["a.wav"], frame_refs=["start"], **kw)
+    assert wf["refcond"]["inputs"]["ref_images.ref_image_0"] == ["start", 0]          # sounds only: Picture 1
+    with pytest.raises(ValueError, match="no plain end frame"):
+        C.build_workflow(prompt="x", image="s.png", refs=["r.png"], frame_refs=["end"], **kw)
+    with pytest.raises(ValueError, match="no plain start frame"):
+        C.build_workflow(prompt="x", image="s.png", refs=["r.png"], frame_refs=["start"],
+                         guides=[{"name": "g.mp4", "frame_idx": 0, "at": "start"}], **kw)
+    with pytest.raises(ValueError, match="only with the reference model"):
+        C.build_workflow(prompt="x", image="s.png", frame_refs=["start"], **kw)
+
+
+def test_h3_tree_and_workflow_agree_on_the_numbers(server, tmp_path):
+    """A clip of an h3 project made through ComfyUI: the prompt's <Picture N> are the workflow's ref_images in
+    that order (a person's 2 pictures, a place, the start frame), no reference sentence is added."""
+    from video_chain import tree as T
+    (server.root / "main.py").write_text("")
+    img = tmp_path / "in.png"
+    Image.new("RGB", (192, 108), (200, 10, 10)).save(img)
+    proj = tmp_path / "proj"
+    t = T.Tree()
+    t.options.update({"prompt_format": "h3", "frames": 39})
+    T.set_start_image(proj.mkdir() or proj, img, t)
+    for i, rgb in enumerate([(200, 150, 130), (190, 140, 120), (90, 90, 200)]):
+        Image.new("RGB", (64, 80), rgb).save(tmp_path / f"p{i}.png")
+    T.add_character(proj, t, "Anna", tmp_path / "p0.png", desc="woman, 30s")
+    T.add_picture(proj, t, "Anna", tmp_path / "p1.png")
+    T.add_character(proj, t, "Kitchen", tmp_path / "p2.png", kind="place")
+    a = t.add(None, "@Anna walks into @Kitchen.")
+    T.save(proj, t)
+    T.run_tree(C.ComfyGenerator(server.url, comfy_dir=server.root), proj, [a.id], log=lambda _m: None)
+    wf = server.prompts[-1]
+    ref = wf["refcond"]["inputs"]
+    keys = sorted(k for k in ref if k.startswith("ref_images."))
+    assert keys == [f"ref_images.ref_image_{i}" for i in range(4)] and ref["ref_images.ref_image_3"] == ["start", 0]
+    assert [wf[ref[k][0]]["inputs"]["image"].startswith("video-chain/") for k in keys[:3]] == [True] * 3
+    assert wf["cond"]["inputs"]["image"] == ["start_still", 0]                    # the start is still pinned
+    t = T.load(proj)
+    assert ref["prompt"] == T.clip_inputs(proj, t, a.id)["prompt"] and C.REF_HINT not in ref["prompt"]
+    assert "<Subject 1> is Anna (woman, 30s), the person in <Picture 1> and <Picture 2>." in ref["prompt"]
+    assert "<Subject 2> is Kitchen, the environment in <Picture 3>." in ref["prompt"]
+    assert "<Picture 4> is the first frame of [Shot 1]." in ref["prompt"]
+    assert t.nodes[a.id].made["settings"]["frame_pictures"] == ["start"]
+    assert T.Checker(proj, t).status(a.id) == "done"
+
+
+def test_refiner_is_told_what_a_reference_is():
+    persons = [{"name": "Anna", "desc": "woman, 30s.", "voice": True}, {"name": "Ben", "desc": ""}]
+    before = C.cast_instruction(persons)
+    assert "@Anna (woman, 30s), has a voice; @Ben." in before and "not a person" not in before
+    text = C.cast_instruction(persons + [{"name": "Kitchen", "desc": "sunny", "kind": "place"},
+                                         {"name": "Noir", "desc": "", "kind": "style"}])
+    assert "@Kitchen (a place: sunny); @Noir (a visual style). @Kitchen, @Noir are not a person: never give them " \
+           "a spoken line or a person's actions." in text
+    assert text.replace("; @Kitchen (a place: sunny); @Noir (a visual style). @Kitchen, @Noir are not a person: "
+                        "never give them a spoken line or a person's actions", "") == before
+    from video_chain import tree as T
+    t = T.Tree()
+    t.options["cast"] = [{"name": "Anna", "images": [], "desc": "woman, 30s.", "lead": True, "voice": {"file": "v"}},
+                         {"name": "Ben", "images": [], "desc": "", "lead": False},
+                         {"name": "Kitchen", "images": [], "desc": "sunny", "lead": False, "kind": "place"},
+                         {"name": "Noir", "images": [], "desc": "", "lead": False, "kind": "style"}]
+    assert C.cast_instruction(T.refiner_cast(t)) == text
+
+
+# ----------------------------------------------------------------------------- continue the clip before (<Video 1>)
+
+def node_labels(cond: dict) -> list[str]:
+    """The labels MiniMaxH3ReferenceToVideo gives its references, in its order (nodes_minimax_h3.py): the images,
+    then the videos (a video's soundtrack gets an <Audio j> right before its <Video k>), then the standalone audio."""
+    out, n = [], {"Picture": 0, "Video": 0, "Audio": 0}
+
+    def add(kind):
+        n[kind] += 1
+        out.append(f"<{kind} {n[kind]}>")
+    for k in cond:
+        if k.startswith("ref_images."):
+            add("Picture")
+    for k in cond:
+        if k.startswith("ref_videos."):
+            if f"ref_video_audios.ref_video_audio_{k.rsplit('_', 1)[-1]}" in cond:
+                add("Audio")
+            add("Video")
+    for k in cond:
+        if k.startswith("ref_audios."):
+            add("Audio")
+    return out
+
+
+def test_reference_video_workflow():
+    """The tail of the clip before goes in as the first reference video (LoadVideo + GetVideoComponents, pictures
+    only): the ref2va model also without pictures or sounds, no soundtrack wired, so a sound stays <Audio 1>; the
+    pinning nodes are the same as without it."""
+    kw = dict(seed=1, width=512, height=512, frames=39, steps=20, loras=[], audio=True, prefix="p")
+    wf = C.build_workflow(prompt="x", image="s.png", ref_videos=["video-chain/tail.mp4"], **kw)
+    ref = wf["refcond"]["inputs"]
+    assert wf["unet"]["inputs"]["unet_name"] == C.UNET_REF and ref["ref_videos.ref_video_0"] == ["rvparts0", 0]
+    assert wf["rvparts0"] == {"class_type": "GetVideoComponents", "inputs": {"video": ["rvideo0", 0]}}
+    assert wf["rvideo0"] == {"class_type": "LoadVideo", "inputs": {"file": "video-chain/tail.mp4"}}
+    assert not [k for k in ref if k.startswith(("ref_video_audios.", "ref_images.", "ref_audios."))]
+    assert "audio_vae" not in ref and wf["cond"]["inputs"]["image"] == ["start", 0]     # the start still pinned
+    assert wf["cond"]["inputs"]["frame_idx"] == 0 and wf["cond"]["inputs"]["latent"] == ["refcond", 1]
+    full = dict(kw, prompt="x", image="s.png", end_image="e.png", refs=["r.png"], frame_refs=["start"],
+                audio_refs=["a.wav"], keyframes=[("k.png", 20)],
+                guides=[{"name": "g.mp4", "frame_idx": 30, "frames": 5, "audio": True, "at": "end"}])
+    without, wf = C.build_workflow(**full), C.build_workflow(**full, ref_videos=["tail.mp4"],
+                                                             video_key=lambda i: f"ref_videos.clip_{i}")
+    ref = wf["refcond"]["inputs"]
+    assert node_labels(ref) == ["<Picture 1>", "<Picture 2>", "<Video 1>", "<Audio 1>"]   # the sound stays Audio 1
+    assert ref["ref_videos.clip_0"] == ["rvparts0", 0] and ref["ref_audios.ref_audio_0"] == ["aref0", 0]
+    assert {k: v for k, v in wf.items() if k not in ("rvideo0", "rvparts0", "refcond")} == \
+        {k: v for k, v in without.items() if k != "refcond"}                              # pinning unchanged
+    assert {k: v for k, v in ref.items() if k != "ref_videos.clip_0"} == without["refcond"]["inputs"]
+
+
+def test_generate_continuing_a_clip(server, start, tmp_path, monkeypatch):
+    """A reference video alone forces the reference model (check_ref_model), is uploaded under the input name the
+    node reports and cleaned up; an older ComfyUI without reference videos refuses it."""
+    import subprocess
+    (server.root / "main.py").write_text("")
+    tail = tmp_path / "tail.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=192x108:r=24", "-f", "lavfi",
+                    "-i", "sine=f=330", "-frames:v", "22", "-t", f"{22 / 24:.4f}", "-c:v", "libx264", "-pix_fmt",
+                    "yuv420p", "-c:a", "aac", str(tail)], check=True)
+    gen = C.ComfyGenerator(server.url, comfy_dir=server.root)
+    checked = []
+    real = gen.check_ref_model
+    monkeypatch.setattr(gen, "check_ref_model", lambda *a: checked.append(1) or real(*a))
+    gen.generate("The car drives on.", start, tmp_path / "v.mp4", tmp_path / "v.png", 3,
+                 settings(ref_videos=[str(tail)]))
+    wf = server.prompts[-1]
+    cond = wf["refcond"]["inputs"]
+    assert checked == [1] and wf["unet"]["inputs"]["unet_name"] == C.UNET_REF
+    assert cond["ref_videos.ref_video_0"] == ["rvparts0", 0] and wf["rvideo0"]["inputs"]["file"].startswith("video-chain/")
+    assert not [k for k in cond if k.startswith(("ref_video_audios.", "ref_images."))] and "audio_vae" not in cond
+    assert wf["cond"]["class_type"] == "MiniMaxH3AddGuide" and wf["cond"]["inputs"]["image"] == ["start", 0]
+    assert cond["prompt"] == "The car drives on."                                  # (no face hint)
+    assert not list((server.root / "input" / "video-chain").glob("*"))             # uploads cleaned up
+    info = {"input": {"optional": {"ref_videos": ["COMFY_AUTOGROW_V3", {"template": {"prefix": "vid_"}}]}}}
+    monkeypatch.setattr(gen, "_object_info", lambda node: info)
+    assert gen.video_key()(0) == "ref_videos.vid_0"
+    monkeypatch.undo()
+    server.video_refs = False                                                       # an older ComfyUI
+    gen = C.ComfyGenerator(server.url, comfy_dir=server.root)
+    with pytest.raises(C.ComfyError, match="no reference videos"):
+        gen.generate("x", start, tmp_path / "w.mp4", tmp_path / "w.png", 3, settings(ref_videos=[str(tail)]))
+
+
+def test_h3_tree_continuation_through_comfyui(server, tmp_path):
+    """A clip of an h3 project that continues the clip before, made through ComfyUI: <Video 1> is the workflow's
+    first reference video (22 frames), the start frame is <Picture 1> and still pinned, the prompt is the one the
+    Model prompt window shows."""
+    from pathlib import Path
+
+    from video_chain import tree as T
+    (server.root / "main.py").write_text("")
+    img = tmp_path / "in.png"
+    Image.new("RGB", (192, 108), (200, 10, 10)).save(img)
+    proj = tmp_path / "proj"
+    t = T.Tree()
+    t.options.update({"prompt_format": "h3", "frames": 39})
+    T.set_start_image(proj.mkdir() or proj, img, t)
+    a = t.add(None, "A red car on a coast road.")
+    b = t.add(a.id, "The car drives on.")
+    b.overrides = {"continue": 22}
+    T.save(proj, t)
+    sent = []
+    real = C.ComfyGenerator.upload
+
+    def upload(self, f):
+        if Path(f).name == "continue_from.mp4":
+            sent.append(chain.probe(Path(f))["frames"])
+        return real(self, f)
+    gen = C.ComfyGenerator(server.url, comfy_dir=server.root)
+    gen.upload = upload.__get__(gen)
+    T.run_tree(gen, proj, [b.id], log=lambda _m: None)
+    wf = server.prompts[-1]
+    ref = wf["refcond"]["inputs"]
+    assert sent == [22] and node_labels(ref) == ["<Picture 1>", "<Video 1>"]
+    assert ref["ref_images.ref_image_0"] == ["start", 0] and ref["ref_videos.ref_video_0"] == ["rvparts0", 0]
+    assert wf["cond"]["inputs"]["image"] == ["start", 0] and wf["cond"]["inputs"]["frame_idx"] == 0
+    t = T.load(proj)
+    assert ref["prompt"] == T.clip_inputs(proj, t, b.id)["prompt"]
+    assert "[keyframe completion + video continuation]" in ref["prompt"]
+    assert T.Checker(proj, t).status(b.id) == "done"
+
+
+def test_another_h3_checkpoint_in_the_workflow():
+    """A chosen H3 checkpoint (a fine-tune) replaces the standard model for plain and reference clips; a distilled
+    one samples with its few-step recipe (shift, sampler, scheduler), with exact attention."""
+    plain = C.build_workflow(prompt="x", image="s.png", seed=1, width=672, height=384, frames=73, steps=28,
+                             loras=[], audio=True, prefix="p", unet="h3/fine.safetensors")
+    assert plain["unet"]["inputs"]["unet_name"] == "h3/fine.safetensors"
+    assert plain["sampler"]["inputs"]["sampler_name"] == C.SAMPLER and plain["sigmas"]["inputs"]["steps"] == 28
+    d = C.DISTILLED_CHECKPOINT
+    from video_chain import tree as T
+    assert d["steps"] == T.DISTILLED_STEPS                                        # (the tree records these steps)
+    wf = C.build_workflow(prompt="x", image="s.png", seed=1, width=672, height=384, frames=73, steps=d["steps"],
+                          loras=[("A/one.safetensors", 0.8)], audio=True, prefix="p", refs=["r.png"],
+                          unet="h3/fine.safetensors", recipe=d["recipe"])
+    assert wf["unet"]["inputs"]["unet_name"] == "h3/fine.safetensors"            # (not the ref2va file)
+    assert (wf["shift"]["inputs"]["shift_video"], wf["shift"]["inputs"]["shift_audio"]) == (12.0, 3.0)
+    assert wf["shift"]["inputs"]["model"] == ["lora0", 0]
+    assert wf["sampler"]["inputs"]["sampler_name"] == "euler" and wf["sigmas"]["inputs"]["scheduler"] == "simple"
+    assert wf["sigmas"]["inputs"]["steps"] == 8
+    assert wf["guider"]["inputs"]["model"] == ["shift", 0] and "sparse" not in wf       # (exact attention)
+
+
+def test_h3_checkpoints_found_in_comfyuis_model_folders(tmp_path):
+    """H3 checkpoints are told by their tensors (the video and audio patch layers), not their names; LoRAs, other
+    models and the standard H3 files are left out; the name is the one ComfyUI lists."""
+    from ui_helpers import H3_KEYS, write_lora
+    root, unet = tmp_path / "diffusion_models", tmp_path / "unet"
+    full = ["video_patch_proj.weight", "audio_patch_proj.weight", "blocks.0.attn.qkv_proj.weight"]
+    write_lora(root / "sub" / "my_tune.safetensors", full)
+    write_lora(unet / "style_tune.safetensors", ["model.diffusion_model." + k for k in full])
+    write_lora(root / C.UNET, full)
+    write_lora(root / "wan.safetensors", ["blocks.0.self_attn.q.weight"])
+    write_lora(root / "h3_lora.safetensors", H3_KEYS + ["video_patch_proj.lora_A.weight"])
+    (root / "broken_h3.safetensors").write_bytes(b"no header")
+    assert C.find_h3_checkpoints([root, unet, tmp_path / "missing"]) == [
+        "style_tune.safetensors", "sub/my_tune.safetensors"]
+    link = tmp_path / "unet2"                                      # the same folder reached twice: listed once
+    link.symlink_to(root, target_is_directory=True)
+    assert C.find_h3_checkpoints([root, link]) == ["sub/my_tune.safetensors"]
+
+
+def test_generating_with_another_h3_checkpoint(server, start, tmp_path):
+    """The clip's checkpoint goes into the workflow (also with references: no ref2va file needed); a distilled one
+    with its recipe; one ComfyUI does not list is refused with its name."""
+    server.extra_unets = ["h3/fine_8step.safetensors"]
+    gen = C.ComfyGenerator(server.url)
+    out, frame = tmp_path / "v.mp4", tmp_path / "v.png"
+    face = tmp_path / "face.png"
+    Image.new("RGB", (64, 64), (1, 2, 3)).save(face)
+    ck = {"name": "h3/fine_8step.safetensors", "distilled": True}
+    gen.generate("x", start, out, frame, 1, settings(checkpoint=ck, steps=8, ref_paths=[str(face)]))
+    wf = server.prompts[-1]
+    assert wf["unet"]["inputs"]["unet_name"] == "h3/fine_8step.safetensors" and "refcond" in wf
+    assert wf["shift"]["inputs"]["shift_video"] == 12.0 and wf["sampler"]["inputs"]["sampler_name"] == "euler"
+    gen.generate("x", start, out, frame, 1, settings(checkpoint={**ck, "distilled": False}))
+    wf = server.prompts[-1]
+    assert wf["unet"]["inputs"]["unet_name"] == "h3/fine_8step.safetensors" and "shift" not in wf
+    with pytest.raises(C.ComfyError, match="gone.safetensors"):
+        gen.generate("x", start, out, frame, 1, settings(checkpoint={"name": "gone.safetensors", "distilled": True}))
+
+
+def test_a_clips_own_sampling_over_a_distilled_checkpoints():
+    """A clip's own sampling replaces what it sets and keeps the rest of the distilled checkpoint's recipe."""
+    from video_chain.comfy.video import DISTILLED_CHECKPOINT, clip_recipe
+    d = DISTILLED_CHECKPOINT["recipe"]
+    assert clip_recipe(None, None) is None and clip_recipe(None, d) == d
+    assert clip_recipe({"scheduler": "beta"}, None) == {"scheduler": "beta"}
+    got = clip_recipe({"scheduler": "beta", "shift": [8.0, 3.0]}, d)
+    assert got == {"sampler": d["sampler"], "scheduler": "beta", "shift": [8.0, 3.0]} and d["scheduler"] == "simple"
+    wf = C.build_workflow(prompt="p", image="s.png", seed=1, width=384, height=384, frames=73, steps=8, loras=[],
+                          audio=False, prefix="p", recipe={"shift": [8.0, 3.0]})
+    kinds = {n["class_type"]: n["inputs"] for n in wf.values()}
+    assert kinds["MiniMaxH3SigmaShift"]["shift_video"] == 8.0
+    assert kinds["KSamplerSelect"]["sampler_name"] == C.SAMPLER and kinds["BasicScheduler"]["scheduler"] == C.SCHEDULER
+
+
+ADALN_KEYS = ["diffusion_model.blocks.0.attn.qkv_proj.lora_A.weight", "diffusion_model.blocks.0.mlp.fc1.lora_A.weight",
+              "diffusion_model.blocks.0.adaln_proj.linear.lora_A.weight"]
+
+
+def test_loras_that_train_adaln_go_through_video_chains_h3_lora_node(server, start, tmp_path, monkeypatch):
+    """Switched off (H3_LORA_NODE_ON: ComfyUI crashed in its first real run): every LoRA through ComfyUI's own
+    loader. Switched on: a LoRA that trains the adaln projections (made on the unpruned H3) is loaded by
+    VideoChainH3LoRA, which also applies that part on the pruned H3 files; other LoRAs as before; a ComfyUI without
+    the node gets the plain loader and a log line; the 2K refine does the same."""
+    from ui_helpers import H3_KEYS, write_lora
+    full = tmp_path / "loras" / "MiniMax H3" / "nose.safetensors"
+    plain = tmp_path / "loras" / "MiniMax H3" / "plain.safetensors"
+    write_lora(full, ADALN_KEYS)
+    write_lora(plain, H3_KEYS)
+    assert C.trains_adaln(full) and not C.trains_adaln(plain) and not C.trains_adaln(tmp_path / "missing.safetensors")
+    wf = C.build_workflow(prompt="x", image=None, seed=1, width=64, height=64, frames=22, steps=8, audio=False,
+                          prefix="p", loras=[("a.safetensors", 0.8), ("b.safetensors", 0.5)],
+                          adaln_loras={"b.safetensors"})
+    assert wf["lora0"]["class_type"] == "LoraLoaderModelOnly"
+    assert wf["lora1"] == {"class_type": C.H3_LORA_NODE, "inputs": {"model": ["lora0", 0],
+                                                                    "lora_name": "b.safetensors", "strength": 0.5}}
+    server.loras = ["MiniMax H3/glow.safetensors", "MiniMax H3/plain.safetensors"]
+    logs = []
+    assert C.client.H3_LORA_NODE_ON is False                                      # (off: the plain loader)
+    off = C.ComfyGenerator(server.url, log=logs.append)
+    off.generate("x", start, tmp_path / "o.mp4", tmp_path / "o.png", 1, settings(lora=str(full), strength=0.7))
+    assert server.prompts[-1]["lora0"]["class_type"] == "LoraLoaderModelOnly" and not logs
+    monkeypatch.setattr(C.client, "H3_LORA_NODE_ON", True)
+    gen = C.ComfyGenerator(server.url, log=logs.append)
+    out, frame = tmp_path / "v.mp4", tmp_path / "v.png"
+    gen.generate("x", start, out, frame, 1, settings(lora=str(full), strength=0.7,
+                                                     extra_loras=[{"lora": str(plain), "strength": 1.0}]))
+    wf = server.prompts[-1]
+    assert wf["lora0"]["class_type"] == C.H3_LORA_NODE and wf["lora0"]["inputs"]["strength"] == 0.7
+    assert wf["lora1"]["class_type"] == "LoraLoaderModelOnly"
+    gen.refine(out, "x", tmp_path / "r.mp4", 5, (1888, 1088), 39, [(str(full), 0.7)])
+    assert server.prompts[-1]["lora0"]["class_type"] == C.H3_LORA_NODE
+    assert "regenerate_2k" in server.prompts[-1]["lora1"]["inputs"]["lora_name"]       # (the refiner: plain)
+    server.h3_lora_node = False                                                       # an older node package
+    gen = C.ComfyGenerator(server.url, log=logs.append)
+    gen.generate("x", start, out, frame, 1, settings(lora=str(full), strength=0.7))
+    assert server.prompts[-1]["lora0"]["class_type"] == "LoraLoaderModelOnly"
+    assert any(C.H3_LORA_NODE in m and "nose.safetensors" in m for m in logs)
+
+
+def test_two_pass_workflow():
+    """Two passes in one job (as Lokken's two-pass H3 workflow): pass 1 at about half the size, its video latent
+    upscaled to the clip's size with H3's latent upscaler and its sound kept; pass 2 at the full size with the
+    same prompt, frames and pins, only the last part of the schedule; the video from pass 2, the sound from pass 1.
+    The model files and the LoRAs are loaded once."""
+    assert C.two_pass_size(672, 384) == (352, 192) and C.two_pass_size(1344, 768) == (672, 384)
+    assert C.two_pass_size(64, 64) == (32, 32)
+    tp = dict(C.TWO_PASS)
+    wf = C.build_two_pass_workflow(two_pass=tp, upscaler="minimax_h3_latent_upscaler_3d_conv_v1_bf16.safetensors",
+                                   prompt="x", image="s.png", seed=3, width=1344, height=768, frames=73, steps=8,
+                                   loras=[("A/one.safetensors", 0.8)], audio=True, prefix="video-chain/abc",
+                                   refs=["r.png"], recipe={"sampler": "euler", "scheduler": "simple",
+                                                           "shift": (12.0, 3.0)})
+    t = {k: v["class_type"] for k, v in wf.items()}
+    assert t["p1_refcond"] == "MiniMaxH3ReferenceToVideo" and t["refcond"] == "MiniMaxH3ReferenceToVideo"
+    assert (wf["p1_refcond"]["inputs"]["width"], wf["p1_refcond"]["inputs"]["height"]) == (672, 384)
+    assert (wf["refcond"]["inputs"]["width"], wf["refcond"]["inputs"]["height"]) == (1344, 768)
+    assert not any(k.startswith("p1_") and t[k] in ("UNETLoader", "CLIPLoader", "VAELoader", "LoraLoaderModelOnly",
+                                                    "MiniMaxH3SigmaShift") for k in t)   # (loaded once)
+    assert wf["p1_guider"]["inputs"]["model"] == wf["guider"]["inputs"]["model"] == ["shift", 0]
+    assert wf["p1_sigmas"]["inputs"] == {"model": ["shift", 0], "scheduler": "simple", "steps": 8, "denoise": 1.0}
+    assert wf["p1_av"] == {"class_type": "LTXVSeparateAVLatent", "inputs": {"av_latent": ["p1_sample", 0]}}
+    up = wf["up"]["inputs"]
+    assert t["up"] == "MiniMaxH3LatentUpscaleWithModel" and up["samples"] == ["p1_av", 0]
+    assert (up["width"], up["height"]) == (1344, 768) and wf[up["model"][0]]["inputs"]["model_name"].startswith(
+        "minimax_h3_latent_upscaler")
+    assert wf["p2_latent"]["inputs"] == {"video_latent": ["up", 0], "audio_latent": ["p1_av", 1]}
+    assert wf["sample"]["inputs"]["latent_image"] == ["p2_latent", 0]
+    assert wf["sigmas"]["inputs"] == {"model": ["shift", 0], "scheduler": "simple", "steps": 3,
+                                      "denoise": tp["denoise"]}                    # 8 steps x 0.3: at least 3
+    assert C.two_pass_steps(8, 0.3) == 3 and C.two_pass_steps(28, 0.3) == 9 and C.two_pass_steps(4, 0.3) == 3
+    assert wf["p1_noise"]["inputs"]["noise_seed"] == wf["noise"]["inputs"]["noise_seed"] == 3
+    assert wf["video"]["inputs"]["images"] == ["decode", 0] and wf["video"]["inputs"]["audio"] == ["p1_decode_audio", 0]
+    assert wf["p1_decode_audio"]["inputs"]["samples"] == ["p1_sample", 0] and "decode_audio" not in wf
+    assert sum(1 for v in t.values() if v == "SaveVideo") == 1 and "p1_" + C.SAVE_LAST_ID not in wf
+    assert wf["last"]["inputs"]["image"] == ["decode", 0]                       # (the last frame from pass 2)
+    for nid, node in wf.items():                                                  # every link points at a node
+        for v in node["inputs"].values():
+            assert not (isinstance(v, list) and len(v) == 2 and isinstance(v[0], str)) or v[0] in wf, (nid, v)
+
+
+def test_generating_in_two_passes(server, start, tmp_path):
+    """A clip whose settings say two_pass is made by build_two_pass_workflow with the H3 latent upscaler ComfyUI
+    lists; without the upscaler ComfyUI is asked for it by name."""
+    gen = C.ComfyGenerator(server.url)
+    out, frame = tmp_path / "v.mp4", tmp_path / "v.png"
+    gen.generate("x", start, out, frame, 1, settings(two_pass=dict(C.TWO_PASS)))
+    wf = server.prompts[-1]
+    assert wf["p2_latent"]["inputs"]["video_latent"] == ["up", 0] and wf["upmodel"]["inputs"]["model_name"] == UPSCALER
+    assert (wf["p1_cond"]["inputs"]["width"], wf["cond"]["inputs"]["width"]) == (352, 672)
+    info = chain.probe(out)
+    assert (info["width"], info["height"]) == (672, 384) and info["audio"]
+    server.refine = False                                          # (no latent upscaler listed, nor its node)
+    with pytest.raises(C.ComfyError, match="(?i)upscale"):
+        gen.generate("x", start, out, frame, 1, settings(two_pass=dict(C.TWO_PASS)))

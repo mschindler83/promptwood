@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import json
 import re
+import warnings
+import zlib
+from functools import lru_cache
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -48,9 +51,6 @@ class Theme(SimpleNamespace):
     def accent_line(self):
         return with_alpha(self.accent, self.accentLineAlpha)
 
-    def accent_scrub(self):
-        return with_alpha(self.accent, self.accentScrubAlpha)
-
     def hover(self):
         return with_alpha(QColor(255, 255, 255), self.hoverAlpha)
 
@@ -83,7 +83,8 @@ def load_tokens(accent: str | None = None) -> Theme:
         for k, v in tok[group].items():
             setattr(t, k, _colour(v) if isinstance(v, str) else v)
     fams = tok["accents"]["families"]
-    fam = next((f for f in fams if f["name"] == (accent or tok["accents"]["default"])), fams[1])
+    default = next(f for f in fams if f["name"] == tok["accents"]["default"])
+    fam = next((f for f in fams if f["name"] == (accent or tok["accents"]["default"])), default)
     t.accent, t.accentHover = QColor(fam["accent"]), QColor(fam["hover"])
     t.accentPressed, t.onAccent = QColor(fam["pressed"]), QColor(fam["onAccent"])
     t.accent_families = [f["name"] for f in fams]
@@ -95,7 +96,8 @@ def load_tokens(accent: str | None = None) -> Theme:
         setattr(t, k, v)
     t.labelWidth = tok["metrics"]["labelWidthMin"]
     ty = tok["type"]
-    t.font = SimpleNamespace(**{k: ty[k]["px"] for k in ("micro", "small", "body", "title", "heading", "display", "mono")})
+    t.font = SimpleNamespace(**{k: ty[k]["px"] for k in ("micro", "small", "body", "title", "heading", "display",
+                                                         "mono")})
     t.uiFamily, t.monoFamily = ty["uiFamily"], ty["monoFamily"]
     return t
 
@@ -112,11 +114,20 @@ def _stroke_for(px: int) -> float:
     return table[-1][1]
 
 
-def tinted_svg(name: str, tint: QColor, px: int = 16) -> bytes:
+@lru_cache(maxsize=None)
+def _svg_text(name: str) -> str | None:
+    """The icon's SVG source, read once; None (with a warning, once) for a name that has no icon."""
     path = THEME_DIR / "icons" / f"{name}.svg"
     if not path.exists():
+        warnings.warn(f"no icon named {name!r} in the theme", stacklevel=3)
+        return None
+    return path.read_text()
+
+
+def tinted_svg(name: str, tint: QColor, px: int = 16) -> bytes:
+    s = _svg_text(name)
+    if s is None:
         return b""
-    s = path.read_text()
     c = tint.name().upper()
     s = re.sub("#000000", c, s, flags=re.IGNORECASE).replace("currentColor", c)
     # authored at 16 px with stroke 1.25; at other sizes the stroke is specified in output px (the design IconEngine)
@@ -128,9 +139,16 @@ def tinted_svg(name: str, tint: QColor, px: int = 16) -> bytes:
 
 
 def icon_pixmap(name: str, px: int, tint: QColor, dpr: float = 1.0) -> QPixmap:
+    """The icon in this tint and size (cached: buttons ask again on every repaint)."""
+    return _icon_pixmap(name, int(px), tint.rgba(), float(dpr))
+
+
+@lru_cache(maxsize=512)
+def _icon_pixmap(name: str, px: int, rgba: int, dpr: float) -> QPixmap:
+    tint = QColor.fromRgba(rgba)
     r = QSvgRenderer(QByteArray(tinted_svg(name, tint, px)))
     pm = QPixmap(round(px * dpr), round(px * dpr))
-    pm.fill(Qt.transparent)
+    pm.fill(Qt.GlobalColor.transparent)
     if r.isValid():
         p = QPainter(pm)
         r.render(p, QRectF(0, 0, pm.width(), pm.height()))
@@ -191,13 +209,16 @@ class ThemeManager:
         self.theme = load_tokens()
         self._tpl = (THEME_DIR / "theme.qss.in").read_text()
         self.qss = ""
+        self._fonts: tuple[str, str] | None = None       # (UI family, mono family), registered once
 
     def _icon_file(self, name: str, c: QColor) -> str:
-        d = Path(QStandardPaths.writableLocation(QStandardPaths.CacheLocation)) / "theme-icons"
+        d = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.CacheLocation)) / "theme-icons"
         d.mkdir(parents=True, exist_ok=True)
-        f = d / f"{name}_{c.name(QColor.HexArgb)[1:]}.svg"
+        svg = tinted_svg(name, c, 32)
+        # the name carries a hash of the content: a changed icon is a new file, never the stale one
+        f = d / f"{name}_{c.name(QColor.NameFormat.HexArgb)[1:]}_{zlib.crc32(svg):08x}.svg"
         if not f.exists():
-            f.write_bytes(tinted_svg(name, c, 32))
+            f.write_bytes(svg)
         return f.as_posix()
 
     def fill_template(self, tpl: str) -> str:
@@ -242,7 +263,7 @@ class ThemeManager:
     @staticmethod
     def palette(t: Theme) -> QPalette:
         p = QPalette()
-        groups = (QPalette.Active, QPalette.Inactive, QPalette.Disabled)
+        groups = (QPalette.ColorGroup.Active, QPalette.ColorGroup.Inactive, QPalette.ColorGroup.Disabled)
 
         def all_(role, c):
             for g in groups:
@@ -270,26 +291,29 @@ class ThemeManager:
         all_(R.Dark, t.bgSunken)
         all_(R.Shadow, t.bgApp)
         for role in (R.Text, R.ButtonText, R.WindowText):
-            p.setColor(QPalette.Disabled, role, t.textDisabled)
-        p.setColor(QPalette.Disabled, R.Button, t.bgRaised)
-        p.setColor(QPalette.Inactive, R.Highlight, t.sel_inactive())
+            p.setColor(QPalette.ColorGroup.Disabled, role, t.textDisabled)
+        p.setColor(QPalette.ColorGroup.Disabled, R.Button, t.bgRaised)
+        p.setColor(QPalette.ColorGroup.Inactive, R.Highlight, t.sel_inactive())
         return p
 
     def apply(self, app: QApplication) -> None:
-        fams = []
-        for f in ("InterVariable.ttf", "JetBrainsMono-Variable.ttf"):
-            fid = QFontDatabase.addApplicationFont(str(THEME_DIR / "fonts" / f))
-            names = QFontDatabase.applicationFontFamilies(fid) if fid >= 0 else []
-            fams.append(names[0] if names else "")
-        if fams[0]:
-            self.theme.uiFamily = fams[0]
-        if fams[1]:
-            self.theme.monoFamily = fams[1]
+        if self._fonts is None:
+            fams = []
+            for font_file in ("InterVariable.ttf", "JetBrainsMono-Variable.ttf"):
+                fid = QFontDatabase.addApplicationFont(str(THEME_DIR / "fonts" / font_file))
+                names = QFontDatabase.applicationFontFamilies(fid) if fid >= 0 else []
+                fams.append(names[0] if names else "")
+            self._fonts = (fams[0], fams[1])
+        ui_family, mono_family = self._fonts
+        if ui_family:
+            self.theme.uiFamily = ui_family
+        if mono_family:
+            self.theme.monoFamily = mono_family
         app.setStyle(QStyleFactory.create("Fusion"))
         t = self.theme
         f = QFont(t.uiFamily)
         f.setPixelSize(t.font.body)
-        f.setHintingPreference(QFont.PreferNoHinting)
+        f.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
         for tag, on in ((b"tnum", 1), (b"cv11", 1), (b"ss03", 1)):
             try:
                 f.setFeature(QFont.Tag(tag.decode()), on)

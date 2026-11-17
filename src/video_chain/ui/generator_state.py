@@ -1,0 +1,133 @@
+"""What the window knows about the generator worker, as types instead of strings and tuples: the model ComfyUI
+holds, the phase of a run, the job in progress, and what a running worker is bound to (MWC-6, MWC-7)."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+
+
+class ComfyModel(str, Enum):
+    """The model this app last used in ComfyUI (None where it is kept: nothing of this app is loaded). A str enum:
+    the values are what was written before, so a plain string still compares equal."""
+    H3 = "h3"
+    H3_HYPERFLOW = "h3-hyperflow"
+    QWEN = "qwen"                       # the image edit model
+    LLM = "llm"                         # the language model of the prompt refiner
+
+
+CLIP_MODELS = (ComfyModel.H3, ComfyModel.H3_HYPERFLOW)      # the clip model: the generator worker holds it
+IMAGE_MODELS = (ComfyModel.QWEN, ComfyModel.LLM)            # a model of an editing window: ComfyUI holds it
+
+
+class Phase(str, Enum):
+    """Where a generator run is."""
+    IDLE = ""
+    STARTING = "starting"
+    DONE = "done"                       # the worker said the run is over (its exit decides success)
+
+
+class ModelState(str, Enum):
+    """The worker's model: loading it takes a while (preparing a RunPod pod, loading into ComfyUI)."""
+    NONE = ""
+    LOADING = "loading"
+    LOADED = "loaded"
+
+
+@dataclass(frozen=True)
+class Refine:
+    """The settings of an export at a refined size (what the worker's "refine" command carries)."""
+    size: str
+    out: str = ""
+    fast_attention: bool = False
+    refine_swapped: bool = False
+    strength: str = "natural"
+    method: str = ""
+    single: bool = False
+    denoise: bool = False
+    cloud: str = ""                     # "runpod" for a cloud export
+
+    def as_command(self) -> dict:
+        """The fields of the worker's command (flags that are off are left out, as before)."""
+        return {"size": self.size, "out": self.out, "fast_attention": self.fast_attention,
+                "refine_swapped": self.refine_swapped, "strength": self.strength, "method": self.method,
+                **({"single": True} if self.single else {}), **({"denoise": True} if self.denoise else {}),
+                **({"cloud": self.cloud} if self.cloud else {})}
+
+
+@dataclass
+class Job:
+    """The generation in progress: the clips to make, the export's refine settings (None: a normal run) and whether
+    the worker has been sent it."""
+    targets: list[str]
+    refine: Refine | None = None
+    sent: bool = False
+
+
+@dataclass(frozen=True)
+class ComfyBinding:
+    """A worker bound to a ComfyUI: its address, its folder and whether it cleans up the copies it makes."""
+    url: str
+    comfy_dir: str
+    cleanup: bool
+
+
+@dataclass(frozen=True)
+class RunpodBinding:
+    """A worker bound to a RunPod pod (a cloud export): GPU, volume, fallback, SeedVR2 size, no-volume option."""
+    gpu: str
+    volume: str
+    fallback: bool
+    models: str
+    without_volume: bool
+
+
+WorkerBinding = ComfyBinding | RunpodBinding
+
+
+@dataclass
+class ComfyService:
+    """What this app has loaded in ComfyUI (the model it last used, None: nothing) and whether the worker's next quit
+    unloads it. One place for what mw_comfy, mw_generator, mw_ends and mw_llama each used to set by hand (MWC-13)."""
+    model: ComfyModel | None = None
+    quit_frees: bool = True         # the worker's next quit unloads the clip model
+
+    def holds_clip(self) -> bool:
+        """The generator worker holds the clip model."""
+        return self.model in CLIP_MODELS
+
+    def holds_image(self) -> bool:
+        """An editing window's model (image edit, language model) is loaded in ComfyUI: it has to be unloaded."""
+        return self.model in IMAGE_MODELS
+
+    def forget(self) -> None:
+        """Nothing of this app is loaded in ComfyUI any more."""
+        self.model = None
+
+    def language_model_loaded(self) -> None:
+        """The prompt refiner's language model is in ComfyUI now (the image model stays the one to unload)."""
+        if self.model != ComfyModel.QWEN:
+            self.model = ComfyModel.LLM
+
+
+@dataclass
+class ModelSwitch:
+    """ComfyUI changing from the clip model to the model of an editing window (an image edit, a replaced person):
+    the clip model is unloaded once, before the first job of the window, and the window says when its own model was
+    loaded (MWC-13: three windows had their own copy of this)."""
+    free: bool = False         # the clip model is still loaded: the first connection unloads it
+    loaded: bool = False       # a model of the window is loaded in ComfyUI now
+
+    def prepare(self, current: ComfyModel | None):
+        """(GUI thread, before each job) Does the clip model have to go? Once: after the first job it is gone."""
+        self.free = not self.loaded and current in CLIP_MODELS
+
+    def free_clip_model(self, editor):
+        """(worker thread, once connected) Unload the clip model if it is still there."""
+        if self.free:
+            editor.free()
+            self.free = False
+
+
+# The worker's events ('@@ {json}' lines, MWC-8) live in video_chain/events.py (the worker must not import ui/).
+from ..events import (  # noqa: E402, F401
+    ByeEvent, ErrorEvent, IdleEvent, LoadingEvent, NodeEvent, NoteEvent, PlanEvent, StartEvent, StepEvent, event_problem)

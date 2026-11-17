@@ -2,13 +2,17 @@
 right-click changes, annotates or removes one. Hard cuts of the made clip show as red marks."""
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QMenu, QSizePolicy, QWidget
 
+from .. import chain
 from .theme import theme
+from .widgets import small_font
 
-FPS = 24
+FPS = chain.FPS
 THUMB_W, THUMB_H = 40, 23
 
 
@@ -20,7 +24,7 @@ class KeyframeStrip(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumHeight(THUMB_H + 18)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setMouseTracking(True)
         self.duration = 3.0
         self.items: list[dict] = []       # {"at", "pixmap", "note", "ok"}
@@ -30,22 +34,30 @@ class KeyframeStrip(QWidget):
         self._drag_at = 0.0
         self._press = None
         self._hover: int | None = None
+        self._thumbs: dict[int, tuple] = {}   # keyframe index -> ((picture key, scale), the picture cut to a thumbnail)
+        self.setAccessibleName("Middle keyframes")
+        self.setAccessibleDescription("no keyframes")
 
     def sizeHint(self):
         return self.minimumSizeHint().expandedTo(self.minimumSize())
 
     # ---- data
-    def set_data(self, duration: float, items: list[dict], cuts: list[float] = (), made: bool = False):
+    def set_data(self, duration: float, items: list[dict], cuts: Sequence[float] = (), made: bool = False):
         self.duration = max(0.25, float(duration))
         self.items, self.cuts, self.made = list(items), list(cuts), made
         self._drag = None
+        self._thumbs = {}
         self.update()
+        n = len(self.items)
+        self.setAccessibleDescription(
+            f"{n} keyframe{'s' if n != 1 else ''} at " + ", ".join(f"{it['at']:.2f} s" for it in self.items)
+            if n else "no keyframes")
         tips = [f"{it['at']:.2f} s" + (f": {it['note']}" if it.get("note") else "") +
                 ("" if it.get("ok", True) else " (picture missing)") for it in self.items]
         self.setToolTip("Middle keyframes: pictures the clip passes through at these moments.\n"
                         "Click an empty spot to add one there; drag one to move it; right-click it to change it.\n"
                         "Keep each one reachable by motion from what comes before it (the same place and light): "
-                        "a picture it cannot move to makes H3 cut to it (marked red) or slowly morph the whole scene (not marked)." + ("\n\n" + "\n".join(tips) if tips else ""))
+                        "a picture it cannot move to makes the video model cut to it (marked red) or slowly morph the whole scene (not marked)." + ("\n\n" + "\n".join(tips) if tips else ""))
 
     # ---- geometry
     def _track(self) -> QRectF:
@@ -73,30 +85,44 @@ class KeyframeStrip(QWidget):
                 return i
         return None
 
+    def thumb(self, i: int, dpr: float) -> QPixmap | None:
+        """Keyframe i's picture cut to a thumbnail at the screen's scale, made once (not on every paint)."""
+        pm: QPixmap | None = self.items[i].get("pixmap")
+        if pm is None or pm.isNull():
+            return None
+        key = (pm.cacheKey(), dpr)
+        hit = self._thumbs.get(i)
+        if hit is None or hit[0] != key:
+            sc = pm.scaled(round(THUMB_W * dpr), round(THUMB_H * dpr), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                           Qt.TransformationMode.SmoothTransformation)
+            sc.setDevicePixelRatio(dpr)
+            hit = self._thumbs[i] = (key, sc)
+        return hit[1]
+
     # ---- painting
     def paintEvent(self, _e):
         t = theme()
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
         tr = self._track()
         mid = tr.center().y()
-        p.setPen(Qt.NoPen)
+        p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(t.bgSunken)
         p.drawRoundedRect(QRectF(tr.left(), mid - 3, tr.width(), 6), 3, 3)
         p.setPen(QPen(t.textTertiary, 1))
         f = p.font()
-        f.setPointSizeF(max(6.5, f.pointSizeF() * 0.8))
+        f = small_font(f, 0.8)
         p.setFont(f)
         step = 1.0 if self.duration <= 12 else 2.0
         s = 0.0
         while s <= self.duration + 1e-6:
             x = self.x_of(s)
             p.drawLine(QPointF(x, tr.bottom() + 1), QPointF(x, tr.bottom() + 4))
-            p.drawText(QRectF(x - 14, tr.bottom() + 3, 28, 12), Qt.AlignCenter, f"{s:g}s")
+            p.drawText(QRectF(x - 14, tr.bottom() + 3, 28, 12), Qt.AlignmentFlag.AlignCenter, f"{s:g}s")
             s += step
         for c in self.cuts:                                     # hard cuts in the made clip
             x = self.x_of(c)
-            p.setPen(QPen(QColor("#e5534b"), 2))
+            p.setPen(QPen(t.negative, 2))
             p.drawLine(QPointF(x, tr.top()), QPointF(x, tr.bottom()))
         order = [i for i in range(len(self.items)) if i != self._drag] + \
             ([self._drag] if self._drag is not None else [])
@@ -105,36 +131,37 @@ class KeyframeStrip(QWidget):
             r = self._rect(i)
             path = QPainterPath()
             path.addRoundedRect(r, 3, 3)
-            pm: QPixmap | None = it.get("pixmap")
-            if pm is not None and not pm.isNull():
+            dpr = self.devicePixelRatioF()
+            sc = self.thumb(i, dpr)
+            if sc is not None:
                 p.save()
                 p.setClipPath(path)
-                sc = pm.scaled(int(r.width()), int(r.height()), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
-                p.drawPixmap(int(r.center().x() - sc.width() / 2), int(r.center().y() - sc.height() / 2), sc)
+                sw, sh = sc.width() / dpr, sc.height() / dpr
+                p.drawPixmap(QPointF(r.center().x() - sw / 2, r.center().y() - sh / 2), sc)
                 p.restore()
             else:
-                p.setPen(Qt.NoPen)
+                p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(t.bgRaised)
                 p.drawPath(path)
             ok = it.get("ok", True)
-            border = QColor("#e5534b") if not ok else t.accent if i in (self._hover, self._drag) else t.lineStrong
+            border = t.negative if not ok else t.accent if i in (self._hover, self._drag) else t.lineStrong
             p.setPen(QPen(border, 2 if i in (self._hover, self._drag) or not ok else 1))
-            p.setBrush(Qt.NoBrush)
+            p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawPath(path)
             if it.get("note"):
-                p.setPen(Qt.NoPen)
+                p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(t.accent)
                 p.drawEllipse(QPointF(r.right() - 4, r.top() + 4), 3, 3)
         if self._drag is not None:
             p.setPen(t.textPrimary)
             r = self._rect(self._drag)
-            p.drawText(QRectF(r.left() - 10, tr.bottom() + 3, r.width() + 20, 12), Qt.AlignCenter,
+            p.drawText(QRectF(r.left() - 10, tr.bottom() + 3, r.width() + 20, 12), Qt.AlignmentFlag.AlignCenter,
                        f"{self._drag_at:.2f}s")
         p.end()
 
     # ---- mouse
     def mousePressEvent(self, e):
-        if e.button() == Qt.LeftButton and self.isEnabled():
+        if e.button() == Qt.MouseButton.LeftButton and self.isEnabled():
             self._press = e.position()
             i = self.index_at(e.position())
             if i is not None:
@@ -149,7 +176,7 @@ class KeyframeStrip(QWidget):
             h = self.index_at(e.position())
             if h != self._hover:
                 self._hover = h
-                self.setCursor(Qt.OpenHandCursor if h is not None else Qt.PointingHandCursor)
+                self.setCursor(Qt.CursorShape.OpenHandCursor if h is not None else Qt.CursorShape.PointingHandCursor)
                 self.update()
         super().mouseMoveEvent(e)
 
@@ -159,7 +186,7 @@ class KeyframeStrip(QWidget):
         super().leaveEvent(e)
 
     def mouseReleaseEvent(self, e):
-        if e.button() != Qt.LeftButton or self._press is None:
+        if e.button() != Qt.MouseButton.LeftButton or self._press is None:
             return super().mouseReleaseEvent(e)
         drag, press = self._drag, self._press
         self._drag, self._press = None, None

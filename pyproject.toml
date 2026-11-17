@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "pillow", "numpy", "safetensors"]
+dev = ["pytest", "pytest-timeout", "pytest-xdist", "pillow", "numpy", "safetensors", "mypy", "ruff"]
 # "Crop to face" for face pictures: insightface's SCRFD detector (from ComfyUI's models folder) on the CPU
 faces = ["onnxruntime>=1.18", "numpy"]
 
@@ -30,10 +30,38 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-video_chain = ["theme/*.json", "theme/*.in", "theme/icons/*.svg", "theme/fonts/*", "setup/manifest.json"]
+video_chain = ["theme/*.json", "theme/*.in", "theme/icons/*.svg", "theme/fonts/*", "cloud/*.sh", "setup/manifest.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "tests"]
-markers = ["models: needs real model files (run with -m models)"]
-addopts = "-m 'not models'"
+markers = ["models: needs real model files (run with -m models)",
+           "slow: takes more than about 5 s (real ffmpeg media); skip with -m 'not slow'",
+           "h3_default: new trees get the app's real default prompt format (h3), not the tests' classic one"]
+# every run in parallel (32 cores: the ffmpeg-heavy suite takes minutes in one process); one test stops after 60 s
+# (thread method: also when stuck inside Qt or a subprocess), a whole run after 300 s (tests/run_limits.py)
+addopts = "-m 'not models' -n 16 --dist load -p run_limits"
+timeout = 60
+timeout_method = "thread"
+faulthandler_timeout = 50
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src/video_chain", "comfy_nodes"]
+ignore_missing_imports = true
+warn_unused_ignores = true
+no_implicit_optional = true
+check_untyped_defs = true
+
+# The linter: what mypy does not see. Silent broad excepts (BLE001 / S110 / S112 / E722: say why with a comment and
+# "# noqa: BLE001", or log it), unused imports / variables and undefined names (pyflakes).
+# (ruff is in the dev extras; the test skips without it)
+[tool.ruff]
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["BLE", "F", "S110", "S112", "E722"]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]        # (the packages re-export their submodules' names)

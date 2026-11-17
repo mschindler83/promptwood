@@ -8,7 +8,10 @@ Two ways in: a clip's own camera setting ({"move", "amplitude", "speed"}: one se
 """
 from __future__ import annotations
 
+import logging
 import re
+
+logger = logging.getLogger(__name__)
 
 # slug -> (label, phrase after "the camera", takes amplitude / speed)
 MOVES: dict[str, tuple[str, str, bool]] = {
@@ -41,7 +44,7 @@ TOKEN = re.compile(r"(?<![\w#&/])#([A-Za-z][A-Za-z0-9-]*)")
 
 def phrase(move: str, amplitude: str | None = None, speed: str | None = None) -> str | None:
     """'the camera pushes in with small amplitude at slow speed' (lower case; None for an unknown move)."""
-    if move not in MOVES:
+    if not isinstance(move, str) or move not in MOVES:
         return None
     _label, words, mods = MOVES[move]
     parts = ["the camera", words]
@@ -54,9 +57,12 @@ def phrase(move: str, amplitude: str | None = None, speed: str | None = None) ->
 
 def sentence(camera: dict | None) -> str:
     """A clip's camera setting as a sentence ('' without one)."""
-    if not camera or camera.get("move") not in MOVES:
+    cam = clean(camera)
+    if cam is None:
         return ""
-    p = phrase(camera["move"], camera.get("amplitude"), camera.get("speed"))
+    p = phrase(cam["move"], cam.get("amplitude"), cam.get("speed"))
+    if p is None:
+        return ""
     return p[0].upper() + p[1:] + "."
 
 
@@ -83,7 +89,9 @@ def expand(text: str) -> str:
         if p is None:
             return m.group(0)
         words = phrase(*p)
-        before = text[:m.start()].rstrip()
+        if words is None:
+            return m.group(0)
+        before = text[:m.start()].rstrip(" \t")        # (a line break stays: a new line starts a sentence)
         start = not before or before[-1] in ".!?]:\n"
         return words[0].upper() + words[1:] if start else words
     return TOKEN.sub(sub, text or "")
@@ -109,28 +117,39 @@ def tokens() -> list[str]:
     return out
 
 
+def label(token: str) -> str | None:
+    """A token in plain words for menus and the # list: 'push-in-small-slow' -> 'Push in, small, slow' (None: not a
+    camera token)."""
+    p = parse(token)
+    if p is None:
+        return None
+    move, amplitude, speed = p
+    return ", ".join([MOVES[move][0]] + [x for x in (amplitude, speed) if x])
+
+
 def is_token(token: str) -> bool:
     return parse(token) is not None
 
 
 def describe(camera: dict | None) -> str:
     """'push in · small · slow' for a clip's summary ('' without one)."""
-    if not camera or camera.get("move") not in MOVES:
+    cam = clean(camera)
+    if cam is None:
         return ""
-    label, _words, mods = MOVES[camera["move"]]
-    extra = [x for x in ((camera.get("amplitude") if mods else None), (camera.get("speed") if mods else None))
-             if x in AMPLITUDES or x in SPEEDS]
-    return " · ".join([label.lower()] + extra)
+    label = MOVES[cam["move"]][0]
+    return " · ".join([label.lower()] + [cam[k] for k in ("amplitude", "speed") if k in cam])
 
 
 def clean(camera) -> dict | None:
     """A stored camera setting, normalised (None when there is none)."""
-    if not isinstance(camera, dict) or camera.get("move") not in MOVES:
+    move = camera.get("move") if isinstance(camera, dict) else None
+    if not isinstance(move, str) or move not in MOVES:
         return None
-    out = {"move": camera["move"]}
-    if MOVES[camera["move"]][2]:
-        if camera.get("amplitude") in AMPLITUDES:
-            out["amplitude"] = camera["amplitude"]
-        if camera.get("speed") in SPEEDS:
-            out["speed"] = camera["speed"]
+    out = {"move": move}
+    if MOVES[move][2]:
+        amplitude, speed = camera.get("amplitude"), camera.get("speed")
+        if isinstance(amplitude, str) and amplitude in AMPLITUDES:
+            out["amplitude"] = amplitude
+        if isinstance(speed, str) and speed in SPEEDS:
+            out["speed"] = speed
     return out

@@ -12,12 +12,12 @@ KNOWN = {"UNETLoader", "CLIPLoader", "VAELoader", "LoadImage", "MiniMaxH3ImageTo
          "KSamplerSelect", "BasicScheduler", "BasicGuider", "SamplerCustomAdvanced", "VAEDecode", "VAEDecodeAudio",
          "ImageFromBatch", "SaveImage", "CreateVideo", "SaveVideo", "LoraLoaderModelOnly",
          "MiniMaxH3ReferenceToVideo", "MiniMaxH3AddGuide", "MiniMaxH3TurboLoRA", "MiniMaxH3TurboSampler",
-         "LoadVideo", "GetVideoComponents", "LoadAudio", "RepeatImageBatch",
+         "LoadVideo", "GetVideoComponents", "LoadAudio", "RepeatImageBatch", "MiniMaxH3SigmaShift",
          # Qwen Image Edit
          "FluxKontextImageScale", "ModelSamplingAuraFlow", "CFGNorm", "TextEncodeQwenImageEditPlus",
          "FluxKontextMultiReferenceLatentMethod", "VAEEncode", "KSampler", "ApplyHyperFlowH3",
          # 2K refine
-         "VAEEncodeAudio", "LTXVConcatAVLatent", "LatentUpscaleModelLoader", "MiniMaxH3LatentUpscaleWithModel",
+         "VAEEncodeAudio", "LTXVConcatAVLatent", "LTXVSeparateAVLatent", "LatentUpscaleModelLoader", "MiniMaxH3LatentUpscaleWithModel",
          "ManualSigmas", "VAEDecodeTiled", "BlockSparseAttention", "TextGenerate", "PreviewAny",
          # image creation
          "CLIPTextEncode", "ConditioningZeroOut", "EmptyLatentImage", "EmptySD3LatentImage", "CFGGuider",
@@ -31,11 +31,11 @@ KNOWN = {"UNETLoader", "CLIPLoader", "VAELoader", "LoadImage", "MiniMaxH3ImageTo
          "VedaSparseAttention",
          # SeedVR2
          "SeedVR2Preprocess", "SeedVR2Conditioning", "SeedVR2PostProcessing", "SeedVR2TemporalChunk",
-         "SeedVR2TemporalMerge", "VAEEncodeTiled",
+         "SeedVR2TemporalMerge", "VAEEncodeTiled", "VideoChainLanczosScale",
          # Wan 2.2 Animate (replace a person)
          "WanAnimateToVideo", "TrimVideoLatent", "DWPreprocessor", "BlockifyMask", "DrawMaskOnImage",
          "CLIPVisionEncode", "CLIPVisionLoader", "ModelSamplingSD3", "ImageBatch", "ImageScale",
-         "VideoChainFaceSwap",
+         "VideoChainFaceSwap", "VideoChainH3LoRA",
          # MOSS-Image
          "T5TokenizerOptions", "TextEncodeMOSSImageEdit", "SkipLayerGuidanceDiTSimple", "ImageScaleToTotalPixels", "GetImageSize"}
 IMAGE_UNETS = ["Chroma1-HD.safetensors", "Chroma1-HD-Flash.safetensors",
@@ -92,6 +92,7 @@ SCHEMAS = {
     "SeedVR2TemporalMerge": ({"latents", "temporal_overlap"}, set()),
     "VAEEncodeTiled": ({"pixels", "vae", "tile_size", "overlap", "temporal_size", "temporal_overlap"}, set()),
     "ImageScale": ({"image", "upscale_method", "width", "height", "crop"}, set()),
+    "VideoChainLanczosScale": ({"image", "width", "height"}, set()),
     "WanAnimateToVideo": ({"positive", "negative", "vae", "width", "height", "length", "batch_size",
                            "continue_motion_max_frames", "video_frame_offset"},
                           {"clip_vision_output", "reference_image", "face_video", "pose_video", "continue_motion",
@@ -123,11 +124,21 @@ class FakeComfy:
         self.refine_strengths: list[str] = []      # the strength of every refine job
         self.seedvr = True                         # SeedVR2's 7B / 3B models and VAE
         self.ram_free = 0                          # /system_stats ram_free (0: not reported)
+        self.vram_total = 0                        # /system_stats devices[0].vram_total (0: no device listed)
+        self.scale_node = False                    # video-chain's VideoChainLanczosScale is installed
         self.veda = True                           # the Veda node and its two predictors
         self.seedvr_jobs: list[str] = []           # the model of every SeedVR2 job
         self.audio_refs = True                     # MiniMaxH3ReferenceToVideo takes reference sounds
+        self.view_truncate = 0                     # the next n downloads end before their Content-Length
+        self.junk: set[str] = set()                # these POST paths answer with a non-JSON page (HTTP 200)
+        self.hold = False                          # jobs stay queued: no history until it is cleared (a busy ComfyUI)
+        self.video_refs = True                     # ... and reference videos (with their soundtracks)
         self.fail_next: str | None = None          # the next job fails with this message (once)
+        self.extra_unets: list[str] = []           # further diffusion models listed (e.g. H3 fine-tunes)
+        self.h3_lora_node = True                   # Promptwood's VideoChainH3LoRA node is installed
+        self.refine_answer: str | None = None      # the prompt refiner's raw answer (None: "REFINED <prompt>")
         self.prompts, self.calls, self.history = [], [], {}
+        self.prompts_deleted: list[str] = []       # ids removed with /queue delete while held
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -141,7 +152,7 @@ class FakeComfy:
         q, q21, mo = self.qwen, self.qwen21, self.moss
         files = {"UNETLoader": ("unet_name", [C.UNET, C.UNET_REF] + ([QWEN_UNET] if q else []) + IMAGE_UNETS
                                 + (QWEN21_UNETS if q21 else []) + ([MOSS_UNET] if mo else [])
-                                + (SEEDVR_UNETS if self.seedvr else [])),
+                                + (SEEDVR_UNETS if self.seedvr else []) + self.extra_unets),
                  "CLIPLoader": ("clip_name", [C.TEXT_ENCODER] + ([QWEN_CLIP] if q else []) + LLM_FILES + IMAGE_CLIPS
                                 + ([QWEN21_CLIP] if q21 else []) + ([MOSS_CLIP] if mo else [])),
                  "VAELoader": ("vae_name", [C.VIDEO_VAE, C.AUDIO_VAE] + ([QWEN_VAE] if q else []) + IMAGE_VAES
@@ -185,9 +196,12 @@ class FakeComfy:
         if node == "VedaSparseAttention":
             return {node: {"input": {"required": {"predictor": ["COMBO", {"options": VEDA_PREDICTORS}]}}}} \
                 if self.veda else {}
+        if node == "VideoChainH3LoRA":
+            return {node: {"input": {"required": {}}}} if self.h3_lora_node else {}
         if node == "VideoChainQwen21FunInpaint":
             return {node: {"input": {"required": {}}}} if self.inpaint21 else {}
-        if node in C.REFINE_NODES + ("BlockSparseAttention",) and node != "LatentUpscaleModelLoader":
+        if node in C.REFINE_NODES + ("BlockSparseAttention", "LTXVSeparateAVLatent") \
+                and node != "LatentUpscaleModelLoader":
             return {node: {"input": {"required": {}}}} if self.refine else {}
         if node == "TextGenerate":
             return {node: {"input": {"required": {}}}}
@@ -201,13 +215,19 @@ class FakeComfy:
         if node in C.QWEN_NODES:
             return {node: {"input": {"required": {}}}} if q else {}
         if node in ("MiniMaxH3ImageToVideo", "MiniMaxH3TurboSampler", "MiniMaxH3TurboLoRA", "MiniMaxH3AddGuide",
-                    "LoadVideo", "GetVideoComponents"):
+                    "LoadVideo", "GetVideoComponents", "MiniMaxH3SigmaShift"):
             return {} if node.startswith("MiniMaxH3Turbo") and not self.turbo_nodes else {node: {"input": {"required": {}}}}
         if node == "MiniMaxH3ReferenceToVideo":
             opt = {"ref_images": ["COMFY_AUTOGROW_V3", {"template": {"prefix": "ref_image_", "min": 0, "max": 9}}]}
             if self.audio_refs:
                 opt["ref_audios"] = ["COMFY_AUTOGROW_V3", {"template": {"prefix": "ref_audio_", "min": 0, "max": 3}}]
+            if self.video_refs:                    # (the real node's Autogrow names, nodes_minimax_h3.py)
+                opt["ref_videos"] = ["COMFY_AUTOGROW_V3", {"template": {"prefix": "ref_video_", "min": 0, "max": 3}}]
+                opt["ref_video_audios"] = ["COMFY_AUTOGROW_V3",
+                                           {"template": {"prefix": "ref_video_audio_", "min": 0, "max": 3}}]
             return {node: {"input": {"required": {}, "optional": opt}}}
+        if node == "VideoChainLanczosScale":
+            return {node: {"input": {"required": {}}}} if self.scale_node else {}
         if node in files:
             field, names = files[node]
             names = [] if self.models_missing and node == "UNETLoader" else names
@@ -248,6 +268,10 @@ class FakeComfy:
         if "gen" in wf and wf["gen"]["class_type"] == "TextGenerate":     # the prompt refiner: a fake answer
             g = wf["gen"]["inputs"]
             self.refined = g
+            if "pic" in wf:                          # a vision model sees a picture: uploaded first
+                assert (self.root / "input" / wf["pic"]["inputs"]["image"]).is_file(), "picture not uploaded"
+            if self.refine_answer is not None:
+                return {"show": {"text": [self.refine_answer]}}
             return {"show": {"text": [f"<think>planning</think>Here is the refined prompt: \"REFINED {g['prompt'][:40]}\""]}}
         if "lock" in wf and "anim0" not in wf and wf.get("save", {}).get("class_type") == "SaveVideo":
             self.faced = wf                          # face only: the clip again (its face "swapped")
@@ -327,7 +351,8 @@ class FakeComfy:
                                               "type": "output"}]}}
         if "refcond" in wf:                         # identity references: ref2va + the start image as guide
             cond = wf["refcond"]["inputs"]
-            assert wf["unet"]["inputs"]["unet_name"].startswith("minimax_h3_ref2va")
+            assert wf["unet"]["inputs"]["unet_name"].startswith("minimax_h3_ref2va") \
+                or wf["unet"]["inputs"]["unet_name"] in self.extra_unets          # (a chosen H3 checkpoint)
             if "start" in wf:
                 assert wf["cond"]["class_type"] == "MiniMaxH3AddGuide"
                 still = wf.get("start_still")      # faces: the start image held as a short still
@@ -340,6 +365,11 @@ class FakeComfy:
                     assert self.audio_refs and wf[v[0]]["class_type"] == "LoadAudio"
                     assert (self.root / "input" / wf[v[0]]["inputs"]["audio"]).is_file(), "sound not uploaded"
                     assert cond["audio_vae"] == ["audio_vae", 0]
+                if k.startswith("ref_videos."):     # a reference video: the pictures of an uploaded clip
+                    assert self.video_refs and wf[v[0]]["class_type"] == "GetVideoComponents" and v[1] == 0
+                    load = wf[wf[v[0]]["inputs"]["video"][0]]
+                    assert load["class_type"] == "LoadVideo" and (self.root / "input" / load["inputs"]["file"]).is_file()
+                assert not k.startswith("ref_video_audios.") or self.video_refs
         else:
             cond = wf["cond"]["inputs"]
             assert ("first_frame" in cond) == ("start" in wf) and ("last_frame" in cond) == ("end" in wf)
@@ -386,7 +416,9 @@ class FakeComfy:
                 fake.calls.append(("GET", u.path))
                 if u.path == "/system_stats":
                     return self._send(200, {"system": {"comfyui_version": "fake",
-                                                       **({"ram_free": fake.ram_free} if fake.ram_free else {})}})
+                                                       **({"ram_free": fake.ram_free} if fake.ram_free else {})},
+                                            "devices": [{"name": "cuda:0 fake", "type": "cuda",
+                                                         "vram_total": fake.vram_total}] if fake.vram_total else []})
                 if u.path.startswith("/object_info/"):
                     return self._send(200, fake.object_info(u.path.rsplit("/", 1)[1]))
                 if u.path.startswith("/history/"):
@@ -395,6 +427,15 @@ class FakeComfy:
                 if u.path == "/view":
                     q = urllib.parse.parse_qs(u.query)
                     f = fake.root / q["type"][0] / q.get("subfolder", [""])[0] / q["filename"][0]
+                    if fake.view_truncate > 0:
+                        fake.view_truncate -= 1
+                        data = f.read_bytes()
+                        self.send_response(200)
+                        self.send_header("Content-Length", str(len(data) + 50))
+                        self.end_headers()
+                        self.wfile.write(data[:len(data) // 2])
+                        self.close_connection = True
+                        return None
                     return self._send(200, f.read_bytes(), "application/octet-stream")
                 return self._send(404, {"error": "not found"})
 
@@ -402,6 +443,8 @@ class FakeComfy:
                 u = urllib.parse.urlparse(self.path)
                 body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
                 fake.calls.append(("POST", u.path))
+                if u.path in fake.junk:
+                    return self._send(200, b"<html>proxy error</html>", "text/html")
                 if u.path == "/upload/image":
                     ctype = self.headers["Content-Type"]
                     boundary = ctype.split("boundary=")[1].encode()
@@ -426,7 +469,9 @@ class FakeComfy:
                 if u.path == "/prompt":
                     fake.prompts.append(payload["prompt"])
                     pid = f"p{len(fake.prompts)}"
-                    if fake.fail_with or fake.fail_next:
+                    if fake.hold:
+                        pass                                   # queued behind another job: no history yet
+                    elif fake.fail_with or fake.fail_next:
                         msg, fake.fail_next = fake.fail_with or fake.fail_next, None
                         fake.history[pid] = {"outputs": {}, "status": {"status_str": "error", "completed": False,
                                              "messages": [["execution_error", {"exception_type": "RuntimeError",
@@ -436,6 +481,8 @@ class FakeComfy:
                                              "status": {"status_str": "success", "completed": True}}
                     return self._send(200, {"prompt_id": pid, "number": 1, "node_errors": {}})
                 if u.path in ("/free", "/interrupt", "/queue"):
+                    if u.path == "/queue" and fake.hold:
+                        fake.prompts_deleted.extend(payload.get("delete", []))
                     fake.calls.append(("BODY", u.path, payload))
                     return self._send(200, {})
                 return self._send(404, {"error": "not found"})

@@ -29,8 +29,8 @@ def hide_consoles() -> None:
         if not kwargs.get("creationflags"):
             kwargs["creationflags"] = CREATE_NO_WINDOW
         plain(self, *args, **kwargs)
-    subprocess.Popen.__init__ = quiet
-    subprocess.Popen._video_chain_quiet = True
+    subprocess.Popen.__init__ = quiet  # type: ignore[method-assign]
+    subprocess.Popen._video_chain_quiet = True  # type: ignore[attr-defined]
 
 
 def ensure_utf8(module: str, argv: list[str] | None = None) -> int | None:
@@ -77,7 +77,7 @@ def link_dir(target: Path, link: Path) -> None:
         os.symlink(os.path.relpath(target, link.parent), link, target_is_directory=True)
     except OSError:
         import _winapi
-        _winapi.CreateJunction(str(target.resolve()), str(link))
+        _winapi.CreateJunction(str(target.resolve()), str(link))  # type: ignore[attr-defined]  # (Windows only)
 
 
 def is_link(path: Path) -> bool:

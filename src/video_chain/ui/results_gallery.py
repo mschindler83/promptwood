@@ -8,15 +8,20 @@ import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QPoint, QRect, QSize, Qt, Signal
+from PySide6.QtCore import QObject, QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QImage, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy,
                                QToolButton, QVBoxLayout, QWidget)
 
+from .workers import run_in_background
+from ..edits import ResultRecord
+from .imageio import read_scaled
 from .theme import theme
-from .widgets import label
+from .widgets import FlowBox, label, safe_emit, smooth_scaled
 
 THUMB_DECODE = 400                    # thumbnails are decoded once at this size (the gallery's largest)
+BADGE_MARGIN, BADGE_HEIGHT = 5, 16     # the pills on a thumbnail (tag, IN USE, star): distance from the edge, height
+STAR_HIT = (30, BADGE_MARGIN + BADGE_HEIGHT + 5)   # the star's click area (width, height): the pill and some room
 RUN_GAP = 15 * 60                     # older results without a run id: the same prompt within 15 min is one run
 
 MODEL_TAGS = {"krea2": "K2", "qwen": "Q", "qwen21": "Q2.1", "moss": "MOSS", "flux3": "F3", "flux1": "F1",
@@ -24,16 +29,16 @@ MODEL_TAGS = {"krea2": "K2", "qwen": "Q", "qwen21": "Q2.1", "moss": "MOSS", "flu
 EDIT_TAGS = {"2511": "EDIT", "qwen21": "Q2.1 EDIT", "moss": "MOSS EDIT"}
 
 
-def model_key(meta: dict) -> str:
+def model_key(meta: ResultRecord) -> str:
     """A result's model, for the filter: create:<family> / edit:<model>."""
     if meta.get("mode") == "create":
         return f"create:{meta.get('family') or '?'}"
     return f"edit:{meta.get('edit_model') or '2511'}"
 
 
-def model_tag(meta: dict) -> str:
+def model_tag(meta: ResultRecord) -> str:
     if meta.get("mode") == "create":
-        return MODEL_TAGS.get(meta.get("family"), "NEW")
+        return MODEL_TAGS.get(meta.get("family") or "", "NEW")
     return EDIT_TAGS.get(meta.get("edit_model") or "2511", "EDIT")
 
 
@@ -57,7 +62,7 @@ def when_text(t: float, now: float | None = None) -> str:
     return time.strftime("%Y-%m-%d %H:%M", day)
 
 
-def run_groups(items: list[tuple[str, dict, float]]) -> list[dict]:
+def run_groups(items: list[tuple[str, ResultRecord, float]]) -> list[dict]:
     """Results (png, meta, mtime; newest first) grouped by Generate run: {"key", "title", "items"} newest run first.
     A run is the results of one Generate (their "run" id); older results without one: the same prompt and model
     made within RUN_GAP of each other."""
@@ -73,6 +78,7 @@ def run_groups(items: list[tuple[str, dict, float]]) -> list[dict]:
             g = {"key": run or f"{png}", "run": run, "prompt": meta.get("prompt", ""), "model": model_key(meta),
                  "newest": t, "oldest": t, "items": []}
             groups.append(g)
+        assert g is not None                           # (same is only true with a group before)
         g["items"].append((png, meta, t))
         g["oldest"] = t
     for g in groups:
@@ -84,103 +90,59 @@ def run_groups(items: list[tuple[str, dict, float]]) -> list[dict]:
     return groups
 
 
-def badged(pix: QPixmap, size: QSize, tag: str, fav: bool, in_use: bool, selected: bool = False) -> QPixmap:
+def badged(pix: QPixmap, size: QSize, tag: str, fav: bool, in_use: bool, selected: bool = False,
+           dpr: float | None = None) -> QPixmap:
     """A thumbnail fitted into size, with its badges painted on: the model tag (bottom left), IN USE (top left),
-    the star (top right) and the selection ring."""
+    the star (top right) and the selection ring. dpr: the pixel ratio of the widget that shows it (default: the
+    primary screen's)."""
     t = theme()
-    dpr = QGuiApplication.primaryScreen().devicePixelRatio() if QGuiApplication.primaryScreen() else 1.0
+    if dpr is None:
+        dpr = QGuiApplication.primaryScreen().devicePixelRatio() if QGuiApplication.primaryScreen() else 1.0
     out = QPixmap(size * dpr)
     out.setDevicePixelRatio(dpr)
-    out.fill(Qt.transparent)
+    out.fill(Qt.GlobalColor.transparent)
     p = QPainter(out)
-    p.setRenderHint(QPainter.Antialiasing)
-    p.setRenderHint(QPainter.SmoothPixmapTransform)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
     r = QRect(QPoint(0, 0), size)
     clip = QPainterPath()
     clip.addRoundedRect(r.adjusted(1, 1, -1, -1), 6, 6)
     p.fillPath(clip, t.bgSunken)
     if not pix.isNull():                   # filled (cropped to the tile's shape), as photo galleries do
-        img = pix.scaled(size * dpr, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+        img = pix.scaled(size * dpr, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                         Qt.TransformationMode.SmoothTransformation)
         img.setDevicePixelRatio(dpr)
         w, h = img.width() / dpr, img.height() / dpr
         p.setClipPath(clip)
         p.drawPixmap(QRect(int((size.width() - w) / 2), int((size.height() - h) / 2), int(w), int(h)), img)
         p.setClipping(False)
     f = QFont(p.font())
-    f.setPixelSize(10)
+    f.setPixelSize(t.font.small)
     f.setBold(True)
     p.setFont(f)
     fm = p.fontMetrics()
 
     def pill(text: str, x: int, y: int, bg: QColor, fg: QColor, right: bool = False) -> None:
         w = fm.horizontalAdvance(text) + 10
-        box = QRect(x - w if right else x, y, w, 16)
+        box = QRect(x - w if right else x, y, w, BADGE_HEIGHT)
         path = QPainterPath()
         path.addRoundedRect(box, 8, 8)
         p.fillPath(path, bg)
         p.setPen(fg)
-        p.drawText(box, Qt.AlignCenter, text)
-    dark = QColor(0, 0, 0, 170)
+        p.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
+    dark = t.hudBg
     if tag:
-        pill(tag, 5, size.height() - 21, dark, QColor(235, 235, 235))
+        pill(tag, BADGE_MARGIN, size.height() - BADGE_MARGIN - BADGE_HEIGHT, dark, t.overlayInk)
     if in_use:
-        pill("IN USE", 5, 5, t.accent, t.onAccent)
+        pill("IN USE", BADGE_MARGIN, BADGE_MARGIN, t.accent, t.onAccent)
     if fav:
-        pill("★", size.width() - 5, 5, QColor(0, 0, 0, 150), QColor(255, 196, 0), right=True)
+        pill("★", size.width() - BADGE_MARGIN, BADGE_MARGIN, t.hudBg, t.warning, right=True)
     if selected:
         p.setPen(QPen(t.accent, 3))
-        p.setBrush(Qt.NoBrush)
+        p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawRoundedRect(r.adjusted(2, 2, -2, -2), 6, 6)
     p.end()
     return out
-
-
-class FlowBox(QWidget):
-    """Places its child widgets left to right and wraps them into rows; its height follows its width. (A widget
-    that places its children itself: a Python QLayout subclass crashed in PySide when items were taken out.)"""
-
-    def __init__(self, parent=None, spacing: int = 8):
-        super().__init__(parent)
-        self.items: list[QWidget] = []
-        self.spacing = spacing
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-
-    def add(self, w: QWidget):
-        w.setParent(self)
-        w.show()
-        self.items.append(w)
-        self._place()
-
-    def clear(self):
-        for w in self.items:
-            w.hide()
-            w.setParent(None)
-            w.deleteLater()
-        self.items = []
-        self._place()
-
-    def _place(self):
-        width = max(1, self.width())
-        x = y = row = 0
-        for w in self.items:
-            hint = w.sizeHint().expandedTo(w.minimumSize())
-            if w.maximumWidth() < hint.width():
-                hint.setWidth(w.maximumWidth())
-            if x + hint.width() > width and row > 0:
-                x, y, row = 0, y + row + self.spacing, 0
-            w.setGeometry(x, y, hint.width(), hint.height())
-            x += hint.width() + self.spacing
-            row = max(row, hint.height())
-        h = y + row
-        if self.minimumHeight() != h:
-            self.setFixedHeight(h)
-
-    def resizeEvent(self, e):                    # noqa: N802  (Qt naming)
-        super().resizeEvent(e)
-        self._place()
-
-    def sizeHint(self):                          # noqa: N802
-        return QSize(200, self.minimumHeight())
 
 
 class ResultView(QWidget):
@@ -190,8 +152,13 @@ class ResultView(QWidget):
         super().__init__(parent)
         self._img = QImage()
         self._text = ""
-        self._scaled: tuple | None = None
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._scaled: tuple | None = None          # (key, pixmap, smooth)
+        self._resizing = False
+        self._settle = QTimer(self)
+        self._settle.setSingleShot(True)
+        self._settle.setInterval(150)
+        self._settle.timeout.connect(self._settled)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMinimumSize(320, 200)
 
     def sizeHint(self):                          # noqa: N802
@@ -211,23 +178,42 @@ class ResultView(QWidget):
     def has_image(self) -> bool:
         return not self._img.isNull()
 
+    def _pixmap(self) -> QPixmap:
+        """The picture fitted to the view. Smooth (area) scaling once per picture and size; while the window edge is
+        being dragged the quick transform is used, and a smooth one follows when the size has settled."""
+        dpr = self.devicePixelRatioF()
+        target = self._img.size().scaled(self.size() * dpr, Qt.AspectRatioMode.KeepAspectRatio)
+        smooth = not self._resizing
+        key = (self._img.cacheKey(), target.width(), target.height())
+        if self._scaled is None or self._scaled[0] != key or (smooth and not self._scaled[2]):
+            scaled = smooth_scaled(self._img, target) if smooth else \
+                self._img.scaled(target, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation)
+            pm = QPixmap.fromImage(scaled)
+            pm.setDevicePixelRatio(dpr)
+            self._scaled = (key, pm, smooth)
+        return self._scaled[1]
+
+    def resizeEvent(self, e):                    # noqa: N802
+        if e is not None:
+            super().resizeEvent(e)
+        self._resizing = True
+        self._settle.start()
+
+    def _settled(self) -> None:
+        self._resizing = False
+        self.update()
+
     def paintEvent(self, _e):                    # noqa: N802
         t = theme()
         p = QPainter(self)
-        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         if self._img.isNull():
             p.setPen(t.textTertiary)
-            p.drawText(self.rect(), Qt.AlignCenter, self._text)
+            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._text)
             p.end()
             return
         dpr = self.devicePixelRatioF()
-        target = self._img.size().scaled(self.size() * dpr, Qt.KeepAspectRatio)
-        key = (self._img.cacheKey(), target.width(), target.height())
-        if self._scaled is None or self._scaled[0] != key:     # smooth (area) scaling once per picture and size
-            pm = QPixmap.fromImage(self._img.scaled(target, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-            pm.setDevicePixelRatio(dpr)
-            self._scaled = (key, pm)
-        pm = self._scaled[1]
+        pm = self._pixmap()
         w, h = pm.width() / dpr, pm.height() / dpr
         p.drawPixmap(QRect(int((self.width() - w) / 2), int((self.height() - h) / 2), int(w), int(h)), pm)
         p.end()
@@ -239,7 +225,7 @@ class Thumb(QWidget):
     opened = Signal(str)
     starred = Signal(str)
 
-    def __init__(self, png: str, meta: dict, parent=None):
+    def __init__(self, png: str, meta: ResultRecord, parent=None):
         super().__init__(parent)
         self.png, self.meta = png, meta
         self.pix = QPixmap()
@@ -247,8 +233,12 @@ class Thumb(QWidget):
         self.selected = False
         self._size = QSize(200, 150)
         self._cache: tuple | None = None
-        self.setCursor(Qt.PointingHandCursor)
-        self.setToolTip(meta.get("prompt", Path(png).name))
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._describe()
+
+    def _describe(self) -> None:
+        self.setToolTip(self.meta.get("prompt", Path(self.png).name))
+        self.setAccessibleName(self.meta.get("prompt") or Path(self.png).name)
 
     def set_size(self, w: int):
         self._size = QSize(w, int(w * 0.75))
@@ -258,13 +248,14 @@ class Thumb(QWidget):
     def sizeHint(self):                          # noqa: N802
         return self._size
 
-    def set_state(self, selected: bool | None = None, in_use: bool | None = None, meta: dict | None = None):
+    def set_state(self, selected: bool | None = None, in_use: bool | None = None, meta: ResultRecord | None = None):
         if selected is not None:
             self.selected = selected
         if in_use is not None:
             self.in_use = in_use
         if meta is not None:
             self.meta = meta
+            self._describe()
         self._cache = None
         self.update()
 
@@ -274,10 +265,12 @@ class Thumb(QWidget):
         self.update()
 
     def rendered(self) -> QPixmap:
-        key = (self.pix.cacheKey(), self._size.width(), self.selected, self.in_use, bool(self.meta.get("favorite")))
+        dpr = self.devicePixelRatioF()
+        key = (self.pix.cacheKey(), self._size.width(), self.selected, self.in_use, bool(self.meta.get("favorite")),
+               dpr)
         if self._cache is None or self._cache[0] != key:
             self._cache = (key, badged(self.pix, self._size, model_tag(self.meta), bool(self.meta.get("favorite")),
-                                       self.in_use, self.selected))
+                                       self.in_use, self.selected, dpr))
         return self._cache[1]
 
     def paintEvent(self, _e):                    # noqa: N802
@@ -286,17 +279,17 @@ class Thumb(QWidget):
         p.end()
 
     def _star_hit(self, pos) -> bool:
-        return pos.x() > self.width() - 30 and pos.y() < 26
+        return pos.x() > self.width() - STAR_HIT[0] and pos.y() < STAR_HIT[1]
 
     def mousePressEvent(self, e):                # noqa: N802
-        if e.button() == Qt.LeftButton:
+        if e.button() == Qt.MouseButton.LeftButton:
             if self._star_hit(e.position().toPoint()):
                 self.starred.emit(self.png)
             else:
                 self.clicked.emit(self.png)
 
     def mouseDoubleClickEvent(self, e):          # noqa: N802
-        if e.button() == Qt.LeftButton and not self._star_hit(e.position().toPoint()):
+        if e.button() == Qt.MouseButton.LeftButton and not self._star_hit(e.position().toPoint()):
             self.opened.emit(self.png)
 
 
@@ -310,13 +303,14 @@ class ResultGallery(QScrollArea):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWidgetResizable(True)
-        self.setFrameShape(QFrame.NoFrame)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setFocusPolicy(Qt.StrongFocus)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.thumbs: dict[str, Thumb] = {}
         self.headers: list[QLabel] = []
         self.size_px = 200
         self._selected: str | None = None
+        self._scroll_pending: int | None = None
         self._build([])
 
     def _build(self, groups: list[dict]):
@@ -335,14 +329,16 @@ class ResultGallery(QScrollArea):
             v.addWidget(head)
             box = FlowBox(spacing=8)
             for png, meta, _t in g["items"]:
-                th = Thumb(png, meta)
+                th = old.get(png)
+                if th is None:                         # (a result seen before keeps its widget and picture)
+                    th = Thumb(png, meta)
+                    th.clicked.connect(self.clicked)
+                    th.opened.connect(self.opened)
+                    th.starred.connect(self.starred)
+                else:
+                    th.set_state(meta=meta)
                 th.set_size(self.size_px)
-                if png in old and not old[png].pix.isNull():
-                    th.pix = old[png].pix
                 th.selected = png == self._selected
-                th.clicked.connect(self.clicked)
-                th.opened.connect(self.opened)
-                th.starred.connect(self.starred)
                 self.thumbs[png] = th
                 box.add(th)
             self.boxes.append(box)
@@ -350,14 +346,13 @@ class ResultGallery(QScrollArea):
             v.addSpacing(6)
         if not groups:
             empty = label("No results here (yet, or not with these filters).", level="tertiary")
-            empty.setAlignment(Qt.AlignCenter)
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
             v.addWidget(empty)
         v.addStretch(1)
         self.setWidget(inner)
 
     def set_groups(self, groups: list[dict], in_use: set[str]):
-        from PySide6.QtCore import QTimer
-        if getattr(self, "_scroll_pending", None) is None:  # (two rebuilds in a row: the first position counts)
+        if self._scroll_pending is None:  # (two rebuilds in a row: the first position counts)
             self._scroll_pending = self.verticalScrollBar().value()
         self._build(groups)
         for png, th in self.thumbs.items():
@@ -369,7 +364,7 @@ class ResultGallery(QScrollArea):
                 self._scroll_pending = None
         QTimer.singleShot(0, restore)                          # (where it was, once laid out)
 
-    def update_thumb(self, png: str, meta: dict, in_use: bool | None = None):
+    def update_thumb(self, png: str, meta: ResultRecord, in_use: bool | None = None):
         """One result's badges anew (e.g. its star), without rebuilding the gallery."""
         th = self.thumbs.get(png)
         if th is not None:
@@ -386,10 +381,14 @@ class ResultGallery(QScrollArea):
         self._selected = png
         th = self.thumbs.get(png) if png else None
         if th is not None:
+            assert png is not None
             th.set_state(selected=True)
             if scroll:
-                from PySide6.QtCore import QTimer
-                QTimer.singleShot(0, lambda: png in self.thumbs and self.ensureWidgetVisible(self.thumbs[png], 20, 20))
+                        QTimer.singleShot(0, lambda: self._reveal_thumb(png))
+
+    def _reveal_thumb(self, png: str) -> None:
+        if png in self.thumbs:
+            self.ensureWidgetVisible(self.thumbs[png], 20, 20)
 
     def set_thumb_size(self, px: int):
         self.size_px = int(px)
@@ -401,33 +400,61 @@ class ResultGallery(QScrollArea):
     def order(self) -> list[str]:
         return list(self.thumbs)
 
-    def keyPressEvent(self, e):                  # noqa: N802  (arrows step, Enter opens, Esc back to Single)
+    def _row_neighbour(self, png: str | None, down: bool) -> str | None:
+        """The thumbnail in the nearest row below / above `png`, the closest one sideways."""
+        cur = self.thumbs.get(png) if png else None
+        if cur is None:
+            return None
+        inner = self.widget()
+        assert inner is not None
+        here = cur.mapTo(inner, cur.rect().center())
+        rows = []
+        for other, th in self.thumbs.items():
+            c = th.mapTo(inner, th.rect().center())
+            if (c.y() > here.y() + 4) if down else (c.y() < here.y() - 4):
+                rows.append((abs(c.y() - here.y()), abs(c.x() - here.x()), other))
+        if not rows:
+            return None
+        nearest = min(r[0] for r in rows)
+        return min((r for r in rows if r[0] == nearest), key=lambda r: r[1])[2]
+
+    def keyPressEvent(self, e):                  # noqa: N802  (arrows step, Home/End, PageUp/Down, Enter opens)
         order = self.order()
-        if e.key() in (Qt.Key_Return, Qt.Key_Enter) and self._selected:
+        key = e.key()
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and self._selected:
             self.opened.emit(self._selected)
-        elif e.key() == Qt.Key_Escape:
+        elif key == Qt.Key.Key_Escape:
             self.back.emit()
-        elif e.key() in (Qt.Key_Right, Qt.Key_Left) and order:
+        elif key in (Qt.Key.Key_Right, Qt.Key.Key_Left) and order:
             i = order.index(self._selected) if self._selected in order else -1
-            self.clicked.emit(order[max(0, min(len(order) - 1, i + (1 if e.key() == Qt.Key_Right else -1)))])
-        elif e.key() in (Qt.Key_Down, Qt.Key_Up) and order:
-            cur = self.thumbs.get(self._selected)
-            if cur is None:
+            self.clicked.emit(order[max(0, min(len(order) - 1, i + (1 if key == Qt.Key.Key_Right else -1)))])
+        elif key == Qt.Key.Key_Home and order:
+            self.clicked.emit(order[0])
+        elif key == Qt.Key.Key_End and order:
+            self.clicked.emit(order[-1])
+        elif key in (Qt.Key.Key_Down, Qt.Key.Key_Up, Qt.Key.Key_PageDown, Qt.Key.Key_PageUp) and order:
+            if self._selected is None or self.thumbs.get(self._selected) is None:
                 self.clicked.emit(order[0])
                 return
-            inner = self.widget()
-            here = cur.mapTo(inner, cur.rect().center())
-            down = e.key() == Qt.Key_Down
-            rows = []                                   # the thumbnails in the nearest row above / below
-            for png, th in self.thumbs.items():
-                c = th.mapTo(inner, th.rect().center())
-                if (c.y() > here.y() + 4) if down else (c.y() < here.y() - 4):
-                    rows.append((abs(c.y() - here.y()), abs(c.x() - here.x()), png))
-            if rows:
-                nearest = min(r[0] for r in rows)
-                self.clicked.emit(min((r for r in rows if r[0] == nearest), key=lambda r: r[1])[2])
+            down = key in (Qt.Key.Key_Down, Qt.Key.Key_PageDown)
+            rows = 1
+            if key in (Qt.Key.Key_PageDown, Qt.Key.Key_PageUp):          # a page: as many rows as are in view
+                rows = max(1, self.viewport().height() // max(1, self.thumbs[self._selected].height() + 8))
+            target = self._selected
+            for _ in range(rows):
+                nxt = self._row_neighbour(target, down)
+                if nxt is None:
+                    break
+                target = nxt
+            if target != self._selected:
+                self.clicked.emit(target)
         else:
             super().keyPressEvent(e)
+
+
+def read_thumb(png: str) -> QImage:
+    """A result's thumbnail, decoded at the reduced size (a PNG is not read in full when only 400 px are shown)."""
+    return read_scaled(png, THUMB_DECODE)[0]
 
 
 class ThumbLoader(QObject):
@@ -438,7 +465,7 @@ class ThumbLoader(QObject):
         super().__init__(parent)
         self._q: queue.LifoQueue = queue.LifoQueue()
         self._stop = threading.Event()
-        threading.Thread(target=self._work, daemon=True).start()
+        run_in_background(self._work, on_done=lambda _r: None, owner=self)
 
     def request(self, png: str, mtime_ns: int):
         self._q.put((png, mtime_ns))
@@ -453,12 +480,11 @@ class ThumbLoader(QObject):
             if job is None or self._stop.is_set():
                 return
             png, mt = job
-            img = QImage(png)
-            if not img.isNull():
-                img = img.scaled(THUMB_DECODE, THUMB_DECODE, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             try:
-                self.ready.emit(png, mt, img)
-            except RuntimeError:                  # the window is gone
+                img = read_thumb(png)
+            except Exception:  # noqa: BLE001  (one bad file or a decoder error must not stop the other thumbnails)
+                img = QImage()
+            if not safe_emit(self.ready, png, mt, img):
                 return
 
 
@@ -469,7 +495,7 @@ class Chip(QLabel):
         if accent:
             self.setProperty("severity", "info")
         self.setToolTip(tip)
-        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
 
 class InfoCard(QFrame):
@@ -480,9 +506,7 @@ class InfoCard(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("infoCard")
-        t = theme()
-        self.setStyleSheet(f"QFrame#infoCard {{ background: {t.bgRaised.name()}; border: 1px solid "
-                           f"{t.lineSubtle.name()}; border-radius: 6px; }}")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
         v = QVBoxLayout(self)
         v.setContentsMargins(8, 6, 8, 6)
         v.setSpacing(4)
@@ -492,13 +516,13 @@ class InfoCard(QFrame):
         prow.setSpacing(4)
         self.b_prompt = QToolButton()
         self.b_prompt.setCheckable(True)
-        self.b_prompt.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self.b_prompt.setArrowType(Qt.RightArrow)
+        self.b_prompt.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.b_prompt.setArrowType(Qt.ArrowType.RightArrow)
         self.b_prompt.setText("Prompt")
         self.b_prompt.setAutoRaise(True)
         self.b_prompt.toggled.connect(self._toggle)
         self.prompt_line = label("", level="tertiary")
-        self.prompt_line.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.prompt_line.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.b_copy = QPushButton("Copy")
         self.b_copy.setAutoDefault(False)
         self.b_copy.setToolTip("Copy the prompt (as you wrote it) to the clipboard")
@@ -506,7 +530,7 @@ class InfoCard(QFrame):
         prow.addWidget(self.b_prompt)
         prow.addWidget(self.prompt_line, 1)
         self.prompt_gap = QWidget()
-        self.prompt_gap.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.prompt_gap.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.prompt_gap.hide()
         prow.addWidget(self.prompt_gap, 1)
         prow.addWidget(self.b_copy)
@@ -520,7 +544,7 @@ class InfoCard(QFrame):
         self.set(None)
 
     def _toggle(self, on: bool):
-        self.b_prompt.setArrowType(Qt.DownArrow if on else Qt.RightArrow)
+        self.b_prompt.setArrowType(Qt.ArrowType.DownArrow if on else Qt.ArrowType.RightArrow)
         self.prompt_box.setVisible(on and bool(self._prompt))
         self.prompt_line.setVisible(not on)
         self.prompt_gap.setVisible(on)
@@ -529,6 +553,21 @@ class InfoCard(QFrame):
         if self._prompt:
             QGuiApplication.clipboard().setText(self._prompt)
             self.b_copy.setText("Copied")
+
+    def colours(self) -> tuple[QColor, QColor]:
+        """(fill, border), read from the theme each time the card is painted."""
+        t = theme()
+        return t.bgRaised, t.lineSubtle
+
+    def paintEvent(self, e):                     # noqa: N802
+        fill, line = self.colours()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setBrush(fill)
+        p.setPen(QPen(line, 1))
+        p.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 6, 6)
+        p.end()
+        super().paintEvent(e)
 
     def text(self) -> str:
         return self._text
@@ -572,9 +611,8 @@ class InfoCard(QFrame):
             b = QPushButton(f"seed {info['seed']}  ↻")
             b.setAutoDefault(False)
             b.setProperty("role", "chipButton")
-            b.setCursor(Qt.PointingHandCursor)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.setFixedHeight(max(16, self.chips.items[-1].sizeHint().height()) if self.chips.items else 18)
-            b.setStyleSheet("padding: 0 6px;")
             b.setToolTip("Use this seed for the next Generate (and keep it: New seed after each Generate is "
                          "switched off)")
             seed = info["seed"]

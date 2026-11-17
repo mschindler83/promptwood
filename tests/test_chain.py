@@ -160,3 +160,130 @@ def test_cli_rejects_bad_input_before_loading_anything(tmp_path, start, capsys):
     assert main([str(start), str(empty), "--out", str(tmp_path / "o")]) == 2
     assert main([str(tmp_path / "missing.png"), str(p), "--out", str(tmp_path / "o")]) == 2
     assert main([str(start), str(p), "--out", str(tmp_path / "o"), "--size", "500x500"]) == 2
+
+
+def test_recorded_cast_names_the_kind_of_a_non_person():
+    kw = dict(model="m", lora=None, strength=1.0, frames=73, steps=28, width=672, height=384, audio=True,
+              refs=[{"file": "refs/ref1.png", "sha1": "x"}])
+    s = chain.settings_dict(cast=[{"name": "Anna", "desc": "woman"}], **kw)
+    assert s["cast"] == [{"name": "Anna", "desc": "woman"}]                    # a person: as before
+    s = chain.settings_dict(cast=[{"name": "Anna", "desc": "woman"}, {"name": "Hall", "desc": "", "kind": "place"}],
+                            **kw)
+    assert s["cast"][1] == {"name": "Hall", "desc": "", "kind": "place"}
+
+
+def test_joined_seconds_reads_the_container(tmp_path):
+    """The length of a joined video without decoding it (Play path on a joined path must not count frames)."""
+    import subprocess
+    v = tmp_path / "a.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=64x64:rate=24", "-frames:v", "48",
+                    "-pix_fmt", "yuv420p", str(v)], check=True)
+    assert abs(chain.joined_seconds(v) - 2.0) < 1e-6 and chain.probe(v)["frames"] == 48
+
+
+def _clip(path: Path, hz: int | None, frames: int = 48, amp: float = 0.5) -> Path:
+    """A 24 fps clip of `frames` frames, with a stereo sine of hz at amplitude amp (None: no sound). Stereo, as
+    ffmpeg's mono-to-stereo upmix would lower the level by 3 dB."""
+    cmd = ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"testsrc=size=64x64:rate=24:d={frames / 24:.6f}"]
+    if hz:
+        e = f"{amp}*sin(2*PI*{hz}*t)"
+        cmd += ["-f", "lavfi", "-i", f"aevalsrc={e}|{e}:s=48000:d={frames / 24:.6f}", "-c:a", "aac"]
+    subprocess.run(cmd + ["-c:v", "libx264", "-pix_fmt", "yuv420p", str(path)], check=True)
+    return path
+
+
+def _wav(path: Path, hz: int, secs: float, amp: float = 0.5) -> Path:
+    e = f"{amp}*sin(2*PI*{hz}*t)"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"aevalsrc={e}|{e}:s=48000:d={secs}",
+                    "-c:a", "pcm_s16le", str(path)], check=True)
+    return path
+
+
+def _pcm(path: Path, start: float = 0.0, secs: float | None = None):
+    """The sound's first channel as float samples at 48 kHz (start / secs: a part of it); not a downmix, which
+    would add up the channels."""
+    import numpy as np
+    cut = ["-ss", f"{start}"] + (["-t", f"{secs}"] if secs else [])
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), *cut, "-vn", "-af", "pan=mono|c0=c0", "-ar",
+                          "48000", "-f", "f32le", "-"], capture_output=True, check=True).stdout
+    return np.frombuffer(raw, np.float32)
+
+
+def _band(x, hz: float) -> float:
+    """The amplitude of the sine at hz in x (about 0.5 for a 0.5 sine)."""
+    import numpy as np
+    spec = np.abs(np.fft.rfft(x * np.hanning(len(x)))) / (len(x) / 4)
+    k = round(hz * len(x) / 48000)
+    return float(spec[k - 3:k + 4].max())
+
+
+def _video_stream(path: Path) -> str:
+    """The video stream's codec, duration and frame count as ffprobe states them (to see it was copied)."""
+    out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                          "stream=duration,nb_frames,codec_name", "-of", "csv=p=0", str(path)],
+                         capture_output=True, text=True, check=True).stdout.strip()
+    return out
+
+
+def _audio_streams(path: Path) -> int:
+    out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index", "-of",
+                          "csv=p=0", str(path)], capture_output=True, text=True, check=True).stdout.split()
+    return len(out)
+
+
+def test_mix_audio_keeps_both_sounds(tmp_path):
+    """mix_audio: the clip's own 440 Hz and the given 1000 Hz are both heard at their own level, in one audio
+    stream; the picture is copied (same frames, same length); padded to the clip's length like replace_audio."""
+    v = _clip(tmp_path / "clip.mp4", 440)
+    before = _video_stream(v)
+    chain.mix_audio(v, _wav(tmp_path / "given.wav", 1000, 2.0, amp=0.25))
+    assert _video_stream(v) == before and chain.probe(v)["frames"] == 48 and _audio_streams(v) == 1
+    assert abs(chain.audio_seconds(v) - 2.0) < 0.05
+    x = _pcm(v, 0.2, 1.6)
+    assert abs(_band(x, 440) - 0.5) < 0.06 and abs(_band(x, 1000) - 0.25) < 0.04     # not normalised (halved)
+    v2 = _clip(tmp_path / "short.mp4", 440)
+    chain.mix_audio(v2, _wav(tmp_path / "short.wav", 1000, 0.8))                       # shorter: silence after it
+    assert abs(chain.audio_seconds(v2) - 2.0) < 0.05 and chain.probe(v2)["frames"] == 48
+    assert _band(_pcm(v2, 0.1, 0.6), 1000) > 0.4 and _band(_pcm(v2, 1.1, 0.8), 1000) < 0.02
+    assert _band(_pcm(v2, 1.1, 0.8), 440) > 0.4                                        # the clip's own goes on
+    v3 = _clip(tmp_path / "long.mp4", 440)
+    chain.mix_audio(v3, _wav(tmp_path / "long.wav", 1000, 5.0))                        # longer: cut at the clip's end
+    assert abs(chain.audio_seconds(v3) - 2.0) < 0.05 and chain.probe(v3)["frames"] == 48
+
+
+def test_mix_audio_never_clips_and_takes_a_level(tmp_path):
+    """Two full-scale sounds together stay under the limit; the level changes only the given sound's share."""
+    import numpy as np
+    v = _clip(tmp_path / "loud.mp4", 440, amp=1.0)
+    chain.mix_audio(v, _wav(tmp_path / "loud.wav", 1000, 2.0, amp=1.0))
+    x = _pcm(v)
+    assert np.abs(x).max() < 1.0 and np.abs(x).max() > 0.6          # limited, not silenced
+    assert _band(_pcm(v, 0.2, 1.6), 440) > 0.25 and _band(_pcm(v, 0.2, 1.6), 1000) > 0.25
+    a, b = _clip(tmp_path / "a.mp4", 440, amp=0.25), _clip(tmp_path / "b.mp4", 440, amp=0.25)
+    given = _wav(tmp_path / "g.wav", 1000, 2.0, amp=0.25)
+    chain.mix_audio(a, given)
+    chain.mix_audio(b, given, level_db=-12)
+    xa, xb = _pcm(a, 0.2, 1.6), _pcm(b, 0.2, 1.6)
+    assert abs(_band(xa, 440) - _band(xb, 440)) < 0.02                              # the clip's own: unchanged
+    assert abs(20 * np.log10(_band(xb, 1000) / _band(xa, 1000)) + 12) < 1.0          # the given one: -12 dB
+
+
+def test_mix_audio_without_a_sound_of_its_own(tmp_path):
+    """A clip without sound (the project's sound off) gets just the given sound, as replace_audio would."""
+    v = _clip(tmp_path / "mute.mp4", None)
+    chain.mix_audio(v, _wav(tmp_path / "g.wav", 1000, 1.0, amp=0.5))
+    assert _audio_streams(v) == 1 and chain.probe(v)["frames"] == 48 and abs(chain.audio_seconds(v) - 2.0) < 0.05
+    assert abs(_band(_pcm(v, 0.1, 0.8), 1000) - 0.5) < 0.06
+
+
+def test_mix_is_recorded_only_with_mix():
+    """The overlay's record stays as before; a mix adds "mix" (and its level only when not 0)."""
+    common = dict(model="m", lora=None, strength=1.0, frames=48, steps=8, width=64, height=64, audio=True)
+    ss = {"file": "", "start": 0.0, "secs": 2.0, "overlay": True}
+    plain = chain.settings_dict(**common, source_sound=ss)["source_sound"]
+    assert plain == {"file": "", "start": 0.0, "secs": 2.0, "file_key": None, "overlay": True}
+    mixed = chain.settings_dict(**common, source_sound={**ss, "mix": True})["source_sound"]
+    assert mixed == {**plain, "mix": True}
+    assert chain.settings_dict(**common, source_sound={**ss, "mix": True, "mix_level": -6})["source_sound"] == \
+        {**plain, "mix": True, "mix_level": -6.0}
+    assert "mix" not in chain.settings_dict(**common, source_sound={**ss, "overlay": False, "mix": True})["source_sound"]

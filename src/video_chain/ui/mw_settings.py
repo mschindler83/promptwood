@@ -1,0 +1,169 @@
+"""Window settings (QSettings), recent projects, the title."""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from PySide6.QtCore import Qt
+
+from .. import runpod as RP, tree as T, triggers
+from . import ui_logic as UL
+from . import settings_keys as SK
+from .ui_logic import (
+    DEFAULT_COMFY_LAUNCHER, DEFAULT_COMFY_URL, LLM_DEFAULT_PORT, LLM_DEFAULT_SERVER, MAX_RECENT)
+from .mw_host import MainWindowHost
+from .qsvalue import qs_value
+from .workers import run_in_background
+
+
+class SettingsMixin(MainWindowHost):
+    """Window settings (QSettings), recent projects, the title."""
+
+    # ------------------------------------------------------------------ settings
+    def _scan_gguf_models(self):
+        """Look for GGUF language models in the model folders, in the background (many folders, slow disks)."""
+        run_in_background(UL.find_gguf_models, on_done=self._gguf_found, owner=self)
+
+    def _gguf_found(self, files: list[Path]):
+        """The model folders were searched: fill the model list, keeping what is chosen or typed."""
+        text, data = self.llm_model.currentText(), self.llm_model.currentData()
+        for f in files:
+            if self.llm_model.findData(str(f)) < 0:
+                self.llm_model.addItem(f.name, str(f))
+                self.llm_model.setItemData(self.llm_model.count() - 1, str(f), Qt.ItemDataRole.ToolTipRole)
+        i = self.llm_model.findData(data) if data else -1
+        if i >= 0:
+            self.llm_model.setCurrentIndex(i)
+        elif text:
+            self.llm_model.setEditText(text)
+        if files and not self._llm_on_saved:
+            self.llm_on.setChecked(True)
+
+    def _load_settings(self):
+        q = self.qs
+        self.keep_loaded.setChecked(qs_value(q, SK.KEEP_LOADED, True, bool))
+        self.comfy_url.setText(qs_value(q, SK.COMFY_URL, DEFAULT_COMFY_URL, str))
+        self.comfy_launcher.setText(qs_value(q, SK.COMFY_LAUNCHER, DEFAULT_COMFY_LAUNCHER, str))
+        self.comfy_dir.setText(qs_value(q, SK.COMFY_DIR, UL.DEFAULT_COMFY_DIR, str))
+        self.comfy_cleanup.setChecked(qs_value(q, SK.COMFY_CLEANUP, True, bool))
+        self.comfy_autostart.setChecked(qs_value(q, SK.COMFY_AUTO_START, True, bool))
+        self.triggers_online.setChecked(qs_value(q, SK.LORA_TRIGGERS_ONLINE, True, bool))
+        self.civitai_site.blockSignals(True)
+        self.civitai_site.setCurrentIndex(max(0, self.civitai_site.findData(
+            triggers.set_site(qs_value(q, SK.CIVITAI_SITE, "", str)))))
+        self.civitai_site.blockSignals(False)
+        self._llm_on_saved = q.contains(SK.LLM_SERVER_ON)      # (not saved yet: on when a model is found, see _gguf_found)
+        self.llm_on.setChecked(qs_value(q, SK.LLM_SERVER_ON, False, bool))
+        self.llm_server.setText(qs_value(q, SK.LLM_SERVER, LLM_DEFAULT_SERVER, str))
+        saved = qs_value(q, SK.LLM_MODEL, "", str)
+        if saved:
+            i = self.llm_model.findData(saved)
+            if i < 0:
+                self.llm_model.addItem(Path(saved).name, saved)
+                i = self.llm_model.count() - 1
+            self.llm_model.setCurrentIndex(i)
+        self.llm_port.setValue(qs_value(q, SK.LLM_PORT, LLM_DEFAULT_PORT, int))
+        self.llm_cpu_moe.setChecked(qs_value(q, SK.LLM_CPU_MOE, True, bool))
+        self.video_gpu.blockSignals(True)
+        self.video_gpu.setChecked(qs_value(q, SK.VIDEO_GPU, True, bool))
+        self.video_gpu.blockSignals(False)
+        self.idle_minutes.setValue(qs_value(q, SK.IDLE_MINUTES, 15, int))
+        self._runpod_loading = True
+        gpu = qs_value(q, SK.RUNPOD_GPU, RP.DEFAULT_GPU, str)
+        i = self.runpod_gpu.findData(gpu)
+        if i >= 0:
+            self.runpod_gpu.setCurrentIndex(i)
+        else:
+            self.runpod_gpu.setEditText(gpu)
+        self.runpod_fallback.setChecked(qs_value(q, SK.RUNPOD_FALLBACK, True, bool))
+        self.runpod_volume.setText(qs_value(q, SK.RUNPOD_VOLUME, "", str))
+        self.runpod_without_volume.setChecked(qs_value(q, SK.RUNPOD_WITHOUT_VOLUME, True, bool))
+        self._runpod_loading = False
+        if g := q.value(SK.GEOMETRY):
+            self.restoreGeometry(g)
+        self._restore_layout()
+        self._fill_recent()
+        proj = qs_value(q, SK.PROJECT, "", str)
+        if proj and Path(proj).is_dir():
+            self.open_project(Path(proj), quiet=True)
+
+    def save_settings(self):
+        q = self.qs
+        q.setValue(SK.KEEP_LOADED, self.keep_loaded.isChecked())
+        q.setValue(SK.COMFY_URL, self.comfy_url.text().strip())
+        q.setValue(SK.COMFY_LAUNCHER, self.comfy_launcher.text().strip())
+        q.setValue(SK.COMFY_DIR, self.comfy_dir.text().strip())
+        q.setValue(SK.COMFY_CLEANUP, self.comfy_cleanup.isChecked())
+        q.setValue(SK.COMFY_AUTO_START, self.comfy_autostart.isChecked())
+        q.setValue(SK.LORA_TRIGGERS_ONLINE, self.triggers_online.isChecked())
+        q.setValue(SK.CIVITAI_SITE, self.civitai_site.currentData())
+        q.setValue(SK.VIDEO_GPU, self.video_gpu.isChecked())
+        q.setValue(SK.LLM_SERVER_ON, self.llm_on.isChecked())
+        q.setValue(SK.LLM_SERVER, self.llm_server.text().strip())
+        q.setValue(SK.LLM_MODEL, self.llm_model_path())
+        q.setValue(SK.LLM_PORT, self.llm_port.value())
+        q.setValue(SK.LLM_CPU_MOE, self.llm_cpu_moe.isChecked())
+        q.setValue(SK.IDLE_MINUTES, self.idle_minutes.value())
+        q.setValue(SK.PROJECT, str(self.project) if self.project else "")
+        if self.tree is not None:
+            q.setValue(SK.LAST_OPTIONS, json.dumps(self.tree.options))
+        q.setValue(SK.GEOMETRY, self.saveGeometry())
+        split, shown = self.split.sizes(), self.act_left.isChecked()
+        q.setValue(SK.LAYOUT, UL.LayoutState(split, self.center.sizes(), shown,
+                                            (split[0] if shown else 0) or self._left_w).to_json())
+        q.sync()
+
+    # ---- recent projects
+    def recent_projects(self) -> list[str]:
+        try:
+            items = json.loads(qs_value(self.qs, SK.RECENT_PROJECTS, "[]", str))
+        except ValueError:
+            items = []
+        return [p for p in items if isinstance(p, str)]
+
+    def _remember_project(self, folder: Path):
+        items = [str(folder)] + [p for p in self.recent_projects() if p != str(folder)]
+        self.qs.setValue(SK.RECENT_PROJECTS, json.dumps(items[:MAX_RECENT]))
+        self._fill_recent()
+
+    @staticmethod
+    def _is_project(folder: Path) -> bool:
+        """A folder with a project (tree.json, or the chain.json of before branching)."""
+        return (Path(folder) / T.TREE_FILE).exists() or (Path(folder) / "chain.json").exists()
+
+    def _fill_recent(self):
+        recent = self.recent_projects()
+        items = [p for p in recent if self._is_project(Path(p))]
+        for menu in (self.recent_menu, self.recent_file_menu):
+            menu.clear()
+            for p in items:
+                act = menu.addAction(f"{Path(p).name}   —   {Path(p).parent}")
+                act.triggered.connect(lambda _=False, f=p: self.open_project(Path(f)))
+            if not items:
+                menu.addAction("no recent projects").setEnabled(False)
+        self.b_recent.setEnabled(bool(recent))
+
+    def _update_title(self):
+        if self.project is None:
+            self.setWindowTitle("Promptwood")
+            return
+        scene = self.film.scene_of(self.project) if self.film else None
+        name = self.film.root.name if self.film else self.project.name
+        many = self.film is not None and len(self.film.scenes) > 1
+        self.setWindowTitle(f"{name} › {scene.title} — Promptwood" if many and scene else f"{name} — Promptwood")
+
+    # ---- the whole film: play, export, generate
+    def _busy_reason(self) -> str:
+        """Why the project must not be changed, opened, closed or copied right now ("" when it may)."""
+        if self.running:
+            return "Wait until generating has finished."
+        if self._joins or self._converts or self._copying:
+            return "Wait until generating, joins, conversions and copies have finished."
+        return ""
+
+    def _idle_or_say(self) -> bool:
+        """True when nothing runs; else the status says why the button did nothing."""
+        why = self._busy_reason()
+        if why:
+            self.status.setText(why)
+        return not why

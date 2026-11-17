@@ -7,24 +7,28 @@ import hashlib
 import html
 import json
 import re
+from typing import cast
+from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtGui import QColor, QSyntaxHighlighter, QTextCharFormat
-from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QDialog, QDialogButtonBox, QFrame, QHBoxLayout, QInputDialog,
-                               QLabel, QLineEdit, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton,
+from PySide6.QtCore import QSize, Qt, QTimer, Signal
+from PySide6.QtGui import (QColor, QGuiApplication, QPainter, QPen, QSyntaxHighlighter,
+                           QTextCharFormat)
+from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QDialog, QFrame, QHBoxLayout, QInputDialog,
+                               QLabel, QLineEdit, QMenu, QPlainTextEdit, QPushButton, QRadioButton,
                                QSizePolicy, QSpinBox, QTextBrowser, QToolButton, QVBoxLayout, QWidget)
 
 from .. import variations as V
-from .results_gallery import FlowBox
 from .theme import theme
-from .widgets import guard_wheel, icon_button, label
+from .dialogs import button_row, confirm, failed, tell, warn
+from .widgets import FlowBox, guard_wheel, icon_button, label
 
 COLORS = ("#e8a33d", "#5aa9e6", "#7bc96f", "#e46f8e", "#a98be0", "#4fc3b9", "#e07b53", "#c9c44f")
 MAX_ALL = 200                    # "every combination" above this asks first
 POSITIONS_KEPT = 60
+FEW_VALUES = 3                   # removing more values than this at once asks first
 HELP = """<b>Prompt variations</b> make many prompts from one.<br><br>
 1. Write <b>{name}</b> in the prompt where something should vary, e.g. <i>a {animal} in the {place}</i>.<br>
-2. Give each name its values below: type one and press Enter, or paste a list (one per line, or comma-separated).<br>
+2. Give each name its values below: type one and press Enter (a comma stays in the value), or add a list with the list button (one per line, or comma-separated).<br>
 3. Generate makes one image per combination: 3 animals × 2 places = 6 images.<br><br>
 <b>Order</b>: <i>In order</i> goes through every combination and continues there next time; <i>Shuffled</i> takes
 every combination once in a random order; <i>Random</i> picks freely (weights count: a value ×3 comes three times as
@@ -34,6 +38,15 @@ often).<br>
 optional part: <i>{?style|, in {style} style}</i> is left out when <i>style</i> is empty.<br>
 Placeholders work in the negative prompt too. Click a value to switch it off, double-click to edit it,
 right-click for its weight."""
+
+
+def _to_int(value, default: int, lo: int, hi: int) -> int:
+    """A whole number from saved state that may be damaged: the default when it is not one, kept within lo..hi."""
+    try:
+        n = int(value or default)
+    except (TypeError, ValueError):
+        n = default
+    return min(max(n, lo), hi)
 
 
 def color_of(name: str, names: list[str]) -> QColor:
@@ -57,8 +70,8 @@ class PlaceholderHighlighter(QSyntaxHighlighter):
             f = QTextCharFormat()
             var = self.panel.variable(name)
             if var is None or not var.active():
-                f.setUnderlineStyle(QTextCharFormat.WaveUnderline)
-                f.setUnderlineColor(QColor("#e05555"))
+                f.setUnderlineStyle(QTextCharFormat.UnderlineStyle.WaveUnderline)
+                f.setUnderlineColor(theme().negative)
                 f.setToolTip(f"{{{name}}} has no values yet: add them in Variations")
             else:
                 c = color_of(name, names)
@@ -66,6 +79,10 @@ class PlaceholderHighlighter(QSyntaxHighlighter):
                 bg.setAlpha(55)
                 f.setBackground(bg)
                 f.setForeground(c.lighter(125))
+                # (a cue besides the colour)
+                f.setUnderlineStyle(QTextCharFormat.UnderlineStyle.SingleUnderline)
+                f.setUnderlineColor(c)
+                f.setToolTip(f"Variable {{{name}}} (number {names.index(name) + 1 if name in names else 0})")
             f.setFontWeight(600)
             self.setFormat(m.start(), m.end() - m.start(), f)
 
@@ -79,8 +96,11 @@ class Pill(QFrame):
         super().__init__(parent)
         self.value, self.color = value, color
         self.setObjectName("pill")
-        self.setFrameShape(QFrame.NoFrame)
-        self.setCursor(Qt.PointingHandCursor)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        # (Space switches, F2 / Enter edits, Delete removes, Menu: weight)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._look = None
         h = QHBoxLayout(self)
         h.setContentsMargins(8, 1, 2, 1)
         h.setSpacing(2)
@@ -99,43 +119,64 @@ class Pill(QFrame):
         self.refresh()
 
     def refresh(self):
-        v, c = self.value, self.color
+        v = self.value
         shown = html.escape(v.text) if v.text.strip() else "<i>(nothing)</i>"
         self.text.setText(f"<s>{shown}</s>" if not v.on else shown)
         self.weight.setText(f"×{v.weight}")
         self.weight.setVisible(self.show_weight or v.weight != 1)
         fg = theme().textPrimary if v.on else theme().textTertiary
-        self.setStyleSheet(f"QLabel {{ color: {fg.name()}; background: transparent; border: none; }} "
-                           f"QToolButton {{ color: {fg.name()}; border: none; background: transparent; }}")
+        if self._look != fg.name():              # (the stylesheet is only set again when the colour changes)
+            self._look = fg.name()
+            self.setStyleSheet(f"QLabel {{ color: {fg.name()}; background: transparent; border: none; }} "
+                               f"QToolButton {{ color: {fg.name()}; border: none; background: transparent; }}")
         self.update()
         self.setToolTip(("Click: switch off (kept, but not used)" if v.on else "Switched off: click to use it again")
-                        + "\nDouble-click: edit · Right-click: weight (for Random), edit, remove")
+                        + "\nDouble-click: edit · Right-click: weight (for Random), edit, remove"
+                        + "\nKeyboard: Space switches, F2 edits, Delete removes, Menu key: weight")
 
     def paintEvent(self, _e):                    # noqa: N802  (the rounded pill, painted: the theme's QFrame style won)
-        from PySide6.QtGui import QPainter, QPen
         c, on = self.color, self.value.on
         bg = QColor(c)
         bg.setAlpha(60 if on else 16)
         border = QColor(c)
         border.setAlpha(255 if on else 90)
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.setPen(QPen(border, 1, Qt.SolidLine if on else Qt.DashLine))
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(QPen(border, 1, Qt.PenStyle.SolidLine if on else Qt.PenStyle.DashLine))
         p.setBrush(bg)
         r = self.rect().adjusted(0, 0, -1, -1)
         p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
+        if self.hasFocus():                      # (the focus ring for keyboard users)
+            p.setPen(QPen(theme().accent, 2))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(r.adjusted(1, 1, -1, -1), r.height() / 2, r.height() / 2)
         p.end()
 
-    def mousePressEvent(self, e):                # noqa: N802
-        if e.button() == Qt.LeftButton:
+    def keyPressEvent(self, e):                  # noqa: N802
+        k = e.key()
+        if k == Qt.Key.Key_Space:
             self.value.on = not self.value.on
             self.refresh()
             self.changed.emit()
-        elif e.button() == Qt.RightButton:
+        elif k in (Qt.Key.Key_F2, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.edit()
+        elif k in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            self.removed.emit(self)
+        elif k == Qt.Key.Key_Menu:
+            self._menu(self.mapToGlobal(self.rect().bottomLeft()))
+        else:
+            super().keyPressEvent(e)
+
+    def mousePressEvent(self, e):                # noqa: N802
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.value.on = not self.value.on
+            self.refresh()
+            self.changed.emit()
+        elif e.button() == Qt.MouseButton.RightButton:
             self._menu(e.globalPosition().toPoint())
 
     def mouseDoubleClickEvent(self, e):          # noqa: N802
-        if e.button() == Qt.LeftButton:
+        if e.button() == Qt.MouseButton.LeftButton:
             self.value.on = not self.value.on    # (the first click of the double-click switched it)
             self.edit(notify=False)              # (the dialog first: a rebuild meanwhile would delete this pill)
             self.changed.emit()                  # once, edited or cancelled
@@ -180,6 +221,7 @@ class VariableCard(QFrame):
     typing = Signal(str)
     insert = Signal(str)
     remove = Signal(str)
+    renamed = Signal(str, str)                # old, new
 
     def __init__(self, var: V.Variable, color: QColor, used: bool, show_weight: bool, pick_file=None, parent=None):
         super().__init__(parent)
@@ -215,7 +257,7 @@ class VariableCard(QFrame):
             self.pills.add(p)
         v.addWidget(self.pills)
         self.add = QLineEdit()
-        self.add.setPlaceholderText("add a value … (Enter; paste several lines at once)")
+        self.add.setPlaceholderText("add a value … (Enter; for a list use the list button)")
         self.add.returnPressed.connect(self._add_typed)
         v.addWidget(self.add)
         if not used:
@@ -246,7 +288,7 @@ class VariableCard(QFrame):
             return
         self.add.clear()
         self.typing.emit(self.var.name)          # (the panel puts the cursor back here after it rebuilt)
-        self.add_values(V.split_values(text) if ("\n" in text or "," in text) else [text])
+        self.add_values(V.split_values(text) if "\n" in text else [text])      # (a comma belongs to the value)
 
     def paste_list(self):
         dlg = QDialog(self)
@@ -257,11 +299,9 @@ class VariableCard(QFrame):
         box = QPlainTextEdit()
         box.setMinimumSize(420, 260)
         lay.addWidget(box)
-        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        bb.accepted.connect(dlg.accept)
-        bb.rejected.connect(dlg.reject)
+        bb, _ok = button_row(dlg, "Add")
         lay.addWidget(bb)
-        if dlg.exec() == QDialog.Accepted:
+        if dlg.exec() == QDialog.DialogCode.Accepted:
             text = "\n".join(x for x in box.toPlainText().splitlines() if not x.strip().startswith("#"))
             self.add_values(V.split_values(text))
         dlg.deleteLater()
@@ -281,10 +321,9 @@ class VariableCard(QFrame):
             path = self.pick_file() if self.pick_file else None
             if path:
                 try:
-                    from pathlib import Path
                     self.add_values(V.wildcard_values(Path(path).read_text(encoding="utf-8", errors="replace")))
                 except OSError as e:
-                    QMessageBox.warning(self, "Wildcard file", f"Could not read it: {e}")
+                    failed(self, "Wildcard file", "read it", e)
         elif chosen is a_none:
             if not any(not v.text.strip() for v in self.var.values):
                 self.var.values.append(V.Value(""))
@@ -298,13 +337,34 @@ class VariableCard(QFrame):
             self.changed.emit()
         elif chosen is a_rename:
             new, ok = QInputDialog.getText(self, "Rename", "New name (letters, digits, _ and -):", text=self.var.name)
-            if ok and re.fullmatch(V.NAME, new.strip()) and new.strip() != self.var.name:
-                self.remove.emit(f"rename:{self.var.name}:{new.strip()}")
+            if ok:
+                self.rename_to(new)
         elif chosen is a_clear:
-            self.var.values.clear()
-            self.changed.emit()
+            self.clear_values()
         elif chosen is a_rm:
-            self.remove.emit(self.var.name)
+            self.remove_variable()
+
+    def rename_to(self, new: str):
+        new = new.strip()
+        if new and new != self.var.name:
+            self.renamed.emit(self.var.name, new)
+
+    def _lost(self) -> str:
+        n = len(self.var.values)
+        return f"{n} value{'s' if n != 1 else ''}"
+
+    def clear_values(self):
+        if len(self.var.values) > FEW_VALUES and not confirm(self, "Variations",
+                                                             f"Remove all {self._lost()} of {{{self.var.name}}}?"):
+            return
+        self.var.values.clear()
+        self.changed.emit()
+
+    def remove_variable(self):
+        if len(self.var.values) > FEW_VALUES and not confirm(
+                self, "Variations", f"Remove {{{self.var.name}}} with its {self._lost()}?"):
+            return
+        self.remove.emit(self.var.name)
 
 
 class VariationsPanel(QFrame):
@@ -319,6 +379,8 @@ class VariationsPanel(QFrame):
         self.vars: list[V.Variable] = []
         self.prompt, self.negative = "", ""
         self.positions: dict[str, int] = {}
+        self._typing_in: str | None = None
+        self._plan_of: tuple = (None, None)         # (signature, V.Plan): see _plan
         self.setObjectName("variations")
         t = theme()
         self.setStyleSheet(f"QFrame#variations {{ border: 1px solid {t.lineSubtle.name()}; border-radius: 8px; }}")
@@ -332,12 +394,12 @@ class VariationsPanel(QFrame):
         self.on.toggled.connect(lambda _on: self._rebuild())
         head.addWidget(self.on)
         self.summary = label("", level="tertiary")
-        self.summary.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.summary.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         head.addWidget(self.summary, 1)
         b_new = icon_button("plus", "New variable: a name for {name}, written into the prompt at the cursor")
         b_new.clicked.connect(lambda: self.new_variable())
         b_help = icon_button("info", "How variations work")
-        b_help.clicked.connect(lambda: QMessageBox.information(self, "Prompt variations", HELP))
+        b_help.clicked.connect(lambda: tell(self, "Prompt variations", HELP))
         b_menu = icon_button("more", "Import / export (the Dynamic Prompter node's JSON), remove all")
         b_menu.clicked.connect(lambda: self._menu(b_menu))
         for b in (b_new, b_help, b_menu):
@@ -362,18 +424,21 @@ class VariationsPanel(QFrame):
         for key, text, tip in (("order", "In order", "Every combination in turn; the next Generate continues there"),
                                ("shuffle", "Shuffled", "Every combination once, in a random order"),
                                ("random", "Random", "Free random picks (values with a higher weight come more often)")):
-            b = QPushButton(text)
-            b.setCheckable(True)
-            b.setToolTip(tip)
-            b.setAutoDefault(False)
-            self.modes.addButton(b)
-            self.mode_buttons[key] = b
+            mode_button = QPushButton(text)
+            mode_button.setCheckable(True)
+            mode_button.setToolTip(tip)
+            mode_button.setAutoDefault(False)
+            self.modes.addButton(mode_button)
+            self.mode_buttons[key] = mode_button
             orow.addWidget(b)
         self.mode_buttons["order"].setChecked(True)
         self.modes.buttonClicked.connect(lambda _b: self._rebuild())
         orow.addStretch(1)
-        orow.addWidget(label("repeat each", level="tertiary"))
+        repeat_label = label("repeat each", level="tertiary")
+        orow.addWidget(repeat_label)
         self.repeat = QSpinBox()
+        repeat_label.setBuddy(self.repeat)
+        self.repeat.setAccessibleName("Repeat each combination")
         self.repeat.setRange(1, 50)
         self.repeat.setPrefix("×")
         self.repeat.setToolTip("Make every combination this many times (each with its own seed)")
@@ -394,7 +459,7 @@ class VariationsPanel(QFrame):
                               "Generate stopped")
         for w in (self.all, self.next):
             w.toggled.connect(lambda *_: self._refresh())
-        self.count.valueChanged.connect(lambda *_: (self.next.setChecked(True), self._refresh()))
+        self.count.valueChanged.connect(self._count_changed)
         arow.addWidget(self.all)
         arow.addWidget(self.next)
         arow.addWidget(self.count)
@@ -443,15 +508,17 @@ class VariationsPanel(QFrame):
         for w in (self.on, self.repeat, self.count, self.all, self.next):
             w.blockSignals(True)
         self.on.setChecked(bool(st.get("on")))
-        self.mode_buttons.get(st.get("mode"), self.mode_buttons["order"]).setChecked(True)
-        self.repeat.setValue(int(st.get("repeat") or 1))
-        self.count.setValue(int(st.get("count") or 4))
+        self.mode_buttons.get(st.get("mode") or "", self.mode_buttons["order"]).setChecked(True)
+        self.repeat.setValue(_to_int(st.get("repeat"), 1, 1, 50))
+        self.count.setValue(_to_int(st.get("count"), 4, 1, 1000))
         (self.next if st.get("amount") == "next" else self.all).setChecked(True)
         for w in (self.on, self.repeat, self.count, self.all, self.next):
             w.blockSignals(False)
-        if not keep_positions or isinstance(st.get("positions"), dict):
-            self.positions = dict(st.get("positions") or {}) if not keep_positions or not self.positions \
-                else {**st.get("positions", {}), **self.positions}
+        saved = st.get("positions") if isinstance(st.get("positions"), dict) else {}
+        if not keep_positions:
+            self.positions = dict(saved or {})
+        elif saved:
+            self.positions = {**saved, **self.positions} if self.positions else dict(saved)
         self._rebuild()
 
     def set_templates(self, prompt: str, negative: str = ""):
@@ -469,12 +536,20 @@ class VariationsPanel(QFrame):
         else:
             self._refresh()
 
+    def _plan(self) -> "V.Plan":
+        """The plan of the current values, built again only when the prompt or a value changed."""
+        sig = (self.prompt, self.negative,
+               tuple((v.name, tuple((x.text, x.on, x.weight) for x in v.values)) for v in self.vars))
+        if self._plan_of[0] != sig:
+            self._plan_of = (sig, V.Plan(self.vars, self.prompt, self.negative))
+        return self._plan_of[1]
+
     def active(self) -> bool:
         """Variations change the next Generate (on, and the prompt has placeholders with values)."""
-        return self.enabled() and bool(V.Plan(self.vars, self.prompt, self.negative).vars)
+        return self.enabled() and bool(self._plan().vars)
 
     def _key(self) -> str:
-        plan = V.Plan(self.vars, self.prompt, self.negative)
+        plan = self._plan()
         raw = json.dumps([self.prompt, self.negative, [(v.name, [x.text for x in v.active()]) for v in plan.vars],
                           self.mode(), self.repeat.value()], ensure_ascii=False)
         return hashlib.sha1(raw.encode()).hexdigest()[:16]
@@ -489,7 +564,7 @@ class VariationsPanel(QFrame):
         """How many images the next Generate makes (without building them)."""
         if not self.active():
             return 0
-        n = V.Plan(self.vars, self.prompt, self.negative).total * self.repeat.value() if self.all.isChecked() \
+        n = self._plan().total * self.repeat.value() if self.all.isChecked() \
             else self.count.value()
         return min(n, V.MAX_IMAGES)
 
@@ -508,19 +583,17 @@ class VariationsPanel(QFrame):
         if len(self.positions) > POSITIONS_KEPT:
             for k in list(self.positions)[:len(self.positions) - POSITIONS_KEPT]:
                 self.positions.pop(k, None)
-        self._refresh()
-        self.changed.emit()
+        self._refresh()                              # (which tells the owner: once)
 
     def restart(self):
         self.positions.pop(self.position_key(), None)
         self._refresh()
-        self.changed.emit()
 
     def too_many(self) -> int:
         """The number of images 'every combination' would make when that is more than MAX_ALL (else 0)."""
         if not self.active() or not self.all.isChecked():
             return 0
-        n = V.Plan(self.vars, self.prompt, self.negative).total * self.repeat.value()
+        n = self._plan().total * self.repeat.value()
         return n if n > MAX_ALL else 0
 
     # ---- editing
@@ -532,7 +605,7 @@ class VariationsPanel(QFrame):
         name = (name or "").strip().strip("{}")
         if not re.fullmatch(V.NAME, name):
             if name:
-                QMessageBox.information(self, "New variable", "Use letters, digits, _ and - (no spaces), e.g. hair_color.")
+                tell(self, "New variable", "Use letters, digits, _ and - (no spaces), e.g. hair_color.")
             return None
         if self.variable(name) is None:
             self.vars.append(V.Variable(name))
@@ -541,15 +614,32 @@ class VariationsPanel(QFrame):
         self._rebuild()
         return name
 
-    def _remove(self, what: str):
-        if what.startswith("rename:"):
-            _r, old, new = what.split(":", 2)
-            var = self.variable(old)
-            if var is not None and self.variable(new) is None:
-                var.name = new
-                self.rename.emit(old, new)
-        else:
-            self.vars = [v for v in self.vars if v.name != what]
+    def _remove(self, name: str):
+        self.vars = [v for v in self.vars if v.name != name]
+        self._rebuild()
+
+    def _rename(self, old: str, new: str):
+        if not re.fullmatch(V.NAME, new):
+            tell(self, "Rename", "Use letters, digits, _ and - (no spaces), e.g. hair_color.")
+            return
+        var = self.variable(old)
+        if var is None:
+            return
+        if self.variable(new) is not None:
+            tell(self, "Rename", f"{{{new}}} is already used by another variable.")
+            return
+        var.name = new
+        self.rename.emit(old, new)
+        self._rebuild()
+
+    def remove_unused(self):
+        used = set(V.names_in(self.prompt, self.negative))
+        gone = [v for v in self.vars if v.name not in used]
+        if sum(len(v.values) for v in gone) > FEW_VALUES and not confirm(
+                self, "Variations", f"Remove {len(gone)} variable{'s' if len(gone) != 1 else ''} that "
+                      f"{'are' if len(gone) != 1 else 'is'} not in the prompt, with their values?"):
+            return
+        self.vars = [v for v in self.vars if v.name in used]
         self._rebuild()
 
     def _menu(self, button):
@@ -563,14 +653,10 @@ class VariationsPanel(QFrame):
         if chosen is a_imp:
             self.import_json()
         elif chosen is a_exp:
-            from PySide6.QtGui import QGuiApplication
             QGuiApplication.clipboard().setText(V.to_json(self.vars))
         elif chosen is a_unused:
-            used = set(V.names_in(self.prompt, self.negative))
-            self.vars = [v for v in self.vars if v.name in used]
-            self._rebuild()
-        elif chosen is a_all and QMessageBox.question(self, "Variations", "Remove all variables and their values?") \
-                == QMessageBox.Yes:
+            self.remove_unused()
+        elif chosen is a_all and confirm(self, "Variations", "Remove all variables and their values?"):
             self.vars = []
             self._rebuild()
 
@@ -583,7 +669,7 @@ class VariationsPanel(QFrame):
         try:
             new = V.from_json(text)
         except ValueError as e:
-            QMessageBox.warning(self, "Import values", f"That is not valid: {e}")
+            warn(self, "Import values", f"That is not valid: {e}")
             return False
         for nv in new:
             cur = self.variable(nv.name)
@@ -597,48 +683,75 @@ class VariationsPanel(QFrame):
         return True
 
     # ---- showing
+    def _count_changed(self, *_) -> None:
+        self.next.setChecked(True)
+        self._refresh()
+
     def _rebuild(self):
         while self.cards_box.count():
             it = self.cards_box.takeAt(0)
-            w = it.widget()                        # (after setParent(None) the item no longer knows it)
+            # (after setParent(None) the item no longer knows it)
+            w = it.widget() if it is not None else None
             if w is not None:
                 w.hide()
                 w.setParent(None)
                 w.deleteLater()
         on = self.enabled()
         self.body.setVisible(on)
-        self.b_new.setVisible(True)
         used = V.names_in(self.prompt, self.negative)
         order = [n for n in used if self.variable(n) is not None] + [v.name for v in self.vars if v.name not in used]
         self.vars.sort(key=lambda v: order.index(v.name) if v.name in order else 999)
         if on:
-            names = self.names()
             for var in self.vars:
-                card = VariableCard(var, color_of(var.name, names), var.name in used, self.mode() == "random",
-                                    self.pick_file)
-                card.changed.connect(self._rebuild_later)
-                card.typing.connect(self._remember_typing)
-                card.insert.connect(self.insert)
-                card.remove.connect(self._remove)
-                self.cards_box.addWidget(card)
-        focus = getattr(self, "_typing_in", None)
+                self.cards_box.addWidget(self._make_card(var, used))
+        self._focus_typing()
+        self._refresh()
+
+    def _make_card(self, var: V.Variable, used: list[str]) -> VariableCard:
+        card = VariableCard(var, color_of(var.name, self.names()), var.name in used, self.mode() == "random",
+                            self.pick_file)
+        card.changed.connect(lambda c=card: self._rebuild_card_later(c))
+        card.typing.connect(self._remember_typing)
+        card.insert.connect(self.insert)
+        card.remove.connect(self._remove)
+        card.renamed.connect(self._rename)
+        return card
+
+    def _focus_typing(self) -> None:
+        """The cursor back in the value field the user was typing in (its card was made anew)."""
+        focus = self._typing_in
         if focus:
             self._typing_in = None
             for i in range(self.cards_box.count()):
-                card = self.cards_box.itemAt(i).widget()
-                if card is not None and card.var.name == focus:
-                    card.add.setFocus()
+                item = self.cards_box.itemAt(i)
+                found = cast("VariableCard | None", item.widget() if item is not None else None)
+                if found is not None and found.var.name == focus:
+                    found.add.setFocus()
+
+    def _rebuild_card_later(self, card: VariableCard) -> None:
+        QTimer.singleShot(0, lambda: self._rebuild_card(card))   # (the pill that asked is still on the stack)
+
+    def _rebuild_card(self, card: VariableCard) -> None:
+        """The values of one placeholder changed: only its card is made anew (the others, and the order of the cards, are as
+        they were: no placeholder came or went)."""
+        i = self.cards_box.indexOf(card)
+        if i < 0 or not self.enabled():
+            return                                 # (a rebuild of all cards came first)
+        used = V.names_in(self.prompt, self.negative)
+        fresh = self._make_card(card.var, used)
+        self.cards_box.insertWidget(i, fresh)
+        self.cards_box.removeWidget(card)
+        card.hide()
+        card.setParent(None)
+        card.deleteLater()
+        self._focus_typing()
         self._refresh()
 
     def _remember_typing(self, name: str):
         self._typing_in = name
 
-    def _rebuild_later(self):
-        from PySide6.QtCore import QTimer
-        QTimer.singleShot(0, self._rebuild)      # (the pill that asked is still on the stack)
-
     def _refresh(self):
-        plan = V.Plan(self.vars, self.prompt, self.negative)
+        plan = self._plan()
         on = self.enabled()
         if not on:
             self.summary.setText("off: one prompt" if not plan.vars else
@@ -670,7 +783,6 @@ class VariationsPanel(QFrame):
             self.position.setText(f"Next: #{start % max(1, total) + 1} of {total}"
                                   + (f" (round {start // max(1, total) + 1})" if start >= total else ""))
         self.b_restart.setEnabled(start > 0 and not rand)
-        self.count.setEnabled(True)
         self._preview(plan)
         self.changed.emit()
 
@@ -697,7 +809,9 @@ class VariationsPanel(QFrame):
                 + (" (random picks)" if self.mode() == "random" else
                    f" (more than {V.SHUFFLE_LIMIT:,} combinations cannot be shuffled: random picks)" if big else "")
                 + ":</p>")
-        self.preview.setHtml(head + "".join(rows) + more)
+        self.preview.setHtml(head.replace("color:gray", "color:" + theme().textTertiary.name())
+                             + "".join(rows).replace("color:gray", "color:" + theme().textTertiary.name())
+                             + more.replace("color:gray", "color:" + theme().textTertiary.name()))
 
     def sizeHint(self):                          # noqa: N802
         return QSize(400, super().sizeHint().height())

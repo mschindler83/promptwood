@@ -314,6 +314,12 @@ def check_software(man: dict, components: list[str]) -> list[Check]:
         ok = r is not None and r.returncode == 0
         out.append(Check(g, "llama.cpp (language model server)", OK if ok else FAIL, "ready" if ok else
                          f"{server} is missing or does not start", "" if ok else f"{SETUP} --only llm"))
+    if "fish" in soft:
+        py = paths.fish_python()
+        r = S.run([str(py), "-c", "import fish_speech, torch"], 180) if py.is_file() else None
+        ok = r is not None and r.returncode == 0
+        out.append(Check(g, "Expressive voices (Fish S2 Pro)", OK if ok else FAIL, "ready" if ok else
+                         f"{py} is missing or lacks fish_speech", "" if ok else f"{SETUP} --with tts-fish"))
     return out
 
 
@@ -485,7 +491,7 @@ def deep_checks(url: str, components: list[str]) -> list[Check]:
     if "video" in components:
         try:
             from ..comfy import ComfyGenerator
-            ComfyGenerator(url, comfy_dir=str(paths.comfy_dir()), cleanup=False, log=lambda *_: None)
+            ComfyGenerator(url, comfy_dir=paths.comfy_dir(), cleanup=False, log=lambda *_: None)
             out.append(Check(g, "The app's own check of the video model", OK))
         except Exception as e:  # noqa: BLE001
             out.append(Check(g, "The app's own check of the video model", FAIL, str(e)))
@@ -496,8 +502,8 @@ def render_test(url: str, log=print, steps: int = 20) -> Check:
     """One short real clip from a generated picture, through the app's own command line."""
     g, name = TESTS, "A real clip (39 frames, with sound)"
     paths.use_private_tools()
-    with tempfile.TemporaryDirectory(prefix="video-chain-test-") as tmp:
-        tmp = Path(tmp)
+    with tempfile.TemporaryDirectory(prefix="video-chain-test-") as tmp_dir:
+        tmp = Path(tmp_dir)
         image, prompts, out = tmp / "start.png", tmp / "prompts.txt", tmp / "out"
         r = S.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=512x512:rate=1", "-frames:v",
                    "1", str(image)], 60)

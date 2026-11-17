@@ -164,6 +164,7 @@ def run(cmd: list, what: str, env: dict | None = None, cwd: Path | None = None, 
                                  stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, text=True, errors="replace")
         except OSError as e:
             raise CommandFailed(f"{what}: {e}") from e
+        assert p.stdout is not None                 # (stdout=PIPE above)
         for line in p.stdout:
             log_only("      " + line.rstrip())
             if line.strip():

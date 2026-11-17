@@ -83,7 +83,7 @@ def test_private_tools_come_first_on_path(home, monkeypatch):
 def test_manifest_is_complete_and_checked():
     man = M.load()
     assert M.profile_components(man, "core") == ["video"]
-    names = set()
+    names: dict = {}
     for cid, c in man["components"].items():
         assert c["profile"] in M.PROFILES and c["files"] and c["bytes"] == sum(f["size"] for f in c["files"])
         for f in c["files"]:
@@ -94,9 +94,9 @@ def test_manifest_is_complete_and_checked():
                     assert re.fullmatch(r"[0-9a-f]{64}", f.get("sha256", "")), (cid, f["path"])
                 assert M.file_url(f).startswith(f"https://huggingface.co/{f['repo']}/resolve/{f['rev']}/")
             if not f.get("hf"):
-                for t in M.file_targets(f, Path("/c"), Path("/h")):
-                    assert str(t) not in names, f"two files for {t}"
-                    names.add(str(t))
+                for t in M.file_targets(f, Path("/c"), Path("/h")):     # (two parts may share one file: the same)
+                    assert names.get(str(t), f.get("sha256")) == f.get("sha256"), f"two files for {t}"
+                    names[str(t)] = f.get("sha256")
         for n in c.get("nodes", []):
             assert n in man["nodes"]
         for n in c.get("software", []):
@@ -131,6 +131,15 @@ def test_manifest_has_the_files_the_app_asks_for():
     assert "missing" not in k and k["style"]
     llm = [f["path"] for f in man["components"]["llm"]["files"]]
     assert any("mmproj" in p for p in llm) and any("instruct" in p.lower() and "mmproj" not in p for p in llm)
+    from video_chain.comfy.image_edit import pick_moss_files, pick_qwen_files
+    e = pick_qwen_files(names("image-edit", "diffusion_models"), names("image-edit", "text_encoders"),
+                        names("image-edit", "vae"), names("image-edit", "loras"))
+    assert "2511" in e["unet"] and e["clip"] and e["vae"] and e["lightning"]          # (all four: the fast edit too)
+    mo = pick_moss_files(names("image-moss", "diffusion_models"), names("image-moss", "text_encoders"),
+                         names("image-moss", "vae"), names("image-moss", "loras"))
+    assert mo and mo["sft"] and mo["edit_lora"]
+    assert {f["repo"] for f in man["components"]["tts-fish"]["files"]} == {tts.FISH_MODEL}
+    assert man["software"]["fish"]["rev"] == tts.FISH_COMMIT and "fish" in man["components"]["tts-fish"]["software"]
 
 
 def test_select_adds_what_parts_need():
@@ -889,7 +898,7 @@ def test_windows_code_stays_out_of_the_way_on_linux(monkeypatch):
             continue
         lines = f.read_text(encoding="utf-8").splitlines()
         for n, line in enumerate(lines):
-            if re.search(r"\bwin\.\w+\(", line) and "win.WINDOWS" not in line:
+            if re.search(r"(?<![\w.])win\.\w+\(", line) and "win.WINDOWS" not in line:   # (not self.win.…)
                 near = "\n".join(lines[max(0, n - 6):n + 1])
                 assert any(k in near for k in ('os.name == "nt"', 'os.name != "nt"', "win.WINDOWS", "paths.WINDOWS")), \
                     f"{f.name}:{n + 1}"
@@ -965,3 +974,36 @@ def test_install_ps1_mirrors_install_sh():
                    "--with pyyaml"):
         assert needle in sh and needle in ps, needle
     assert "not yet run on a Windows computer" in ps
+
+
+def test_fish_s2_pro_is_set_up_from_its_pinned_code(home, monkeypatch):
+    """Part tts-fish: fish-speech's code at the commit the app was made for, its environment with the PyTorch build
+    the driver can run (pyaudio left out), recorded so a second run skips it; the doctor names what is missing."""
+    calls = []
+    monkeypatch.setattr(I, "fetch", lambda url, dest, *a, **k: calls.append(("fetch", url)))
+
+    def extract(archive, dest, strip=0, members=None):
+        (dest / ".venv" / "bin").mkdir(parents=True)
+        (dest / ".venv" / "bin" / "python").write_text("")
+    monkeypatch.setattr(I, "extract", extract)
+    monkeypatch.setattr(I, "run", lambda cmd, what, **k: calls.append(("run", [str(c) for c in cmd])))
+    inst = I.Installer(I.Options(only=["tts-fish"]))
+    assert inst.components == ["tts", "tts-fish"]                       # (its voice samples need Whisper)
+    for drv, extra in (("580.82", "cu129"), ("570.1", "cu128"), ("560.3", "cu126")):
+        monkeypatch.setattr(I.S, "gpu", lambda d=drv: {"driver": d, "free_mb": 20000})
+        assert inst.fish_extra() == extra
+    monkeypatch.setattr(I.S, "gpu", lambda: None)
+    assert inst.fish_extra() == "cpu"
+    assert "fish" in [name for name, _fn in inst.pending()] and not inst.fish_done()
+    monkeypatch.setattr(I.S, "gpu", lambda: {"driver": "580.82", "free_mb": 20000})
+    inst.fish()
+    rev = inst.man["software"]["fish"]["rev"]
+    assert calls[0] == ("fetch", f"https://github.com/fishaudio/fish-speech/archive/{rev}.tar.gz")
+    cmd = calls[1][1]
+    assert cmd[1:4] == ["sync", "--project", str(paths.fish_dir())] and "--extra" in cmd and "cu129" in cmd
+    assert cmd[-2:] == ["--no-install-package", "pyaudio"]
+    assert inst.fish_done() and "fish" not in [name for name, _fn in inst.pending()]
+    assert paths.load_config()["fish_dir"] == str(paths.fish_dir())
+    checks = D.check_software(inst.man, ["tts", "tts-fish"])
+    fish = next(c for c in checks if "Fish" in c.name)
+    assert fish.status == D.FAIL and "--with tts-fish" in fish.fix                # (an empty python: not ready)

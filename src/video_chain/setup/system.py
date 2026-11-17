@@ -143,12 +143,13 @@ def driver_major(g: dict | None) -> int:
 def ffmpeg_state() -> dict:
     """{"ffmpeg", "ffprobe": paths or None, "version", "x264", "aac": the encoders the app writes with}."""
     paths.use_private_tools()
-    out = {"ffmpeg": shutil.which("ffmpeg"), "ffprobe": shutil.which("ffprobe"), "version": "", "x264": False,
+    out: dict = {"ffmpeg": shutil.which("ffmpeg"), "ffprobe": shutil.which("ffprobe"), "version": "", "x264": False,
            "aac": False}
-    if out["ffmpeg"]:
-        v = run([out["ffmpeg"], "-hide_banner", "-version"])
+    ffmpeg = out["ffmpeg"]
+    if isinstance(ffmpeg, str):
+        v = run([ffmpeg, "-hide_banner", "-version"])
         out["version"] = v.stdout.split("\n")[0].replace("ffmpeg version ", "").split(" ")[0] if v and v.stdout else ""
-        e = run([out["ffmpeg"], "-hide_banner", "-encoders"])
+        e = run([ffmpeg, "-hide_banner", "-encoders"])
         text = e.stdout if e else ""
         out["x264"] = bool(re.search(r"^\s*V\S*\s+libx264\s", text, re.M))
         out["aac"] = bool(re.search(r"^\s*A\S*\s+aac\s", text, re.M))
