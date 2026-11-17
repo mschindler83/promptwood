@@ -76,8 +76,17 @@ def save_config(**values) -> dict:
             data[k] = str(v)
     config_file().parent.mkdir(parents=True, exist_ok=True)
     tmp = config_file().with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    with open(tmp, "w", encoding="utf-8") as f:     # (on the disk before it replaces the old one: a crash right
+        f.write(json.dumps(data, indent=2, sort_keys=True) + "\n")    # after must not leave an empty file)
+        f.flush()
+        os.fsync(f.fileno())
     tmp.replace(config_file())
+    if not WINDOWS:                                 # (the rename itself, in the folder's entry)
+        fd = os.open(config_file().parent, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
     return data
 
 

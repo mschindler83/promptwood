@@ -1007,3 +1007,14 @@ def test_fish_s2_pro_is_set_up_from_its_pinned_code(home, monkeypatch):
     checks = D.check_software(inst.man, ["tts", "tts-fish"])
     fish = next(c for c in checks if "Fish" in c.name)
     assert fish.status == D.FAIL and "--with tts-fish" in fish.fix                # (an empty python: not ready)
+
+
+def test_config_json_is_on_the_disk_before_it_replaces_the_old_one(home, monkeypatch):
+    """A crash right after setup wrote config.json must not leave an empty file (the app would then use the
+    defaults instead of the user's folders): the new file is synced before the rename, the folder after it."""
+    synced = []
+    real = os.fsync
+    monkeypatch.setattr(os, "fsync", lambda fd: (synced.append(fd), real(fd))[1])
+    paths.save_config(hf_cache="/models")
+    assert len(synced) >= 2                                      # the file's data, then the folder's entry
+    assert paths.load_config() == {"hf_cache": "/models"} and not list(home.glob("*.tmp"))
