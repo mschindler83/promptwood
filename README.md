@@ -6,8 +6,9 @@ with the MiniMax H3 video model. Around the clips it has a storyboard with branc
 inpaint), a cast with faces and voices, spoken lines (text to speech), a prompt refiner with a local language model,
 head and face swap, 2K refine and upscaled export.
 
-Everything runs on your own computer. Nothing is uploaded, unless you choose ElevenLabs for voices or look up LoRA
-trigger words at CivitAI (both optional, both with your own key).
+Everything runs on your own computer. Nothing is uploaded, unless you choose ElevenLabs for voices, look up LoRA
+trigger words at CivitAI, or upscale an export on a RunPod cloud GPU (all optional, each with your own key; RunPod
+gets the clips it upscales).
 
 ## What you need
 
@@ -24,15 +25,18 @@ The one thing it cannot install is the NVIDIA driver; it tells you the command f
 
 **Windows:** prepared but not yet tested. The app has Windows branches for everything that differs there (they
 are in `src/video_chain/win.py`), and `install.ps1` is the counterpart of `install.sh`; neither has run on a
-Windows computer yet. Linux behaves exactly as before: none of that code runs there.
+Windows computer yet. On Linux none of that code runs.
 
 ## Install
 
 ```bash
-git clone <this repository> video-chain
+git clone https://gitlab.com/mschindler/video-chain.git
 cd video-chain
 ./install.sh
 ```
+
+Without git: on https://gitlab.com/mschindler/video-chain choose **Code → Download source code (tar.gz)**, unpack it,
+and run `./install.sh` in that folder.
 
 That is the whole installation. The script
 

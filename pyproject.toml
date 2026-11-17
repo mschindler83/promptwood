@@ -1,6 +1,6 @@
 [project]
 name = "video-chain"
-version = "0.1.0"
+version = "0.2.0"
 description = "Chain MiniMax-H3 image-to-video clips: each prompt continues from the last frame of the clip before"
 readme = "README.md"
 license = "PolyForm-Noncommercial-1.0.0"
