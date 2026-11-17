@@ -1,4 +1,5 @@
-"""Face swap on video frames with FaceFusion's HyperSwap (256 px), as FaceFusion does it.
+"""Face swap on video frames with FaceFusion's HyperSwap model (256 px), by the method FaceFusion uses (Video
+Chain's own code: no FaceFusion code is in it).
 
 Per frame: the faces (SCRFD det_10g, with their 5 landmarks), the person followed through the clip (the largest
 face first, then the face nearest to it), the face aligned to the arcface_128 template at 256 px, HyperSwap with
@@ -13,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
-TEMPLATES = {      # FaceFusion's warp templates (5 landmarks, as a share of the crop)
+TEMPLATES = {      # the alignments the models were trained with (5 landmarks as a share of the crop; FaceFusion's)
     "arcface_112_v2": [[0.34191607, 0.46157411], [0.65653393, 0.45983393], [0.50022500, 0.64050536],
                        [0.37097589, 0.82469196], [0.63151696, 0.82325089]],
     "arcface_128": [[0.36167656, 0.40387734], [0.63696719, 0.40235469], [0.50019687, 0.56044219],
@@ -58,49 +59,49 @@ def _nms(boxes, scores, thresh=0.4):
 
 
 def warp(frame, landmarks, template: str, size: int):
-    """The face aligned to a template: (crop, affine matrix frame -> crop)."""
+    """The face aligned to a template: a similarity transform (turn, scale, shift) fitted to the 5 landmarks, the
+    frame resampled through it. (crop, matrix frame -> crop); (None, None) when the points cannot be fitted."""
     import cv2
-    dst = np.array(TEMPLATES[template], np.float32) * size
-    m = cv2.estimateAffinePartial2D(np.asarray(landmarks, np.float32), dst, method=cv2.RANSAC,
-                                    ransacReprojThreshold=100)[0]
-    if m is None:                                  # degenerate landmarks: no alignment for this face
+    src = np.asarray(landmarks, np.float32).reshape(-1, 2)
+    dst = np.asarray(TEMPLATES[template], np.float32) * size
+    matrix = cv2.estimateAffinePartial2D(src, dst, method=cv2.RANSAC, ransacReprojThreshold=100)[0]
+    if matrix is None:                             # degenerate landmarks: no alignment for this face
         return None, None
-    return cv2.warpAffine(frame, m, (size, size), borderMode=cv2.BORDER_REPLICATE, flags=cv2.INTER_AREA), m
+    crop = cv2.warpAffine(frame, matrix, (size, size), flags=cv2.INTER_AREA, borderMode=cv2.BORDER_REPLICATE)
+    return crop, matrix
 
 
 def box_mask(size: int, blur: float = MASK_BLUR):
-    """FaceFusion's box mask: the crop, its border faded out."""
+    """A square mask for a size x size crop: 1 inside, a band at the border set to 0, then softened with a Gaussian
+    so the pasted face fades into the frame (blur: the share of the half crop the fade takes)."""
     import cv2
-    amount = int(size * 0.5 * blur)
-    area = max(amount // 2, 1)
-    m = np.ones((size, size), np.float32)
-    m[:area, :] = 0
-    m[-area:, :] = 0
-    m[:, :area] = 0
-    m[:, -area:] = 0
-    return cv2.GaussianBlur(m, (0, 0), amount * 0.25) if amount > 0 else m
+    fade = int(size * 0.5 * blur)                  # px the fade reaches into the crop
+    band = max(fade // 2, 1)
+    mask = np.zeros((size, size), np.float32)
+    mask[band:size - band, band:size - band] = 1.0
+    return cv2.GaussianBlur(mask, (0, 0), fade / 4) if fade > 0 else mask
 
 
 def paste_back(frame, crop, mask, matrix):
-    """The crop laid back into the frame through the inverse of matrix, weighted by mask."""
+    """The crop laid back into the frame through the inverse of matrix (frame -> crop), weighted by mask. Only the
+    part of the frame the crop covers is resampled; a new frame comes back."""
     import cv2
     h, w = frame.shape[:2]
     ch, cw = crop.shape[:2]
-    inv = cv2.invertAffineTransform(matrix)
-    pts = np.array([[0, 0], [cw, 0], [cw, ch], [0, ch]], np.float32)
-    pts = pts @ inv[:, :2].T + inv[:, 2]
-    x1, y1 = np.clip(np.floor(pts.min(axis=0)).astype(int), 0, [w, h])
-    x2, y2 = np.clip(np.ceil(pts.max(axis=0)).astype(int), 0, [w, h])
-    if x2 <= x1 or y2 <= y1:
+    back = cv2.invertAffineTransform(matrix)
+    corners = cv2.transform(np.array([[[0, 0], [cw, 0], [cw, ch], [0, ch]]], np.float32), back)[0]
+    x1, y1 = np.clip(np.floor(corners.min(axis=0)), 0, [w, h]).astype(int)
+    x2, y2 = np.clip(np.ceil(corners.max(axis=0)), 0, [w, h]).astype(int)
+    if x2 <= x1 or y2 <= y1:                       # (the crop lies outside the frame)
         return frame
-    pm = inv.copy()
-    pm[0, 2] -= x1
-    pm[1, 2] -= y1
-    m = cv2.warpAffine(mask, pm, (int(x2 - x1), int(y2 - y1))).clip(0, 1)[..., None]
-    c = cv2.warpAffine(crop, pm, (int(x2 - x1), int(y2 - y1)), borderMode=cv2.BORDER_REPLICATE)
+    to_region = back.copy()
+    to_region[:, 2] -= (x1, y1)                    # (into the covered part's own coordinates)
+    area = (int(x2 - x1), int(y2 - y1))
+    alpha = cv2.warpAffine(mask, to_region, area).clip(0, 1)[..., None]
+    face = cv2.warpAffine(crop, to_region, area, borderMode=cv2.BORDER_REPLICATE).astype(np.float32)
     out = frame.copy()
-    region = out[y1:y2, x1:x2].astype(np.float32)
-    out[y1:y2, x1:x2] = (region * (1 - m) + c.astype(np.float32) * m).round().clip(0, 255).astype(np.uint8)
+    under = out[y1:y2, x1:x2].astype(np.float32)
+    out[y1:y2, x1:x2] = (under * (1 - alpha) + face * alpha).round().clip(0, 255).astype(np.uint8)
     return out
 
 
