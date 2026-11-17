@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDou
                                QPushButton, QScrollArea, QSlider, QSpinBox, QStackedWidget, QVBoxLayout, QWidget)
 
 from ..comfy import EDIT_MODELS
+from ..comfy.image_edit import edit_size
 # (main_window and the tests import these from here: they moved to video_chain/edits.py)
 from ..edits import (EDITS_DIR, MOSS_EDIT_QUALITIES, QUALITY_TEXT, ResultRecord, how_made, lora_note,  # noqa: F401
                      project_edits, record_use, scale_to, uses_index, uses_of, write_meta)
@@ -53,6 +54,10 @@ from .variations_panel import PlaceholderHighlighter, VariationsPanel
 from .widgets import (FrameTile, fit_size, guard_wheel, icon_button, label, remember_geometry,
                       shortcut, combo_item, label_for)
 from .qsvalue import qs_value
+
+
+SHAPES = (("16:9 landscape", 16 / 9), ("9:16 portrait", 9 / 16), ("1:1 square", 1.0), ("4:3", 4 / 3),
+          ("3:4", 3 / 4), ("3:2", 3 / 2), ("2:3", 2 / 3))     # (text, width / height) of a new picture
 
 
 @dataclass
@@ -283,8 +288,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         cv.addLayout(srow2)
         arow = QHBoxLayout()
         self.aspect = QComboBox()
-        for text, value in (("16:9 landscape", 16 / 9), ("9:16 portrait", 9 / 16), ("1:1 square", 1.0),
-                            ("4:3", 4 / 3), ("3:4", 3 / 4), ("3:2", 3 / 2), ("2:3", 2 / 3)):
+        for text, value in SHAPES:
             self.aspect.addItem(text, value)
         if self.start_aspect:
             self.aspect.insertItem(0, "like the start image", self.start_aspect)
@@ -391,6 +395,20 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         self.keep_size.setToolTip("The model works at about 1 megapixel in its own aspect steps; this scales the "
                                   "result back to the exact size of the image it was made from, so it fits the "
                                   "chain's video size")
+        self.edit_shape = QComboBox()
+        self.edit_shape.addItem("like the image to edit", None)
+        if self.start_aspect:
+            self.edit_shape.addItem("like the start image", self.start_aspect)
+        for text, value in SHAPES:
+            self.edit_shape.addItem(text, value)
+        saved = qs_value(self.qs, SK.EDIT_SHAPE, "", str) if self.qs is not None else ""
+        for i in range(1, self.edit_shape.count()):
+            if saved and abs(float(self.edit_shape.itemData(i)) - float(saved)) < 1e-6:
+                self.edit_shape.setCurrentIndex(i)
+                break
+        self.edit_shape_label = label_for("Shape", self.edit_shape, level="tertiary")
+        self._show_edit_shape()
+        self.edit_shape.currentIndexChanged.connect(lambda *_: self._edit_shape_changed())
         self.tags = QCheckBox("Add the usual quality tags (masterpiece, best quality …)")
         self.tags.setChecked(True)
         self.tags.setToolTip("Illustrious models are trained on such tags; they are put before your prompt")
@@ -415,9 +433,33 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         srow.addWidget(self.fresh_seed)
         opts.addWidget(label_for("Seed", self.seed, level="tertiary"), 1, 0)
         opts.addLayout(srow, 1, 1, 1, 3)
-        opts.addWidget(self.keep_size, 2, 0, 1, 4)
-        opts.addWidget(self.tags, 3, 0, 1, 4)
+        opts.addWidget(self.edit_shape_label, 2, 0)
+        opts.addWidget(self.edit_shape, 2, 1, 1, 3)
+        opts.addWidget(self.keep_size, 3, 0, 1, 4)
+        opts.addWidget(self.tags, 4, 0, 1, 4)
         left.addLayout(opts)
+
+    def edit_out_size(self) -> tuple[int, int] | None:
+        """The size an edit comes out at in another shape (None: the shape of the image to edit)."""
+        aspect = self.edit_shape.currentData()
+        return edit_size(float(aspect)) if aspect else None
+
+    def _show_edit_shape(self) -> None:
+        size = self.edit_out_size()
+        self.keep_size.setEnabled(size is None)
+        self.edit_shape.setToolTip(
+            "The shape of the result. Like the image to edit: the model keeps its shape. Another shape (e.g. a "
+            "16:9 character sheet from a 9:16 portrait): the model draws a new picture of that shape and sees "
+            "the image to edit as its reference" if size is None else
+            f"The result is {size[0]} × {size[1]} (about 1 megapixel), whatever the shape of the image to edit; "
+            "the model sees that image as its reference. A painted mask needs the image's own shape")
+
+    def _edit_shape_changed(self) -> None:
+        aspect = self.edit_shape.currentData()
+        self._remember(SK.EDIT_SHAPE, repr(float(aspect)) if aspect else "")
+        self._show_edit_shape()
+        self._show_mask()
+        self._update_buttons()
 
     def _build_actions(self, left: QVBoxLayout):
         brow = QHBoxLayout()
@@ -696,11 +738,13 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         run_words = [self._trigger_words(r) for r in runs]
         refs = [p for p in (self.pic2.path, self.pic3.path) if p]
         self._remember_loras()
-        keep_size = self.keep_size.isChecked() and mask is None   # (an inpaint comes back at the source's own size)
+        out_size = self.edit_out_size() if mask is None else None
+        keep_size = self.keep_size.isChecked() and mask is None and out_size is None   # (an inpaint: its own size)
         self._batch_names = [Path(f).name for f in sources] if len(sources) > 1 else []
         self._per_image = per
         plan = EditPlan(self.project / EDITS_DIR, self.connect_editor, prompt, quality, n, [], runs, run_words, refs,
-                        jobs, model=model, sources=sources, per=per, mask=mask, keep_size=keep_size)
+                        jobs, model=model, sources=sources, per=per, mask=mask, keep_size=keep_size,
+                        out_size=out_size)
         self._start_worker(EditWorker(plan), base_n,
                            "Connecting to ComfyUI … (the first edit loads the model, which takes a while; if a "
                            "clip is being generated, the edit waits for it)")

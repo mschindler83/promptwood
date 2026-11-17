@@ -59,6 +59,8 @@ if TYPE_CHECKING:
         edit_box: QWidget
         edit_model: QComboBox
         edit_pics: QWidget
+        edit_shape: QComboBox
+        edit_shape_label: QLabel
         f_count: QLabel
         f_model: QComboBox
         f_search: QLineEdit

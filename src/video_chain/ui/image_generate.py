@@ -53,6 +53,7 @@ class EditPlan(Plan):
     per: int = 1                                  # results per source
     mask: QImage | None = None
     keep_size: bool = False
+    out_size: tuple[int, int] | None = None       # another shape: the model draws at this size (keep_size is off)
 
 
 @dataclass
@@ -156,7 +157,7 @@ class EditWorker(GenerateWorker):
                 if img.isNull():
                     self.skipped.append(Path(src).name)   # (a folder's unreadable file: the next one)
                     continue
-                if p.keep_size:
+                if p.keep_size and p.out_size is None:
                     size = (_even(img.width()), _even(img.height()))
             kept = edits.keep_source(p.edits, src)           # the original stays with its results
             entry = [kept, None, 0]
@@ -177,8 +178,9 @@ class EditWorker(GenerateWorker):
         p, mask_file = self.plan, entry[1]
         job, seed, loras, words = self._pick(j)
         out = edits.unique_out(p.edits, "edit", seed, k)
+        shape = {"size": p.out_size} if p.out_size else {}
         meta = self.editor.edit(Path(src), with_triggers(self._prompt_of(job), words), out, seed, p.quality,
-                                [Path(x) for x in p.refs], loras, model=p.model, mask=mask_file)
+                                [Path(x) for x in p.refs], loras, model=p.model, mask=mask_file, **shape)
         entry[2] += 1
         if size is not None:
             try:
@@ -188,7 +190,7 @@ class EditWorker(GenerateWorker):
                 raise
         self._finish(out, meta, job, seed, words, {
             "source": src, "source_copy": str(kept), **({"mask": str(mask_file)} if mask_file else {}),
-            "refs": p.refs, "size": list(size) if size else None,
+            "refs": p.refs, "size": list(shown) if (shown := size or p.out_size) else None,
             **({"folder": str(Path(src).parent)} if many else {}), **self._variation(job)})
 
     def _cleanup(self) -> None:

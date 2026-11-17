@@ -148,6 +148,9 @@ class SourceMixin(ImageEditHost):
             return ""
         if self.edit_model.currentData() != "qwen21":
             return "A painted mask works with Qwen-Image 2.1: choose it as the model (or remove the mask)."
+        if self.edit_shape.currentData() is not None:
+            return ("A painted mask keeps the shape of the image to edit: choose Shape “like the image to edit” "
+                    "(or remove the mask).")
         return ""
 
     def _show_mask(self):

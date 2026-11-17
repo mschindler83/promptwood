@@ -3,6 +3,7 @@ ComfyImageEditor (the same connection, upload and cleanup as the clip generator)
 from __future__ import annotations
 
 import logging
+import math
 import re
 import uuid
 from pathlib import Path
@@ -43,12 +44,27 @@ def pick_qwen_files(unets: list[str], clips: list[str], vaes: list[str], loras: 
             "lightning": (light[0], _steps_in(light[0])) if light else None}
 
 
+EDIT_PIXELS = 1024 * 1024        # an edit in another shape: about 1 megapixel, as the models see their pictures
+EDIT_MULTIPLE = 32
+
+
+def edit_size(aspect: float) -> tuple[int, int]:
+    """The output size of an edit in another shape: about EDIT_PIXELS at the aspect (width / height), in steps of
+    EDIT_MULTIPLE (what all three edit models take)."""
+    w = math.sqrt(EDIT_PIXELS * aspect)
+    h = w / aspect
+    m = EDIT_MULTIPLE
+    return max(m, round(w / m) * m), max(m, round(h / m) * m)
+
+
 def build_edit_workflow(*, prompt: str, image: str, refs: Sequence[str] = (), seed: int, steps: int, cfg: float,
                         files: dict, lightning: str | None, prefix: str,
-                        loras: Sequence[tuple[str, float]] = ()) -> dict:
+                        loras: Sequence[tuple[str, float]] = (), size: tuple[int, int] | None = None) -> dict:
     """One Qwen Image Edit: the source image (scaled to the model's size) edited by the prompt; refs: up to two more
     pictures (Picture 2, Picture 3 in the prompt), e.g. a face. As ComfyUI's blueprint 'Image Edit (Qwen 2511)'.
-    loras: (ComfyUI name, strength) chained after the model, in this order, before the Lightning LoRA."""
+    loras: (ComfyUI name, strength) chained after the model, in this order, before the Lightning LoRA.
+    size: the result's (width, height), drawn on an empty latent (the source is still seen whole, as a reference);
+    None: the source's shape (its latent, as the blueprint)."""
     wf: dict = {
         "clip": loader_clip(files["clip"], "qwen_image"),
         "vae": loader_vae(files["vae"]),
@@ -71,7 +87,11 @@ def build_edit_workflow(*, prompt: str, image: str, refs: Sequence[str] = (), se
                     "inputs": {"clip": ["clip", 0], "prompt": text, "vae": ["vae", 0], **pics}}
         wf[name + "_ref"] = {"class_type": "FluxKontextMultiReferenceLatentMethod",
                              "inputs": {"conditioning": [name, 0], "reference_latents_method": "index_timestep_zero"}}
-    wf["latent"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["scale", 0], "vae": ["vae", 0]}}
+    if size is not None:
+        wf["latent"] = {"class_type": "EmptySD3LatentImage", "inputs": {"width": int(size[0]), "height": int(size[1]),
+                                                                        "batch_size": 1}}
+    else:
+        wf["latent"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["scale", 0], "vae": ["vae", 0]}}
     wf["sample"] = {"class_type": "KSampler",
                     "inputs": {"model": ["cfgnorm", 0], "seed": int(seed), "steps": int(steps), "cfg": float(cfg),
                                "sampler_name": "euler", "scheduler": "simple", "positive": ["pos_ref", 0],
@@ -378,13 +398,16 @@ class ComfyImageEditor(ComfyGenerator):
 
     def edit(self, image: Path, prompt: str, out_png: Path, seed: int, quality: str = "fast",
              refs: Sequence[Path] = (), loras: Sequence[tuple[str, float]] = (), model: str = "2511",
-             mask: Path | None = None) -> dict:
+             mask: Path | None = None, size: tuple[int, int] | None = None) -> dict:
         """Edit image by prompt; the result goes to out_png. loras: (file, strength) in ComfyUI's LoRA folders.
         model: a key of EDIT_MODELS. mask: a picture at the image's size, white where it is drawn anew (inpaint;
-        Qwen-Image 2.1 only). Returns what it was made with."""
+        Qwen-Image 2.1 only). size: the result's (width, height) for another shape (edit_size); None: the image's
+        shape. Returns what it was made with."""
         self._begin_job()
         if mask is not None and self.can_inpaint(model):
             raise ComfyError(self.can_inpaint(model))
+        if mask is not None and size is not None:
+            raise ComfyError("a painted mask keeps the shape of the picture: no other output size")
         names = []
         for path, strength in loras:
             name = self.name_for(path)
@@ -392,9 +415,9 @@ class ComfyImageEditor(ComfyGenerator):
                 raise ComfyError(f"{Path(path).name} is not in ComfyUI's LoRA folders")
             names.append((name, float(strength)))
         if model == "qwen21":
-            return self._edit21(image, prompt, out_png, seed, quality, refs, loras, names, mask)
+            return self._edit21(image, prompt, out_png, seed, quality, refs, loras, names, mask, size)
         if model == "moss":
-            return self._edit_moss(image, prompt, out_png, seed, refs, loras, names)
+            return self._edit_moss(image, prompt, out_png, seed, refs, loras, names, size)
         if self.missing_2511:
             raise ComfyError(self.missing_2511)
         light = self.files.get("lightning") if quality == "fast" else None
@@ -414,7 +437,7 @@ class ComfyImageEditor(ComfyGenerator):
             prefix = f"{SUBFOLDER}/edit_{uuid.uuid4().hex[:12]}"
             wf = build_edit_workflow(prompt=prompt, image=name, refs=ref_names, seed=seed, steps=steps, cfg=cfg,
                                      files=self.files, lightning=light[0] if light else None, prefix=prefix,
-                                     loras=names)
+                                     loras=names, size=size)
             self._run_saving(wf, EDIT_SAVE_ID, out_png, [])
         finally:
             self._drop_uploads(uploads)
@@ -435,7 +458,7 @@ class ComfyImageEditor(ComfyGenerator):
         finally:
             self._drop_uploads(uploads)
 
-    def _edit_moss(self, image, prompt, out_png, seed, refs, loras, names) -> dict:
+    def _edit_moss(self, image, prompt, out_png, seed, refs, loras, names, size=None) -> dict:
         if self.files_moss is None:
             raise ComfyError("MOSS-Image is not available for edits (moss_image_sft_*.safetensors, its edit LoRA "
                              "moss_image_edit_lora_*, qwen3.5_9b and flux2-vae in ComfyUI's models)")
@@ -447,7 +470,7 @@ class ComfyImageEditor(ComfyGenerator):
                 pics.append(uploads[-1][0])
             wf = build_moss_workflow(files=self.files_moss, prompt=prompt, seed=seed,
                                      prefix=f"{SUBFOLDER}/edit_{uuid.uuid4().hex[:12]}", save_as=EDIT_SAVE_ID,
-                                     images=pics, loras=names)
+                                     images=pics, loras=names, size=size)
         except BaseException:
             self._drop_uploads(uploads)              # (_run_saving cleans up only once it runs)
             raise
@@ -456,7 +479,7 @@ class ComfyImageEditor(ComfyGenerator):
                 "model": wf["unet"]["inputs"]["unet_name"], "lightning": None,
                 "loras": [{"path": str(p), "strength": float(st)} for p, st in loras]}
 
-    def _edit21(self, image, prompt, out_png, seed, quality, refs, loras, names, mask=None) -> dict:
+    def _edit21(self, image, prompt, out_png, seed, quality, refs, loras, names, mask=None, size=None) -> dict:
         if self.files21 is None:
             raise ComfyError("Qwen-Image 2.1 is not available (qwen_image_2.1_*.safetensors, qwen3vl_8b and "
                              "qwen_image_2.1_vae in ComfyUI's models, and a ComfyUI with its nodes)")
@@ -484,7 +507,7 @@ class ComfyImageEditor(ComfyGenerator):
                            "feather": feather}
             wf = build_qwen21_workflow(files=self.files21, prompt=prompt, seed=seed, quality=quality,
                                        prefix=f"{SUBFOLDER}/edit_{uuid.uuid4().hex[:12]}", save_as=EDIT_SAVE_ID,
-                                       images=pics, loras=names, inpaint=inpaint)
+                                       images=pics, loras=names, inpaint=inpaint, size=size)
         except BaseException:
             self._drop_uploads(uploads)
             raise

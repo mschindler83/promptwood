@@ -36,7 +36,7 @@ class ModelsMixin(ImageEditHost):
         (self.m_create if create else self.m_edit).setChecked(True)
 
         self.setWindowTitle("Create a new image with AI" if create else "Edit an image with AI")
-        for w in (self.edit_box, self.edit_pics, self.keep_size):
+        for w in (self.edit_box, self.edit_pics, self.keep_size, self.edit_shape, self.edit_shape_label):
             w.setVisible(not create)
         self.create_box.setVisible(create)
         self.prompt_title.setText("2  Describe the image" if create else "2  What should change?")
