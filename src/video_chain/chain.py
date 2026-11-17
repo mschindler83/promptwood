@@ -452,15 +452,22 @@ def cut_frames(video: Path, out: Path, first: int, count: int, fps: int = FPS) -
     return has_audio
 
 
+SMOOTH_FADE = 48        # frames: a join's colour correction fades back to the clip's own colour over this long
+
+
 def concat(videos: list[Path], out: Path, drop_first: bool = True, fps: int = FPS,
            cuts: list[tuple[int, int]] | None = None, size: tuple[int, int] | None = None,
-           fill: bool = False) -> None:
+           fill: bool = False, smooth: list[dict | None] | None = None) -> None:
     """Join clips into one video. With drop_first, clips 2..n lose their first frame (and its 1/24 s of sound),
     which repeats the last frame of the clip before. cuts instead gives (frames cut at the start, frames cut at
     the end) per clip. Clips without sound get silence, so sound stays in sync. size: fit every clip into this
     frame (aspect kept, black bars), for parts of different sizes (a film's scenes); fill: cover the frame instead
     (a few pixels cut off rather than thin bars, for clips of about the same shape). Clips of different sizes
-    without a size (e.g. a frozen clip made at an older resolution) are scaled to the largest of them, filled."""
+    without a size (e.g. a frozen clip made at an older resolution) are scaled to the largest of them, filled.
+    smooth: per clip None or {"blend": frames, "lut": a colour filter (joinmatch.lut)} for a join after a carry-over:
+    the clip's frames just before its cut (the model's copy of the clip before's last frames) are blended with
+    that clip's last `blend` frames, and the colour filter is applied at its start, fading out over SMOOTH_FADE
+    frames. The joined length and the sound stay as the cuts say (the sound is cut as without smooth)."""
     if not videos:
         raise ValueError("nothing to join")
     infos = [probe(v) for v in videos]
@@ -470,23 +477,49 @@ def concat(videos: list[Path], out: Path, drop_first: bool = True, fps: int = FP
     if cuts is None:
         cuts = [(1 if (drop_first and k > 0) else 0, 0) for k in range(len(videos))]
     any_audio = any(i["audio"] for i in infos)
+    smooth = [None if not s or not (s.get("blend") or s.get("lut")) or k == 0 else s
+              for k, s in enumerate(smooth or [None] * len(videos))]
+    smoothed = any(smooth)
     args: list[str] = []
     for v in videos:
         args += ["-i", str(v)]
     filters, labels = [], []
+    vlabels: list[str] = []
+    alabels: list[str] = []
+    lengths: list[int] = []
+    blends: list[int] = []
     extra = len(videos)
     for k, info in enumerate(infos):
         skip, cut_end = cuts[k]
         if info["frames"] - skip - cut_end < 1:              # never cut a clip away completely
             skip, cut_end = 0, 0
         stop = info["frames"] - cut_end
+        sm = smooth[k]
+        blend = min(int(sm.get("blend") or 0), skip, max(0, lengths[-1] - 1) if lengths else 0) if sm else 0
         fit = "" if not size else (
             f",scale={size[0]}:{size[1]}:force_original_aspect_ratio=increase:flags=lanczos,"
             f"crop={size[0]}:{size[1]},setsar=1" if fill else
             f",scale={size[0]}:{size[1]}:force_original_aspect_ratio=decrease:flags=lanczos,"
             f"pad={size[0]}:{size[1]}:(ow-iw)/2:(oh-ih)/2,setsar=1")
-        filters.append(f"[{k}:v]trim=start_frame={skip}:end_frame={stop},setpts=PTS-STARTPTS,fps={fps}{fit}[v{k}]")
-        labels.append(f"[v{k}]")
+        if not smoothed:
+            filters.append(f"[{k}:v]trim=start_frame={skip}:end_frame={stop},setpts=PTS-STARTPTS,fps={fps}{fit}[v{k}]")
+            labels.append(f"[v{k}]")
+        else:
+            seg = stop - skip + blend                        # (the blend's frames come before the cut)
+            base = (f"[{k}:v]trim=start_frame={skip - blend}:end_frame={stop},setpts=PTS-STARTPTS,fps={fps}{fit},"
+                    "format=yuv420p,settb=AVTB")
+            colour = (sm or {}).get("lut") or ""
+            fade = min(SMOOTH_FADE, seg // 2)
+            if colour and fade >= 2:                         # corrected at the start, back to its own colour after
+                filters.append(f"{base},split[s{k}c][s{k}r]")
+                filters.append(f"[s{k}c]trim=end_frame={fade},{colour},setpts=PTS-STARTPTS[s{k}cc]")
+                filters.append(f"[s{k}cc][s{k}r]xfade=transition=fade:duration={(fade - 1) / fps:.6f}:offset=0"
+                               f"[v{k}]")
+            else:
+                filters.append(f"{base}[v{k}]")
+            vlabels.append(f"[v{k}]")
+            lengths.append(seg)
+            blends.append(blend)
         if any_audio:
             start, end = skip / fps, stop / fps
             if info["audio"]:
@@ -498,10 +531,26 @@ def concat(videos: list[Path], out: Path, drop_first: bool = True, fps: int = FP
             # pad short sound with silence, then cut exactly to the clip's frames
             filters.append(f"{src}aresample=48000,aformat=channel_layouts=stereo,apad,"
                            f"atrim=start={start:.6f}:end={end:.6f},asetpts=PTS-STARTPTS[a{k}]")
-            labels.append(f"[a{k}]")
+            (alabels if smoothed else labels).append(f"[a{k}]")
     n = len(videos)
-    filters.append("".join(labels) + f"concat=n={n}:v=1:a={1 if any_audio else 0}" +
-                   ("[v][a]" if any_audio else "[v]"))
+    if not smoothed:
+        filters.append("".join(labels) + f"concat=n={n}:v=1:a={1 if any_audio else 0}" +
+                       ("[v][a]" if any_audio else "[v]"))
+    else:
+        cv, t = vlabels[0], lengths[0]
+        for k in range(1, n):
+            nv = f"[j{k}]" if k < n - 1 else "[v]"
+            if blends[k]:                                    # the clip before's last frames into the model's copy
+                filters.append(f"{cv}{vlabels[k]}xfade=transition=fade:duration={blends[k] / fps:.6f}:"
+                               f"offset={(t - blends[k]) / fps:.6f},settb=AVTB{nv}")
+            else:
+                filters.append(f"{cv}{vlabels[k]}concat=n=2:v=1:a=0,fps={fps},settb=AVTB{nv}")
+            t += lengths[k] - blends[k]
+            cv = nv
+        if n == 1:
+            filters.append(f"{cv}null[v]")
+        if any_audio:
+            filters.append("".join(alabels) + f"concat=n={n}:v=0:a=1[a]")
     maps = ["-map", "[v]"] + (["-map", "[a]"] if any_audio else [])
     codec = ["-c:v", "libx264", "-crf", "16", "-preset", "slow", "-pix_fmt", "yuv420p"]
     codec += ["-c:a", "aac", "-b:a", "192k"] if any_audio else []

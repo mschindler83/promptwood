@@ -641,6 +641,14 @@ class BuildMixin(MainWindowHost):
         self.keep_rep.setToolTip("Each clip starts with the last frame of the clip before; by default that repeated "
                                  "frame is left out when a path is joined")
         c.addRow("", self.keep_rep)
+        self.smooth_joins = QCheckBox("Smooth joins after a carry-over")
+        self.smooth_joins.setChecked(d["smooth_joins"])
+        self.smooth_joins.setToolTip(
+            "A clip with carry-over frames paints its own copy of the clip before's last frames, a little off in "
+            "timing and colour. On: when a path is joined, the cut follows the copy's timing, the colour is matched "
+            "to the clip before (fading back to the clip's own over 2 s) and the last frames are blended. The clips "
+            "themselves stay as made; off: a plain cut after the carry-over")
+        c.addRow("", self.smooth_joins)
         self.style_prefix = QLineEdit()
         self.style_prefix.setPlaceholderText("e.g. cinematic, soft daylight, handheld camera")
         self.style_prefix.setToolTip("Put before every prompt (look, camera, light, a LoRA's trigger word). "
@@ -1198,7 +1206,7 @@ class BuildMixin(MainWindowHost):
             spin.valueChanged.connect(self._options_typing)
             spin.editingFinished.connect(self._exact_shown)     # (typed in full: the nearest size into the field)
         for sig in (self.frames.currentIndexChanged, self.resolution.currentIndexChanged, self.exact_size.toggled,
-                    self.shape.currentIndexChanged, self.audio.toggled, self.keep_rep.toggled,
+                    self.shape.currentIndexChanged, self.audio.toggled, self.keep_rep.toggled, self.smooth_joins.toggled,
                     self.speed.currentIndexChanged, self.veda.toggled, self.turbo_lora.currentIndexChanged,
                     self.h3_distilled.toggled, self.two_pass.toggled):
             sig.connect(self._options_changed)

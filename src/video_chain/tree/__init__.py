@@ -349,6 +349,8 @@ from .export import (  # noqa: F401
     refine_record,
     _refined_sound,
     refine_path,
+    smooth_cuts,
+    join_cuts,
     join_path)
 
 logger = logging.getLogger(__name__)

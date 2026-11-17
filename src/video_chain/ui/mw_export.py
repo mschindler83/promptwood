@@ -39,7 +39,7 @@ class ExportMixin(MainWindowHost):
             with lock:
                 joined = T.join_path(project, tree, nid, out)
                 secs = chain.joined_seconds(joined)             # not in the GUI thread (network shares)
-                return joined, secs, T.path_spans(tree, nid)
+                return joined, secs, T.path_spans(tree, nid, T.join_cuts(project, tree, nid))
 
         def error(e: BaseException):                           # (the answer ends "joining")
             self._joined(None, str(e) or type(e).__name__, purpose, pre, str(project))

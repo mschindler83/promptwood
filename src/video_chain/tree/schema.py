@@ -116,6 +116,7 @@ class Options(TypedDict, total=False):
     resolution: int
     audio: bool
     keep_repeated: bool
+    smooth_joins: bool                  # joins after a carry-over measured and smoothed (joinmatch)
     seed: int
     aspect: str                         # the shape of a project without a start picture or video (shape unset)
     shape: str                          # the clips' shape (a sources.ASPECTS key); unset: the start image's / video's

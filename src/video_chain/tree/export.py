@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Callable, Protocol
 
@@ -9,10 +10,12 @@ from ..triggers import with_triggers
 from .. import camera as _camera
 from .. import chain
 from .. import h3_prompt as _h3
+from .. import joinmatch
 from .. import media
+from .consts import DEFAULT_OPTIONS
 from .consts import REFINED, checkpoint_of
 from .model import Node, Tree, short_id
-from .timeline import SWAPPED_REFINE_PROMPT, handover_index, made_frames, path_cuts
+from .timeline import SWAPPED_REFINE_PROMPT, _guide_of, handover_index, made_frames, path_cuts
 from .files import load, refined_file
 from .starts import prepared_start, start_source
 from .sources import source_rotation
@@ -313,13 +316,95 @@ def refine_path(generator: RefineGenerator, project: Path, nid: str, size: str, 
             emit({"e": "node", "id": node.id, "state": "done"})
         videos = [files.get(n.id) or refined_file(project, n, size) for n in path]
         cuts = [(0, 0)] if single else path_cuts(tree, path, bool(tree.options.get("keep_repeated")))
+        smooth = None
+        if not single:
+            cuts, smooth = smooth_cuts(project, tree, path, videos, cuts)
         out = Path(out)
         out.parent.mkdir(parents=True, exist_ok=True)
         emit({"e": "joining"})
-        chain.concat(videos, out, cuts=cuts)            # (inside: a temporary single copy is still there)
+        chain.concat(videos, out, cuts=cuts, smooth=smooth)   # (inside: a temporary single copy is still there)
     emit({"e": "exported", "file": str(out)})
     emit({"e": "done", "made": made_now})
     return out
+
+
+logger = logging.getLogger(__name__)
+
+JOINS_FILE = "joins.json"          # paths/: the kept measures of smooth joins
+JOINS_KEPT = 500                   # measures kept at most (the oldest go)
+
+
+def _join_key(a: Path, a_end: int, b: Path, guide: int) -> str | None:
+    try:
+        return json.dumps([str(a), a.stat().st_mtime_ns, int(a_end), str(b), b.stat().st_mtime_ns, int(guide),
+                           joinmatch.VERSION])
+    except OSError:
+        return None
+
+
+def smooth_cuts(project: Path, tree: Tree, path: list[Node], videos: list[Path], cuts: list[tuple[int, int]],
+                measure: bool = True) -> tuple[list[tuple[int, int]], list[dict | None]]:
+    """The cuts and chain.concat's smooth of a path's join (option "smooth_joins"): every generated clip after
+    another clip or video is measured against it (joinmatch.measure; kept in paths/joins.json for these files),
+    its start cut moved by the measured offset, with the colour correction and blend. A join that cannot be
+    measured (another picture, an unreadable file) stays as it is. measure=False: only the kept measures (no
+    ffmpeg). Off, or with the repeated frames kept: the cuts as given and no smooth."""
+    cuts = list(cuts)
+    smooth: list[dict | None] = [None] * len(path)
+    o = tree.options
+    if not o.get("smooth_joins", DEFAULT_OPTIONS["smooth_joins"]) or o.get("keep_repeated") or len(path) < 2:
+        return cuts, smooth
+    file = Path(project) / "paths" / JOINS_FILE
+    try:
+        kept = json.loads(file.read_text(encoding="utf-8")) if file.is_file() else {}
+        kept = kept if isinstance(kept, dict) else {}
+    except (OSError, ValueError):
+        kept = {}
+    changed = False
+    for k in range(1, len(path)):
+        b = path[k]
+        if b.is_video or not b.made:
+            continue
+        guide = _guide_of(b)
+        key = _join_key(Path(videos[k - 1]), cuts[k - 1][1], Path(videos[k]), guide)
+        if key is None:
+            continue
+        m = kept.get(key, False)
+        if m is False and measure:
+            try:
+                stop = chain.probe(videos[k - 1])["frames"] - cuts[k - 1][1]
+                m = joinmatch.measure(videos[k - 1], stop, videos[k], guide)
+            except (OSError, RuntimeError, ValueError) as e:      # (media errors too: a join is never refused)
+                logger.warning("join before clip %s not measured: %s", b.id, e)
+                continue
+            kept[key] = m
+            changed = True
+        if not m:
+            continue
+        start, end = cuts[k]
+        frames = chain.probe(videos[k])["frames"] if measure else (made_frames(b) or 0)
+        new = max(1, start + int(m.get("offset") or 0))
+        if frames and new + end >= frames:
+            continue
+        cuts[k] = (new, end)
+        smooth[k] = {"blend": int(m.get("blend") or 0), "lut": joinmatch.lut(m.get("planes") or [])}
+    if changed:
+        try:
+            while len(kept) > JOINS_KEPT:
+                kept.pop(next(iter(kept)))
+            file.parent.mkdir(parents=True, exist_ok=True)
+            chain.atomic_write_text(file, json.dumps(kept))
+        except OSError as e:
+            logger.warning("the join measures could not be kept: %s", e)
+    return cuts, smooth
+
+
+def join_cuts(project: Path, tree: Tree, nid: str) -> list[tuple[int, int]]:
+    """The cuts the joined path to nid has (the kept measures of its smooth joins; no ffmpeg), for path_spans."""
+    path = tree.path_to(nid)
+    cuts = path_cuts(tree, path, bool(tree.options.get("keep_repeated")))
+    videos = [Path(project) / n.made_dict()["video"] for n in path]
+    return smooth_cuts(project, tree, path, videos, cuts, measure=False)[0]
 
 
 def join_path(project: Path, tree: Tree, nid: str, out: Path | None = None, persist: bool = False,
@@ -341,7 +426,8 @@ def join_path(project: Path, tree: Tree, nid: str, out: Path | None = None, pers
     if missing:
         raise ValueError(f"not made yet: {', '.join(missing)}")
     videos = [project / n.made_dict()["video"] for n in path]
-    cuts = path_cuts(tree, path, bool(tree.options.get("keep_repeated")))
+    cuts, smooth = smooth_cuts(project, tree, path, videos, path_cuts(tree, path,
+                                                                     bool(tree.options.get("keep_repeated"))))
     target = Path(out) if out else project / "paths" / f"{nid}.mp4"
     target.parent.mkdir(parents=True, exist_ok=True)
     size = None                    # frozen clips of an older size: every clip scaled to the size clips have now
@@ -351,12 +437,12 @@ def join_path(project: Path, tree: Tree, nid: str, out: Path | None = None, pers
         if base is not None and len(sizes) > 1:
             size = (int(base["width"]), int(base["height"]))
     key = json.dumps([[str(v), v.stat().st_mtime_ns] for v in videos] + [[list(c) for c in cuts]] +
-                     ([list(size)] if size else []))
+                     ([list(size)] if size else []) + ([smooth] if any(smooth) else []))
     stamp = target.with_suffix(".json")
     if out is None and target.exists() and stamp.exists() and stamp.read_text() == key:
         return target
     def write(f: Path) -> None:
-        chain.concat(videos, f, cuts=cuts, size=size, fill=True)
+        chain.concat(videos, f, cuts=cuts, size=size, fill=True, smooth=smooth)
     if out is None:                                # the join before is never deleted: it goes to old/
         chain.replace_kept(project, target, write)
         chain.atomic_write_text(stamp, key)
