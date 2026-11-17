@@ -30,12 +30,12 @@ Windows computer yet. On Linux none of that code runs.
 ## Install
 
 ```bash
-git clone https://github.com/mschindler83/video-chain.git
-cd video-chain
+git clone https://github.com/mschindler83/promptwood.git
+cd promptwood
 ./install.sh
 ```
 
-Without git: download **Source code (tar.gz)** of the latest release from https://github.com/mschindler83/video-chain/releases, unpack
+Without git: download **Source code (tar.gz)** of the latest release from https://github.com/mschindler83/promptwood/releases, unpack
 it, and run `./install.sh` in that folder.
 
 That is the whole installation. The script
@@ -56,11 +56,11 @@ The screen stays short; everything the tools print goes to a log in `<home>/logs
 lines and the log's path are shown.
 
 When it ends with `Promptwood is ready`, every part of the app works. Start it from the applications menu or with
-`video-chain-gui`.
+`promptwood-gui`.
 
 Nothing needs root and nothing is written outside two folders: the app's own folder and its *home*
 (`~/.local/share/video-chain`, or `$VIDEO_CHAIN_HOME`), which holds ComfyUI, the models and the tools.
-To remove everything, delete these two folders (and `~/.local/share/applications/video-chain.desktop`).
+To remove everything, delete these two folders (and `~/.local/share/applications/promptwood.desktop`).
 
 ### Options
 
@@ -75,7 +75,7 @@ To remove everything, delete these two folders (and `~/.local/share/applications
 ./install.sh --hf-cache ~/.cache/huggingface/hub       # text to speech / language models you already have
 ./install.sh --comfy-dir ~/ComfyUI    # use the ComfyUI you already have (add --comfy-python if it has no .venv)
 ./install.sh --yes --accept-licenses  # no questions (for scripts)
-VIDEO_CHAIN_HOME=/big/disk/video-chain ./install.sh    # everything on another disk
+VIDEO_CHAIN_HOME=/big/disk/promptwood ./install.sh    # everything on another disk
 ./install.sh --help                   # all options and all parts with their sizes
 ```
 
@@ -93,21 +93,21 @@ huggingface.co only (not to the storage servers downloads are redirected to) and
 ### Later
 
 ```bash
-video-chain doctor                    # what is installed, what is missing, and the command that fixes it
-video-chain doctor --render           # also render a real test clip
-video-chain setup                     # install whatever is missing (safe to run again at any time)
-video-chain setup --with headswap-wan # add a part
-video-chain setup --steps comfyui     # repeat one install step (system, comfyui, nodes)
+promptwood doctor                    # what is installed, what is missing, and the command that fixes it
+promptwood doctor --render           # also render a real test clip
+promptwood setup                     # install whatever is missing (safe to run again at any time)
+promptwood setup --with headswap-wan # add a part
+promptwood setup --steps comfyui     # repeat one install step (system, comfyui, nodes)
 ```
 
 The same report is in the app under **Help > Setup check**.
 
 ## Use
 
-- `video-chain-gui` opens the app. It starts ComfyUI itself when a clip is to be made (the Start button next to the
+- `promptwood-gui` opens the app. It starts ComfyUI itself when a clip is to be made (the Start button next to the
   ComfyUI status), or uses the one that is running.
-- `video-chain start.jpg prompts.txt --out ~/chains/test1` renders a chain from the command line: one prompt per
-  line, each clip starts from the last frame of the one before. `video-chain --help` lists the options.
+- `promptwood start.jpg prompts.txt --out ~/chains/test1` renders a chain from the command line: one prompt per
+  line, each clip starts from the last frame of the one before. `promptwood --help` lists the options.
 
 Where the app looks for things is set by the installer in `<home>/config.json` and can be changed in the app
 (**Settings > ComfyUI and preferences**) or with environment variables; `src/video_chain/paths.py` lists them.
@@ -161,7 +161,7 @@ Promptwood is free for **non-commercial use** under the [PolyForm Noncommercial 
 personal projects, hobby, study and research, and non-profit, educational and public organisations may use, change
 and share it. Its source is public, but it is not "open source" in the OSI sense: **commercial use** (in a business,
 for clients, for monetised content) needs a separate licence from the author: ask through the project page,
-https://github.com/mschindler83/video-chain.
+https://github.com/mschindler83/promptwood.
 
 The ComfyUI nodes in `comfy_nodes/video_chain_nodes/` run inside ComfyUI and use its code, so they are licensed under
 the [GNU GPL 3.0](comfy_nodes/video_chain_nodes/LICENSE), as ComfyUI is.

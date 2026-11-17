@@ -1,4 +1,4 @@
-"""`video-chain doctor`: what is installed, what is missing and how to get it.
+"""`promptwood doctor`: what is installed, what is missing and how to get it.
 
 check_all() looks at files and programs only (fast, no network, the GPU is not used). deep_checks() asks a running
 ComfyUI what it lists (starting ComfyUI when needed); render_test() makes one short real clip. Standard library
@@ -26,7 +26,7 @@ from .download import human
 
 OK, WARN, FAIL, INFO = "ok", "warn", "fail", "info"
 MARK = {OK: "[ ok ]", WARN: "[warn]", FAIL: "[FAIL]", INFO: "[ -- ]"}
-SETUP = "video-chain setup"
+SETUP = "promptwood setup"
 LIVE, TESTS = "What the running ComfyUI offers", "Tests with the real models"
 
 
@@ -380,7 +380,7 @@ class ComfySession:
             if self.expect_dir is not None and not running_comfy_is(self.url, self.expect_dir):
                 raise RuntimeError(f"another ComfyUI (not the one in {self.expect_dir}) is running at {self.url}; "
                                    "it was left alone and nothing was tested. Give Promptwood's ComfyUI its own "
-                                   "port: video-chain setup --steps comfyui --comfy-port 8189")
+                                   "port: promptwood setup --steps comfyui --comfy-port 8189")
             self.log(f"ComfyUI is running at {self.url}")
             return self
         if not self.launcher.is_file():

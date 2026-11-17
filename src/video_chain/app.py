@@ -1,4 +1,4 @@
-"""GUI entry point: video-chain-gui"""
+"""GUI entry point: promptwood-gui"""
 from __future__ import annotations
 
 import logging
@@ -129,8 +129,9 @@ def main(argv: list[str] | None = None) -> int:
     argv = sys.argv if argv is None else argv
     app = cast(QApplication, QApplication.instance() or QApplication(argv))
     app.setOrganizationName("video-chain")
-    app.setApplicationName("Video Chain")
-    app.setDesktopFileName("video-chain")
+    app.setApplicationName("Video Chain")             # (internal: where the settings are kept; the name shown is
+    app.setApplicationDisplayName("Promptwood")       # the display name, which Qt also puts after window titles)
+    app.setDesktopFileName("promptwood")             # (the menu entry promptwood.desktop: its icon and name)
     ThemeManager.instance().apply(app)
     paths.use_private_tools()
     try:
@@ -138,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
     except media.MediaError:
         from .setup.system import install_hint
         QMessageBox.critical(None, "Promptwood",
-                             "ffmpeg and ffprobe are required and were not found.\n\nRun  video-chain setup  in a "
+                             "ffmpeg and ffprobe are required and were not found.\n\nRun  promptwood setup  in a "
                              f"terminal (it installs what is missing), or:  {install_hint('ffmpeg')}")
         return 1
     relay = _qt_error_relay()()

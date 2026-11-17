@@ -1,10 +1,10 @@
-"""video-chain: one start image + N prompts -> N chained MiniMax-H3 clips + one joined video, rendered by a running
+"""promptwood: one start image + N prompts -> N chained MiniMax-H3 clips + one joined video, rendered by a running
 ComfyUI (see comfy/). E.g.
-  video-chain start.jpg prompts.txt --out ~/chains/test1 --lora my_h3_lora.safetensors
+  promptwood start.jpg prompts.txt --out ~/chains/test1 --lora my_h3_lora.safetensors
 The LoRA must be in one of ComfyUI's LoRA folders.
 
-  video-chain setup     installs everything the app needs (ComfyUI, models, …); safe to run again
-  video-chain doctor    reports what is installed and what is missing
+  promptwood setup     installs everything the app needs (ComfyUI, models, …); safe to run again
+  promptwood doctor    reports what is installed and what is missing
 """
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ def _not_negative(kind):
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="video-chain", description=__doc__,
+    p = argparse.ArgumentParser(prog="promptwood", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("image", type=Path, nargs="?", help="start image of the first clip")
     p.add_argument("prompts", type=Path, nargs="?",

@@ -48,7 +48,7 @@ def available(model: Path | None) -> str | None:
         import numpy  # noqa: F401
         import onnxruntime  # noqa: F401
     except ImportError:
-        return "onnxruntime is not installed (run: video-chain setup --only faces)"
+        return "onnxruntime is not installed (run: promptwood setup --only faces)"
     return None
 
 

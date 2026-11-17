@@ -1,7 +1,7 @@
 [project]
-name = "video-chain"
+name = "promptwood"
 version = "0.2.0"
-description = "Chain MiniMax-H3 image-to-video clips: each prompt continues from the last frame of the clip before"
+description = "Promptwood: chain MiniMax-H3 image-to-video clips into a film; each prompt continues from the last frame of the clip before"
 readme = "README.md"
 license = "PolyForm-Noncommercial-1.0.0"
 license-files = ["LICENSE.md"]
@@ -19,10 +19,12 @@ dev = ["pytest", "pytest-timeout", "pytest-xdist", "pillow", "numpy", "safetenso
 faces = ["onnxruntime>=1.18", "numpy"]
 
 [project.scripts]
-video-chain = "video_chain.__main__:main"
+promptwood = "video_chain.__main__:main"
+video-chain = "video_chain.__main__:main"         # (the earlier name, kept for existing setups)
 
 [project.gui-scripts]
-video-chain-gui = "video_chain.app:main"
+promptwood-gui = "video_chain.app:main"
+video-chain-gui = "video_chain.app:main"          # (the earlier name, kept for existing setups)
 
 [build-system]
 requires = ["setuptools>=77"]

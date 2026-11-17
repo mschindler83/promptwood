@@ -321,7 +321,7 @@ def test_removing_music_needs_its_package_and_model(tmp_path):
     cache = fake_cache(tmp_path)
     loc = tts.LocalTTS(python=env / "bin" / "python", cache=cache, worker=w, start_timeout=20)
     assert loc.problems() == [] and "audio-separator" in loc.problems(isolate=True)[0]
-    with pytest.raises(tts.TtsError, match="video-chain setup --only tts"):
+    with pytest.raises(tts.TtsError, match="promptwood setup --only tts"):
         loc.isolate(tmp_path / "in.wav", tmp_path / "out.wav")
     assert not loc.running()                                # (not even started)
     (env / "lib" / "python3.12" / "site-packages" / "audio_separator").mkdir(parents=True)
@@ -679,7 +679,7 @@ def test_fish_problems_and_engine_choice(tmp_path):
     helper = tts.LocalTTS(python=tmp_path / "nope" / "python", cache=tmp_path)
     fish = tts.FishTTS(python=tmp_path / "nofish" / "python", cache=tmp_path, helper=helper)
     bad = fish.problems(transcribe=True)
-    assert "Fish S2 Pro's environment is missing" in bad[0] and "video-chain setup --with tts-fish" in bad[0]
+    assert "Fish S2 Pro's environment is missing" in bad[0] and "promptwood setup --with tts-fish" in bad[0]
     assert any(tts.FISH_MODEL in b for b in bad) and any("TTS environment" in b for b in bad)
     t = T.Tree()
     t.options["tts"] = {"provider": "fish"}

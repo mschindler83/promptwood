@@ -656,6 +656,52 @@ wheels = [
 ]
 
 [[package]]
+name = "promptwood"
+version = "0.2.0"
+source = { editable = "." }
+dependencies = [
+    { name = "keyring" },
+    { name = "pyside6" },
+    { name = "pyyaml" },
+    { name = "websocket-client" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "numpy" },
+    { name = "pillow" },
+    { name = "pytest" },
+    { name = "pytest-timeout" },
+    { name = "pytest-xdist" },
+    { name = "ruff" },
+    { name = "safetensors" },
+]
+faces = [
+    { name = "numpy" },
+    { name = "onnxruntime" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "keyring", specifier = ">=25.7.0" },
+    { name = "mypy", marker = "extra == 'dev'" },
+    { name = "numpy", marker = "extra == 'dev'" },
+    { name = "numpy", marker = "extra == 'faces'" },
+    { name = "onnxruntime", marker = "extra == 'faces'", specifier = ">=1.18" },
+    { name = "pillow", marker = "extra == 'dev'" },
+    { name = "pyside6", specifier = ">=6.8" },
+    { name = "pytest", marker = "extra == 'dev'" },
+    { name = "pytest-timeout", marker = "extra == 'dev'" },
+    { name = "pytest-xdist", marker = "extra == 'dev'" },
+    { name = "pyyaml", specifier = ">=6" },
+    { name = "ruff", marker = "extra == 'dev'" },
+    { name = "safetensors", marker = "extra == 'dev'" },
+    { name = "websocket-client", specifier = ">=1.7" },
+]
+provides-extras = ["dev", "faces"]
+
+[[package]]
 name = "protobuf"
 version = "7.36.2"
 source = { registry = "https://pypi.org/simple" }
@@ -944,52 +990,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/f6/cc/6253133b5bb138fc3
 wheels = [
     { url = "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl", hash = "sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8", size = 45571, upload-time = "2026-07-02T08:40:04.659Z" },
 ]
-
-[[package]]
-name = "video-chain"
-version = "0.2.0"
-source = { editable = "." }
-dependencies = [
-    { name = "keyring" },
-    { name = "pyside6" },
-    { name = "pyyaml" },
-    { name = "websocket-client" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "mypy" },
-    { name = "numpy" },
-    { name = "pillow" },
-    { name = "pytest" },
-    { name = "pytest-timeout" },
-    { name = "pytest-xdist" },
-    { name = "ruff" },
-    { name = "safetensors" },
-]
-faces = [
-    { name = "numpy" },
-    { name = "onnxruntime" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "keyring", specifier = ">=25.7.0" },
-    { name = "mypy", marker = "extra == 'dev'" },
-    { name = "numpy", marker = "extra == 'dev'" },
-    { name = "numpy", marker = "extra == 'faces'" },
-    { name = "onnxruntime", marker = "extra == 'faces'", specifier = ">=1.18" },
-    { name = "pillow", marker = "extra == 'dev'" },
-    { name = "pyside6", specifier = ">=6.8" },
-    { name = "pytest", marker = "extra == 'dev'" },
-    { name = "pytest-timeout", marker = "extra == 'dev'" },
-    { name = "pytest-xdist", marker = "extra == 'dev'" },
-    { name = "pyyaml", specifier = ">=6" },
-    { name = "ruff", marker = "extra == 'dev'" },
-    { name = "safetensors", marker = "extra == 'dev'" },
-    { name = "websocket-client", specifier = ">=1.7" },
-]
-provides-extras = ["dev", "faces"]
 
 [[package]]
 name = "websocket-client"

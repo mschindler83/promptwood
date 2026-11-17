@@ -70,7 +70,7 @@ def install_hint(what: str, osi: dict | None = None) -> str:
     pk = PACKAGES.get(what, {}).get(osi.get("manager") or "")
     if not pk:
         if paths.WINDOWS and what == "ffmpeg":
-            return "winget install Gyan.FFmpeg   (or: video-chain setup --steps system)"
+            return "winget install Gyan.FFmpeg   (or: promptwood setup --steps system)"
         return {"ffmpeg": "install ffmpeg (https://ffmpeg.org/download.html)",
                 "nvidia": "install the NVIDIA driver (https://www.nvidia.com/drivers)",
                 "qt": "install the libraries Qt needs (https://doc.qt.io/qt-6/linux-requirements.html)"}[what]

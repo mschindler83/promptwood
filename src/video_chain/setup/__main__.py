@@ -1,4 +1,4 @@
-"""video-chain setup / video-chain doctor (also: python -m video_chain.setup …)."""
+"""promptwood setup / promptwood doctor (also: python -m video_chain.setup …)."""
 from __future__ import annotations
 
 import argparse

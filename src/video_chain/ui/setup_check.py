@@ -1,5 +1,5 @@
 """Help > Setup check: what the app needs on this computer, what is there and how to get the rest (the same report
-as `video-chain doctor`)."""
+as `promptwood doctor`)."""
 from __future__ import annotations
 
 from PySide6.QtCore import QThread, Signal
@@ -34,7 +34,7 @@ class SetupCheckDialog(QDialog):
         self.text.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
         lay.addWidget(self.text, 1)
         hint = QLabel("Missing parts are installed in a terminal with the command after each arrow "
-                      "(<code>video-chain setup</code> installs everything that is missing; it is safe to run again).")
+                      "(<code>promptwood setup</code> installs everything that is missing; it is safe to run again).")
         hint.setWordWrap(True)
         lay.addWidget(hint)
         box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)

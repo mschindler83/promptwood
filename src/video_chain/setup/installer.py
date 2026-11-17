@@ -1,4 +1,4 @@
-"""`video-chain setup`: brings a computer from "the app is unpacked" to "every part of the app works".
+"""`promptwood setup`: brings a computer from "the app is unpacked" to "every part of the app works".
 
 It installs ComfyUI (or uses one that is there), its custom nodes, the model files, the text to speech environment,
 llama.cpp and, when the system has none that fits, ffmpeg; then it checks the result and renders one real clip.
@@ -198,7 +198,7 @@ class Installer:
                     f"{human(left)} to download" + (f" (of {human(total)}; the rest is already here)"
                                                    if left < total else ""))
             say(f"  {i}) {prof:9} {M.PROFILE_TEXT[prof]}\n               {size}")
-        say("     Single parts can be added later at any time: video-chain setup --with NAME")
+        say("     Single parts can be added later at any time: promptwood setup --with NAME")
         choice = ask_text("Your choice", "2")
         o.profile = dict(zip("123", M.PROFILES)).get(choice, choice if choice in M.PROFILES else "standard")
         self.choose_components()
@@ -255,7 +255,7 @@ class Installer:
             return
         d = self.comfy_dir
         target = d / "extra_model_paths.yaml"
-        if target.is_file() and "written by video-chain setup" not in target.read_text(encoding="utf-8"):
+        if target.is_file() and "written by promptwood setup" not in target.read_text(encoding="utf-8"):
             raise SetupError(f"{target} exists and was not written by setup: add your model folders there yourself")
         sections: dict = {}
         for i, given in enumerate(self.o.models_from):
@@ -280,7 +280,7 @@ class Installer:
                     base = Path(os.path.expanduser(str(sec.get("base_path", ""))))
                     sec["base_path"] = str(base if base.is_absolute() else src / base) + "/"
                     sections[f"shared_{i}_{name}"] = sec
-        lines = ["# written by video-chain setup (--models-from): model folders used in place, never changed"]
+        lines = ["# written by promptwood setup (--models-from): model folders used in place, never changed"]
         for name, sec in sections.items():
             lines.append(f"{name}:")
             for k, v in sec.items():
@@ -333,7 +333,7 @@ class Installer:
         rest = [cid for cid in self.man["components"] if cid not in self.components]
         if rest and self.models and not self.o.only:
             say("    Left out      " + ", ".join(rest) + "\n                  (add one with --with NAME; "
-                "video-chain setup --help lists what each is)")
+                "promptwood setup --help lists what each is)")
         need, software = sum(j["size"] for j in jobs), self.program_bytes()
         free = S.free_bytes(self.comfy_dir)
         say(f"    To download   models: {human(need) if need else 'nothing'}"
@@ -560,7 +560,7 @@ class Installer:
             launcher = Path(cfg) if cfg and Path(cfg).is_file() and Path(cfg) != ours else ours
             if launcher == ours and paths.WINDOWS:
                 ours.parent.mkdir(parents=True, exist_ok=True)
-                ours.write_text("@echo off\r\nrem Starts ComfyUI for Promptwood (written by video-chain setup). "
+                ours.write_text("@echo off\r\nrem Starts ComfyUI for Promptwood (written by promptwood setup). "
                                 "Extra arguments go to ComfyUI.\r\n"
                                 f'cd /d "{d}" || exit /b 1\r\n'
                                 f'"{py}" main.py --port {port} --base-directory "{d}" %*\r\n', encoding="utf-8",
@@ -821,16 +821,16 @@ class Installer:
         if paths.WINDOWS:
             self.desktop_windows(bin_dir, py)
             return
-        for name, module in (("video-chain", "video_chain"), ("video-chain-gui", "video_chain.app")):
+        for name, module in (("promptwood", "video_chain"), ("promptwood-gui", "video_chain.app")):
             script = bin_dir / name
-            script.write_text(f'#!/usr/bin/env bash\n# Promptwood (written by video-chain setup)\n'
+            script.write_text(f'#!/usr/bin/env bash\n# Promptwood (written by promptwood setup)\n'
                               f'export VIDEO_CHAIN_HOME="{self.home}"\nexec "{py}" -m {module} "$@"\n')
             script.chmod(0o755)
         if not self.o.desktop or platform.system() != "Linux":
             return
         local = Path.home() / ".local" / "bin"
         if str(local) in os.environ.get("PATH", "").split(os.pathsep) and local.is_dir():
-            for name in ("video-chain", "video-chain-gui"):
+            for name in ("promptwood", "promptwood-gui"):
                 link = local / name
                 if link.is_symlink() or not link.exists():
                     if link.is_symlink():
@@ -840,22 +840,22 @@ class Installer:
         icon = Path(__file__).resolve().parents[1] / "theme" / "icons" / "app.svg"
         try:
             apps.mkdir(parents=True, exist_ok=True)
-            (apps / "video-chain.desktop").write_text(
+            (apps / "promptwood.desktop").write_text(
                 "[Desktop Entry]\nType=Application\nName=Promptwood\n"
                 "Comment=Chain image-to-video clips into one film\n"
-                f"Exec={bin_dir / 'video-chain-gui'}\n" + (f"Icon={icon}\n" if icon.is_file() else "")
-                + "Terminal=false\nCategories=AudioVideo;Video;\nStartupWMClass=video-chain\n")
+                f"Exec={bin_dir / 'promptwood-gui'}\n" + (f"Icon={icon}\n" if icon.is_file() else "")
+                + "Terminal=false\nCategories=AudioVideo;Video;\nStartupWMClass=promptwood\n")
         except OSError:
             pass
 
     def desktop_windows(self, bin_dir: Path, py: Path) -> None:
-        """(Windows) video-chain.cmd and video-chain-gui.cmd in <home>\\bin and a Start menu entry."""
+        """(Windows) promptwood.cmd and promptwood-gui.cmd in <home>\\bin and a Start menu entry."""
         pyw = py.with_name("pythonw.exe")
-        for name, module, exe, start in (("video-chain", "video_chain", py, ""),
-                                         ("video-chain-gui", "video_chain.app", pyw if pyw.is_file() else py,
+        for name, module, exe, start in (("promptwood", "video_chain", py, ""),
+                                         ("promptwood-gui", "video_chain.app", pyw if pyw.is_file() else py,
                                           'start "" ')):
             (bin_dir / f"{name}.cmd").write_text(
-                "@echo off\r\nrem Promptwood (written by video-chain setup)\r\n"
+                "@echo off\r\nrem Promptwood (written by promptwood setup)\r\n"
                 f'set "VIDEO_CHAIN_HOME={self.home}"\r\nset PYTHONUTF8=1\r\n'
                 f'{start}"{exe}" -X utf8 -m {module} %*\r\n', encoding="utf-8", newline="")
         if not self.o.desktop:
@@ -870,7 +870,7 @@ class Installer:
             subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], timeout=60,
                            capture_output=True,
                            env={**os.environ, "VC_LNK": str(menu / "Promptwood.lnk"),
-                                "VC_TARGET": str(bin_dir / "video-chain-gui.cmd"), "VC_DIR": str(self.home)})
+                                "VC_TARGET": str(bin_dir / "promptwood-gui.cmd"), "VC_DIR": str(self.home)})
         except (OSError, subprocess.SubprocessError):
             pass                                         # (no menu entry: the .cmd file starts the app as well)
 
@@ -890,7 +890,7 @@ class Installer:
         if self.o.test and busy and not D.failed(checks):
             checks.append(D.Check(D.TESTS, "Test clip, test line, language model", D.WARN,
                                   f"skipped: other programs use the graphics card ({(gpu or {})['free_mb'] / 1024:.0f} GB "
-                                  "free)", "close them, then: video-chain doctor --render --speech --llm"))
+                                  "free)", "close them, then: promptwood doctor --render --speech --llm"))
         if self.o.test and not busy and not D.failed(checks):
             checks += run_tests(self.man, installed)
         say()
@@ -963,7 +963,7 @@ class Installer:
         shutil.rmtree(self.home / "downloads", ignore_errors=True)
         if ok:
             say(f"\nPromptwood is ready. Start it from your applications menu, or with:\n"
-                f"    {short(self.home / 'bin' / ('video-chain-gui.cmd' if paths.WINDOWS else 'video-chain-gui'))}\n"
+                f"    {short(self.home / 'bin' / ('promptwood-gui.cmd' if paths.WINDOWS else 'promptwood-gui'))}\n"
                 "ComfyUI is started by the app when it is needed (the Start button next to its status).")
         else:
             say(f"\nThe full output of this run is in {short(log)}")

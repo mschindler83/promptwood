@@ -289,7 +289,7 @@ class ViewMixin(MainWindowHost):
         h.addAction("About Promptwood", self.show_about)
 
     def show_setup_check(self):
-        """What the app needs on this computer and what is missing (the report of `video-chain doctor`)."""
+        """What the app needs on this computer and what is missing (the report of `promptwood doctor`)."""
         from .setup_check import SetupCheckDialog
         self._setup_check = SetupCheckDialog(self)
         self._setup_check.show()
@@ -344,10 +344,13 @@ class ViewMixin(MainWindowHost):
 
     def show_about(self):
         """Help → About: what this is and which version."""
-        try:
-            version = importlib.metadata.version("video-chain")
-        except importlib.metadata.PackageNotFoundError:
-            version = "development"
+        version = "development"
+        for dist in ("promptwood", "video-chain"):     # (an environment installed before the rename: the old name)
+            try:
+                version = importlib.metadata.version(dist)
+                break
+            except importlib.metadata.PackageNotFoundError:
+                pass
         from .responsible import ABOUT
         QMessageBox.about(self, "About Promptwood",
                           f"<b>Promptwood</b> {version}<br>Chain MiniMax-H3 image-to-video clips: each prompt "

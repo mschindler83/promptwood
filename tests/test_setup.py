@@ -963,10 +963,10 @@ def test_windows_install_choices(server, home, monkeypatch):
     monkeypatch.setenv("APPDATA", str(home / "roaming"))
     home.mkdir(parents=True, exist_ok=True)
     inst.desktop_windows(home, Path(r"C:\app\.venv\Scripts\python.exe"))
-    cmd = (home / "video-chain-gui.cmd").read_bytes().decode()
+    cmd = (home / "promptwood-gui.cmd").read_bytes().decode()
     assert "set PYTHONUTF8=1" in cmd and "-X utf8 -m video_chain.app %*" in cmd
     assert cmd.count("\r\n") == cmd.count("\n") == 5                # Windows line ends, written as they are
-    assert 'VIDEO_CHAIN_HOME=' in (home / "video-chain.cmd").read_text()
+    assert 'VIDEO_CHAIN_HOME=' in (home / "promptwood.cmd").read_text()
 
 
 def test_install_ps1_mirrors_install_sh():
@@ -1019,3 +1019,20 @@ def test_config_json_is_on_the_disk_before_it_replaces_the_old_one(home, monkeyp
     paths.save_config(hf_cache="/models")
     assert len(synced) >= 2                                      # the file's data, then the folder's entry
     assert paths.load_config() == {"hf_cache": "/models"} and not list(home.glob("*.tmp"))
+
+
+def test_the_menu_entry_belongs_to_the_window(home, tmp_path, monkeypatch):
+    """Linux: the menu entry is promptwood.desktop, and the app's window says the same desktop file name (Wayland and
+    X11 match window and entry by it), so the menu's icon and name are the window's."""
+    import platform
+    import re
+    data = tmp_path / "data"
+    monkeypatch.setenv("XDG_DATA_HOME", str(data))
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    inst = I.Installer(I.Options(only=["video"]))
+    inst.desktop()
+    entry = (data / "applications" / "promptwood.desktop").read_text()
+    assert "Name=Promptwood\n" in entry and "StartupWMClass=promptwood\n" in entry
+    assert re.search(r"Exec=.*promptwood-gui\n", entry) and (home / "bin" / "promptwood").is_file()
+    app_src = (SRC / "src" / "video_chain" / "app.py").read_text()
+    assert 'setDesktopFileName("promptwood")' in app_src

@@ -2,7 +2,7 @@
 for characters. Three providers:
 
 - local: Qwen3-TTS (Apache 2.0; German, English and 8 more languages) in its own environment (paths.tts_python:
-  <home>/tts-venv, set up by `video-chain setup`), run by tts_worker.py, started when needed and stopped right after. A character speaks in the voice of its
+  <home>/tts-venv, set up by `promptwood setup`), run by tts_worker.py, started when needed and stopped right after. A character speaks in the voice of its
   voice sample (Base model: cloned from the sample and what it says, transcribed once with Whisper; from its longer
   clone reference, tree.clone_file, when the voice was set from a longer source); a new voice is made from a
   description (VoiceDesign model).
@@ -10,7 +10,7 @@ for characters. Three providers:
   a Mel-Band RoFormer model through the audio-separator package; a cloned voice copies whatever is in its sample).
 - fish: Fish S2 Pro (Fish Audio Research License: free for research and non-commercial use only; about 80
   languages, German among the well-supported ones) in fish-speech's own environment (paths.fish_dir:
-  <home>/fish-speech with its .venv, `video-chain setup --with tts-fish`), run by fish_worker.py. Like local it clones each character's voice sample (transcribed once with the
+  <home>/fish-speech with its .venv, `promptwood setup --with tts-fish`), run by fish_worker.py. Like local it clones each character's voice sample (transcribed once with the
   local worker's Whisper), and it takes the tone of a line from free-form [tags] in it: "[angry] Lass mich!",
   "[whispering, scared] Hörst du das?", "Ja [laughs] genau". It needs about 19 GB of VRAM (a 24 GB card with
   nothing else on it), so the refiner's llama.cpp server is stopped and ComfyUI unloads its models before it
@@ -60,7 +60,7 @@ WHISPER = "openai/whisper-large-v3-turbo"
 SEPARATOR_DIR = "audio-separator"        # in the model cache: audio-separator's own (flat) model folder
 SEPARATOR_MODEL = "vocals_mel_band_roformer.ckpt"    # Mel-Band RoFormer, vocals (Kimberley Jensen): 2 GB of VRAM
 LOCAL_VRAM_MB = 5500                     # measured: 4.5 GB peak for the 1.7B models (bf16), Whisper turbo less
-SETUP_HINT = "run: video-chain setup --only tts   (Help > Setup check shows what is missing)"
+SETUP_HINT = "run: promptwood setup --only tts   (Help > Setup check shows what is missing)"
 FISH_DIR = paths.fish_dir()                 # fish-speech's code (git checkout) with its own .venv
 FISH_PYTHON = paths.fish_python()
 FISH_WORKER = Path(__file__).resolve().with_name("fish_worker.py")
@@ -69,7 +69,7 @@ FISH_COMMIT = "0f8a12e8a651062fdee9c33a894bdccd3a8513f1"     # the fish-speech v
 FISH_VRAM_MB = 19500                     # measured: 19.4 GB of the GPU at the peak (model, caches, codec)
 FISH_RAM_MB = 6000                       # free RAM needed to start it (measured: 3 GB at the peak, with fish_worker)
 FISH_RAM_CAP_GB = 12                     # the hard limit of its systemd scope (no swap): a runaway worker ends there
-FISH_SETUP_HINT = "run: video-chain setup --with tts-fish   (Help > Setup check shows what is missing)"
+FISH_SETUP_HINT = "run: promptwood setup --with tts-fish   (Help > Setup check shows what is missing)"
 SEPARATOR_HINT = SETUP_HINT
 
 # the dialogue language (project setting) -> Qwen3-TTS's name / ISO 639-1 for ElevenLabs
