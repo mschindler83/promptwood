@@ -251,32 +251,39 @@ class CastMixin(MainWindowHost):
         assert self.project is not None
         name, project = c["name"], self.project
         pictures = [str(project / rel) for rel in c["images"]]
+        images = list(c["images"])
         self._describing = name
+        self.use_llama()
         self._update_cast_buttons()
         self.status.setText(f"Describing @{name} from its pictures (the llama.cpp model is loaded first)…")
         run_in_background(lambda: llama.describe(kind, name, pictures, desc),
-                          on_done=lambda text: self._described(name, desc, str(project), text, ""),
+                          on_done=lambda text: self._described(name, desc, str(project), text, "", images),
                           on_error=lambda e: self._described(name, desc, str(project), "",
-                                                             str(e) or type(e).__name__),
+                                                             str(e) or type(e).__name__, images),
                           owner=self)
         return True
 
-    def _described(self, name: str, was: str, project: str, text: str, err: str) -> None:
+    def _described(self, name: str, was: str, project: str, text: str, err: str,
+                   images: list[str] | None = None) -> None:
         self._describing = None
-        self.stop_llama("the description was written")     # (its RAM / VRAM back for clips and images)
+        self.release_llama("the description was written")  # (its RAM / VRAM back, unless the refiner uses it)
         self._update_cast_buttons()
         if err:
             self._report_error(f"Could not describe @{name}: {err}")
             return
         c = T.character(self.tree, name) if self.tree is not None and str(self.project) == project else None
-        if c is None or T.kind_of(c) == "person" or c.get("desc", "") != was or self.running:
+        sel = self._selected_character()
+        typing = (sel is not None and c is not None and sel["name"] == c["name"]
+                  and self.char_desc.text().strip() != (c.get("desc") or "").strip())   # (not saved yet)
+        if (c is None or T.kind_of(c) == "person" or c.get("desc", "") != was or self.running or typing
+                or (images is not None and list(c["images"]) != images)):
             self.status.setText(f"@{name} changed meanwhile, so its description was not replaced. The model's "
                                 f"description: {text}")
             return
         before = self._done_clips()
         assert self.tree is not None
         T.update_character(self.tree, name, desc=text)
-        self._show_references(select=name)
+        self._show_references()                             # (the selection stays as the user has it)
         self._write_tree()
         self._changed()
         if not self._report_remade(before, f"Description of @{name} written from its pictures"):

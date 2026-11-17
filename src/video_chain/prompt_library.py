@@ -23,6 +23,11 @@ def default_dir() -> Path:
     return Path(env) if env else config.data_dir() / "prompts"
 
 
+def _folder_of(p: dict) -> str:
+    f = p.get("folder")
+    return squash(f) if isinstance(f, str) else ""
+
+
 def _kind(kind: str) -> str:
     if kind not in KINDS:
         raise ValueError(f"no such kind of prompt: {kind}")
@@ -38,10 +43,10 @@ class PromptLibrary(FolderStore):
     # ---- reading
     def list(self, kind: str | None = None) -> list[dict]:
         """The saved prompts (of one kind), by folder and name."""
-        items = [p for p in self._entries() if p.get("kind") in KINDS and isinstance(p.get("text"), str)
-                 and (kind is None or p["kind"] == kind)]
+        items = [p for p in self._entries() if isinstance(p.get("kind"), str) and p["kind"] in KINDS
+                 and isinstance(p.get("text"), str) and (kind is None or p["kind"] == kind)]
         for p in items:
-            p["folder"] = squash(p.get("folder") or "")
+            p["folder"], p["name"] = _folder_of(p), str(p["name"])
         return sorted(items, key=lambda p: (p["folder"].lower(), str(p["name"]).lower()))
 
     def get(self, pid: str) -> dict | None:
@@ -58,9 +63,15 @@ class PromptLibrary(FolderStore):
                     None)
 
     # ---- changing
+    @staticmethod
+    def _canon(items, kind: str, folder: str) -> str:
+        """The folder's spelling as the library has it (a folder differing only in case is the same folder)."""
+        return next((_folder_of(p) for p in items if p.get("kind") == kind
+                     and _folder_of(p).lower() == folder.lower()), folder) if folder else ""
+
     def _clash(self, items, kind: str, folder: str, name: str, keep: str | None = None) -> None:
         for p in items:
-            if (p.get("kind") == kind and squash(p.get("folder") or "").lower() == folder.lower()
+            if (p.get("kind") == kind and _folder_of(p).lower() == folder.lower()
                     and str(p.get("name") or "").lower() == name.lower() and p.get("id") != keep):
                 where = f" in “{folder}”" if folder else ""
                 raise ValueError(f"there is already a prompt “{name}”{where}")
@@ -76,8 +87,9 @@ class PromptLibrary(FolderStore):
         now = time.strftime("%Y-%m-%d %H:%M")
         with self._exclusive():
             data = self._read(update=True)
+            folder = self._canon(data[self.KEY], kind, folder)
             old = next((p for p in data[self.KEY] if p.get("kind") == kind
-                        and squash(p.get("folder") or "").lower() == folder.lower()
+                        and _folder_of(p).lower() == folder.lower()
                         and str(p.get("name") or "").lower() == name.lower()), None)
             if old is not None and not replace:
                 self._clash(data[self.KEY], kind, folder, name)
@@ -117,7 +129,7 @@ class PromptLibrary(FolderStore):
             raise ValueError("a name is needed")
 
         def change(items, p):
-            self._clash(items, p["kind"], squash(p.get("folder") or ""), new, keep=p["id"])
+            self._clash(items, p.get("kind"), _folder_of(p), new, keep=p.get("id"))
             p["name"] = new
         self._change(vid, change)
 
@@ -126,8 +138,9 @@ class PromptLibrary(FolderStore):
         folder = squash(folder or "")
 
         def change(items, p):
-            self._clash(items, p["kind"], folder, str(p["name"]), keep=p["id"])
-            p["folder"] = folder
+            into = self._canon([q for q in items if q is not p], p.get("kind"), folder)
+            self._clash(items, p.get("kind"), into, str(p.get("name") or ""), keep=p.get("id"))
+            p["folder"] = into
         return self._change(pid, change)
 
     def rename_folder(self, kind: str, old: str, new: str) -> int:
@@ -138,9 +151,10 @@ class PromptLibrary(FolderStore):
             raise ValueError("a folder name is needed")
         with self._exclusive():
             data = self._read(update=True)
-            moving = [p for p in data[self.KEY]
-                      if p.get("kind") == kind and squash(p.get("folder") or "").lower() == old.lower()]
+            moving = [p for p in data[self.KEY] if p.get("kind") == kind and _folder_of(p).lower() == old.lower()]
             ids = {p.get("id") for p in moving}
+            if new.lower() != old.lower():             # (only its case changes: the new spelling as typed)
+                new = self._canon([q for q in data[self.KEY] if q.get("id") not in ids], kind, new)
             for p in moving:
                 self._clash([q for q in data[self.KEY] if q.get("id") not in ids], kind, new, str(p["name"]))
             for p in moving:
@@ -156,8 +170,7 @@ class PromptLibrary(FolderStore):
             raise ValueError("a folder name is needed")
         with self._exclusive():
             data = self._read(update=True)
-            left = [p for p in data[self.KEY]
-                    if not (p.get("kind") == kind and squash(p.get("folder") or "").lower() == folder.lower())]
+            left = [p for p in data[self.KEY] if not (p.get("kind") == kind and _folder_of(p).lower() == folder.lower())]
             gone = len(data[self.KEY]) - len(left)
             if gone:
                 data[self.KEY] = left

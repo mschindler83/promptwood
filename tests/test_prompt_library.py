@@ -61,3 +61,30 @@ def test_a_damaged_library_is_kept_aside(tmp_path):
     assert lib.list() == []
     lib.save("video", "A", "a")
     assert [p["name"] for p in lib.list()] == ["A"] and list(d.glob("library.json.*.bak"))
+
+
+def test_a_folder_keeps_one_spelling(tmp_path):
+    lib = PromptLibrary(tmp_path / "lib")
+    lib.save("video", "A", "a", folder="Camera")
+    lib.save("video", "B", "b", folder="camera")                       # the folder there is: its spelling
+    assert lib.folders("video") == ["Camera"] and {p["folder"] for p in lib.list("video")} == {"Camera"}
+    c = lib.save("video", "C", "c")
+    assert lib.move(c["id"], "CAMERA")["folder"] == "Camera"
+    assert lib.rename_folder("video", "camera", "CAMERA") == 3          # only its case: the new spelling
+    assert lib.folders("video") == ["CAMERA"]
+    lib.save("video", "D", "d", folder="Shots")
+    lib.rename_folder("video", "CAMERA", "shots")                       # into a folder there is: one folder
+    assert lib.folders("video") == ["Shots"]
+
+
+def test_a_hand_edited_library_does_not_break_it(tmp_path):
+    d = tmp_path / "lib"
+    d.mkdir()
+    (d / "library.json").write_text(json.dumps({"version": 1, "prompts": [
+        {"id": "a1", "name": "Odd", "kind": ["video"], "text": "x"},
+        {"id": "a2", "name": "No text", "kind": "video"},
+        {"id": "a3", "name": "Fine", "kind": "video", "text": "fine", "folder": 5}]}))
+    lib = PromptLibrary(d)
+    assert [p["name"] for p in lib.list()] == ["Fine"]
+    lib.rename("a3", "Good")
+    assert lib.get("a3")["name"] == "Good"

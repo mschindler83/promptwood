@@ -135,6 +135,17 @@ class LlamaMixin(MainWindowHost):
         self.log.appendPlainText(msg)
         self.status.setText(msg)
 
+    _llama_users = 0                                # the refiner window, Describe: what uses the server now
+
+    def use_llama(self) -> None:
+        """Something uses the llama.cpp server until it calls release_llama (it is not stopped under it)."""
+        self._llama_users += 1
+
+    def release_llama(self, why: str = "") -> bool:
+        """It is no longer used by that: stopped when nothing else uses it (its RAM / VRAM back)."""
+        self._llama_users = max(0, self._llama_users - 1)
+        return self.stop_llama(why) if self._llama_users == 0 else False
+
     def stop_llama(self, why: str = "", wait: bool = False, grace: float | None = None) -> bool:
         """Stop the refiner's llama.cpp server if the app started it (its RAM / VRAM back for ComfyUI). wait: until
         it is gone (when the window closes: a background wait would die with the app, leaving the server). grace:

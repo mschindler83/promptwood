@@ -175,3 +175,29 @@ def test_the_project_option(app, win, tmp_path, image):  # noqa: F811
     win.smooth_joins.setChecked(False)
     win._options_changed()
     assert win.tree.options["smooth_joins"] is False
+
+
+def test_a_short_carry_over_is_matched_against_its_first_frame(scene, tmp_path):
+    """2-4 carry-over frames: H3 anchors only the first of them (MiniMaxH3AddGuide), so b's first frame copies
+    a's frame stop - guide; that is what the colour is matched with."""
+    a = _cut(scene, tmp_path / "a.mp4", 0, 60)
+    b = _cut(scene, tmp_path / "b.mp4", 57, 70, SHIFT)                    # b[0] = a[57]: a 3-frame carry-over
+    m = joinmatch.measure(a, 60, b, 3)
+    assert m is not None and m["offset"] == 0 and m["blend"] == 0
+    assert m["planes"][0][0] == pytest.approx(1 / 1.06, abs=0.02)
+    assert m["planes"][1] == [1.0, pytest.approx(-5, abs=0.5)]           # (the right frame: the exact U shift)
+
+
+def test_a_damaged_kept_measure_is_measured_again(scene, tmp_path):
+    a, b = _clips(scene, tmp_path, 22, 1)
+    t = T.Tree()
+    na = _made(t, None, a, 60, 0)
+    nb = _made(t, na.id, b, 70, 22)
+    T.smooth_cuts(tmp_path, t, [na, nb], [a, b], [(0, 0), (22, 0)])
+    f = tmp_path / "paths" / "joins.json"
+    kept = json.loads(f.read_text())
+    f.write_text(json.dumps({k: {"offset": "x", "planes": 7} for k in kept}))
+    got, smooth = T.smooth_cuts(tmp_path, t, [na, nb], [a, b], [(0, 0), (22, 0)])
+    assert got == [(0, 0), (21, 0)] and smooth[1]["lut"]
+    f.write_text("[1, 2]")                                                  # not even a dict
+    assert T.smooth_cuts(tmp_path, t, [na, nb], [a, b], [(0, 0), (22, 0)])[0] == got

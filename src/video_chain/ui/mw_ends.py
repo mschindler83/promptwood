@@ -51,6 +51,7 @@ class EndsMixin(MainWindowHost):
         cast = T.refiner_cast(self.tree) if self.tree is not None and kind in ("video", "video_h3") else []
         dlg = PR.RefineDialog(self, text, kind, connect, self.qs, start_comfy=self.start_comfy, cast=cast,
                            pictures=pictures or [], seconds=seconds, start_image=start_image, loras=loras)
+        self.use_llama()
         try:
             if dlg.exec() != QDialog.DialogCode.Accepted:
                 return None
@@ -61,7 +62,7 @@ class EndsMixin(MainWindowHost):
             return PR.RefineResult(text=chosen) if chosen else None
         finally:
             # the llama.cpp model goes with the window: it slows image / clip generation down while it is loaded
-            self.stop_llama("the prompt refiner was closed")
+            self.release_llama("the prompt refiner was closed")   # (not while Describe still uses it)
             if dlg.refined_any and not self.running and self.comfy.model != ComfyModel.QWEN:
                 # a language model is in ComfyUI now: unloaded before the next clips, idle time as usual
                 self.comfy.language_model_loaded()

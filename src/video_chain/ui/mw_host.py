@@ -90,6 +90,7 @@ if TYPE_CHECKING:
         _kill_timer: QTimer
         _left_w: int
         _llama: LlamaServer | None
+        _llama_users: int
         _loading: bool
         _model_state: ModelState
         _model_timer: QTimer

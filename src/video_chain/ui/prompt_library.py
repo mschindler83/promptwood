@@ -3,6 +3,7 @@ every project (video_chain.prompt_library), in folders per kind. The prompt of t
 from here, and a saved one is put into that field: at the cursor (Insert) or instead of its text (Replace)."""
 from __future__ import annotations
 
+import shiboken6
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QInputDialog,
                                QLineEdit, QPlainTextEdit, QPushButton, QSplitter, QTreeWidget, QTreeWidgetItem,
@@ -49,6 +50,8 @@ class PromptLibraryDialog(QDialog):
                  settings=None):
         super().__init__(parent)
         self.lib, self.target = lib or PL.library(), target
+        self._gone = False                            # the field it was opened from was deleted
+        self._closed: set[str] | None = None          # the folders the user collapsed (None: not shown yet)
         self.setWindowTitle("Prompt library")
         fit_size(self, 820, 520)
         remember_geometry(self, settings, "promptLibrary")
@@ -121,21 +124,37 @@ class PromptLibraryDialog(QDialog):
         for b in (self.b_insert, self.b_replace, self.b_close):
             row.addWidget(b)
         v.addLayout(row)
+        if target is not None:                         # (a deleted field disconnects by itself)
+            target.textChanged.connect(self._selected)
         self.fill()
 
     # ---- what is shown
     def current_kind(self) -> str:
         return str(self.kind.currentData())
 
+    def _field(self) -> QPlainTextEdit | None:
+        """The prompt field, None when there is none or it is gone (a clip card rebuilt meanwhile)."""
+        if self.target is not None and not shiboken6.isValid(self.target):
+            self.target, self._gone = None, True
+        return self.target
+
     def _text(self) -> str:
-        return self.target.toPlainText().strip() if self.target is not None else ""
+        f = self._field()
+        return f.toPlainText().strip() if f is not None else ""
 
     def _editable(self) -> bool:
-        return self.target is not None and not self.target.isReadOnly()
+        f = self._field()
+        return f is not None and not f.isReadOnly()
 
     def fill(self, select: str | None = None) -> None:
         keep = select or self.selected_id()
-        open_folders = {it.data(0, ROLE_FOLDER) for it in self._folder_items() if it.isExpanded()}
+        keep_folder = None if select else self.selected_folder()
+        if self._closed is not None:                   # (what the user collapsed stays so)
+            shown = {str(it.data(0, ROLE_FOLDER)).lower(): it.isExpanded() for it in self._folder_items()}
+            self._closed = {f for f in self._closed if shown.get(f) is not True} | {f for f, e in shown.items()
+                                                                                     if not e}
+        else:
+            self._closed = set()
         words = self.search.text().lower().split()
         prompts = [p for p in self.lib.list(self.current_kind())
                    if all(w in (p["name"] + " " + p["text"] + " " + p["folder"]).lower() for w in words)]
@@ -166,8 +185,9 @@ class PromptLibraryDialog(QDialog):
                 pick = it
         for name, it in folders.items():
             it.setText(0, f"{it.data(0, ROLE_FOLDER)}   ({it.childCount()})")
-            it.setExpanded(bool(words) or it.data(0, ROLE_FOLDER) in open_folders or pick is not None
-                           and pick.parent() is it or not open_folders)
+            it.setExpanded(bool(words) or name not in self._closed or pick is not None and pick.parent() is it)
+            if pick is None and keep_folder is not None and name == keep_folder.lower():
+                pick = it
         if pick is not None:
             self.tree.setCurrentItem(pick)
         self.tree.setVisible(bool(prompts) or bool(words))
@@ -212,7 +232,8 @@ class PromptLibraryDialog(QDialog):
                                  "Delete the selected prompt from the library")
         self.b_insert.setEnabled(p is not None and editable)
         self.b_replace.setEnabled(p is not None and editable)
-        why = ("" if editable else "Open the library from a prompt to put a saved one into it" if self.target is None
+        why = ("" if editable else "That prompt is not shown any more: open the library from it again"
+               if self._gone else "Open the library from a prompt to put a saved one into it" if self.target is None
                else "That prompt cannot be changed now")
         for b in (self.b_insert, self.b_replace):
             if why:
@@ -334,10 +355,11 @@ class PromptLibraryDialog(QDialog):
         p = self.lib.get(pid) if pid else None
         if p is None or not self._editable():
             return False
-        assert self.target is not None
+        field = self._field()
+        assert field is not None
         if how == "replace":
-            replace_text(self.target, p["text"])
+            replace_text(field, p["text"])
         else:
-            insert_at_cursor(self.target, p["text"])          # (spaced from the words around it)
+            insert_at_cursor(field, p["text"])          # (spaced from the words around it)
         self.accept()
         return True

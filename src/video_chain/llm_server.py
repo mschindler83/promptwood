@@ -182,7 +182,11 @@ def describe_messages(*, kind: str, name: str, pictures: Sequence[str], desc: st
 
 def clean_description(text: str) -> str:
     """A description as the cast keeps it: one line, without a preface the model wrote anyway."""
-    text = re.sub(r"^\s*(the|this) (image|picture|photo)s? (shows?|depicts?|features?)\s*:?\s*", "", text, flags=re.I)
+    lines = [re.sub(r"^\s*(?:[-*•]|\d+[.)])\s+", "", ln) for ln in (text or "").splitlines()]   # list marks
+    text = " ".join(" ".join(lines).split()).replace("**", "").replace("__", "")
+    text = text.strip().strip("\"“”'‘’`").strip()
+    text = re.sub(r"^(the|this) (image|picture|photo|photograph)s? (shows?|depicts?|features?|is of|is)\s*:?\s*",
+                  "", text, flags=re.I)
     return text.strip()
 
 

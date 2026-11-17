@@ -11,7 +11,7 @@ from PySide6.QtWidgets import QPlainTextEdit  # noqa: E402
 from conftest import settings  # noqa: E402,F401
 from ui_helpers import app, image, new_project, win  # noqa: E402,F401
 from video_chain import prompt_library as PL  # noqa: E402
-from video_chain.ui.prompt_library import PromptLibraryDialog  # noqa: E402
+from video_chain.ui.prompt_library import ROLE_FOLDER as PL_ROLE, PromptLibraryDialog  # noqa: E402
 
 
 def _names(dlg):
@@ -107,3 +107,43 @@ def test_the_image_window_opens_it(app, tmp_path):  # noqa: F811
     dlg.set_mode("create")
     assert dlg.open_prompt_library(modal=False).current_kind() == "create"
     dlg.reject()
+
+
+def test_a_field_that_is_gone_is_left_alone(app, tmp_path):  # noqa: F811
+    """The card's prompt is rebuilt while the library is open: nothing is put anywhere, nothing breaks."""
+    import shiboken6
+    lib = PL.PromptLibrary(tmp_path / "lib")
+    a = lib.save("video", "A", "a text")
+    field = QPlainTextEdit("mine")
+    dlg = PromptLibraryDialog(None, "video", field, lib)
+    dlg.select(a["id"])
+    assert dlg.b_replace.isEnabled()
+    shiboken6.delete(field)
+    dlg._selected()
+    assert not dlg.b_replace.isEnabled() and not dlg.b_save.isEnabled()
+    assert not dlg.use("replace") and dlg.save("B", "") is None and not dlg.update_selected(confirm=False)
+
+
+def test_the_buttons_follow_the_prompt(app, tmp_path):  # noqa: F811
+    lib = PL.PromptLibrary(tmp_path / "lib")
+    field = QPlainTextEdit("")
+    dlg = PromptLibraryDialog(None, "video", field, lib)
+    assert not dlg.b_save.isEnabled()
+    field.setPlainText("now there is text")
+    assert dlg.b_save.isEnabled()
+
+
+def test_folders_stay_as_they_were(app, tmp_path):  # noqa: F811
+    lib = PL.PromptLibrary(tmp_path / "lib")
+    lib.save("video", "A", "a", folder="Camera")
+    lib.save("video", "B", "b", folder="Moves")
+    dlg = PromptLibraryDialog(None, "video", QPlainTextEdit("x"), lib)
+    folders = {dlg.tree.topLevelItem(k).data(0, PL_ROLE): dlg.tree.topLevelItem(k)
+               for k in range(dlg.tree.topLevelItemCount())}
+    for it in folders.values():
+        it.setExpanded(False)                                    # all collapsed: they stay so
+    dlg.tree.setCurrentItem(folders["Moves"])
+    dlg.fill()
+    items = [dlg.tree.topLevelItem(k) for k in range(dlg.tree.topLevelItemCount())]
+    assert not any(it.isExpanded() for it in items)
+    assert dlg.selected_folder() == "Moves" and dlg.b_rename.isEnabled()       # the folder stays selected

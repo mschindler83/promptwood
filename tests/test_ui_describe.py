@@ -29,7 +29,7 @@ class FakeLlama:
         return False
 
 
-def _place(win, tmp_path):
+def _place(win, tmp_path):  # noqa: F811
     pic = tmp_path / "k.png"
     Image.new("RGB", (160, 120), (200, 200, 0)).save(pic)
     T.add_character(win.project, win.tree, "Kitchen", pic, kind="place")
@@ -37,7 +37,7 @@ def _place(win, tmp_path):
     win._show_references(select="Kitchen")
 
 
-def test_describe_fills_a_places_description(app, win, tmp_path, image, monkeypatch):
+def test_describe_fills_a_places_description(app, win, tmp_path, image, monkeypatch):  # noqa: F811
     new_project(win, tmp_path, image, ("Anna cooks in @Kitchen",))
     _place(win, tmp_path)
     assert not win.b_char_describe.isHidden() and win.b_char_describe.isEnabled()
@@ -64,7 +64,7 @@ def test_describe_fills_a_places_description(app, win, tmp_path, image, monkeypa
     assert win.b_char_describe.isHidden()
 
 
-def test_describe_asks_before_replacing_and_keeps_an_edit_made_meanwhile(app, win, tmp_path, image, monkeypatch):
+def test_describe_asks_before_replacing_and_keeps_an_edit_made_meanwhile(app, win, tmp_path, image, monkeypatch):  # noqa: F811
     new_project(win, tmp_path, image, ("one",))
     _place(win, tmp_path)
     T.update_character(win.tree, "Kitchen", desc="mine")
@@ -87,7 +87,7 @@ def test_describe_asks_before_replacing_and_keeps_an_edit_made_meanwhile(app, wi
     assert "Could not describe @Kitchen" in win.status.text() and win.b_char_describe.isEnabled()
 
 
-def test_adding_a_picture_to_a_place_without_description_mentions_describe(app, win, tmp_path, image):
+def test_adding_a_picture_to_a_place_without_description_mentions_describe(app, win, tmp_path, image):  # noqa: F811
     new_project(win, tmp_path, image, ("one",))
     T.add_character(win.project, win.tree, "Garden", kind="place")
     win._show_references(select="Garden")
@@ -95,3 +95,57 @@ def test_adding_a_picture_to_a_place_without_description_mentions_describe(app, 
     Image.new("RGB", (160, 120), (0, 200, 0)).save(pic)
     assert win.add_reference(str(pic), crop=None)
     assert "Describe can write its description" in win.status.text()
+
+
+def test_describe_leaves_the_server_to_the_refiner_and_the_users_work_alone(app, win, tmp_path, image,  # noqa: F811
+                                                                            monkeypatch):
+    """The refiner uses the server while Describe runs: it is not stopped under it. Text being typed in the
+    description, another entry selected meanwhile and pictures changed meanwhile are left as they are."""
+    new_project(win, tmp_path, image, ("one",))
+    _place(win, tmp_path)
+    fake = FakeLlama()
+    monkeypatch.setattr(win, "llama_server", lambda: fake)
+    stopped = []
+    monkeypatch.setattr(win, "stop_llama", lambda why="", **k: stopped.append(why) or True)
+    win.use_llama()                                                          # (the refiner is open)
+    fake.go.clear()
+    assert win.describe_entry(confirm=False)
+    fake.go.set()
+    wait(app, lambda: win._describing is None)
+    assert stopped == []                                                     # the refiner still has it
+    win.release_llama("the prompt refiner was closed")
+    assert stopped == ["the prompt refiner was closed"]
+
+    fake.go.clear()                                                          # typed, not saved yet
+    assert win.describe_entry(confirm=False)
+    win.char_desc.setText("half typed")
+    fake.go.set()
+    wait(app, lambda: win._describing is None)
+    assert win.char_desc.text() == "half typed" and "not replaced" in win.status.text()
+
+    win._show_references(select="Kitchen")
+    fake.go.clear()                                                          # another entry selected meanwhile
+    assert win.describe_entry(confirm=False)
+    win._show_references(select="Anna")
+    fake.go.set()
+    wait(app, lambda: win._describing is None)
+    flush(app, win)
+    assert T.character(win.tree, "Kitchen")["desc"] == fake.answer
+    assert win._selected_character()["name"] == "Anna"
+
+    win._show_references(select="Kitchen")
+    T.update_character(win.tree, "Kitchen", desc="")
+    fake.go.clear()                                                          # its pictures changed meanwhile
+    assert win.describe_entry(confirm=False)
+    T.character(win.tree, "Kitchen")["images"] = []
+    fake.go.set()
+    wait(app, lambda: win._describing is None)
+    assert T.character(win.tree, "Kitchen")["desc"] == "" and "not replaced" in win.status.text()
+
+
+def test_a_description_is_one_clean_line():  # noqa: F811
+    from video_chain.llm_server import clean_description
+    assert clean_description("The photograph shows: a **sunny** kitchen,\n- white tiles\n") == \
+        "a sunny kitchen, white tiles"
+    assert clean_description("“The image is of a quiet garden.”") == "a quiet garden."
+    assert clean_description("A dark cellar") == "A dark cellar"

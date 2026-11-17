@@ -73,7 +73,8 @@ def measure(a_video: str | Path, a_stop: int, b_video: str | Path, guide: int) -
     cut, "planes": [[gain, offset]] for Y, U, V (b onto a), "blend": frames to blend, "error"}, or None when b's
     start is no copy of a's end."""
     g = int(guide) if int(guide) >= MIN_GUIDE else 1
-    a = read_yuv(a_video, a_stop - g, g)
+    # a shorter carry-over: H3 anchors only its first frame (MiniMaxH3AddGuide), so b[0] copies a[stop - guide]
+    a = read_yuv(a_video, a_stop - (g if g > 1 else max(1, int(guide))), g)
     b = read_yuv(b_video, 0, g + (SEARCH if g > 1 else 0))
     if len(a) < g or not b:
         return None

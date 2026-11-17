@@ -342,6 +342,16 @@ def _join_key(a: Path, a_end: int, b: Path, guide: int) -> str | None:
         return None
 
 
+def _good_measure(m) -> bool:
+    """A kept measure as joinmatch.measure makes it (a damaged one is measured again)."""
+    try:
+        return (isinstance(m, dict) and isinstance(m.get("offset"), int) and isinstance(m.get("blend"), int)
+                and len(m["planes"]) == 3 and all(len(p) == 2 and all(isinstance(v, (int, float)) for v in p)
+                                                  for p in m["planes"]))
+    except (KeyError, TypeError):
+        return False
+
+
 def smooth_cuts(project: Path, tree: Tree, path: list[Node], videos: list[Path], cuts: list[tuple[int, int]],
                 measure: bool = True) -> tuple[list[tuple[int, int]], list[dict | None]]:
     """The cuts and chain.concat's smooth of a path's join (option "smooth_joins"): every generated clip after
@@ -357,7 +367,7 @@ def smooth_cuts(project: Path, tree: Tree, path: list[Node], videos: list[Path],
     file = Path(project) / "paths" / JOINS_FILE
     try:
         kept = json.loads(file.read_text(encoding="utf-8")) if file.is_file() else {}
-        kept = kept if isinstance(kept, dict) else {}
+        kept = {k: m for k, m in kept.items() if m is None or _good_measure(m)} if isinstance(kept, dict) else {}
     except (OSError, ValueError):
         kept = {}
     changed = False
