@@ -37,7 +37,7 @@ fetch() {   # fetch URL  -> stdout
 
 # ---- the app's source: this folder, or (when the script was piped into a shell) a download
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)"
-if [ -z "$SRC" ] || [ ! -f "$SRC/pyproject.toml" ] || ! grep -q 'name = "video-chain"' "$SRC/pyproject.toml"; then
+if [ -z "$SRC" ] || [ ! -f "$SRC/pyproject.toml" ] || ! grep -q 'name = "promptwood"' "$SRC/pyproject.toml"; then
     [ -n "${VIDEO_CHAIN_REPO:-}" ] || die "run install.sh from Promptwood's folder, or set VIDEO_CHAIN_REPO to its repository address (https://…)"
     SRC="$HOME_DIR/app"
     if [ ! -f "$SRC/pyproject.toml" ]; then

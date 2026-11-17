@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Runs the promptwood command line (clips rendered by a running ComfyUI) with this project's Python, without
+# installing it (a checkout after `uv sync`).
+set -u
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ ! -x "$HERE/.venv/bin/python" ]; then
+    echo "promptwood: $HERE/.venv/bin/python is missing; run: uv sync" >&2
+    exit 1
+fi
+exec "$HERE/.venv/bin/python" -m video_chain "$@"

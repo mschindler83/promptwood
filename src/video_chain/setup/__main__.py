@@ -16,7 +16,7 @@ def build_parser() -> argparse.ArgumentParser:
     man = M.load()
     parts = "\n".join(f"  {cid:14} {c['bytes'] / 2**30:6.1f} GB  [{c['profile']}]  {c['title']}"
                       for cid, c in man["components"].items())
-    p = argparse.ArgumentParser(prog="video-chain", formatter_class=argparse.RawDescriptionHelpFormatter,
+    p = argparse.ArgumentParser(prog="promptwood", formatter_class=argparse.RawDescriptionHelpFormatter,
                                 description="Install and check everything Promptwood needs.",
                                 epilog=f"Parts (for --only / --with / --without):\n{parts}\n\n"
                                        "Steps (for --steps, to repair one): system (ffmpeg), comfyui, nodes\n"

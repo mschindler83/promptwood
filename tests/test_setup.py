@@ -34,7 +34,7 @@ def test_no_personal_paths_in_the_code():
     bad = re.compile(r"/home/[a-z]|192\.168\.")
     hits = []
     for f in [*SRC.joinpath("src").rglob("*.py"), *SRC.joinpath("comfy_nodes").rglob("*.py"),
-              *SRC.joinpath("src").rglob("*.json"), SRC / "install.sh", SRC / "video-chain", SRC / "pyproject.toml"]:
+              *SRC.joinpath("src").rglob("*.json"), SRC / "install.sh", SRC / "promptwood", SRC / "pyproject.toml"]:
         for n, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
             if bad.search(line):
                 hits.append(f"{f.relative_to(SRC)}:{n}: {line.strip()[:80]}")
@@ -1036,3 +1036,13 @@ def test_the_menu_entry_belongs_to_the_window(home, tmp_path, monkeypatch):
     assert re.search(r"Exec=.*promptwood-gui\n", entry) and (home / "bin" / "promptwood").is_file()
     app_src = (SRC / "src" / "video_chain" / "app.py").read_text()
     assert 'setDesktopFileName("promptwood")' in app_src
+
+
+def test_install_sh_knows_its_own_folder():
+    """install.sh recognises the app's folder by the package name in pyproject.toml (else it would download the app
+    again, or stop): that name is the one the package really has."""
+    import tomllib
+    name = tomllib.loads((SRC / "pyproject.toml").read_text())["project"]["name"]
+    sh = (SRC / "install.sh").read_text()
+    looked_for = re.search(r"grep -q 'name = \"([^\"]+)\"' \"\$SRC/pyproject.toml\"", sh)
+    assert looked_for and looked_for.group(1) == name
