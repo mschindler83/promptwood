@@ -311,6 +311,9 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         self.b_refine = icon_button("gen", "Refine this prompt with a language model")
         self.b_refine.clicked.connect(self._refine_prompt)
         self.b_refine.setVisible(self.refine is not None)
+        self.b_prompts = icon_button("list", "Prompt library: save this prompt, or put a saved one into it")
+        self.b_prompts.clicked.connect(lambda: self.open_prompt_library())
+        prow0.addWidget(self.b_prompts)
         prow0.addWidget(self.b_refine)
         left.addLayout(prow0)
         self.prompt = QPlainTextEdit()
@@ -460,6 +463,17 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         self._show_edit_shape()
         self._show_mask()
         self._update_buttons()
+
+    def open_prompt_library(self, modal: bool = True):
+        """The prompt library for this window's prompt (its Edit or Create prompts first). modal=False: the window
+        is made and handed back (for a test)."""
+        from .prompt_library import PromptLibraryDialog
+        dlg = PromptLibraryDialog(self, "create" if self.mode() == "create" else "edit", self.prompt,
+                                  settings=self.qs)
+        if not modal:
+            return dlg
+        dlg.exec()
+        return dlg
 
     def _build_actions(self, left: QVBoxLayout):
         brow = QHBoxLayout()

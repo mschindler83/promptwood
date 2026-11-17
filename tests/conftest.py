@@ -157,6 +157,8 @@ def no_plugins(monkeypatch):
 def own_trigger_db(tmp_path, monkeypatch):
     monkeypatch.setenv("VIDEO_CHAIN_TRIGGERS", str(tmp_path / "lora_triggers.json"))
     monkeypatch.setenv("VIDEO_CHAIN_PRESETS", str(tmp_path / "lora_presets.json"))
+    for name in ("VIDEO_CHAIN_PROMPTS", "VIDEO_CHAIN_VOICES", "VIDEO_CHAIN_CASTS"):   # (the libraries: in tmp_path)
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.delenv("CIVITAI_API_KEY", raising=False)
     import keyring
     from video_chain import triggers

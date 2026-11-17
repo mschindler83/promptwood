@@ -194,6 +194,24 @@ class NodeMixin(MainWindowHost):
             replace_text(card.edit, new.text)          # Ctrl+Z in the prompt takes it back
             self.status.setText(f"Clip #{T.short_id(node.id)}: prompt refined (Ctrl+Z in the prompt undoes it).")
 
+    @_node_action("prompts", applies="clip", frozen_check=False)
+    def _act_prompts(self, action: str, node: T.Node | None, nid: str | None):
+        """The prompt library for this clip's description (a frozen clip's can be saved, not changed)."""
+        assert node is not None
+        card = self._card_of(node.id, PromptCard)
+        if card is not None:
+            self.open_prompt_library("video", card.edit)
+
+    def open_prompt_library(self, kind: str, target=None):
+        """The prompt library window for a prompt field (target), its `kind` of prompts first. Without modal
+        dialogs it is made and handed back."""
+        from .prompt_library import PromptLibraryDialog
+        dlg = PromptLibraryDialog(self, kind, target, settings=self.qs)
+        if not self.modal_dialogs:
+            return dlg
+        dlg.exec()
+        return dlg
+
     @_node_action("handover", applies="clip")
     def _act_handover(self, action: str, node: T.Node | None, nid: str | None):
         assert node is not None

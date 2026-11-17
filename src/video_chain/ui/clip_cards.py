@@ -272,13 +272,18 @@ class PromptCard(_ClipCardBase):
                 a.triggered.connect(lambda _=False, t=token: self.insert_text(f"#{t}"))
         self.b_camera.setMenu(self.camera_menu)
         self.b_camera.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.b_examples = self._text_button("Examples", "Example descriptions: one replaces an empty description, "
-                                            "else it is added at the end (Ctrl+Z takes it back)")
+        self.b_examples = self._text_button("Prompts", "Example descriptions: one replaces an empty description, "
+                                            "else it is added at the end (Ctrl+Z takes it back); the prompt "
+                                            "library keeps your own")
         self.examples_menu = QMenu(self.b_examples)
         for ex in EXAMPLES:
             a = self.examples_menu.addAction(ex if len(ex) <= 60 else ex[:57].rstrip() + " …")
             a.setToolTip(ex)
             a.triggered.connect(lambda _=False, t=ex: self.add_example(t))
+        self.examples_menu.addSeparator()
+        self.a_prompts = self.examples_menu.addAction("Prompt library…")
+        self.a_prompts.setToolTip("Save this description to use it again, or put a saved one into it")
+        self.a_prompts.triggered.connect(lambda: self.action.emit("prompts", self.nid))
         self.b_examples.setMenu(self.examples_menu)
         self.b_examples.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         for b in (self.b_mention, self.b_camera, self.b_examples):
