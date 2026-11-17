@@ -104,6 +104,10 @@ class SwapDialog(QDialog):
         top = QHBoxLayout(self)
         left = QVBoxLayout()
         left.addWidget(label("The head that is drawn anew", type_="heading"))
+        from .responsible import FACES
+        consent = label(FACES, level="tertiary")
+        consent.setWordWrap(True)
+        left.addWidget(consent)
         self.player = ComparePlayer(self)               # the clip; with a result: before | after, frame by frame
         self.player.overlay = self._draw_head
         self.player.view.show_text("Looking for the head …")

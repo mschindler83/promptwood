@@ -433,6 +433,10 @@ class Installer:
         else:
             say("    You accept a model's licence by downloading it. docs/MODELS.md lists every file with its "
                 "source and licence.")
+        say("    Promptwood itself: PolyForm Noncommercial 1.0.0 (free for non-commercial use; LICENSE.md).\n"
+            "    Use it responsibly: faces, heads and voices of real people only with their consent, no content that\n"
+            "    impersonates, deceives, harasses or sexualises anyone, and label AI-made media of real people when\n"
+            "    you publish it (README: Responsible use).")
         if self.o.accept_licenses:
             return
         if not self.interactive or not ask("    Do you accept these licences?"):

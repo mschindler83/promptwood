@@ -348,9 +348,10 @@ class ViewMixin(MainWindowHost):
             version = importlib.metadata.version("video-chain")
         except importlib.metadata.PackageNotFoundError:
             version = "development"
+        from .responsible import ABOUT
         QMessageBox.about(self, "About Promptwood",
                           f"<b>Promptwood</b> {version}<br>Chain MiniMax-H3 image-to-video clips: each prompt "
-                          "continues from the last frame of the clip before.")
+                          f"continues from the last frame of the clip before.{ABOUT}")
 
     def show_shortcuts(self):
         """Help → Keyboard shortcuts: the table every window binds from (not modal: it stays beside the work)."""

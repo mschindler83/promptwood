@@ -123,6 +123,11 @@ class AudioRangeDialog(RangePlayerMixin, QDialog):
             form.setRowVisible(0, False)
         self.info_label = label("", level="tertiary")
         v.addWidget(self.info_label)
+        if voice:
+            from .responsible import VOICES
+            consent = label(VOICES, level="tertiary")
+            consent.setWordWrap(True)
+            v.addWidget(consent)
         if voice and player:
             from .widgets import VideoView
             self.video = VideoView()                # (a video's picture: who speaks when)

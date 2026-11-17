@@ -3,6 +3,8 @@ name = "video-chain"
 version = "0.1.0"
 description = "Chain MiniMax-H3 image-to-video clips: each prompt continues from the last frame of the clip before"
 readme = "README.md"
+license = "PolyForm-Noncommercial-1.0.0"
+license-files = ["LICENSE.md"]
 requires-python = ">=3.12"
 dependencies = [
     "PySide6>=6.8",
@@ -23,7 +25,7 @@ video-chain = "video_chain.__main__:main"
 video-chain-gui = "video_chain.app:main"
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]

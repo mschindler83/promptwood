@@ -329,6 +329,7 @@ def test_installer_downloads_models_and_doctor_sees_them(server, home, monkeypat
     inst.licences()
     out = capsys.readouterr().out
     assert "Test Licence" in out and "https://example.org/terms" in out and "extra: Apache-2.0 / MIT" in out
+    assert "Promptwood itself: PolyForm Noncommercial" in out and "consent" in out      # (its own terms, before any download)
     inst.model_files()
     assert (comfy / "models" / "diffusion_models" / "unet.safetensors").stat().st_size == 4000
     assert (comfy / "models" / "insightface" / "models" / "buffalo_l" / "det_10g.onnx").read_bytes() == b"detector"

@@ -120,6 +120,27 @@ python tools/build_manifest.py                                 # after changing 
 The installer lives in `src/video_chain/setup/` (standard library only): `manifest.json` is the list of parts,
 `installer.py` the steps, `doctor.py` the checks, `download.py` the resumable downloads.
 
+## Responsible use
+
+Promptwood can put a real person's face into a video, swap a head, and speak in a cloned voice. Use these only
+with people who agreed to it:
+
+- **Consent.** Use a person's face, likeness or voice only with their permission, and only for what they agreed to.
+  This includes the pictures you give the cast, the voices you clone or record, and every face or head swap.
+- **No harm.** Do not make content that impersonates, deceives, harasses, defames or sexualises a real person, that
+  shows a minor in any sexual or harmful way, or that is meant to mislead people about real events (fake news,
+  fraud, political deception).
+- **Say that it is made with AI.** Label generated or altered videos, pictures and voices of real people as such
+  when you publish them. Several laws require it (for example the EU AI Act for "deepfakes"), and so do many
+  platforms.
+- **Rights in what you put in.** Use pictures, videos, music and voices you are allowed to use (your own, licensed,
+  or with permission).
+- **The models' own rules.** Each model comes with its publisher's licence and use policy (see
+  [docs/MODELS.md](docs/MODELS.md)); several forbid exactly the uses above, and some allow no commercial use at all.
+
+You are responsible for what you make with Promptwood and for following the law where you live and publish. The
+software comes without any warranty (see the licence).
+
 ## Licences of what gets installed
 
 Promptwood installs programs and models made by others, and each keeps its own licence. **Many of the models are
@@ -129,3 +150,22 @@ a research licence, the InsightFace face models are for non-commercial research 
 and for some files (the HyperSwap and GPEN face models) the publisher states no licence at all. The installer shows, per part, what each
 publisher states and asks before it downloads; [docs/MODELS.md](docs/MODELS.md) has the full list with links.
 Whether your use is allowed is yours to check; parts you do not want can be left out (`--without faces`).
+
+## Licence
+
+Promptwood is free for **non-commercial use** under the [PolyForm Noncommercial License 1.0.0](LICENSE.md):
+personal projects, hobby, study and research, and non-profit, educational and public organisations may use, change
+and share it. Its source is public, but it is not "open source" in the OSI sense: **commercial use** (in a business,
+for clients, for monetised content) needs a separate licence from the author: ask through the project page,
+https://gitlab.com/mschindler/video-chain.
+
+The ComfyUI nodes in `comfy_nodes/video_chain_nodes/` run inside ComfyUI and use its code, so they are licensed under
+the [GNU GPL 3.0](comfy_nodes/video_chain_nodes/LICENSE), as ComfyUI is.
+
+A licence for Promptwood covers Promptwood only, never the models it uses: those keep their publishers' licences
+(above), whatever your licence for the app.
+
+## Contributing
+
+Bug reports and ideas are welcome as issues. Code contributions can only be taken with a contributor agreement that
+lets the author also offer them under the commercial licence; please ask in an issue before you start on one.
