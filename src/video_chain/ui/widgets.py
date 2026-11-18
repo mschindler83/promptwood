@@ -517,23 +517,49 @@ class FrameTile(QLabel):
 
 
 class FlowBox(QWidget):
-    """Places its child widgets left to right and wraps them into rows; its height follows its width. (A widget
-    that places its children itself: a Python QLayout subclass crashed in PySide when items were taken out.)"""
+    """Places its child widgets left to right and wraps them into rows; its height follows its width. A hidden
+    child takes no place; a child shown, hidden or resized is placed again (once for many changes at a time).
+    (A widget that places its children itself: a Python QLayout subclass crashed in PySide when items were taken
+    out.)"""
 
     def __init__(self, parent=None, spacing: int = 8):
         super().__init__(parent)
         self.items: list[QWidget] = []
         self.spacing = spacing
+        self._pending = False
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
-    def add(self, w: QWidget):
+    def add(self, w: QWidget, show: bool = True):
         w.setParent(self)
-        w.show()
+        if show:
+            w.show()
+        w.installEventFilter(self)                   # (shown, hidden or resized later: placed again)
         self.items.append(w)
+        self._place()
+
+    def eventFilter(self, obj, e):                   # noqa: N802  (Qt naming)
+        if e.type() in (QEvent.Type.Show, QEvent.Type.Hide, QEvent.Type.LayoutRequest) and obj.parent() is self:
+            self._later()
+        return False
+
+    def event(self, e):
+        if e.type() == QEvent.Type.LayoutRequest:    # (a child's size hint changed, e.g. its text)
+            self._later()
+        return super().event(e)
+
+    def _later(self):
+        """Place once when the event loop is back (a show of the box shows every child: not once per child)."""
+        if not self._pending:
+            self._pending = True
+            QTimer.singleShot(0, self, self._placed_later)
+
+    def _placed_later(self):
+        self._pending = False
         self._place()
 
     def clear(self):
         for w in self.items:
+            w.removeEventFilter(self)
             w.hide()
             w.setParent(None)
             w.deleteLater()
@@ -544,6 +570,8 @@ class FlowBox(QWidget):
         width = max(1, self.width())
         x = y = row = 0
         for w in self.items:
+            if w.isHidden() or w.parent() is not self:   # (a hidden one takes no place; one moved away is not ours)
+                continue
             hint = w.sizeHint().expandedTo(w.minimumSize())
             if w.maximumWidth() < hint.width():
                 hint.setWidth(w.maximumWidth())

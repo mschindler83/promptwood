@@ -728,3 +728,60 @@ def test_cast_kinds_in_the_window(app, win, tmp_path, image, monkeypatch):
     assert "Could not change @Kitchen" in win.status.text() and "has a voice" in win.status.text()
     assert T.kind_of(T.character(win.tree, "Kitchen")) == "person" and win.char_kind.currentData() == "person"
     assert T.load(win.project).options["cast"][0].get("kind") is None
+
+def test_a_long_voice_name_wraps_instead_of_widening_the_panel(app, win, tmp_path, image):
+    """The voice line with a long ElevenLabs name made the cast panel wider than its place (cut off on the right);
+    the ElevenLabs name was also said twice when the voice is named after it."""
+    new_project(win, tmp_path, image, ("a",))
+    face = tmp_path / "f.png"
+    Image.new("RGB", (80, 100), (190, 150, 120)).save(face)
+    win.add_reference(str(face))
+    c = T.character(win.tree, "Person1")
+    c["voice"] = {"file": "refs/v.wav", "name": "ElevenLabs: Alice - Clear, Engaging Educator", "secs": 4.0}
+    c["tts"] = {"eleven": {"id": "x", "name": "Alice - Clear, Engaging Educator"}}
+    win._show_character()
+    assert win.char_voice.text().count("Alice - Clear, Engaging Educator") == 1
+    c["tts"] = {"eleven": {"id": "y", "name": "Bob - Deep and calm narrator voice for documentaries"}}
+    win._show_character()
+    assert "Bob" in win.char_voice.text()
+    assert win._voice_row.minimumSizeHint().width() < 620
+
+
+def test_the_cast_panel_fits_the_left_column(app, win, tmp_path, image):
+    """The cast panel was 621 px at least (the rows of buttons in one line each); the left column starts at 400 px
+    and can be 340: the buttons wrap into rows instead, so nothing is cut off on the right."""
+    new_project(win, tmp_path, image, ("a",))
+    win.char_voice.setText("Voice: ElevenLabs: Alice - Clear, Engaging Educator (4.0 s) · a much longer name here")
+    from PySide6.QtWidgets import QScrollArea
+    scroll = next(s for s in win.findChildren(QScrollArea) if s.widget() is not None
+                  and s.widget().isAncestorOf(win.b_ref_sheets))
+    assert scroll.widget().minimumSizeHint().width() <= win.left_tabs.minimumWidth()
+    win.left_tabs.setCurrentWidget(scroll)
+    scroll.resize(340, 900)
+    scroll.widget().resize(scroll.viewport().width(), scroll.widget().height())
+    app.processEvents()
+    for b in (win.b_ref_del, win.b_char_del, win.b_voice_del, win.b_ref_sheets, win.b_cast_lib):
+        right = b.mapTo(scroll.widget(), b.rect().topRight()).x()
+        assert right <= scroll.viewport().width(), b.text()                    # (every button in view)
+    where = win.b_ref_sheets.geometry().topLeft()
+    win.b_ref_sheets.hide()                                                   # (a place: no Sheets…)
+    app.processEvents()
+    assert win.b_ref_crop.geometry().topLeft() == where                       # (its place is taken: no gap)
+
+
+def test_the_voice_line_takes_voices_without_names(app, win, tmp_path, image):
+    """Review: a voice whose name is None, or an ElevenLabs voice without a name, raised in the voice line; a short
+    ElevenLabs name inside another voice's name was hidden."""
+    new_project(win, tmp_path, image, ("a",))
+    face = tmp_path / "f.png"
+    Image.new("RGB", (80, 100), (190, 150, 120)).save(face)
+    win.add_reference(str(face))
+    c = T.character(win.tree, "Person1")
+    c["voice"] = {"file": "refs/v.wav", "name": None, "secs": 2.0}
+    c["tts"] = {"eleven": {"id": "abc"}}
+    win._show_character()
+    assert "ElevenLabs: abc" in win.char_voice.text()
+    c["voice"] = {"file": "refs/v.wav", "name": "Alice voice", "secs": 2.0}
+    c["tts"] = {"eleven": {"id": "x", "name": "Al"}}
+    win._show_character()
+    assert "ElevenLabs: Al" in win.char_voice.text()

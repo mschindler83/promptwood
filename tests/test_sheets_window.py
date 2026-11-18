@@ -152,5 +152,7 @@ def test_the_flattened_templates_go_with_the_run_not_the_window(app, tmp_path):
     dlg.make("head_sheet")
     work = dlg.worker.plan.work
     wait(app, lambda: not dlg.busy)
-    assert work is not None and not Path(work).exists()
+    assert work is not None
+    wait(app, lambda: not Path(work).exists(), timeout=10)          # (removed right after the run's last signal)
+    assert not Path(work).exists()
     dlg.deleteLater()

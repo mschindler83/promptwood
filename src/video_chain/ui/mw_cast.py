@@ -706,9 +706,12 @@ class CastMixin(MainWindowHost):
         v = (c or {}).get("voice")
         el = ((c or {}).get("tts") or {}).get("eleven")
         long = f"; cloned from {T.clone_secs(v):.1f} s" if v and v.get("ref") else ""
+        en = (el or {}).get("name") or (el or {}).get("id") or ""
+        same = v is not None and (v.get("name") or "") == f"ElevenLabs: {en}"      # (a voice named after it: once)
         self.char_voice.setText((f"Voice: {v.get('name') or Path(v['file']).name} "
                                  f"({float(v.get('secs') or 0):.1f} s{long})"
-                                 if v else "Voice: none") + (f" · ElevenLabs: {el['name']}" if el else ""))
+                                 if v else "Voice: none")
+                                + (f" · ElevenLabs: {en}" if en and not same else ""))
         self.refs.clear()
         for k, rel in enumerate(c["images"] if c else [], start=1):
             pm = self._pixmap(self.project / rel) if self.project else None

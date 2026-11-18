@@ -19,7 +19,7 @@ from .guide import EngineBanner, GuidePanel, NextHint
 from .storyboard import Storyboard
 from .timeline import Timeline
 from .view_mode import AdvancedNote, row_widget
-from .widgets import guard_wheel, icon_button, label, label_for, remember_geometry, section_bar, shortcut, timer
+from .widgets import FlowBox, guard_wheel, icon_button, label, label_for, remember_geometry, section_bar, shortcut, timer
 from .mw_support import FileDrop, _CurrentStack
 from .preview import Preview, StartTile
 from .ui_logic import (
@@ -215,7 +215,6 @@ class BuildMixin(MainWindowHost):
         self.cast_list.currentRowChanged.connect(self._show_character)
         self.cast_list.itemDoubleClicked.connect(self._rename_character)
         iv.addWidget(self.cast_list)
-        crow = QHBoxLayout()
         self.b_char_new = QPushButton("New")
         self.b_char_new.setToolTip("A new entry: a person (a character with face pictures, a voice, can be the "
                                    "lead) or a place, object or style (whole pictures); a name to mention as @Name")
@@ -242,13 +241,10 @@ class BuildMixin(MainWindowHost):
                                    "and voices, places, objects, styles), or bring entries of a saved cast into "
                                    "this project")
         self.b_cast_lib.clicked.connect(self.open_cast_library)
-        crow.addWidget(self.b_char_new)
-        crow.addWidget(self.b_char_rename)
-        crow.addWidget(self.char_kind)
-        crow.addStretch(1)
-        crow.addWidget(self.b_cast_lib)
-        crow.addWidget(self.b_char_del)
-        iv.addLayout(crow)
+        crow = FlowBox(spacing=6)                  # (the buttons wrap into rows: the panel fits the left column)
+        for w in (self.b_char_new, self.b_char_rename, self.char_kind, self.b_cast_lib, self.b_char_del):
+            crow.add(w)
+        iv.addWidget(crow)
         self.char_desc = QLineEdit()
         self.char_desc.setPlaceholderText("Description (optional), e.g. woman, 30s, grey knit sweater")
         self.char_desc.setToolTip("Goes into the prompt the model gets for clips that mention this character")
@@ -267,9 +263,12 @@ class BuildMixin(MainWindowHost):
         self.char_lead.toggled.connect(self._character_lead_changed)
         iv.addWidget(self.char_lead)
         self._voice_row = QWidget()
-        vrow = QHBoxLayout(self._voice_row)
+        vrow = QVBoxLayout(self._voice_row)
         vrow.setContentsMargins(0, 0, 0, 0)
+        vrow.setSpacing(4)
         self.char_voice = label("Voice: none", level="tertiary")
+        self.char_voice.setWordWrap(True)          # (a long voice name wraps: it never widens the cast panel)
+        self.char_voice.setMinimumWidth(120)
         self.char_voice.setToolTip("A character with a voice speaks its lines with it: write the line in quotes in "
                                    "the sentence of its @Name, e.g. @Anna looks up and says \"Good morning.\" "
                                    "Use a voice only with the speaker's consent.")
@@ -301,10 +300,12 @@ class BuildMixin(MainWindowHost):
                                     "voice there, or give it a saved one (copied into this project, with its "
                                     "transcript and ElevenLabs voice)")
         self.b_voice_lib.clicked.connect(self.open_voice_library)
-        vrow.addWidget(self.char_voice, 1)
+        vrow.addWidget(self.char_voice)
+        vbuttons = FlowBox(spacing=6)              # (the voice's buttons below its name, wrapping into rows)
         for b in (self.b_voice_file, self.b_voice_clip, self.b_voice_tts, self.b_voice_clone, self.b_voice_lib,
                   self.b_voice_play, self.b_voice_del):
-            vrow.addWidget(b)
+            vbuttons.add(b)
+        vrow.addWidget(vbuttons)
         iv.addWidget(self._voice_row)
         self.refs = QListWidget()
         self.refs.setViewMode(QListWidget.ViewMode.IconMode)
@@ -315,7 +316,6 @@ class BuildMixin(MainWindowHost):
         self.refs.setToolTip("Face pictures of the selected character (up to 3, e.g. front and side): best a "
                              "sharp close-up of the face, without the scene around it")
         iv.addWidget(self.refs)
-        rrow = QHBoxLayout()
         self.b_ref_add = QPushButton("Image…")
         self.b_ref_add.setToolTip("Add an image file as a face picture of the selected character")
         self.b_ref_add.clicked.connect(self._add_reference)
@@ -341,13 +341,14 @@ class BuildMixin(MainWindowHost):
         self.refs.itemDoubleClicked.connect(self._recrop_reference)
         self.refs.currentRowChanged.connect(self._update_cast_buttons)
         self.ref_add_label = label("Add face:", level="tertiary")
-        rrow.addWidget(self.ref_add_label)
-        for b in (self.b_ref_add, self.b_ref_create, self.b_ref_start, self.b_ref_clip, self.b_ref_sheets):
-            rrow.addWidget(b)
-        rrow.addStretch(1)
-        rrow.addWidget(self.b_ref_crop)
-        rrow.addWidget(self.b_ref_del)
-        iv.addLayout(rrow)
+        self.ref_add_label.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        self.ref_add_label.setMinimumHeight(self.b_ref_add.sizeHint().height())
+        rrow = FlowBox(spacing=6)                  # (wraps into rows: the panel fits the left column)
+        rrow.add(self.ref_add_label)
+        for rb in (self.b_ref_add, self.b_ref_create, self.b_ref_start, self.b_ref_clip, self.b_ref_sheets,
+                   self.b_ref_crop, self.b_ref_del):
+            rrow.add(rb)
+        iv.addWidget(rrow)
         irow = QFormLayout()
         irow.setContentsMargins(0, 0, 0, 0)
         self.ref_size = QComboBox()
@@ -386,6 +387,10 @@ class BuildMixin(MainWindowHost):
         mrow.setContentsMargins(0, 0, 0, 0)
         irow.addRow("ElevenLabs model", self._eleven_row)
         self._tts_form = irow
+        for box in (self.ref_size, self.dialogue_lang, self.tts_provider, self.eleven_model):
+            box.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            box.setMinimumContentsLength(12)        # (narrower than its longest item: the list shows it whole)
+            box.view().setTextElideMode(Qt.TextElideMode.ElideNone)
         iv.addLayout(irow)
         self.ref_hint = QCheckBox("Tie each person to their face in the prompt")
         self.ref_hint.setChecked(True)
