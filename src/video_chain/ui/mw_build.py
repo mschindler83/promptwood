@@ -632,8 +632,10 @@ class BuildMixin(MainWindowHost):
         self.turbo_strength.setRange(-10.0, 10.0)
         self.turbo_strength.setSingleStep(0.05)
         self.turbo_strength.setValue(d["turbo"]["strength"])
-        self.turbo_strength.setToolTip("Keep 1.0; smear/ghosting -> a bit higher (1.05-1.2), over-sharp grain -> "
-                                       "a bit lower (0.8-0.95)")
+        self.turbo_strength.setToolTip("0.85 for new projects: at 1.0 each clip sharpens the start frame it "
+                                       "carries over a little, which adds up along a chain; 0.85 keeps it level. "
+                                       "Smear/ghosting -> a bit higher (0.9-1.2), over-sharp grain -> a bit lower "
+                                       "(0.8). Changing it makes the made clips again")
         trow.addWidget(self.turbo_steps)
         trow.addWidget(label_for("strength", self.turbo_strength, level="tertiary"))
         trow.addWidget(self.turbo_strength)

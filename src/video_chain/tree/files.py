@@ -23,6 +23,7 @@ from .schema import Options, Overrides
 from .consts import (
     CLIP_KEYS,
     DEFAULT_OPTIONS,
+    OLD_TURBO_STRENGTH,
     NO_LORA,
     NewerTreeError,
     REFINED,
@@ -160,7 +161,7 @@ def _merged_options(stored: dict) -> Options:
     out: dict[str, Any] = dict(copy.deepcopy(DEFAULT_OPTIONS))
     for k, v in stored.items():
         if isinstance(v, dict) and isinstance(out.get(k), dict) and k != "cast":
-            out[k] = {**out[k], **v}
+            out[k] = {**out[k], **({"strength": OLD_TURBO_STRENGTH} if k == "turbo" else {}), **v}
         else:
             out[k] = v
     return cast(Options, out)                       # (the keys of a stored file are not checked here)

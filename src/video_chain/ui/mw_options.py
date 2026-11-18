@@ -44,7 +44,10 @@ class OptionsMixin(MainWindowHost):
                     if key in (o.get(k) or {}):
                         kind2(o[k][key])
                 except (TypeError, ValueError):
-                    del o[k][key]
+                    if k == "turbo" and key == "strength":   # (a stored project: as it was made, not the new default)
+                        o[k][key] = T.OLD_TURBO_STRENGTH
+                    else:
+                        del o[k][key]
         try:
             float(o.get("cfg", 1.0))
         except (TypeError, ValueError):

@@ -171,3 +171,25 @@ def test_sidecar_text_is_written_whole(tmp_path):
     chain.atomic_write_text(f, '{"a": 1}')
     chain.atomic_write_text(f, '{"a": 2}')
     assert json.loads(f.read_text()) == {"a": 2} and [p.name for p in d.iterdir()] == ["pins.json"]
+
+
+def test_turbo_strength_new_default_and_stored_projects_keep_theirs():
+    """Turbo at 1.0 sharpened every carried-over start frame (14-24 % per clip, measured); 0.85 holds it level. New
+    projects get 0.85; a stored project keeps what it was made with: its own value, or 1.0 when it has a turbo
+    setting saved without one (as the default was then), so its clips are not made again."""
+    assert T.DEFAULT_OPTIONS["turbo"]["strength"] == 0.85 and T.Tree().options["turbo"]["strength"] == 0.85
+    old = T.Tree.from_json({"options": {"turbo": {"on": True, "steps": 6}}, "nodes": []})
+    assert old.options["turbo"]["strength"] == 1.0
+    own = T.Tree.from_json({"options": {"turbo": {"on": True, "strength": 1.1}}, "nodes": []})
+    assert own.options["turbo"]["strength"] == 1.1
+    never = T.Tree.from_json({"options": {}, "nodes": []})          # (no turbo setting saved: the new default)
+    assert never.options["turbo"]["strength"] == 0.85
+
+
+def test_an_unreadable_turbo_strength_reads_as_the_old_default():
+    """Review: the option widgets dropped an unreadable strength and showed the new default (0.85) for it, so an
+    existing turbo project would have made its clips at 0.85."""
+    from video_chain.ui.mw_options import OptionsMixin
+    o = {"turbo": {"on": True, "strength": "z", "steps": 6}, "hyperflow": {"on": False, "strength": None}}
+    OptionsMixin._clean_options(o)
+    assert o["turbo"]["strength"] == T.OLD_TURBO_STRENGTH and "strength" not in o["hyperflow"]

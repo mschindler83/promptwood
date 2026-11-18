@@ -68,6 +68,12 @@ CONTINUE_CHOICES = (22, 39, 56, 73, 90, 107, 124)
 DEFAULT_FRAMES = 73                 # a clip's length when nothing else is set
 
 
+# Turbo's strength for new projects: at 1.0 every clip sharpened the start frame it carried over by 14-24 % (fine
+# detail), compounding along a chain (1.6x after three clips); at 0.85 it stayed level (measured with the reference
+# model, 6 steps). Before, the default was 1.0: a stored turbo setting without a strength keeps that
+# (OLD_TURBO_STRENGTH), so its clips stay as made.
+TURBO_STRENGTH = 0.85
+OLD_TURBO_STRENGTH = 1.0
 DEFAULT_OPTIONS: Options = {"model": "Comfy-Org/MiniMax-H3", "frames": DEFAULT_FRAMES, "steps": 28,
                    "resolution": 512, "audio": True, "keep_repeated": False, "seed": 42,
                    # a join after a carry-over: the cut follows the model's copy, its colour matched, blended
@@ -75,7 +81,7 @@ DEFAULT_OPTIONS: Options = {"model": "Comfy-Org/MiniMax-H3", "frames": DEFAULT_F
                    # (no "shape": the clips take the start image's / first video's; without either 16:9, or the
                    # "aspect" an older version stored for such a project)
                    # turbo: a step-distilled LoRA + its sampler, few steps for every clip (ComfyUI only)
-                   "turbo": {"on": False, "lora": None, "steps": 6, "strength": 1.0},
+                   "turbo": {"on": False, "lora": None, "steps": 6, "strength": TURBO_STRENGTH},
                    # HyperFlow: Video Rebirth's 8-step LoRA with its own sigma grid (ComfyUI-HyperFlow-H3 nodes)
                    "hyperflow": {"on": False, "strength": 1.0},
                    # Pika H3 Flex: Pika's post-trained H3 as a LoRA, 6 steps (ComfyUI template recipe)

@@ -2287,3 +2287,22 @@ def test_a_start_picture_cut_is_recorded_and_used(project, tmp_path):
     Image.new("RGB", (96, 54), (10, 10, 10)).save(img)
     T.set_start_image(project, img, t)                                    # another picture: its own cut
     assert T.get_crop(t, project, project / T.START_FILE) is None
+
+
+def test_clips_made_with_turbo_before_the_new_default_stay_done(project, tmp_path):
+    """Review: an existing project's clips made at Turbo 1.0 (also from a file saved without a strength) are not
+    changed by the new default (0.85 for new projects)."""
+    import json
+    turbo = tmp_path / "turbo.safetensors"
+    turbo.write_bytes(b"t")
+    t, a, *_ = build(project)
+    t = T.load(project)
+    t.options["turbo"] = {"on": True, "lora": str(turbo), "steps": 6, "strength": 1.0}
+    T.save(project, t)
+    run(project, [a.id])
+    assert statuses(project)["a"] == "done"
+    f = project / T.TREE_FILE
+    d = json.loads(f.read_text(encoding="utf-8"))
+    del d["options"]["turbo"]["strength"]                            # (saved before the strength was stored)
+    f.write_text(json.dumps(d), encoding="utf-8")
+    assert T.load(project).options["turbo"]["strength"] == 1.0 and statuses(project)["a"] == "done"
