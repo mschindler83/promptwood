@@ -15,7 +15,10 @@ lines, pictures, music and an upscaled export.
 Everything runs on your own computer. Nothing is uploaded unless you choose one of the optional online services
 (see [Privacy](#privacy)).
 
-<!-- A screenshot of the main window goes here, e.g. ![The storyboard](docs/images/storyboard.png) -->
+[![Promptwood's main window: the clips of a story as a branching graph on the left, the player and the timeline of the selected path in the middle, and the selected clip's prompt and settings on the right](docs/images/main-window.png)](docs/images/main-window.png)
+
+<sub>The main window: every clip of the story with its branches (left), the player and the timeline of the
+selected path (middle), and the selected clip with its prompt, face and settings (right). Click for full size.</sub>
 
 ## Contents
 
