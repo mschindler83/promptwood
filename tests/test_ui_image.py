@@ -1208,6 +1208,7 @@ def test_random_loras_in_the_create_window(app, tmp_path, image, monkeypatch):
         assert "Stop interrupts the image being made" in dlg.tries.toolTip()          # (it does not wait for it)
         dlg.family.setCurrentIndex(dlg.family.findData("sdxl"))
         assert dlg.loras.active_items() == [] and dlg.b_random.isEnabled()            # (the list is not needed)
+        assert "the model's LoRAs" in dlg.b_random.toolTip() and "list" not in dlg.b_random.toolTip()
         r = dlg.random_loras(modal=False)
         assert r.paths == files and [r.table.item(i, 2).text() for i in range(3)] == ["Glow", "Rain", "Snow"]
         assert [(c.low, c.high, c.on, c.pinned) for c in r.pool()] == [(0.5, 1.0, True, False)] * 3

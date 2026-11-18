@@ -80,8 +80,8 @@ selected path (middle), and the selected clip with its prompt, face and settings
   painted mask, or make an output of another shape (for example a 16:9 character sheet from a portrait).
 - **Variations:** placeholders in a prompt make a planned series of images.
 - **Random LoRAs:** images from one prompt, each with a random choice of the image model's LoRAs at random strengths
-  (pin the ones every image needs, leave some out, set a range per LoRA and the most per image), a set number or
-  until you press Stop.
+  (pin the ones every image needs, and each image gets them plus at least one random one; leave some out, set a
+  range per LoRA and the most per image), a set number or until you press Stop.
 
 **People in existing videos**
 - **Head swap** (MiniMax H3 head-swap LoRA or Wan 2.2 Animate) and **face swap** (HyperSwap), with the person's

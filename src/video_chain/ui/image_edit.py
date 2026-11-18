@@ -712,7 +712,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         why_not = self._random_problem() if self.mode() == "create" else ""
         self.b_random.setEnabled(ok and not why_not)
         self.b_random.setToolTip(
-            "Make images from this prompt, each with a random choice of the list's LoRAs at random strengths: "
+            "Make images from this prompt, each with a random choice of the model's LoRAs at random strengths: "
             "pinned ones always, a set number of images or until Stop" if ok and not why_not else
             why_not or (why if idle else "Working …"))
 

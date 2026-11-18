@@ -196,9 +196,14 @@ class RandomLorasDialog(QDialog):
 
     def set_range_shown(self, low: float, high: float) -> None:
         """Every LoRA the table shows (all, or those the search finds) gets this range."""
-        for row, path in enumerate(self.paths):
-            if not self.table.isRowHidden(row):
-                self.set_range(path, low, high)
+        self._filling = True                                   # (one check at the end, not one per cell)
+        try:
+            for row, path in enumerate(self.paths):
+                if not self.table.isRowHidden(row):
+                    self.set_range(path, low, high)
+        finally:
+            self._filling = False
+        self._check()
 
     def _item_changed(self, item: QTableWidgetItem) -> None:
         if self._filling:

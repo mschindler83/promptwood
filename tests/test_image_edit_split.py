@@ -325,3 +325,17 @@ def test_random_loras_strength_cells_take_negative_strengths(app, tmp_path):
     delegate.setModelData(editor, dlg.table.model(), index)
     assert dlg.pool()[0].low == -1.25
     dlg.deleteLater()
+
+
+def test_random_loras_one_range_for_many_loras_checks_once(app, tmp_path, monkeypatch):
+    """Set for the LoRAs shown on many LoRAs sets them all and checks the window once, not once per cell."""
+    from video_chain import lora_random as R
+    from video_chain.ui.random_loras import RandomLorasDialog
+    many = {"choices": [R.Choice(f"l{i}", 0.5, 1.0) for i in range(50)], "most": 2, "n": 1, "same_seed": False}
+    dlg = RandomLorasDialog(None, many, 1)
+    calls = []
+    real = dlg._check
+    monkeypatch.setattr(dlg, "_check", lambda: (calls.append(1), real()))
+    dlg.set_range_shown(0.2, 0.4)
+    assert all((c.low, c.high) == (0.2, 0.4) for c in dlg.pool()) and len(calls) == 1
+    dlg.deleteLater()
