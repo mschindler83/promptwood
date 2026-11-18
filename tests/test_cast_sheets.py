@@ -194,3 +194,15 @@ def test_the_head_swap_offers_each_persons_faces_with_a_label(tmp_path):
     ben = T.character(t, "Ben")
     assert got == [("Face of @Anna (1)", str(p / anna["images"][0])), ("Face of @Anna (2)", str(p / anna["images"][1])),
                    ("Face of @Ben (head sheet, front view)", str(p / T.front_of(T.sheet_of(ben, "head_sheet"))))]
+
+
+def test_a_clip_tells_h3_which_pictures_are_sheets(tmp_path):
+    p, t = _project(tmp_path)
+    T.add_character(p, t, "Ben", _picture(tmp_path / "b.png", (2, 2, 2)))
+    T.set_sheets(p, t, "Anna", *_sheets(tmp_path))
+    t.options["prompt_format"] = "h3"
+    got = T.clip_cast(t.options, "@Ben greets @Anna.")
+    ben, anna = got["h3"]["subjects"]
+    assert "sheets" not in ben                                       # (plain pictures: the subject as before)
+    assert anna["sheets"] == ["head_sheet", "body_sheet"] and anna["pictures"] == [2, 3]
+    assert "<Picture 2> is a close-up character sheet of Anna's head" in got["prompt"]

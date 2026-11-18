@@ -409,3 +409,21 @@ def test_continuation_with_subjects_and_a_voice_keeps_the_audio_numbers():
 def test_continuation_leaves_a_structured_prompt_alone():
     own = "subject_definitions:\nmy own\n\nsummary:\n[video continuation] mine"
     assert H.compose(own, continues=1) == own
+
+
+def test_a_persons_character_sheets_are_named_in_the_definitions():
+    """A person with character sheets: each sheet is said to be one person in three views (not three people);
+    plain pictures read as before."""
+    out = H.compose("@Anna walks.", subjects=[
+        {"name": "Anna", "desc": "a tall woman", "pictures": [1, 2], "sheets": ["head_sheet", "body_sheet"]}])
+    assert "<Subject 1> is Anna (a tall woman), the person in <Picture 1> and <Picture 2>." in out
+    assert ("<Picture 1> is a close-up character sheet of Anna's head: the same person three times side by side, "
+            "from the front, in profile and in a three-quarter view.") in out
+    assert ("<Picture 2> is a full-body character sheet of Anna: the same person three times side by side, from "
+            "the front, in profile and in a three-quarter view.") in out
+    assert ("<Subject 1> (appears in [Shot 1]): fully_preserved - Anna's face, identity and body build are "
+            "retained (the character sheets show one person from several angles).") in out
+    plain = H.compose("@Anna walks.", subjects=[{"name": "Anna", "pictures": [1, 2]}])
+    assert "character sheet" not in plain and "Anna's face and identity are retained." in plain
+    one = H.compose("@Anna walks.", subjects=[{"name": "Anna", "pictures": [1, 2], "sheets": ["", "head_sheet"]}])
+    assert "<Picture 2> is a close-up character sheet" in one and "<Picture 1> is a" not in one

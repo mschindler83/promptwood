@@ -21,6 +21,7 @@ from .cast import (
     is_h3,
     kind_of,
     lead_of,
+    role_of,
     mentions)
 from .prompts import _picture_tags, _pictures_note, _voiced_prompt, dialogue, without_speech_tags
 from .schema import CastEntry, Options, Overrides
@@ -213,6 +214,9 @@ def _h3_cast(options: Options, prompt: str, voices: bool, lead_ok: bool) -> dict
         subjects.append({"name": c["name"], "kind": kind_of(c), "desc": (c.get("desc") or "").strip(),
                          "pictures": list(range(first, len(images) + 1)),
                          "voice": voices and not structured and kind_of(c) == "person" and bool(c.get("voice"))})
+        roles = [role_of(c, r) for r in c["images"]]
+        if any(roles):
+            subjects[-1]["sheets"] = roles                    # (absent for plain pictures: as before)
         record.append(_cast_record(c))
     said = [{"start": d["start"], "end": d["end"], "line": d["line"],
              "speaker": d["speaker"]["name"] if d["speaker"] else None} for d in lines]
