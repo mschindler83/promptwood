@@ -14,6 +14,11 @@ VIDEO_VAE = "minimax_h3_video_vae_fp16.safetensors"
 AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors"
 SAMPLER = "res_multistep"
 PIKA_SIGMAS = "1.0, 0.972973, 0.923077, 0.8, 0.571429, 0.333333, 0.0"   # ComfyUI's Pika H3 Flex templates
+# The noise level H3 conditions its pinned frames and reference pictures at (ComfyUI's VISUAL_COND_TIMESTEP: nearly
+# clean); another one goes in through Promptwood's VideoChainH3PinNoise node
+PIN_NOISE_OFF = 0.999
+PIN_NOISE_RANGE = (0.5, 1.0)
+PIN_NOISE_NODE = "VideoChainH3PinNoise"
 SCHEDULER = "simple"
 REF_HINT = "The person has exactly the face and look of the person in <Picture 1>."
 
@@ -72,7 +77,8 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
                    recipe: dict | None = None, veda: str | None = None,
                    keyframes: Sequence[tuple[str, int]] = (), frame_refs: Sequence[str] = (),
                    ref_videos: Sequence[str] = (), video_key: Callable[[int], str] | None = None,
-                   unet: str | None = None, adaln_loras: Collection[str] = ()) -> dict:
+                   unet: str | None = None, adaln_loras: Collection[str] = (),
+                   pin_noise: float | None = None) -> dict:
     """The API-format workflow for one clip (image = the uploaded start image, as LoadImage names it; None: a
     clip without a start frame).
 
@@ -122,6 +128,9 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
     adaln_loras: names of LoRAs that train the adaln projections (loras.trains_adaln): loaded by Promptwood's
     H3 LoRA node, which also applies that part on the pruned H3 files.
 
+    pin_noise: the noise level H3 conditions the pinned frames and reference pictures at (PIN_NOISE_OFF or None:
+    H3's own, no node; else Promptwood's VideoChainH3PinNoise after every pinned frame).
+
     The parts: _check_combination (every invalid mix is refused before a node is built), _skeleton,
     _conditioning (the start / end frames, references, sounds), _guides, _keyframes, _model_chain (speed modes,
     LoRAs), _sampling and _output."""
@@ -151,6 +160,13 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
         latent, positive = _conditioning_plain(wf, **cond)
     positive = _guides(wf, positive, latent, guides, audio)
     positive = _keyframes(wf, positive, latent, keyframes)
+    if pin_noise is not None and abs(float(pin_noise) - PIN_NOISE_OFF) > 1e-9:
+        if not PIN_NOISE_RANGE[0] <= float(pin_noise) <= PIN_NOISE_RANGE[1]:
+            raise ValueError(f"the pinned-frame noise level {pin_noise} is outside {PIN_NOISE_RANGE[0]}-"
+                             f"{PIN_NOISE_RANGE[1]}")
+        wf["pin_noise"] = {"class_type": PIN_NOISE_NODE, "inputs": {"conditioning": positive,
+                                                                     "visual": float(pin_noise)}}
+        positive = ["pin_noise", 0]
     model = _model_chain(wf, loras=loras, turbo=turbo, hyperflow=hyperflow, pika=pika, recipe=recipe,
                          adaln_loras=adaln_loras)
     _sampling(wf, model=model, positive=positive, latent=latent, steps=steps, cfg=cfg, hyperflow=hyperflow,

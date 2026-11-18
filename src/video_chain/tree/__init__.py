@@ -321,6 +321,7 @@ from .audio_tracks import (  # noqa: F401
     _soundtrack_sentence)
 from .inputs import (  # noqa: F401
     model_prompt,
+    pin_noise_of,
     continue_frames,
     frames_before,
     continue_choices,

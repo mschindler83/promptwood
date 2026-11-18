@@ -121,6 +121,7 @@ class Options(TypedDict, total=False):
     keep_repeated: bool
     smooth_joins: bool                  # joins after a carry-over measured and smoothed (joinmatch)
     steady_look: bool                   # the handed-over frame corrected (steady.py; off in older projects)
+    pin_noise: float                    # H3's noise level for pinned frames (missing: its own 0.999)
     seed: int
     aspect: str                         # the shape of a project without a start picture or video (shape unset)
     shape: str                          # the clips' shape (a sources.ASPECTS key); unset: the start image's / video's

@@ -9,6 +9,8 @@ faceswap.py), the identity from up to four pictures of the new person; GPEN face
 VideoChainLanczosScale: ComfyUI's lanczos resize with the same frames, on all CPU cores (see scale.py).
 VideoChainH3LoRA: a MiniMax-H3 LoRA as ComfyUI's loader applies it; on the pruned H3 files also the adaln part of a
 LoRA trained on the unpruned model, added at run time (see h3_lora.py).
+VideoChainH3PinNoise: the noise level MiniMax H3 conditions its pinned frames and reference pictures at (see
+pin_noise.py).
 Copy this folder into ComfyUI/custom_nodes and restart ComfyUI.
 """
 import logging
@@ -141,10 +143,12 @@ class VideoChainFaceSwap:
 
 from .scale import VideoChainLanczosScale  # noqa: E402
 from .h3_lora import VideoChainH3LoRA  # noqa: E402
+from .pin_noise import VideoChainH3PinNoise  # noqa: E402
 
 NODE_CLASS_MAPPINGS = {"VideoChainFaceSwap": VideoChainFaceSwap,
                        "VideoChainLanczosScale": VideoChainLanczosScale,
-                       "VideoChainH3LoRA": VideoChainH3LoRA}
+                       "VideoChainH3LoRA": VideoChainH3LoRA,
+                       "VideoChainH3PinNoise": VideoChainH3PinNoise}
 if HAS_QWEN21:
     NODE_CLASS_MAPPINGS["VideoChainQwen21FunInpaint"] = VideoChainQwen21FunInpaint
 else:
@@ -153,4 +157,5 @@ else:
 NODE_DISPLAY_NAME_MAPPINGS = {"VideoChainQwen21FunInpaint": "Qwen-Image 2.1 Fun Inpaint (Promptwood)",
                               "VideoChainFaceSwap": "Face Swap, HyperSwap (Promptwood)",
                               "VideoChainLanczosScale": "Lanczos Scale, all cores (Promptwood)",
-                              "VideoChainH3LoRA": "H3 LoRA, also on pruned H3 (Promptwood)"}
+                              "VideoChainH3LoRA": "H3 LoRA, also on pruned H3 (Promptwood)",
+                              "VideoChainH3PinNoise": "H3 pinned-frame noise (Promptwood)"}

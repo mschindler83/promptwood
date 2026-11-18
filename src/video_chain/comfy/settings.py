@@ -32,6 +32,7 @@ class ClipSettings(TypedDict, total=False):
     """Every key is optional: a missing key means the default noted here. Speed modes (turbo / hyperflow / pika):
     a LoraEntry-shaped dict ({"lora", "strength"}, hyperflow and pika: only "strength"), missing or empty: off."""
     width: int                 # DEFAULT_WIDTH
+    pin_noise: float           # H3's noise level for pinned frames (missing: its own, no node)
     height: int                # DEFAULT_HEIGHT
     frames: int                # DEFAULT_FRAMES
     steps: int                 # DEFAULT_STEPS

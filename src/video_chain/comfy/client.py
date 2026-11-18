@@ -32,7 +32,7 @@ from .seedvr import SEEDVR_PRECISION_LOCAL, SeedvrMixin
 from .settings import (DEFAULT_FRAMES, DEFAULT_HEIGHT, DEFAULT_REF_SIZE, DEFAULT_STEPS, DEFAULT_WIDTH,
                        ClipSettings)
 from .video import (AUDIO_VAE, DISTILLED_CHECKPOINT, TEXT_ENCODER, TWO_PASS_NODES, UNET, UNET_REF, VEDA_NODE,
-                    VIDEO_VAE, build_two_pass_workflow, build_workflow, clip_recipe,
+                    PIN_NOISE_NODE, PIN_NOISE_OFF, VIDEO_VAE, build_two_pass_workflow, build_workflow, clip_recipe,
                     pick_veda_predictor, with_ref_hint)
 from .wfb import H3_LORA_NODE, SAVE_LAST_ID, SAVE_VIDEO_ID, SUBFOLDER, combo_options
 
@@ -287,6 +287,14 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
             raise ComfyError("ComfyUI lists no Veda predictor in models/veda "
                              "(https://huggingface.co/Veda-Sparse/Minimax-H3-T2VA-Veda-8NFE-600Step-Preview)")
         return name
+
+    def pin_noise(self, level: float) -> float:
+        """The pinned-frame noise level, once this ComfyUI has Promptwood's node for it (ComfyError if not)."""
+        if abs(float(level) - PIN_NOISE_OFF) > 1e-9 and not self._object_info(PIN_NOISE_NODE):
+            raise ComfyError(f"ComfyUI has no {PIN_NOISE_NODE} node (pinned-frame noise): copy video-chain's "
+                             "comfy_nodes/video_chain_nodes into ComfyUI/custom_nodes and restart ComfyUI, or set "
+                             "the pinned-frame noise back to off")
+        return float(level)
 
     def check_guides(self):
         for node in ("MiniMaxH3AddGuide", "LoadVideo", "GetVideoComponents"):
@@ -627,6 +635,7 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
         two = _setting_dict(s, "two_pass") if s.get("two_pass") else None
         build = (lambda **kw: build_two_pass_workflow(two_pass=two, upscaler=self.two_pass_upscaler(), **kw)) \
             if two else build_workflow
+        pin = None if s.get("pin_noise") is None else self.pin_noise(s["pin_noise"])
         try:
             wf = build(prompt=prompt, image=image, seed=seed, width=s.get("width", DEFAULT_WIDTH),
                                 height=s.get("height", DEFAULT_HEIGHT), frames=s.get("frames", DEFAULT_FRAMES),
@@ -642,7 +651,8 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
                                 keyframes=keyframes, unet=ck.get("name") or None, adaln_loras=adaln,
                                 ref_videos=videos, **({"video_key": self.video_key()} if videos else {}),
                                 veda=self.veda_predictor(bool(refs or sounds or videos))
-                                if s.get("veda") and not distilled else None)
+                                if s.get("veda") and not distilled else None,
+                                pin_noise=pin)
         except ValueError as e:                # (a setting combination that cannot be built: say why)
             raise ComfyError(str(e)) from e
         entry = self._run_workflow(wf)

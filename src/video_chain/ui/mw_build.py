@@ -671,6 +671,18 @@ class BuildMixin(MainWindowHost):
             "the next clip (also the carried-over frames). The clips themselves stay as made. Changing it makes the "
             "clips after the first one again")
         c.addRow("", self.steady_look)
+        self.pin_noise = QDoubleSpinBox()
+        self.pin_noise.setRange(0.8, 0.999)
+        self.pin_noise.setDecimals(3)
+        self.pin_noise.setSingleStep(0.01)
+        self.pin_noise.setValue(0.999)
+        self.pin_noise.setToolTip(
+            "How clean MiniMax H3 takes the frames it pins (the start frame, carried-over frames, keyframes) and the "
+            "reference pictures. 0.999: H3's own (nearly clean): it copies their fine detail exactly, its own "
+            "artifacts too, which sharpens a chain from clip to clip. Lower (e.g. 0.95): a little noise is mixed into "
+            "them and the model is told so; it follows them a little more loosely. Needs Promptwood's ComfyUI nodes "
+            "(comfy_nodes/video_chain_nodes in ComfyUI/custom_nodes). Changing it makes the made clips again")
+        c.addRow("Pinned-frame noise", self.pin_noise)
         self.style_prefix = QLineEdit()
         self.style_prefix.setPlaceholderText("e.g. cinematic, soft daylight, handheld camera")
         self.style_prefix.setToolTip("Put before every prompt (look, camera, light, a LoRA's trigger word). "
@@ -1232,7 +1244,7 @@ class BuildMixin(MainWindowHost):
             spin.editingFinished.connect(self._exact_shown)     # (typed in full: the nearest size into the field)
         for sig in (self.frames.currentIndexChanged, self.resolution.currentIndexChanged, self.exact_size.toggled,
                     self.shape.currentIndexChanged, self.audio.toggled, self.keep_rep.toggled, self.smooth_joins.toggled,
-                    self.steady_look.toggled,
+                    self.steady_look.toggled, self.pin_noise.valueChanged,
                     self.speed.currentIndexChanged, self.veda.toggled, self.turbo_lora.currentIndexChanged,
                     self.h3_distilled.toggled, self.two_pass.toggled):
             sig.connect(self._options_changed)

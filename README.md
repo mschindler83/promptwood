@@ -53,7 +53,9 @@ selected path (middle), and the selected clip with its prompt, face and settings
   A *carry-over* of 5, 22 or 39 frames hands over motion and sound, and joins are smoothed (timing and colour of
   the model's copy matched, the last frames blended). A long chain keeps its look: what each clip's model added to
   the frame it started from (fine texture, colour) is measured and taken off the frame it hands to the next clip,
-  so it does not get sharper and sharper from clip to clip.
+  so it does not get sharper and sharper from clip to clip. *Pinned-frame noise* (Clip settings) makes H3 follow the
+  pictures it is given (the pinned frames and the reference pictures) a little more loosely, so it copies their fine
+  detail less exactly.
 - **Storyboard with branches:** any clip can be continued in several ways; variants with other seeds, freeze what
   works, compare versions side by side. A graph, a timeline and clip cards show the same story.
 - **Films with scenes:** several scenes in one film, joined by cut, crossfade or continuation, played and exported as

@@ -98,6 +98,22 @@ def plain_frames(project: Path, tree: Tree, node: Node) -> tuple[bool, bool]:
     return start, end
 
 
+PIN_NOISE_OFF = 0.999   # H3's own level (comfy.video.PIN_NOISE_OFF): not recorded
+
+
+def pin_noise_of(options) -> float | None:
+    """The project's pinned-frame noise level (option "pin_noise"), None when it is H3's own (not set) or cannot be
+    used (not a number, outside 0.5-1.0)."""
+    v = options.get("pin_noise")
+    try:
+        v = None if v is None else round(float(v), 3)
+    except (TypeError, ValueError):
+        return None
+    if v is None or v != v or not 0.5 <= v <= 1.0 or abs(v - PIN_NOISE_OFF) < 1e-9:
+        return None
+    return v
+
+
 def node_settings(base: dict, options: Options, node: Node, audio_pool: list[dict] | None = None,
                   picture_sha: Callable[[str], str | None] | None = None,
                   source_sound: dict | None = None, frames_given: tuple[bool, bool] = (False, False)) -> dict:
@@ -153,7 +169,8 @@ def node_settings(base: dict, options: Options, node: Node, audio_pool: list[dic
                                checkpoint=base.get("checkpoint"), two_pass=base.get("two_pass"),
                                camera=_camera.clean(ov.get("camera")),
                                steady=_steady.VERSION if options.get("steady_look") and node.parent is not None
-                               and not node.is_video else None)
+                               and not node.is_video else None,
+                               pin_noise=pin_noise_of(options) if not node.is_video else None)
     recipe = {k: own[k] for k in ("sampler", "scheduler", "shift") if k in own}
     if recipe:                                   # (only when the clip sets any: other clips are recorded as before)
         s["recipe"] = recipe

@@ -684,7 +684,7 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
                   voice_language: str | None = None, lora_triggers: list | None = None,
                   source_sound: dict | None = None, veda: bool = False, camera: dict | None = None,
                   cfg: float = 1.0, checkpoint: dict | None = None, two_pass: dict | None = None,
-                  steady: int | None = None) -> dict:
+                  steady: int | None = None, pin_noise: float | None = None) -> dict:
     """What a clip depends on besides prompt, seed and start image; a clip is reused only if this is unchanged.
     The LoRA counts by content (lora_sha1), so a LoRA retrained into the same file makes its clips change.
     extra_loras: further LoRAs stacked after the first ([(path, strength)]), only present when there are any, so
@@ -697,7 +697,8 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
     checkpoint: another H3 checkpoint ({"name", "distilled"}), only present when one is chosen.
     two_pass: made in two passes ({"scale", "denoise"}), only present when on.
     steady: the frame it starts from was handed over with the clip before's look change taken off (steady.VERSION),
-    only present when so."""
+    only present when so.
+    pin_noise: the noise level H3 conditions its pinned frames and reference pictures at, only present when set."""
     s: dict[str, Any] = {"model": model, "lora": lora or None, "lora_sha1": file_signature(lora) if lora else None,
          "strength": float(strength) if lora else 1.0,
          "frames": int(frames), "steps": int(steps), "width": int(width), "height": int(height),
@@ -712,6 +713,8 @@ def settings_dict(*, model: str, lora: str | None, strength: float, frames: int,
         s["checkpoint"] = {"name": str(checkpoint["name"]), "distilled": bool(checkpoint.get("distilled"))}
     if two_pass:                                # pass 1 at a smaller size, pass 2 adds the detail at the full size
         s["two_pass"] = {"scale": float(two_pass["scale"]), "denoise": float(two_pass["denoise"])}
+    if pin_noise is not None:                   # pinned frames conditioned at this noise level (not H3's own)
+        s["pin_noise"] = round(float(pin_noise), 3)
     if steady:                                  # its start frame corrected (steady.py)
         s["steady_look"] = int(steady)
     if abs(float(cfg) - 1.0) > 1e-6:            # CFG of the speed mode (only when not 1: earlier clips keep theirs)

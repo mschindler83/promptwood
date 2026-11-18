@@ -101,6 +101,7 @@ class OptionsMixin(MainWindowHost):
             self.keep_rep.setChecked(bool(o.get("keep_repeated", d["keep_repeated"])))
             self.smooth_joins.setChecked(bool(o.get("smooth_joins", d["smooth_joins"])))
             self.steady_look.setChecked(bool(o.get("steady_look", False)))   # (missing: a project from before)
+            self.pin_noise.setValue(T.pin_noise_of(o) or 0.999)
             self.veda.setChecked(bool((o.get("veda") or d["veda"]).get("on", d["veda"]["on"])))
             self.two_pass.setChecked(bool((o.get("two_pass") or {}).get("on")))
             style = o.get("style") or {}
@@ -226,6 +227,10 @@ class OptionsMixin(MainWindowHost):
             "veda": {"on": self.veda.isChecked()}, "two_pass": {"on": self.two_pass.isChecked()},
             "checkpoint": {"name": self.h3_model.currentData() or "",
                            "distilled": bool(self.h3_model.currentData()) and self.h3_distilled.isChecked()}})
+        if T.pin_noise_of({"pin_noise": self.pin_noise.value()}) is None:
+            self.tree.options.pop("pin_noise", None)    # (H3's own level: nothing stored, clips recorded as before)
+        else:
+            self.tree.options["pin_noise"] = round(self.pin_noise.value(), 3)
         if self.shape.currentData():
             self.tree.options["shape"] = self.shape.currentData()
         else:
