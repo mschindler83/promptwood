@@ -7,8 +7,10 @@ keyring (never the system keyring with the user's CivitAI key).
 New trees are made in the classic prompt format here (the tests written before the h3 format assert its text); a test
 of the h3 format sets tree.options["prompt_format"] = "h3", one marked h3_default gets the app's real default."""
 import atexit
+import ipaddress
 import os
 import shutil
+import socket
 import tempfile
 import urllib.request
 from urllib.parse import urlparse
@@ -92,6 +94,36 @@ def own_folders(tmp_path, monkeypatch):
 
 
 _LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1", "[::1]")
+
+
+REAL_COMFYUI_PORTS = (8188,)       # the user's own ComfyUI on this machine (the app's default address)
+_REAL_CONNECT = socket.socket.connect
+
+
+def _no_real_comfyui(self, address):
+    """No test reaches the user's real ComfyUI: a connection to its port on this machine is refused at once (the
+    windows' status poll asked it, two tests sent it requests, one an unload; a busy ComfyUI hung the run). For the
+    whole run, not per test: a window's poll thread can still ask after its test ended. The fake ComfyUI servers
+    run on other ports."""
+    if isinstance(address, tuple) and len(address) >= 2 and address[1] in REAL_COMFYUI_PORTS \
+            and _this_machine(str(address[0])):
+        raise ConnectionRefusedError(f"a test reached for the real ComfyUI at {address[0]}:{address[1]}")
+    return _REAL_CONNECT(self, address)
+
+
+def _this_machine(host: str) -> bool:
+    """Any loopback address (127/8, ::1, ::ffff:127.x), 0.0.0.0 / :: or the name localhost."""
+    if host.lower() in ("localhost", "localhost.localdomain"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host.split("%")[0])
+    except ValueError:
+        return False
+    mapped = getattr(ip, "ipv4_mapped", None)
+    return ip.is_loopback or ip.is_unspecified or bool(mapped and (mapped.is_loopback or mapped.is_unspecified))
+
+
+socket.socket.connect = _no_real_comfyui    # type: ignore[method-assign]
 
 
 @pytest.fixture(autouse=True)
