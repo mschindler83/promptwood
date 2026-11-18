@@ -58,3 +58,6 @@ THUMB_CACHE_DIR = "thumbCacheDir"
 VIDEO_DIR = "videoDir"
 VIDEO_GPU = "videoGpu"
 VIEW_MODE = "viewMode"
+SHEETS_PROMPT = "sheets/prompt_"            # + the sheet's role: its own prompt (none: the app's default)
+SHEETS_QUALITY = "sheets/quality"
+SHEETS_TRIES = "sheets/tries"

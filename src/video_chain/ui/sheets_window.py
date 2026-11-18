@@ -22,6 +22,7 @@ from .. import chain, edits, sheets as S
 from ..imagegen import FAMILIES
 from .image_common import SEED_MAX
 from .image_generate import CreatePlan, GenerateWorker
+from . import settings_keys as SK
 from .widgets import fit_size, guard_wheel, label, label_for
 
 THUMB = QSize(240, 134)
@@ -140,14 +141,14 @@ class SheetsDialog(QDialog):
         self.tries = QSpinBox()
         self.tries.setRange(1, MAX_TRIES)
         try:
-            self.tries.setValue(int(str(self.qs.value("sheets/tries", 2) or 2)))
+            self.tries.setValue(int(str(self.qs.value(SK.SHEETS_TRIES, 2) or 2)))
         except ValueError:
             self.tries.setValue(2)
         self.tries.setToolTip("How many tries a Make makes (each with a new seed)")
         self.quality = QComboBox()
         for key, text in FAMILIES[S.FAMILY]["qualities"].items():
             self.quality.addItem(text, key)
-        k = self.quality.findData(self.qs.value("sheets/quality", "fast"))
+        k = self.quality.findData(self.qs.value(SK.SHEETS_QUALITY, "fast"))
         self.quality.setCurrentIndex(max(0, k))
         opts.addWidget(label_for("Tries", self.tries, level="tertiary"))
         opts.addWidget(self.tries)
@@ -212,7 +213,7 @@ class SheetsDialog(QDialog):
     # ---- prompts
     @staticmethod
     def _key(role: str) -> str:
-        return f"sheets/prompt_{role}"
+        return SK.SHEETS_PROMPT + role
 
     def reset_prompt(self, role: str) -> None:
         self.prompts[role].setPlainText(S.DEFAULT_PROMPTS[role])
@@ -225,8 +226,8 @@ class SheetsDialog(QDialog):
                 self.qs.setValue(self._key(role), text)
             else:
                 self.qs.remove(self._key(role))
-        self.qs.setValue("sheets/tries", self.tries.value())
-        self.qs.setValue("sheets/quality", self.quality.currentData())
+        self.qs.setValue(SK.SHEETS_TRIES, self.tries.value())
+        self.qs.setValue(SK.SHEETS_QUALITY, self.quality.currentData())
 
     # ---- making tries
     def make(self, role: str) -> None:
