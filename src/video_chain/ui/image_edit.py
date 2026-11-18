@@ -393,7 +393,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         self.tries.valueChanged.connect(lambda _v: self._variations_changed())
         self.tries.setToolTip(f"How many results at once (1 … {MAX_RESULTS}; each with the next seed), to pick the "
                               "best one. They are made one after another and each appears when it is ready; "
-                              "Stop ends it after the current one")
+                              "Stop interrupts the image being made (those already made stay)")
         self.keep_size = QCheckBox("Keep the size of the image to edit")
         self.keep_size.setChecked(True)
         self.keep_size.setToolTip("The model works at about 1 megapixel in its own aspect steps; this scales the "
@@ -756,7 +756,8 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         n = per * len(sources)
         if len(sources) > 1 and n > ASK_ABOVE and not ask(
                 self, "Edit a folder", f"This makes {n:,} images: {len(sources)} pictures × {per} each. "
-                "They are made one after another (Stop ends it after the current one). Start?"):
+                "They are made one after another (Stop interrupts the image being made; those already made "
+                "stay). Start?"):
             self._busy = False
             return
         run_words = [self._trigger_words(r) for r in runs]
@@ -893,7 +894,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
             return
         if n == 0:                                 # continuous: no end, the bar shows the current image
             self.bar.setValue(round(1000 * (i / steps if steps else 0)))
-            self.state.setText(f"Image {k} (continuous, Stop ends it after this one): step {i} / {steps}")
+            self.state.setText(f"Image {k} (continuous until Stop): step {i} / {steps}")
             return
         frac = (k - 1 + (i / steps if steps else 0)) / max(1, n)
         self.bar.setValue(round(1000 * frac))

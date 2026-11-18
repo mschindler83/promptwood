@@ -1202,6 +1202,7 @@ def test_random_loras_in_the_create_window(app, tmp_path, image, monkeypatch):
         dlg.family.setCurrentIndex(dlg.family.findData("sdxl"))
         dlg.prompt.setPlainText("1girl, red coat")
         assert dlg.b_random.isVisibleTo(dlg) and not dlg.b_random.isEnabled()          # no LoRAs in the list yet
+        assert "Stop interrupts the image being made" in dlg.tries.toolTip()          # (it does not wait for it)
         assert "Add the LoRAs" in dlg.b_random.toolTip()
         dlg.loras.set_items(dlg._known(), [{"path": files[0], "strength": 1.0}, {"path": files[1], "strength": 0.8},
                                            {"path": files[2], "strength": 0.6, "off": True}])
