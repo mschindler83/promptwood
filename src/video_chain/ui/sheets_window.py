@@ -59,15 +59,17 @@ class SheetWorker(GenerateWorker):
 
 class SheetsDialog(QDialog):
     """project: where the tries are kept (edits/); name: the person; source: the photo; connect(progress) -> a
-    connected ComfyImageCreator (worker thread); on_start(): before each run (GUI thread). After Save (accepted),
-    chosen(role) is the picked try of each sheet."""
+    connected ComfyImageCreator (worker thread); on_start(): before each run (GUI thread); pick() -> another photo
+    (None: no Other photo… button). After Save (accepted), chosen(role) is the picked try of each sheet and source
+    the photo they were made from."""
 
     def __init__(self, parent, project: Path, name: str, source: Path, connect: Callable,
-                 settings: QSettings, on_start: Callable[[], None] | None = None):
+                 settings: QSettings, on_start: Callable[[], None] | None = None,
+                 pick: Callable[[], str | None] | None = None):
         super().__init__(parent)
         self.setWindowTitle(f"Character sheets of @{name}")
         self.project, self.name, self.source = Path(project), name, Path(source)
-        self.connect_creator, self.qs, self.on_start = connect, settings, on_start
+        self.connect_creator, self.qs, self.on_start, self.pick = connect, settings, on_start, pick
         self.worker: SheetWorker | None = None
         self.busy = False
         self._tmp = tempfile.TemporaryDirectory(prefix="sheets_")
@@ -78,13 +80,16 @@ class SheetsDialog(QDialog):
         self.buttons: dict[str, QPushButton] = {}
         v = QVBoxLayout(self)
         top = QHBoxLayout()
-        photo = label()
-        pm = QPixmap(str(self.source))
-        if not pm.isNull():
-            photo.setPixmap(pm.scaled(QSize(120, 160), Qt.AspectRatioMode.KeepAspectRatio,
-                                      Qt.TransformationMode.SmoothTransformation))
-        photo.setToolTip(str(self.source))
-        top.addWidget(photo)
+        side = QVBoxLayout()
+        self.photo = label()
+        side.addWidget(self.photo)
+        self.b_other = QPushButton("Other photo…")
+        self.b_other.setToolTip("Make the sheets from another photo (the tries of this one stay in the image window)")
+        self.b_other.clicked.connect(self.other_photo)
+        self.b_other.setVisible(pick is not None)
+        side.addWidget(self.b_other)
+        side.addStretch(1)
+        top.addLayout(side)
         intro = label(f"Two character sheets of @{name} are made from this photo with Qwen-Image 2.1: a close-up "
                       "head sheet and a full-body sheet, each the person from the front, in profile and in a "
                       "three-quarter view, laid out like the app's templates. Make a few tries, click the best of "
@@ -170,11 +175,35 @@ class SheetsDialog(QDialog):
         end.addWidget(self.b_save)
         end.addWidget(close)
         v.addLayout(end)
-        for png, meta in reversed(edits.project_edits(self.project)):     # (oldest first: as they were made)
-            if meta.get("sheet") in S.ROLES and self.signature and meta.get("sheet_source") == self.signature:
-                self._add_result(str(png), meta["sheet"])
+        self._show_photo()
         guard_wheel(self)
         fit_size(self, 1100, 760)
+        self._update()
+
+    # ---- the photo
+    def _show_photo(self) -> None:
+        """The photo and its earlier tries (kept in edits/, oldest first: as they were made)."""
+        pm = QPixmap(str(self.source))
+        self.photo.setPixmap(pm.scaled(QSize(120, 160), Qt.AspectRatioMode.KeepAspectRatio,
+                                       Qt.TransformationMode.SmoothTransformation) if not pm.isNull() else QPixmap())
+        self.photo.setToolTip(str(self.source))
+        for role in S.ROLES:
+            self.results[role] = []
+            self.galleries[role].clear()
+        for png, meta in reversed(edits.project_edits(self.project)):
+            if meta.get("sheet") in S.ROLES and self.signature and meta.get("sheet_source") == self.signature:
+                self._add_result(str(png), meta["sheet"])
+
+    def other_photo(self) -> None:
+        if self.busy or self.pick is None:
+            return
+        f = self.pick()
+        if not f:
+            return
+        self.source = Path(f)
+        self.signature = chain.file_signature(self.source) or ""
+        self._show_photo()
+        self.state.setText("")
         self._update()
 
     # ---- prompts
@@ -275,7 +304,7 @@ class SheetsDialog(QDialog):
 
     def _update(self) -> None:
         idle = not self.busy
-        for b in (*self.buttons.values(), self.b_both):
+        for b in (*self.buttons.values(), self.b_both, self.b_other):
             b.setEnabled(idle)
         self.b_stop.setEnabled(self.busy)
         self.b_save.setEnabled(idle and all(self.chosen(r) for r in S.ROLES))

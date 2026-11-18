@@ -164,6 +164,7 @@ if TYPE_CHECKING:
         b_ref_clip: QPushButton
         b_ref_create: QPushButton
         b_ref_crop: QPushButton
+        b_ref_sheets: QPushButton
         b_ref_del: QPushButton
         b_ref_start: QPushButton
         b_simple: QPushButton

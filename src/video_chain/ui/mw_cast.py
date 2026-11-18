@@ -6,9 +6,9 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon, QImageReader
-from PySide6.QtWidgets import QApplication, QDialog, QInputDialog, QListWidgetItem
+from PySide6.QtWidgets import QApplication, QDialog, QInputDialog, QListWidgetItem, QMessageBox
 
-from .. import faces, tree as T
+from .. import faces, sheets as S, tree as T
 from . import dialogs as D, image_picker as IP
 from .workers import run_in_background
 from .clip_inputs import KIND_NAMES
@@ -396,6 +396,100 @@ class CastMixin(MainWindowHost):
         finally:
             dlg.deleteLater()
 
+    def ask_first_photo(self, who: str) -> str | None:
+        """A person's first photo: "sheets" (make character sheets from it), "face" (a face picture, cropped) or
+        None (cancelled)."""
+        box = QMessageBox(QApplication.activeModalWidget() or self)
+        box.setWindowTitle("First photo")
+        box.setText(f"The first photo of {who}: make character sheets from it, or use it as a face picture?")
+        box.setInformativeText("Character sheets (a close-up head sheet and a full-body sheet, each from the front, "
+                               "in profile and in a three-quarter view) are made with Qwen-Image 2.1 and keep the "
+                               "person the same from every angle. A face picture is cropped from the photo, as "
+                               "before.")
+        sheets = box.addButton("Make character sheets", QMessageBox.ButtonRole.AcceptRole)
+        face = box.addButton("Use as a face picture", QMessageBox.ButtonRole.ActionRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(sheets)
+        box.exec()
+        clicked = box.clickedButton()
+        box.deleteLater()
+        return "sheets" if clicked is sheets else "face" if clicked is face else None
+
+    def _sheet_photo(self, c: T.CastEntry) -> Path | None:
+        """The photo a person's sheets are made from: the kept one, else the full picture of its first face."""
+        assert self.project is not None
+        src = T.sheet_source(c)
+        if src and (self.project / src).is_file():
+            return self.project / src
+        for rel in c["images"]:
+            if not T.role_of(c, rel):
+                full = self.project / T.source_of(rel)
+                return full if full.is_file() else self.project / rel
+        return None
+
+    def make_sheets(self, name: str | None = None, source: Path | None = None, new: bool = False) -> bool:
+        """The character sheets window for a person (name; None: the selected one) from source (None: its photo,
+        or one picked now). new: the person is made when the sheets are saved. True when they were saved."""
+        if self.project is None or self.tree is None:
+            self.status.setText("Open or create a project folder first.")
+            return False
+        if self.running:
+            self.status.setText("Wait until generating has finished.")
+            return False
+        c = None if new else (T.character(self.tree, name) if name else self._selected_character())
+        if not new and (c is None or T.kind_of(c) != "person"):
+            self.status.setText("Character sheets are for a person: select one (New… makes one).")
+            return False
+        who = name if new else c["name"] if c else ""
+        assert who
+        if source is None and c is not None:
+            source = self._sheet_photo(c)
+        if source is None:
+            f = IP.pick_image(self, f"A photo of @{who} for the character sheets (best the face clearly, ideally "
+                                    "the whole person)", self.qs, None, self._picker_places(), self.project_images())
+            if not f:
+                return False
+            source = Path(f)
+        from .sheets_window import SheetsDialog
+        switch, before, _connect, connect_create = self.image_job()
+        dlg = SheetsDialog(self, self.project, who, Path(source), connect=connect_create, settings=self.qs,
+                           on_start=before, pick=lambda: IP.pick_image(
+                               self, f"Another photo of @{who} for the character sheets", self.qs, None,
+                               self._picker_places(), self.project_images()))
+        self._edit_switch = switch
+        saved = []
+        dlg.accepted.connect(lambda: saved.append(self._sheets_saved(dlg, who, new)))
+        try:
+            dlg.exec()
+        finally:
+            dlg.deleteLater()
+            self.edits_closed()
+        return bool(saved and saved[0])
+
+    def _sheets_saved(self, dlg, name: str, new: bool) -> bool:
+        assert self.project is not None and self.tree is not None
+        head, body = dlg.chosen("head_sheet"), dlg.chosen("body_sheet")
+        if not head or not body:
+            return False
+        before = self._done_clips()
+        try:
+            if new:
+                T.add_character(self.project, self.tree, name)
+            T.set_sheets(self.project, self.tree, name, Path(head), Path(body), dlg.source)
+        except (ValueError, OSError, RuntimeError) as e:
+            self._report_error(f"Could not save the sheets of @{name}: {e}")
+            made = T.character(self.tree, name) if new else None
+            if made is not None and not made["images"]:           # (the new person is not kept without sheets)
+                T.remove_character(self.project, self.tree, name)
+            return False
+        self._show_references(select=name)
+        self._write_tree()
+        self._changed()
+        self._say(f"Sheets saved to @{name}: a head sheet and a full-body sheet (the photo is kept to make them "
+                  "again with Sheets…).")
+        self._report_remade(before, f"Sheets saved to @{name}")
+        return True
+
     def create_reference(self):
         """The Create image window for a face picture of the selected character (its "Add as face reference")."""
         c = self._selected_character()
@@ -429,6 +523,16 @@ class CastMixin(MainWindowHost):
             return False
         if word == "picture":                      # a place, object or style: the whole picture, no crop window
             crop = None
+        first = owner is None or (T.kind_of(owner) == "person" and not owner["images"])
+        if crop == "ask" and word == "face picture" and first:
+            who = f"@{owner['name']}" if owner is not None else "a new character"
+            choice = self.ask_first_photo(who)
+            if choice is None:
+                self.status.setText("Nothing added.")
+                return False
+            if choice == "sheets":
+                name = owner["name"] if owner is not None else T.next_character_name(self.tree)
+                return self.make_sheets(name, Path(path), new=owner is None)
         if crop == "ask":
             lead = T.lead_of(self.tree)
             who = f"@{target['name']}" if target else (f"@{lead['name']}" if lead else "a new character")
@@ -528,7 +632,10 @@ class CastMixin(MainWindowHost):
             pm = self._pixmap(self.project / c["images"][0]) if self.project and c["images"] else None
             n = len(c["images"])
             if T.kind_of(c) == "person":
-                text = (f"@{c['name']}   {plural(n, 'face')}" if n else f"@{c['name']}   no face yet") + \
+                sheets = sum(1 for r in c["images"] if T.role_of(c, r))
+                had = (("head + body sheet" if sheets == 2 else plural(sheets, "sheet"))
+                       + (f" + {plural(n - sheets, 'face')}" if n > sheets else "") if sheets else plural(n, "face"))
+                text = (f"@{c['name']}   {had}" if n else f"@{c['name']}   no face yet") + \
                     ("   · voice" if c.get("voice") else "") + ("   · lead" if c.get("lead") else "")
             else:
                 text = (f"@{c['name']}   {plural(n, 'picture')}" if n else
@@ -586,7 +693,9 @@ class CastMixin(MainWindowHost):
         self.refs.clear()
         for k, rel in enumerate(c["images"] if c else [], start=1):
             pm = self._pixmap(self.project / rel) if self.project else None
-            item = QListWidgetItem(QIcon(pm) if pm else QIcon(), f"{c['name'] if c else ''} {k}")
+            role = T.role_of(c, rel)
+            item = QListWidgetItem(QIcon(pm) if pm else QIcon(),
+                                   S.LABELS[role] if role else f"{c['name'] if c else ''} {k}")
             item.setData(Qt.ItemDataRole.UserRole, rel)
             item.setToolTip(rel)
             self.refs.addItem(item)
@@ -598,6 +707,7 @@ class CastMixin(MainWindowHost):
         switch; a place, object or style has (whole) pictures only."""
         person = c is None or T.kind_of(c) == "person"
         self._voice_row.setVisible(person)
+        self.b_ref_sheets.setVisible(person)
         self.b_char_describe.setVisible(not person)
         self.char_lead.setVisible(person)
         self.ref_add_label.setText("Add face:" if person else "Add picture:")
@@ -651,5 +761,7 @@ class CastMixin(MainWindowHost):
         self.b_cast_lib.setEnabled(self.project is not None)
         self._update_library_windows()
         pic = self.refs.currentItem() is not None
-        self.b_ref_crop.setEnabled(idle and pic)
+        sheet = pic and bool(T.role_of(c, self.refs.currentItem().data(Qt.ItemDataRole.UserRole)))
+        self.b_ref_crop.setEnabled(idle and pic and not sheet)          # (a sheet is never cropped)
+        self.b_ref_sheets.setEnabled(idle)
         self.b_ref_del.setEnabled(idle and pic)

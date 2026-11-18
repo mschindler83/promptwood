@@ -71,6 +71,40 @@ class EndsMixin(MainWindowHost):
             dlg.deleteLater()
 
     # ---- AI image edit
+    def image_job(self):
+        """What a window that makes images in ComfyUI needs: (switch, before, connect, connect_create). before() (GUI
+        thread, before each run) makes room (the clip model goes once, the language model and the worker now);
+        connect / connect_create(progress) (worker thread) -> a ComfyImageEditor / ComfyImageCreator. The switch
+        says whether an image model was loaded (edits_closed)."""
+        url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL)
+        comfy_dir = self._comfy_dir_path()
+        cleanup = self.comfy_cleanup.isChecked()
+
+        switch = ModelSwitch()
+
+        def before_edit():                          # GUI thread, before each Generate
+            self.stop_idle_unload()
+            self.stop_llama("its memory is needed for the image")
+            switch.prepare(self.comfy.model)       # (the clip model is unloaded once, before the first image)
+            if self.worker_alive and not self.running:
+                self._quit_worker(free=False)               # its model goes now; it is started again for clips
+
+        def connect(progress):                      # worker thread
+            ed = CMF.ComfyImageEditor(url, log=lambda _m: None, progress=progress, comfy_dir=comfy_dir, cleanup=cleanup)
+            switch.free_clip_model(ed)
+            switch.loaded = True
+            return ed
+
+        def connect_create(progress):               # worker thread: the image creator (any image family)
+            ed = imagegen.ComfyImageCreator(url, log=lambda _m: None, progress=progress, comfy_dir=comfy_dir,
+                                            cleanup=cleanup)
+            switch.free_clip_model(ed)
+            if progress is not None:                # (None: only listing the models)
+                switch.loaded = True                # an image model is loaded (unloaded before the next clips)
+            return ed
+
+        return switch, before_edit, connect, connect_create
+
     def edit_image(self, nid: str | None = None, from_node: bool = False, start: bool = False,
                    mode: str = "auto", character: str | None = None) -> ImageEditDialog | None:
         """The image edit dialog. nid: the clip whose end image a result can become (its frame is offered first);
@@ -114,32 +148,7 @@ class EndsMixin(MainWindowHost):
         if start:
             first = str(self.project / T.START_FILE) if (self.project / T.START_FILE).is_file() else None
         target = nid if node is not None and not node.is_video and self.tree.video_child(nid) is None else None
-        url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL)
-        comfy_dir = self._comfy_dir_path()
-        cleanup = self.comfy_cleanup.isChecked()
-
-        switch = ModelSwitch()
-
-        def before_edit():                          # GUI thread, before each Generate
-            self.stop_idle_unload()
-            self.stop_llama("its memory is needed for the image")
-            switch.prepare(self.comfy.model)       # (the clip model is unloaded once, before the first image)
-            if self.worker_alive and not self.running:
-                self._quit_worker(free=False)               # its model goes now; it is started again for clips
-
-        def connect(progress):                      # worker thread
-            ed = CMF.ComfyImageEditor(url, log=lambda _m: None, progress=progress, comfy_dir=comfy_dir, cleanup=cleanup)
-            switch.free_clip_model(ed)
-            switch.loaded = True
-            return ed
-
-        def connect_create(progress):               # worker thread: the image creator (any image family)
-            ed = imagegen.ComfyImageCreator(url, log=lambda _m: None, progress=progress, comfy_dir=comfy_dir,
-                                            cleanup=cleanup)
-            switch.free_clip_model(ed)
-            if progress is not None:                # (None: only listing the models)
-                switch.loaded = True                # an image model is loaded (unloaded before the next clips)
-            return ed
+        switch, before_edit, connect, connect_create = self.image_job()
 
         def use(kind: str, png: str):
             if self.running:

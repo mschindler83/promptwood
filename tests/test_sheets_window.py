@@ -119,3 +119,26 @@ def test_a_failure_is_shown(app, tmp_path):
     wait(app, lambda: not dlg.busy)
     assert "Qwen-Image 2.1 is not available" in dlg.state.text()
     dlg.deleteLater()
+
+
+def test_another_photo_starts_over_with_its_own_tries(app, tmp_path):
+    from video_chain.ui.sheets_window import SheetsDialog
+    c = FakeCreator()
+    dlg, photo, project, qs = _dialog(tmp_path, c)
+    dlg.make("head_sheet")
+    wait(app, lambda: not dlg.busy and dlg.results["head_sheet"])
+    other = tmp_path / "other.png"
+    Image.new("RGB", (200, 300), (1, 200, 1)).save(other)
+    dlg.deleteLater()
+    dlg = SheetsDialog(None, project, "Anna", photo, connect=lambda progress: c, settings=qs,
+                       pick=lambda: str(other))
+    assert dlg.results["head_sheet"] and not dlg.b_other.isHidden()
+    dlg.other_photo()
+    assert dlg.source == other and dlg.results["head_sheet"] == [] and dlg.galleries["head_sheet"].count() == 0
+    dlg.make("head_sheet")
+    wait(app, lambda: not dlg.busy and dlg.results["head_sheet"])
+    assert c.calls[-1]["refs"][1] == str(other)
+    no_pick, *_ = _dialog(tmp_path, c, qs)
+    assert no_pick.b_other.isHidden()
+    no_pick.deleteLater()
+    dlg.deleteLater()

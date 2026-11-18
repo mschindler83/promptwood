@@ -122,6 +122,14 @@ def own_log_handlers():
 
 
 @pytest.fixture(autouse=True)
+def first_photo_as_face(monkeypatch):
+    """The cast's question for a person's first photo (character sheets or a face picture) is answered "face":
+    the tests from before sheets keep their flow; a test of sheets patches win.ask_first_photo itself."""
+    from video_chain.ui.mw_cast import CastMixin
+    monkeypatch.setattr(CastMixin, "ask_first_photo", lambda self, who: "face")
+
+
+@pytest.fixture(autouse=True)
 def no_unanswered_dialogs(monkeypatch):
     """A message box a test does not answer fails it at once: offscreen nobody can click it, so the run would
     otherwise wait for ever. A test that expects one patches QMessageBox.question (etc.) itself."""

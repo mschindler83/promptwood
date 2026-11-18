@@ -323,6 +323,11 @@ class BuildMixin(MainWindowHost):
         self.b_ref_create.setToolTip("Create a face picture with AI (the Create image window); there “Add as face "
                                      "reference” adds a result to the selected character")
         self.b_ref_create.clicked.connect(lambda: self.create_reference())   # (clicked passes checked=False)
+        self.b_ref_sheets = QPushButton("Sheets…")
+        self.b_ref_sheets.setToolTip("Character sheets: a close-up head sheet and a full-body sheet of the selected "
+                                     "person (front, profile, three-quarter view), made from a photo with "
+                                     "Qwen-Image 2.1; they become the person's pictures")
+        self.b_ref_sheets.clicked.connect(lambda: self.make_sheets())        # (clicked passes checked=False)
         self.b_ref_start = QPushButton("Start image")
         self.b_ref_start.clicked.connect(self._reference_from_start)
         self.b_ref_clip = QPushButton("Selected clip")
@@ -337,7 +342,7 @@ class BuildMixin(MainWindowHost):
         self.refs.currentRowChanged.connect(self._update_cast_buttons)
         self.ref_add_label = label("Add face:", level="tertiary")
         rrow.addWidget(self.ref_add_label)
-        for b in (self.b_ref_add, self.b_ref_create, self.b_ref_start, self.b_ref_clip):
+        for b in (self.b_ref_add, self.b_ref_create, self.b_ref_start, self.b_ref_clip, self.b_ref_sheets):
             rrow.addWidget(b)
         rrow.addStretch(1)
         rrow.addWidget(self.b_ref_crop)
