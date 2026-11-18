@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDou
                                QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QProgressBar,
                                QPushButton, QScrollArea, QSlider, QSpinBox, QStackedWidget, QVBoxLayout, QWidget)
 
+from .. import lora_random
 from ..comfy import EDIT_MODELS
 from ..comfy.image_edit import edit_size
 # (main_window and the tests import these from here: they moved to video_chain/edits.py)
@@ -38,7 +39,7 @@ from .dialogs import button_row, confirm as ask
 from .image_common import (ASK_ABOVE, CREATE_HINT, FAMILY_RETRIES, FAMILY_RETRY_MS, FOLDER_ITEM, FOLDER_PREFIX,  # noqa: F401
                            MAX_RESULTS, PROMPT_HINT, RESULT_GRID, RESULT_ICON, RESULT_STRIP_HEIGHT, SEED_MAX,
                            SIDE_PANEL_WIDTH, PictureSlot)
-from .image_generate import CreatePlan, EditPlan, CreateWorker, EditWorker, GenerateWorker
+from .image_generate import CreatePlan, EditPlan, CreateWorker, EditWorker, GenerateWorker, RandomRun
 from .image_loras import LorasMixin
 from .image_models import ModelsMixin
 from .image_presets import PresetsMixin
@@ -481,6 +482,8 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         self.b_gen.setProperty("variant", "primary")
         self.b_gen.setToolTip("Edit the image with this prompt (Ctrl+Enter)")
         self.b_gen.clicked.connect(self.generate)
+        self.b_random = QPushButton("Random LoRAs…")
+        self.b_random.clicked.connect(lambda: self.random_loras())
         self.b_cancel = QPushButton("Stop")
         self.b_cancel.clicked.connect(self.cancel)
         self.b_cancel.setEnabled(False)
@@ -488,6 +491,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         self.b_start_comfy.hide()
         self.b_start_comfy.clicked.connect(self._start_comfy)
         brow.addWidget(self.b_gen)
+        brow.addWidget(self.b_random)
         brow.addWidget(self.b_cancel)
         brow.addWidget(self.b_start_comfy)
         brow.addStretch(1)
@@ -705,6 +709,12 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
                                "Edit the image with this prompt (Ctrl+Enter)") if ok else
                               why if idle else "Working …")
         self.b_cancel.setEnabled(not idle)
+        why_not = self._random_problem() if self.mode() == "create" else ""
+        self.b_random.setEnabled(ok and not why_not)
+        self.b_random.setToolTip(
+            "Make images from this prompt, each with a random choice of the list's LoRAs at random strengths: "
+            "pinned ones always, a set number of images or until Stop" if ok and not why_not else
+            why_not or (why if idle else "Working …"))
 
     def _update_buttons(self):
         self._update_generate_button()
@@ -768,10 +778,8 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         if self._busy or not self.b_gen.isEnabled():
             return
         self._busy = True
-        fam, model = self.family.currentData(), self.model_file.currentData()
         prompt = " ".join(self.prompt.toPlainText().split())
-        negative = " ".join(self.negative.text().split()) if self._negative_used() else ""
-        quality, n = self.quality.currentData(), self.tries.value()
+        n = self.tries.value()
         jobs = self._variation_jobs()
         if jobs is not None:
             if not jobs:
@@ -780,17 +788,70 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
             n = len(jobs)
         runs = self._lora_runs()                     # (One image per LoRA: each result with every LoRA in turn)
         base_n, n = n, n * len(runs)
-        run_words = [self._trigger_words(r) for r in runs]
+        self._start_create(self._create_plan(prompt, n, runs, jobs), base_n)
+
+    def _create_plan(self, prompt: str, n: int, runs: list, jobs: list | None,
+                     random_run: RandomRun | None = None) -> CreatePlan:
+        """A Create's plan with the window's model, quality, size, negative, reference pictures and sampling."""
+        fam, model = self.family.currentData(), self.model_file.currentData()
+        negative = " ".join(self.negative.text().split()) if self._negative_used() else ""
         refs = [s.path for s in self.cpics[:FAMILIES[fam]["refs"]] if s.path] if self.use_refs.isChecked() else []
         self._remember_loras()                    # what it was made with is offered next time
         w, h = size_for(fam, self.aspect.currentData() or 1.0)
         assert self.connect_create is not None
-        plan = CreatePlan(self.project / EDITS_DIR, self.connect_create, prompt, quality, n, [], runs, run_words,
-                          refs, jobs, family=fam, model_file=model, negative=negative, width=w, height=h,
-                          strength=self.ref_strength.value(), tags=self.tags.isChecked(), sampling=self.sampling())
+        return CreatePlan(self.project / EDITS_DIR, self.connect_create, prompt, self.quality.currentData(), n, [],
+                          runs, [self._trigger_words(r) for r in runs], refs, jobs, family=fam, model_file=model,
+                          negative=negative, width=w, height=h, strength=self.ref_strength.value(),
+                          tags=self.tags.isChecked(), sampling=self.sampling(), random=random_run)
+
+    def _start_create(self, plan: CreatePlan, base_n: int) -> None:
         self._start_worker(CreateWorker(plan), base_n,
-                           f"Connecting to ComfyUI … (the first image loads {FAMILIES[fam]['label']}, which takes a "
-                           "while)")
+                           f"Connecting to ComfyUI … (the first image loads {FAMILIES[plan.family]['label']}, which "
+                           "takes a while)")
+
+    # ---- random LoRAs (Create mode)
+    def _random_key(self) -> str:
+        return f"randomLoras_{self.family.currentData()}"
+
+    def _random_problem(self) -> str:
+        """Why Random LoRAs cannot start now ('' = it can)."""
+        if self.mode() != "create":
+            return "Random LoRAs make new images (Create)"
+        if not self.loras.active_items():
+            return "Add the LoRAs to choose from to the list first (+ LoRA)"
+        if self.variations.active():
+            return "Random LoRAs use one prompt: switch the variations off first"
+        return ""
+
+    def random_loras(self, modal: bool = True):
+        """The Random LoRAs window for the list's LoRAs (those switched on); Generate N images or Continuous there
+        starts the run. modal=False: the window is made and handed back (for a test)."""
+        from .random_loras import RandomLorasDialog
+        if self._busy or not self.b_gen.isEnabled() or self._random_problem():
+            self.state.setText(self._random_problem() or self.b_gen.toolTip())
+            return None
+        try:
+            saved = json.loads(qs_value(self.qs, self._random_key(), "{}", str)) if self.qs is not None else {}
+        except ValueError:
+            saved = {}
+        dlg = RandomLorasDialog(self, lora_random.from_saved(saved, self.loras.active_items()), self.seed.value())
+        if not modal:
+            return dlg
+        if dlg.exec():
+            self.start_random(dlg)
+        return dlg
+
+    def start_random(self, dlg) -> None:
+        """Run what the Random LoRAs window says: n images, or (continuous) images until Stop."""
+        if self._busy or self._random_problem() or dlg.problems():
+            return
+        self._remember(self._random_key(), json.dumps(dlg.saved()))
+        pool = dlg.pool()
+        words = {c.path: self._trigger_words([(c.path, 1.0)]) for c in pool}
+        self._busy = True
+        prompt = " ".join(self.prompt.toPlainText().split())
+        run = RandomRun(pool, dlg.most.value(), dlg.same_seed.isChecked(), words)
+        self._start_create(self._create_plan(prompt, 0 if dlg.continuous else dlg.n.value(), [[]], None, run), 1)
 
     def _start_worker(self, worker: GenerateWorker, base_n: int, text: str):
         """Run a Generate: on_start first (a refusal ends it), then the seeds (a refused Generate keeps the seed)."""
@@ -829,6 +890,10 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
     def _progress(self, k: int, n: int, i: int, steps: int):
         if k == 0:
             self.state.setText("No Lightning LoRA for this model in ComfyUI: using Standard (20 steps).")
+            return
+        if n == 0:                                 # continuous: no end, the bar shows the current image
+            self.bar.setValue(round(1000 * (i / steps if steps else 0)))
+            self.state.setText(f"Image {k} (continuous, Stop ends it after this one): step {i} / {steps}")
             return
         frac = (k - 1 + (i / steps if steps else 0)) / max(1, n)
         self.bar.setValue(round(1000 * frac))

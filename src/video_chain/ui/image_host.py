@@ -46,6 +46,7 @@ if TYPE_CHECKING:
         b_gen: QPushButton
         b_mask: QPushButton
         b_mask_clear: QPushButton
+        b_random: QPushButton
         b_refine: QToolButton
         b_single: QPushButton
         b_start_comfy: QPushButton

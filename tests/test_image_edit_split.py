@@ -248,3 +248,50 @@ def test_strip_and_seed_chip_are_styled_by_the_theme_not_per_widget(app, tmp_pat
     card.set({"seed": 5, "prompt": "x"})
     chips = [b for b in card.findChildren(type(dlg.b_gen)) if b.property("role") == "chipButton"]
     assert chips and all(b.styleSheet() == "" for b in chips)
+
+
+def _random_plan(tmp_path, editor, rnd, n):
+    from video_chain.ui.image_generate import CreatePlan
+    return CreatePlan(edits=tmp_path / "edits", connect=lambda progress: editor, prompt="a cat", quality="fast", n=n,
+                      seeds=[5], runs=[[]], run_words=[[]], refs=[], family="sdxl", model_file="m.safetensors",
+                      negative="", width=32, height=16, random=rnd)
+
+
+def test_create_worker_with_random_loras(app, tmp_path):
+    """Random LoRAs: each image its own choice (the pinned one always) and strengths, its trigger words, a new seed
+    each (or the window's seed for all); recorded with the image."""
+    from video_chain import lora_random as R
+    from video_chain.ui.image_generate import CreateWorker, RandomRun
+    pool = [R.Choice("pin", 0.5, 0.5, True), R.Choice("b", 0.2, 0.4), R.Choice("c", 0.6, 0.9)]
+    words = {"pin": ["pw"], "b": ["bw"], "c": []}
+    editor = _Editor()
+    got = _run_worker(CreateWorker(_random_plan(tmp_path, editor, RandomRun(pool, 2, False, words, seed=3), 30)))
+    assert got["finished"] == [""] and len(got["results"]) == 30
+    for (_fam, prompt, _seed, _neg, loras), (_png, meta) in zip(editor.calls, got["results"]):
+        assert loras[0] == "pin" and 1 <= len(loras) <= 2
+        assert prompt == ", ".join(["pw"] + (["bw"] if "b" in loras else [])) + ", a cat"
+        assert meta["random_loras"] == {"pinned": ["pin"], "most": 2}       # (the LoRAs: the editor's record)
+    assert {tuple(c[4]) for c in editor.calls} == {("pin",), ("pin", "b"), ("pin", "c")}
+    assert len({c[2] for c in editor.calls}) > 20                          # a new seed each
+    editor = _Editor()
+    _run_worker(CreateWorker(_random_plan(tmp_path, editor, RandomRun(pool, 2, True, words, seed=3), 5)))
+    assert [c[2] for c in editor.calls] == [5] * 5                        # the same seed: the window's
+
+
+def test_continuous_random_loras_run_until_stopped(app, tmp_path):
+    from video_chain import lora_random as R
+    from video_chain.ui.image_generate import CreateWorker, RandomRun
+    holder = []
+    editor = _Editor()
+    real = editor.create
+
+    def create(*a):
+        out = real(*a)
+        if len(editor.calls) == 7:
+            holder[0].cancel()
+        return out
+    editor.create = create
+    w = CreateWorker(_random_plan(tmp_path, editor, RandomRun([R.Choice("a", 1, 1)], 1, False, {}, seed=1), 0))
+    holder.append(w)
+    got = _run_worker(w)
+    assert len(got["results"]) == 7 and got["finished"] == [""]

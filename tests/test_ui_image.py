@@ -1172,3 +1172,82 @@ def test_multi_picker_double_click_on_a_deselected_picture_takes_it(app, tmp_pat
     dlg._activated(b)
     assert dlg.result() == QDialog.DialogCode.Accepted
     assert dlg.chosen_all() == [str((d / "b.png").resolve())] and dlg.chosen() == dlg.chosen_all()[0]
+
+
+def test_random_loras_in_the_create_window(app, tmp_path, image, monkeypatch):
+    """Random LoRAs (Create): the window lists the list's LoRAs to pin and give a range; Generate N images makes
+    them, each with the pinned LoRA and a random choice of the others at strengths in their ranges; the choices are
+    remembered; Continuous makes images until Stop. Edit mode has no such button."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from fake_comfy import FakeComfy
+
+    from video_chain.ui.main_window import MainWindow
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    server = FakeComfy(tmp_path / "comfy", loras=tuple(f"MiniMax H3/{n}.safetensors" for n in ("glow", "rain", "snow")))
+    try:
+        q = settings(tmp_path, "random.ini")
+        q.setValue("comfyUrl", server.url)
+        w = MainWindow(q, command=FAKE)
+        new_project(w, tmp_path, image, ("a",))
+        files = []
+        for name in ("glow", "rain", "snow"):
+            f = tmp_path / "loras" / "MiniMax H3" / f"{name}.safetensors"
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_bytes(b"x")
+            files.append(str(f))
+        w.image_loras = {"sdxl": [(f, Path(f).name) for f in files], "flux1": [], "krea2": []}
+        w.modal_dialogs = False
+        dlg = w.edit_image(start=True, mode="create")
+        wait(app, lambda: dlg.families, timeout=20)
+        dlg.family.setCurrentIndex(dlg.family.findData("sdxl"))
+        dlg.prompt.setPlainText("1girl, red coat")
+        assert dlg.b_random.isVisibleTo(dlg) and not dlg.b_random.isEnabled()          # no LoRAs in the list yet
+        assert "Add the LoRAs" in dlg.b_random.toolTip()
+        dlg.loras.set_items(dlg._known(), [{"path": files[0], "strength": 1.0}, {"path": files[1], "strength": 0.8},
+                                           {"path": files[2], "strength": 0.6, "off": True}])
+        assert dlg.b_random.isEnabled()
+        r = dlg.random_loras(modal=False)
+        assert [path for path, *_ in r.rows] == files[:2]                              # (not the one switched off)
+        assert [(c.low, c.high) for c in r.pool()] == [(0.5, 1.0), (0.4, 0.8)]
+        r.rows[0][1].setChecked(True)                                                  # glow pinned
+        r.rows[1][2].setValue(0.3)
+        r.rows[1][3].setValue(0.3)                                                     # rain always at 0.3
+        r.most.setValue(1)
+        assert r.problems() == [] and r.b_make.isEnabled()
+        r.rows[1][1].setChecked(True)                                                  # 2 pinned, at most 1
+        assert "2 LoRAs are pinned" in r.problem.text() and not r.b_make.isEnabled()
+        r.rows[1][1].setChecked(False)
+        r.most.setValue(2)
+        r.n.setValue(6)
+        r.same_seed.setChecked(True)
+        assert r.b_make.text() == "Generate 6 images"
+        dlg.start_random(r)
+        wait(app, lambda: not dlg._busy, timeout=120)
+        assert dlg.state.text().startswith("Done") and dlg.results.count() == 6
+        metas = [json.loads(f.read_text()) for f in (w.project / "edits").glob("new_*.json")]
+        assert len(metas) == 6 and len({m["seed"] for m in metas}) == 1                # the same seed
+        for m in metas:
+            got = {Path(lo["path"]).stem: lo["strength"] for lo in m["loras"]}
+            assert 0.5 <= got["glow"] <= 1.0 and set(got) <= {"glow", "rain"} and got.get("rain", 0.3) == 0.3
+            assert m["random_loras"] == {"pinned": [files[0]], "most": 2}
+        r2 = dlg.random_loras(modal=False)                                             # remembered
+        assert r2.rows[0][1].isChecked() and r2.pool()[1].high == 0.3 and r2.n.value() == 6 and r2.most.value() == 2
+        r2.same_seed.setChecked(False)
+        made = []
+
+        def stop_at_three(_png, meta):
+            made.append(meta)
+            if len(made) == 3:
+                dlg.cancel()                                                           # Stop
+        r2.continuous = True
+        dlg.start_random(r2)
+        dlg._worker.result.connect(stop_at_three)
+        wait(app, lambda: not dlg._busy, timeout=120)
+        assert dlg.state.text() == "Stopped." and 3 <= len(made) <= 4
+        assert len({m["seed"] for m in made}) == len(made)                             # a new seed each
+        dlg.set_mode("edit")
+        assert not dlg.b_random.isVisibleTo(dlg)
+        dlg.done(0)
+        w.close()
+    finally:
+        server.close()

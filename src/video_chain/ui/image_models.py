@@ -39,6 +39,7 @@ class ModelsMixin(ImageEditHost):
         for w in (self.edit_box, self.edit_pics, self.keep_size, self.edit_shape, self.edit_shape_label):
             w.setVisible(not create)
         self.create_box.setVisible(create)
+        self.b_random.setVisible(create)
         self.prompt_title.setText("2  Describe the image" if create else "2  What should change?")
         self.prompt.setPlaceholderText(CREATE_HINT if create else PROMPT_HINT)
         self.b_refine.setToolTip("Refine this prompt with a language model")

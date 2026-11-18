@@ -55,6 +55,7 @@ class PromptMixin(ImageEditHost):
         n = (self.variations.amount() if active else self.tries.value()) * per
         self.b_gen.setText(f"Generate {n} image{'s' if n != 1 else ''}" if active or per > 1 or self.batch
                            else "Generate")
+        self._update_generate_button()               # (Random LoRAs: the list's LoRAs and the variations count)
 
     def _insert_placeholder(self, name: str):
         cur = self.prompt.textCursor()

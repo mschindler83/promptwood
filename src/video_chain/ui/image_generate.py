@@ -3,6 +3,8 @@ another, writes each one's record and tells the window (progress, result, finish
 what they ask the editor for; the loop, the file names, the record and the error handling are shared."""
 from __future__ import annotations
 
+import itertools
+import random as _random
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -14,9 +16,11 @@ from PySide6.QtGui import QImage
 
 from .workers import run_in_background
 from .. import edits
+from .. import lora_random
 from ..comfy import EDIT_MODELS
-from ..triggers import with_triggers
+from ..triggers import stack_words, with_triggers
 from .imageio import upright
+from .image_common import SEED_MAX
 from .widgets import safe_emit
 
 
@@ -57,6 +61,17 @@ class EditPlan(Plan):
 
 
 @dataclass
+class RandomRun:
+    """Random LoRAs (lora_random): each image the pinned LoRAs and a random choice of the others (at most `most` in
+    all), at random strengths; same_seed: every image the window's seed, else a new random one each."""
+    pool: list[lora_random.Choice]
+    most: int
+    same_seed: bool
+    words: dict[str, list[str]]                   # the trigger words of each LoRA (read on the GUI thread)
+    seed: int | None = None                       # the random generator's seed (None: unpredictable; for the tests)
+
+
+@dataclass
 class CreatePlan(Plan):
     family: str = ""
     model_file: str | None = None
@@ -66,6 +81,7 @@ class CreatePlan(Plan):
     strength: float = 0.65
     tags: bool = False
     sampling: dict = field(default_factory=dict)
+    random: RandomRun | None = None               # random LoRAs; then n = 0 means "until Stop" (continuous)
 
 
 class GenerateWorker(QObject):
@@ -204,11 +220,12 @@ class CreateWorker(GenerateWorker):
     def _make(self) -> None:
         p = self.plan
         kept = edits.keep_source(p.edits, p.refs[0]) if p.refs else None   # the first picture is the "original"
-        for k in range(1, p.n + 1):
+        rng = _random.Random(p.random.seed) if p.random else None
+        for k in (itertools.count(1) if p.random and p.n == 0 else range(1, p.n + 1)):
             if self.cancelled:
                 break
             self._k = k
-            job, seed, loras, words = self._pick(k - 1)
+            job, seed, loras, words = self._random_pick(rng) if rng else self._pick(k - 1)
             out = edits.unique_out(p.edits, "new", seed, k)
             neg = (" ".join(job.negative.split()) if p.negative else "") if job else p.negative
             meta = self.editor.create(p.family, p.model_file, with_triggers(self._prompt_of(job), words), out, seed,
@@ -216,4 +233,16 @@ class CreateWorker(GenerateWorker):
                                       p.strength, p.tags, p.sampling)
             self._finish(out, meta, job, seed, words, {
                 "refs": p.refs, **self._variation(job), "tags": p.tags,
-                "source_copy": str(kept) if kept else None})
+                "source_copy": str(kept) if kept else None, **self._random_meta()})
+
+    def _random_pick(self, rng: _random.Random):
+        """(job, seed, LoRAs, words) of the next random-LoRA image."""
+        r = self.plan.random
+        assert r is not None
+        loras = lora_random.pick(r.pool, r.most, rng)
+        seed = self.plan.seeds[0] if r.same_seed else rng.randint(1, SEED_MAX)
+        return None, seed, loras, stack_words([path for path, _s in loras], lookup=lambda q: r.words.get(q, []))
+
+    def _random_meta(self) -> dict:
+        r = self.plan.random
+        return {"random_loras": {"pinned": [c.path for c in r.pool if c.pinned], "most": r.most}} if r else {}
