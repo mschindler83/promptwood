@@ -10,7 +10,7 @@ def choices(*specs):
     return [R.Choice(path, low, high, pinned) for path, low, high, pinned in specs]
 
 
-def test_pinned_loras_are_always_in_and_count_towards_the_most():
+def test_pinned_loras_are_always_in_with_at_least_one_random_one_and_count_towards_the_most():
     pool = choices(("a", 0.5, 1.0, True), ("b", 0.2, 0.4, False), ("c", 0.6, 0.6, False), ("d", -1.0, 0.0, False))
     rng = random.Random(1)
     sizes = set()
@@ -22,7 +22,7 @@ def test_pinned_loras_are_always_in_and_count_towards_the_most():
         for p, s in got:
             spec = next(c for c in pool if c.path == p)
             assert spec.low - 1e-9 <= s <= spec.high + 1e-9 and round(s, 2) == s
-    assert sizes == {1, 2, 3}                       # fewer than the most, too
+    assert sizes == {2, 3}                          # the pinned one and 1 or 2 random ones (never it alone)
 
 
 def test_at_least_one_lora_and_never_more_than_there_are():
@@ -52,7 +52,11 @@ def test_problems():
     assert R.problems([R.Choice("a", 1, 1, on=False)], 3) == [R.NONE_TO_CHOOSE]
     pool = choices(("a", 1, 1, True), ("b", 1, 1, True), ("c", 1, 1, False))
     assert R.problems(pool, 1) == ["2 LoRAs are pinned, but an image may have at most 1"]
-    assert R.problems(pool, 2) == []
+    assert R.problems(pool, 2) == ["2 LoRAs are pinned and an image may have at most 2: that leaves no room for a "
+                                   "random one (raise the most)"]
+    assert R.problems(pool, 3) == []
+    only_pinned = [R.Choice("a", 1, 1, True), R.Choice("b", 1, 1, on=False)]
+    assert R.problems(only_pinned, 1) == []                                    # (nothing else to choose: fine)
     assert R.problems(pool, 0) == ["An image needs at least 1 LoRA"]
 
 
@@ -100,7 +104,7 @@ def test_loras_left_out_are_never_picked_unless_pinned():
     pool = [R.Choice("a", 1, 1), R.Choice("b", 1, 1, on=False), R.Choice("c", 1, 1, pinned=True, on=False)]
     rng = random.Random(7)
     seen = {tuple(p for p, _s in R.pick(pool, 3, rng)) for _ in range(100)}
-    assert seen == {("c",), ("a", "c")}                                         # (pinned: in, even when left out)
+    assert seen == {("a", "c")}                                 # (pinned: in, even when left out; b never)
 
 
 def test_left_out_is_remembered():

@@ -1,6 +1,6 @@
 """Random LoRA variations (the image window's Random LoRAs): from the LoRAs of the image model, every image gets the
-pinned ones and a random choice of the others (those not left out), at least one LoRA and at most `most` in all, each
-at a random strength within its own range. No Qt."""
+pinned ones and at least one random one of the others (those not left out), at most `most` in all, each at a random
+strength within its own range. No Qt."""
 from __future__ import annotations
 
 import math
@@ -46,19 +46,21 @@ def problems(pool: list[Choice], most: int) -> list[str]:
     pinned = sum(1 for c in pool if c.pinned)
     if pinned > most:
         return [f"{pinned} LoRAs are pinned, but an image may have at most {most}"]
+    if pinned == most and any(c.on and not c.pinned for c in pool):
+        return [f"{pinned} LoRA{'s are' if pinned != 1 else ' is'} pinned and an image may have at most {most}: "
+                "that leaves no room for a random one (raise the most)"]
     return []
 
 
 def pick(pool: list[Choice], most: int, rng: random.Random) -> list[tuple[str, float]]:
-    """The LoRAs of one image, in the pool's order: every pinned one, then a random number of the others that are
-    on, so the image has between 1 (or the number pinned) and `most` LoRAs (fewer when there are fewer); each at a
-    random strength from its range. problems() must be empty."""
+    """The LoRAs of one image, in the pool's order: every pinned one and at least one random one of the others that
+    are on, up to `most` in all (a random number, so often fewer; only the pinned ones when there are no others);
+    each at a random strength from its range. problems() must be empty."""
     pinned = [c for c in pool if c.pinned]
     others = [c for c in pool if c.on and not c.pinned]
-    least = max(1, len(pinned))
-    upto = min(int(most), len(pinned) + len(others))
-    total = rng.randint(least, upto)
-    chosen = {id(c) for c in pinned} | {id(c) for c in rng.sample(others, total - len(pinned))}
+    room = min(int(most) - len(pinned), len(others))       # random ones at most
+    extra = rng.randint(1, room) if room >= 1 else 0
+    chosen = {id(c) for c in pinned} | {id(c) for c in rng.sample(others, extra)}
     return [(c.path, strength(c.low, c.high, rng)) for c in pool if id(c) in chosen]
 
 

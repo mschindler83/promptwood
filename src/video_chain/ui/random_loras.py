@@ -67,9 +67,10 @@ class RandomLorasDialog(QDialog):
         k = len(set_up["choices"])
         intro = label(f"Every image has the same prompt and a random choice of the {k} LoRA{'s' if k != 1 else ''} "
                       f"ComfyUI has{' for ' + model if model else ''}, each at a random strength from its range. "
-                      "Pinned LoRAs are in every image; LoRAs switched off under Use are never chosen. An image gets "
-                      "at least one LoRA and at most the number below, pinned ones included, often fewer. The LoRAs "
-                      "in the image window's list are not used for these images.", level="secondary")
+                      "Pinned LoRAs are in every image, together with at least one random LoRA; LoRAs switched off "
+                      "under Use are never chosen. The number below is the most per image, pinned ones included; "
+                      "often an image has fewer. The LoRAs in the image window's list are not used for these "
+                      "images.", level="secondary")
         intro.setWordWrap(True)
         v.addWidget(intro)
         top = QHBoxLayout()
@@ -125,8 +126,8 @@ class RandomLorasDialog(QDialog):
         self.most = QSpinBox()
         self.most.setRange(1, R.MAX_MOST)
         self.most.setValue(set_up["most"])
-        self.most.setToolTip("How many LoRAs an image may have at most, pinned ones included; each image gets a "
-                             "random number from 1 (or the number pinned) up to this")
+        self.most.setToolTip("How many LoRAs an image may have at most, pinned ones included; each image gets the "
+                             "pinned ones and a random number of others (at least one) up to this")
         self.most.valueChanged.connect(lambda _v: self._check())
         self.most_note = label("", level="tertiary")
         self.n = QSpinBox()

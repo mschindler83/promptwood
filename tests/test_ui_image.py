@@ -1220,6 +1220,8 @@ def test_random_loras_in_the_create_window(app, tmp_path, image, monkeypatch):
         assert [(c.low, c.high) for c in r.pool()] == [(0.5, 1.0), (0.3, 0.3), (0.5, 1.0)]
         assert "2 LoRAs to choose from, 1 pinned" in r.most_note.text()
         r.most.setValue(1)
+        assert "no room for a random one" in r.problem.text() and not r.b_make.isEnabled()
+        r.most.setValue(2)
         assert r.problems() == [] and r.b_make.isEnabled()
         r.set_checked(files[2], PIN, True)                                             # pinned: used again
         assert r.pool()[2].on and "2 LoRAs are pinned" in r.problem.text() and not r.b_make.isEnabled()
@@ -1237,7 +1239,7 @@ def test_random_loras_in_the_create_window(app, tmp_path, image, monkeypatch):
         assert len(metas) == 6 and len({m["seed"] for m in metas}) == 1                # the same seed
         for m in metas:
             got = {Path(lo["path"]).stem: lo["strength"] for lo in m["loras"]}
-            assert 0.5 <= got["glow"] <= 1.0 and set(got) <= {"glow", "rain"} and got.get("rain", 0.3) == 0.3
+            assert 0.5 <= got["glow"] <= 1.0 and set(got) == {"glow", "rain"} and got["rain"] == 0.3   # never alone
             assert m["random_loras"] == {"pinned": [files[0]], "most": 2}
         r2 = dlg.random_loras(modal=False)                                             # remembered
         p2 = r2.pool()

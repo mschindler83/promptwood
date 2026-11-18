@@ -268,10 +268,10 @@ def test_create_worker_with_random_loras(app, tmp_path):
     got = _run_worker(CreateWorker(_random_plan(tmp_path, editor, RandomRun(pool, 2, False, words, seed=3), 30)))
     assert got["finished"] == [""] and len(got["results"]) == 30
     for (_fam, prompt, _seed, _neg, loras), (_png, meta) in zip(editor.calls, got["results"]):
-        assert loras[0] == "pin" and 1 <= len(loras) <= 2
+        assert loras[0] == "pin" and len(loras) == 2
         assert prompt == ", ".join(["pw"] + (["bw"] if "b" in loras else [])) + ", a cat"
         assert meta["random_loras"] == {"pinned": ["pin"], "most": 2}       # (the LoRAs: the editor's record)
-    assert {tuple(c[4]) for c in editor.calls} == {("pin",), ("pin", "b"), ("pin", "c")}
+    assert {tuple(c[4]) for c in editor.calls} == {("pin", "b"), ("pin", "c")}       # never the pinned one alone
     assert len({c[2] for c in editor.calls}) > 20                          # a new seed each
     editor = _Editor()
     _run_worker(CreateWorker(_random_plan(tmp_path, editor, RandomRun(pool, 2, True, words, seed=3), 5)))
