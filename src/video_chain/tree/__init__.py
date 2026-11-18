@@ -178,6 +178,8 @@ from .cast import (  # noqa: F401
     sheet_of,
     sheet_source,
     set_sheets,
+    front_of,
+    swap_pictures,
     remove_voice,
     update_character,
     set_kind,

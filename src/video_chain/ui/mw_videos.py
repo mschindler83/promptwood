@@ -263,16 +263,8 @@ class VideosMixin(MainWindowHost):
             self.status.setText(f"Video #{T.short_id(nid)} is not converted yet: generate its path (or wait for the "
                                 "conversion), then replace the person.")
             return None
-        pictures = []
         assert self.tree is not None
-        for c in T.cast_of(self.tree):
-            if T.kind_of(c) != "person":            # (a head swap takes faces)
-                continue
-            for k, rel in enumerate(c["images"], start=1):
-                assert self.project is not None
-                if (self.project / rel).is_file():
-                    pictures.append((f"Face of @{c['name']}" + (f" ({k})" if len(c["images"]) > 1 else ""),
-                                     str(self.project / rel)))
+        pictures = T.swap_pictures(self.project, self.tree)   # (a sheet person: its head sheet's front view)
         url = (self.comfy_url.text().strip() or DEFAULT_COMFY_URL)
         comfy_dir = self._comfy_dir_path()
         cleanup = self.comfy_cleanup.isChecked()

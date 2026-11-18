@@ -159,3 +159,38 @@ def test_put_entry_checks_the_roles(tmp_path):
     with pytest.raises(ValueError, match="role"):
         T.put_entry(p, t, "Cara", [(face, None)], roles=["wing"])
     assert T.character(t, "Cara") is None
+
+
+def test_the_head_sheet_keeps_its_front_view_for_the_head_swap(tmp_path):
+    """The head swap takes one face, never a sheet: the head sheet's front view (its left third, as the template
+    has it) is kept beside it, and goes with it."""
+    p, t = _project(tmp_path)
+    head = tmp_path / "h.png"
+    im = Image.new("RGB", (300, 90), (0, 0, 255))
+    im.paste((255, 0, 0), (0, 0, 100, 90))                                    # (the left third: the front view)
+    im.save(head)
+    _h, body, photo = _sheets(tmp_path)
+    T.set_sheets(p, t, "Anna", head, body, photo)
+    anna = T.character(t, "Anna")
+    rel = T.sheet_of(anna, "head_sheet")
+    front = p / T.front_of(rel)
+    assert front.is_file() and Image.open(front).size == (100, 90)
+    assert Image.open(front).getpixel((50, 45)) == (255, 0, 0)
+    assert not (p / T.front_of(T.sheet_of(anna, "body_sheet"))).exists()        # (a body sheet has none)
+    assert [f for _label, f in T.swap_pictures(p, t)] == [str(front)]
+    T.remove_picture(p, t, rel)
+    assert not front.exists()
+    assert T.swap_pictures(p, t) == []                                          # (a body sheet is no face)
+
+
+def test_the_head_swap_offers_each_persons_faces_with_a_label(tmp_path):
+    p, t = _project(tmp_path)
+    T.add_picture(p, t, "Anna", _picture(tmp_path / "a2.png", (1, 1, 1)))
+    T.add_character(p, t, "Ben", _picture(tmp_path / "b.png", (2, 2, 2)))
+    T.add_character(p, t, "Kitchen", _picture(tmp_path / "k.png", (3, 3, 3)), kind="place")
+    T.set_sheets(p, t, "Ben", *_sheets(tmp_path))
+    got = T.swap_pictures(p, t)
+    anna = T.character(t, "Anna")
+    ben = T.character(t, "Ben")
+    assert got == [("Face of @Anna (1)", str(p / anna["images"][0])), ("Face of @Anna (2)", str(p / anna["images"][1])),
+                   ("Face of @Ben (head sheet, front view)", str(p / T.front_of(T.sheet_of(ben, "head_sheet"))))]

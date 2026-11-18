@@ -172,6 +172,38 @@ def sheet_source(c: CastEntry | None) -> str | None:
     return (c.get("source") or None) if c else None
 
 
+def front_of(rel: str) -> str:
+    """Where a head sheet's front view is kept (refs/ref1.png -> refs/ref1_front.png): the one face the head swap
+    gets (a sheet never)."""
+    return (rel[:-4] if rel.endswith(".png") else rel) + "_front.png"
+
+
+def _write_front(project: Path, rel: str) -> None:
+    """The head sheet's front view: its left third (where the template has it), the full height."""
+    from .. import media
+    w, h = media.image_size(Path(project) / rel)
+    chain.to_png(Path(project) / rel, Path(project) / front_of(rel), (0, 0, max(1, w // 3), h))
+
+
+def swap_pictures(project: Path, tree: Tree) -> list[tuple[str, str]]:
+    """What the head swap offers as the new person's face: [(label, path)] of every person's faces (face_for_swap;
+    places, objects and styles have none), in cast order."""
+    out: list[tuple[str, str]] = []
+    for c in cast_of(tree):
+        if kind_of(c) != "person":
+            continue
+        plain = [r for r in c["images"] if not role_of(c, r)]
+        for rel in c["images"]:
+            role = role_of(c, rel)
+            f = Path(project) / (front_of(rel) if role == "head_sheet" else rel)
+            if role == "body_sheet" or not f.is_file():
+                continue
+            label = (f"Face of @{c['name']} (head sheet, front view)" if role else
+                     f"Face of @{c['name']}" + (f" ({plain.index(rel) + 1})" if len(plain) > 1 else ""))
+            out.append((label, str(f)))
+    return out
+
+
 def _pruned(c: CastEntry) -> CastEntry:
     """The entry with roles only for the pictures it still has (none left: no "roles" key)."""
     roles = {r: v for r, v in (c.get("roles") or {}).items() if r in c["images"]}
@@ -191,7 +223,7 @@ def _free_rel(project: Path, tree: Tree, stem: str, taken: set[str]) -> str:
     used = set(all_pictures(tree)) | {c["source"] for c in cast_of(tree) if c.get("source")} | taken
     k = 1
     while (f"{REFS_DIR}/{stem}{k}.png" in used or (d / f"{stem}{k}.png").exists()
-           or (d / f"{stem}{k}_full.png").exists()):
+           or (d / f"{stem}{k}_full.png").exists() or (d / f"{stem}{k}_front.png").exists()):
         k += 1
     return f"{REFS_DIR}/{stem}{k}.png"
 
@@ -220,6 +252,9 @@ def set_sheets(project: Path, tree: Tree, name: str, head: Path, body: Path, sou
             made.append(Path(project) / rel)
             chain.to_png(Path(image), Path(project) / rel)
             rels[role] = rel
+            if role == "head_sheet":
+                made.append(Path(project) / front_of(rel))
+                _write_front(project, rel)
     except BaseException:
         for f in made:
             f.unlink(missing_ok=True)
@@ -345,7 +380,7 @@ def put_entry(project: Path, tree: Tree, name: str, faces: Sequence[tuple[Path, 
     try:
         for face, full in faces:
             while ((d / f"ref{k}.png").exists() or (d / f"ref{k}_full.png").exists()
-                   or f"{REFS_DIR}/ref{k}.png" in used):
+                   or (d / f"ref{k}_front.png").exists() or f"{REFS_DIR}/ref{k}.png" in used):
                 k += 1
             rel = f"{REFS_DIR}/ref{k}.png"
             made.append(Path(project) / rel)
@@ -355,6 +390,10 @@ def put_entry(project: Path, tree: Tree, name: str, faces: Sequence[tuple[Path, 
                 shutil.copyfile(full, Path(project) / source_of(rel))
             images.append(rel)
             k += 1
+        for rel, role in zip(images, roles or ()):
+            if role == "head_sheet":
+                made.append(Path(project) / front_of(rel))
+                _write_front(project, rel)
         src = None
         if source is not None:
             src = _free_rel(project, tree, SHEET_SOURCE, set())
@@ -424,7 +463,7 @@ def add_reference(project: Path, image: Path, tree: Tree, name: str | None = Non
 def _drop_file(project: Path, rel: str, tree: Tree) -> None:
     if rel in all_pictures(tree):
         return                                     # another character still uses it
-    for f in (rel, source_of(rel)):
+    for f in (rel, source_of(rel), front_of(rel)):
         retire(project, REFS_DIR, f)                # (never deleted: moved to old/)
 
 
