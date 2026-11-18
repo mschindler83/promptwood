@@ -196,7 +196,7 @@ def test_the_head_swap_offers_each_persons_faces_with_a_label(tmp_path):
                    ("Face of @Ben (head sheet, front view)", str(p / T.front_of(T.sheet_of(ben, "head_sheet"))))]
 
 
-def test_a_clip_tells_h3_which_pictures_are_sheets(tmp_path):
+def test_a_clip_tells_h3_to_take_only_who_a_person_is_from_sheets(tmp_path):
     p, t = _project(tmp_path)
     T.add_character(p, t, "Ben", _picture(tmp_path / "b.png", (2, 2, 2)))
     T.set_sheets(p, t, "Anna", *_sheets(tmp_path))
@@ -205,7 +205,8 @@ def test_a_clip_tells_h3_which_pictures_are_sheets(tmp_path):
     ben, anna = got["h3"]["subjects"]
     assert "sheets" not in ben                                       # (plain pictures: the subject as before)
     assert anna["sheets"] == ["head_sheet", "body_sheet"] and anna["pictures"] == [2, 3]
-    assert "<Picture 2> is a close-up character sheet of Anna's head" in got["prompt"]
+    assert "partially_preserved - only Anna's face, identity and body build are taken from" in got["prompt"]
+    assert "character sheet" not in got["prompt"]                    # (described, H3 painted the sheet itself)
 
 
 def test_the_face_pass_groups_hold_faces_never_sheets(tmp_path):

@@ -411,19 +411,33 @@ def test_continuation_leaves_a_structured_prompt_alone():
     assert H.compose(own, continues=1) == own
 
 
-def test_a_persons_character_sheets_are_named_in_the_definitions():
-    """A person with character sheets: each sheet is said to be one person in three views (not three people);
-    plain pictures read as before."""
+def test_a_persons_character_sheets_are_not_described_and_their_layout_is_not_kept():
+    """A person with character sheets: the sheets are not described ("three times side by side" made H3 paint the
+    sheet itself into the video) and only who the person is comes from them, as the classic format says; plain
+    pictures read as before."""
     out = H.compose("@Anna walks.", subjects=[
         {"name": "Anna", "desc": "a tall woman", "pictures": [1, 2], "sheets": ["head_sheet", "body_sheet"]}])
     assert "<Subject 1> is Anna (a tall woman), the person in <Picture 1> and <Picture 2>." in out
-    assert ("<Picture 1> is a close-up character sheet of Anna's head: the same person three times side by side, "
-            "from the front, in profile and in a three-quarter view.") in out
-    assert ("<Picture 2> is a full-body character sheet of Anna: the same person three times side by side, from "
-            "the front, in profile and in a three-quarter view.") in out
-    assert ("<Subject 1> (appears in [Shot 1]): fully_preserved - Anna's face, identity and body build are "
-            "retained (the character sheets show one person from several angles).") in out
+    assert "character sheet" not in out and "side by side" not in out and "<Picture 1> is" not in out
+    assert ("<Subject 1> (appears in [Shot 1]): partially_preserved - only Anna's face, identity and body build "
+            "are taken from <Picture 1> and <Picture 2>: the pictures only show who Anna is; the scene, pose, "
+            "framing and layout come from the detailed description.") in out
     plain = H.compose("@Anna walks.", subjects=[{"name": "Anna", "pictures": [1, 2]}])
-    assert "character sheet" not in plain and "Anna's face and identity are retained." in plain
+    assert ("<Subject 1> (appears in [Shot 1]): fully_preserved - Anna's face and identity are retained."
+            in plain)
     one = H.compose("@Anna walks.", subjects=[{"name": "Anna", "pictures": [1, 2], "sheets": ["", "head_sheet"]}])
-    assert "<Picture 2> is a close-up character sheet" in one and "<Picture 1> is a" not in one
+    assert "partially_preserved - only Anna's face" in one and "character sheet" not in one
+
+
+def test_only_a_persons_sheet_pictures_change_the_wording():
+    """Review: no sheet role, a place or object given roles, or a role without a picture: the output is as before."""
+    plain = H.compose("@Anna walks.", subjects=[{"name": "Anna", "pictures": [1, 2]}])
+    assert H.compose("@Anna walks.", subjects=[{"name": "Anna", "pictures": [1, 2], "sheets": ["", ""]}]) == plain
+    assert H.compose("@Anna walks.", subjects=[{"name": "Anna", "pictures": [1], "sheets": ["", "head_sheet"]}]) \
+        == H.compose("@Anna walks.", subjects=[{"name": "Anna", "pictures": [1]}])
+    for kind in ("place", "object"):
+        own = H.compose("@Kitchen.", subjects=[{"name": "Kitchen", "kind": kind, "pictures": [1]}])
+        assert H.compose("@Kitchen.", subjects=[{"name": "Kitchen", "kind": kind, "pictures": [1],
+                                                 "sheets": ["head_sheet"]}]) == own
+    one = H.compose("@Anna walks.", subjects=[{"name": "Anna", "pictures": [1, 2], "sheets": ["", "head_sheet"]}])
+    assert "taken from <Picture 1> and <Picture 2>: the pictures only show who Anna is" in one

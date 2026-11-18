@@ -120,9 +120,8 @@ _POSSESSIVE = re.compile(r"['’]s\b")
 
 _DEFINES = {"person": "the person in", "place": "the environment in", "object": "the object in",
             "style": "the visual style of"}
-_VIEWS = "the same person three times side by side, from the front, in profile and in a three-quarter view"
-_SHEETS = {"head_sheet": "is a close-up character sheet of {name}'s head: " + _VIEWS + ".",
-           "body_sheet": "is a full-body character sheet of {name}: " + _VIEWS + "."}
+_SHEETS = ("head_sheet", "body_sheet")                   # (never described: "three times side by side" made H3
+                                                         # paint the sheet itself into the video)
 
 
 @dataclass(frozen=True)
@@ -462,12 +461,13 @@ def compose(body: str, *, start: bool = False, end: bool = False, seconds: float
         d = f" ({sub.desc.rstrip('.').strip()})" if sub.desc else ""
         pics = _listing([f"<Picture {p}>" for p in sub.pictures]) if sub.pictures else ""
         defs.append(f"<Subject {k}> is {sub.name}{d}" + (f", {_DEFINES[sub.kind]} {pics}." if pics else "."))
-        sheets = dict(zip(sub.pictures, sub.sheets)) if sub.kind == "person" else {}
-        defs += [f"<Picture {p}> " + _SHEETS[r].format(name=sub.name) for p, r in sheets.items() if r in _SHEETS]
-        if sub.pictures:
-            reason = {"person": (f"{sub.name}'s face, identity and body build are retained (the character sheets "
-                                 "show one person from several angles)." if any(r in _SHEETS for r in sheets.values())
-                                 else f"{sub.name}'s face and identity are retained."),
+        if sub.kind == "person" and any(r in _SHEETS for _p, r in zip(sub.pictures, sub.sheets)):
+            where = ", ".join(f"[Shot {x}]" for x in shots_of(k))   # (as the classic format: who, not how)
+            keep.append(f"<Subject {k}> (appears in {where}): partially_preserved - only {sub.name}'s face, identity "
+                        f"and body build are taken from {pics}: the pictures only show who {sub.name} is; the scene, "
+                        "pose, framing and layout come from the detailed description.")
+        elif sub.pictures:
+            reason = {"person": f"{sub.name}'s face and identity are retained.",
                       "place": f"the layout and look of {sub.name} are retained.",
                       "object": f"the shape and look of {sub.name} are retained.",
                       "style": f"the visual style of {sub.name} is retained."}[sub.kind]
