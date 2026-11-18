@@ -75,3 +75,21 @@ def test_the_most_is_never_exceeded(most):
     pool = choices(*[(str(i), 0.5, 1.0, False) for i in range(6)])
     rng = random.Random(6)
     assert all(1 <= len(R.pick(pool, most, rng)) <= most for _ in range(100))
+
+
+def test_a_lora_listed_twice_is_one_choice():
+    """The same file twice in the list must not be picked twice in one image."""
+    got = R.from_saved(None, [{"path": "a", "strength": 1.0}, {"path": "b", "strength": 0.5},
+                              {"path": "a", "strength": 0.4}])
+    assert [c.path for c in got["choices"]] == ["a", "b"]
+    for seed in range(50):
+        paths = [p for p, _s in R.pick(got["choices"], 3, random.Random(seed))]
+        assert len(paths) == len(set(paths))
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -float("inf")])
+def test_remembered_numbers_that_are_not_finite_fall_back_to_the_defaults(bad):
+    saved = {"most": bad, "n": bad, "loras": {"a": {"low": bad, "high": bad}}}
+    got = R.from_saved(saved, [{"path": "a", "strength": 1.0}])
+    assert (got["most"], got["n"]) == (R.DEFAULT_MOST, R.DEFAULT_N)
+    assert (got["choices"][0].low, got["choices"][0].high) == (0.5, 1.0)

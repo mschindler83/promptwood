@@ -116,7 +116,7 @@ class GenerateWorker(QObject):
             p.edits.mkdir(parents=True, exist_ok=True)
             self.editor = p.connect(lambda i, s: self.progress.emit(self._k, p.n, i, s))
             self._make()
-            self.finished.emit("")
+            self.finished.emit("cancelled" if self.cancelled else "")   # (Stop between two images: stopped)
         except Exception as e:  # noqa: BLE001
             safe_emit(self.finished, "cancelled" if self.cancelled else str(e))
         finally:

@@ -2,6 +2,7 @@
 the others, at least one LoRA and at most `most` in all, each at a random strength within its own range. No Qt."""
 from __future__ import annotations
 
+import math
 import random
 from dataclasses import dataclass
 from typing import Any
@@ -67,9 +68,10 @@ def to_saved(pool: list[Choice], *, most: int, n: int, same_seed: bool) -> dict[
 
 def _number(value: Any, default: float) -> float:
     try:
-        return float(value)
+        got = float(value)
     except (TypeError, ValueError):
         return default
+    return got if math.isfinite(got) else default
 
 
 def from_saved(saved: dict | None, items: list[dict]) -> dict[str, Any]:
@@ -78,8 +80,10 @@ def from_saved(saved: dict | None, items: list[dict]) -> dict[str, Any]:
     saved = saved if isinstance(saved, dict) else {}
     loras = saved.get("loras")
     known: dict = loras if isinstance(loras, dict) else {}
-    pool = []
+    pool: list[Choice] = []
     for it in items:
+        if any(c.path == it["path"] for c in pool):     # (the same file twice: one choice, never both in an image)
+            continue
         lo, hi = default_range(_number(it.get("strength", 1.0), 1.0))
         entry = known.get(it["path"])
         got: dict = entry if isinstance(entry, dict) else {}

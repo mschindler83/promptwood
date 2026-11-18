@@ -157,7 +157,7 @@ def test_edit_worker_cancel_ends_as_cancelled(app, tmp_path):
     w = EditWorker(_edit_plan(tmp_path, editor, [str(src)], per=3, n=3, seeds=[1, 2, 3], runs=[[]], run_words=[[]]))
     holder.append(w)
     got = _run_worker(w)
-    assert len(got["results"]) == 1 and got["finished"] == [""]       # the loop stops; nothing failed
+    assert len(got["results"]) == 1 and got["finished"] == ["cancelled"]   # the loop stops: Stopped, not Done
 
 
 def test_create_worker_makes_one_image_per_lora_and_variation(app, tmp_path):
@@ -294,4 +294,4 @@ def test_continuous_random_loras_run_until_stopped(app, tmp_path):
     w = CreateWorker(_random_plan(tmp_path, editor, RandomRun([R.Choice("a", 1, 1)], 1, False, {}, seed=1), 0))
     holder.append(w)
     got = _run_worker(w)
-    assert len(got["results"]) == 7 and got["finished"] == [""]
+    assert len(got["results"]) == 7 and got["finished"] == ["cancelled"]     # (Stop: "Stopped.", not "Done.")
