@@ -236,6 +236,7 @@ if TYPE_CHECKING:
         keep_loaded: QCheckBox
         keep_rep: QCheckBox
         smooth_joins: QCheckBox
+        steady_look: QCheckBox
         left_tabs: QTabWidget
         live: dict[str, str]
         llm_cpu_moe: QCheckBox

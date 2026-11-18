@@ -266,7 +266,9 @@ class ProjectMixin(MainWindowHost):
                 last = json.loads(qs_value(self.qs, SK.LAST_OPTIONS, "{}", str))
                 tree.options.update(cast(T.Options, {
                     k: v for k, v in last.items()
-                    if k in T.DEFAULT_OPTIONS and k not in ("identity", "cast", "style", "audio_refs")}))
+                    if k in T.DEFAULT_OPTIONS
+                    and k not in ("identity", "cast", "style", "audio_refs", "steady_look")}))   # (steady: always on
+                # for a new project; an old project it was taken from has it off only to stay as it was made)
             except ValueError:
                 pass
         self._clean_options(tree.options)           # (a value that cannot be read must not leave a half-open project)

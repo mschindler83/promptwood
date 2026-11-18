@@ -42,7 +42,8 @@ testpaths = ["tests"]
 pythonpath = ["src", "tests"]
 markers = ["models: needs real model files (run with -m models)",
            "slow: takes more than about 5 s (real ffmpeg media); skip with -m 'not slow'",
-           "h3_default: new trees get the app's real default prompt format (h3), not the tests' classic one"]
+           "h3_default: new trees get the app's real default prompt format (h3), not the tests' classic one",
+           "steady_default: new trees get the app's real default steady look (on), not the tests' plain handover"]
 # every run in parallel (32 cores: the ffmpeg-heavy suite takes minutes in one process); one test stops after 60 s
 # (thread method: also when stuck inside Qt or a subprocess), a whole run after 300 s (tests/run_limits.py)
 addopts = "-m 'not models' -n 16 --dist load -p run_limits"

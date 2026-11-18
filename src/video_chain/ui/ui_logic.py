@@ -338,6 +338,8 @@ def project_setting_changes(o: dict) -> list[tuple[str, str]]:
         out.append(("keep_repeated", "Keep repeated frames"))
     if bool(o.get("smooth_joins", d["smooth_joins"])) != d["smooth_joins"]:
         out.append(("smooth_joins", "Smooth joins"))
+    if bool(o.get("steady_look", False)) != d["steady_look"]:
+        out.append(("steady_look", "Steady look"))
     style = o.get("style") or {}
     for k, name in (("prefix", "Style before"), ("suffix", "Style after")):
         if (style.get(k) or "").strip():

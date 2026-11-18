@@ -5,7 +5,8 @@ Every test gets its own LoRA trigger database and LoRA presets (never the app's 
 keyring (never the system keyring with the user's CivitAI key).
 
 New trees are made in the classic prompt format here (the tests written before the h3 format assert its text); a test
-of the h3 format sets tree.options["prompt_format"] = "h3", one marked h3_default gets the app's real default."""
+of the h3 format sets tree.options["prompt_format"] = "h3", one marked h3_default gets the app's real default. Likewise
+they hand over the frame as it is (steady_look off); one marked steady_default gets the app's default."""
 import atexit
 import ipaddress
 import os
@@ -48,6 +49,15 @@ def classic_prompts(request, monkeypatch):
     if request.node.get_closest_marker("h3_default") is None:
         from video_chain import tree as T
         monkeypatch.setitem(T.DEFAULT_OPTIONS, "prompt_format", "classic")
+
+
+@pytest.fixture(autouse=True)
+def plain_handover(request, monkeypatch):
+    """New trees hand over the frame as it is (the tests written before the steady look assert it); a test marked
+    steady_default gets the app's real default."""
+    if request.node.get_closest_marker("steady_default") is None:
+        from video_chain import tree as T
+        monkeypatch.setitem(T.DEFAULT_OPTIONS, "steady_look", False)
 
 
 def settings(tmp_path, name="s.ini", view="advanced"):

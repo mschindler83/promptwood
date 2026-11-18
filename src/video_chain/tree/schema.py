@@ -59,6 +59,7 @@ class MadeRecord(TypedDict, total=False):
     keyframe_key: Any
     guide_from: Any
     continue_from: Any
+    look: dict                          # what its model added to the frame it was given (steady.measure)
     kind: str                           # a video node's record
     key: dict[str, Any]
 
@@ -119,6 +120,7 @@ class Options(TypedDict, total=False):
     audio: bool
     keep_repeated: bool
     smooth_joins: bool                  # joins after a carry-over measured and smoothed (joinmatch)
+    steady_look: bool                   # the handed-over frame corrected (steady.py; off in older projects)
     seed: int
     aspect: str                         # the shape of a project without a start picture or video (shape unset)
     shape: str                          # the clips' shape (a sources.ASPECTS key); unset: the start image's / video's

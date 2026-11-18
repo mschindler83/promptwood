@@ -78,6 +78,9 @@ DEFAULT_OPTIONS: Options = {"model": "Comfy-Org/MiniMax-H3", "frames": DEFAULT_F
                    "resolution": 512, "audio": True, "keep_repeated": False, "seed": 42,
                    # a join after a carry-over: the cut follows the model's copy, its colour matched, blended
                    "smooth_joins": True,
+                   # the frame a clip hands to the next one goes with what its model added taken off (steady.py);
+                   # off for a project saved before the option (its clips stay as made)
+                   "steady_look": True,
                    # (no "shape": the clips take the start image's / first video's; without either 16:9, or the
                    # "aspect" an older version stored for such a project)
                    # turbo: a step-distilled LoRA + its sampler, few steps for every clip (ComfyUI only)

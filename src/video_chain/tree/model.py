@@ -247,6 +247,8 @@ class Tree:
                 extra={k: copy.deepcopy(v) for k, v in d.items() if k not in _TREE_KEYS})
         if stored.get("prompt_format") not in PROMPT_FORMATS:
             t.options["prompt_format"] = "classic"   # a project from before the setting: as it was made
+        if "steady_look" not in stored:
+            t.options["steady_look"] = False          # a project from before the setting: its clips as they were made
         _migrate_cast(t.options, "cast" in stored)
         for nd in copy.deepcopy(d.get("nodes", [])):        # (a copy: the caller's dict is not changed)
             n = _node_from_json(nd, project_loras, t.nodes)

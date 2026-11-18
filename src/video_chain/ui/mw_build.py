@@ -661,6 +661,16 @@ class BuildMixin(MainWindowHost):
             "to the clip before (fading back to the clip's own over 2 s) and the last frames are blended. The clips "
             "themselves stay as made; off: a plain cut after the carry-over")
         c.addRow("", self.smooth_joins)
+        self.steady_look = QCheckBox("Keep the look steady along a chain")
+        self.steady_look.setChecked(d["steady_look"])
+        self.steady_look.setToolTip(
+            "A clip that starts from the frame the clip before hands over paints that frame again, and the model "
+            "(most of all with a speed LoRA) adds a little fine texture and shifts its colour while doing so; the "
+            "next clip adds its own, so a long chain gets sharper and sharper. On: what each clip added to the frame "
+            "it started from is measured (its first frame against that frame) and taken off the frame it hands to "
+            "the next clip (also the carried-over frames). The clips themselves stay as made. Changing it makes the "
+            "clips after the first one again")
+        c.addRow("", self.steady_look)
         self.style_prefix = QLineEdit()
         self.style_prefix.setPlaceholderText("e.g. cinematic, soft daylight, handheld camera")
         self.style_prefix.setToolTip("Put before every prompt (look, camera, light, a LoRA's trigger word). "
@@ -1222,6 +1232,7 @@ class BuildMixin(MainWindowHost):
             spin.editingFinished.connect(self._exact_shown)     # (typed in full: the nearest size into the field)
         for sig in (self.frames.currentIndexChanged, self.resolution.currentIndexChanged, self.exact_size.toggled,
                     self.shape.currentIndexChanged, self.audio.toggled, self.keep_rep.toggled, self.smooth_joins.toggled,
+                    self.steady_look.toggled,
                     self.speed.currentIndexChanged, self.veda.toggled, self.turbo_lora.currentIndexChanged,
                     self.h3_distilled.toggled, self.two_pass.toggled):
             sig.connect(self._options_changed)

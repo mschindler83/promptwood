@@ -8,6 +8,7 @@ from ..triggers import with_triggers
 from .. import camera as _camera
 from .. import chain
 from .. import h3_prompt as _h3
+from .. import steady as _steady
 from .consts import CONTINUE_CHOICES, DEFAULT_FRAMES, MAX_CAST_PICTURES, checkpoint_of, clean_sampling
 from .model import Node, Tree
 from .timeline import clip_length, full_prompt, handover_index, made_frames
@@ -150,7 +151,9 @@ def node_settings(base: dict, options: Options, node: Node, audio_pool: list[dic
                                veda=veda_for(options, base["width"], base["height"],
                                              int(ov.get("frames", options.get("frames", DEFAULT_FRAMES)))),
                                checkpoint=base.get("checkpoint"), two_pass=base.get("two_pass"),
-                               camera=_camera.clean(ov.get("camera")))
+                               camera=_camera.clean(ov.get("camera")),
+                               steady=_steady.VERSION if options.get("steady_look") and node.parent is not None
+                               and not node.is_video else None)
     recipe = {k: own[k] for k in ("sampler", "scheduler", "shift") if k in own}
     if recipe:                                   # (only when the clip sets any: other clips are recorded as before)
         s["recipe"] = recipe

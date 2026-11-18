@@ -370,7 +370,7 @@ class PathMixin(MainWindowHost):
                                "Stop generating")
         self._update_comfy_label()
         for widget in (self.start_tile, self.frames, self.resolution, self.steps,
-                  self.audio, self.keep_rep, self.smooth_joins, self.b_project,
+                  self.audio, self.keep_rep, self.smooth_joins, self.steady_look, self.b_project,
                   self.comfy_url, self.ref_size, self.ref_hint, self.b_ref_add, self.b_ref_create,
                   self.b_ref_start,
                   self.b_ref_del, self.b_ref_crop, self.b_char_new, self.b_char_rename, self.b_char_del, self.char_desc,

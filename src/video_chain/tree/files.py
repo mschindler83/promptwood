@@ -133,6 +133,7 @@ def load(project: Path) -> Tree:
     t = Tree()
     if old:
         t.options["prompt_format"] = "classic"      # made before the setting existed
+        t.options["steady_look"] = False            # (as it was made: the frame handed over as it is)
         t.image = old.get("image")
         s = dict(old.get("settings") or {})
         s.setdefault("backend", "ai-toolkit")        # linear chains were always made with ai-toolkit

@@ -51,7 +51,9 @@ selected path (middle), and the selected clip with its prompt, face and settings
 **Clips and films**
 - **Chained clips:** each clip starts from the last frame of the clip before (or from an earlier hand-over frame).
   A *carry-over* of 5, 22 or 39 frames hands over motion and sound, and joins are smoothed (timing and colour of
-  the model's copy matched, the last frames blended).
+  the model's copy matched, the last frames blended). A long chain keeps its look: what each clip's model added to
+  the frame it started from (fine texture, colour) is measured and taken off the frame it hands to the next clip,
+  so it does not get sharper and sharper from clip to clip.
 - **Storyboard with branches:** any clip can be continued in several ways; variants with other seeds, freeze what
   works, compare versions side by side. A graph, a timeline and clip cards show the same story.
 - **Films with scenes:** several scenes in one film, joined by cut, crossfade or continuation, played and exported as

@@ -8,6 +8,7 @@ from typing import Any, Callable, cast
 
 from .. import chain
 from .. import media
+from .. import steady
 from .consts import VIDEO
 from .guard import inside
 from .model import Node, Tree, short_id
@@ -477,6 +478,47 @@ def _record_made(project: Path, tree: Tree, node: Node, settings: dict, *, new_v
     return old
 
 
+def _first_frame_look(given: Path | None, video: Path, tmp: Path, log: Callable[[str], None]) -> dict | None:
+    """What the model added to the picture a clip was given (steady.measure of it and the clip's first frame)."""
+    if given is None or not Path(given).is_file() or not video.is_file():
+        return None
+    try:
+        first = tmp / "look_first.png"
+        chain.frame_at(video, 0, first)
+        return steady.measure(given, first)
+    except (OSError, RuntimeError, media.MediaError) as e:
+        log(f"could not measure the clip's look: {e}")
+        return None
+
+
+def handed_look(project: Path, tree: Tree, node: Node, checker: Checker,
+                log: Callable[[str], None] = lambda _m: None) -> dict | None:
+    """The look change of the clip before node (what its model added to the frame it was given), to be taken off
+    the frame it hands to node: its record, or (a clip made before the steady look) measured from the plain frame
+    it was given. None: nothing to take off (a real video, a carry-over before, no copy of its start)."""
+    if node.parent is None:
+        return None
+    parent = tree.nodes[node.parent]
+    made = parent.made or {}
+    if parent.is_video or not made.get("video"):
+        return None
+    look = made.get("look")
+    if isinstance(look, dict) and look.get("version") == steady.VERSION:
+        return look
+    ps = made.get("settings") or {}
+    if ps.get("guide") or ps.get("steady_look"):    # (given a carry-over, or a corrected frame: not known here)
+        return None
+    start = checker.start_frame(parent)
+    if start is None:
+        return None
+    if parent.parent is None:                      # what it was really given: the start picture for the canvas
+        base = checker.base() or {}
+        if base.get("width") and base.get("height"):
+            start = prepared_start(project, base["width"], base["height"], start, crop=ps.get("start_crop"))
+    with media.scratch("look") as tmp:
+        return _first_frame_look(start, Path(project) / made["video"], Path(tmp), log)
+
+
 def _make_ai_clip(generator: chain.Generator, project: Path, tree: Tree, node: Node, checker: Checker,
                   k: int, total: int, emit: Callable[[dict], None],
                   log: Callable[[str], None]) -> tuple[list[Path], list[Path]]:
@@ -506,12 +548,40 @@ def _make_ai_clip(generator: chain.Generator, project: Path, tree: Tree, node: N
     continue_from = checker.continue_from(node)
     call = _generator_call(project, node, settings)
     own: Path | None = None
+    look_in = handed_look(project, tree, node, checker, log) if settings.get("steady_look") else None
+    look_out: dict | None = None
     try:
         with media.scratch("job", dir=str(nodes_dir)) as tmp:
             guides, end_image = _guides(project, tree, node, settings, Path(tmp))
             if guides:
                 call["guides"] = guides
             ref_video = _continuation(project, tree, node, settings, Path(tmp))
+            if look_in is not None and not steady.is_identity(look_in) and start is not None:
+                # what the clip before added, taken off what it hands over (the start frame, the carried-over
+                # frames, the continued end): worked out once on the hand-over frame; optional, so a failure
+                # leaves them as they are
+                try:
+                    lead = next((g for g in guides if g.get("at") == "start"), None)
+                    probe = start                  # the amount on what goes over: a carry-over's own last frame
+                    if lead is not None:           # (its video compression has texture of its own)
+                        probe = Path(tmp) / "steady_probe.png"
+                        chain.frame_at(Path(lead["video"]), int(lead["frames"]) - 1, probe)
+                    vf = steady.correction_filter(probe, look_in)
+                    if send is not None and node.parent is not None and lead is None:
+                        fixed = Path(tmp) / "start_steady.png"
+                        steady.correct(send, fixed, look_in, vf)
+                        send = fixed
+                    for i, g in enumerate(guides):
+                        if g.get("at") == "start":
+                            fixed = Path(tmp) / f"guide_steady{i}.mp4"
+                            steady.correct_clip(g["video"], fixed, look_in, vf)
+                            g["video"] = str(fixed)
+                    if ref_video is not None:
+                        fixed = Path(tmp) / "continue_steady.mp4"
+                        steady.correct_clip(ref_video, fixed, look_in, vf)
+                        ref_video = fixed
+                except (OSError, RuntimeError, media.MediaError) as e:
+                    log(f"{nid}: the look could not be steadied, handed over as it is ({e})")
             if ref_video is not None:          # <Video 1>: the end of the clip before
                 call["ref_videos"] = [str(ref_video)]
             if end_image is not None:
@@ -531,6 +601,16 @@ def _make_ai_clip(generator: chain.Generator, project: Path, tree: Tree, node: N
                                    f"({', '.join(numbered)})")
             generator.generate(model_prompt(tree.options, node, settings, start=plain[0], end=plain[1]),
                                send, new_video, new_frame, node.seed, settings=call)
+            if tree.options.get("steady_look"):    # what this clip's model added: taken off what it hands on
+                start_guide = next((g for g in guides if g.get("at") == "start"), None)
+                given = send if plain[0] else None
+                if start_guide is not None:
+                    given = Path(tmp) / "guide_first.png"
+                    try:
+                        chain.frame_at(Path(start_guide["video"]), 0, given)
+                    except (OSError, RuntimeError, media.MediaError):
+                        given = None
+                look_out = _first_frame_look(given, new_video, Path(tmp), log)
             if sound is not None and new_video.exists() and settings["source_sound"].get("overlay"):
                 own = chain.keep_own_sound(new_video)    # the model's sound, before it is replaced / mixed
             if sound is not None and new_video.exists() and settings["source_sound"].get("mix"):
@@ -548,6 +628,8 @@ def _make_ai_clip(generator: chain.Generator, project: Path, tree: Tree, node: N
     old = _record_made(project, tree, node, settings, new_video=new_video, new_frame=new_frame, own=own,
                        made_n=made_n, start_sha=start_sha, end_key=end_key, key_key=key_key,
                        guide_from=guide_from, continue_from=continue_from, log=log)
+    if look_out is not None and node.made is not None:
+        node.made["look"] = look_out       # (taken off the frame it hands to the next clip: steady.py)
     return [new_video, new_frame] + ([own] if own is not None else []), old
 
 

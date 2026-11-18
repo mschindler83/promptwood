@@ -100,6 +100,7 @@ class OptionsMixin(MainWindowHost):
             self._fill_h3_models()
             self.keep_rep.setChecked(bool(o.get("keep_repeated", d["keep_repeated"])))
             self.smooth_joins.setChecked(bool(o.get("smooth_joins", d["smooth_joins"])))
+            self.steady_look.setChecked(bool(o.get("steady_look", False)))   # (missing: a project from before)
             self.veda.setChecked(bool((o.get("veda") or d["veda"]).get("on", d["veda"]["on"])))
             self.two_pass.setChecked(bool((o.get("two_pass") or {}).get("on")))
             style = o.get("style") or {}
@@ -218,7 +219,7 @@ class OptionsMixin(MainWindowHost):
         self.tree.options.update({
             "frames": self.frames.currentData(), "resolution": self.resolution.currentData(),
             "steps": self.steps.value(), "audio": self.audio.isChecked(), "keep_repeated": self.keep_rep.isChecked(),
-            "smooth_joins": self.smooth_joins.isChecked(),
+            "smooth_joins": self.smooth_joins.isChecked(), "steady_look": self.steady_look.isChecked(),
             "turbo": {**(self.tree.options.get("turbo") or {}),
                       "lora": self.turbo_lora.currentData(),
                       "steps": self.turbo_steps.value(), "strength": round(self.turbo_strength.value(), 2)},
