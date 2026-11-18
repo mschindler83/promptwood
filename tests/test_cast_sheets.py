@@ -206,3 +206,41 @@ def test_a_clip_tells_h3_which_pictures_are_sheets(tmp_path):
     assert "sheets" not in ben                                       # (plain pictures: the subject as before)
     assert anna["sheets"] == ["head_sheet", "body_sheet"] and anna["pictures"] == [2, 3]
     assert "<Picture 2> is a close-up character sheet of Anna's head" in got["prompt"]
+
+
+def test_the_face_pass_groups_hold_faces_never_sheets(tmp_path):
+    """Review: a person with a plain face and sheets gave its 3-up sheets to the face pass as more faces."""
+    p, t = _project(tmp_path)
+    T.set_sheets(p, t, "Anna", *_sheets(tmp_path))
+    T.add_picture(p, t, "Anna", _picture(tmp_path / "f.png", (4, 4, 4), (80, 80)))
+    T.add_character(p, t, "Kitchen", _picture(tmp_path / "k.png", (3, 3, 3)), kind="place")
+    anna = T.character(t, "Anna")
+    face = str(p / anna["images"][2])
+    front = str(p / T.front_of(T.sheet_of(anna, "head_sheet")))
+    assert T.swap_groups(p, t) == [[front, face]]
+
+
+def test_a_missing_front_view_is_made_again(tmp_path):
+    p, t = _project(tmp_path)
+    T.set_sheets(p, t, "Anna", *_sheets(tmp_path))
+    front = p / T.front_of(T.sheet_of(T.character(t, "Anna"), "head_sheet"))
+    front.unlink()
+    assert [f for _l, f in T.swap_pictures(p, t)] == [str(front)] and front.is_file()
+
+
+def test_a_sheet_is_never_cropped(tmp_path):
+    p, t = _project(tmp_path)
+    T.set_sheets(p, t, "Anna", *_sheets(tmp_path))
+    with pytest.raises(ValueError, match="sheet"):
+        T.recrop_picture(p, t, T.sheet_of(T.character(t, "Anna"), "body_sheet"), (0, 0, 10))
+
+
+def test_room_for_two_sheets(tmp_path):
+    p, t = _project(tmp_path)
+    assert T.sheets_problem(t, "Anna") == ""                           # (1 face -> 2 sheets: 2 of 9)
+    for k in range(T.MAX_CAST_PICTURES - 2):
+        T.add_character(p, t, f"P{k}", _picture(tmp_path / f"p{k}.png", (k, k, k)), kind="object")
+    assert T.sheets_problem(t, "Anna") == ""                           # (8 others? 7 + Anna's 2 = 9)
+    T.add_character(p, t, "Extra", _picture(tmp_path / "x.png", (7, 7, 7)), kind="object")
+    assert "at most 9" in T.sheets_problem(t, "Anna")
+    assert "at most 9" in T.sheets_problem(t, None)                    # (a new person: 9 + 2)

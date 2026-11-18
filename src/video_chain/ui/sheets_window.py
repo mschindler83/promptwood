@@ -6,8 +6,8 @@ the window is opened for the same photo again."""
 from __future__ import annotations
 
 import random
+import shutil
 import tempfile
-import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -56,6 +56,10 @@ class SheetWorker(GenerateWorker):
     def _variation(self, job) -> dict:
         return {}
 
+    def _cleanup(self) -> None:
+        if self.plan.work is not None:                  # (the run's flattened templates)
+            shutil.rmtree(self.plan.work, ignore_errors=True)
+
 
 class SheetsDialog(QDialog):
     """project: where the tries are kept (edits/); name: the person; source: the photo; connect(progress) -> a
@@ -72,7 +76,6 @@ class SheetsDialog(QDialog):
         self.connect_creator, self.qs, self.on_start, self.pick = connect, settings, on_start, pick
         self.worker: SheetWorker | None = None
         self.busy = False
-        self._tmp = tempfile.TemporaryDirectory(prefix="sheets_")
         self.signature = chain.file_signature(self.source) or ""
         self.results: dict[str, list[str]] = {r: [] for r in S.ROLES}
         self.prompts: dict[str, QPlainTextEdit] = {}
@@ -249,7 +252,7 @@ class SheetsDialog(QDialog):
                          quality=str(self.quality.currentData()), n=len(jobs), seeds=[s for _r, _p, s in jobs],
                          runs=[[]], run_words=[[]], refs=[str(self.source)], family=S.FAMILY, jobs=jobs,
                          source=str(self.source), signature=self.signature,
-                         work=Path(self._tmp.name) / uuid.uuid4().hex[:6])
+                         work=Path(tempfile.mkdtemp(prefix="sheets_")))
         w = SheetWorker(plan)
         w.progress.connect(self._progress)
         w.result.connect(self._result)

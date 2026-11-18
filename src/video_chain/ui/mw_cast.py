@@ -442,6 +442,17 @@ class CastMixin(MainWindowHost):
             return False
         who = name if new else c["name"] if c else ""
         assert who
+        problem = T.sheets_problem(self.tree, None if new else who)
+        if problem:                                        # (before any GPU work: Save could not keep them)
+            self.status.setText(f"No room for the sheets of @{who}: {problem}.")
+            return False
+        plain = [r for r in (c["images"] if c else []) if not T.role_of(c, r)]
+        if plain and QMessageBox.question(
+                self, "Character sheets",
+                f"@{who}'s {plural(len(plain), 'face picture')} will be replaced by the two sheets when you save "
+                "them (the pictures go to old/; clips made with them become CHANGED). Make sheets?") \
+                != QMessageBox.StandardButton.Yes:
+            return False
         if source is None and c is not None:
             source = self._sheet_photo(c)
         if source is None:
@@ -451,6 +462,7 @@ class CastMixin(MainWindowHost):
                 return False
             source = Path(f)
         from .sheets_window import SheetsDialog
+        outer = self._edit_switch if QApplication.activeModalWidget() is not None else None
         switch, before, _connect, connect_create = self.image_job()
         dlg = SheetsDialog(self, self.project, who, Path(source), connect=connect_create, settings=self.qs,
                            on_start=before, pick=lambda: IP.pick_image(
@@ -463,7 +475,12 @@ class CastMixin(MainWindowHost):
             dlg.exec()
         finally:
             dlg.deleteLater()
-            self.edits_closed()
+            if outer is not None:                  # (opened from another image window: it goes on with its switch)
+                if switch.loaded and hasattr(outer, "loaded"):
+                    outer.loaded = True
+                self._edit_switch = outer
+            else:
+                self.edits_closed()
         return bool(saved and saved[0])
 
     def _sheets_saved(self, dlg, name: str, new: bool) -> bool:
@@ -514,6 +531,8 @@ class CastMixin(MainWindowHost):
                                                         if T.kind_of(c) == "person"), None)
         word = self._ref_word(owner)
         if owner is not None and len(owner["images"]) >= T.MAX_PICTURES_PER_CHARACTER:
+            if any(T.role_of(owner, r) for r in owner["images"]):
+                word = "picture"                   # (sheets are pictures, not faces)
             self.status.setText(f"@{owner['name']} has {T.MAX_PICTURES_PER_CHARACTER} {word}s already; remove "
                                 f"one first (or select another {'character' if word == 'face picture' else 'entry'}).")
             return False

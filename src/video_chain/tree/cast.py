@@ -185,23 +185,48 @@ def _write_front(project: Path, rel: str) -> None:
     chain.to_png(Path(project) / rel, Path(project) / front_of(rel), (0, 0, max(1, w // 3), h))
 
 
-def swap_pictures(project: Path, tree: Tree) -> list[tuple[str, str]]:
-    """What the head swap offers as the new person's face: [(label, path)] of every person's faces (face_for_swap;
-    places, objects and styles have none), in cast order."""
+def _faces(project: Path, c: CastEntry) -> list[tuple[str, str]]:
+    """A person's faces for the head swap: [(label, path)]; a head sheet gives its front view (made again when it is
+    missing), a body sheet nothing."""
+    plain = [r for r in c["images"] if not role_of(c, r)]
     out: list[tuple[str, str]] = []
-    for c in cast_of(tree):
-        if kind_of(c) != "person":
+    for rel in c["images"]:
+        role = role_of(c, rel)
+        if role == "body_sheet":
             continue
-        plain = [r for r in c["images"] if not role_of(c, r)]
-        for rel in c["images"]:
-            role = role_of(c, rel)
-            f = Path(project) / (front_of(rel) if role == "head_sheet" else rel)
-            if role == "body_sheet" or not f.is_file():
-                continue
-            label = (f"Face of @{c['name']} (head sheet, front view)" if role else
-                     f"Face of @{c['name']}" + (f" ({plain.index(rel) + 1})" if len(plain) > 1 else ""))
-            out.append((label, str(f)))
+        f = Path(project) / (front_of(rel) if role == "head_sheet" else rel)
+        if role == "head_sheet" and not f.is_file() and (Path(project) / rel).is_file():
+            try:
+                _write_front(project, rel)
+            except (OSError, RuntimeError, ValueError):
+                pass
+        if not f.is_file():
+            continue
+        label = (f"Face of @{c['name']} (head sheet, front view)" if role else
+                 f"Face of @{c['name']}" + (f" ({plain.index(rel) + 1})" if len(plain) > 1 else ""))
+        out.append((label, str(f)))
     return out
+
+
+def swap_pictures(project: Path, tree: Tree) -> list[tuple[str, str]]:
+    """What the head swap offers as the new person's face: [(label, path)] of every person's faces (a sheet person:
+    its head sheet's front view; places, objects and styles have none), in cast order."""
+    return [x for c in cast_of(tree) if kind_of(c) == "person" for x in _faces(project, c)]
+
+
+def swap_groups(project: Path, tree: Tree) -> list[list[str]]:
+    """The faces of each person (the face pass of a swap uses all of one person's), never a sheet."""
+    return [g for c in cast_of(tree) if kind_of(c) == "person" if (g := [f for _l, f in _faces(project, c)])]
+
+
+def sheets_problem(tree: Tree, name: str | None) -> str:
+    """Why a person (None: a new one) cannot get its two sheets ('' = it can): the project's picture limit."""
+    c = character(tree, name) if name else None
+    others = len(all_pictures(tree)) - (len(c["images"]) if c else 0)
+    if others + 2 > MAX_CAST_PICTURES:
+        return (f"at most {MAX_CAST_PICTURES} pictures in a project: the two sheets would make {others + 2} "
+                "(remove a picture first)")
+    return ""
 
 
 def _pruned(c: CastEntry) -> CastEntry:
@@ -237,10 +262,9 @@ def set_sheets(project: Path, tree: Tree, name: str, head: Path, body: Path, sou
         raise ValueError(f"no character called {name}")
     if kind_of(c) != "person":
         raise ValueError(f"@{c['name']} is a {kind_of(c)}: only a person has character sheets")
-    others = len(all_pictures(tree)) - len(c["images"])
-    if others + 2 > MAX_CAST_PICTURES:
-        raise ValueError(f"at most {MAX_CAST_PICTURES} pictures in a project (@{c['name']}'s two sheets would make "
-                         f"{others + 2})")
+    problem = sheets_problem(tree, c["name"])
+    if problem:
+        raise ValueError(problem)
     Path(project, REFS_DIR).mkdir(parents=True, exist_ok=True)
     taken: set[str] = set()
     made: list[Path] = []
@@ -296,6 +320,8 @@ def recrop_picture(project: Path, tree: Tree, rel: str, crop: tuple[int, int, in
     uncropped is its own full picture."""
     if rel not in all_pictures(tree):
         raise ValueError(f"{rel} is no face picture of the cast")
+    if any(role_of(c, rel) for c in cast_of(tree)):
+        raise ValueError(f"{rel} is a character sheet: a sheet is never cropped")
     full = Path(project) / source_of(rel)
     if not full.is_file():                          # added uncropped (or before cropping existed): it is the full one
         shutil.copyfile(Path(project) / rel, full)

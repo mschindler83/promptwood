@@ -302,7 +302,7 @@ class VideosMixin(MainWindowHost):
                              "turbo": self.find_lora(swap.H3_SWAP_TURBO),
                              "settings": T.current_settings(self.project, self.tree.options, self.tree),
                              "connect": connect_h3, "describe": describe_face},
-                         groups=[[str(self.project / rel) for rel in c["images"]] for c in T.cast_of(self.tree)],
+                         groups=T.swap_groups(self.project, self.tree),       # (faces only, never a sheet)
                          pick=lambda title: IP.pick_image(
                              self, title, self.qs, None, self._picker_places(), self.project_images()))
         self._edit_switch = switch                  # (as the image window: the model is unloaded after it)

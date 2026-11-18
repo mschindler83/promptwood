@@ -142,3 +142,15 @@ def test_another_photo_starts_over_with_its_own_tries(app, tmp_path):
     assert no_pick.b_other.isHidden()
     no_pick.deleteLater()
     dlg.deleteLater()
+
+
+def test_the_flattened_templates_go_with_the_run_not_the_window(app, tmp_path):
+    """Review: the templates were flattened into the window's temporary folder; closed during a run, the run made it
+    again and left it behind. Now each run has its own folder, removed when the run ends."""
+    c = FakeCreator()
+    dlg, *_ = _dialog(tmp_path, c)
+    dlg.make("head_sheet")
+    work = dlg.worker.plan.work
+    wait(app, lambda: not dlg.busy)
+    assert work is not None and not Path(work).exists()
+    dlg.deleteLater()

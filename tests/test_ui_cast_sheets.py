@@ -102,3 +102,45 @@ def test_sheets_needs_a_person_and_asks_for_a_photo_when_it_has_none(app, win, t
     _fake_sheets(monkeypatch, tmp_path, opened)
     assert win.make_sheets()
     assert opened[0]["source"] == photo and T.sheet_of(T.character(win.tree, "Dan"), "head_sheet")
+
+
+def test_no_sheets_window_when_two_sheets_do_not_fit(app, win, tmp_path, image, monkeypatch):
+    """Review: the limit was only checked at Save, after the GPU work."""
+    new_project(win, tmp_path, image, ("a",))
+    for k in range(T.MAX_CAST_PICTURES):
+        T.add_character(win.project, win.tree, f"O{k}", _png(tmp_path / f"o{k}.png", (k, k, k)), kind="object")
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("Eve", True))
+    opened = []
+    _fake_sheets(monkeypatch, tmp_path, opened)
+    win._show_references()
+    assert not win.make_sheets("Eve", _png(tmp_path / "e.png", (1, 1, 1)), new=True)
+    assert opened == [] and "at most 9" in win.status.text()
+
+
+def test_replacing_plain_faces_with_sheets_is_confirmed(app, win, tmp_path, image, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    new_project(win, tmp_path, image, ("a",))
+    win.add_reference(str(_png(tmp_path / "face.png", (190, 150, 120), (80, 100))))
+    asked = []
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: asked.append(a[2]) or QMessageBox.No)
+    opened = []
+    _fake_sheets(monkeypatch, tmp_path, opened)
+    assert not win.make_sheets() and opened == [] and "face" in asked[0]
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    assert win.make_sheets() and len(opened) == 1
+    assert win.make_sheets() and len(opened) == 2                   # (sheets already: nothing plain to lose)
+
+
+def test_sheets_from_inside_another_image_window_keep_its_model_switch(app, win, tmp_path, image, monkeypatch):
+    from PySide6.QtWidgets import QApplication, QWidget
+    new_project(win, tmp_path, image, ("a",))
+    outer = object()
+    win._edit_switch = outer
+    monkeypatch.setattr(QApplication, "activeModalWidget", staticmethod(lambda: QWidget()))
+    closed = []
+    monkeypatch.setattr(win, "edits_closed", lambda: closed.append(1))
+    monkeypatch.setattr(win, "ask_first_photo", lambda who: "sheets")
+    opened = []
+    _fake_sheets(monkeypatch, tmp_path, opened)
+    assert win.add_reference(str(_png(tmp_path / "p.png", (2, 2, 2), (90, 120))))
+    assert win._edit_switch is outer and closed == []                # (the image window still runs)

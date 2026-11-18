@@ -2,9 +2,11 @@
 In the app's data folder ($XDG_DATA_HOME/video-chain/casts, VIDEO_CHAIN_CASTS):
   library.json  {"version": 1, "casts": [{"id", "name", "saved", "entries": [entry]}]}
   entry         {"name", "kind" (absent: a person), "desc", "lead", "faces": n (its pictures),
-                 "voice": what voice_library.keep_voice keeps (a person's, or absent)}
+                 "voice": what voice_library.keep_voice keeps (a person's, or absent),
+                 "roles": a person's picture roles, one per picture (absent: plain pictures),
+                 "source": true when source.png, the photo its sheets were made from, is kept}
   <id>/<k>/     the k-th entry's files: face1.png … (its pictures; face1_full.png: the full picture one was
-                cropped from), voice.wav, ref.wav
+                cropped from), voice.wav, ref.wav, source.png
 People, places, objects and styles are kept; casts saved when only people were kept list them under "people".
 An entry brought into a project is copied into it (tree.put_entry, tree.put_voice): a project never points into
 the library."""
