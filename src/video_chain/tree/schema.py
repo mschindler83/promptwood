@@ -60,6 +60,7 @@ class MadeRecord(TypedDict, total=False):
     guide_from: Any
     continue_from: Any
     look: dict                          # what its model added to the frame it was given (steady.measure)
+    latent: str                         # its sampled latent (Motion Context's file), for the clip after it
     kind: str                           # a video node's record
     key: dict[str, Any]
 
@@ -122,6 +123,7 @@ class Options(TypedDict, total=False):
     smooth_joins: bool                  # joins after a carry-over measured and smoothed (joinmatch)
     steady_look: bool                   # the handed-over frame corrected (steady.py; off in older projects)
     pin_noise: float                    # H3's noise level for pinned frames (missing: its own 0.999)
+    latent_handover: bool               # carry-overs from the clip before's latent (Motion Context)
     seed: int
     aspect: str                         # the shape of a project without a start picture or video (shape unset)
     shape: str                          # the clips' shape (a sources.ASPECTS key); unset: the start image's / video's

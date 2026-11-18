@@ -36,6 +36,7 @@ KNOWN = {"UNETLoader", "CLIPLoader", "VAELoader", "LoadImage", "MiniMaxH3ImageTo
          "WanAnimateToVideo", "TrimVideoLatent", "DWPreprocessor", "BlockifyMask", "DrawMaskOnImage",
          "CLIPVisionEncode", "CLIPVisionLoader", "ModelSamplingSD3", "ImageBatch", "ImageScale",
          "VideoChainFaceSwap", "VideoChainH3LoRA", "VideoChainH3PinNoise",
+         "MiniMaxH3MotionContext", "MiniMaxH3MotionContextLoadLatent", "MiniMaxH3MotionContextSaveLatent",
          # MOSS-Image
          "T5TokenizerOptions", "TextEncodeMOSSImageEdit", "SkipLayerGuidanceDiTSimple", "ImageScaleToTotalPixels", "GetImageSize"}
 IMAGE_UNETS = ["Chroma1-HD.safetensors", "Chroma1-HD-Flash.safetensors",
@@ -137,6 +138,8 @@ class FakeComfy:
         self.extra_unets: list[str] = []           # further diffusion models listed (e.g. H3 fine-tunes)
         self.h3_lora_node = True                   # Promptwood's VideoChainH3LoRA node is installed
         self.pin_noise_node = True                 # Promptwood's VideoChainH3PinNoise node is installed
+        self.motion_context = True                 # NikoDemon80's ComfyUI-H3-Motion-Context nodes are installed
+        self.context_latents: list[bytes] = []     # the latents the clips continued from, as uploaded
         self.refine_answer: str | None = None      # the prompt refiner's raw answer (None: "REFINED <prompt>")
         self.prompts, self.calls, self.history = [], [], {}
         self.prompts_deleted: list[str] = []       # ids removed with /queue delete while held
@@ -199,6 +202,8 @@ class FakeComfy:
                 if self.veda else {}
         if node == "VideoChainH3LoRA":
             return {node: {"input": {"required": {}}}} if self.h3_lora_node else {}
+        if node.startswith("MiniMaxH3MotionContext"):
+            return {node: {"input": {"required": {}}}} if self.motion_context else {}
         if node == "VideoChainH3PinNoise":
             return {node: {"input": {"required": {}}}} if self.pin_noise_node else {}
         if node == "VideoChainQwen21FunInpaint":
@@ -395,9 +400,18 @@ class FakeComfy:
         subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"color=red:s={w}x{h}",
                         "-frames:v", "1", str(last)], check=True)
         sub = str(Path(prefix).parent)
-        return {"save_video": {"images": [{"filename": out.name, "subfolder": sub, "type": "output"}],
-                               "animated": [True]},
-                "save_last": {"images": [{"filename": last.name, "subfolder": sub, "type": "output"}]}}
+        res = {"save_video": {"images": [{"filename": out.name, "subfolder": sub, "type": "output"}],
+                              "animated": [True]},
+               "save_last": {"images": [{"filename": last.name, "subfolder": sub, "type": "output"}]}}
+        if "mc_load" in wf:                         # the clip before's latent, uploaded
+            got = self.root / "input" / wf["mc_load"]["inputs"]["latent_path"]
+            assert got.is_file(), "latent not uploaded"
+            self.context_latents.append(got.read_bytes())
+        if "mc_save" in wf:                         # Motion Context's latent file, reported as Save Latent does
+            lat = self.root / "output" / (wf["mc_save"]["inputs"]["filename_prefix"] + "_00001_.safetensors")
+            lat.write_bytes(b"fake H3 latent")
+            res["mc_save"] = {"latents": [{"filename": lat.name, "subfolder": sub, "type": "output"}]}
+        return res
 
     def _handler(self):
         fake = self

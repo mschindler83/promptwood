@@ -81,6 +81,9 @@ DEFAULT_OPTIONS: Options = {"model": "Comfy-Org/MiniMax-H3", "frames": DEFAULT_F
                    # the frame a clip hands to the next one goes with what its model added taken off (steady.py);
                    # off for a project saved before the option (its clips stay as made)
                    "steady_look": True,
+                   # a carry-over sliced from the clip before's latent (ComfyUI-H3-Motion-Context), every clip's
+                   # latent saved with it; off until switched on (it needs those nodes in ComfyUI)
+                   "latent_handover": False,
                    # (no "shape": the clips take the start image's / first video's; without either 16:9, or the
                    # "aspect" an older version stored for such a project)
                    # turbo: a step-distilled LoRA + its sampler, few steps for every clip (ComfyUI only)
@@ -188,12 +191,14 @@ REFINED = ("1080p", "2k")          # refined copies of a clip version for export
 
 
 # a clip file of this app (also the fixed names of older versions)
-_CLIP_NAME = re.compile(r"^n\d+(_[0-9a-f]{8})?((_first|_f\d+)?\.(mp4|png)|_(1080p|2k)\.(mp4|json)|\.own\.(m4a|mka))$")
+_CLIP_NAME = re.compile(r"^n\d+(_[0-9a-f]{8})?((_first|_f\d+)?\.(mp4|png)|_(1080p|2k)\.(mp4|json)|\.own\.(m4a|mka)"
+                        r"|\.latent\.safetensors)$")
 
 
 # the files of a clip version its record names (own_sound: the model's sound of a clip with a sound laid over, kept
 # for remix_sound); they travel together: kept aside, made again, removed as one
-CLIP_KEYS = ("video", "frame", "first", "own_sound")
+CLIP_KEYS = ("video", "frame", "first", "own_sound", "latent")
+CONTEXT_LENGTHS = (5, 22, 39, 56)  # carry-overs a latent handover takes (whole latent steps; comfy.CONTEXT_LENGTHS)
 
 
 # another H3 checkpoint (options["checkpoint"]: {"name": ComfyUI's name, "distilled": bool}; no name: the standard

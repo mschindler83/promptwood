@@ -342,6 +342,8 @@ def project_setting_changes(o: dict) -> list[tuple[str, str]]:
         out.append(("steady_look", "Steady look"))
     if T.pin_noise_of(o) is not None:
         out.append(("pin_noise", "Pinned-frame noise"))
+    if bool(o.get("latent_handover", False)) != d["latent_handover"]:
+        out.append(("latent_handover", "Carry-over from the latent"))
     style = o.get("style") or {}
     for k, name in (("prefix", "Style before"), ("suffix", "Style after")):
         if (style.get(k) or "").strip():

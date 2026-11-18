@@ -55,7 +55,10 @@ selected path (middle), and the selected clip with its prompt, face and settings
   the frame it started from (fine texture, colour) is measured and taken off the frame it hands to the next clip,
   so it does not get sharper and sharper from clip to clip. *Pinned-frame noise* (Clip settings) makes H3 follow the
   pictures it is given (the pinned frames and the reference pictures) a little more loosely, so it copies their fine
-  detail less exactly.
+  detail less exactly. *Carry over from the latent* takes the carry-over straight from the clip before's latent,
+  picture and sound, with no decode and encode again at the join (NikoDemon80's
+  [ComfyUI-H3-Motion-Context](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context) nodes, installed by setup;
+  off by default, every clip then keeps its latent too, and clips made before it was on hand over their frames).
 - **Storyboard with branches:** any clip can be continued in several ways; variants with other seeds, freeze what
   works, compare versions side by side. A graph, a timeline and clip cards show the same story.
 - **Films with scenes:** several scenes in one film, joined by cut, crossfade or continuation, played and exported as

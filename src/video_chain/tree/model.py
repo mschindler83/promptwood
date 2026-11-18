@@ -247,6 +247,8 @@ class Tree:
                 extra={k: copy.deepcopy(v) for k, v in d.items() if k not in _TREE_KEYS})
         if stored.get("prompt_format") not in PROMPT_FORMATS:
             t.options["prompt_format"] = "classic"   # a project from before the setting: as it was made
+        if "latent_handover" not in stored:
+            t.options["latent_handover"] = False      # (the default too; kept explicit like the others)
         if "steady_look" not in stored:
             t.options["steady_look"] = False          # a project from before the setting: its clips as they were made
         _migrate_cast(t.options, "cast" in stored)

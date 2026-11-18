@@ -32,7 +32,7 @@ from .seedvr import SEEDVR_PRECISION_LOCAL, SeedvrMixin
 from .settings import (DEFAULT_FRAMES, DEFAULT_HEIGHT, DEFAULT_REF_SIZE, DEFAULT_STEPS, DEFAULT_WIDTH,
                        ClipSettings)
 from .video import (AUDIO_VAE, DISTILLED_CHECKPOINT, TEXT_ENCODER, TWO_PASS_NODES, UNET, UNET_REF, VEDA_NODE,
-                    PIN_NOISE_NODE, PIN_NOISE_OFF, VIDEO_VAE, build_two_pass_workflow, build_workflow, clip_recipe,
+                    MOTION_CONTEXT_NODES, PIN_NOISE_NODE, PIN_NOISE_OFF, VIDEO_VAE, build_two_pass_workflow, build_workflow, clip_recipe,
                     pick_veda_predictor, with_ref_hint)
 from .wfb import H3_LORA_NODE, SAVE_LAST_ID, SAVE_VIDEO_ID, SUBFOLDER, combo_options
 
@@ -296,6 +296,14 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
                              "the pinned-frame noise back to off")
         return float(level)
 
+    def check_motion_context(self):
+        """The latent handover's nodes (NikoDemon80's ComfyUI-H3-Motion-Context); ComfyError if one is missing."""
+        for node in MOTION_CONTEXT_NODES:
+            if not self._object_info(node):
+                raise ComfyError(f"ComfyUI has no {node} node: install ComfyUI-H3-Motion-Context (setup does that; "
+                                 "https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context) and restart ComfyUI, or "
+                                 "switch off the carry-over from the latent")
+
     def check_guides(self):
         for node in ("MiniMaxH3AddGuide", "LoadVideo", "GetVideoComponents"):
             if not self._object_info(node):
@@ -492,7 +500,7 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
                 digest.update(chunk)
                 size += len(chunk)
         suffix = image.suffix.lower() or ".png"
-        if not re.fullmatch(r"\.[a-z0-9]{1,5}", suffix):
+        if not re.fullmatch(r"\.[a-z0-9]{1,5}", suffix) and suffix != ".safetensors":   # (a latent keeps its kind)
             suffix = ".bin"                          # (never an odd suffix into the multipart header)
         name = digest.hexdigest()[:20] + suffix
         with _UPLOADS_LOCK:
@@ -636,6 +644,13 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
         build = (lambda **kw: build_two_pass_workflow(two_pass=two, upscaler=self.two_pass_upscaler(), **kw)) \
             if two else build_workflow
         pin = None if s.get("pin_noise") is None else self.pin_noise(s["pin_noise"])
+        ctx = s.get("context_latent") or {}            # the clip before's latent (Motion Context)
+        if ctx or s.get("latent_out"):
+            self.check_motion_context()
+        context = None
+        if ctx:
+            context = self.upload(Path(ctx["file"]))
+            uploads.append((context, Path(ctx["file"])))
         try:
             wf = build(prompt=prompt, image=image, seed=seed, width=s.get("width", DEFAULT_WIDTH),
                                 height=s.get("height", DEFAULT_HEIGHT), frames=s.get("frames", DEFAULT_FRAMES),
@@ -652,7 +667,8 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
                                 ref_videos=videos, **({"video_key": self.video_key()} if videos else {}),
                                 veda=self.veda_predictor(bool(refs or sounds or videos))
                                 if s.get("veda") and not distilled else None,
-                                pin_noise=pin)
+                                pin_noise=pin, context_latent=context, context_frames=int(ctx.get("frames") or 0),
+                                save_latent=bool(s.get("latent_out")))
         except ValueError as e:                # (a setting combination that cannot be built: say why)
             raise ComfyError(str(e)) from e
         entry = self._run_workflow(wf)
@@ -663,9 +679,16 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
             raise ComfyError("ComfyUI finished without the video or the last frame")
         self._save(video, Path(out_video))
         self._save(frame, Path(out_last_frame))
+        lat = self._first_file(outputs.get("mc_save")) if s.get("latent_out") else None
+        if s.get("latent_out") and lat is None:
+            raise ComfyError("ComfyUI finished without the clip's latent (H3 Motion Context Save Latent)")
+        if lat is not None:
+            self._save(lat, Path(s["latent_out"]))
         if self.cleanup:
             self._remove(self.output_dir, video, Path(out_video))
             self._remove(self.output_dir, frame, Path(out_last_frame))
+            if lat is not None:
+                self._remove(self.output_dir, lat, Path(s["latent_out"]))
 
     def _remove(self, top: PurePath | None, f: dict, local: Path, same_size: bool = True) -> None:
         """Delete ComfyUI's copy of a file, only inside its video-chain subfolder and (for outputs) only if the
@@ -687,7 +710,7 @@ class ComfyGenerator(RefineMixin, SeedvrMixin):
     def _first_file(out: dict | None) -> dict | None:
         if not out:
             return None
-        files = out.get("images") or out.get("videos") or out.get("gifs") or []
+        files = out.get("images") or out.get("videos") or out.get("gifs") or out.get("latents") or []
         return files[0] if files else None
 
     def _download(self, f: dict) -> bytes:

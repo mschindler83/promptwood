@@ -19,6 +19,11 @@ PIKA_SIGMAS = "1.0, 0.972973, 0.923077, 0.8, 0.571429, 0.333333, 0.0"   # ComfyU
 PIN_NOISE_OFF = 0.999
 PIN_NOISE_RANGE = (0.5, 1.0)
 PIN_NOISE_NODE = "VideoChainH3PinNoise"
+# Latent handover (NikoDemon80's ComfyUI-H3-Motion-Context): the carry-over sliced out of the clip before's latent
+MOTION_CONTEXT_NODES = ("MiniMaxH3MotionContext", "MiniMaxH3MotionContextLoadLatent",
+                        "MiniMaxH3MotionContextSaveLatent")
+CONTEXT_LENGTHS = (5, 22, 39, 56)    # the carry-overs that are whole latent steps (the node offers only these)
+CONTEXT_AUDIO_FRAMES = 18            # frames of sound pinned before the join (the node's recommendation)
 SCHEDULER = "simple"
 REF_HINT = "The person has exactly the face and look of the person in <Picture 1>."
 
@@ -78,7 +83,8 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
                    keyframes: Sequence[tuple[str, int]] = (), frame_refs: Sequence[str] = (),
                    ref_videos: Sequence[str] = (), video_key: Callable[[int], str] | None = None,
                    unet: str | None = None, adaln_loras: Collection[str] = (),
-                   pin_noise: float | None = None) -> dict:
+                   pin_noise: float | None = None, context_latent: str | None = None, context_frames: int = 0,
+                   save_latent: bool = False) -> dict:
     """The API-format workflow for one clip (image = the uploaded start image, as LoadImage names it; None: a
     clip without a start frame).
 
@@ -131,6 +137,11 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
     pin_noise: the noise level H3 conditions the pinned frames and reference pictures at (PIN_NOISE_OFF or None:
     H3's own, no node; else Promptwood's VideoChainH3PinNoise after every pinned frame).
 
+    context_latent: the uploaded latent of the clip before (Motion Context's file, ComfyUI's input folder): its last
+    context_frames frames (one of CONTEXT_LENGTHS), picture and sound, are pinned at the start of this clip
+    (MiniMaxH3MotionContext), in place of a start frame or a start guide. save_latent: this clip's sampled latent is
+    saved for the clip after it (MiniMaxH3MotionContextSaveLatent, "<prefix>_latent").
+
     The parts: _check_combination (every invalid mix is refused before a node is built), _skeleton,
     _conditioning (the start / end frames, references, sounds), _guides, _keyframes, _model_chain (speed modes,
     LoRAs), _sampling and _output."""
@@ -138,7 +149,10 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
     audio_key = audio_key or default_audio_key
     video_key = video_key or default_video_key
     guided = {g.get("at") for g in guides}
-    use_start = image is not None and "start" not in guided
+    if context_latent is not None and int(context_frames) not in CONTEXT_LENGTHS:
+        raise ValueError(f"a carry-over from the latent takes {', '.join(map(str, CONTEXT_LENGTHS))} frames, not "
+                         f"{context_frames}")
+    use_start = image is not None and "start" not in guided and context_latent is None
     use_end = end_image is not None and "end" not in guided
     has_refs = bool(refs or audio_refs or ref_videos)
     _check_combination(has_refs=has_refs, frame_refs=frame_refs, use_start=use_start, use_end=use_end,
@@ -160,6 +174,14 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
         latent, positive = _conditioning_plain(wf, **cond)
     positive = _guides(wf, positive, latent, guides, audio)
     positive = _keyframes(wf, positive, latent, keyframes)
+    if context_latent is not None:                 # the clip before's tail, straight from its latent
+        wf["mc_load"] = {"class_type": "MiniMaxH3MotionContextLoadLatent",
+                         "inputs": {"latent_path": context_latent, "clip_index": 1, "folder": "input"}}
+        wf["mc"] = {"class_type": "MiniMaxH3MotionContext",
+                    "inputs": {"conditioning": positive, "vae": ["vae", 0], "latent": latent,
+                               "context_length": str(int(context_frames)),
+                               "audio_context_length": CONTEXT_AUDIO_FRAMES, "context_latent": ["mc_load", 0]}}
+        positive = ["mc", 0]
     if pin_noise is not None and abs(float(pin_noise) - PIN_NOISE_OFF) > 1e-9:
         if not PIN_NOISE_RANGE[0] <= float(pin_noise) <= PIN_NOISE_RANGE[1]:
             raise ValueError(f"the pinned-frame noise level {pin_noise} is outside {PIN_NOISE_RANGE[0]}-"
@@ -172,6 +194,9 @@ def build_workflow(*, prompt: str, image: str | None, seed: int, width: int, hei
     _sampling(wf, model=model, positive=positive, latent=latent, steps=steps, cfg=cfg, hyperflow=hyperflow,
               pika=pika, recipe=recipe, veda=veda)
     _output(wf, audio=audio, prefix=prefix)
+    if save_latent:                                # for the clip after this one
+        wf["mc_save"] = {"class_type": "MiniMaxH3MotionContextSaveLatent",
+                         "inputs": {"latent": ["sample", 0], "filename_prefix": f"{prefix}_latent", "clip_index": 0}}
     return wf
 
 
@@ -371,7 +396,7 @@ TWO_PASS_MIN_STEPS = 3
 TWO_PASS_NODES = ("LatentUpscaleModelLoader", "MiniMaxH3LatentUpscaleWithModel", "LTXVSeparateAVLatent",
                   "LTXVConcatAVLatent")
 _SHARED = ("unet", "clip", "vae", "audio_vae")     # loaded once for both passes
-_PASS1_OUTPUT = ("decode", "last", "video", SAVE_VIDEO_ID, SAVE_LAST_ID)   # pass 1 is not decoded or saved
+_PASS1_OUTPUT = ("decode", "last", "video", SAVE_VIDEO_ID, SAVE_LAST_ID, "mc_save")   # pass 1: not decoded or saved
 
 
 def two_pass_size(width: int, height: int, scale: float = TWO_PASS["scale"]) -> tuple[int, int]:
@@ -393,7 +418,8 @@ def _links_renamed(value, rename: Callable[[str], str]):
 def _reachable(wf: dict) -> dict:
     """wf without the nodes no output (SaveVideo / SaveImage) depends on."""
     keep: set[str] = set()
-    todo = [k for k, v in wf.items() if v["class_type"] in ("SaveVideo", "SaveImage")]
+    todo = [k for k, v in wf.items() if v["class_type"] in ("SaveVideo", "SaveImage",
+                                                             "MiniMaxH3MotionContextSaveLatent")]
     while todo:
         k = todo.pop()
         if k in keep or k not in wf:
@@ -411,6 +437,9 @@ def build_two_pass_workflow(*, two_pass: dict, upscaler: str, **kw) -> dict:
     conditioning carries the start / end frames, references, keyframes and guides at that size) samples that latent
     with the last part of the schedule. The model files and the model chain (LoRAs, speed mode) are shared; the video
     is pass 2's, the sound pass 1's."""
+    if kw.get("context_latent") is not None:
+        raise ValueError("a carry-over from the latent cannot be made in two passes (pass 1 is smaller, a latent "
+                         "cannot be resized)")
     width, height = int(kw["width"]), int(kw["height"])
     w1, h1 = two_pass_size(width, height, float(two_pass.get("scale", TWO_PASS["scale"])))
     full = build_workflow(**kw)

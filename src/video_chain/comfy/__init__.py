@@ -42,7 +42,7 @@ from .loras import (comfy_lora_roots, comfy_model_roots, find_h3_checkpoints, fi
 from .ffutil import (ffmpeg, FFMPEG_TIMEOUT, with_audio)  # noqa: F401
 from .video import (AUDIO_VAE, DISTILLED_CHECKPOINT, TWO_PASS, TWO_PASS_NODES, build_two_pass_workflow,
                     build_workflow, two_pass_size, two_pass_steps, TWO_PASS_MIN_STEPS, default_audio_key, default_ref_key, default_video_key, pick_veda_predictor,
-                    PIKA_SIGMAS, PIN_NOISE_OFF, PIN_NOISE_NODE,
+                    PIKA_SIGMAS, PIN_NOISE_OFF, PIN_NOISE_NODE, MOTION_CONTEXT_NODES, CONTEXT_LENGTHS, CONTEXT_AUDIO_FRAMES,
                     REF_HINT, SAMPLER, SCHEDULER, TEXT_ENCODER, UNET, UNET_REF, VEDA_NODE, VEDA_SETTINGS, VIDEO_VAE,
                     with_ref_hint)  # noqa: F401
 from .refine import (build_refine_workflow, CONTEXT_OVERLAP, context_window, latent_frames, pick_refine_files,

@@ -550,9 +550,19 @@ def _make_ai_clip(generator: chain.Generator, project: Path, tree: Tree, node: N
     own: Path | None = None
     look_in = handed_look(project, tree, node, checker, log) if settings.get("steady_look") else None
     look_out: dict | None = None
+    latent_in = checker.latent_source(node)       # the carry-over from the clip before's latent (Motion Context)
+    new_latent: Path | None = None
+    if tree.options.get("latent_handover"):        # (every clip's latent is kept for the clip after it)
+        new_latent = new_video.with_name(new_video.stem + ".latent.safetensors")
+        call["latent_out"] = str(new_latent)
     try:
         with media.scratch("job", dir=str(nodes_dir)) as tmp:
             guides, end_image = _guides(project, tree, node, settings, Path(tmp))
+            if latent_in is not None:              # the head from the latent: no start frame, no start guide
+                guides = [g for g in guides if g.get("at") != "start"]
+                call["context_latent"] = {"file": str(latent_in), "frames": int(settings.get("guide") or 0)}
+                send = None
+                log(f"{nid}: carry-over from the latent of the clip before")
             if guides:
                 call["guides"] = guides
             ref_video = _continuation(project, tree, node, settings, Path(tmp))
@@ -621,7 +631,7 @@ def _make_ai_clip(generator: chain.Generator, project: Path, tree: Tree, node: N
             raise RuntimeError(f"the generator did not write the clip of {nid}")
         made_n = chain.probe(new_video)["frames"]      # the real count (hand-over frames, joins)
     except BaseException:
-        for f in (new_video, new_frame, own):
+        for f in (new_video, new_frame, own, new_latent):
             if f is not None:
                 _unlink(f)
         raise
@@ -630,7 +640,11 @@ def _make_ai_clip(generator: chain.Generator, project: Path, tree: Tree, node: N
                        guide_from=guide_from, continue_from=continue_from, log=log)
     if look_out is not None and node.made is not None:
         node.made["look"] = look_out       # (taken off the frame it hands to the next clip: steady.py)
-    return [new_video, new_frame] + ([own] if own is not None else []), old
+    kept = [new_video, new_frame] + ([own] if own is not None else [])
+    if new_latent is not None and new_latent.is_file() and node.made is not None:
+        node.made["latent"] = f"nodes/{new_latent.name}"
+        kept.append(new_latent)
+    return kept, old
 
 
 def run_tree(generator: chain.Generator, project: Path, targets: list[str],

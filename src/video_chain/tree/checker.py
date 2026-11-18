@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from .. import chain
-from .consts import DEFAULT_FRAMES, DEFAULT_OPTIONS, DISTILLED_STEPS, TWO_PASS, checkpoint_of
+from .consts import CONTEXT_LENGTHS, DEFAULT_FRAMES, DEFAULT_OPTIONS, DISTILLED_STEPS, TWO_PASS, checkpoint_of
 from .model import Node, Tree, short_id
 from .timeline import clip_length, handover_file, handover_index
 from .files import _old_record, node_files
@@ -214,7 +214,29 @@ class Checker:
         k = handover_index(self.tree, parent)            # an earlier hand-over: other guide frames
         v = parent.made.get("video")
         rev = parent.made.get("sound_rev")              # its sound built again in place: the guide hears the new one
-        return None if v is None else v + (f"@{k}" if k is not None else "") + (f"~s{rev}" if rev else "")
+        lat = "#latent" if self.latent_source(node) is not None else ""   # (from the latent: another carry-over)
+        return None if v is None else v + (f"@{k}" if k is not None else "") + (f"~s{rev}" if rev else "") + lat
+
+    def latent_source(self, node: Node) -> Path | None:
+        """The latent node's carry-over is sliced from (option "latent_handover"): the clip before's saved latent,
+        when it has one of this clip's size, hands over at its last frame, its sound is the model's own (none laid
+        over, mixed or given: the latent holds the model's), and the carry-over is one Motion Context takes, in one
+        pass, without a given sound of its own; None: the carry-over is cut from its frames."""
+        if not self.tree.options.get("latent_handover") or node.parent is None:
+            return None
+        s = self.settings(node.id)
+        if not s or int(s.get("guide") or 0) not in CONTEXT_LENGTHS or s.get("two_pass") or s.get("source_sound"):
+            return None                              # (a given sound: the latent's would be pinned on top)
+        parent = self.tree.nodes[node.parent]
+        made = parent.made or {}
+        ps = made.get("settings") or {}
+        if parent.is_video or not made.get("latent") or made.get("sound_rev") or made.get("own_sound") \
+                or ps.get("source_sound") \
+                or handover_index(self.tree, parent) is not None \
+                or (ps.get("width"), ps.get("height")) != (s.get("width"), s.get("height")):
+            return None
+        f = Path(self.project) / made["latent"]
+        return f if f.is_file() else None
 
     def continue_from(self, node: Node) -> str | None:
         """The clip a continuation's reference video is cut from (its file name: every new clip gets a new one,

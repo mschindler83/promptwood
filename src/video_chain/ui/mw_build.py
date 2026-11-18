@@ -683,6 +683,19 @@ class BuildMixin(MainWindowHost):
             "them and the model is told so; it follows them a little more loosely. Needs Promptwood's ComfyUI nodes "
             "(comfy_nodes/video_chain_nodes in ComfyUI/custom_nodes). Changing it makes the made clips again")
         c.addRow("Pinned-frame noise", self.pin_noise)
+        self.latent_handover = QCheckBox("Carry over from the latent")
+        self.latent_handover.setChecked(d["latent_handover"])
+        self.latent_handover.setToolTip(
+            "A clip with a carry-over (5, 22, 39 or 56 frames) takes those frames, picture and sound, straight from "
+            "the latent of the clip before instead of its decoded video: no decode and encode again at the join, "
+            "which is where colour drift and softening along a chain come from. Every clip made from then on keeps "
+            "its latent next to its video (tens to a few hundred MB, depending on size and length). The carry-over "
+            "comes from the frames as before when the clip before has no latent (made before this was on: make it "
+            "again to get one), is a real video, has another size, hands over at an earlier frame or has a sound "
+            "laid over, and for a clip in two passes or made to a given sound. The steady look does not touch "
+            "frames taken from the latent. Needs NikoDemon80's ComfyUI-H3-Motion-Context nodes in ComfyUI (setup "
+            "installs them). Switching it off makes the clips that took their carry-over from a latent again")
+        c.addRow("", self.latent_handover)
         self.style_prefix = QLineEdit()
         self.style_prefix.setPlaceholderText("e.g. cinematic, soft daylight, handheld camera")
         self.style_prefix.setToolTip("Put before every prompt (look, camera, light, a LoRA's trigger word). "
@@ -1244,7 +1257,7 @@ class BuildMixin(MainWindowHost):
             spin.editingFinished.connect(self._exact_shown)     # (typed in full: the nearest size into the field)
         for sig in (self.frames.currentIndexChanged, self.resolution.currentIndexChanged, self.exact_size.toggled,
                     self.shape.currentIndexChanged, self.audio.toggled, self.keep_rep.toggled, self.smooth_joins.toggled,
-                    self.steady_look.toggled, self.pin_noise.valueChanged,
+                    self.steady_look.toggled, self.pin_noise.valueChanged, self.latent_handover.toggled,
                     self.speed.currentIndexChanged, self.veda.toggled, self.turbo_lora.currentIndexChanged,
                     self.h3_distilled.toggled, self.two_pass.toggled):
             sig.connect(self._options_changed)

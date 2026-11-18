@@ -12,7 +12,7 @@ Written by `tools/build_manifest.py` from the installer's list (`src/video_chain
 
 ## video: Video clips (MiniMax H3, image to video with sound)
 
-Profile `core`, 39.6 GB.
+Profile `core`, 39.6 GB. Custom nodes: https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context (GPL-3.0).
 
 | File | Size | Source | Licence stated there |
 |---|---|---|---|

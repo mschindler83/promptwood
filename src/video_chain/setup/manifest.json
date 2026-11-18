@@ -30,6 +30,12 @@
   }
  },
  "nodes": {
+  "h3-motion-context": {
+   "git": "https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context",
+   "rev": "518c083d11d80fa5920222ad89889924ee4401c9",
+   "dir": "ComfyUI-H3-Motion-Context",
+   "licence": "GPL-3.0"
+  },
   "video-chain": {
    "bundled": "comfy_nodes/video_chain_nodes",
    "pip": [
@@ -72,6 +78,9 @@
   "video": {
    "title": "Video clips (MiniMax H3, image to video with sound)",
    "profile": "core",
+   "nodes": [
+    "h3-motion-context"
+   ],
    "files": [
     {
      "repo": "Comfy-Org/MiniMax-H3",

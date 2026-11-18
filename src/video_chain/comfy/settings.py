@@ -33,6 +33,8 @@ class ClipSettings(TypedDict, total=False):
     a LoraEntry-shaped dict ({"lora", "strength"}, hyperflow and pika: only "strength"), missing or empty: off."""
     width: int                 # DEFAULT_WIDTH
     pin_noise: float           # H3's noise level for pinned frames (missing: its own, no node)
+    context_latent: dict       # {"file", "frames"}: the carry-over from the clip before's latent (Motion Context)
+    latent_out: str            # where this clip's sampled latent is saved (missing: not saved)
     height: int                # DEFAULT_HEIGHT
     frames: int                # DEFAULT_FRAMES
     steps: int                 # DEFAULT_STEPS

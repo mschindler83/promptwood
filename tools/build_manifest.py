@@ -44,6 +44,7 @@ WAN = "Comfy-Org/Wan-Animate-2"
 SPEC = {
     "video": {
         "title": "Video clips (MiniMax H3, image to video with sound)", "profile": "core",
+        "nodes": ["h3-motion-context"],     # (latent handover between chained clips; option, off by default)
         "files": [m(H3, "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors", "diffusion_models"),
                   m(H3, "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", "text_encoders"),
                   m(H3, "vae/minimax_h3_video_vae_fp16.safetensors", "vae"),
@@ -180,6 +181,9 @@ SPEC = {
 
 # Custom nodes, pinned to the commits the app was tested with
 NODES = {
+    "h3-motion-context": {"git": "https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context",
+                          "rev": "518c083d11d80fa5920222ad89889924ee4401c9", "dir": "ComfyUI-H3-Motion-Context",
+                          "licence": "GPL-3.0"},
     "video-chain": {"bundled": "comfy_nodes/video_chain_nodes", "pip": ["onnxruntime-gpu", "opencv-python-headless"]},
     "h3-turbo": {"git": "https://github.com/Larryvrh/ComfyUI-MiniMax-H3-Turbo", "rev": "4274783",
                  "dir": "ComfyUI-MiniMax-H3-Turbo", "licence": "Apache-2.0"},

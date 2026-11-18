@@ -102,6 +102,7 @@ class OptionsMixin(MainWindowHost):
             self.smooth_joins.setChecked(bool(o.get("smooth_joins", d["smooth_joins"])))
             self.steady_look.setChecked(bool(o.get("steady_look", False)))   # (missing: a project from before)
             self.pin_noise.setValue(T.pin_noise_of(o) or 0.999)
+            self.latent_handover.setChecked(bool(o.get("latent_handover", False)))
             self.veda.setChecked(bool((o.get("veda") or d["veda"]).get("on", d["veda"]["on"])))
             self.two_pass.setChecked(bool((o.get("two_pass") or {}).get("on")))
             style = o.get("style") or {}
@@ -221,6 +222,7 @@ class OptionsMixin(MainWindowHost):
             "frames": self.frames.currentData(), "resolution": self.resolution.currentData(),
             "steps": self.steps.value(), "audio": self.audio.isChecked(), "keep_repeated": self.keep_rep.isChecked(),
             "smooth_joins": self.smooth_joins.isChecked(), "steady_look": self.steady_look.isChecked(),
+            "latent_handover": self.latent_handover.isChecked(),
             "turbo": {**(self.tree.options.get("turbo") or {}),
                       "lora": self.turbo_lora.currentData(),
                       "steps": self.turbo_steps.value(), "strength": round(self.turbo_strength.value(), 2)},

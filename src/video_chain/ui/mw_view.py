@@ -36,7 +36,7 @@ class ViewMixin(MainWindowHost):
             # project: speed and quality knobs, prompt wording, path joining
             (c, self.steps), (c, self.speed), (c, self._cfg_row), (c, self.veda), (c, self.turbo_lora),
             (c, self._h3_model_row), (c, self.two_pass),
-            (c, self._turbo_row), (c, self.keep_rep), (c, self.smooth_joins), (c, self.steady_look), (c, self.pin_noise), (c, self.prompt_format), (c, self.style_prefix),
+            (c, self._turbo_row), (c, self.keep_rep), (c, self.smooth_joins), (c, self.steady_look), (c, self.pin_noise), (c, self.latent_handover), (c, self.prompt_format), (c, self.style_prefix),
             (c, self.style_suffix), (c, self.lora_triggers),
             # cast: how the pictures are sent
             (self._tts_form, self.ref_size), self.ref_hint, (self._tts_form, self._eleven_row),
@@ -210,7 +210,7 @@ class ViewMixin(MainWindowHost):
         return {"steps": (c, self.steps), "speed": (c, self.speed), "turbo": (c, self._turbo_row),
                 "cfg": (c, self._cfg_row), "veda": (c, self.veda), "keep_repeated": (c, self.keep_rep),
                 "smooth_joins": (c, self.smooth_joins), "steady_look": (c, self.steady_look),
-                "pin_noise": (c, self.pin_noise),
+                "pin_noise": (c, self.pin_noise), "latent_handover": (c, self.latent_handover),
                 "h3_model": (c, self._h3_model_row), "two_pass": (c, self.two_pass),
                 "style_prefix": (c, self.style_prefix), "style_suffix": (c, self.style_suffix),
                 "prompt_format": (c, self.prompt_format), "lora_triggers": (c, self.lora_triggers),
