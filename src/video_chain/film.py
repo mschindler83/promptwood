@@ -466,12 +466,27 @@ def summary(film: Film, sid: str, tree: "T.Tree | None" = None, status_of: dict 
     return out
 
 
-def film_problems(film: Film, trees: dict | None = None) -> list[str]:
+def scene_range(film: Film, scenes: tuple[int, int] | None) -> tuple[int, int]:
+    """(first, last) scene numbers (from 1, both included) of a range; None: the whole film."""
+    if scenes is None:
+        return 1, len(film.scenes)
+    first, last = scenes
+    if not 1 <= first <= last <= len(film.scenes):
+        raise ValueError(f"no such range of scenes: {first} to {last} (the film has {len(film.scenes)})")
+    return first, last
+
+
+def film_problems(film: Film, trees: dict | None = None, scenes: tuple[int, int] | None = None) -> list[str]:
     """Why the film cannot be played / exported yet (a scene without clips, clips not made). trees: filled with
-    each scene's loaded tree (scene id -> Tree), so the caller does not read them again."""
+    each scene's loaded tree (scene id -> Tree), so the caller does not read them again. scenes: (first, last)
+    scene numbers (from 1, both included): only those are checked, and the first one's join to the scene before
+    is not part of it; None: the whole film."""
+    first, last = scene_range(film, scenes)
     out = []
     for k, sc in enumerate(film.scenes, start=1):
-        if k > 1 and sc.join == "continue":
+        if not first <= k <= last:
+            continue
+        if k > first and sc.join == "continue":
             end = film.end_frame(film.scenes[k - 2].id)
             if end is None:
                 out.append(f"scene {k} ({sc.title}) continues scene {k - 1}, which is not made yet")
@@ -500,17 +515,20 @@ def film_problems(film: Film, trees: dict | None = None) -> list[str]:
     return out
 
 
-def join_film(film: Film, out: Path, keep: bool = False) -> Path:
+def join_film(film: Film, out: Path, keep: bool = False, scenes: tuple[int, int] | None = None) -> Path:
     """The film as one video: every scene's path up to its ending, joined as each scene says (cut, crossfade, or
     continuing: its repeated first frame left out). Scenes of another size than the first are fitted into its frame
     (black bars). keep: out is the app's own file of the film (played again and again): it is joined again only
-    when something changed, and the join before is then moved to old/ in the film's folder, never deleted."""
+    when something changed, and the join before is then moved to old/ in the film's folder, never deleted.
+    scenes: (first, last) scene numbers (from 1, both included) to join only those; None: the whole film."""
+    a, b = scene_range(film, scenes)
+    chosen = film.scenes[a - 1:b]
     trees: dict = {}
-    problems = film_problems(film, trees)
+    problems = film_problems(film, trees, scenes)
     if problems:
         raise ValueError(problems[0])
     parts = []
-    for sc in film.scenes:
+    for sc in chosen:
         d = film.path(sc.id)
         t = trees.get(sc.id) or T.load(d)
         take = film.take_of(sc.id, t)
@@ -521,7 +539,7 @@ def join_film(film: Film, out: Path, keep: bool = False) -> Path:
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
     size = (first["width"] // 2 * 2, first["height"] // 2 * 2)     # even (the video codec needs it)
-    joins = [s.join for s in film.scenes]
+    joins = [s.join for s in chosen]                           # (joins[0] is not used)
 
     def write(f: Path) -> None:
         chain.join_parts(parts, f, size, joins, fade=FADE_SECS)

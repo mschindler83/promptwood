@@ -256,3 +256,68 @@ def test_duplicating_continuing_scenes(project, tmp_path):
     c = f.duplicate(s2.id)                           # s3 continues s2: the copy goes to the end, not in between
     assert [s.id for s in f.scenes] == ["s1", s2.id, s3.id, c.id] and c.join == "cut" and c.title == "Two (copy)"
     assert f.duplicate(c.id).title == "Two (copy 2)"
+
+
+def _three_scenes(project, tmp_path, make=(1, 2, 3)):
+    """A film of three scenes with one clip each; the scenes in `make` are made."""
+    t1 = T.load(project)
+    t1.selected = next(iter(t1.nodes))
+    T.save(project, t1)
+    f = F.Film.load(project)
+    dirs = {1: (project, t1.selected)}
+    for k in (2, 3):
+        s = f.add_scene(f"Scene {k}", start_image=tmp_path / "start.jpg")
+        d = f.path(s.id)
+        t = T.load(d)
+        n = t.add(None, f"clip {k}")
+        t.selected = n.id
+        T.save(d, t)
+        dirs[k] = (d, n.id)
+    for k in make:
+        T.run_tree(FakeGenerator(frames=17, size=None), dirs[k][0], [dirs[k][1]], log=lambda _m: None)
+    return f, dirs
+
+
+def test_a_range_of_scenes_is_joined_and_only_its_scenes_are_checked(project, tmp_path):
+    f, dirs = _three_scenes(project, tmp_path, make=(1, 2))           # scene 3 not made yet
+    assert any("scene 3" in m for m in F.film_problems(f))
+    assert F.film_problems(f, scenes=(1, 2)) == []                     # (scene 3 is not in the range)
+    frames = {k: chain.probe(T.join_path(d, T.load(d), n))["frames"] for k, (d, n) in dirs.items() if k < 3}
+    out = F.join_film(f, tmp_path / "one-two.mp4", scenes=(1, 2))
+    assert chain.probe(out)["frames"] == frames[1] + frames[2]
+    out = F.join_film(f, tmp_path / "two.mp4", scenes=(2, 2))
+    assert chain.probe(out)["frames"] == frames[2]
+    with pytest.raises(ValueError, match="scene 3"):
+        F.join_film(f, tmp_path / "all.mp4")                           # (no range: the whole film, as before)
+    for bad in ((0, 1), (2, 1), (1, 4)):
+        with pytest.raises(ValueError, match="range"):
+            F.join_film(f, tmp_path / "bad.mp4", scenes=bad)
+
+
+def test_a_range_may_begin_with_a_continuing_scene(project, tmp_path):
+    """Its join to the scene before is not part of the range: it plays whole, and the scene before is not checked."""
+    f, dirs = _three_scenes(project, tmp_path, make=(2,))
+    f.set_join("s2", "continue")
+    assert any("continues scene 1" in m for m in F.film_problems(f))
+    assert F.film_problems(f, scenes=(2, 2)) == []
+    d, n = dirs[2]
+    out = F.join_film(f, tmp_path / "two.mp4", scenes=(2, 2))
+    assert chain.probe(out)["frames"] == chain.probe(T.join_path(d, T.load(d), n))["frames"]
+
+
+def test_a_range_is_kept_in_its_own_file_and_joins_inside_it_are_used(project, tmp_path):
+    """Review: the app's own file of a range (keep), and a crossfade / continuation inside the range."""
+    f, dirs = _three_scenes(project, tmp_path, make=(1, 2))
+    whole = project / "paths" / "film.mp4"
+    own = project / "paths" / "film-scenes-1-2.mp4"
+    assert F.join_film(f, own, keep=True, scenes=(1, 2)) == own
+    stamp = own.stat().st_mtime_ns
+    assert F.join_film(f, own, keep=True, scenes=(1, 2)) == own and own.stat().st_mtime_ns == stamp
+    assert not whole.exists()
+    frames = {k: chain.probe(T.join_path(d, T.load(d), n))["frames"] for k, (d, n) in dirs.items() if k < 3}
+    f.set_join("s2", "fade")
+    out = F.join_film(f, tmp_path / "fade.mp4", scenes=(1, 2))
+    fade = min(F.FADE_SECS, frames[1] / 24 / 2, frames[2] / 24 / 2)
+    assert abs(chain.probe(out)["frames"] - (frames[1] + frames[2] - fade * 24)) <= 1
+    f.set_join("s3", "continue")                                       # (scene 3 continues scene 2 in the range)
+    assert any("scene 3" in m and "continues scene 2" in m for m in F.film_problems(f, scenes=(2, 3)))

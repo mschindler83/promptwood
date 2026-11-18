@@ -126,6 +126,7 @@ class MainWindow(BuildMixin, GeneratorMixin, ComfyMixin, ExportMixin, VideosMixi
         self._idle_since, self._idle_timeout = 0.0, None
         self._model_state = ModelState.NONE
         self._joins = 0                         # path joins still running
+        self._film_range: tuple[str, str] | None = None   # the scenes Play / Export film used last (ids)
         self._converts: dict[str, str] = {}     # video node -> token of its conversion in progress
         self._kill_timer = timer(self, self._kill, KILL_GRACE_MS, single=True)
         self._film_queue: list[str] | None = None    # Generate film: the scenes still to make

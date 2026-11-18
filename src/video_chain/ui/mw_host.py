@@ -86,6 +86,7 @@ if TYPE_CHECKING:
         _idle_since: float
         _idle_timeout: float | None
         _join_lock: Lock
+        _film_range: tuple[str, str] | None
         _joins: int
         _keep_row: QWidget
         _kill_timer: QTimer

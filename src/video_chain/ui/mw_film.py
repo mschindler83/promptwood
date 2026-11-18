@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
 
 from .workers import run_in_background
 from .. import chain, film as F, tree as T
-from . import dialogs as D, shortcuts as S
+from . import dialogs as D, scene_range as SR, shortcuts as S
 from .widgets import format_time, label, remember_geometry
 from .mw_host import MainWindowHost
 
@@ -18,27 +18,63 @@ from .mw_host import MainWindowHost
 class FilmMixin(MainWindowHost):
     """The film: scenes, storyboard, joining the scenes."""
 
-    def join_film(self, purpose: str = "play", out: Path | None = None):
+    def ask_scenes(self, action: str) -> tuple[bool, tuple[int, int] | None]:
+        """Which scenes to play / export: (chosen, scenes); scenes: (first, last) scene numbers (from 1), None for
+        the whole film (also a film of one scene: nothing asked); chosen is False when cancelled. The last choice is
+        offered again while its scenes are there."""
         if self.film is None:
-            return
+            return False, None
+        scenes = self.film.scenes
+        if len(scenes) < 2:
+            return True, None
+        ids = [s.id for s in scenes]
+        first, last = 1, len(ids)
+        kept = self._film_range                    # (None: the whole film, also with scenes added since)
+        if kept and kept[0] in ids and kept[1] in ids and ids.index(kept[0]) <= ids.index(kept[1]):
+            first, last = ids.index(kept[0]) + 1, ids.index(kept[1]) + 1
+        got = SR.pick_range(self, [s.title for s in scenes], first, last, action)
+        if got is None:
+            return False, None
+        whole = got == (1, len(ids))
+        self._film_range = None if whole else (ids[got[0] - 1], ids[got[1] - 1])
+        return True, None if whole else got
+
+    def _may_join_film(self) -> bool:
+        """No join while clips are made or another join runs (said in the status line)."""
         if self.running:
             self.status.setText("Wait until generating has finished.")
-            return
+            return False
         if self._joins:
             self.status.setText("A join is still running; wait for it.")
+            return False
+        return True
+
+    def play_film(self):
+        """Play film / ▶ Film: asks for the scenes (two or more), then joins and plays them."""
+        if self.film is None or not self._may_join_film():
+            return
+        chosen, scenes = self.ask_scenes("Play")
+        if chosen:
+            self.join_film("play", scenes=scenes)
+
+    def join_film(self, purpose: str = "play", out: Path | None = None, scenes: tuple[int, int] | None = None):
+        """Join the film (or the scenes from first to last, numbered from 1) to play or export it."""
+        if self.film is None or not self._may_join_film():
             return
         if not self._save_tree():
             return
         self._update_continues()
         film = F.Film.load(self.film.root)
-        target = Path(out) if out else self.film.root / "paths" / "film.mp4"
+        part = f"-scenes-{scenes[0]}-{scenes[1]}" if scenes else ""
+        target = Path(out) if out else self.film.root / "paths" / f"film{part}.mp4"
         root = str(self.film.root)
         self.status.setText("Checking and joining the film …")
         self._joins += 1                           # (a run waits for it, a second join is refused)
         self._update_buttons()
 
         def work():
-            path = F.join_film(film, target, keep=out is None)
+            path = (F.join_film(film, target, keep=out is None, scenes=scenes) if scenes   # (the whole film: as before)
+                    else F.join_film(film, target, keep=out is None))
             try:
                 secs = chain.joined_seconds(Path(path))      # not in the GUI thread (network shares)
             except Exception:  # noqa: BLE001
@@ -46,10 +82,11 @@ class FilmMixin(MainWindowHost):
             return path, root, secs
 
         # (whatever ends the job: the busy flag is reset by the answer)
-        run_in_background(work, on_done=lambda r: self._film_joined(r, None, purpose),
-                          on_error=lambda e: self._film_joined((None, root, 0.0), str(e), purpose), owner=self)
+        run_in_background(work, on_done=lambda r: self._film_joined(r, None, purpose, scenes),
+                          on_error=lambda e: self._film_joined((None, root, 0.0), str(e), purpose, scenes),
+                          owner=self)
 
-    def _film_joined(self, result, error, purpose):
+    def _film_joined(self, result, error, purpose, scenes: tuple[int, int] | None = None):
         self._joins = max(0, self._joins - 1)
         self._update_buttons()
         path, root, secs = result
@@ -59,19 +96,26 @@ class FilmMixin(MainWindowHost):
             self.status.setText(f"The film cannot be joined yet: {error}.")
             return
         if purpose == "play":
-            self.preview.open(Path(path), f"Film · {len(self.film.scenes) if self.film else 1} scenes · "
-                                          f"{format_time(secs, 1)}")
-            self.status.setText(f"Film joined: {format_time(secs, 1)}.")
+            first, n = (scenes[0], scenes[1] - scenes[0] + 1) if scenes else (None, len(self.film.scenes))
+            self.preview.open(Path(path), f"Film · {n} scene{'s' if n != 1 else ''} · {format_time(secs, 1)}")
+            part = f" (scenes {first} to {first + n - 1})" if first is not None and n > 1 else (
+                f" (scene {first})" if first is not None else "")
+            self.status.setText(f"Film joined{part}: {format_time(secs, 1)}.")
         else:
             self.status.setText(f"Exported the film: {Path(path).name} ({format_time(secs, 1)}).")
 
     def export_film(self):
         if self.film is None or not self._idle_or_say():
             return
-        start = str(self.film.root / f"{self.film.root.name}-film.mp4")
+        chosen, scenes = self.ask_scenes("Export")
+        if not chosen:
+            return
+        part = ("" if not scenes else f"-scene-{scenes[0]}" if scenes[0] == scenes[1]
+                else f"-scenes-{scenes[0]}-{scenes[1]}")
+        start = str(self.film.root / f"{self.film.root.name}-film{part}.mp4")
         f, _ = QFileDialog.getSaveFileName(self, "Export the film", start, "Video (*.mp4)")
         if f:
-            self.join_film("export", Path(f if f.lower().endswith(".mp4") else f + ".mp4"))
+            self.join_film("export", Path(f if f.lower().endswith(".mp4") else f + ".mp4"), scenes=scenes)
 
     def generate_film(self):
         """Make every scene's missing clips (up to each scene's ending), one scene after the other."""

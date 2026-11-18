@@ -54,7 +54,8 @@ selected path (middle), and the selected clip with its prompt, face and settings
   the model's copy matched, the last frames blended).
 - **Storyboard with branches:** any clip can be continued in several ways; variants with other seeds, freeze what
   works, compare versions side by side. A graph, a timeline and clip cards show the same story.
-- **Films with scenes:** several scenes in one film, joined by cut, crossfade or continuation, exported as one video.
+- **Films with scenes:** several scenes in one film, joined by cut, crossfade or continuation, played and exported as
+  one video (the whole film or from one scene to another).
 - **Keyframes and end images:** a picture the clip passes through at a given moment, or the frame it must end at.
 - **Real videos in the chain:** use a range of your own video, continue from it or lead into it.
 - **Camera moves** as short tokens (`#push-in`, `#arc`, `#tilt-up` …), turned into the sentences the model

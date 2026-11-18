@@ -953,10 +953,12 @@ class BuildMixin(MainWindowHost):
         self.b_film_gen.setToolTip("Make every scene's missing clips, scene after scene (up to each scene's ending)")
         self.b_film_gen.clicked.connect(self.generate_film)
         self.b_film_play = QPushButton("Play film")
-        self.b_film_play.setToolTip("Join all scenes in their order (hard cuts) and play the film")
-        self.b_film_play.clicked.connect(lambda: self.join_film("play"))
+        self.b_film_play.setToolTip("Join the scenes in their order (by cut, crossfade or continuation, as each scene "
+                                    "says) and play them; with two scenes or more, asks which: the whole film or from "
+                                    "one scene to another")
+        self.b_film_play.clicked.connect(lambda: self.play_film())
         self.b_film_export = QPushButton("Export film…")
-        self.b_film_export.setToolTip("Save the whole film as one video")
+        self.b_film_export.setToolTip("Save the film as one video: the whole film or from one scene to another")
         self.b_film_export.clicked.connect(self.export_film)
         self.b_film_cast = QPushButton("Cast…")
         self.b_film_cast.setToolTip("Who appears in which scene (along the clips the film plays)")
@@ -1102,8 +1104,9 @@ class BuildMixin(MainWindowHost):
         self.b_play_path.setToolTip("Join the clips of the selected path and play them")
         self.b_play_path.clicked.connect(lambda: self.join_selected("play"))
         self.b_play_film = QPushButton("▶ Film")
-        self.b_play_film.setToolTip("Join all scenes of the film and play it")
-        self.b_play_film.clicked.connect(lambda: self.join_film("play"))
+        self.b_play_film.setToolTip("Join the scenes of the film and play them (the whole film or from one scene "
+                                    "to another)")
+        self.b_play_film.clicked.connect(lambda: self.play_film())
         self.b_export = QPushButton("Export path…")
         self.b_export.setToolTip("Save the selected path as one video")
         self.b_export.clicked.connect(lambda: self.export_path())          # (clicked passes checked=False)
