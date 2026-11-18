@@ -48,7 +48,8 @@ def test_a_fixed_range_gives_that_strength_and_a_reversed_range_is_read_low_to_h
 
 
 def test_problems():
-    assert R.problems([], 3) == ["Add at least one LoRA to the list"]
+    assert R.problems([], 3) == [R.NONE_TO_CHOOSE]
+    assert R.problems([R.Choice("a", 1, 1, on=False)], 3) == [R.NONE_TO_CHOOSE]
     pool = choices(("a", 1, 1, True), ("b", 1, 1, True), ("c", 1, 1, False))
     assert R.problems(pool, 1) == ["2 LoRAs are pinned, but an image may have at most 1"]
     assert R.problems(pool, 2) == []
@@ -93,3 +94,16 @@ def test_remembered_numbers_that_are_not_finite_fall_back_to_the_defaults(bad):
     got = R.from_saved(saved, [{"path": "a", "strength": 1.0}])
     assert (got["most"], got["n"]) == (R.DEFAULT_MOST, R.DEFAULT_N)
     assert (got["choices"][0].low, got["choices"][0].high) == (0.5, 1.0)
+
+
+def test_loras_left_out_are_never_picked_unless_pinned():
+    pool = [R.Choice("a", 1, 1), R.Choice("b", 1, 1, on=False), R.Choice("c", 1, 1, pinned=True, on=False)]
+    rng = random.Random(7)
+    seen = {tuple(p for p, _s in R.pick(pool, 3, rng)) for _ in range(100)}
+    assert seen == {("c",), ("a", "c")}                                         # (pinned: in, even when left out)
+
+
+def test_left_out_is_remembered():
+    saved = R.to_saved([R.Choice("a", 0.5, 1.0, on=False)], most=2, n=3, same_seed=False)
+    assert R.from_saved(saved, [{"path": "a"}, {"path": "b"}])["choices"] == [R.Choice("a", 0.5, 1.0, on=False),
+                                                                              R.Choice("b", 0.5, 1.0)]

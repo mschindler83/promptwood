@@ -305,7 +305,23 @@ def test_random_loras_most_is_not_limited_by_a_short_list(app, tmp_path):
     one = {"choices": [R.Choice("a", 0.5, 1.0)], "most": 4, "n": 8, "same_seed": False}
     dlg = RandomLorasDialog(None, one, 1)
     assert dlg.most.maximum() >= 10 and dlg.most.value() == 4 and dlg.saved()["most"] == 4
-    assert "1 LoRA in the list" in dlg.most_note.text()
+    assert "1 LoRA to choose from" in dlg.most_note.text()
     dlg.most.setValue(6)
     assert dlg.problems() == [] and dlg.b_make.isEnabled()
+    dlg.deleteLater()
+
+
+def test_random_loras_strength_cells_take_negative_strengths(app, tmp_path):
+    from PySide6.QtWidgets import QStyleOptionViewItem
+
+    from video_chain import lora_random as R
+    from video_chain.ui.random_loras import LOW, RandomLorasDialog
+    dlg = RandomLorasDialog(None, {"choices": [R.Choice("a", 0.5, 1.0)], "most": 2, "n": 1, "same_seed": False}, 1)
+    index = dlg.table.model().index(0, LOW)
+    delegate = dlg.table.itemDelegateForColumn(LOW)
+    editor = delegate.createEditor(dlg.table, QStyleOptionViewItem(), index)
+    assert editor.minimum() < 0 and editor.value() == 0.5
+    editor.setValue(-1.25)
+    delegate.setModelData(editor, dlg.table.model(), index)
+    assert dlg.pool()[0].low == -1.25
     dlg.deleteLater()

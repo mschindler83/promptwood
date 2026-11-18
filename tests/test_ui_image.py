@@ -1175,13 +1175,15 @@ def test_multi_picker_double_click_on_a_deselected_picture_takes_it(app, tmp_pat
 
 
 def test_random_loras_in_the_create_window(app, tmp_path, image, monkeypatch):
-    """Random LoRAs (Create): the window lists the list's LoRAs to pin and give a range; Generate N images makes
-    them, each with the pinned LoRA and a random choice of the others at strengths in their ranges; the choices are
-    remembered; Continuous makes images until Stop. Edit mode has no such button."""
+    """Random LoRAs (Create): the window lists every LoRA of the chosen model (not the window's list) to use or
+    leave out, pin and give a range; Generate N images makes them, each with the pinned LoRA and a random choice of
+    the others at strengths in their ranges; the choices are remembered; Continuous makes images until Stop. A model
+    without LoRAs and Edit mode have no such button."""
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from fake_comfy import FakeComfy
 
     from video_chain.ui.main_window import MainWindow
+    from video_chain.ui.random_loras import HIGH, LOW, PIN, USE
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
     server = FakeComfy(tmp_path / "comfy", loras=tuple(f"MiniMax H3/{n}.safetensors" for n in ("glow", "rain", "snow")))
     try:
@@ -1195,29 +1197,35 @@ def test_random_loras_in_the_create_window(app, tmp_path, image, monkeypatch):
             f.parent.mkdir(parents=True, exist_ok=True)
             f.write_bytes(b"x")
             files.append(str(f))
-        w.image_loras = {"sdxl": [(f, Path(f).name) for f in files], "flux1": [], "krea2": []}
+        w.image_loras = {"sdxl": [(f, Path(f).stem.title()) for f in files], "flux1": [], "krea2": []}
         w.modal_dialogs = False
         dlg = w.edit_image(start=True, mode="create")
         wait(app, lambda: dlg.families, timeout=20)
-        dlg.family.setCurrentIndex(dlg.family.findData("sdxl"))
         dlg.prompt.setPlainText("1girl, red coat")
-        assert dlg.b_random.isVisibleTo(dlg) and not dlg.b_random.isEnabled()          # no LoRAs in the list yet
+        dlg.family.setCurrentIndex(dlg.family.findData("krea2"))
+        assert dlg.b_random.isVisibleTo(dlg) and not dlg.b_random.isEnabled()          # this model has no LoRAs
+        assert "no LoRAs for this model" in dlg.b_random.toolTip()
         assert "Stop interrupts the image being made" in dlg.tries.toolTip()          # (it does not wait for it)
-        assert "Add the LoRAs" in dlg.b_random.toolTip()
-        dlg.loras.set_items(dlg._known(), [{"path": files[0], "strength": 1.0}, {"path": files[1], "strength": 0.8},
-                                           {"path": files[2], "strength": 0.6, "off": True}])
-        assert dlg.b_random.isEnabled()
+        dlg.family.setCurrentIndex(dlg.family.findData("sdxl"))
+        assert dlg.loras.active_items() == [] and dlg.b_random.isEnabled()            # (the list is not needed)
         r = dlg.random_loras(modal=False)
-        assert [path for path, *_ in r.rows] == files[:2]                              # (not the one switched off)
-        assert [(c.low, c.high) for c in r.pool()] == [(0.5, 1.0), (0.4, 0.8)]
-        r.rows[0][1].setChecked(True)                                                  # glow pinned
-        r.rows[1][2].setValue(0.3)
-        r.rows[1][3].setValue(0.3)                                                     # rain always at 0.3
+        assert r.paths == files and [r.table.item(i, 2).text() for i in range(3)] == ["Glow", "Rain", "Snow"]
+        assert [(c.low, c.high, c.on, c.pinned) for c in r.pool()] == [(0.5, 1.0, True, False)] * 3
+        assert "3 LoRAs to choose from" in r.most_note.text()
+        r.search.setText("rain")
+        r.set_range_shown(0.3, 0.3)                                                    # only rain is shown
+        r.search.setText("")
+        r.set_checked(files[0], PIN, True)                                             # glow pinned
+        r.set_checked(files[2], USE, False)                                            # snow left out
+        assert [(c.low, c.high) for c in r.pool()] == [(0.5, 1.0), (0.3, 0.3), (0.5, 1.0)]
+        assert "2 LoRAs to choose from, 1 pinned" in r.most_note.text()
         r.most.setValue(1)
         assert r.problems() == [] and r.b_make.isEnabled()
-        r.rows[1][1].setChecked(True)                                                  # 2 pinned, at most 1
-        assert "2 LoRAs are pinned" in r.problem.text() and not r.b_make.isEnabled()
-        r.rows[1][1].setChecked(False)
+        r.set_checked(files[2], PIN, True)                                             # pinned: used again
+        assert r.pool()[2].on and "2 LoRAs are pinned" in r.problem.text() and not r.b_make.isEnabled()
+        r.set_checked(files[2], PIN, False)
+        r.set_checked(files[2], USE, False)
+        assert r.table.item(0, LOW).data(0x2) == 0.5 and r.table.item(1, HIGH).data(0x2) == 0.3
         r.most.setValue(2)
         r.n.setValue(6)
         r.same_seed.setChecked(True)
@@ -1232,7 +1240,8 @@ def test_random_loras_in_the_create_window(app, tmp_path, image, monkeypatch):
             assert 0.5 <= got["glow"] <= 1.0 and set(got) <= {"glow", "rain"} and got.get("rain", 0.3) == 0.3
             assert m["random_loras"] == {"pinned": [files[0]], "most": 2}
         r2 = dlg.random_loras(modal=False)                                             # remembered
-        assert r2.rows[0][1].isChecked() and r2.pool()[1].high == 0.3 and r2.n.value() == 6 and r2.most.value() == 2
+        p2 = r2.pool()
+        assert p2[0].pinned and p2[1].high == 0.3 and not p2[2].on and r2.n.value() == 6 and r2.most.value() == 2
         r2.same_seed.setChecked(False)
         made = []
 

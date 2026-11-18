@@ -30,7 +30,7 @@ from .. import lora_random
 from ..comfy import EDIT_MODELS
 from ..comfy.image_edit import edit_size
 # (main_window and the tests import these from here: they moved to video_chain/edits.py)
-from ..edits import (EDITS_DIR, MOSS_EDIT_QUALITIES, QUALITY_TEXT, ResultRecord, how_made, lora_note,  # noqa: F401
+from ..edits import (EDITS_DIR, LORA_FAMILY, MOSS_EDIT_QUALITIES, QUALITY_TEXT, ResultRecord, how_made, lora_note,  # noqa: F401
                      project_edits, record_use, scale_to, uses_index, uses_of, write_meta)
 from ..imagegen import FAMILIES, size_for
 from . import shortcuts as S
@@ -818,15 +818,17 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         """Why Random LoRAs cannot start now ('' = it can)."""
         if self.mode() != "create":
             return "Random LoRAs make new images (Create)"
-        if not self.loras.active_items():
-            return "Add the LoRAs to choose from to the list first (+ LoRA)"
+        fam = self.family.currentData()
+        if not self.family_loras.get(LORA_FAMILY.get(fam, fam)):          # (no disk reads: used while typing)
+            return "ComfyUI has no LoRAs for this model (Rescan LoRAs in the main window after adding some)"
         if self.variations.active():
             return "Random LoRAs use one prompt: switch the variations off first"
         return ""
 
     def random_loras(self, modal: bool = True):
-        """The Random LoRAs window for the list's LoRAs (those switched on); Generate N images or Continuous there
-        starts the run. modal=False: the window is made and handed back (for a test)."""
+        """The Random LoRAs window for every LoRA of the chosen model (those ComfyUI has for it, and files chosen
+        here earlier); Generate N images or Continuous there starts the run. modal=False: the window is made and
+        handed back (for a test)."""
         from .random_loras import RandomLorasDialog
         if self._busy or not self.b_gen.isEnabled() or self._random_problem():
             self.state.setText(self._random_problem() or self.b_gen.toolTip())
@@ -835,7 +837,10 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
             saved = json.loads(qs_value(self.qs, self._random_key(), "{}", str)) if self.qs is not None else {}
         except ValueError:
             saved = {}
-        dlg = RandomLorasDialog(self, lora_random.from_saved(saved, self.loras.active_items()), self.seed.value())
+        known = self._known()
+        dlg = RandomLorasDialog(self, lora_random.from_saved(saved, [{"path": p} for p, _label in known]),
+                                self.seed.value(), labels=dict(known),
+                                model=FAMILIES.get(self.family.currentData(), {}).get("label", ""))
         if not modal:
             return dlg
         if dlg.exec():
@@ -847,7 +852,7 @@ class ImageEditDialog(ModelsMixin, SourceMixin, ResultsMixin, PromptMixin, Loras
         if self._busy or self._random_problem() or dlg.problems():
             return
         self._remember(self._random_key(), json.dumps(dlg.saved()))
-        pool = dlg.pool()
+        pool = [c for c in dlg.pool() if c.usable]
         words = {c.path: self._trigger_words([(c.path, 1.0)]) for c in pool}
         self._busy = True
         prompt = " ".join(self.prompt.toPlainText().split())
