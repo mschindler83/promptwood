@@ -89,6 +89,8 @@ class CastEntry(TypedDict, total=False):
     kind: str                           # CAST_KINDS; a person has none
     voice: Voice
     tts: dict[str, Eleven]              # {"eleven": {...}}: its ElevenLabs voice
+    roles: dict[str, str]               # picture (refs/...) -> PICTURE_ROLES (a person's sheets; none: plain)
+    source: str                         # refs/src<k>.png: the photo its sheets were made from (no picture)
 
 
 class AudioRef(TypedDict, total=False):

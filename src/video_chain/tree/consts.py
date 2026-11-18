@@ -124,6 +124,10 @@ MAX_CAST_PICTURES = 9              # MiniMax H3 ref2va takes up to 9 reference i
 MAX_PICTURES_PER_CHARACTER = 3
 
 
+PICTURE_ROLES = ("head_sheet", "body_sheet")   # what a person's picture is (none: a plain picture, as before)
+SHEET_SOURCE = "src"                            # refs/src<k>.png: the photo a person's sheets were made from
+
+
 MAX_AUDIO_REFS = 3                 # MiniMax H3 ref2va: up to 3 sounds, each 2-15 s, together at most 15 s
 
 

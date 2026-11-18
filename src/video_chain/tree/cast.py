@@ -20,8 +20,10 @@ from .consts import (
     MAX_PICTURES_PER_CHARACTER,
     MENTION,
     NAME_OK,
+    PICTURE_ROLES,
     PROMPT_FORMATS,
     REFS_DIR,
+    SHEET_SOURCE,
     VOICE_MAX_SECS,
     VOICE_REF_MAX_SECS)
 from .guard import retire
@@ -57,6 +59,13 @@ def _migrate_cast(options: Options, has_cast: bool) -> None:
                 r = v.get("ref")
                 if isinstance(r, dict) and isinstance(r.get("file"), str) and r["file"]:
                     entry["voice"]["ref"] = {"file": r["file"], "secs": float(r.get("secs") or 0)}
+            given: Any = c.get("roles")
+            roles = {pic: role for pic, role in (given.items() if isinstance(given, dict) else ())
+                     if isinstance(pic, str) and pic in entry["images"] and role in PICTURE_ROLES}
+            if roles:
+                entry["roles"] = roles                    # (absent when it has none: older files stay as they are)
+            if isinstance(c.get("source"), str) and c["source"]:
+                entry["source"] = c["source"]
             el = (c.get("tts") or {}).get("eleven") if isinstance(c.get("tts"), dict) else None
             if isinstance(el, dict) and isinstance(el.get("id"), str) and el["id"]:
                 entry["tts"] = {"eleven": {"id": el["id"], "name": str(el.get("name") or el["id"])}}
@@ -144,6 +153,89 @@ def source_of(rel: str) -> str:
     return rel[:-4] + "_full.png" if rel.endswith(".png") else rel + "_full.png"
 
 
+def role_of(c: CastEntry | None, rel: str) -> str:
+    """What a picture of a cast entry is: "head_sheet" / "body_sheet" (a person's character sheets), or "" (a plain
+    picture: a face, or a place's, object's or style's picture; also every picture of an older project)."""
+    if c is None or kind_of(c) != "person" or rel not in c["images"]:
+        return ""
+    return (c.get("roles") or {}).get(rel, "")
+
+
+def sheet_of(c: CastEntry | None, role: str) -> str | None:
+    """A person's picture with this role (PICTURE_ROLES), or None."""
+    return next((r for r in (c["images"] if c else []) if role_of(c, r) == role), None)
+
+
+def sheet_source(c: CastEntry | None) -> str | None:
+    """The photo a person's sheets were made from (refs/src<k>.png; kept to make them again, never sent as a
+    picture), or None."""
+    return (c.get("source") or None) if c else None
+
+
+def _pruned(c: CastEntry) -> CastEntry:
+    """The entry with roles only for the pictures it still has (none left: no "roles" key)."""
+    roles = {r: v for r, v in (c.get("roles") or {}).items() if r in c["images"]}
+    out = _without(c, "roles")
+    if roles:
+        out["roles"] = roles
+    return out
+
+
+def _source_in_use(tree: Tree, rel: str) -> bool:
+    return any(c.get("source") == rel for c in cast_of(tree))
+
+
+def _free_rel(project: Path, tree: Tree, stem: str, taken: set[str]) -> str:
+    """refs/<stem><k>.png for the first k no file, picture, source or name in taken has."""
+    d = Path(project) / REFS_DIR
+    used = set(all_pictures(tree)) | {c["source"] for c in cast_of(tree) if c.get("source")} | taken
+    k = 1
+    while (f"{REFS_DIR}/{stem}{k}.png" in used or (d / f"{stem}{k}.png").exists()
+           or (d / f"{stem}{k}_full.png").exists()):
+        k += 1
+    return f"{REFS_DIR}/{stem}{k}.png"
+
+
+def set_sheets(project: Path, tree: Tree, name: str, head: Path, body: Path, source: Path) -> CastEntry:
+    """A person's pictures become its two character sheets (head: a close-up head sheet, body: a full-body sheet;
+    each the whole picture) and source the photo they were made from (kept, never a picture). Its former pictures
+    and source go to old/; name, description, lead and voice stay. Nothing is changed on an error."""
+    c = character(tree, name)
+    if c is None:
+        raise ValueError(f"no character called {name}")
+    if kind_of(c) != "person":
+        raise ValueError(f"@{c['name']} is a {kind_of(c)}: only a person has character sheets")
+    others = len(all_pictures(tree)) - len(c["images"])
+    if others + 2 > MAX_CAST_PICTURES:
+        raise ValueError(f"at most {MAX_CAST_PICTURES} pictures in a project (@{c['name']}'s two sheets would make "
+                         f"{others + 2})")
+    Path(project, REFS_DIR).mkdir(parents=True, exist_ok=True)
+    taken: set[str] = set()
+    made: list[Path] = []
+    rels: dict[str, str] = {}
+    try:
+        for role, image, stem in (("head_sheet", head, "ref"), ("body_sheet", body, "ref"), ("", source, SHEET_SOURCE)):
+            rel = _free_rel(project, tree, stem, taken)
+            taken.add(rel)
+            made.append(Path(project) / rel)
+            chain.to_png(Path(image), Path(project) / rel)
+            rels[role] = rel
+    except BaseException:
+        for f in made:
+            f.unlink(missing_ok=True)
+        raise
+    old_images, old_source = list(c["images"]), c.get("source")
+    entry: CastEntry = {**c, "images": [rels["head_sheet"], rels["body_sheet"]],
+                        "roles": {rels["head_sheet"]: "head_sheet", rels["body_sheet"]: "body_sheet"},
+                        "source": rels[""]}
+    _set_cast(tree, [entry if x is c else x for x in cast_of(tree)])
+    for rel in old_images:
+        _drop_file(project, rel, tree)
+    if old_source and not _source_in_use(tree, old_source):
+        retire(project, REFS_DIR, old_source)
+    return entry
+
+
 def _write_picture(project: Path, image: Path, rel: str, crop: tuple[int, int, int] | None) -> None:
     """The face picture rel from image, cropped to the square crop (x, y, side) if given; the full picture is kept
     beside it (source_of) for cropping again."""
@@ -218,13 +310,24 @@ def add_character(project: Path, tree: Tree, name: str, image: Path | None = Non
 
 
 def put_entry(project: Path, tree: Tree, name: str, faces: Sequence[tuple[Path, Path | None]], desc: str = "",
-              replace: bool = False, kind: str = "person") -> CastEntry:
+              replace: bool = False, kind: str = "person", roles: Sequence[str] | None = None,
+              source: Path | None = None) -> CastEntry:
     """A ready cast entry (e.g. of the cast library) joins the cast as it is: faces are its pictures (a person's
     face pictures) with the full pictures they were cropped from (None: the picture is its own), copied into
     refs/. replace: an entry of that name is replaced in its place (a person stays the lead if it was; the old
     pictures and voice go to old/); else the name must be free. A person is the lead when the cast has no other
-    person. Nothing is changed on an error. Returns the entry (a person without a voice: put_voice gives it one)."""
+    person. A person's roles: one per picture (PICTURE_ROLES, or "" for a plain one) and source the photo its
+    sheets were made from (copied in). Nothing is changed on an error. Returns the entry (a person without a voice:
+    put_voice gives it one)."""
     kind = _check_kind(kind)
+    if roles is not None:
+        if len(roles) != len(faces):
+            raise ValueError(f"one role per picture ({len(roles)} roles for {len(faces)} pictures)")
+        bad = [r for r in roles if r and r not in PICTURE_ROLES]
+        if bad:
+            raise ValueError(f"unknown picture role {bad[0]!r} (one of {', '.join(PICTURE_ROLES)})")
+    if kind != "person":
+        roles, source = None, None                 # (only a person has sheets)
     old = character(tree, name) if replace else None
     name = check_name(tree, name, keep=old["name"] if old else None)
     if len(faces) > MAX_PICTURES_PER_CHARACTER:
@@ -252,6 +355,11 @@ def put_entry(project: Path, tree: Tree, name: str, faces: Sequence[tuple[Path, 
                 shutil.copyfile(full, Path(project) / source_of(rel))
             images.append(rel)
             k += 1
+        src = None
+        if source is not None:
+            src = _free_rel(project, tree, SHEET_SOURCE, set())
+            made.append(Path(project) / src)
+            shutil.copyfile(source, Path(project) / src)
     except BaseException:
         for f in made:
             f.unlink(missing_ok=True)
@@ -262,12 +370,19 @@ def put_entry(project: Path, tree: Tree, name: str, faces: Sequence[tuple[Path, 
                         "lead": person and (bool(old and old.get("lead")) or no_person)}
     if not person:
         entry["kind"] = kind
+    given = {rel: r for rel, r in zip(images, roles or ()) if r}
+    if given:
+        entry["roles"] = given
+    if src:
+        entry["source"] = src
     if old is None:
         _set_cast(tree, cast_of(tree) + [entry])
         return entry
     _set_cast(tree, [entry if x is old else x for x in cast_of(tree)])
     for rel in old["images"]:
         _drop_file(project, rel, tree)
+    if old.get("source") and not _source_in_use(tree, old["source"]):
+        retire(project, REFS_DIR, old["source"])
     if old.get("voice"):
         _drop_voice(project, old["voice"], tree)
     return entry
@@ -314,7 +429,7 @@ def _drop_file(project: Path, rel: str, tree: Tree) -> None:
 
 
 def remove_picture(project: Path, tree: Tree, rel: str) -> None:
-    _set_cast(tree, [{**c, "images": [r for r in c["images"] if r != rel]} for c in cast_of(tree)])
+    _set_cast(tree, [_pruned({**c, "images": [r for r in c["images"] if r != rel]}) for c in cast_of(tree)])
     _drop_file(project, rel, tree)
 
 
@@ -325,6 +440,8 @@ def remove_character(project: Path, tree: Tree, name: str) -> None:
     _set_cast(tree, [x for x in cast_of(tree) if x is not c])
     for rel in c["images"]:
         _drop_file(project, rel, tree)
+    if c.get("source") and not _source_in_use(tree, c["source"]):
+        retire(project, REFS_DIR, c["source"])
     if c.get("voice"):
         _drop_voice(project, c["voice"], tree)
 

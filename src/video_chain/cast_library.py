@@ -74,6 +74,20 @@ class CastLibrary(FolderStore):
             out.append((d / f"face{j}.png", full if full.is_file() else None))
         return out
 
+    @staticmethod
+    def roles(saved: dict) -> Sequence[str] | None:
+        """A saved person's picture roles (one per picture; None: plain pictures, or ones not readable)."""
+        roles = saved.get("roles")
+        n = int(saved.get("faces") or 0)
+        if not isinstance(roles, list) or len(roles) != n:
+            return None
+        return [r if r in T.PICTURE_ROLES else "" for r in roles]
+
+    def source(self, cid: str, k: int, saved: dict) -> Path | None:
+        """The photo a saved person's sheets were made from (None: none kept)."""
+        f = self.entry_dir(cid, k) / "source.png"
+        return f if saved.get("source") and f.is_file() else None
+
     def save(self, project: Path, tree: T.Tree, name: str) -> dict:
         """Keep a project's whole cast (pictures, descriptions, kinds, the lead, voices) under name."""
         cast = T.cast_of(tree)
@@ -98,6 +112,13 @@ class CastLibrary(FolderStore):
                                "faces": len(c["images"])}
                     if T.kind_of(c) != "person":
                         p["kind"] = T.kind_of(c)
+                    roles = [T.role_of(c, rel) for rel in c["images"]]
+                    if any(roles):
+                        p["roles"] = roles                      # (absent: plain pictures, as before)
+                    src = T.sheet_source(c) if T.kind_of(c) == "person" else None
+                    if src and (Path(project) / src).is_file():
+                        shutil.copyfile(Path(project) / src, d / "source.png")
+                        p["source"] = True
                     if c.get("voice") and T.kind_of(c) == "person":
                         p["voice"] = keep_voice(project, c, d)
                     kept.append(p)
@@ -149,7 +170,8 @@ class CastLibrary(FolderStore):
             k = index[ch.name]
             p = saved["entries"][k]
             entry = T.put_entry(project, tree, ch.as_name, self.faces(cid, k, p), p.get("desc", ""),
-                                replace=ch.replace, kind=kind_of(p))
+                                replace=ch.replace, kind=kind_of(p), roles=self.roles(p),
+                                source=self.source(cid, k, p))
             if p.get("voice") and kind_of(p) == "person":
                 put_kept_voice(project, tree, entry["name"], self.entry_dir(cid, k), p["voice"],
                                f"{p['name']} ({saved['name']})")
