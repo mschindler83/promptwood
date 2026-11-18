@@ -286,7 +286,7 @@
    "bytes": 8836222790
   },
   "image": {
-   "title": "Pictures: create, edit and inpaint (Qwen-Image 2.1)",
+   "title": "Pictures: create, edit, inpaint and character sheets (Qwen-Image 2.1)",
    "profile": "standard",
    "nodes": [
     "video-chain"

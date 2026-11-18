@@ -56,7 +56,7 @@ Profile `standard`, 8.2 GB.
 | `seedvr2_7b_int8_convrot.safetensors` | 7.8 GB | https://huggingface.co/Comfy-Org/SeedVR2 | [apache-2.0](https://huggingface.co/Comfy-Org/SeedVR2) |
 | `seedvr2_ema_vae_fp16.safetensors` | 0.5 GB | https://huggingface.co/Comfy-Org/SeedVR2 | [apache-2.0](https://huggingface.co/Comfy-Org/SeedVR2) |
 
-## image: Pictures: create, edit and inpaint (Qwen-Image 2.1)
+## image: Pictures: create, edit, inpaint and character sheets (Qwen-Image 2.1)
 
 Profile `standard`, 26.4 GB. Custom nodes: bundled with Promptwood.
 

@@ -65,6 +65,10 @@ selected path (middle), and the selected clip with its prompt, face and settings
 **Cast, voices and sound**
 - **Cast:** people (face pictures, cropped automatically), places, objects and styles, written as `@Name` in the
   prompts. A place's or object's description can be written from its pictures by the local language model.
+- **Character sheets:** from one photo of a person, Qwen-Image 2.1 makes a close-up head sheet and a full-body sheet,
+  each the person from the front, in profile and in a three-quarter view (laid out like the templates that come with
+  the app). They keep the person the same from every angle in the clips; the head swap takes the head sheet's front
+  view. **Sheets…** in the cast (or the question when a person gets a first photo); the prompts can be edited.
 - **Spoken lines:** write a line in quotes and the clip speaks it, lips in sync. Voices from
   [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base) (clone a voice from a short sample, or design one
   from a description), [Fish S2 Pro](https://huggingface.co/fishaudio/s2-pro) (tones from `[tags]` such as
@@ -237,7 +241,8 @@ projects are wherever you saved them and are not touched.
    ComfyUI when generating**; the status bar shows "Video engine: …"), and the clip appears on its card when it is
    made.
 4. **Continue from here** adds the next clip; **Branch** tries another way the story could go.
-5. Add people and places under **Cast**, give them voices, and write spoken lines in quotes:
+5. Add people and places under **Cast** (for a person, best a photo turned into character sheets), give them voices,
+   and write spoken lines in quotes:
    `@Anna turns to the window and says "It's starting to rain."`
 6. Play the path with **▶ Path**, and export it with **Export path…** when you like it (several scenes: **Generate
    film**, **Play film**, **Export film…**).
