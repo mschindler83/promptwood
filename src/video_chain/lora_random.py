@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 DEFAULT_MOST = 3            # LoRAs per image at most
+MAX_MOST = 20               # (the field's limit; an image never gets more LoRAs than the list has)
 DEFAULT_N = 8               # images per run (not in continuous mode)
 MAX_N = 500
 DECIMALS = 2                # strengths as the LoRA list shows them
@@ -91,5 +92,5 @@ def from_saved(saved: dict | None, items: list[dict]) -> dict[str, Any]:
                            round(_number(got.get("high"), hi), DECIMALS), bool(got.get("pinned", False))))
     most = int(_number(saved.get("most"), DEFAULT_MOST))
     n = int(_number(saved.get("n"), DEFAULT_N))
-    return {"choices": pool, "most": max(1, most), "n": min(MAX_N, max(1, n)),
+    return {"choices": pool, "most": min(MAX_MOST, max(1, most)), "n": min(MAX_N, max(1, n)),
             "same_seed": bool(saved.get("same_seed", False))}

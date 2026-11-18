@@ -295,3 +295,17 @@ def test_continuous_random_loras_run_until_stopped(app, tmp_path):
     holder.append(w)
     got = _run_worker(w)
     assert len(got["results"]) == 7 and got["finished"] == ["cancelled"]     # (Stop: "Stopped.", not "Done.")
+
+
+def test_random_loras_most_is_not_limited_by_a_short_list(app, tmp_path):
+    """The most per image can be set beyond the list's length (the list may grow later): a short list neither
+    blocks the field nor cuts the remembered number down."""
+    from video_chain import lora_random as R
+    from video_chain.ui.random_loras import RandomLorasDialog
+    one = {"choices": [R.Choice("a", 0.5, 1.0)], "most": 4, "n": 8, "same_seed": False}
+    dlg = RandomLorasDialog(None, one, 1)
+    assert dlg.most.maximum() >= 10 and dlg.most.value() == 4 and dlg.saved()["most"] == 4
+    assert "1 LoRA in the list" in dlg.most_note.text()
+    dlg.most.setValue(6)
+    assert dlg.problems() == [] and dlg.b_make.isEnabled()
+    dlg.deleteLater()
